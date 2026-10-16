@@ -180,6 +180,18 @@ async def test_seed_defaults_inserts_embedder_when_empty():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("embedder", "implementation"), [({}, "vllm"), ({"provider": "tei"}, "tei")])
+async def test_seed_defaults_seeds_the_embedder_with_its_provider(embedder, implementation):
+    from core.config.root import Settings
+
+    repo = _FakeEndpointRepo()
+    await _make_service(repo, settings=Settings(embedder=embedder)).seed_defaults()
+
+    [row] = [row for (_, model_type), row in repo._store.items() if model_type == "embedder"]
+    assert row.extra["implementation"] == implementation
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_skips_type_when_rows_exist():
     existing = _make_row(name="custom", model_type="embedder", is_default=True)
     repo = _FakeEndpointRepo(rows=[existing])
@@ -778,6 +790,34 @@ async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_in
     assert "vllm.embedderModelName" in warning
     assert "acknowledge_indexed_data=true" in warning
     assert "Resend" not in warning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "env_provider", "configured", "expected"),
+    [
+        # Named by env, the vendor syncs, indexed files or not: like the URL, it
+        # is how the operator describes the server, not a change of model.
+        ("vllm", "tei", "tei", "tei"),
+        # Not named by env, the config default must not undo an admin's choice.
+        ("tei", None, "vllm", "tei"),
+        ("tei", "", "vllm", "tei"),
+    ],
+)
+async def test_seed_defaults_sync_on_boot_sets_the_embedder_vendor_only_when_env_names_it(
+    monkeypatch, stored, env_provider, configured, expected
+):
+    if env_provider is None:
+        monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("EMBEDDER_PROVIDER", env_provider)
+    _, repo = _indexed_env_managed_embedder(extra={"implementation": stored, "api_key": "old-key", "managed_by": "env"})
+    svc = _make_service(repo, settings=_sync_settings(provider=configured))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["implementation"] == expected
+    assert warnings == []
 
 
 @pytest.mark.asyncio
@@ -1970,6 +2010,156 @@ async def test_validate_endpoint_reports_missing_model_on_reachable_endpoint(mon
         "reachable": True,
         "model_found": False,
         "models_served": ["other-model"],
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("served", "version_status", "model_found", "detail"),
+    [
+        # Ollama lists the tag and serves an untagged name as :latest, and only as that.
+        (["nomic-embed-text:latest"], 200, True, None),
+        (["nomic-embed-text:v1.5"], 200, False, None),
+        # vLLM accepts only the names it lists, and has no /api/version.
+        (["nomic-embed-text:latest"], 404, False, None),
+        # A failed answer is not an Ollama answer.
+        (["nomic-embed-text:latest"], "refused", False, None),
+        # No answer in time: neither served nor refused.
+        (
+            ["nomic-embed-text:latest"],
+            "timeout",
+            None,
+            'Reachable, but the endpoint did not say in time whether it serves "nomic-embed-text" '
+            'as "nomic-embed-text:latest".',
+        ),
+    ],
+)
+async def test_validate_endpoint_matches_an_untagged_model_name_to_its_latest_tag_on_ollama(
+    monkeypatch, served, version_status, model_found, detail
+):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            if url == "http://models.test:11434/api/version":
+                if version_status == "refused":
+                    raise httpx.ConnectError("connection refused")
+                if version_status == "timeout":
+                    raise httpx.ReadTimeout("timed out")
+                return FakeResponse(version_status, {"version": "0.40.1"})
+            assert url == "http://models.test:11434/v1/models"
+            return FakeResponse(200, {"data": [{"id": model_id} for model_id in served]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://models.test:11434/v1", "nomic-embed-text", model_type="embedder")
+
+    assert result == {
+        "reachable": True,
+        "model_found": model_found,
+        "models_served": served,
+        "transcription_supported": None,
+        "detail": detail,
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_checks_a_tei_embedder_on_its_health_route(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://tei.test/v1", "BAAI/bge-m3", model_type="embedder", extra={"implementation": "tei"}
+    )
+
+    # TEI has no model list: reachable, the model left unconfirmed rather than refused.
+    assert calls == ["http://tei.test/health"]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [None, "", "   "])
+async def test_validate_endpoint_leaves_model_found_unset_without_a_model_name(monkeypatch, model_name):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": []}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            assert url == "http://llm:8000/v1/models"
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", model_name)
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": [],
         "transcription_supported": None,
         "detail": None,
     }

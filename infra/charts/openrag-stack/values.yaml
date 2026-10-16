@@ -478,12 +478,23 @@ postgresProvisioning:
   # at a pre-created database.
   autoCreateDatabase: true
   # Leave app-start migrations enabled for compose-like installs. Operators can
-  # disable this when they run migrations through the Helm hook below.
+  # disable this when they run migrations through the Helm hook below. Sets
+  # POSTGRES_RUN_MIGRATIONS: the chart refuses an env.config or env.secrets
+  # entry for it that disagrees, since the entry would silently replace this
+  # value.
   runMigrationsInApp: true
+  # A pre-install/pre-upgrade hook, for an external PostgreSQL only: it runs
+  # before Helm creates the bundled one, so the chart refuses it with
+  # postgresql.enabled.
   migrationJob:
     enabled: false
     backoffLimit: 3
     hookDeletePolicy: before-hook-creation,hook-succeeded
+  # Set true when you apply the migrations yourself (`python -m
+  # services.persistence.migrations.run`), with runMigrationsInApp and
+  # migrationJob both off. Without it the chart refuses that combination,
+  # since then nothing applies them and the app answers 503.
+  externalMigrations: false
 
 # === Milvus ===
 milvus:
@@ -1133,6 +1144,9 @@ env:
     # Embedder
     EMBEDDER_MODEL_NAME: '{{ .Values.vllm.embedderModelName }}'
     EMBEDDER_BASE_URL: 'http://{{ .Release.Name }}-embedder-engine-service/v1'
+    # Client for an external embedder: vllm (default, needs GET /models), ollama,
+    # or tei (Hugging Face text-embeddings-inference, which has no /models).
+    # EMBEDDER_PROVIDER: "tei"
 
     # Reranker
     RERANKER_MODEL: '{{ .Values.reranker.model.id }}'
@@ -1150,11 +1164,15 @@ env:
     # false to let endpoints edited from the admin UI stay as the source of
     # truth. See docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     MODEL_ENDPOINT_SYNC_ON_BOOT: "false"
+
+    # Refresh only saved defaults that still match a previous bundled prompt.
+    # Disable during a staged rollout while older application pods run.
+    PROMPTS_REFRESH_DEFAULTS: "true"
     # When true, /ready (the readiness probe) fails while the default embedder is
     # unavailable. Every replica shares it, so its outage or restart then takes
     # all of them out of the Service, admin API and UI included. Before enabling,
-    # check that /ready reports checks.embedder: ok (the probe needs the model
-    # name verbatim in GET /models). See
+    # check that /ready reports checks.embedder: ok (the probe looks the model
+    # name up in GET /models, or checks /health for EMBEDDER_PROVIDER=tei). See
     # docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     READINESS_REQUIRE_EMBEDDER: "false"
 

@@ -189,6 +189,9 @@ async def test_snapshot_separates_identical_urls_with_different_api_keys(respx_m
         ("llm", "ollama", "/v1", "/v1/models"),
         ("reranker", "infinity", "", "/health"),
         ("reranker", "tei", "", "/health"),
+        # TEI serves /health at its root, next to /v1/embeddings.
+        ("embedder", "tei", "", "/health"),
+        ("embedder", "tei", "/v1/", "/health"),
     ],
 )
 async def test_snapshot_uses_provider_specific_probe_path(respx_mock, kind, implementation, base, path):
@@ -294,6 +297,235 @@ async def test_malformed_model_list_entry_marks_endpoint_unavailable(respx_mock)
     snapshot = await ReadinessService({}, discover_model_endpoints=discovery).snapshot()
 
     assert [(item.provider, item.status) for item in snapshot.model_endpoints] == [("malformed", "unavailable")]
+
+
+@pytest.mark.parametrize(
+    ("model_name", "served", "asks_version", "expected_status"),
+    [
+        # Ollama lists every model with its tag and resolves an untagged name to :latest.
+        ("nomic-embed-text", ["nomic-embed-text:latest"], True, "ok"),
+        ("hf.co/org/model", ["hf.co/org/model:latest"], True, "ok"),
+        ("registry:5000/org/model", ["registry:5000/org/model:latest"], True, "ok"),
+        ("nomic-embed-text:v1.5", ["nomic-embed-text:v1.5"], False, "ok"),
+        # Only :latest: Ollama answers 404 for an untagged name with no :latest pulled.
+        ("nomic-embed-text", ["nomic-embed-text:v1.5"], False, "unavailable"),
+        ("nomic-embed-text:v1.5", ["nomic-embed-text:latest"], False, "unavailable"),
+    ],
+)
+async def test_untagged_model_name_matches_its_latest_tag_on_ollama(
+    respx_mock, model_name, served, asks_version, expected_status
+):
+    respx_mock.get("http://ollama.test:11434/v1/models").respond(200, json={"data": [{"id": id_} for id_ in served]})
+    version = respx_mock.get("http://ollama.test:11434/api/version").respond(200, json={"version": "0.40.1"})
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="default",
+                    kind="embedder",
+                    # Env-seeded endpoints run as ``vllm`` even when they point at Ollama.
+                    config=ModelEndpointConfig(endpoint="http://ollama.test:11434/v1", model_name=model_name),
+                    is_default=True,
+                ),
+            )
+        )
+    )
+    service = ReadinessService({}, discover_model_endpoints=discovery, summary_model_kinds=("embedder",))
+
+    snapshot = await service.snapshot()
+
+    assert version.called is asks_version
+    assert snapshot.checks["embedder"] == expected_status
+
+
+@pytest.mark.parametrize(
+    ("version_response", "expected_status"),
+    [
+        (httpx.Response(200, json={"version": "0.40.1"}), "ok"),
+        # vLLM accepts only the names it lists: served as ``nomic-embed-text:latest``
+        # (``--served-model-name``), it answers 404 for ``nomic-embed-text``.
+        (httpx.Response(404, json={"detail": "Not Found"}), "unavailable"),
+        (httpx.Response(200, text="<html></html>"), "unavailable"),
+        (httpx.ConnectError("connection refused"), "unavailable"),
+    ],
+)
+async def test_latest_tag_serves_an_untagged_name_only_on_ollama(respx_mock, version_response, expected_status):
+    respx_mock.get("http://models.test:8000/v1/models").respond(200, json={"data": [{"id": "nomic-embed-text:latest"}]})
+    version = respx_mock.get("http://models.test:8000/api/version").mock(side_effect=[version_response])
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="default",
+                    kind="embedder",
+                    config=ModelEndpointConfig(
+                        endpoint="http://models.test:8000/v1",
+                        model_name="nomic-embed-text",
+                        extra={"api_key": "secret"},
+                    ),
+                    is_default=True,
+                ),
+            )
+        )
+    )
+    service = ReadinessService({}, discover_model_endpoints=discovery, summary_model_kinds=("embedder",))
+
+    snapshot = await service.snapshot()
+
+    assert version.call_count == 1
+    assert version.calls.last.request.headers["Authorization"] == "Bearer secret"
+    assert snapshot.checks["embedder"] == expected_status
+
+
+@pytest.mark.parametrize(
+    ("version_failure", "untagged_status"),
+    [
+        ("refused", "unavailable"),
+        # Too deeply nested for the JSON parser: RecursionError, not ValueError.
+        ("unparsable", "unavailable"),
+        # READINESS_REQUIRE_EMBEDDER fails readiness on ``unavailable``, not on ``timeout``.
+        ("hangs", "timeout"),
+    ],
+)
+async def test_failed_version_request_does_not_fail_an_exact_match_sharing_the_probe(
+    respx_mock, version_failure, untagged_status
+):
+    version_requests = []
+
+    async def fail_version(request):
+        version_requests.append(request)
+        if version_failure == "refused":
+            raise httpx.ConnectError("connection refused")
+        if version_failure == "unparsable":
+            return httpx.Response(200, content=b"[" * 100_000, headers={"Content-Type": "application/json"})
+        await asyncio.Event().wait()
+
+    respx_mock.get("http://models.test:8000/v1/models").respond(
+        200, json={"data": [{"id": "served-embedder"}, {"id": "nomic-embed-text:latest"}]}
+    )
+    respx_mock.get("http://models.test:8000/api/version").mock(side_effect=fail_version)
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="default",
+                    kind="embedder",
+                    config=ModelEndpointConfig(endpoint="http://models.test:8000/v1", model_name="served-embedder"),
+                    is_default=True,
+                ),
+                ModelEndpointTarget(
+                    provider="untagged",
+                    kind="embedder",
+                    config=ModelEndpointConfig(endpoint="http://models.test:8000/v1", model_name="nomic-embed-text"),
+                ),
+            )
+        )
+    )
+    service = ReadinessService({}, discover_model_endpoints=discovery, summary_model_kinds=("embedder",), timeout=0.2)
+    started = asyncio.get_running_loop().time()
+
+    snapshot = await service.snapshot()
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < 0.3
+    assert len(version_requests) == 1
+    assert [(item.provider, item.status) for item in snapshot.model_endpoints] == [
+        ("default", "ok"),
+        ("untagged", untagged_status),
+    ]
+    assert snapshot.checks["embedder"] == "ok"
+
+
+@pytest.mark.parametrize("models_delay", [0.15, 0.3])
+async def test_admin_check_shares_one_timeout_budget_with_the_version_request(respx_mock, models_delay):
+    version_requests = []
+
+    async def slow_models(_request):
+        await asyncio.sleep(models_delay)
+        return httpx.Response(200, json={"data": [{"id": "nomic-embed-text:latest"}]})
+
+    async def never_respond(request):
+        version_requests.append(request)
+        await asyncio.Event().wait()
+
+    respx_mock.get("http://models.test:8000/v1/models").mock(side_effect=slow_models)
+    respx_mock.get("http://models.test:8000/api/version").mock(side_effect=never_respond)
+    config = ModelEndpointConfig(endpoint="http://models.test:8000/v1", model_name="nomic-embed-text")
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(readiness_module.LatestAliasTimeoutError) as exc_info:
+        await check_model_endpoint(config, timeout=0.2)
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < models_delay + 0.1
+    # Past the deadline already: the version request is not sent at all.
+    assert len(version_requests) == (1 if models_delay < 0.2 else 0)
+    assert exc_info.value.model_ids == ["nomic-embed-text:latest"]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "models_url"),
+    [
+        # A base URL missing its /v1, or with the wrong prefix: vLLM serves its
+        # routes under /v1 only, so the inference routes 404 there too.
+        ("http://vllm.test:8000", "http://vllm.test:8000/models"),
+        ("http://vllm.test:8000/", "http://vllm.test:8000/models"),
+        ("https://vllm.test/v2", "https://vllm.test/v2/models"),
+    ],
+)
+async def test_model_list_404_is_unavailable(respx_mock, endpoint, models_url):
+    route = respx_mock.get(models_url).respond(404, json={"detail": "Not Found"})
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="default",
+                    kind="embedder",
+                    config=ModelEndpointConfig(endpoint=endpoint, model_name="embedder"),
+                    is_default=True,
+                ),
+            )
+        )
+    )
+    service = ReadinessService({}, discover_model_endpoints=discovery, summary_model_kinds=("embedder",))
+
+    snapshot = await service.snapshot()
+
+    assert route.call_count == 1
+    assert snapshot.checks["embedder"] == "unavailable"
+
+
+@pytest.mark.parametrize(("implementation", "expected_status"), [("tei", "ok"), ("vllm", "unavailable")])
+async def test_an_embedder_without_a_model_list_is_ready_only_when_declared_tei(
+    respx_mock, implementation, expected_status
+):
+    # TEI embeds on /v1/embeddings and has no /models. Declared ``tei``, it is
+    # probed on /health; left as ``vllm``, its /models 404 is what a malformed
+    # vLLM base URL answers, so it stays unavailable.
+    models = respx_mock.get("http://tei.test/v1/models").respond(404)
+    health = respx_mock.get("http://tei.test/health").respond(200)
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="default",
+                    kind="embedder",
+                    config=ModelEndpointConfig(
+                        endpoint="http://tei.test/v1",
+                        model_name="BAAI/bge-m3",
+                        extra={"implementation": implementation},
+                    ),
+                    is_default=True,
+                ),
+            )
+        )
+    )
+    service = ReadinessService({}, discover_model_endpoints=discovery, summary_model_kinds=("embedder",))
+
+    snapshot = await service.snapshot()
+
+    assert (health.called, models.called) == (implementation == "tei", implementation == "vllm")
+    assert snapshot.checks["embedder"] == expected_status
 
 
 async def test_missing_endpoint_config_is_unresolvable_without_http_request(respx_mock):

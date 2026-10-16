@@ -118,6 +118,109 @@ notes find that version in the `helm.sh/chart` label of the
 `networkPolicy.enabled: false` or under `--dry-run=client`, they print the steps
 that apply on every upgrade.
 
+## Upgrades that change the indexer generation
+
+Some releases bump the indexer actor generation (`_INDEXER_ACTOR_PROTOCOL_VERSION`
+in `openrag/services/workers/indexer_pool.py`), and some of those also replace
+the shared `TaskStateManager` actor. 2.2.x runs `v7` and 2.3.x runs `v13`: the
+generations in between only ever existed on `develop`, so an upgrade from 2.2.x
+to 2.3.x moves `v7` to `v13` and replaces the `TaskStateManager`. This matters
+only when OpenRAG pods share a Ray cluster: with `ray.enabled: true`, or with an
+external cluster set through `RAY_ADDRESS`. With `ray.enabled: false` (the
+default) each pod runs its own Ray and restarts with it.
+
+The chart's Deployment sets no `strategy`, so Kubernetes rolls it with its default
+`RollingUpdate`: new pods start while old ones still serve, against the same Ray
+cluster. The first new pod replaces the `TaskStateManager` when it lacks a method
+the new generation needs. The old generation's workers keep a handle to the killed
+actor, so the files they are still indexing lose their state writes and stay
+`SERIALIZING` in the status API.
+
+For such an upgrade, first stop traffic and wait until no indexing task is
+active, as in step 1 of the
+[upgrade guide](/openrag/documentation/upgrading/#1-stop-traffic-and-let-indexing-finish):
+
+```bash
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "https://<openrag host>/queue/tasks?task_status=active"
+# {"tasks": []}
+```
+
+Scaling OpenRAG down does not stop the old workers: with `ray.enabled: true` or
+an external cluster they run on the Ray cluster, not in the OpenRAG pods, and
+keep indexing after the pods are gone. Then never let the two releases run side
+by side:
+
+- Scale OpenRAG to zero before `helm upgrade`. The upgrade sets the replica count
+  back to `openrag.replicas`, so there is nothing to scale up afterwards:
+
+  ```bash
+  kubectl scale -n <release namespace> deploy/<fullname>-openrag --replicas=0
+  ```
+
+- Or switch the Deployment to `Recreate`, which stops every old pod before the
+  first new one starts. The chart does not manage the field, so the change
+  survives later `helm upgrade` runs:
+
+  ```bash
+  kubectl patch -n <release namespace> deploy/<fullname>-openrag \
+    -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+  ```
+
+The chart keeps the default rather than rendering `Recreate` with `ray.enabled`:
+`Recreate` takes the API down on every upgrade, not only on the few that change
+the generation, and under Ray Serve the API runs on the Ray pods, which the
+Deployment strategy does not reach. KubeRay does not recreate those pods when the
+chart changes either: follow the Ray step of the release's
+[upgrade guide](/openrag/documentation/upgrading/#3-plan-the-ray-restart), which
+restarts the Ray cluster and removes the old generation with it.
+
+On an **external Ray cluster**, which nothing in the chart restarts, retire the
+old generation once traffic to the old release has stopped and before the new
+release starts. Retire the generation of the release you are leaving, which is
+`v7` for 2.2.x. To check it, read it from that release's tag, or list the
+indexer dispatchers alive on the cluster (each is named
+`IndexerPoolDispatcher-<generation>`):
+
+```bash
+git show v2.2.2:openrag/services/workers/indexer_pool.py | grep '^_INDEXER_ACTOR_PROTOCOL_VERSION'
+
+PYTHONPATH=openrag uv run python -c "import ray; ray.init(address='${RAY_ADDRESS}'); \
+  print(sorted(a['name'] for a in ray.util.list_named_actors(all_namespaces=True) \
+  if a['name'].startswith('IndexerPoolDispatcher')))"
+```
+
+Then retire it, for 2.2.x:
+
+```bash
+PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
+  --ray-address "${RAY_ADDRESS}" \
+  --generation v7 \
+  --timeout 3600
+```
+
+It stops the old generation from accepting work, waits for the files it accepted
+to settle, then removes its actors. If the timeout expires, it leaves them running
+and accepting work again: do not start the new release then. Find out what is
+still indexing, and run the command again. See
+[Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
+
+### Upgrades that keep the generation
+
+A fix that lives in the Ray actors reaches a shared Ray cluster only when those
+actors are recreated, and a release that keeps the generation does not recreate
+them. The fence that holds a file while an orphaned indexing worker may still
+write to it is such a fix: an upgrade from 2.3.0 or 2.3.1 keeps `v13`, so the
+`TaskStateManager` and the indexer actors from the old release keep running, and
+an orphaned task can still release its file while its worker runs. The API then
+logs a warning that the running Ray actors predate the fence.
+
+Recreate them once, at a time when no indexing is running. With `ray.enabled:
+true`, delete every Ray pod, head included, as in step 4 of the
+[upgrade guide](/openrag/documentation/upgrading/#4-upgrade-the-release). Restart
+an external Ray cluster yourself. With `ray.enabled: false` (the default) Ray runs
+inside the OpenRAG pod, so the pod restart of the upgrade recreates the actors.
+
 ## Notes
 
 For the default direct-API deployment, startup and liveness probes use
@@ -144,9 +247,14 @@ timeout). Every replica shares that embedder, so its outage, or a restart while
 vLLM loads the model, then takes all of them out of the Service at once: the
 admin API and admin UI too, which leaves `kubectl port-forward` as the only way in.
 Before enabling it, check that `/ready` reports `checks.embedder: ok`: the probe
-needs the configured model name verbatim in the endpoint's `GET /models` list, so
-an Ollama model configured without its `:tag`, or an endpoint without a `/models`
-route, reads `unavailable` although it works. Checks use short timeouts and results are cached
+looks the configured model name up in the endpoint's `GET /models` list, so an
+embedder that works can still read `unavailable`, for example behind a gateway that
+lists the model under another name, or on another endpoint without a `/models` route.
+A Hugging Face text-embeddings-inference (TEI) embedder has no such route: set
+`EMBEDDER_PROVIDER=tei` in `env.config` (or pick the `tei` vendor in the admin UI)
+and its `/health` is probed instead, without checking the model name. On Ollama,
+recognized by its `GET /api/version`, an untagged name also matches its `:latest`
+tag, as Ollama resolves it. Checks use short timeouts and results are cached
 for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.
@@ -424,9 +532,13 @@ Pre-create the database before installing the release. If `POSTGRES_DATABASE` is
 
 In `values.yaml`, disable the bundled PostgreSQL chart, set `postgresProvisioning.autoCreateDatabase` to `false`, set `postgresProvisioning.runMigrationsInApp` to `false`, and enable `postgresProvisioning.migrationJob`. Then provide the managed database connection through `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and optionally `POSTGRES_DATABASE`.
 
-The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema.
+The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema. Because a `pre-install` hook runs before Helm creates the release's own resources, the Job reads its own copies of the env ConfigMap and Secret, created as hooks just before it and deleted once it succeeds. With `env.secretsProvider` set to `externalSecret` or `vaultStaticSecret`, the copy is a second `ExternalSecret` or `VaultStaticSecret`, and the Job's pod cannot start until the operator has created that Secret. Helm does not wait for the operator itself, only for the Job, within `--timeout` (5 minutes by default), so raise `--timeout` if your operator can take longer to sync. An `env.existingSecret` is read directly.
 
-When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them.
+If the Job fails, Helm 3.19 and later delete its copies along with the failure. Helm 3.18 and earlier, and Argo CD, leave them in the namespace, as does any Helm version that is interrupted or cannot create the Job, and `helm uninstall` does not remove them, since Helm does not track hook resources. The Secret copy holds the same credentials as the app's Secret. The next install, upgrade or sync replaces the copies. To remove them before that, delete the ConfigMap and the Secret whose names end in `-migration-env` and `-migration-env-secrets`, and with `externalSecret` or `vaultStaticSecret` also the `ExternalSecret` or `VaultStaticSecret` named like the Secret. Find them by that suffix, `kubectl get configmap,secret -n <namespace> | grep migration-env` (add `externalsecret` or `vaultstaticsecret` to the list with that provider), rather than by `<fullname>`: the chart shortens the fullname in these names, to 49 characters for the ConfigMap and 41 for the Secret, so with a long fullname they don't start with the full `<fullname>`.
+
+The Job is for an external PostgreSQL only. It runs before Helm creates any of the release's own resources, the bundled PostgreSQL included, so the chart refuses `migrationJob.enabled` together with `postgresql.enabled`.
+
+When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them, so the chart refuses to render unless you set `postgresProvisioning.externalMigrations: true` to say you run `python -m services.persistence.migrations.run` yourself. Set the app's side through `runMigrationsInApp` only: the chart also refuses an `env.config.POSTGRES_RUN_MIGRATIONS` or `env.secrets.POSTGRES_RUN_MIGRATIONS` that disagrees with it, since that entry would silently replace it. Do not put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an external secrets operator: the pods read the Secret after the ConfigMap, so its value wins, and the chart cannot read it to check it.
 
 ## GPU metrics
 
