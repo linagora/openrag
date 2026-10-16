@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import os
 import re
 import threading
 import time
@@ -17,6 +18,7 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
+from core.utils.child_process import kill_orphaned_group, kill_process_group, run_tied, tie_to_parent
 from core.utils.logging import get_logger
 from marker.converters.pdf import PdfConverter
 from ray.exceptions import TaskCancelledError
@@ -36,6 +38,10 @@ def _force_kill_executor(executor, log) -> None:
     reclaim a wedged worker. ``ProcessPoolExecutor`` doesn't expose which
     process ran a given task, which is why ``MarkerWorker`` gives every slot its
     own single-process executor: killing one never touches another slot's parse.
+
+    Each worker leads its own process group (``tie_to_parent``), and the whole
+    group is killed: killing the worker alone left the processes pdftext had
+    started inside it running (#1167).
     """
     if executor is None:
         return
@@ -43,7 +49,13 @@ def _force_kill_executor(executor, log) -> None:
     procs = list(getattr(executor, "_processes", {}).values())
     for proc in procs:
         try:
-            proc.kill()
+            # A broken pool keeps its crashed child, already reaped: its pid may
+            # belong to another process now, but what pdftext started in it may
+            # still be running.
+            if proc.exitcode is not None:
+                kill_orphaned_group(proc.pid)
+                continue
+            kill_process_group(proc.pid)
         except Exception:  # noqa: BLE001 - one unkillable proc must not block the rest
             log.warning("Failed to kill Marker worker process", exc_info=True)
     try:
@@ -55,6 +67,29 @@ def _force_kill_executor(executor, log) -> None:
             proc.join(timeout=5)
         except Exception:  # noqa: BLE001 - a stuck join must not block the rebuild
             pass
+
+
+def _tie_pdftext_workers() -> None:
+    """Make the processes pdftext starts inside this slot child die with it.
+
+    pdftext extracts text with its own ``ProcessPoolExecutor`` and its own
+    initializer, so nothing ties those processes to the slot child: when the
+    actor dies abruptly, the kernel kills the child and they keep running
+    (#1167). Replacing the pool class pdftext looks up in its module gives each
+    of them :func:`run_tied` as initializer, ahead of pdftext's own. They stay in
+    the child's process group, so recycling the slot still kills them. pdftext
+    builds the pool inside the parse, on this child's main thread, which lives as
+    long as the child.
+    """
+    import pdftext.extraction
+
+    base = pdftext.extraction.ProcessPoolExecutor
+
+    class _TiedProcessPoolExecutor(base):
+        def __init__(self, *args, initializer=None, initargs=(), **kwargs):
+            super().__init__(*args, initializer=run_tied, initargs=(os.getpid(), initializer, initargs), **kwargs)
+
+    pdftext.extraction.ProcessPoolExecutor = _TiedProcessPoolExecutor
 
 
 def _marker_num_gpus(config) -> float:
@@ -227,8 +262,6 @@ _RECYCLE_CANCEL_RETRY_DELAY = 0.5
 @ray.remote
 class MarkerWorker:
     def __init__(self):
-        import os
-
         from core.config import load_config
         from core.utils.logging import get_logger
 
@@ -310,15 +343,20 @@ class MarkerWorker:
             self.executors[slot] = ProcessPoolExecutor(
                 max_workers=1,
                 initializer=self._worker_init,
-                initargs=(self.model_dict, self.config.loader.marker_parse_memory_limit_mb),
+                initargs=(self.model_dict, self.config.loader.marker_parse_memory_limit_mb, os.getpid()),
                 mp_context=mp.get_context("spawn"),
                 max_tasks_per_child=self.config.loader.marker_max_tasks_per_child,
             )
             self.logger.debug(f"MarkerWorker slot {slot} executor ready")
 
     @staticmethod
-    def _worker_init(model_dict, memory_limit_mb: int = 0):
+    def _worker_init(model_dict, memory_limit_mb: int = 0, parent_pid: int | None = None):
         global worker_model_dict
+        # First, so a child whose actor is already gone exits before loading
+        # anything, and one whose actor dies later dies with it (#1167).
+        if parent_pid is not None:
+            tie_to_parent(parent_pid)
+            _tie_pdftext_workers()
         worker_model_dict = model_dict
         # Logged before the ceiling, like `_apply_parse_memory_limit`'s own lines:
         # under a tight limit the log call's allocation could raise MemoryError,
@@ -368,6 +406,12 @@ class MarkerWorker:
         # actually runs instead of being cancelled from outside (#894).
         timeout = self.config.loader.marker_child_timeout
 
+        # Runs on the event loop's default thread pool, whose threads live as
+        # long as the actor. A slot's child is started either here by
+        # ``submit``, or by the executor's manager thread when it replaces a
+        # child after ``max_tasks_per_child``; both threads outlive the child.
+        # The child is tied to the thread that started it (``tie_to_parent``):
+        # a short-lived thread would take the child with it when it ends.
         def run_with_timeout():
             with self._executor_locks[slot]:
                 current_executor = self.executors[slot]
