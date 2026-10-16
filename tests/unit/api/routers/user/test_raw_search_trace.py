@@ -138,6 +138,8 @@ def test_trace_fingerprint_contains_effective_search_options():
                 "include_ancestors": True,
                 "related_limit": 8,
                 "max_ancestor_depth": 4,
+                "rerank": False,
+                "rerank_candidates": None,
             },
         }
     )

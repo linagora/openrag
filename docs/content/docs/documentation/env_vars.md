@@ -315,7 +315,7 @@ The PostgreSQL database is configured using the following environment variables:
 | `POSTGRES_PASSWORD` | str | root_password | Password for database authentication |
 | `POSTGRES_DATABASE` | str | `partitions_for_collection_<VDB_COLLECTION_NAME>` | Database used for OpenRAG relational metadata. If unset, OpenRAG derives the historical name from the vector collection. |
 | `POSTGRES_AUTO_CREATE_DB` | bool | true | Creates the database automatically when it is missing. Keep this for local compose; set it to `false` for managed Postgres where the app role has no `CREATEDB`. |
-| `POSTGRES_RUN_MIGRATIONS` | bool | true | Runs Alembic migrations during app startup. Set it to `false` when migrations are applied by a deployment Job or init step. |
+| `POSTGRES_RUN_MIGRATIONS` | bool | true | Runs Alembic migrations during app startup. Set it to `false` when migrations are applied by a deployment Job or init step. With the Helm chart, set `postgresProvisioning.runMigrationsInApp` instead: the chart sets this variable from it, and refuses a `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` that disagrees. |
 | `POSTGRES_POOL_MIN_SIZE` | int | 5 | Minimum size of the async PostgreSQL connection pool. |
 | `POSTGRES_POOL_MAX_SIZE` | int | 20 | Maximum size of the async PostgreSQL connection pool. |
 | `POSTGRES_COMMAND_TIMEOUT` | int | 30 | Timeout in seconds for PostgreSQL commands issued through the async pool. |
@@ -823,6 +823,15 @@ Deployment-level knobs; most deployments never need to touch these — the compo
 | `OPENRAG_CONTAINER_STARTUP_TIMEOUT` | `float` | `max(60, 4 × POSTGRES_COMMAND_TIMEOUT)` (= 120 with defaults) | Seconds the API's service container (DB pools, Ray actors, …) is allowed to initialize at startup before the app fails fast. |
 | `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
 | `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |
+
+#### TLS proxy overlay (opt-in)
+
+Read only by the opt-in proxy compose file (`infra/compose/proxy.docker-compose.yaml`). Relative paths resolve against `infra/compose/`:
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PROXY_DATA_DIR` | `str` | `../../nginx_data` | Host directory for Nginx Proxy Manager's state (config and `database.sqlite`). |
+| `PROXY_LETSENCRYPT_DIR` | `str` | `../../letsencrypt` | Host directory for the Let's Encrypt certificates NPM issues. |
 
 #### Monitoring profile (opt-in)
 
