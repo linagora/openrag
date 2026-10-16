@@ -7,10 +7,11 @@ and uses the build_url function for link building.
 """
 
 from api.dependencies.auth import current_user, require_admin
-from di.providers import get_job_service
+from di.providers import get_job_service, get_config
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
 from api.dependencies.build_url import build_url
+
 
 router = APIRouter()
 
@@ -88,7 +89,7 @@ Returns list of tasks with:
 )
 async def list_tasks(
     request: Request,
-    config,
+    config=Depends(get_config),
     task_status: str | None = None,
     user=Depends(current_user),
     service=Depends(get_job_service),
