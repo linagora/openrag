@@ -917,6 +917,19 @@ openrag:
   # bundles into one file on a shared emptyDir before the main container
   # starts (see values-openrag.yaml's kc-ca-bundle example).
   extraInitContainers: []
+  # Operator-managed accounts provisioned by the API at startup (auth.seed_users,
+  # see docs/documentation/user_auth.md). Each entry names the env var holding
+  # its token (token_env), never the token: put the value in the chart's Secret
+  # (env.secrets, or the KV path read by externalSecret / vaultStaticSecret).
+  # Rendered as SEED_USERS in the env ConfigMap, only when non-empty.
+  #   seedUsers:
+  #     - external_user_id: svc-cozy-stack
+  #       display_name: cozy-stack
+  #       token_env: COZY_STACK_TOKEN
+  #       is_admin: false
+  #       partitions:
+  #         - { name: twake, role: editor }
+  seedUsers: []
   serviceAccountName: ""
   # Uncomment to override the shared security.automountServiceAccountToken /
   # security.containerSecurityContext defaults for this workload specifically.

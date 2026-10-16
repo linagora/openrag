@@ -224,7 +224,7 @@ async def lifespan(app: FastAPI):
     if container is not None:
         try:
             logger.info("Startup: initializing ServiceContainer", timeout=CONTAINER_STARTUP_TIMEOUT)
-            await asyncio.wait_for(container.initialize(), timeout=CONTAINER_STARTUP_TIMEOUT)
+            await asyncio.wait_for(container.initialize(seed_users=True), timeout=CONTAINER_STARTUP_TIMEOUT)
             logger.info("Startup: ServiceContainer initialized")
         except TimeoutError:  # pragma: no cover - defensive boot guard
             logger.exception("ServiceContainer.initialize timed out; serving degraded (503)")

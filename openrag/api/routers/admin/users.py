@@ -178,7 +178,9 @@ async def get_user(
 **Response:**
 Returns 204 No Content on successful deletion.
 
-**Note:** Cannot delete the default admin user (ID: 1).
+**Note:** Cannot delete the default admin user (ID: 1). An account still
+listed in `auth.seed_users` cannot be deleted either (409): remove its entry
+and restart the API first.
 """,
 )
 async def delete_user(

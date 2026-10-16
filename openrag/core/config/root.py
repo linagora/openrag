@@ -5,6 +5,7 @@ from __future__ import annotations
 from core.models.preset import PartitionConfig
 from pydantic import Field
 
+from .auth import AuthConfig
 from .base import ConfigMixin
 from .chunking import ChunkerConfig
 from .endpoints import (
@@ -70,3 +71,4 @@ class Settings(ConfigMixin):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     presets: PresetsConfig = Field(default_factory=PresetsConfig)
     partitions: dict[str, PartitionConfig] = Field(default_factory=dict)
+    auth: AuthConfig = Field(default_factory=AuthConfig)

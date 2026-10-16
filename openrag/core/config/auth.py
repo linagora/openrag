@@ -15,6 +15,11 @@ here so the rules are configuration, not code:
 * :class:`AuthBypassConfig` carries the three path policies the auth
   middleware consults on every request. Defaults match the legacy
   hardcoded sets exactly so the move is behaviour-preserving.
+
+* :class:`AuthConfig` is the ``auth:`` section of ``conf/config.yaml``.
+  It holds ``seed_users``, the operator-managed accounts provisioned at
+  startup (:class:`SeedUserConfig`): their shape is configuration, their
+  token stays in the environment.
 """
 
 from __future__ import annotations
@@ -23,7 +28,10 @@ import os
 import re
 from typing import ClassVar
 
-from pydantic import BaseModel
+from core.models.user import PartitionRole
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from .base import ConfigMixin
 
 # ---------------------------------------------------------------------------
 # OIDC config + env validator
@@ -302,3 +310,87 @@ class AuthBypassConfig(BaseModel):
     # Public in token mode, login-gated under oidc (see constant above).
     # Operators that want docs fully public under oidc can override to ().
     oidc_gated_paths: tuple[str, ...] = DEFAULT_OIDC_GATED_PATHS
+
+
+# ---------------------------------------------------------------------------
+# Operator-managed accounts (auth.seed_users)
+# ---------------------------------------------------------------------------
+
+#: The admin bootstrap token. A seed user may not reuse it: the admin account
+#: is ``users.id = 1`` and is never managed through ``seed_users``.
+ADMIN_TOKEN_ENV_VAR = "AUTH_TOKEN"
+
+#: Environment variable that replaces ``auth.seed_users`` at deploy time, as a
+#: JSON (or YAML) list. ``conf/config.yaml`` is baked into the image, so this is
+#: how the Helm chart (``openrag.seedUsers``) supplies the list.
+SEED_USERS_ENV_VAR = "SEED_USERS"
+
+
+class SeedUserPartition(BaseModel):
+    """One partition membership of a seed user."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    name: str = Field(min_length=1)
+    role: PartitionRole
+
+
+class SeedUserConfig(BaseModel):
+    """An account provisioned at startup from configuration.
+
+    ``token_env`` names the environment variable holding the bearer token,
+    never the token itself: the shape is versioned, the secret is injected
+    (OpenBao, a Kubernetes Secret, ``.env``). Unknown keys are refused so a
+    plaintext ``token:`` typed by mistake fails the boot instead of being
+    ignored while it sits in a versioned file.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    external_user_id: str = Field(min_length=1)
+    display_name: str | None = None
+    token_env: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    is_admin: bool = False
+    partitions: list[SeedUserPartition] = Field(default_factory=list)
+
+    @field_validator("external_user_id")
+    @classmethod
+    def _non_blank_external_user_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("external_user_id must not be blank")
+        return value
+
+    @field_validator("token_env")
+    @classmethod
+    def _not_the_admin_token(cls, value: str) -> str:
+        if value == ADMIN_TOKEN_ENV_VAR:
+            raise ValueError(f"token_env must not be {ADMIN_TOKEN_ENV_VAR}: the admin token belongs to users.id = 1")
+        return value
+
+    @model_validator(mode="after")
+    def _defaults_and_unique_partitions(self) -> SeedUserConfig:
+        if self.display_name is None:
+            object.__setattr__(self, "display_name", self.external_user_id)
+        seen: set[str] = set()
+        for membership in self.partitions:
+            if membership.name in seen:
+                raise ValueError(f"partition {membership.name!r} is listed twice for {self.external_user_id!r}")
+            seen.add(membership.name)
+        return self
+
+
+class AuthConfig(ConfigMixin):
+    """The ``auth:`` section of ``conf/config.yaml``."""
+
+    seed_users: list[SeedUserConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_keys(self) -> AuthConfig:
+        for field in ("external_user_id", "token_env"):
+            seen: set[str] = set()
+            for seed in self.seed_users:
+                value = getattr(seed, field)
+                if value in seen:
+                    raise ValueError(f"auth.seed_users: {field} {value!r} is used by more than one entry")
+                seen.add(value)
+        return self

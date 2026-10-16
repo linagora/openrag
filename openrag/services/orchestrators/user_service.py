@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from core.models.user import PartitionRole, UserPartition
 from core.utils.consts import DEFAULT_ADMIN_USER_ID, DEFAULT_PARTITION_NAME
-from core.utils.exceptions import UserNotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, UserNotFoundError, ValidationError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -62,6 +62,7 @@ class UserService:
         partition_service: PartitionService,
         membership_repo: PartitionMembershipRepository,
         job_service: JobService,
+        seed_user_ids: frozenset[str] = frozenset(),
     ) -> None:
         self._user_repo = user_repo
         # Injected so future phases can consolidate authz decisions
@@ -83,6 +84,9 @@ class UserService:
         # UserService) — so UserService composes JobService rather than
         # holding a Ray handle itself.
         self._job_service = job_service
+        # external_user_id of every auth.seed_users entry this process booted
+        # with: a managed account still listed there cannot be deleted.
+        self._seed_user_ids = seed_user_ids
 
     # ------------------------------------------------------------------
     # Validation
@@ -183,6 +187,18 @@ class UserService:
         anyone allowed to manage its members.
         """
         await self._ensure_exists(user_id)
+        existing_user = await self._user_repo.get_user(user_id)
+        if existing_user is None:
+            raise UserNotFoundError(f"User '{user_id}' not found")
+        if existing_user.managed_by_config and existing_user.external_user_id in self._seed_user_ids:
+            # The next startup would recreate the entry under a new id with
+            # only its listed memberships, after its partitions were deleted.
+            # Once the entry is removed (and the token revoked at startup) the
+            # row is no longer listed and can be deleted.
+            raise ConflictError(
+                f"User '{user_id}' is managed by configuration (auth.seed_users): "
+                "remove its entry there and restart the API before deleting it"
+            )
         owned_all = [
             p["partition"]
             for p in await self._membership_repo.list_user_partitions_dict(user_id)
@@ -220,6 +236,17 @@ class UserService:
         existing_user = await self._user_repo.get_user(user_id)
         if existing_user is None:
             raise UserNotFoundError(f"User '{user_id}' not found")
+        if (
+            existing_user.managed_by_config
+            and "external_user_id" in updates
+            and updates["external_user_id"] != existing_user.external_user_id
+        ):
+            # auth.seed_users matches its rows on external_user_id: a rename
+            # would detach the row from its entry and keep its token alive.
+            raise ConflictError(
+                f"User '{user_id}' is managed by configuration (auth.seed_users): "
+                "change its external_user_id there, not through the API"
+            )
         demotes_admin = existing_user.is_admin and updates.get("is_admin") is False
 
         revoked = 0
