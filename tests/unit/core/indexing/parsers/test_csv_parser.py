@@ -317,6 +317,15 @@ async def test_trailing_empty_header_names_are_preserved_with_generated_names():
     assert result.text_blocks[0].metadata["csv_columns"] == ["a", "b", "column_3"]
 
 
+async def test_generated_header_names_do_not_collide_with_explicit_names():
+    result = await CsvParser().parse(Document(text="a,column_3,\n1,existing,unnamed\n"))
+
+    assert result.text_blocks[0].text == (
+        "| a | column_3 | column_3_2 |\n| --- | --- | --- |\n| 1 | existing | unnamed |"
+    )
+    assert result.text_blocks[0].metadata["csv_columns"] == ["a", "column_3", "column_3_2"]
+
+
 async def test_unclosed_quote_reports_consumed_physical_lines():
     with pytest.raises(NoIndexableContentError) as exc_info:
         await CsvParser().parse(Document(text='id,note\n1,"5 inch screen\n2,ok\n3,also\n'))
@@ -371,14 +380,12 @@ async def test_valid_utf8_path_does_not_run_chardet(tmp_path, monkeypatch):
 
 
 async def test_mostly_utf8_path_replaces_a_stray_cp1252_byte(tmp_path, monkeypatch):
-    samples: list[bytes] = []
     fake_chardet = ModuleType("chardet")
 
-    def detect(raw):
-        samples.append(raw)
-        return {"encoding": "utf-8", "confidence": 0.99}
+    def fail_if_called(_raw):
+        raise AssertionError("chardet must not reinterpret text that already contains valid UTF-8")
 
-    fake_chardet.detect = detect
+    fake_chardet.detect = fail_if_called
     monkeypatch.setitem(sys.modules, "chardet", fake_chardet)
     path = tmp_path / "mixed-encoding.csv"
     utf8_rows = "".join(f"{number},café\n" for number in range(7_000)).encode("utf-8")
@@ -389,5 +396,43 @@ async def test_mostly_utf8_path_replaces_a_stray_cp1252_byte(tmp_path, monkeypat
     assert "café" in result.text_blocks[0].text
     assert "Rep\ufffd" in result.text_blocks[0].text
     assert result.text_blocks[0].metadata["csv_decode_replacements"] == 1
+
+
+async def test_utf8_french_text_with_a_stray_byte_keeps_utf8(tmp_path, monkeypatch):
+    fake_chardet = ModuleType("chardet")
+
+    def fail_if_called(_raw):
+        raise AssertionError("chardet must not reinterpret valid UTF-8 accents")
+
+    fake_chardet.detect = fail_if_called
+    monkeypatch.setitem(sys.modules, "chardet", fake_chardet)
+    path = tmp_path / "mixed-french.csv"
+    path.write_bytes("id,note\n1,Le café crème à l’église\n2,".encode() + b"Ren\xe9\n")
+
+    result = await CsvParser().parse(Document(source_path=str(path)))
+
+    assert "Le café crème à l’église" in result.text_blocks[0].text
+    assert "Ren\ufffd" in result.text_blocks[0].text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 1
+
+
+async def test_plain_ascii_prefix_uses_bounded_chardet_sample(tmp_path, monkeypatch):
+    samples: list[bytes] = []
+    fake_chardet = ModuleType("chardet")
+
+    def detect(raw):
+        samples.append(raw)
+        return {"encoding": "cp1252", "confidence": 0.99}
+
+    fake_chardet.detect = detect
+    monkeypatch.setitem(sys.modules, "chardet", fake_chardet)
+    path = tmp_path / "cp1252-after-ascii.csv"
+    ascii_rows = "".join(f"{number},plain text\n" for number in range(10_000)).encode()
+    path.write_bytes(b"id,name\n" + ascii_rows + b"10000,Ren\xe9\n")
+
+    result = await CsvParser(batch_size=20_000).parse(Document(source_path=str(path)))
+
+    assert "René" in result.text_blocks[0].text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 0
     assert len(samples) == 1
     assert len(samples[0]) <= 128 * 1024

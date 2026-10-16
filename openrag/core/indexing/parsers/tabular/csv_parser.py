@@ -23,18 +23,6 @@ _CSV_FIELD_SIZE_LIMIT = 16 * 1024 * 1024
 csv.field_size_limit(max(csv.field_size_limit(), _CSV_FIELD_SIZE_LIMIT))
 
 
-def _detect_bytes_encoding(raw: bytes) -> str:
-    try:
-        raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        try:
-            import chardet
-        except ImportError:
-            return "cp1252"
-        return chardet.detect(raw).get("encoding") or "cp1252"
-    return "utf-8-sig"
-
-
 def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
     """Inspect the complete stream without retaining it in memory.
 
@@ -47,6 +35,7 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
     prefix = bytearray()
     failing_block = b""
     blocks_read = 0
+    saw_utf8_multibyte = False
 
     raw_stream.seek(0)
     while block := raw_stream.read(_ENCODING_SAMPLE_SIZE):
@@ -54,10 +43,14 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
         if len(prefix) < _ENCODING_SAMPLE_SIZE:
             prefix.extend(block[: _ENCODING_SAMPLE_SIZE - len(prefix)])
         try:
-            decoder.decode(block, final=False)
-        except UnicodeDecodeError:
+            decoded = decoder.decode(block, final=False)
+            saw_utf8_multibyte |= not decoded.isascii()
+        except UnicodeDecodeError as exc:
             utf8_valid = False
             failing_block = block
+            # ``exc.object`` includes any bytes buffered by the incremental
+            # decoder. Everything before ``exc.start`` was valid UTF-8.
+            saw_utf8_multibyte |= any(byte >= 0x80 for byte in exc.object[: exc.start])
             break
     if utf8_valid:
         try:
@@ -68,6 +61,13 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
     raw_stream.seek(0)
     if utf8_valid:
         return "utf-8-sig", "strict"
+
+    # Valid multibyte text before the first bad byte is strong evidence that
+    # this is UTF-8 with a stray byte, not a single-byte encoded file. Asking
+    # chardet here can silently reinterpret every valid accent in the file.
+    if saw_utf8_multibyte:
+        logger.warning("CSV contains invalid bytes after valid UTF-8 text; replacing undecodable bytes")
+        return "utf-8-sig", "replace"
 
     detection_sample = bytes(prefix)
     remaining = _ENCODING_DETECTION_LIMIT - len(detection_sample)
@@ -86,6 +86,29 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
         return "utf-8-sig", "replace"
     logger.bind(encoding=encoding).warning("CSV is not valid UTF-8; using detected fallback encoding")
     return encoding, "replace"
+
+
+def _detect_bytes_encoding(raw: bytes) -> tuple[str, str]:
+    return _detect_stream_encoding(io.BytesIO(raw))
+
+
+def _normalize_headers(headers: list[str]) -> list[str]:
+    """Give blank headers stable names without colliding with explicit names."""
+    used_names = {header for header in headers if header}
+    normalized = []
+    for index, header in enumerate(headers, start=1):
+        if header:
+            normalized.append(header)
+            continue
+        base_name = f"column_{index}"
+        generated_name = base_name
+        suffix = 2
+        while generated_name in used_names:
+            generated_name = f"{base_name}_{suffix}"
+            suffix += 1
+        normalized.append(generated_name)
+        used_names.add(generated_name)
+    return normalized
 
 
 def markdown_row(cells: list[str]) -> str:
@@ -131,8 +154,8 @@ class CsvParser(DocumentParser):
                 newline="",
             )
         raw = document.raw_bytes or b""
-        encoding = _detect_bytes_encoding(raw)
-        return io.StringIO(raw.decode(encoding, errors="replace").removeprefix("\ufeff"), newline="")
+        encoding, errors = _detect_bytes_encoding(raw)
+        return io.StringIO(raw.decode(encoding, errors=errors).removeprefix("\ufeff"), newline="")
 
     def _delimiter_for(self, stream) -> str:
         if self.delimiter is not None:
@@ -202,7 +225,7 @@ class CsvParser(DocumentParser):
                     continue
                 if row:
                     headers = row
-            headers = [header if header else f"column_{index}" for index, header in enumerate(headers, start=1)]
+            headers = _normalize_headers(headers)
             decode_replacements += sum(header.count("\ufffd") for header in headers)
             header_lines = [
                 markdown_row(headers),
