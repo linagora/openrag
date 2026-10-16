@@ -731,6 +731,13 @@ reranker:
   nodeSelector: {}
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
+  # Model precision (Infinity's --dtype). On GPU, Infinity's default picks
+  # bfloat16, where a document's score depends on what shares its batch, so
+  # near-tied chunks swap places between identical requests. "bfloat16" trades
+  # that for about three times the throughput; "" keeps Infinity's default.
+  # The container also sets NVIDIA_TF32_OVERRIDE=0: Infinity turns TF32 matmuls
+  # on, and with them on float32 scores still move with the batch.
+  dtype: "float32"
   command:
     - v2
     - --model-id

@@ -36,8 +36,15 @@ spec:
             - "v2"
             - "--model-id"
             - "{{ .Values.reranker.model.id }}"
+            {{- with .Values.reranker.dtype }}
+            - "--dtype"
+            - {{ . | quote }}
+            {{- end }}
             - "--port"
             - "{{ .Values.reranker.service.port }}"
+          env:
+            - name: NVIDIA_TF32_OVERRIDE
+              value: "0"
           ports:
             - containerPort: {{ .Values.reranker.service.port }}
               name: reranker
