@@ -10,6 +10,7 @@ here). Retrieval is faked; the real ``format_context`` /
 from __future__ import annotations
 
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -1621,6 +1622,34 @@ async def test_chat_trace_records_contextualizer_parse_fallback():
     assert context["subqueries"][0]["query"] == "Original legal question?"
     assert context["error"]["kind"] == "ValidationError"
     assert context["error"]["message"] == "redacted"
+
+
+@pytest.mark.asyncio
+async def test_chat_trace_records_empty_retrieval_query_list_as_fallback():
+    original = "Find the policy about remote work"
+    llm = FakeLLM(
+        chat_responses=[
+            json.dumps({"requires_retrieval": True, "query_list": []}),
+            "answer",
+        ]
+    )
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": original}],
+            "metadata": {"include_retrieval_trace": True},
+        },
+        prepare_sources=lambda _docs, _web: [],
+        model_name="m",
+    )
+
+    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == original
+    context = out["extra"]["retrieval_trace"]["contextualization"]
+    assert context["fallback_used"] is True
+    assert context["subqueries"][0]["query"] == original
 
 
 @pytest.mark.asyncio
@@ -4253,6 +4282,25 @@ async def test_truncated_contextualizer_retries_compactly_with_same_512_budget()
 
 
 @pytest.mark.asyncio
+async def test_complete_json_with_length_finish_reason_is_kept_without_retry():
+    payload = json.dumps(
+        {
+            "query_list": [
+                {"query": "A cost"},
+                {"query": "B cost"},
+            ]
+        }
+    )
+    llm = FakeLLM(chat_responses=[{"content": payload + "\n" * 50, "finish_reason": "length"}])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    result = await svc.generate_query([{"role": "user", "content": "Compare A and B"}])
+
+    assert [query.query for query in result.query_list] == ["A cost", "B cost"]
+    assert len(llm.chat_calls) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("budget", [1, 2, 8])
 async def test_web_query_budget_preserves_all_facets(budget):
     from core.models.query import Query, SearchQueries
@@ -4301,6 +4349,8 @@ def test_refreshed_template_formats_with_current_renderer_arguments():
     rendered = template.format(query_language="en", current_date="2026-10-13", calendar_anchors=anchors)
     assert anchors in rendered
     assert f"Return no more than {MAX_QUERY_SUBQUERIES} sub-queries total" in rendered
+    limits = re.findall(r"Return no more than (\d+) sub-queries total", template)
+    assert limits == [str(MAX_QUERY_SUBQUERIES)]
 
 
 def test_512_output_budget_limits_initial_fanout_before_truncation():
