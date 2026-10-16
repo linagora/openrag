@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
+from core.models.user import PartitionRole, UserPartition
+from core.utils.consts import DEFAULT_ADMIN_USER_ID, DEFAULT_PARTITION_NAME
 from core.utils.exceptions import UserNotFoundError, ValidationError
 from core.utils.logging import get_logger
 
@@ -174,16 +176,29 @@ class UserService:
 
         Mirrors the legacy Ray ``delete_user``: every partition where the
         user holds the ``owner`` role is deleted (vectors + relational
-        rows, via PartitionService) before the user row is removed.
+        rows, via PartitionService) before the user row is removed. The
+        ``default`` partition is kept, since it cannot be deleted; only the
+        user's membership in it goes, with the user row. If the user owned
+        it, the seeded admin is made its owner so it never ends up without
+        anyone allowed to manage its members.
         """
         await self._ensure_exists(user_id)
-        owned = [
+        owned_all = [
             p["partition"]
             for p in await self._membership_repo.list_user_partitions_dict(user_id)
             if p.get("role") == "owner"
         ]
+        owned = [p for p in owned_all if p != DEFAULT_PARTITION_NAME]
         for partition in owned:
             await self._partition_service.delete_partition(partition)
+        if DEFAULT_PARTITION_NAME in owned_all and user_id != DEFAULT_ADMIN_USER_ID:
+            await self._membership_repo.assign_partition(
+                UserPartition(
+                    user_id=DEFAULT_ADMIN_USER_ID,
+                    partition=DEFAULT_PARTITION_NAME,
+                    role=PartitionRole.OWNER,
+                )
+            )
         await self._user_repo.delete_user(user_id)
         logger.info("Deleted user", user_id=user_id, cascaded_partitions=len(owned))
 

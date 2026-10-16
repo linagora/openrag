@@ -56,12 +56,19 @@ class Retriever(ABC):
         ...
 
     @abstractmethod
-    async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
+    async def expand_search_results(
+        self,
+        results: list[Chunk],
+        filter_params: dict | None = None,
+        filter: str | None = None,
+    ) -> list[Chunk]:
         """Optionally enrich a result set with related/ancestor chunks.
 
         ``filter_params`` carries the same restriction (e.g. a workspace's
         ``file_id`` allowlist) the initial search was scoped by — expansion
         must never surface a chunk that restriction would have excluded.
+        ``filter`` is the expression that search used, so a temporal or caller
+        filter is not dropped when related chunks are added (#953).
         """
         ...
 
@@ -113,7 +120,9 @@ class BaseRetriever(Retriever):
             **kwargs,
         )
 
-    async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
+    async def expand_search_results(
+        self, results: list[Chunk], filter_params: dict | None = None, filter: str | None = None
+    ) -> list[Chunk]:
         return await _expand_with_related_chunks(
             searcher=self.searcher,
             results=results,
@@ -122,6 +131,7 @@ class BaseRetriever(Retriever):
             related_limit=self.related_limit,
             max_ancestor_depth=self.max_ancestor_depth,
             filter_params=filter_params,
+            filter=filter,
         )
 
 
@@ -242,6 +252,7 @@ async def _expand_with_related_chunks(
     related_limit: int = 10,
     max_ancestor_depth: int | None = None,
     filter_params: dict | None = None,
+    filter: str | None = None,
 ) -> list[Chunk]:
     """Append related and/or ancestor chunks to a result set, deduplicated by id.
 
@@ -252,7 +263,8 @@ async def _expand_with_related_chunks(
     ``filter_params`` carries the same restriction the initial search was
     scoped by (e.g. a workspace's ``file_id`` allowlist) — passed through so
     related/ancestor expansion cannot surface a chunk outside that scope
-    (#706).
+    (#706). ``filter`` is that search's expression, so expansion cannot pull
+    in chunks the caller excluded (#953).
     """
     if not results or (not include_related and not include_ancestors):
         return results
@@ -284,6 +296,7 @@ async def _expand_with_related_chunks(
                     relationship_id=rel_id,
                     limit=related_limit,
                     allowed_file_ids=allowed_file_ids,
+                    filter=filter,
                 )
         except Exception:
             logger.warning("get_related_chunks failed (partition=%s, relationship_id=%s)", part, rel_id, exc_info=True)
@@ -298,6 +311,7 @@ async def _expand_with_related_chunks(
                     limit=related_limit,
                     max_ancestor_depth=max_ancestor_depth,
                     allowed_file_ids=allowed_file_ids,
+                    filter=filter,
                 )
         except Exception:
             logger.warning("get_ancestor_chunks failed (partition=%s, file_id=%s)", part, file_id, exc_info=True)

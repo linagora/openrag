@@ -20,6 +20,7 @@ class FakeRetriever(Retriever):
         self.expand_input: list[Chunk] | None = None
         self.expand_result: list[Chunk] | None = None
         self.expand_filter_params: dict | None = None
+        self.expand_filter: str | None = None
         self.expansion_enabled = expansion_enabled
 
     async def retrieve(self, partition, query, filter=None, filter_params=None, trace=None):
@@ -36,9 +37,10 @@ class FakeRetriever(Retriever):
             return self.results_queue.pop(0)
         return []
 
-    async def expand_search_results(self, results, filter_params=None):
+    async def expand_search_results(self, results, filter_params=None, filter=None):
         self.expand_input = list(results)
         self.expand_filter_params = filter_params
+        self.expand_filter = filter
         return list(self.expand_result) if self.expand_result is not None else list(results)
 
 
@@ -79,6 +81,32 @@ async def test_retrieve_docs_temporal_filter_passed_through():
     )
     await p.retrieve_docs(partition=["p1"], query=q)
     assert "created_at" in r.calls[0]["filter"]
+
+
+@pytest.mark.asyncio
+async def test_expansion_receives_the_filter_the_search_used():
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [_chunks("a")]
+    p = RetrieverPipeline(retriever=r)
+    q = Query(
+        query="hi",
+        temporal_filters=[TemporalPredicate(operator=">=", value="2026-01-01T00:00:00+00:00")],
+    )
+    await p.retrieve_docs(partition=["p1"], query=q)
+    assert r.expand_filter == r.calls[0]["filter"]
+
+
+@pytest.mark.asyncio
+async def test_expansion_follows_filterless_fallback():
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [[], _chunks("a")]
+    p = RetrieverPipeline(retriever=r, allow_filterless_fallback=True)
+    q = Query(
+        query="hi",
+        temporal_filters=[TemporalPredicate(operator=">=", value="2026-01-01T00:00:00+00:00")],
+    )
+    await p.retrieve_docs(partition=["p1"], query=q)
+    assert r.expand_filter is None
 
 
 @pytest.mark.asyncio
