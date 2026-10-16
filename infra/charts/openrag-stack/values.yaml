@@ -744,6 +744,7 @@ reranker:
     id: Alibaba-NLP/gte-multilingual-reranker-base
   # Flags appended to `v2 --model-id <model.id> --port <service.port>`, e.g.
   # ["--batch-size", "16"]. They replace `command`, which was never read.
+  # --model-id and --port are refused: set model.id and service.port.
   extraArgs: []
   # Environment variables for the reranker container alone (Kubernetes EnvVar
   # objects). They take precedence over the shared env.config ConfigMap the
@@ -778,8 +779,9 @@ reranker:
   # benchmark has run, which took 100-125 s on 4 CPUs, 180-210 s on 2 and
   # 340-380 s on 1 in our tests, cached model or not. The startup probe allows
   # 10 minutes for that (plus a first-boot download); liveness and readiness
-  # start only after it passes. Set a probe to null to drop it, and its httpGet to null to give it
-  # another handler.
+  # start only after it passes. Set a probe to null to drop it, and its
+  # httpGet to null to give it another handler. Setting the whole block to
+  # null keeps these defaults: drop each probe instead.
   probes:
     startup:
       httpGet:

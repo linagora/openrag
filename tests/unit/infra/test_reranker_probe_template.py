@@ -132,10 +132,57 @@ def test_a_probe_takes_another_handler_once_http_get_is_null(tmp_path: Path) -> 
 
 
 @requires_helm
-def test_no_probes_block_renders_without_probes(tmp_path: Path) -> None:
-    container = _reranker_container(_documents(tmp_path, "--set", "reranker.probes=null"))
+def test_every_probe_set_to_null_renders_without_probes(tmp_path: Path) -> None:
+    container = _reranker_container(
+        _documents(
+            tmp_path,
+            "--set",
+            "reranker.probes.startup=null",
+            "--set",
+            "reranker.probes.readiness=null",
+            "--set",
+            "reranker.probes.liveness=null",
+        )
+    )
 
     assert not {"startupProbe", "readinessProbe", "livenessProbe"} & container.keys()
+
+
+def _default_probes() -> dict:
+    values = yaml.safe_load((CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
+    return values["reranker"]["probes"]
+
+
+def _probes(container: dict) -> dict:
+    return {
+        "startup": container.get("startupProbe"),
+        "readiness": container.get("readinessProbe"),
+        "liveness": container.get("livenessProbe"),
+    }
+
+
+@requires_helm
+def test_values_without_a_probes_block_keep_the_default_probes(tmp_path: Path) -> None:
+    """`helm upgrade --reuse-values` keeps the previous chart's values, which have
+    no probes block; the probes were hardcoded then and must not vanish now."""
+    chart = _isolated_chart(tmp_path)
+    values = yaml.safe_load((chart / "values.yaml").read_text(encoding="utf-8"))
+    del values["reranker"]["probes"]
+    (chart / "values.yaml").write_text(yaml.safe_dump(values), encoding="utf-8")
+    assert HELM is not None
+    result = subprocess.run([HELM, "template", "test", str(chart)], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    documents = [document for document in yaml.safe_load_all(result.stdout) if document]
+
+    assert _probes(_reranker_container(documents)) == _default_probes()
+
+
+@requires_helm
+def test_a_null_probes_block_keeps_the_default_probes(tmp_path: Path) -> None:
+    container = _reranker_container(_documents(tmp_path, "--set", "reranker.probes=null"))
+
+    assert _probes(container) == _default_probes()
 
 
 # One source for the model and the port
@@ -241,6 +288,32 @@ def test_command_flags_that_never_applied_are_refused(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "reranker.command is not read by the chart" in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        ("{--port,9000}", "reranker.extraArgs sets --port"),
+        ("{--port=9000}", "reranker.extraArgs sets --port"),
+        ("{--model-id,BAAI/bge-reranker-v2-m3}", "reranker.extraArgs sets --model-id"),
+        ("{--batch-size,8,--model-id=BAAI/bge-reranker-v2-m3}", "reranker.extraArgs sets --model-id"),
+    ],
+)
+def test_extra_args_cannot_set_the_model_or_the_port(tmp_path: Path, flags: str, message: str) -> None:
+    """A second --port moves Infinity off the port the probes and OpenRAG use; a
+    second --model-id loads another model than the one OpenRAG names."""
+    result = _render(tmp_path, "--set", f"reranker.extraArgs={flags}")
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@requires_helm
+def test_extra_args_may_start_like_a_reserved_flag(tmp_path: Path) -> None:
+    container = _reranker_container(_documents(tmp_path, "--set", "reranker.extraArgs={--port-forward-ok}"))
+
+    assert container["args"][-1] == "--port-forward-ok"
 
 
 @requires_helm

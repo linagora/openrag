@@ -27,6 +27,18 @@
 {{- fail (printf "reranker.command is not read by the chart, and never was: the reranker runs %q. Put extra flags in reranker.extraArgs, the model in reranker.model.id and the port in reranker.service.port, then delete reranker.command." (join " " $args)) }}
 {{- end }}
 {{- end }}
+{{- /* The model and the port come from reranker.model.id and
+   reranker.service.port alone: a second --model-id would load another model,
+   and a second --port would move Infinity off the port that the probes,
+   the Service and RERANKER_BASE_URL use. */}}
+{{- range $reranker.extraArgs | default list }}
+{{- $flag := toString . }}
+{{- range list "--model-id" "--port" }}
+{{- if or (eq $flag .) (hasPrefix (printf "%s=" .) $flag) }}
+{{- fail (printf "reranker.extraArgs sets %s, which the chart already passes from %s. Set it there and remove it from reranker.extraArgs." . (ternary "reranker.model.id" "reranker.service.port" (eq . "--model-id"))) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- /* With the bundled reranker, OpenRAG must name the model Infinity serves
    (Infinity ignores the name when it serves one model, so a mismatch reranks
    with another model than the one configured) and call the port it listens
@@ -87,7 +99,36 @@ spec:
               name: reranker
           resources:
             {{- toYaml .Values.reranker.resources | nindent 12 }}
-          {{- $probes := .Values.reranker.probes | default dict }}
+          {{- $probes := $reranker.probes }}
+          {{- if not (hasKey $reranker "probes") }}
+          {{- /* Values without a probes block, e.g. from `helm upgrade
+             --reuse-values`, which keeps the previous chart's values and
+             drops this chart's defaults. Earlier charts hardcoded these
+             probes, so they must not vanish on upgrade. Keep this equal to
+             reranker.probes in values.yaml. */}}
+          {{- $probes = fromYaml `
+startup:
+  httpGet:
+    path: /health
+    port: reranker
+  periodSeconds: 10
+  failureThreshold: 60
+readiness:
+  httpGet:
+    path: /health
+    port: reranker
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 6
+liveness:
+  httpGet:
+    path: /health
+    port: reranker
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  failureThreshold: 3
+` }}
+          {{- end }}
           {{- with $probes.startup }}
           startupProbe:
             {{- toYaml . | nindent 12 }}
