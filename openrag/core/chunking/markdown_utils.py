@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from core.utils.exceptions import PipelineError
 from core.utils.text import clean_markdown_table_spacing
 
 # Header + delimiter + at least one row. The delimiter row is one or more cells
@@ -339,7 +340,14 @@ def _chunk_wide_csv_row(
     identity_indexes = _identity_column_indexes(columns)
     payload_indexes = [index for index in range(len(columns)) if index not in identity_indexes]
     if not payload_indexes:
-        return []
+        return _chunk_csv_row_per_column(
+            columns=columns,
+            cells=cells,
+            row_number=row_number,
+            table_element=table_element,
+            chunk_size=chunk_size,
+            length_function=length_function,
+        )
 
     group_indexes: list[list[int]] = []
     current_payload: list[int] = []
@@ -389,14 +397,23 @@ def _chunk_wide_csv_row(
         # cell exceeds the budget alongside the identity columns.
         payload_in_group = [index for index in indexes if index not in identity_indexes]
         if len(payload_in_group) != 1:
-            raise ValueError("CSV column group exceeded its token budget")
+            raise PipelineError("CSV column group exceeded its token budget")
         split_index = payload_in_group[0]
         split_position = indexes.index(split_index)
         column_name = columns[split_index]
         label = f"[CSV row {row_number}; {column_name} continuation 999/999]"
         reserved_cells = list(group_cells)
         reserved_cells[split_position] = label
-        cell_budget = max(1, chunk_size - length_function(_markdown_table(group_columns, reserved_cells)))
+        cell_budget = chunk_size - length_function(_markdown_table(group_columns, reserved_cells))
+        if cell_budget <= 0:
+            return _chunk_csv_row_per_column(
+                columns=columns,
+                cells=cells,
+                row_number=row_number,
+                table_element=table_element,
+                chunk_size=chunk_size,
+                length_function=length_function,
+            )
         parts = _split_to_budget(cells[split_index], cell_budget, length_function)
         for part_number, part in enumerate(parts, start=1):
             continuation_cells = list(group_cells)
@@ -419,12 +436,71 @@ def _chunk_wide_csv_row(
     return chunks
 
 
+def _chunk_csv_row_per_column(
+    *,
+    columns: list[str],
+    cells: list[str],
+    row_number: int,
+    table_element: MDElement,
+    chunk_size: int,
+    length_function: Callable[[str], int],
+) -> list[MDElement]:
+    """Emit one independently bounded group per column of a CSV row."""
+    chunks: list[MDElement] = []
+    total_groups = len(columns)
+    for group_number, (column_name, cell) in enumerate(zip(columns, cells, strict=True), start=1):
+        group_columns = [column_name]
+        metadata = {
+            **(table_element.metadata or {}),
+            "csv_columns": group_columns,
+            "csv_row_start": row_number,
+            "csv_row_end": row_number,
+            "csv_row_numbers": [row_number],
+            "csv_row_number": row_number,
+            "csv_column_group": group_number,
+            "csv_column_groups_total": total_groups,
+        }
+        group_text = _markdown_table(group_columns, [cell])
+        if length_function(group_text) <= chunk_size:
+            chunks.append(
+                MDElement(
+                    type="table",
+                    content=group_text,
+                    page_number=table_element.page_number,
+                    metadata=metadata,
+                )
+            )
+            continue
+
+        label = f"[CSV row {row_number}; {column_name} continuation 999/999]"
+        cell_budget = chunk_size - length_function(_markdown_table(group_columns, [label]))
+        if cell_budget <= 0:
+            raise PipelineError(f"CSV column {column_name!r} leaves no room for content within the chunk token budget")
+        parts = _split_to_budget(cell, cell_budget, length_function)
+        for part_number, part in enumerate(parts, start=1):
+            continuation = f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+            chunks.append(
+                MDElement(
+                    type="table",
+                    content=_markdown_table(group_columns, [continuation]),
+                    page_number=table_element.page_number,
+                    metadata={
+                        **metadata,
+                        "csv_column": column_name,
+                        "csv_part": part_number,
+                        "csv_parts_total": len(parts),
+                    },
+                )
+            )
+    return chunks
+
+
 def _split_to_budget(text: str, budget: int, length_function: Callable[[str], int]) -> list[str]:
-    """Without loss divide text at whitespace and then characters if it isnecessary."""
+    """Without loss, divide text at whitespace and then characters when necessary."""
     if not text:
         return [""]
     if budget <= 0:
-        return [text]
+        raise PipelineError("CSV cell split requires a positive token budget")
 
     pieces: list[str] = []
     remaining = text
@@ -497,7 +573,7 @@ def _chunk_csv_table(
         source_row_numbers = list(range(first_row_number, first_row_number + len(data_rows)))
     else:
         source_row_numbers = [int(row_number) for row_number in source_row_numbers]
-    body_budget = max(1, chunk_size - header_tokens)
+    body_budget = chunk_size - header_tokens
     chunks: list[MDElement] = []
     current_rows: list[str] = []
     current_row_numbers: list[int] = []
@@ -583,7 +659,20 @@ def _chunk_csv_table(
         base_cells = list(cells)
         base_cells[cell_index] = f"[CSV row {row_number}; {column_name} continuation 999/999]"
         label_reserve = length_function(_markdown_row(base_cells))
-        parts = _split_to_budget(cells[cell_index], max(1, body_budget - label_reserve), length_function)
+        cell_budget = body_budget - label_reserve
+        if cell_budget <= 0:
+            chunks.extend(
+                _chunk_csv_row_per_column(
+                    columns=columns,
+                    cells=cells,
+                    row_number=row_number,
+                    table_element=table_element,
+                    chunk_size=chunk_size,
+                    length_function=length_function,
+                )
+            )
+            continue
+        parts = _split_to_budget(cells[cell_index], cell_budget, length_function)
         for part_number, part in enumerate(parts, start=1):
             continuation_cells = list(cells)
             continuation_cells[cell_index] = (

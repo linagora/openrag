@@ -16,6 +16,7 @@ from core.chunking.markdown_utils import (
     span_inside,
     split_md_elements,
 )
+from core.utils.exceptions import PipelineError
 
 
 def _mock_length(text: str) -> int:
@@ -375,9 +376,49 @@ class TestChunkTable:
 
         assert chunks
         assert all(chunk.metadata["csv_row_number"] == 2 for chunk in chunks)
-        assert values[1] in chunks[0].content
-        reconstructed = [chunk.content.split("] ", 1)[1].split(" |", 1)[0] for chunk in chunks]
-        assert "".join(reconstructed) == values[0]
+        assert all(len(chunk.content.split()) <= 20 for chunk in chunks)
+        assert len(chunks) < 10
+        reconstructed: dict[str, list[str]] = {"id": [], "name": []}
+        for chunk in chunks:
+            column = chunk.metadata["csv_column"]
+            reconstructed[column].append(chunk.content.split("] ", 1)[1].split(" |", 1)[0])
+        assert {column: "".join(parts) for column, parts in reconstructed.items()} == dict(
+            zip(["id", "name"], values, strict=True)
+        )
+
+    def test_csv_oversized_cells_are_split_independently(self):
+        columns = ["question", "answer"]
+        values = [
+            " ".join(f"question-{number}" for number in range(780)),
+            " ".join(f"answer-{number}" for number in range(2_000)),
+        ]
+        table = "\n".join(
+            [
+                "| question | answer |",
+                "| --- | --- |",
+                f"| {values[0]} | {values[1]} |",
+            ]
+        )
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": columns, "csv_row_start": 2},
+            ),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) < 100
+        assert all(len(chunk.content.split()) <= 100 for chunk in chunks)
+        reconstructed: dict[str, list[str]] = {column: [] for column in columns}
+        for chunk in chunks:
+            column = chunk.metadata["csv_column"]
+            reconstructed[column].append(chunk.content.split("] ", 1)[1].split(" |", 1)[0])
+        assert {column: "".join(parts) for column, parts in reconstructed.items()} == dict(
+            zip(columns, values, strict=True)
+        )
 
 
 def test_split_to_budget_uses_logarithmic_whitespace_probes():
@@ -394,6 +435,11 @@ def test_split_to_budget_uses_logarithmic_whitespace_probes():
     assert "".join(pieces) == text
     assert all(len(piece.split()) <= 1_000 for piece in pieces)
     assert calls < 100
+
+
+def test_split_to_budget_rejects_non_positive_budget():
+    with pytest.raises(PipelineError, match="positive token budget"):
+        _split_to_budget("content", budget=0, length_function=len)
 
 
 def test_md_element_repr_truncates_content():
