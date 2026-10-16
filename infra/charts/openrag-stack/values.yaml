@@ -1132,7 +1132,9 @@ env:
     # Loaders
     PDFLOADER: "PyMuPDFLoader"
     # PyMuPDF parses one PDF at a time per indexer worker unless asked: each
-    # slot is then a child process (~80 MiB inside a Ray worker before parsing).
+    # slot is then a child process (~80 MiB inside a Ray worker before parsing,
+    # up to what its largest parse needs while parsing; between parses its RSS
+    # drops back near that, its VmData not always).
     # The ceiling (MiB) makes an oversized PDF fail on its own instead of
     # OOM-killing the worker; each child logs its baseline when it starts. See
     # env_vars.md.
