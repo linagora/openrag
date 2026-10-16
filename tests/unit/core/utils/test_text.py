@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+import pytest
 from core.utils.text import neutralize_prompt_control_tokens
 
 
@@ -43,17 +44,15 @@ class TestNeutralizePromptControlTokens:
 
 def test_get_num_tokens_does_not_pass_enable_thinking_to_chatopenai(monkeypatch):
     import core.utils.text as text_utils
+    from langchain_openai import ChatOpenAI
 
     captured: dict = {}
 
-    class FakeChatOpenAI:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+    def recording_chatopenai(**kwargs):
+        captured.update(kwargs)
+        return ChatOpenAI(**kwargs)
 
-        def get_num_tokens(self, _text: str) -> int:
-            return 1
-
-    monkeypatch.setitem(sys.modules, "langchain_openai", SimpleNamespace(ChatOpenAI=FakeChatOpenAI))
+    monkeypatch.setitem(sys.modules, "langchain_openai", SimpleNamespace(ChatOpenAI=recording_chatopenai))
     monkeypatch.setattr(
         text_utils,
         "load_config",
@@ -74,3 +73,43 @@ def test_get_num_tokens_does_not_pass_enable_thinking_to_chatopenai(monkeypatch)
 
     assert length_function("hello") == 1
     assert "enable_thinking" not in captured
+
+
+@pytest.mark.parametrize(("fallback", "expected_tokens"), [(False, 11), (True, 10)])
+@pytest.mark.parametrize("request_type", ["chat", "completion"])
+def test_literal_special_token_text_is_counted_and_budgeted(monkeypatch, fallback, expected_tokens, request_type):
+    import core.utils.text as text_utils
+    import langchain_openai
+    from api.routers.user.chat import validate_tokens_limit
+    from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
+
+    monkeypatch.setattr(text_utils, "_cached_length_function", None)
+    monkeypatch.setattr(
+        text_utils,
+        "load_config",
+        lambda: SimpleNamespace(
+            llm=SimpleNamespace(model_dump=lambda: {"model": "gpt-4o-mini", "api_key": "test-key"})
+        ),
+    )
+    if fallback:
+
+        def unavailable_configured_counter(**_kwargs):
+            raise RuntimeError("configured counter cannot initialize")
+
+        monkeypatch.setattr(langchain_openai, "ChatOpenAI", unavailable_configured_counter)
+
+    content = "What does <|endoftext|> mean?"
+    counter = text_utils.get_num_tokens()
+    assert counter(content) == expected_tokens
+    if request_type == "chat":
+        request = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": content}], max_tokens=1)
+        budget = expected_tokens + 5  # Four tokens per message, plus one output token.
+    else:
+        request = OpenAICompletionRequest(prompt=content, max_tokens=1)
+        budget = expected_tokens + 1
+
+    assert validate_tokens_limit(request, max_tokens_allowed=budget) == (True, "")
+    is_valid, message = validate_tokens_limit(request, max_tokens_allowed=budget - 1)
+    assert is_valid is False
+    assert "exceeds maximum token limit" in message
+    assert (request.messages[0].content if request_type == "chat" else request.prompt) == content

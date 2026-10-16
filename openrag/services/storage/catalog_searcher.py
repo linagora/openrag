@@ -166,6 +166,7 @@ class CatalogSearcher(RetrievalSearcher):
         relationship_id: str,
         limit: int,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         return await self._filter(
             await self._searcher.get_related_chunks(
@@ -173,6 +174,7 @@ class CatalogSearcher(RetrievalSearcher):
                 relationship_id=relationship_id,
                 limit=limit,
                 allowed_file_ids=allowed_file_ids,
+                filter=filter,
             )
         )
 
@@ -183,6 +185,7 @@ class CatalogSearcher(RetrievalSearcher):
         limit: int,
         max_ancestor_depth: int | None = None,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         return await self._filter(
             await self._searcher.get_ancestor_chunks(
@@ -191,6 +194,7 @@ class CatalogSearcher(RetrievalSearcher):
                 limit=limit,
                 max_ancestor_depth=max_ancestor_depth,
                 allowed_file_ids=allowed_file_ids,
+                filter=filter,
             )
         )
 
