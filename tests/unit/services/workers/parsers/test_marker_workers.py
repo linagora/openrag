@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import itertools
 import multiprocessing
+import os
+import signal
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -29,9 +33,16 @@ def test_marker_num_gpus_uses_ray_cluster_resources_when_cuda_is_hidden(monkeypa
 # ---------------------------------------------------------------------------
 
 
+_fake_pids = itertools.count(1_000_000)
+_fake_procs: dict[int, _FakeProc] = {}
+
+
 class _FakeProc:
     def __init__(self, kill_error: Exception | None = None) -> None:
+        self.pid = next(_fake_pids)
+        _fake_procs[self.pid] = self
         self.kill_error = kill_error
+        self.exitcode: int | None = None
         self.killed = False
         self.joined = False
 
@@ -67,6 +78,20 @@ class _NullLogger:
         pass
 
 
+@pytest.fixture(autouse=True)
+def _kill_fakes_by_pid(monkeypatch):
+    """_force_kill_executor kills by pid; route that to the fake with the pid."""
+    real_kill = marker_workers.kill_process_group
+
+    def kill(pid: int) -> None:
+        if pid in _fake_procs:
+            _fake_procs[pid].kill()
+        else:
+            real_kill(pid)
+
+    monkeypatch.setattr(marker_workers, "kill_process_group", kill)
+
+
 def test_force_kill_executor_kills_every_worker_then_shuts_down():
     procs = [_FakeProc(), _FakeProc(), _FakeProc()]
     executor = _FakeExecutor(procs)
@@ -95,6 +120,97 @@ def test_force_kill_executor_survives_a_kill_error():
 
     assert ok.killed
     assert executor.shutdown_kwargs == {"wait": False, "cancel_futures": True}
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process groups as on the workers")
+def test_force_kill_executor_leaves_the_pid_of_a_crashed_child_alone(monkeypatch):
+    """A broken pool keeps its crashed child after reaping it, so its pid is
+    free: killing that pid's group could hit an unrelated process."""
+    killed: list[int] = []
+    monkeypatch.setattr(marker_workers, "kill_process_group", killed.append)
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("fork"))
+    with pytest.raises(concurrent.futures.process.BrokenProcessPool):
+        executor.submit(os._exit, 9).result(timeout=60)
+    crashed = next(iter(executor._processes.values()))
+    assert crashed.exitcode == 9
+
+    marker_workers._force_kill_executor(executor, _NullLogger())
+
+    assert killed == []
+
+
+# Kept alive in a pool child, so the processes it started keep running.
+_grandchild_pool: concurrent.futures.ProcessPoolExecutor | None = None
+
+
+def _start_grandchildren(count: int) -> list[int]:
+    """Start a pool inside the slot's child, as pdftext does inside Marker's."""
+    global _grandchild_pool
+    _grandchild_pool = concurrent.futures.ProcessPoolExecutor(
+        max_workers=count, mp_context=multiprocessing.get_context("spawn")
+    )
+    for _ in range(count):
+        _grandchild_pool.submit(time.sleep, 600)
+    deadline = time.monotonic() + 60
+    while len(_grandchild_pool._processes) < count and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return list(_grandchild_pool._processes)
+
+
+def _process_group() -> int:
+    return os.getpgid(0)
+
+
+def _running(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        # Gone before the open, or between the open and the read.
+        return False
+
+
+def _real_slot_executor() -> concurrent.futures.ProcessPoolExecutor:
+    """A slot executor with Marker's initializer, minus the models."""
+    return concurrent.futures.ProcessPoolExecutor(
+        max_workers=1,
+        mp_context=multiprocessing.get_context("fork"),
+        initializer=marker_workers.MarkerWorker._worker_init,
+        initargs=({}, 0, os.getpid()),
+    )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process groups and /proc as on the workers")
+def test_a_slot_child_leads_its_own_process_group():
+    executor = _real_slot_executor()
+    try:
+        child_group = executor.submit(_process_group).result(timeout=60)
+
+        assert child_group == next(iter(executor._processes)) != os.getpgid(0)
+    finally:
+        executor.shutdown(wait=True)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process groups and /proc as on the workers")
+def test_recycling_a_slot_kills_what_its_child_started():
+    """A recycle used to kill the slot's child alone, leaving pdftext's
+    processes running inside nothing (#1167)."""
+    executor = _real_slot_executor()
+    grandchildren = executor.submit(_start_grandchildren, 2).result(timeout=120)
+    child = next(iter(executor._processes))
+    try:
+        marker_workers._force_kill_executor(executor, _NullLogger())
+
+        deadline = time.monotonic() + 5
+        while any(_running(pid) for pid in [child, *grandchildren]) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not any(_running(pid) for pid in [child, *grandchildren])
+    finally:
+        for pid in grandchildren:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +313,7 @@ def test_setup_mp_resets_only_its_own_slot(monkeypatch):
         {
             "max_workers": 1,
             "initializer": worker._worker_init,
-            "initargs": ({}, 0),  # (model_dict, marker_parse_memory_limit_mb)
+            "initargs": ({}, 0, os.getpid()),  # (model_dict, marker_parse_memory_limit_mb, parent_pid)
             "mp_context": built[0]["mp_context"],
             "max_tasks_per_child": 1,
         }
