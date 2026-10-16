@@ -23,7 +23,7 @@ import os
 import re
 from typing import ClassVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # OIDC config + env validator
@@ -115,7 +115,7 @@ class OIDCConfig(BaseModel):
     enabled: bool = False
     issuer_url: str = ""
     client_id: str = ""
-    client_secret: str = ""
+    client_secret: str = Field(default="", repr=False)
     # Public URL the IdP redirects back to after login. Must point at the
     # *front door* that serves the UI AND can reach the backend's /auth/callback
     # (e.g. the admin-ui / reverse-proxy port) — not necessarily the bare API
@@ -125,7 +125,7 @@ class OIDCConfig(BaseModel):
     # "Choosing OIDC_REDIRECT_URI".
     redirect_uri: str = ""
     scopes: str = "openid email profile offline_access"
-    token_encryption_key: str = ""
+    token_encryption_key: str = Field(default="", repr=False)
     claim_source: str = "id_token"
     claim_mapping: str = ""
     post_logout_redirect_uri: str = ""
