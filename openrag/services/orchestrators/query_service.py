@@ -45,6 +45,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from core.config.retrieval import DEFAULT_WEBSEARCH_MAX_QUERIES
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.models.retrieval_trace import (
@@ -1104,7 +1105,7 @@ class QueryService:
 
     async def _search_web(self, queries: SearchQueries):
         texts = list(dict.fromkeys(q.query.strip() for q in queries.query_list if q.query.strip()))
-        budget = getattr(getattr(self._config, "websearch", None), "max_queries", 1)
+        budget = getattr(getattr(self._config, "websearch", None), "max_queries", DEFAULT_WEBSEARCH_MAX_QUERIES)
         # Preserve contextualized facets when combining them to respect the provider budget.
         groups = [texts[i::budget] for i in range(min(budget, len(texts)))]
         return await asyncio.gather(*(self._web.search("; ".join(group)) for group in groups))

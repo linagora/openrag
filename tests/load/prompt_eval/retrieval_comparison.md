@@ -22,7 +22,7 @@ The shared prompt-refresh implementation from #1097 is already in `develop`, and
 
 `rag.max_contextualized_query_len` is an output-token limit, despite its historical name. Explicit limits such as 512 remain respected. The contextualizer receives that budget and retries truncated or malformed responses with compact JSON and coarser complete coverage. Filters and all requested facets must survive grouping. A token budget cannot guarantee arbitrarily long requests will fit; two failures still fall back to the original question and may lose inferred date filters. Monitor these warnings and raise the configured limit when needed.
 
-Web search defaults to one provider call per request. `WEBSEARCH_MAX_QUERIES` (1–8) permits a deliberate increase independently of document retrieval. Queries exceeding this budget are combined without dropping facets. This bounds per-request amplification; aggregate traffic across replicas still needs to fit the provider quota. No provider quota or load test was available to establish a safe aggregate rate.
+Web search allows up to three provider calls per request by default. `WEBSEARCH_MAX_QUERIES` (1–8) controls this independently of document retrieval, preserving separate calls for common two- or three-facet decompositions. Queries exceeding this budget are combined without dropping facets. This bounds per-request amplification; aggregate traffic across replicas still needs to fit the provider quota. No provider quota or load test was available to establish a safe aggregate rate.
 
 
 ## October 13 chunk comparison

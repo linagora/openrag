@@ -366,7 +366,7 @@ websearch:
   top_k: 5
   lang: fr-FR
   max_tokens: 2000
-  max_queries: 1
+  max_queries: 3
   fetch_content: true
   fetch_max_results: 3
   fetch_timeout: 1.0

@@ -4314,6 +4314,22 @@ async def test_web_query_budget_preserves_all_facets(budget):
     assert all(f"facet {i}" in " ".join(web.calls) for i in range(8))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True], ids=["missing-config", "model-default"])
+async def test_default_web_query_budget_keeps_three_facets_separate(configured):
+    from core.config.retrieval import StaanWebSearchConfig
+    from core.models.query import Query, SearchQueries
+
+    web = FakeWeb()
+    svc = _svc(web=web)
+    svc._config.websearch = StaanWebSearchConfig() if configured else None
+    queries = SearchQueries(query_list=[Query(query=f"facet {name}") for name in ("A", "B", "C")])
+
+    await svc._gather_rag_and_web(queries, ["p"], 5, None)
+
+    assert web.calls == ["facet A", "facet B", "facet C"]
+
+
 def test_bundled_comparison_rule_groups_more_than_eight_items():
     template = _disk_prompt_service()._disk_seed("query_contextualizer")
     assert "more than 8 items" in template
@@ -4335,6 +4351,7 @@ async def test_web_only_budget_deduplicates_and_combines_contextualized_queries(
         chat_responses=[json.dumps({"query_list": [{"query": q} for q in ["aspect A", "aspect A", "aspect B"]]})]
     )
     svc = _svc(llm=llm, web=web, mode="ChatBotRag")
+    svc._config.websearch = SimpleNamespace(max_queries=1)
     await svc._prepare_chat(
         None, {"messages": [{"role": "user", "content": "compare them"}], "metadata": {"websearch": True}}
     )

@@ -26,12 +26,12 @@ Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
 the actors on its own. See
 [Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
 
-When web search is enabled, contextualized sub-queries are combined as needed
-to stay within `WEBSEARCH_MAX_QUERIES` provider calls per request (default `1`,
-maximum `8`). Earlier 2.3.x versions could make one provider call for each
-sub-query. Keep the default if provider quota is tight; raise the limit only
-after checking the provider's per-request and aggregate replica quotas. A
-single combined query can return different results from separate facet searches.
+When web search is enabled, `WEBSEARCH_MAX_QUERIES` allows up to three provider
+calls per request by default (maximum `8`), keeping separate searches for common
+two- or three-facet queries. Additional facets are combined as needed without
+being dropped. Earlier 2.3.x versions could make one provider call for each
+sub-query, so results may differ. Check the provider's per-request and aggregate
+replica quotas before raising the limit.
 
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
