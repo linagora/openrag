@@ -174,14 +174,17 @@ The Chainlit WebSocket must answer `101 Switching Protocols`, and plain HTTP
 must redirect to HTTPS. Keep `--http1.1` in the first check: with **HTTP/2
 Support** on in NPM, curl would otherwise use HTTP/2, which drops the
 `Connection` and `Upgrade` headers, and the check would fail even though
-browsers connect.
+browsers connect. Once the WebSocket is open, curl keeps reading it until it is
+interrupted, so `--max-time 5` ends the check. The `(28) Operation timed out`
+it prints after the `101` line is expected.
 
 ```bash
-curl -sS --http1.1 -o /dev/null -D- \
+curl -sS --http1.1 --max-time 5 -o /dev/null -D- \
   -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" \
   -H "Sec-WebSocket-Version: 13" \
   "https://<domain>/chainlit/ws/socket.io/?EIO=4&transport=websocket" | grep -i '^HTTP'
+# expect: HTTP/1.1 101 Switching Protocols, then curl: (28) Operation timed out
 
 curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' "http://<domain>/v1/models"
 # expect: 301 https://<domain>/v1/models
