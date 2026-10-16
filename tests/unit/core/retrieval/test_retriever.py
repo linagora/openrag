@@ -180,6 +180,17 @@ async def test_expansion_with_related_dedupes_by_id():
 
 
 @pytest.mark.asyncio
+async def test_expansion_passes_the_search_filter():
+    s = FakeSearcher()
+    r = SingleRetriever(searcher=s, include_related=True, include_ancestors=True)
+    initial = [Chunk(id="1", text="x", partition="p1", document_id="f1", metadata={"relationship_id": "r1"})]
+    expr = 'created_at >= ISO "2026-01-01T00:00:00+00:00"'
+    await r.expand_search_results(initial, filter=expr)
+    assert s.related_calls[0]["filter"] == expr
+    assert s.ancestor_calls[0]["filter"] == expr
+
+
+@pytest.mark.asyncio
 async def test_expansion_with_ancestors_calls_searcher():
     s = FakeSearcher()
     s.ancestor_result = [_chunk("99", document_id="f1")]
