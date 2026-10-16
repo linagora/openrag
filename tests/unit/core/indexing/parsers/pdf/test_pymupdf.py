@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import ctypes
+import functools
 import multiprocessing
 import os
+import platform
+import resource
 import signal
 import sys
 import threading
@@ -395,6 +399,14 @@ class TestParsesRunInChildProcesses:
 # ceiling refuses one of its allocations.
 _MUPDF_CALLOC_FAILURE = "code=2: calloc (18904 x 40 bytes) failed"
 _MUPDF_FREETYPE_FAILURE = "FzErrorLibrary: code=3: FT_New_Memory_Face(): out of memory"
+# Measured on JPEG 2000 images under RLIMIT_DATA: the two errors MuPDF raises
+# for one it could not read, and what OpenJPEG logged to MuPDF's warnings.
+_JPX_DECODE_FAILURE = "code=8: Failed to decode JPX image"
+_JPX_HEADER_FAILURE = "code=8: Failed to read JPX header"
+_JPX_TILE_TOO_LARGE = "openjpeg error: Size of tile data exceeds system limits"
+_JPX_SIZ_NO_MEMORY = "openjpeg error: Not enough memory to take in charge SIZ marker"
+_JPX_TILE_MEMORY_ERROR = "openjpeg error: Cannot decode tile, memory error"
+_JPX_DAMAGED = "openjpeg error: Tile part length size inconsistent with stream length"
 
 
 class _Unpicklable(Exception):
@@ -421,6 +433,48 @@ def _raise_system_error(raw: bytes, filename: str):
     raise SystemError("error return without exception set")
 
 
+def _raise_jpx_failure(warning: str, message: str, raw: bytes, filename: str):
+    """Fail as MuPDF does on a JPEG 2000 image, after OpenJPEG logged *warning*."""
+    if warning:
+        pymupdf.mupdf.fz_warn(warning)
+    raise _Unpicklable(message)
+
+
+def _raise_value_error(raw: bytes, filename: str):
+    raise ValueError("not a PDF")
+
+
+def _raise_chained_jpx_failure(raw: bytes, filename: str):
+    try:
+        raise _Unpicklable(_JPX_DECODE_FAILURE)
+    except _Unpicklable as inner:
+        raise ValueError("page 3 failed") from inner
+
+
+def _raise_jpx_failure_while_handling(raw: bytes, filename: str):
+    """Chained implicitly, as an error raised inside an ``except`` block is."""
+    try:
+        raise _Unpicklable(_JPX_DECODE_FAILURE)
+    except _Unpicklable:
+        raise ValueError("page 3 failed")  # noqa: B904 - the implicit chain is the point
+
+
+def _raise_cyclic_chain(raw: bytes, filename: str):
+    outer = ValueError("page 3 failed")
+    inner = ValueError("page 4 failed")
+    outer.__cause__, inner.__cause__ = inner, outer
+    raise outer
+
+
+def _forget_mupdf_warnings() -> None:
+    """Flushed as well as reset, so no earlier warning can be counted as a repeat."""
+    pymupdf.TOOLS.mupdf_warnings(reset=1)
+
+
+def _release_state() -> tuple[bool, bool]:
+    return pymupdf_mod._IN_POOL_CHILD, pymupdf_mod._MALLOC_TRIM is not None
+
+
 def _bare_memory_error():
     raise MemoryError
 
@@ -429,7 +483,9 @@ class TestFailuresTheParentCanActOn:
     @pytest.fixture(autouse=True)
     def _limited_pool(self):
         pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=1, memory_limit_mb=4096))
+        _forget_mupdf_warnings()
         yield
+        _forget_mupdf_warnings()
         _drop_pool()
 
     @pytest.mark.asyncio
@@ -437,7 +493,10 @@ class TestFailuresTheParentCanActOn:
     async def test_a_ceiling_hit_arrives_as_a_memory_error_naming_the_setting(self, extract):
         """Before: MuPDF's error arrived as ``TypeError: cannot pickle
         'SwigPyObject' object``, and a bare ``MemoryError`` with no message."""
-        with pytest.raises(MemoryError, match=r"PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB"):
+        with pytest.raises(
+            MemoryError,
+            match=r"exceeded PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB\. Raise that limit to index this file\.$",
+        ):
             await pymupdf_mod._get_pool().run(pymupdf_mod._run_extract, extract, b"", "x.pdf")
 
     @pytest.mark.asyncio
@@ -470,6 +529,13 @@ class TestFailuresTheParentCanActOn:
         segfault or the kernel's OOM killer, where raising the limit is wrong."""
         with pytest.raises(concurrent.futures.process.BrokenProcessPool, match="killed by SIGKILL"):
             await pymupdf_mod._get_pool().run(_kill_self)
+
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_without_a_ceiling_an_empty_memory_error_names_no_setting(self):
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=2))
+        with pytest.raises(MemoryError, match=r"^PyMuPDF ran out of memory parsing this PDF\.$"):
+            await pymupdf_mod._get_pool().run(_bare_memory_error)
 
     @pytest.mark.asyncio
     async def test_an_empty_memory_error_from_the_child_gets_its_message(self):
@@ -512,6 +578,9 @@ class TestFailuresTheParentCanActOn:
         failure there cannot be blamed on it."""
         monkeypatch.setattr(process_limits, "child_vmdata_mb", lambda: 10_000)
         monkeypatch.setattr(pymupdf_mod, "_CHILD_MEMORY_LIMIT_MB", 0)
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_REQUESTED_LIMIT_MB", 0)
+        monkeypatch.setattr(pymupdf_mod, "_IN_POOL_CHILD", False)
+        monkeypatch.setattr(pymupdf_mod, "_MALLOC_TRIM", None)
         pymupdf_mod._pool_worker_init(4096)
 
         assert pymupdf_mod._CHILD_MEMORY_LIMIT_MB == 0
@@ -538,6 +607,288 @@ class TestFailuresTheParentCanActOn:
     def test_without_a_ceiling_the_message_names_no_setting(self):
         with pytest.raises(MemoryError, match=r"^PyMuPDF ran out of memory parsing this PDF\.$"):
             pymupdf_mod._run_extract(_raise_bare_memory_error, b"", "x.pdf")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("warning", "message"),
+        [
+            (_JPX_TILE_TOO_LARGE, _JPX_DECODE_FAILURE),
+            (_JPX_SIZ_NO_MEMORY, _JPX_HEADER_FAILURE),
+            (_JPX_TILE_MEMORY_ERROR, _JPX_DECODE_FAILURE),
+        ],
+        ids=["decode", "header", "tile-memory-error"],
+    )
+    async def test_a_jpx_failure_logged_as_out_of_memory_is_the_ceiling(self, warning, message):
+        """Measured: JPEG 2000 images that parse without a ceiling fail under one
+        with these errors, which name no memory; OpenJPEG's warning does. Before,
+        it was a plain error, and the child near its ceiling was kept."""
+        pool = pymupdf_mod._get_pool()
+        before = await pool.run(os.getpid)
+        extract = functools.partial(_raise_jpx_failure, warning, message)
+        with pytest.raises(MemoryError, match=r"PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB"):
+            await pool.run(pymupdf_mod._run_extract, extract, b"", "x.pdf")
+
+        assert await pool.run(os.getpid) != before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "warning",
+        [_JPX_DAMAGED, "Read from memory error. Got 3 bytes, block should be of 4 bytes", ""],
+        ids=["damaged", "memory-not-refused", "nothing-logged"],
+    )
+    async def test_a_jpx_failure_not_logged_as_memory_names_both_causes(self, warning):
+        """Measured: a damaged image fails with the same error, and a tiled image
+        over the ceiling failed with no memory warning either. The error says
+        both. The child is replaced: over the ceiling, it still held about 600 MiB of
+        ``VmData`` after releasing the parse's memory, and the next file failed in
+        it, though that file parsed in a fresh child (measured at 900 MiB)."""
+        pool = pymupdf_mod._get_pool()
+        before = await pool.run(os.getpid)
+        extract = functools.partial(_raise_jpx_failure, warning, _JPX_DECODE_FAILURE)
+        with pytest.raises(
+            pymupdf_mod.JPEG2000ReadError,
+            match=r"Failed to decode JPX image\. A JPEG 2000 image.*4096 MiB memory limit "
+            r"\(PYMUPDF_PARSE_MEMORY_LIMIT_MB\).*higher limit, raise it;.*damaged",
+        ):
+            await pool.run(pymupdf_mod._run_extract, extract, b"", "x.pdf")
+
+        assert await pool.run(os.getpid) != before
+
+    @pytest.mark.parametrize(
+        "fails", [_raise_chained_jpx_failure, _raise_jpx_failure_while_handling], ids=["from", "while-handling"]
+    )
+    def test_a_jpx_failure_is_recognised_behind_another_error(self, in_child, fails):
+        with pytest.raises(pymupdf_mod.JPEG2000ReadError, match=r"^ValueError: page 3 failed\. A JPEG 2000 image"):
+            pymupdf_mod._run_extract(fails, b"", "x.pdf")
+
+    @pytest.mark.parametrize(
+        "warning",
+        [
+            "openjpeg error: Cannot allocate Tier 1 handle",
+            "openjpeg error: opj_j2k_read_tlm(): cannot allocate m_tile_part_infos.",
+            "openjpeg error: Error allocating tile component data.",
+            "openjpeg error: Memory allocation failure in opj_jp2_apply_pclr().",
+            "openjpeg error: opj_j2k_build_tp_index_from_tlm(): tile index allocation failed",
+        ],
+    )
+    def test_openjpeg_s_other_allocation_failures_are_the_ceiling(self, in_child, warning):
+        """OpenJPEG's other messages for a refused allocation, from the bundled library's strings."""
+        extract = functools.partial(_raise_jpx_failure, warning, _JPX_DECODE_FAILURE)
+        with pytest.raises(MemoryError, match=r"PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB"):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+    def test_a_cyclic_chain_is_walked_once(self, in_child):
+        with pytest.raises(ValueError, match="page 3 failed"):
+            pymupdf_mod._run_extract(_raise_cyclic_chain, b"", "x.pdf")
+
+    def test_without_a_ceiling_a_jpx_failure_crosses_unchanged(self, monkeypatch):
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_MEMORY_LIMIT_MB", 0)
+        extract = functools.partial(_raise_jpx_failure, _JPX_TILE_TOO_LARGE, _JPX_DECODE_FAILURE)
+        with pytest.raises(RuntimeError, match=r"^_Unpicklable: code=8: Failed to decode JPX image$"):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+    def test_another_decode_failure_under_a_ceiling_is_not_jpx(self, in_child):
+        extract = functools.partial(_raise_jpx_failure, _JPX_TILE_TOO_LARGE, "code=8: Failed to decode JBIG2 image")
+        with pytest.raises(RuntimeError, match=r"^_Unpicklable: code=8: Failed to decode JBIG2 image$"):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+    def test_an_earlier_parse_warning_does_not_count(self, in_child):
+        """MuPDF's warnings outlive a parse; only this parse's may decide."""
+        pymupdf.mupdf.fz_warn(_JPX_TILE_TOO_LARGE)
+        extract = functools.partial(_raise_jpx_failure, "", _JPX_DECODE_FAILURE)
+        with pytest.raises(pymupdf_mod.JPEG2000ReadError, match="damaged"):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+    def test_a_warning_repeating_the_last_one_still_counts(self, in_child):
+        """MuPDF logs a warning identical to the last one only as a count, so a
+        parse whose warning repeats the previous parse's last one would otherwise
+        log just "... repeated 2 times..."."""
+        pymupdf.mupdf.fz_warn(_JPX_TILE_TOO_LARGE)
+        extract = functools.partial(_raise_jpx_failure, _JPX_TILE_TOO_LARGE, _JPX_DECODE_FAILURE)
+        with pytest.raises(MemoryError, match=r"PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB"):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+    def test_a_jpx_failure_names_the_ceiling_the_child_applied(self, in_child, monkeypatch):
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_MEMORY_LIMIT_MB", 777)
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_REQUESTED_LIMIT_MB", 777)
+        extract = functools.partial(_raise_jpx_failure, "", _JPX_DECODE_FAILURE)
+        with pytest.raises(pymupdf_mod.JPEG2000ReadError, match=r"777 MiB memory limit"):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+    def test_a_memory_error_while_classifying_is_out_of_memory(self, in_child, monkeypatch):
+        """Under a tight ceiling, reading the warnings can itself be refused memory."""
+
+        def refused(exc):
+            raise MemoryError
+
+        monkeypatch.setattr(pymupdf_mod, "_is_allocation_failure", refused)
+        with pytest.raises(MemoryError, match=r"PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB"):
+            pymupdf_mod._run_extract(_raise_value_error, b"", "x.pdf")
+
+    @pytest.mark.parametrize(
+        ("fails", "error", "message"),
+        [
+            (
+                _raise_bare_memory_error,
+                MemoryError,
+                r"512 MiB limit, which a limit it inherited lowered from PYMUPDF_PARSE_MEMORY_LIMIT_MB=1024 MiB\. "
+                r"Raise the inherited limit to index this file\.$",
+            ),
+            (
+                functools.partial(_raise_jpx_failure, "", _JPX_DECODE_FAILURE),
+                pymupdf_mod.JPEG2000ReadError,
+                r"512 MiB memory limit, which a limit it inherited lowered from PYMUPDF_PARSE_MEMORY_LIMIT_MB=1024 MiB, "
+                r"the cause can be that limit.*higher limit, raise the inherited limit;",
+            ),
+        ],
+        ids=["out-of-memory", "jpx"],
+    )
+    def test_a_lowered_ceiling_names_the_limit_that_lowered_it(self, monkeypatch, fails, error, message):
+        """Raising the setting cannot help there: the child never goes above an
+        inherited limit. Through the child's real startup, with an inherited
+        512 MiB limit and 1024 asked for."""
+        monkeypatch.setattr(resource, "getrlimit", lambda which: (512 * 1024 * 1024, resource.RLIM_INFINITY))
+        monkeypatch.setattr(resource, "setrlimit", lambda which, limits: None)
+        monkeypatch.setattr(process_limits, "child_vmdata_mb", lambda: 60)
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_MEMORY_LIMIT_MB", 0)
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_REQUESTED_LIMIT_MB", 0)
+        monkeypatch.setattr(pymupdf_mod, "_IN_POOL_CHILD", False)
+        monkeypatch.setattr(pymupdf_mod, "_MALLOC_TRIM", None)
+        pymupdf_mod._pool_worker_init(1024)
+        monkeypatch.setattr(pymupdf_mod, "_MALLOC_TRIM", None)
+        monkeypatch.setattr(pymupdf_mod.pymupdf.TOOLS, "store_shrink", lambda percent: None)
+
+        with pytest.raises(error, match=message):
+            pymupdf_mod._run_extract(fails, b"", "x.pdf")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fails", [_bare_memory_error, functools.partial(os._exit, 9)], ids=["empty", "died"])
+    async def test_the_parent_hedges_the_ceiling_it_names(self, fails):
+        """The parent names the configured ceiling, which the child may have
+        refused (at or below its baseline) or lowered (an inherited limit)."""
+        with pytest.raises(
+            MemoryError,
+            match=r"likeliest.*raise it to index this file\. If the child logged at startup that a limit it inherited "
+            r"lowered that one, raise the inherited limit instead; if it logged that it did not apply it, "
+            r"PYMUPDF_PARSE_MEMORY_LIMIT_MB is not the cause\.$",
+        ):
+            await pymupdf_mod._get_pool().run(fails)
+
+
+@pytest.fixture
+def in_child(monkeypatch):
+    """This process as a pool child under a 4096 MiB ceiling, without its housekeeping."""
+    monkeypatch.setattr(pymupdf_mod, "_IN_POOL_CHILD", True)
+    monkeypatch.setattr(pymupdf_mod, "_CHILD_MEMORY_LIMIT_MB", 4096)
+    monkeypatch.setattr(pymupdf_mod, "_CHILD_REQUESTED_LIMIT_MB", 4096)
+    monkeypatch.setattr(pymupdf_mod, "_MALLOC_TRIM", None)
+    monkeypatch.setattr(pymupdf_mod.pymupdf.TOOLS, "store_shrink", lambda percent: None)
+    _forget_mupdf_warnings()
+    yield
+    _forget_mupdf_warnings()
+
+
+class TestParseMemoryIsReleased:
+    @pytest.fixture
+    def calls(self, monkeypatch) -> list[str]:
+        calls: list[str] = []
+        monkeypatch.setattr(pymupdf_mod, "_IN_POOL_CHILD", True)
+        monkeypatch.setattr(pymupdf_mod.pymupdf.TOOLS, "store_shrink", lambda percent: calls.append(f"store {percent}"))
+        monkeypatch.setattr(pymupdf_mod, "_MALLOC_TRIM", lambda pad: calls.append(f"trim {pad}"))
+        return calls
+
+    def test_a_child_hands_back_memory_after_a_parse(self, calls):
+        def extract(raw: bytes, filename: str):
+            calls.append("parse")
+            return [], []
+
+        pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+        assert calls == ["parse", "store 100", "trim 0"]
+
+    def test_a_child_hands_back_memory_after_a_failed_parse(self, calls):
+        def extract(raw: bytes, filename: str):
+            calls.append("parse")
+            raise ValueError("not a PDF")
+
+        with pytest.raises(ValueError, match="not a PDF"):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+        assert calls == ["parse", "store 100", "trim 0"]
+
+    def test_a_child_over_its_ceiling_is_not_trimmed(self, calls):
+        """It is replaced; only the store is emptied, so the message can be built."""
+
+        def extract(raw: bytes, filename: str):
+            calls.append("parse")
+            raise MemoryError
+
+        with pytest.raises(MemoryError):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+        assert calls == ["parse", "store 100"]
+
+    def test_a_child_with_an_unreadable_jpx_image_is_not_trimmed(self, calls, monkeypatch):
+        """It is replaced too: it may be over its ceiling."""
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_MEMORY_LIMIT_MB", 4096)
+
+        def extract(raw: bytes, filename: str):
+            calls.append("parse")
+            raise _Unpicklable(_JPX_DECODE_FAILURE)
+
+        with pytest.raises(pymupdf_mod.JPEG2000ReadError):
+            pymupdf_mod._run_extract(extract, b"", "x.pdf")
+
+        assert calls == ["parse"]
+
+    def test_malloc_trim_is_looked_up_before_the_ceiling(self, monkeypatch):
+        """Past the ceiling, loading it could fail the initializer."""
+        order: list[str] = []
+        monkeypatch.setattr(pymupdf_mod, "_load_malloc_trim", lambda: order.append("load") or None)
+        monkeypatch.setattr(pymupdf_mod, "apply_parse_memory_limit", lambda *args, **kwargs: order.append("limit") or 0)
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_MEMORY_LIMIT_MB", 0)
+        monkeypatch.setattr(pymupdf_mod, "_CHILD_REQUESTED_LIMIT_MB", 0)
+        monkeypatch.setattr(pymupdf_mod, "_IN_POOL_CHILD", False)
+        monkeypatch.setattr(pymupdf_mod, "_MALLOC_TRIM", None)
+        pymupdf_mod._pool_worker_init(4096)
+
+        assert order == ["load", "limit"]
+
+    @pytest.mark.skipif(platform.libc_ver()[0] != "glibc", reason="malloc_trim is glibc's")
+    def test_malloc_trim_is_called_with_its_c_signature(self):
+        """Without it, ctypes passes the pad as a C int, where ``size_t`` is wider."""
+        trim = pymupdf_mod._load_malloc_trim()
+
+        assert (trim.argtypes, trim.restype) == ([ctypes.c_size_t], ctypes.c_int)
+
+    def test_housekeeping_cannot_fail_the_parse(self, monkeypatch):
+        def fail(pad):
+            raise MemoryError
+
+        monkeypatch.setattr(pymupdf_mod, "_IN_POOL_CHILD", True)
+        monkeypatch.setattr(pymupdf_mod, "_MALLOC_TRIM", fail)
+
+        assert pymupdf_mod._run_extract(lambda raw, filename: (["text"], []), b"", "x.pdf") == (["text"], [])
+        with pytest.raises(ValueError, match="not a PDF"):
+            pymupdf_mod._run_extract(_raise_value_error, b"", "x.pdf")
+
+    def test_the_thread_leaves_its_process_memory_alone(self, calls, monkeypatch):
+        """The thread shares its process with the rest of the worker."""
+        monkeypatch.setattr(pymupdf_mod, "_IN_POOL_CHILD", False)
+        pymupdf_mod._run_extract(lambda raw, filename: ([], []), b"", "x.pdf")
+
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_real_child_finds_malloc_trim_on_glibc(self):
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=2))
+        try:
+            in_child, has_trim = await pymupdf_mod._get_pool().run(_release_state)
+        finally:
+            _drop_pool()
+
+        assert in_child
+        assert has_trim == (platform.libc_ver()[0] == "glibc")
 
 
 def _echo(value):

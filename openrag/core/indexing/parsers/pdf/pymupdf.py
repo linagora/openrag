@@ -34,6 +34,7 @@ without touching a parse running in another slot.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import gc
 import os
 import pickle
@@ -86,14 +87,65 @@ _MIN_PARSE_HEADROOM_MB = 128
 #: ``RLIMIT_DATA`` with PyMuPDF 1.26.
 _MUPDF_ALLOC_FAILURE = re.compile(r"\b(?:malloc|calloc|realloc)\b.*\bfailed\b|\bout of memory\b")
 
+#: The errors MuPDF raises for a JPEG 2000 image it could not read. Running out
+#: of memory is one cause, a damaged image another: the text is the same.
+_JPX_FAILURE = re.compile(r"\bFailed to (?:decode JPX image|read JPX header)\b")
+
+#: What OpenJPEG logs to MuPDF's warnings when it is refused memory. Measured
+#: under ``RLIMIT_DATA`` on JPEG 2000 images that parse without a ceiling: the
+#: first three, on most failures but not all (a tiled image failed without any
+#: at 600 and 900 MiB). The allocation phrases are OpenJPEG's other messages for
+#: a refused allocation, from the bundled library's strings. None was logged for
+#: the three damaged images tried, from 70 MiB to 1.4 GiB.
+_JPX_ALLOC_WARNING = re.compile(
+    r"\bexceeds system limits\b|\bNot enough memory\b|\bCannot decode tile, memory error\b"
+    r"|\b[Cc]annot allocate\b|\bError allocating\b|\ballocation fail(?:ure|ed)\b"
+)
+
 #: The ceiling this process runs under, set by the pool initializer. Read to
 #: name it in the error a parse over it raises; 0 where none applies.
 _CHILD_MEMORY_LIMIT_MB = 0
 
+#: The ceiling the pool asked this child for, which an inherited limit can lower.
+_CHILD_REQUESTED_LIMIT_MB = 0
+
+#: Set in a pool child only: the thread shares its process with the rest of
+#: the worker, whose memory is not the parse's to hand back.
+_IN_POOL_CHILD = False
+
+#: glibc's ``malloc_trim``, or ``None`` where the C library has none (musl).
+_MALLOC_TRIM: Callable[[int], int] | None = None
+
+
+class JPEG2000ReadError(RuntimeError):
+    """A JPEG 2000 image failed under a ceiling, with nothing logged about memory.
+
+    The image may be damaged, or over the ceiling: in the second case the child
+    may still hold what the image took (measured at 900 MiB, about 600 MiB of
+    ``VmData`` after the parse's memory was released), so the next file would
+    fail in it.
+    The pool replaces the child either way.
+    """
+
+
+def _load_malloc_trim() -> Callable[[int], int] | None:
+    try:
+        trim = ctypes.CDLL("libc.so.6").malloc_trim
+    except (OSError, AttributeError):
+        return None
+    trim.argtypes = [ctypes.c_size_t]
+    trim.restype = ctypes.c_int
+    return trim
+
 
 def _pool_worker_init(memory_limit_mb: int) -> None:
     """Cap what one parse may allocate, in the child that runs it."""
-    global _CHILD_MEMORY_LIMIT_MB
+    global _CHILD_MEMORY_LIMIT_MB, _CHILD_REQUESTED_LIMIT_MB, _IN_POOL_CHILD, _MALLOC_TRIM
+    # Before the ceiling: past it, an allocation here could fail the
+    # initializer, which has no handler (see ``apply_parse_memory_limit``).
+    _MALLOC_TRIM = _load_malloc_trim()
+    _IN_POOL_CHILD = True
+    _CHILD_REQUESTED_LIMIT_MB = memory_limit_mb
     # The limit actually applied, which is 0 when it was refused and lower
     # than asked when an existing limit clamped it, so the error names that one.
     _CHILD_MEMORY_LIMIT_MB = apply_parse_memory_limit(
@@ -104,39 +156,143 @@ def _pool_worker_init(memory_limit_mb: int) -> None:
     )
 
 
+def _release_parse_memory() -> None:
+    """Hand back what a parse leaves behind, in a pool child that survives it.
+
+    An idle child otherwise keeps it until it is replaced, after
+    ``PYMUPDF_MAX_TASKS_PER_CHILD`` parses. It empties MuPDF's resource store,
+    then has ``malloc_trim`` return freed heap to the system. That brings RSS
+    back near the child's baseline, but not always ``VmData``, which is what the
+    ceiling counts. Measured after a 60-page PDF of large images: RSS 84 MiB
+    against 349 without this, while ``VmData``, 333 without it, varied from run
+    to run between 224 and 282; after a large JPEG 2000 image, ``VmData`` was back
+    near the baseline. What that buys the next file depends
+    on what came before, measured at 900 MiB with a JPEG 2000 file that parses
+    alone at 800: after one PDF of large images it failed without this and parsed
+    with it; after another it failed either way.
+
+    Best-effort: housekeeping must never fail, or replace, the parse it follows.
+    """
+    if not _IN_POOL_CHILD:
+        return
+    try:
+        pymupdf.TOOLS.store_shrink(100)
+        if _MALLOC_TRIM is not None:
+            _MALLOC_TRIM(0)
+    except Exception:  # noqa: BLE001 - see the docstring
+        pass
+
+
 def _is_allocation_failure(exc: BaseException) -> bool:
     """Whether *exc*, or anything it was raised from, is a refused allocation.
 
-    Under a ceiling, a ``SystemError`` counts too: measured, the binding can
-    fail to build its own exception when memory runs out and raises ``error
-    return without exception set`` instead.
+    Under a ceiling, two more errors count: a ``SystemError`` (measured, the
+    binding can fail to build its own exception when memory runs out and
+    raises ``error return without exception set`` instead), and a JPEG 2000
+    failure that OpenJPEG logged as a refused allocation.
     """
+    return _find_in_chain(exc, _is_refused_allocation)
+
+
+def _is_refused_allocation(exc: BaseException) -> bool:
+    if isinstance(exc, MemoryError) or _MUPDF_ALLOC_FAILURE.search(str(exc)):
+        return True
+    return _CHILD_MEMORY_LIMIT_MB > 0 and (isinstance(exc, SystemError) or _jpx_ran_out_of_memory(exc))
+
+
+def _is_jpx_failure(exc: BaseException) -> bool:
+    return bool(_JPX_FAILURE.search(str(exc)))
+
+
+def _jpx_ran_out_of_memory(exc: BaseException) -> bool:
+    """Whether *exc* is a JPEG 2000 failure OpenJPEG logged as a refused allocation.
+
+    Reads the warnings of the current parse only: ``_run_extract`` clears them
+    before each parse in a child.
+    """
+    return _is_jpx_failure(exc) and bool(_JPX_ALLOC_WARNING.search(pymupdf.TOOLS.mupdf_warnings(reset=0)))
+
+
+def _clear_mupdf_warnings() -> None:
+    """Forget the warnings logged so far, so the next read holds only new ones.
+
+    Flushed, not only reset: MuPDF counts a warning identical to the last one
+    instead of logging it, so after a reset alone a parse repeating the previous
+    parse's last warning would log only "... repeated 2 times...".
+    """
+    pymupdf.TOOLS.mupdf_warnings(reset=1)
+
+
+def _find_in_chain(exc: BaseException, matches: Callable[[BaseException], bool]) -> bool:
+    """Whether *exc*, or anything it was raised from, *matches*."""
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, MemoryError) or _MUPDF_ALLOC_FAILURE.search(str(current)):
-            return True
-        if isinstance(current, SystemError) and _CHILD_MEMORY_LIMIT_MB > 0:
+        if matches(current):
             return True
         current = current.__cause__ or current.__context__
     return False
 
 
-def _out_of_memory_message(limit_mb: int) -> str:
+#: A ceiling the parent names may not be the one its child runs under: the
+#: child refuses one at or below its baseline, and an inherited limit can lower
+#: it. The child logs either when it starts; only the child knows which applies.
+_IF_NOT_APPLIED = (
+    "If the child logged at startup that a limit it inherited lowered that one, raise the inherited limit "
+    "instead; if it logged that it did not apply it, PYMUPDF_PARSE_MEMORY_LIMIT_MB is not the cause."
+)
+
+
+def _out_of_memory_message(applied_mb: int, requested_mb: int) -> str:
+    """The error for a parse over the ceiling *applied_mb* the child runs under."""
+    if applied_mb <= 0:
+        return "PyMuPDF ran out of memory parsing this PDF."
+    if applied_mb < requested_mb:
+        return (
+            f"PyMuPDF ran out of memory parsing this PDF: the parse exceeded this child's {applied_mb} MiB "
+            f"limit, which a limit it inherited lowered from PYMUPDF_PARSE_MEMORY_LIMIT_MB={requested_mb} MiB. "
+            "Raise the inherited limit to index this file."
+        )
+    return (
+        "PyMuPDF ran out of memory parsing this PDF: the parse exceeded "
+        f"PYMUPDF_PARSE_MEMORY_LIMIT_MB={applied_mb} MiB. Raise that limit to index this file."
+    )
+
+
+def _jpx_failure_message(exc: BaseException, applied_mb: int, requested_mb: int) -> str:
+    """The error for a JPEG 2000 failure under the ceiling *applied_mb*, with nothing logged about memory."""
+    if applied_mb < requested_mb:
+        limit = (
+            f"this child's {applied_mb} MiB memory limit, which a limit it inherited lowered from "
+            f"PYMUPDF_PARSE_MEMORY_LIMIT_MB={requested_mb} MiB,"
+        )
+        remedy = "raise the inherited limit"
+    else:
+        limit = f"this child's {applied_mb} MiB memory limit (PYMUPDF_PARSE_MEMORY_LIMIT_MB),"
+        remedy = "raise it"
+    return (
+        f"{type(exc).__name__}: {exc}. A JPEG 2000 image in this PDF could not be read. Under {limit} "
+        "the cause can be that limit, which OpenJPEG does not always report: if the file parses with a higher "
+        f"limit, {remedy}; if it also fails without one, the image is damaged."
+    )
+
+
+def _parent_out_of_memory_message(limit_mb: int) -> str:
+    """The error for an out-of-memory failure the child could not describe."""
     if limit_mb > 0:
         return (
-            "PyMuPDF ran out of memory parsing this PDF: the parse exceeded "
-            f"PYMUPDF_PARSE_MEMORY_LIMIT_MB={limit_mb} MiB. Raise that limit to index this file."
+            f"PyMuPDF ran out of memory parsing this PDF. PYMUPDF_PARSE_MEMORY_LIMIT_MB={limit_mb} MiB is set "
+            f"and is the likeliest limit the parse exceeded: raise it to index this file. {_IF_NOT_APPLIED}"
         )
-    return "PyMuPDF ran out of memory parsing this PDF."
+    return _out_of_memory_message(0, 0)
 
 
 def _child_died_message(limit_mb: int) -> str:
     return (
         "PyMuPDF's child process died while parsing this PDF. With "
         f"PYMUPDF_PARSE_MEMORY_LIMIT_MB={limit_mb} MiB set, that limit is the likeliest cause: "
-        "raise it to index this file."
+        f"raise it to index this file. {_IF_NOT_APPLIED}"
     )
 
 
@@ -161,27 +317,47 @@ def _run_extract(
 ) -> tuple[list[str], list[ImageBlock]]:
     """Run *extract* and turn its failure into one the parent can act on.
 
-    Runs where the parse runs — in the child when the pool uses processes. Two
+    Runs where the parse runs — in the child when the pool uses processes. Three
     failures would otherwise reach the parent as something misleading:
 
     - a refused allocation arrives as MuPDF's own error, or as a bare
       ``MemoryError`` with no message; it becomes a ``MemoryError`` naming the
       setting that decides it.
+    - a JPEG 2000 image that fails under a ceiling, with nothing logged about
+      memory, may be over the ceiling or damaged; it becomes a
+      ``JPEG2000ReadError`` that says both, and the pool replaces the child.
     - MuPDF's SWIG exceptions cannot be pickled, and the pool reports that as
       ``TypeError: cannot pickle 'SwigPyObject' object`` instead of the error
       itself; it becomes a ``RuntimeError`` carrying the original text.
+
+    A child the pool keeps — the parse succeeded, or failed for another reason
+    than these three — hands back the memory the parse left
+    (``_release_parse_memory``). The pool replaces the others.
     """
+    if _IN_POOL_CHILD:
+        # This parse's warnings only, which is how ``_jpx_ran_out_of_memory``
+        # tells a refused allocation from a damaged image; they also never pile
+        # up over a child's lifetime.
+        _clear_mupdf_warnings()
     try:
-        return extract(source, filename)
+        result = extract(source, filename)
     except Exception as exc:
         try:
             out_of_memory = _is_allocation_failure(exc)
         except MemoryError:
             out_of_memory = True
         if not out_of_memory:
+            if _CHILD_MEMORY_LIMIT_MB > 0 and _find_in_chain(exc, _is_jpx_failure):
+                raise JPEG2000ReadError(
+                    _jpx_failure_message(exc, _CHILD_MEMORY_LIMIT_MB, _CHILD_REQUESTED_LIMIT_MB)
+                ) from exc
+            _release_parse_memory()
             if _survives_pickling(exc):
                 raise
             raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
+    else:
+        _release_parse_memory()
+        return result
     # Raised outside the handler, unchained, after freeing what can be freed:
     # until then the exception's traceback holds every frame of the failed parse
     # — the memory that hit the ceiling — and the pool formats that traceback to
@@ -190,7 +366,7 @@ def _run_extract(
     # the setting itself (``_ParsePool.run``).
     gc.collect()
     pymupdf.TOOLS.store_shrink(100)
-    raise MemoryError(_out_of_memory_message(_CHILD_MEMORY_LIMIT_MB))
+    raise MemoryError(_out_of_memory_message(_CHILD_MEMORY_LIMIT_MB, _CHILD_REQUESTED_LIMIT_MB))
 
 
 def _retire_executor(executor: Executor) -> None:
@@ -326,13 +502,14 @@ class _ParsePool:
                 raise
             try:
                 return await parse
-            except (BrokenProcessPool, MemoryError, asyncio.CancelledError) as exc:
+            except (BrokenProcessPool, MemoryError, JPEG2000ReadError, asyncio.CancelledError) as exc:
                 # Read before the executor is retired, which clears it.
                 exit_code = _child_exit_code(executor)
                 # A dead child poisons its executor. A child over the ceiling
                 # survives, but freeing the parse's objects need not bring its
                 # heap back under the limit, so the next file would fail for a
-                # reason that is not its own (measured). A cancelled or timed-out
+                # reason that is not its own (measured), and a JPEG 2000 image
+                # that failed may have been over it. A cancelled or timed-out
                 # parse keeps running in its child. Each needs a fresh child.
                 if self.uses_processes:
                     self._replace(slot, executor)
@@ -357,7 +534,7 @@ class _ParsePool:
                         raise MemoryError(_child_died_message(limit_mb)) from exc
                 # Also measured: a MemoryError sent back with no message.
                 if isinstance(exc, MemoryError) and not str(exc):
-                    raise MemoryError(_out_of_memory_message(limit_mb)) from exc
+                    raise MemoryError(_parent_out_of_memory_message(limit_mb)) from exc
                 raise
             finally:
                 self._count_parse(slot, executor)
