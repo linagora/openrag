@@ -41,11 +41,13 @@ import pickle
 import re
 import signal
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from multiprocessing import get_context
+from multiprocessing.process import BaseProcess
 from typing import Any, Literal
 
 import pymupdf
@@ -96,7 +98,10 @@ _JPX_FAILURE = re.compile(r"\bFailed to (?:decode JPX image|read JPX header)\b")
 #: first three, on most failures but not all (a tiled image failed without any
 #: at 600 and 900 MiB). The allocation phrases are OpenJPEG's other messages for
 #: a refused allocation, from the bundled library's strings. None was logged for
-#: the three damaged images tried, from 70 MiB to 1.4 GiB.
+#: the three damaged images tried, from 70 MiB to 1.4 GiB. A damaged image whose
+#: header declares more than the ceiling does log one: OpenJPEG is refused the
+#: memory before decoding reaches the damage, so that error says so too
+#: (``_JPX_OUT_OF_MEMORY_HINT``).
 _JPX_ALLOC_WARNING = re.compile(
     r"\bexceeds system limits\b|\bNot enough memory\b|\bCannot decode tile, memory error\b"
     r"|\b[Cc]annot allocate\b|\bError allocating\b|\ballocation fail(?:ure|ed)\b"
@@ -260,6 +265,14 @@ def _out_of_memory_message(applied_mb: int, requested_mb: int) -> str:
     )
 
 
+#: Appended when a JPEG 2000 image ran out of memory: measured, a damaged image
+#: declaring 60000 x 60000 pixels did so under every ceiling up to 16 GiB, and
+#: failed as damaged without one.
+_JPX_OUT_OF_MEMORY_HINT = (
+    "It was a JPEG 2000 image: if the file still fails with a higher limit, or without one, the image is damaged."
+)
+
+
 def _jpx_failure_message(exc: BaseException, applied_mb: int, requested_mb: int) -> str:
     """The error for a JPEG 2000 failure under the ceiling *applied_mb*, with nothing logged about memory."""
     if applied_mb < requested_mb:
@@ -344,10 +357,12 @@ def _run_extract(
     except Exception as exc:
         try:
             out_of_memory = _is_allocation_failure(exc)
+            jpx = _find_in_chain(exc, _is_jpx_failure)
         except MemoryError:
             out_of_memory = True
+            jpx = False
         if not out_of_memory:
-            if _CHILD_MEMORY_LIMIT_MB > 0 and _find_in_chain(exc, _is_jpx_failure):
+            if _CHILD_MEMORY_LIMIT_MB > 0 and jpx:
                 raise JPEG2000ReadError(
                     _jpx_failure_message(exc, _CHILD_MEMORY_LIMIT_MB, _CHILD_REQUESTED_LIMIT_MB)
                 ) from exc
@@ -366,7 +381,10 @@ def _run_extract(
     # the setting itself (``_ParsePool.run``).
     gc.collect()
     pymupdf.TOOLS.store_shrink(100)
-    raise MemoryError(_out_of_memory_message(_CHILD_MEMORY_LIMIT_MB, _CHILD_REQUESTED_LIMIT_MB))
+    message = _out_of_memory_message(_CHILD_MEMORY_LIMIT_MB, _CHILD_REQUESTED_LIMIT_MB)
+    if jpx:
+        message = f"{message} {_JPX_OUT_OF_MEMORY_HINT}"
+    raise MemoryError(message)
 
 
 def _retire_executor(executor: Executor) -> None:
@@ -387,15 +405,35 @@ def _retire_executor(executor: Executor) -> None:
     executor.shutdown(wait=False, cancel_futures=True)
 
 
-def _child_exit_code(executor: Executor) -> int | None:
-    """The exit code of *executor*'s child, or ``None`` while it runs or if unknown.
+def _child_process(executor: Executor) -> BaseProcess | None:
+    """*executor*'s child, read before the executor is retired, which clears it.
 
-    Negative for a signal, as ``multiprocessing`` reports it. When a child dies,
-    the pool's thread joins it but keeps it in ``_processes`` (private, see
-    :func:`_retire_executor`), so it is readable until the executor is retired.
+    When a child dies, the pool's thread joins it but keeps it in ``_processes``
+    (private, see :func:`_retire_executor`).
     """
     processes = list((getattr(executor, "_processes", None) or {}).values())
-    return processes[0].exitcode if processes else None
+    return processes[0] if processes else None
+
+
+#: How long a broken pool's dead child may take to report its exit code.
+_EXIT_CODE_WAIT_SECONDS = 1.0
+
+
+async def _dead_child_exit_code(process: BaseProcess | None) -> int | None:
+    """The exit code of a child the pool reported dead, or ``None`` if unknown.
+
+    Negative for a signal, as ``multiprocessing`` reports it. The pool fails the
+    parse before its thread has joined the child, so the code can still be
+    unknown when the parse ends: the child may not be reapable yet, or the
+    pool's thread may be reaping it. Waits for it a little, without blocking the
+    event loop.
+    """
+    if process is None:
+        return None
+    deadline = time.monotonic() + _EXIT_CODE_WAIT_SECONDS
+    while process.exitcode is None and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    return process.exitcode
 
 
 class _ParsePool:
@@ -503,8 +541,7 @@ class _ParsePool:
             try:
                 return await parse
             except (BrokenProcessPool, MemoryError, JPEG2000ReadError, asyncio.CancelledError) as exc:
-                # Read before the executor is retired, which clears it.
-                exit_code = _child_exit_code(executor)
+                child = _child_process(executor)
                 # A dead child poisons its executor. A child over the ceiling
                 # survives, but freeing the parse's objects need not bring its
                 # heap back under the limit, so the next file would fail for a
@@ -521,6 +558,7 @@ class _ParsePool:
                         raise BrokenProcessPool(
                             "The PyMuPDF parse pool was replaced while this parse ran; retry the file."
                         ) from exc
+                    exit_code = await _dead_child_exit_code(child)
                     # The ceiling can only end a child through a Python
                     # MemoryError (exit code 1). A signal is something else: a
                     # segfault on a malformed PDF, or the kernel's OOM killer,
@@ -529,8 +567,9 @@ class _ParsePool:
                         raise BrokenProcessPool(_child_killed_message(-exit_code)) from exc
                     # Measured under a tight ceiling: the child can die receiving
                     # the next file (the pool's own unpickling raises MemoryError
-                    # outside any parse code).
-                    if limit_mb > 0 and exit_code != 0:
+                    # outside any parse code). An exit code still unknown names
+                    # no cause.
+                    if limit_mb > 0 and exit_code is not None and exit_code > 0:
                         raise MemoryError(_child_died_message(limit_mb)) from exc
                 # Also measured: a MemoryError sent back with no message.
                 if isinstance(exc, MemoryError) and not str(exc):

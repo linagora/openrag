@@ -466,6 +466,35 @@ def _raise_cyclic_chain(raw: bytes, filename: str):
     raise outer
 
 
+def _jpx_pdf_declaring(directory, size: int):
+    """A PDF whose JPEG 2000 image declares one *size* x *size* tile but holds a
+    64 x 48 codestream, so decoding finds it damaged."""
+    import io
+    import struct
+
+    from PIL import Image
+
+    small = io.BytesIO()
+    Image.new("RGB", (64, 48), (1, 2, 3)).save(small, format="JPEG2000", no_jp2=True)
+    codestream = bytearray(small.getvalue())
+    siz = codestream.index(b"\xff\x51")
+    struct.pack_into(">IIIIII", codestream, siz + 6, size, size, 0, 0, size, size)
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Body text.")
+    seed = io.BytesIO()
+    Image.new("RGB", (64, 48)).save(seed, format="JPEG2000")
+    xref = page.insert_image(pymupdf.Rect(72, 120, 523, 458), stream=seed.getvalue())
+    doc.update_stream(xref, bytes(codestream), compress=False)
+    doc.xref_set_key(xref, "Filter", "/JPXDecode")
+    doc.xref_set_key(xref, "Width", str(size))
+    doc.xref_set_key(xref, "Height", str(size))
+    path = directory / "declares_more_than_it_holds.pdf"
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def _forget_mupdf_warnings() -> None:
     """Flushed as well as reset, so no earlier warning can be counted as a repeat."""
     pymupdf.TOOLS.mupdf_warnings(reset=1)
@@ -531,6 +560,40 @@ class TestFailuresTheParentCanActOn:
             await pymupdf_mod._get_pool().run(_kill_self)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("exit_codes", "match"),
+        [([None, None, None, -signal.SIGKILL], "killed by SIGKILL"), ([None], "terminated abruptly")],
+        ids=["known-late", "never-known"],
+    )
+    async def test_a_dead_childs_exit_code_is_awaited_and_an_unknown_one_blames_nothing(
+        self, monkeypatch, exit_codes, match
+    ):
+        """The pool fails the parse before its thread has joined the dead child,
+        so its exit code can still read ``None``: a SIGKILL then came back as the
+        ceiling's ``MemoryError`` (seen in 1 of 40 kills)."""
+
+        class _LateExit:
+            def __init__(self) -> None:
+                self._codes = iter(exit_codes)
+
+            @property
+            def exitcode(self) -> int | None:
+                return next(self._codes, exit_codes[-1])
+
+        monkeypatch.setattr(pymupdf_mod, "_child_process", lambda executor: _LateExit())
+        monkeypatch.setattr(pymupdf_mod, "_EXIT_CODE_WAIT_SECONDS", 0.2)
+        with pytest.raises(concurrent.futures.process.BrokenProcessPool, match=match):
+            await pymupdf_mod._get_pool().run(os._exit, 9)
+
+    @pytest.mark.asyncio
+    async def test_a_damaged_jpx_declaring_more_than_the_ceiling_says_it_may_be_damaged(self, tmp_path):
+        """Measured: this image fails as damaged without a ceiling, but under any
+        ceiling up to 16 GiB OpenJPEG is refused its tile before decoding reaches
+        the damage, so raising the limit alone cannot help."""
+        path = _jpx_pdf_declaring(tmp_path, 60000)
+        with pytest.raises(MemoryError, match=r"PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB\..* the image is damaged\.$"):
+            await pymupdf_mod._get_pool().run(pymupdf_mod._run_extract, _extract_markdown, str(path), "x.pdf")
+
     @pytest.mark.asyncio
     async def test_without_a_ceiling_an_empty_memory_error_names_no_setting(self):
         pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=2))
@@ -625,7 +688,11 @@ class TestFailuresTheParentCanActOn:
         pool = pymupdf_mod._get_pool()
         before = await pool.run(os.getpid)
         extract = functools.partial(_raise_jpx_failure, warning, message)
-        with pytest.raises(MemoryError, match=r"PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB"):
+        with pytest.raises(
+            MemoryError,
+            match=r"PYMUPDF_PARSE_MEMORY_LIMIT_MB=4096 MiB\. Raise that limit to index this file\. It was a JPEG 2000 "
+            r"image: if the file still fails with a higher limit, or without one, the image is damaged\.$",
+        ):
             await pool.run(pymupdf_mod._run_extract, extract, b"", "x.pdf")
 
         assert await pool.run(os.getpid) != before
