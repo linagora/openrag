@@ -164,7 +164,7 @@ class ModelsConfig(ConfigMixin):
 
         ``name`` defaults to the ``"default"`` alias (see ``ModelEndpointService``),
         but any catalogued endpoint name works — in particular a partition's
-        ``chat_llm`` preset, so the token preflight can read that endpoint's
+        ``chat_llm`` endpoint, so the token preflight can read that endpoint's
         budget instead of always falling back to the global default.
         """
         endpoint = self.llm.get(name)
