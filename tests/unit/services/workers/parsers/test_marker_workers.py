@@ -645,28 +645,36 @@ def _as_production_raises_it() -> RuntimeError:
     conversions that decide whether the fix works at all.
     """
     from ray.exceptions import RayTaskError
+    from services.workers.ray_utils import _task_failed
 
     try:
         raise MemoryError("parse ceiling")
     except MemoryError as exc:
         ray_error = RayTaskError("t", "traceback", exc).as_instanceof_cause()
-    produced = RuntimeError("MarkerPool PDF (all pages) (f.pdf) failed")
+    produced = _task_failed("MarkerPool PDF (all pages) (f.pdf)", ray_error)
     produced.__cause__ = ray_error
     return produced
 
 
-def test_call_ray_actor_with_timeout_really_converts_to_runtimeerror():
+async def test_call_ray_actor_with_timeout_really_converts_to_runtimeerror():
     """The premise of `_as_production_raises_it`. If this ever stops holding —
     say the wrapper starts re-raising the original type — the helper above is
     testing a path that no longer exists, and both guards would go untested
     while staying green."""
-    import inspect
+    from ray.exceptions import RayTaskError
+    from services.workers.ray_utils import _task_failed, call_ray_actor_with_timeout
 
-    from services.workers import ray_utils
+    ray_error = RayTaskError("t", "traceback", MemoryError("parse ceiling")).as_instanceof_cause()
 
-    source = inspect.getsource(ray_utils.call_ray_actor_with_timeout)
-    assert "except RayTaskError" in source
-    assert "raise RuntimeError" in source
+    async def remote():
+        raise ray_error
+
+    with pytest.raises(RuntimeError) as raised:
+        await call_ray_actor_with_timeout(asyncio.create_task(remote()), 1, "MarkerPool PDF (all pages) (f.pdf)")
+
+    assert type(raised.value) is RuntimeError
+    assert raised.value.__cause__ is ray_error
+    assert str(raised.value) == str(_task_failed("MarkerPool PDF (all pages) (f.pdf)", ray_error))
 
 
 def test_caused_by_finds_the_memory_error_through_the_ray_wrapper():
@@ -920,9 +928,11 @@ def _across_an_actor_boundary(exc: BaseException, description: str) -> RuntimeEr
     import pickle
 
     from ray.exceptions import RayTaskError
+    from services.workers.ray_utils import _task_failed
 
-    produced = RuntimeError(f"{description} failed")
-    produced.__cause__ = RayTaskError("t", "traceback", pickle.loads(pickle.dumps(exc))).as_instanceof_cause()
+    ray_error = RayTaskError("t", "traceback", pickle.loads(pickle.dumps(exc))).as_instanceof_cause()
+    produced = _task_failed(description, ray_error)
+    produced.__cause__ = ray_error
     return produced
 
 

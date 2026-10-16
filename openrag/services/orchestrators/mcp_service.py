@@ -37,6 +37,7 @@ from core.indexing.validators import (
     validate_content_matches_extension,
     validate_ooxml_package,
 )
+from core.models.document import Document
 from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ConflictError, ValidationError
 from core.utils.logging import get_logger
@@ -577,7 +578,15 @@ class MCPService:
             raise FileExistsError(f"File '{file_id}' already exists in partition '{partition}'")
 
         filename = Path(urlparse(url).path.rstrip("/")).name or file_id
-        suffix = Path(filename).suffix or ""
+        metadata = _strip_protected_metadata(extra_metadata)
+        metadata["source_url"] = url
+        guessed_mime, _ = mimetypes.guess_type(filename)
+        if guessed_mime and "mimetype" not in metadata:
+            metadata["mimetype"] = guessed_mime
+
+        # Downloaded under the suffix it is parsed as, like an upload, so the
+        # path-based parsers read this file rather than a second copy.
+        suffix = Document.type_suffix(filename, metadata.get("mimetype"))
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = Path(tmp.name)
         download_complete = False
@@ -590,12 +599,13 @@ class MCPService:
             if not download_complete:
                 tmp_path.unlink(missing_ok=True)
 
-        # The extension comes from the URL path, and it alone selects the
-        # parser — the same trust the upload routes refuse to extend to a
-        # caller-supplied filename. Check the downloaded bytes agree with it.
+        # The extension from the URL path, or the mimetype standing in for an
+        # unknown one, selects the parser — the same trust the upload routes
+        # refuse to extend to a caller-supplied filename. Check the downloaded
+        # bytes agree with it.
         content_verified = False
         try:
-            extension = suffix.lstrip(".").lower()
+            extension = Document.type_extension(filename, metadata.get("mimetype"))
             with tmp_path.open("rb") as downloaded:
                 validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
                 await asyncio.to_thread(validate_ooxml_package, extension, downloaded)
@@ -607,12 +617,6 @@ class MCPService:
             # would otherwise be left on disk.
             if not content_verified:
                 tmp_path.unlink(missing_ok=True)
-
-        metadata = _strip_protected_metadata(extra_metadata)
-        metadata["source_url"] = url
-        guessed_mime, _ = mimetypes.guess_type(filename)
-        if guessed_mime and "mimetype" not in metadata:
-            metadata["mimetype"] = guessed_mime
 
         try:
             task_id = await self._indexing.add_file(

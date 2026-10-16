@@ -430,7 +430,8 @@ class VLLMClient(LLM):
         payload_kwargs = {**self._defaults, **kwargs} if use_defaults else dict(kwargs)
         fallback_thinking = self._enable_thinking if use_defaults else None
         enable_thinking = payload_kwargs.pop("enable_thinking", fallback_thinking)
-        if enable_thinking is not None and enable_thinking is True:
+        # False must be sent too: Qwen3 templates think unless told not to.
+        if enable_thinking is not None:
             chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
             chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
             payload_kwargs["chat_template_kwargs"] = chat_template_kwargs
@@ -859,6 +860,20 @@ class VLLMEmbedder(Embedder):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+@embedder_registry.register("tei")
+class TEIEmbedder(VLLMEmbedder):
+    """Embedding client for Hugging Face text-embeddings-inference.
+
+    TEI serves the OpenAI-compatible ``/embeddings`` route (with or without
+    ``/v1``) but no ``/models``: the model is the one the server was started
+    with, and its input limit comes from that model, with ``--auto-truncate``
+    deciding whether a longer input is cut or refused.
+    """
+
+    async def _fetch_served_max_model_len(self) -> int | None:
+        return None
 
 
 # ---------------------------------------------------------------------------
