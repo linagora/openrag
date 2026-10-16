@@ -13,6 +13,19 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## 2.3.0 or 2.3.1 to a later 2.3.x
+
+The fence that holds a file while an orphaned indexing worker may still write to
+it lives in the Ray actors, and these upgrades keep the indexer generation `v13`,
+so actors already running are not replaced. On a shared Ray cluster
+(`ray.enabled: true`, or an external cluster) restart the Ray cluster once after
+the upgrade, at a time when no indexing is running, so the actors are recreated.
+Until then the API logs a warning that the running Ray actors predate the fence.
+With Ray inside the OpenRAG pod or container (`ray.enabled: false`, or Docker
+Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
+the actors on its own. See
+[Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
+
 ## Changes in 2.3.0 for every deployment
 
 This section applies to every upgrade from OpenRAG 2.2.1 or 2.2.2, on Kubernetes
