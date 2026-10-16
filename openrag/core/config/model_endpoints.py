@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from core.config.base import ConfigMixin
+from core.utils.redaction import RedactedExtraRepr
 from pydantic import BaseModel, Field
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
@@ -37,7 +38,7 @@ def is_placeholder_api_key(value: object) -> bool:
     return value is None or (isinstance(value, str) and value.strip() in PLACEHOLDER_API_KEYS)
 
 
-class ModelEndpointConfig(BaseModel):
+class ModelEndpointConfig(RedactedExtraRepr, BaseModel):
     """A single registered inference endpoint.
 
     ``name`` is the stable registry identity when this config came from the
@@ -179,7 +180,7 @@ class ModelsConfig(ConfigMixin):
         return _positive_int(self.llm_extra(name).get(LLM_OUTPUT_TOKENS_KEY))
 
 
-class ModelEndpointRow(BaseModel):
+class ModelEndpointRow(RedactedExtraRepr, BaseModel):
     """DB representation of a model endpoint (returned by the repository)."""
 
     name: str
