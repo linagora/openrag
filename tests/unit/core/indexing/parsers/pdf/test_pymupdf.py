@@ -191,7 +191,7 @@ class TestPagesWithFallback:
         assert 0 < _MARKDOWN_TEXT_RATIO_THRESHOLD < 1
 
     def test_only_one_warning_for_two_pages_that_fallback(self):
-        """Only the pages that drop below the threshold are replaced; good pages keep their markdown."""
+        """Two pages falling back log one warning listing both."""
         from loguru import logger
 
         records = []
@@ -217,15 +217,15 @@ class TestPagesWithFallback:
         finally:
             logger.remove(sink_id)
 
-            warnings = [record for record in records if record["level"].name == "WARNING"]
+        warnings = [record for record in records if record["level"].name == "WARNING"]
 
-            assert len(warnings) == 1
-            extra = warnings[0]["extra"]
-            assert extra["fallen_back_pages"] == [1, 2]
-            assert extra["fallen_back_pages_count"] == 2
+        assert len(warnings) == 1
+        extra = warnings[0]["extra"]
+        assert extra["fallen_back_pages"] == [1, 2]
+        assert extra["fallen_back_pages_count"] == 2
 
-            assert pages[0] == plain0
-            assert pages[1] == plain1
+        assert pages[0] == plain0
+        assert pages[1] == plain1
 
 
 class TestExtractMarkdownPerPageFallback:
