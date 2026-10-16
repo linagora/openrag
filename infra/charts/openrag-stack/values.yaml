@@ -478,12 +478,23 @@ postgresProvisioning:
   # at a pre-created database.
   autoCreateDatabase: true
   # Leave app-start migrations enabled for compose-like installs. Operators can
-  # disable this when they run migrations through the Helm hook below.
+  # disable this when they run migrations through the Helm hook below. Sets
+  # POSTGRES_RUN_MIGRATIONS: the chart refuses an env.config or env.secrets
+  # entry for it that disagrees, since the entry would silently replace this
+  # value.
   runMigrationsInApp: true
+  # A pre-install/pre-upgrade hook, for an external PostgreSQL only: it runs
+  # before Helm creates the bundled one, so the chart refuses it with
+  # postgresql.enabled.
   migrationJob:
     enabled: false
     backoffLimit: 3
     hookDeletePolicy: before-hook-creation,hook-succeeded
+  # Set true when you apply the migrations yourself (`python -m
+  # services.persistence.migrations.run`), with runMigrationsInApp and
+  # migrationJob both off. Without it the chart refuses that combination,
+  # since then nothing applies them and the app answers 503.
+  externalMigrations: false
 
 # === Milvus ===
 milvus:
