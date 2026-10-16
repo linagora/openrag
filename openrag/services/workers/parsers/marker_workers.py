@@ -18,7 +18,7 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
-from core.utils.child_process import kill_orphaned_group, kill_process_group, tie_to_parent
+from core.utils.child_process import kill_orphaned_group, kill_process_group, run_tied, tie_to_parent
 from core.utils.logging import get_logger
 from marker.converters.pdf import PdfConverter
 from ray.exceptions import TaskCancelledError
@@ -67,6 +67,29 @@ def _force_kill_executor(executor, log) -> None:
             proc.join(timeout=5)
         except Exception:  # noqa: BLE001 - a stuck join must not block the rebuild
             pass
+
+
+def _tie_pdftext_workers() -> None:
+    """Make the processes pdftext starts inside this slot child die with it.
+
+    pdftext extracts text with its own ``ProcessPoolExecutor`` and its own
+    initializer, so nothing ties those processes to the slot child: when the
+    actor dies abruptly, the kernel kills the child and they keep running
+    (#1167). Replacing the pool class pdftext looks up in its module gives each
+    of them :func:`run_tied` as initializer, ahead of pdftext's own. They stay in
+    the child's process group, so recycling the slot still kills them. pdftext
+    builds the pool inside the parse, on this child's main thread, which lives as
+    long as the child.
+    """
+    import pdftext.extraction
+
+    base = pdftext.extraction.ProcessPoolExecutor
+
+    class _TiedProcessPoolExecutor(base):
+        def __init__(self, *args, initializer=None, initargs=(), **kwargs):
+            super().__init__(*args, initializer=run_tied, initargs=(os.getpid(), initializer, initargs), **kwargs)
+
+    pdftext.extraction.ProcessPoolExecutor = _TiedProcessPoolExecutor
 
 
 def _marker_num_gpus(config) -> float:
@@ -333,6 +356,7 @@ class MarkerWorker:
         # anything, and one whose actor dies later dies with it (#1167).
         if parent_pid is not None:
             tie_to_parent(parent_pid)
+            _tie_pdftext_workers()
         worker_model_dict = model_dict
         # Logged before the ceiling, like `_apply_parse_memory_limit`'s own lines:
         # under a tight limit the log call's allocation could raise MemoryError,

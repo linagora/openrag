@@ -146,12 +146,16 @@ def test_force_kill_executor_treats_a_crashed_child_as_gone(monkeypatch):
 _grandchild_pool: concurrent.futures.ProcessPoolExecutor | None = None
 
 
-def _start_grandchildren(count: int) -> list[int]:
-    """Start a pool inside the slot's child, as pdftext does inside Marker's."""
+def _start_grandchildren(count: int, through_pdftext: bool = False) -> list[int]:
+    """Start a pool inside the slot's child, as pdftext does inside Marker's.
+
+    ``through_pdftext`` builds it with the class pdftext looks up, as its parse does.
+    """
+    import pdftext.extraction
+
     global _grandchild_pool
-    _grandchild_pool = concurrent.futures.ProcessPoolExecutor(
-        max_workers=count, mp_context=multiprocessing.get_context("spawn")
-    )
+    pool_class = pdftext.extraction.ProcessPoolExecutor if through_pdftext else concurrent.futures.ProcessPoolExecutor
+    _grandchild_pool = pool_class(max_workers=count, mp_context=multiprocessing.get_context("spawn"))
     for _ in range(count):
         _grandchild_pool.submit(time.sleep, 600)
     deadline = time.monotonic() + 60
@@ -243,6 +247,80 @@ def test_recycling_a_slot_whose_child_crashed_kills_what_it_started():
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG and /proc as on the workers")
+def test_pdftext_workers_die_with_the_slot_child():
+    """An actor that dies abruptly takes its slot child with it (tie_to_parent);
+    the processes pdftext started inside the child must follow (#1167)."""
+    executor = _real_slot_executor()
+    grandchildren = executor.submit(_start_grandchildren, 2, True).result(timeout=120)
+    child = next(iter(executor._processes))
+    try:
+        os.kill(child, signal.SIGKILL)
+
+        deadline = time.monotonic() + 5
+        while any(_running(pid) for pid in grandchildren) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not any(_running(pid) for pid in grandchildren)
+    finally:
+        for pid in grandchildren:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _pdftext_worker_group() -> int:
+    """The process group of a worker pdftext's pool class starts, read once its
+    initializer has run: a task only starts after that."""
+    import pdftext.extraction
+
+    with pdftext.extraction.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        return pool.submit(os.getpgid, 0).result(timeout=60)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process groups as on the workers")
+def test_pdftext_workers_stay_in_the_slot_childs_group():
+    """So a slot recycle, which kills the child's group, reaches them too."""
+    executor = _real_slot_executor()
+    try:
+        group = executor.submit(_pdftext_worker_group).result(timeout=120)
+
+        assert group == next(iter(executor._processes))
+    finally:
+        executor.shutdown(wait=True)
+
+
+def test_pdftext_builds_its_pool_through_the_replaced_class(monkeypatch, tmp_path):
+    """The tie relies on pdftext looking its pool class up in its module at
+    parse time; a pdftext release that stops doing so fails here. Real text
+    extraction also shows pdftext's own initializer still runs."""
+    import pdftext.extraction
+    import pypdfium2
+
+    monkeypatch.setattr(pdftext.extraction, "ProcessPoolExecutor", pdftext.extraction.ProcessPoolExecutor)
+    marker_workers._tie_pdftext_workers()
+    built: list[dict] = []
+
+    class _Recording(pdftext.extraction.ProcessPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            built.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(pdftext.extraction, "ProcessPoolExecutor", _Recording)
+    pdf = pypdfium2.PdfDocument.new()
+    for _ in range(20):
+        pdf.new_page(200, 200)
+    path = tmp_path / "blank.pdf"
+    pdf.save(path)
+    pdf.close()
+
+    pages = pdftext.extraction._get_pages(str(path), workers=2)
+
+    assert len(pages) == 20
+    assert len(built) == 1
 
 
 # ---------------------------------------------------------------------------

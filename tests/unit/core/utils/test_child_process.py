@@ -14,7 +14,7 @@ import sys
 import time
 
 import pytest
-from core.utils.child_process import kill_orphaned_group, kill_process_group, tie_to_parent
+from core.utils.child_process import kill_orphaned_group, kill_process_group, run_tied, tie_to_parent
 
 linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux-only")
 
@@ -205,3 +205,34 @@ def test_a_process_holding_the_pid_of_a_reaped_child_is_left_alone():
     finally:
         _kill_quietly(unrelated.pid)
         unrelated.join(timeout=10)
+
+
+def _group_and_pool(tied: bool, worker_info) -> None:
+    """Lead a group and start a pool in it, as a slot child does for pdftext."""
+    os.setpgrp()
+    tie = {"initializer": run_tied, "initargs": (os.getpid(), os.chdir, ("/",))} if tied else {}
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"), **tie)
+    worker = pool.submit(os.getpid).result(timeout=60)
+    worker_info.put((worker, pool.submit(os.getpgid, 0).result(timeout=60), pool.submit(os.getcwd).result(timeout=60)))
+    time.sleep(120)
+
+
+@linux_only
+@pytest.mark.parametrize(("tied", "survives"), [(True, False), (False, True)])
+def test_a_worker_tied_by_run_tied_dies_with_its_parent_and_stays_in_its_group(tied, survives):
+    ctx = multiprocessing.get_context("fork")
+    worker_info = ctx.Queue()
+    parent = ctx.Process(target=_group_and_pool, args=(tied, worker_info))
+    parent.start()
+    worker, group, cwd = worker_info.get(timeout=60)
+    try:
+        assert group == parent.pid
+        # The pool's own initializer ran after the tie.
+        assert (cwd == "/") is tied
+
+        os.kill(parent.pid, signal.SIGKILL)
+        parent.join(timeout=10)
+
+        assert _alive_after(worker, 2) is survives
+    finally:
+        _kill_quietly(worker)

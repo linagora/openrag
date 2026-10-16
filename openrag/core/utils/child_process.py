@@ -6,9 +6,10 @@ child also keeps its GPU memory), and waits forever on a queue no one writes to
 any more (#1167). Ray stops a worker's children when it stops the worker itself
 (``ray.kill``), but not after such a death.
 
-:func:`tie_to_parent` runs first in each child. :func:`kill_process_group` is how
-the parent reclaims a child together with whatever the child started, such as
-pdftext's own process pool inside a Marker child, and
+:func:`tie_to_parent` runs first in each child. :func:`run_tied` does the same for
+the processes a child starts in turn, such as pdftext's own process pool inside a
+Marker child, without moving them out of the child's group. :func:`kill_process_group`
+is how the parent reclaims a child together with whatever the child started, and
 :func:`kill_orphaned_group` reclaims what a child that already died left behind.
 """
 
@@ -18,6 +19,7 @@ import ctypes
 import os
 import signal
 import sys
+from collections.abc import Callable
 
 from core.utils.logging import get_logger
 
@@ -51,6 +53,17 @@ def tie_to_parent(parent_pid: int) -> None:
         os.setpgrp()
     except OSError as exc:
         logger.warning(f"Could not make the pool child a process-group leader: {exc}")
+    die_with_parent(parent_pid)
+
+
+def die_with_parent(parent_pid: int) -> None:
+    """Have the kernel ``SIGKILL`` this process when its parent dies.
+
+    :func:`tie_to_parent` without the new process group: the process stays in
+    its parent's group, so killing that group still reaches it. The same thread
+    rule applies, and a process whose parent is already gone exits at once.
+    Linux only, and best-effort.
+    """
     if not sys.platform.startswith("linux"):
         return
     try:
@@ -62,6 +75,17 @@ def tie_to_parent(parent_pid: int) -> None:
         return
     if os.getppid() != parent_pid:
         os._exit(1)
+
+
+def run_tied(parent_pid: int, initializer: Callable[..., object] | None, initargs: tuple) -> None:
+    """Pool initializer: :func:`die_with_parent`, then the pool's own *initializer*.
+
+    For a pool whose initializer someone else chose: pass this one instead, with
+    the pid of the process building the pool and the original initializer.
+    """
+    die_with_parent(parent_pid)
+    if initializer is not None:
+        initializer(*initargs)
 
 
 def kill_process_group(pid: int) -> None:
