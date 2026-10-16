@@ -141,7 +141,10 @@ async def get_supported_types(config=Depends(get_config)):
 
 **File Type Support:**
 - Supports standard file extensions listed in `/supported/types`
-- For unsupported extensions, specify `mimetype` in metadata
+- For unsupported or missing extensions, specify `mimetype` in metadata: a
+  supported mimetype then decides how the file is parsed (`minutes.cozy-note`
+  sent as `text/markdown` is parsed as Markdown). A supported extension is
+  never overridden by the mimetype.
 
 **Metadata Format:**
 JSON string containing file metadata. Example:
@@ -230,11 +233,17 @@ async def add_file(
                 file,
                 Path(config.paths.data_dir),
                 with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
             )
             file_path = saved_upload.path
             content_sha256 = saved_upload.sha256
         else:
-            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
+            )
             content_sha256 = None
     except OpenRAGError:
         # Domain errors (e.g. 413 too-large, 400 bad filename) carry their own
@@ -384,11 +393,17 @@ async def put_file(
                 file,
                 Path(config.paths.data_dir),
                 with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
             )
             file_path = saved_upload.path
             content_sha256 = saved_upload.sha256
         else:
-            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
+            )
             content_sha256 = None
     except OpenRAGError:
         raise

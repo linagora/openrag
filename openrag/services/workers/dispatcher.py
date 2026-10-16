@@ -27,7 +27,11 @@ from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.failure_reporting import submit_task_failure
-from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
+from services.workers.ray_utils import (
+    RemoteTimeoutError,
+    call_ray_actor_with_timeout,
+    retry_idempotent_ray_actor_method,
+)
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING
@@ -576,15 +580,17 @@ class WorkerDispatcher(IndexingDispatcher):
             )
         except TaskCancelledError:
             return True
-        except TimeoutError as exc:
-            logger.warning(
-                "Timed out waiting for submitted indexing task to settle after dispatch failure",
-                task_id=task_id,
-            )
-            raise TimeoutError(
-                f"Timed out waiting for submitted indexing task {task_id} to settle after dispatch failure"
-            ) from exc
         except Exception as exc:
+            # A RemoteTimeoutError is the task failing on a timeout of its own:
+            # it has settled, so only our own wait running out is a timeout here.
+            if isinstance(exc, TimeoutError) and not isinstance(exc, RemoteTimeoutError):
+                logger.warning(
+                    "Timed out waiting for submitted indexing task to settle after dispatch failure",
+                    task_id=task_id,
+                )
+                raise TimeoutError(
+                    f"Timed out waiting for submitted indexing task {task_id} to settle after dispatch failure"
+                ) from exc
             logger.info(
                 "Submitted indexing task settled after dispatch failure cancellation request",
                 task_id=task_id,

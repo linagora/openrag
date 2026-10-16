@@ -9,7 +9,9 @@ Formula:
 
 with ``rank_i`` the 1-based rank of the item in list ``i``. Smaller ``k``
 amplifies the top of each list; ``k=60`` is the canonical default and
-balances rank sensitivity across lists.
+balances rank sensitivity across lists. A list can stand for several lists
+merged into one: with a rank scale ``n_i`` its ranks count as
+``rank_i / n_i``.
 
 Identification of "the same item" is delegated to the caller via
 ``key_fn`` — typically returning the chunk id, document id, or URL.
@@ -35,6 +37,7 @@ def rrf_reranking(
     top_k: int | None = None,
     trace: RetrievalTraceBuilder | None = None,
     trace_stage: TraceStageName = "hybrid_fused",
+    rank_scales: Sequence[float] | None = None,
 ) -> list[T]:
     """Fuse multiple ranked lists into one via Reciprocal Rank Fusion.
 
@@ -45,6 +48,14 @@ def rrf_reranking(
                 ``id(item)`` (object identity), which prevents fusion across
                 lists for items lacking a logical id.
         k: RRF dampening constant. ``60`` is canonical.
+        rank_scales: One per list, default 1 each. A list that ranks together
+                what ``n`` lists would have ranked separately (one ranking over
+                ``n`` sources) passes ``n``: an item at rank ``r`` in it scores
+                ``1 / (k + r / n)``, so the list takes about ``n`` times the
+                share of the fused top a scale-1 list takes, as its ``n`` lists
+                would have. Weighting the score by ``n`` instead would not:
+                scores fall so slowly that the list's first ``(n - 1)(k + 1)``
+                items would all outrank another list's best.
 
     Returns:
         A single ranked list, best first. Empty input -> empty list.
@@ -52,10 +63,13 @@ def rrf_reranking(
 
     Raises:
         ValueError: if ``k < 0`` (would produce a zero or negative
-        denominator at rank 1 or below and crash with ZeroDivisionError).
+        denominator at rank 1 or below and crash with ZeroDivisionError),
+        or if ``rank_scales`` does not hold one positive scale per list.
     """
     if k < 0:
         raise ValueError(f"RRF k must be non-negative, got {k}")
+    if rank_scales is not None and (len(rank_scales) != len(ranked_lists) or any(scale <= 0 for scale in rank_scales)):
+        raise ValueError(f"RRF needs one positive rank scale per list, got {list(rank_scales)}")
     if not ranked_lists:
         _record_rrf_trace(trace, [], {}, {}, top_k, trace_stage)
         return []
@@ -69,12 +83,13 @@ def rrf_reranking(
 
     fused: dict[Hashable, tuple[float, T]] = {}
     occurrences: dict[Hashable, list[T]] = {}
-    for ranked in ranked_lists:
+    for index, ranked in enumerate(ranked_lists):
+        scale = rank_scales[index] if rank_scales is not None else 1
         for rank, item in enumerate(ranked, start=1):
             key = key_fn(item)
             occurrences.setdefault(key, []).append(item)
             score, kept = fused.get(key, (0.0, item))
-            fused[key] = (score + 1.0 / (rank + k), kept)
+            fused[key] = (score + 1.0 / (rank / scale + k), kept)
 
     ordered = sorted(fused.items(), key=lambda entry: entry[1][0], reverse=True)
     result = [item for _, (_, item) in ordered]

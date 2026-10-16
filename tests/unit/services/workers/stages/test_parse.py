@@ -110,3 +110,19 @@ async def test_parse_stage_surfaces_internal_timeout_when_no_outer_bound():
 
     assert row["stage"] == "parse_failed"
     assert row["error"] == "internal parser timeout"
+
+
+@pytest.mark.asyncio
+async def test_parse_stage_keeps_a_parser_timeout_that_fired_before_its_bound():
+    """A pooled parser raises its own TimeoutError (a pool deadline, a Marker
+    child's limit) well inside the stage bound. Its message names the real
+    cause, so the stage must not swap it for a bound that never expired."""
+    document = Document(id="doc-1", filename="f.pdf", content_type=DocumentType.TEXT, text="hi")
+    row = {"document": document}
+    error = TimeoutError("MarkerLoader PDF loading (f.pdf) failed: TimeoutError: MarkerPool PDF (f.pdf) timed out")
+
+    with pytest.raises(TimeoutError) as raised:
+        await parse_stage(row, FakeParser(error=error), timeout=3600)
+
+    assert raised.value is error
+    assert row["error"] == str(error)

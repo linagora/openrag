@@ -95,9 +95,7 @@ class _FakeParser:
 )
 def test_resolve_backend(filename: str, content_type: DocumentType, expected_backend: str) -> None:
     disp = ParserDispatcher(_config())
-    from services.workers.parsers.parser_dispatcher import _suffix
-
-    assert disp._resolve_backend(content_type, _suffix(filename)) == expected_backend
+    assert disp._resolve_backend(content_type, Document.type_extension(filename)) == expected_backend
 
 
 def test_resolve_pdf_backend_variants() -> None:
