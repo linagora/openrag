@@ -65,12 +65,12 @@ def resolve_partition_chat_llm(
     partitions: list[str] | None,
     partition_configs: dict[str, PartitionConfig],
 ) -> str | None:
-    """Resolve the ``chat_llm`` preset every partition in *partitions* agrees on.
+    """Resolve the ``chat_llm`` model endpoint every partition in *partitions* agrees on.
 
-    ``None`` means "no single owning preset — the caller should fall back to
+    ``None`` means "no single owning endpoint — the caller should fall back to
     the default LLM": a direct-LLM request (no partitions), the ``"all"``
     cross-partition sentinel, or a multi-partition request whose partitions
-    disagree (or none set a preset). Shared by the answering-LLM resolution
+    disagree (or none set one). Shared by the answering-LLM resolution
     (``QueryService._resolve_llm``) and the chat-completions token preflight
     (``api.routers.user.chat``), so the LLM that actually answers a request
     and the budget it was checked against never fall out of sync.
