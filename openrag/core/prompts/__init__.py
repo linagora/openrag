@@ -8,7 +8,9 @@ from .chat_prompt_builder import (
     WebSourceLike,
     format_context,
     format_web_context,
+    message_tokens,
     prepend_system_prompt,
+    tool_definition_tokens,
 )
 from .contextualization_builder import (
     BASE_CHUNK_FORMAT,
@@ -45,7 +47,9 @@ __all__ = [
     # chat
     "format_context",
     "format_web_context",
+    "message_tokens",
     "prepend_system_prompt",
+    "tool_definition_tokens",
     "SOURCE_SEPARATOR",
     "EMPTY_CONTEXT_MESSAGE",
     "WebSourceLike",

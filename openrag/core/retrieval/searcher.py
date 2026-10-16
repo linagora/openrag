@@ -24,8 +24,12 @@ leak across this boundary.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from core.models.chunk import Chunk
+
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
 
 
 def file_id_restriction(filter_params: dict | None) -> list[str] | None:
@@ -58,6 +62,7 @@ class RetrievalSearcher(ABC):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Single-query similarity search."""
         ...
@@ -72,6 +77,7 @@ class RetrievalSearcher(ABC):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run one similarity search per query, return the merged result."""
         ...
@@ -96,12 +102,14 @@ class RetrievalSearcher(ABC):
         relationship_id: str,
         limit: int,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         """Fetch other chunks belonging to the same relationship group.
 
         ``allowed_file_ids``, when not ``None``, restricts results to that
         file-id set (workspace scoping) — expansion must never surface a
-        related file outside the caller's authorized scope.
+        related file outside the caller's authorized scope. ``filter`` is the
+        same expression the initial search used, such as a temporal predicate.
         """
         ...
 
@@ -113,11 +121,13 @@ class RetrievalSearcher(ABC):
         limit: int,
         max_ancestor_depth: int | None = None,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         """Walk parent links up the document tree from a file.
 
         ``allowed_file_ids``, when not ``None``, restricts results to that
         file-id set (workspace scoping) — expansion must never surface an
-        ancestor file outside the caller's authorized scope.
+        ancestor file outside the caller's authorized scope. ``filter`` is the
+        same expression the initial search used, such as a temporal predicate.
         """
         ...

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, NoReturn
 
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.config.indexation_pipeline import IndexationPipelineConfig
@@ -12,9 +14,9 @@ from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.topic_tags import TopicTagger
-from core.models.document import Document, DocumentType
+from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.ray_metrics import observe_stage_duration
-from core.utils.exceptions import PipelineError
+from core.utils.exceptions import NoIndexableContentError, PipelineError
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
@@ -114,6 +116,12 @@ class IndexingPipeline:
     # How many of a document's images may contend for the shared VLM gate at
     # once. ``None`` leaves the fan-out unbounded (one caller per image).
     caption_concurrency: int | None = None
+    # ``loader.save_markdown``: keep a copy of the parsed markdown next to the
+    # upload, for inspecting parser output.
+    save_markdown: bool = False
+    # ``paths.data_dir``. The markdown copy is only written for uploads stored
+    # under it; anything else (e.g. MCP ``index_url`` temp downloads) is skipped.
+    data_dir: Path | None = None
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
@@ -237,7 +245,13 @@ class IndexingPipeline:
             # Outside the ``vlm is not None`` branch on purpose: if captioning
             # was skipped, the bytes were never going to be read at all.
             _release_image_bytes(row)
+            if self.save_markdown:
+                await _save_markdown(row, self.data_dir)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
+            # Emptiness is the chunk count. Caption is the only enrichment that
+            # has run, and only run() knows whether it ran (#1077).
+            if not row["chunks"]:
+                _raise_nothing_to_index(row, caption_ran=vlm is not None)
             if contextualizer is not None:
                 await _timed_enrichment(
                     "contextualize",
@@ -294,7 +308,7 @@ class IndexingPipeline:
                         status_code=503,
                     )
             # After the embed: the dimension is measured, not configured.
-            row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"))
+            row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"), vector_field)
             # What the catalog write checks the partition's embedder against (#958).
             row["embedder_fingerprint"] = getattr(embedder, "vector_fingerprint", None)
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
@@ -669,6 +683,8 @@ def build_indexing_pipeline(
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None,
     defer_replace_cleanup: bool = False,
     caption_concurrency: int | None = None,
+    save_markdown: bool = False,
+    data_dir: Path | None = None,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -694,7 +710,93 @@ def build_indexing_pipeline(
         topic_tagger_factory=topic_tagger_factory,
         defer_replace_cleanup=defer_replace_cleanup,
         caption_concurrency=caption_concurrency,
+        save_markdown=save_markdown,
+        data_dir=data_dir,
     )
+
+
+def markdown_sidecar_path(source_path: str | Path) -> Path:
+    """Path of the ``SAVE_MARKDOWN`` copy for an upload stored at ``source_path``.
+
+    The suffix is appended rather than swapped so a markdown upload is never
+    overwritten.
+    """
+    return Path(f"{source_path}.md")
+
+
+async def _save_markdown(row: MutableMapping[str, Any], data_dir: Path | None) -> None:
+    """Write the parsed markdown to ``<upload>.md`` next to the stored upload.
+
+    Runs after captioning, so image descriptions are already in the text. Rows
+    without a ``source_path`` have nowhere to write, and a ``source_path``
+    outside ``data_dir`` (an MCP ``index_url`` temp download) would leave the
+    copy under a random name in a node's temp dir, so both are skipped.
+    Rendering and writing run together off the event loop. Best effort: a
+    debugging copy must never fail the file, so an error in either is only
+    logged.
+    """
+    document = row.get("document")
+    processed = row.get("processed_document")
+    source_path = getattr(document, "source_path", None)
+    if not source_path or not isinstance(processed, ProcessedDocument):
+        return
+    log = logger.bind(task_id=row.get("task_id"), filename=row.get("filename", ""))
+    if data_dir is None or not Path(source_path).resolve().is_relative_to(Path(data_dir).resolve()):
+        log.debug(f"SAVE_MARKDOWN: skipping {source_path}, which is not under the data directory")
+        return
+    target = markdown_sidecar_path(source_path)
+    try:
+        await asyncio.to_thread(lambda: target.write_text(_render_markdown(processed), encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - a debugging copy must not fail the file
+        log.warning(f"SAVE_MARKDOWN: could not write {target}: {exc}")
+
+
+def _render_markdown(processed: ProcessedDocument) -> str:
+    """Join a document's text blocks into a readable markdown file.
+
+    Once the document spans more than one page, a ``<!-- page N -->`` line
+    opens each run of blocks from page N. Images that were never described
+    still have their parser placeholder (``![](docling_img_3)``) in the text,
+    pointing at bytes released after the caption decision; each becomes its
+    alt text, or ``[Image]`` when it has none, the fallback
+    ``normalize_data_uri_images`` uses. Remote images keep their link, which
+    still resolves.
+    """
+    readable_refs: dict[str, str] = {}
+    for image in processed.images:
+        ref = image.metadata.get("markdown_ref")
+        if not ref or image.caption or image.source_url:
+            continue
+        readable_refs[ref] = (image.metadata.get("alt") or "").strip() or "[Image]"
+
+    pages = {block.page_number for block in processed.text_blocks if block.page_number is not None}
+    mark_pages = len(pages) > 1 or bool(pages - {1})
+
+    parts: list[str] = []
+    last_page: int | None = None
+    for block in processed.text_blocks:
+        text = block.text
+        for ref, readable in readable_refs.items():
+            text = text.replace(ref, readable)
+        if not text:
+            continue
+        if mark_pages and block.page_number is not None and block.page_number != last_page:
+            parts.append(f"<!-- page {block.page_number} -->")
+            last_page = block.page_number
+        parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _raise_nothing_to_index(row: MutableMapping[str, Any], *, caption_ran: bool) -> NoReturn:
+    caption_error = (row.get("degraded_stages") or {}).get("caption")
+    if caption_error is not None:
+        raise PipelineError(f"Nothing to index: image captioning failed: {caption_error}")
+    images = getattr(row.get("processed_document"), "images", None) or []
+    if images and not caption_ran:
+        raise NoIndexableContentError(
+            f"No text was extracted and the document's {len(images)} image(s) were not captioned."
+        )
+    raise NoIndexableContentError("No indexable content was extracted from this document.")
 
 
 def _release_image_bytes(row: MutableMapping[str, Any]) -> None:

@@ -373,7 +373,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.0"
+    tag: "v2.3.1"
   resources:
     head:
       requests:
@@ -773,7 +773,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.3.0"
+    tag: "v2.3.1"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -830,7 +830,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.0"
+    tag: "v2.3.1"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -1101,6 +1101,9 @@ env:
     # Embedder
     EMBEDDER_MODEL_NAME: '{{ .Values.vllm.embedderModelName }}'
     EMBEDDER_BASE_URL: 'http://{{ .Release.Name }}-embedder-engine-service/v1'
+    # Client for an external embedder: vllm (default, needs GET /models), ollama,
+    # or tei (Hugging Face text-embeddings-inference, which has no /models).
+    # EMBEDDER_PROVIDER: "tei"
 
     # Reranker
     RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
@@ -1118,11 +1121,15 @@ env:
     # false to let endpoints edited from the admin UI stay as the source of
     # truth. See docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     MODEL_ENDPOINT_SYNC_ON_BOOT: "false"
+
+    # Refresh only saved defaults that still match a previous bundled prompt.
+    # Disable during a staged rollout while older application pods run.
+    PROMPTS_REFRESH_DEFAULTS: "true"
     # When true, /ready (the readiness probe) fails while the default embedder is
     # unavailable. Every replica shares it, so its outage or restart then takes
     # all of them out of the Service, admin API and UI included. Before enabling,
-    # check that /ready reports checks.embedder: ok (the probe needs the model
-    # name verbatim in GET /models). See
+    # check that /ready reports checks.embedder: ok (the probe looks the model
+    # name up in GET /models, or checks /health for EMBEDDER_PROVIDER=tei). See
     # docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     READINESS_REQUIRE_EMBEDDER: "false"
 
@@ -1133,6 +1140,12 @@ env:
     PDFLOADER: "PyMuPDFLoader"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
+    # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse
+    # raises MemoryError in that child instead of OOM-killing the pod. Left unset
+    # (off) on purpose: it bounds the child's whole memory, torch included, so a
+    # value below its baseline fails every parse. The worker logs the baseline at
+    # startup — measure there first, then set this well above it.
+    # MARKER_PARSE_MEMORY_LIMIT_MB: "6144"
     MARKER_MAX_PROCESSES: "15"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"

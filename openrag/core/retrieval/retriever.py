@@ -19,8 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from itertools import chain as ichain
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.llm.llm import LLM, chat_content
 from core.models.chunk import Chunk
@@ -34,6 +33,12 @@ from core.utils.registry import Registry
 
 logger = logging.getLogger(__name__)
 
+MAX_EXPANSION_CONCURRENCY = 16
+
+
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
+
 
 class Retriever(ABC):
     """Common surface for all retrieval strategies."""
@@ -45,17 +50,25 @@ class Retriever(ABC):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run the strategy and return scored chunks."""
         ...
 
     @abstractmethod
-    async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
+    async def expand_search_results(
+        self,
+        results: list[Chunk],
+        filter_params: dict | None = None,
+        filter: str | None = None,
+    ) -> list[Chunk]:
         """Optionally enrich a result set with related/ancestor chunks.
 
         ``filter_params`` carries the same restriction (e.g. a workspace's
         ``file_id`` allowlist) the initial search was scoped by — expansion
         must never surface a chunk that restriction would have excluded.
+        ``filter`` is the expression that search used, so a temporal or caller
+        filter is not dropped when related chunks are added (#953).
         """
         ...
 
@@ -91,7 +104,11 @@ class BaseRetriever(Retriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.search(
             query=query,
             partition=partition,
@@ -100,9 +117,12 @@ class BaseRetriever(Retriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
-    async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
+    async def expand_search_results(
+        self, results: list[Chunk], filter_params: dict | None = None, filter: str | None = None
+    ) -> list[Chunk]:
         return await _expand_with_related_chunks(
             searcher=self.searcher,
             results=results,
@@ -111,6 +131,7 @@ class BaseRetriever(Retriever):
             related_limit=self.related_limit,
             max_ancestor_depth=self.max_ancestor_depth,
             filter_params=filter_params,
+            filter=filter,
         )
 
 
@@ -150,8 +171,12 @@ class MultiQueryRetriever(BaseRetriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         queries = await self._generate_queries(query)
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -160,6 +185,7 @@ class MultiQueryRetriever(BaseRetriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
 
@@ -196,12 +222,16 @@ class HyDeRetriever(BaseRetriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         hyde = (await self.get_hyde(query)).strip()
         if not hyde:
             queries = [query]
         else:
             queries = [hyde, query] if self.combine else [hyde]
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -210,6 +240,7 @@ class HyDeRetriever(BaseRetriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
 
@@ -221,6 +252,7 @@ async def _expand_with_related_chunks(
     related_limit: int = 10,
     max_ancestor_depth: int | None = None,
     filter_params: dict | None = None,
+    filter: str | None = None,
 ) -> list[Chunk]:
     """Append related and/or ancestor chunks to a result set, deduplicated by id.
 
@@ -231,14 +263,19 @@ async def _expand_with_related_chunks(
     ``filter_params`` carries the same restriction the initial search was
     scoped by (e.g. a workspace's ``file_id`` allowlist) — passed through so
     related/ancestor expansion cannot surface a chunk outside that scope
-    (#706).
+    (#706). ``filter`` is that search's expression, so expansion cannot pull
+    in chunks the caller excluded (#953).
     """
     if not results or (not include_related and not include_ancestors):
+        return results
+
+    if related_limit == 0:
         return results
 
     allowed_file_ids = file_id_restriction(filter_params)
     seen_ids = {c.id for c in results if c.id}
     expanded: list[Chunk] = list(results)
+    semaphore = asyncio.Semaphore(MAX_EXPANSION_CONCURRENCY)
 
     relationship_ids: set[tuple[str, str]] = set()
     file_infos: set[tuple[str, str]] = set()
@@ -253,22 +290,29 @@ async def _expand_with_related_chunks(
 
     async def _safe_related(part: str, rel_id: str) -> list[Chunk]:
         try:
-            return await searcher.get_related_chunks(
-                partition=part, relationship_id=rel_id, limit=related_limit, allowed_file_ids=allowed_file_ids
-            )
+            async with semaphore:
+                return await searcher.get_related_chunks(
+                    partition=part,
+                    relationship_id=rel_id,
+                    limit=related_limit,
+                    allowed_file_ids=allowed_file_ids,
+                    filter=filter,
+                )
         except Exception:
             logger.warning("get_related_chunks failed (partition=%s, relationship_id=%s)", part, rel_id, exc_info=True)
             return []
 
     async def _safe_ancestors(part: str, file_id: str) -> list[Chunk]:
         try:
-            return await searcher.get_ancestor_chunks(
-                partition=part,
-                file_id=file_id,
-                limit=related_limit,
-                max_ancestor_depth=max_ancestor_depth,
-                allowed_file_ids=allowed_file_ids,
-            )
+            async with semaphore:
+                return await searcher.get_ancestor_chunks(
+                    partition=part,
+                    file_id=file_id,
+                    limit=related_limit,
+                    max_ancestor_depth=max_ancestor_depth,
+                    allowed_file_ids=allowed_file_ids,
+                    filter=filter,
+                )
         except Exception:
             logger.warning("get_ancestor_chunks failed (partition=%s, file_id=%s)", part, file_id, exc_info=True)
             return []
@@ -281,12 +325,13 @@ async def _expand_with_related_chunks(
 
     if tasks:
         all_results = await asyncio.gather(*tasks)
-        for chunk in ichain.from_iterable(all_results):
-            if chunk.id and chunk.id in seen_ids:
-                continue
-            if chunk.id:
-                seen_ids.add(chunk.id)
-            expanded.append(chunk)
+        for result_group in all_results:
+            for chunk in result_group:
+                if chunk.id and chunk.id in seen_ids:
+                    continue
+                if chunk.id:
+                    seen_ids.add(chunk.id)
+                expanded.append(chunk)
 
     return expanded
 

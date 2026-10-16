@@ -18,6 +18,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
+from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.exceptions import PartitionNotFoundError
 from services.orchestrators.retrieval_service import RetrievalService
 
@@ -83,12 +84,14 @@ def _partition(
     name: str = "tenant-a",
     embedder: str = "embed-a",
     retrieval: RetrievalPipelineConfig | None = None,
+    chat_llm: str | None = None,
 ) -> PartitionConfig:
     return PartitionConfig(
         name=name,
         embedder=embedder,
         indexation=IndexationPipelineConfig(),
         retrieval=retrieval or RetrievalPipelineConfig(),
+        chat_llm=chat_llm,
     )
 
 
@@ -205,6 +208,39 @@ async def test_search_uses_the_partition_embedder():
     assert call["with_surrounding_chunks"] is True
 
 
+class SwappingPresetService:
+    """Another process completed a swap of every partition onto *embedder*; a refresh loads it."""
+
+    def __init__(self, config, embedder: str) -> None:
+        self.config, self.embedder, self.refreshes = config, embedder, 0
+
+    async def try_refresh_if_stale(self) -> None:
+        self.refreshes += 1
+        self.config.partitions = {
+            name: _partition(name=name, embedder=self.embedder) for name in self.config.partitions
+        }
+
+
+@pytest.mark.asyncio
+async def test_search_reloads_an_embedder_switched_by_another_process():
+    svc, _, searchers = _embedder_svc({"p1": "embed-a"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"})
+    svc._preset_service = SwappingPresetService(svc._config, "embed-b")
+
+    await svc.search(text="q", partitions="p1", top_k=5, similarity_threshold=0.5)
+
+    assert list(searchers) == ["embed-b"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_reloads_an_embedder_switched_by_another_process():
+    svc, _, searchers = _embedder_svc({"p1": "embed-a"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"})
+    svc._preset_service = SwappingPresetService(svc._config, "embed-b")
+
+    await svc.retrieve_multi(partitions=["p1"], search_queries=SearchQueries(query_list=[Query(query="q")]))
+
+    assert list(searchers) == ["embed-b"]
+
+
 @pytest.mark.asyncio
 async def test_search_across_embedders_fuses_hits_then_adds_surrounding():
     svc, _, searchers = _embedder_svc(
@@ -236,6 +272,55 @@ async def test_search_across_embedders_fuses_hits_then_adds_surrounding():
     (surrounding_call,) = searchers["embed-a"].surrounding_calls
     assert [c.id for c in surrounding_call["chunks"]] == ["a1", "b1", "a2"]
     assert surrounding_call["allowed_file_ids"] == ["f"]
+
+
+@pytest.mark.asyncio
+async def test_search_merges_raw_trace_across_embedder_groups():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    trace = RetrievalTraceBuilder("request-1", "q")
+
+    for searcher in (searchers.setdefault("embed-a", FakeSearcher()), searchers.setdefault("embed-b", FakeSearcher())):
+
+        async def traced_search(_searcher=searcher, **kwargs):
+            _searcher.search_calls.append(kwargs)
+            kwargs["trace"].record_stage("dense_before_threshold", status="complete", candidates=[])
+            return []
+
+        searcher.search = traced_search
+
+    await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5, trace=trace)
+
+    assert trace.stages["original_query"].status == "complete"
+    assert trace.stages["dense_before_threshold"].status == "unavailable"
+    assert len(trace.query_traces) == 2
+    assert {child.partition for child in trace.query_traces} == {"p1", "p2"}
+    assert all(
+        next(stage for stage in child.stages if stage.name == "dense_before_threshold").status == "complete"
+        for child in trace.query_traces
+    )
+    assert all(call["trace"] is not trace for searcher in searchers.values() for call in searcher.search_calls)
+
+
+@pytest.mark.asyncio
+async def test_search_records_pre_top_k_partition_fusion_candidates():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers.setdefault("embed-a", FakeSearcher()).search_result = [_chunk("a1")]
+    searchers.setdefault("embed-b", FakeSearcher()).search_result = [_chunk("b1")]
+    trace = RetrievalTraceBuilder("request-1", "q")
+
+    results = await svc.search(text="q", partitions=["p1", "p2"], top_k=1, similarity_threshold=0.5, trace=trace)
+
+    assert [chunk.id for chunk in results] == ["a1"]
+    fused = trace.stages["partition_fused"]
+    assert fused.status == "complete"
+    assert fused.candidate_count == 2
+    assert [candidate.id for candidate in fused.candidates] == ["a1", "b1"]
+    assert fused.candidates[0].removal_reason is None
+    assert fused.candidates[1].removal_reason.code == "partition_top_k"
 
 
 @pytest.mark.asyncio
@@ -288,6 +373,26 @@ async def test_search_across_embedders_drops_a_failing_one():
     out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
 
     assert [c.id for c in out] == ["a1"]
+
+
+@pytest.mark.asyncio
+async def test_search_across_embedders_records_failed_group_in_child_trace():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_error = RuntimeError("embedder down")
+    trace = RetrievalTraceBuilder("request-1", "q")
+
+    out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5, trace=trace)
+
+    assert [chunk.id for chunk in out] == ["a1"]
+    traces_by_partition = {child.partition: child for child in trace.query_traces}
+    failed_errors = traces_by_partition["p2"].errors
+    assert any(error.stage == "partition_search" and error.kind == "RuntimeError" for error in failed_errors)
+    assert traces_by_partition["p1"].errors == []
 
 
 @pytest.mark.asyncio
@@ -548,7 +653,7 @@ async def test_retrieve_all_expands_to_per_partition_embedders():
 @pytest.mark.asyncio
 async def test_retrieve_all_applies_partition_top_n():
     """The reranker top_n was dropped on the `all` path (default_top_k was None).
-    With expansion, each partition's top_n truncates its results."""
+    With expansion, each group's top_n truncates its results."""
     s = FakeSearcher()
     s.search_result = [_chunk("a"), _chunk("b"), _chunk("c")]
     reranker = FakeReranker()
@@ -571,7 +676,64 @@ async def test_retrieve_all_applies_partition_top_n():
     out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
 
     assert [c.id for c in out] == ["a", "b"]  # truncated to top_n=2, not the full 3
-    assert s.search_calls[0]["partition"] == ["solo"]
+    # One group: "all" is kept, so the search stays unscoped.
+    assert s.search_calls[0]["partition"] == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_unset_top_n_follows_global_reranker_top_k():
+    """A preset without top_n truncates to the global reranker.top_k (RERANKER_TOP_K)."""
+    s = FakeSearcher()
+    s.search_result = [_chunk(c) for c in "abcdefg"]
+    cfg = _config()  # reranker.top_k = 5
+    cfg.partitions = {
+        "solo": _partition(
+            name="solo",
+            retrieval=RetrievalPipelineConfig(
+                top_k=7, enable_reranker=False, include_related=False, include_ancestors=False
+            ),
+        )
+    }
+    svc = RetrievalService(searcher=s, reranker=None, llm=None, config=cfg, searcher_factory=lambda name: s)
+
+    out = await svc.retrieve(partitions=["solo"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["a", "b", "c", "d", "e"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_depth_override_preserves_preset_final_top_n():
+    searcher = FakeSearcher()
+    searcher.search_result = [_chunk(str(index)) for index in range(20)]
+    cfg = _config()
+    cfg.partitions = {
+        "solo": _partition(
+            name="solo",
+            retrieval=RetrievalPipelineConfig(
+                top_k=50,
+                top_n=10,
+                enable_reranker=False,
+                include_related=False,
+                include_ancestors=False,
+            ),
+        )
+    }
+    service = RetrievalService(
+        searcher=searcher,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda _name: searcher,
+    )
+    results = await service.retrieve_multi(
+        partitions=["solo"],
+        search_queries=SearchQueries(query_list=[Query(query="question")]),
+        top_k=None,
+        retrieval_top_k=100,
+    )
+
+    assert len(results) == 10
+    assert searcher.search_calls[0]["top_k"] == 100
 
 
 @pytest.mark.asyncio
@@ -594,6 +756,306 @@ async def test_retrieve_all_falls_back_to_legacy_when_no_partitions_exist():
 
     assert [c.id for c in out] == ["x"]
     assert default_searcher.search_calls[0]["partition"] == ["all"]
+
+
+# --- partitions on one embedder and one retrieval preset share a pipeline ---
+
+
+def _grouping_svc(partitions: list[PartitionConfig], fields: dict[str, str], **kwargs):
+    """A service over these partitions, with the embedders' vector fields.
+
+    Returns the service and one searcher per embedder name.
+    """
+    cfg = _config()
+    cfg.partitions = {p.name: p for p in partitions}
+    cfg.models = SimpleNamespace(
+        reranker={}, embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()}
+    )
+    searchers: dict[str, FakeSearcher] = {}
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: searchers.setdefault(name, FakeSearcher()),
+        **kwargs,
+    )
+    return svc, searchers
+
+
+@pytest.mark.asyncio
+async def test_retrieve_shares_one_pipeline_across_partitions_on_one_embedder_and_preset():
+    reranker = FakeReranker()
+    preset = RetrievalPipelineConfig(enable_reranker=True, reranker="r")
+    svc, searchers = _grouping_svc(
+        [_partition(name="p1", retrieval=preset), _partition(name="p2", retrieval=preset)],
+        {"embed-a": "vector_embed_a"},
+        reranker_factory=lambda name: reranker,
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [
+        Chunk(id="a", text="from p1", partition="p1"),
+        Chunk(id="b", text="from p2", partition="p2"),
+    ]
+
+    out = await svc.retrieve(partitions=["p1", "p2"], query=Query(query="hello"))
+
+    # One embedding and one search over both partitions, one rerank pass over
+    # their pooled candidates: no per-partition lists to fuse by rank.
+    (call,) = searchers["embed-a"].search_calls
+    assert call["partition"] == ["p1", "p2"]
+    (rerank_call,) = reranker.calls
+    assert rerank_call["documents"] == ["from p1", "from p2"]
+    assert [c.id for c in out] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_on_one_embedder_and_preset_stays_unscoped():
+    svc, searchers = _grouping_svc(
+        [_partition(name="p1"), _partition(name="p2")],
+        {"embed-a": "vector_embed_a"},
+    )
+
+    await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    (call,) = searchers["embed-a"].search_calls
+    assert call["partition"] == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_groups_partitions_per_embedder():
+    svc, searchers = _grouping_svc(
+        [
+            _partition(name="p1", embedder="embed-a"),
+            _partition(name="p2", embedder="embed-b"),
+            _partition(name="p3", embedder="embed-a"),
+        ],
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+    )
+
+    await svc.retrieve_multi(partitions=["all"], search_queries=SearchQueries(query_list=[Query(query="hello")]))
+
+    assert [c["partition"] for c in searchers["embed-a"].search_calls] == [["p1", "p3"]]
+    assert [c["partition"] for c in searchers["embed-b"].search_calls] == [["p2"]]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_keeps_the_default_alias_and_its_embedder_in_one_pipeline():
+    # "default" points at embed-a: both write the same field.
+    svc, searchers = _grouping_svc(
+        [_partition(name="p1", embedder="default"), _partition(name="p2", embedder="embed-a")],
+        {"default": "vector_embed_a", "embed-a": "vector_embed_a"},
+    )
+
+    await svc.retrieve(partitions=["p1", "p2"], query=Query(query="hello"))
+
+    assert list(searchers) == ["default"]
+    (call,) = searchers["default"].search_calls
+    assert call["partition"] == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_splits_one_embedder_by_retrieval_preset():
+    # Same embedder, but p2 keeps fewer results: each needs its own pipeline.
+    svc, searchers = _grouping_svc(
+        [
+            _partition(name="p1"),
+            _partition(name="p2", retrieval=RetrievalPipelineConfig(top_n=3)),
+            _partition(name="p3"),
+        ],
+        {"embed-a": "vector_embed_a"},
+    )
+
+    groups = await svc._pipeline_groups_for_partitions(["p1", "p2", "p3"])
+
+    assert [(names, top_n) for names, _, top_n in groups] == [(["p1", "p3"], 5), (["p2"], 3)]
+    await svc.retrieve(partitions=["p1", "p2", "p3"], query=Query(query="hello"))
+    assert [c["partition"] for c in searchers["embed-a"].search_calls] == [["p1", "p3"], ["p2"]]
+
+
+@pytest.mark.asyncio
+async def test_expansion_presets_split_by_the_llm_that_rewrites_the_query():
+    """A hyde or multiQuery preset without its own ``llm`` rewrites the query
+    with the partition's chat LLM, so partitions on different chat LLMs cannot
+    share a pipeline. A single-query preset uses no LLM, so its chat LLM does
+    not matter."""
+    hyde = RetrievalPipelineConfig(type="hyde")
+    llm_names: list[str] = []
+    svc, _ = _grouping_svc(
+        [
+            _partition(name="h1", retrieval=hyde, chat_llm="llm-1"),
+            _partition(name="h2", retrieval=hyde, chat_llm="llm-1"),
+            _partition(name="h3", retrieval=hyde, chat_llm="llm-2"),
+            _partition(name="s1", chat_llm="llm-2"),
+            _partition(name="s2"),
+        ],
+        {"embed-a": "vector_embed_a"},
+        llm_factory=lambda name: llm_names.append(name) or object(),
+        prompt_service=_RecordingPromptService("HYDE {question}"),
+    )
+
+    hyde_groups = await svc._pipeline_groups_for_partitions(["h1", "h2", "h3"])
+    single_groups = await svc._pipeline_groups_for_partitions(["s1", "s2"])
+
+    assert [names for names, _, _ in hyde_groups] == [["h1", "h2"], ["h3"]]
+    assert llm_names == ["llm-1", "llm-2"]
+    assert [names for names, _, _ in single_groups] == [["s1", "s2"]]
+
+
+@pytest.mark.asyncio
+async def test_preset_fields_the_pipeline_does_not_read_do_not_split_partitions():
+    no_rerank = {"enable_reranker": False}
+    svc, _ = _grouping_svc(
+        [
+            _partition(name="p1", retrieval=RetrievalPipelineConfig(**no_rerank)),
+            # Reranking is off, so which reranker is named does not matter.
+            _partition(name="p2", retrieval=RetrievalPipelineConfig(**no_rerank, reranker="r")),
+            # A single-query preset rewrites nothing.
+            _partition(
+                name="p3",
+                retrieval=RetrievalPipelineConfig(
+                    **no_rerank, llm="llm-1", hyde_prompt_name="h", multi_query_prompt_name="m"
+                ),
+            ),
+            # QueryService reads the contextualizer prompt, the pipeline does not.
+            _partition(name="p4", retrieval=RetrievalPipelineConfig(**no_rerank, query_contextualizer_prompt_name="c")),
+        ],
+        {"embed-a": "vector_embed_a"},
+    )
+
+    plan = await svc.resolve_retrieval_plan(["p1", "p2", "p3", "p4"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+
+    assert [group.partitions for group in plan.groups] == [("p1", "p2", "p3", "p4")]
+
+
+@pytest.mark.asyncio
+async def test_caller_overrides_merge_presets_that_differ_only_in_what_they_override():
+    svc, _ = _grouping_svc(
+        [
+            _partition(name="p1"),
+            _partition(
+                name="p2",
+                retrieval=RetrievalPipelineConfig(
+                    top_k=20, similarity_threshold=0.3, reranker="r", include_related=False
+                ),
+            ),
+        ],
+        {"embed-a": "vector_embed_a"},
+    )
+    overrides = {"top_k": 10, "similarity_threshold": 0.5, "disable_reranker": True, "disable_expansion": True}
+
+    as_configured = await svc._pipeline_groups_for_partitions(["p1", "p2"])
+    overridden = await svc._pipeline_groups_for_partitions(["p1", "p2"], **overrides)
+    plan = await svc.resolve_retrieval_plan(["p1", "p2"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT, **overrides)
+
+    assert [names for names, _, _ in as_configured] == [["p1"], ["p2"]]
+    assert [names for names, _, _ in overridden] == [["p1", "p2"]]
+    assert [group.partitions for group in plan.groups] == [("p1", "p2")]
+
+
+@pytest.mark.asyncio
+async def test_groups_fuse_in_proportion_to_their_partition_count():
+    """A group's list ranks several partitions together, so RRF divides its
+    ranks by the partition count: three partitions on one pipeline take three
+    of every four fused places next to a partition on its own, as they did when
+    each partition was fused as a list of its own."""
+    preset = RetrievalPipelineConfig(top_n=9)
+    svc, searchers = _grouping_svc(
+        [
+            _partition(name="p1", retrieval=preset),
+            _partition(name="p2", retrieval=preset),
+            _partition(name="p3", retrieval=preset),
+            _partition(name="lone", embedder="embed-b", retrieval=preset),
+        ],
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk(f"a{i}") for i in range(1, 10)]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_result = [_chunk(f"b{i}") for i in range(1, 10)]
+
+    out = await svc.retrieve(partitions=["p1", "p2", "p3", "lone"], query=Query(query="hello"))
+
+    assert [c.id for c in out[:8]] == ["a1", "a2", "a3", "b1", "a4", "a5", "a6", "b2"]
+
+
+_CONTEXTUALIZER_PROMPT = SimpleNamespace(content_hash="hash", name=None, source="default")
+
+
+@pytest.mark.asyncio
+async def test_resolved_plan_groups_partitions_as_retrieve_does():
+    svc, searchers = _grouping_svc(
+        [
+            _partition(name="p1"),
+            _partition(name="p2", retrieval=RetrievalPipelineConfig(top_n=3)),
+            _partition(name="p3"),
+        ],
+        {"embed-a": "vector_embed_a"},
+    )
+
+    plan = await svc.resolve_retrieval_plan(["p1", "p2", "p3"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+
+    assert [(group.partitions, group.default_top_k) for group in plan.groups] == [(("p1", "p3"), 5), (("p2",), 3)]
+    assert [partition["name"] for partition in plan.public_configuration["partitions"]] == ["p1", "p2", "p3"]
+    await svc.retrieve(partitions=["p1", "p2", "p3"], query=Query(query="hello"), resolved_plan=plan)
+    assert [c["partition"] for c in searchers["embed-a"].search_calls] == [["p1", "p3"], ["p2"]]
+
+
+@pytest.mark.asyncio
+async def test_resolved_plan_for_all_on_one_pipeline_stays_unscoped():
+    svc, _ = _grouping_svc([_partition(name="p1"), _partition(name="p2")], {"embed-a": "vector_embed_a"})
+
+    plan = await svc.resolve_retrieval_plan(["all"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+
+    (group,) = plan.groups
+    assert group.partitions == ("all",)
+
+
+class _RefreshingPromptService:
+    """A prompt service during whose lookup another request refreshes the partition configs."""
+
+    def __init__(self, resolved: str):
+        self._resolved = resolved
+        self.refresh = lambda: None
+
+    async def resolve_prompt(self, prompt_type, names=None):
+        self.refresh()
+        return self._resolved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["groups", "plan"])
+async def test_a_group_is_built_from_the_settings_it_was_grouped_by(path):
+    """Building the hyde group's pipeline waits on its prompt, and a config
+    refresh can land meanwhile. The next group is still built from what it was
+    grouped by, not from a fresh read of its first partition's config."""
+    prompt_service = _RefreshingPromptService("HYDE {question}")
+    svc, searchers = _grouping_svc(
+        [
+            _partition(name="h1", retrieval=RetrievalPipelineConfig(type="hyde")),
+            _partition(name="p1"),
+            _partition(name="p2"),
+        ],
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+        llm_factory=lambda name: object(),
+        prompt_service=prompt_service,
+    )
+    # The refresh moves p1 to another embedder and rrf_k.
+    prompt_service.refresh = lambda: svc._config.partitions.update(
+        p1=_partition(name="p1", embedder="embed-b", retrieval=RetrievalPipelineConfig(rrf_k=7))
+    )
+
+    if path == "groups":
+        groups = [
+            (names, pipeline) for names, pipeline, _ in await svc._pipeline_groups_for_partitions(["h1", "p1", "p2"])
+        ]
+    else:
+        plan = await svc.resolve_retrieval_plan(["h1", "p1", "p2"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+        groups = [(list(group.partitions), group.pipeline) for group in plan.groups]
+
+    assert [names for names, _ in groups] == [["h1"], ["p1", "p2"]]
+    assert groups[1][1].rrf_k == RetrievalPipelineConfig().rrf_k
+    assert "embed-b" not in searchers
 
 
 # --- #708: the "all" fan-out must be concurrency-bounded (production safety) ---
