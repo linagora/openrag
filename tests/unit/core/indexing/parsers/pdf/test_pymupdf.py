@@ -27,6 +27,16 @@ def _minimal_pdf_bytes() -> bytes:
         doc.close()
 
 
+def _pdf_with_text(text: str) -> bytes:
+    doc = pymupdf.open()
+    try:
+        page = doc.new_page()
+        page.insert_text((72, 72), text)
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
 class TestExtractMarkdownFallback:
     def test_retries_once_against_cleaned_copy_on_runtime_error(self):
         raw = _minimal_pdf_bytes()
@@ -57,6 +67,20 @@ class TestExtractMarkdownFallback:
 
         assert pages == ["hello world"]
         assert mock.call_count == 1
+
+    def test_retries_once_against_cleaned_copy_on_runtime_error_and_falls_back_to_plain_text_when_markdown_is_nearly_empty(
+        self,
+    ):
+        raw = _pdf_with_text("hello world this is a longer sentence to exceed the threshold")
+        # Simulate pymupdf4llm returning nearly nothing
+        good_chunks = [{"text": "x"}]
+
+        with patch(_TO_MARKDOWN, side_effect=[RuntimeError("code=4: no font file for digest"), good_chunks]) as mock:
+            pages, images = _extract_markdown(raw, "broken.pdf")
+
+        assert pages == ["hello world this is a longer sentence to exceed the threshold"]
+        assert images == []
+        assert mock.call_count == 2
 
 
 class TestPyMuPDFParserRecovery:
@@ -108,18 +132,9 @@ class TestRecoveryPathResidency:
 class TestPagesWithFallback:
     """Per-page plain-text fallback when pymupdf4llm drops text (issue #1102)."""
 
-    def _pdf_with_text(self, text: str) -> bytes:
-        doc = pymupdf.open()
-        try:
-            page = doc.new_page()
-            page.insert_text((72, 72), text)
-            return doc.tobytes()
-        finally:
-            doc.close()
-
     def test_keeps_markdown_when_text_is_retained(self):
         """No fallback when markdown length is at least the threshold fraction."""
-        raw = self._pdf_with_text("hello world")
+        raw = _pdf_with_text("hello world")
         with pymupdf.open(stream=raw, filetype="pdf") as doc:
             chunks = [{"text": "hello world"}]
             pages = _pages_with_fallback(doc, chunks, "ok.pdf")
@@ -127,7 +142,7 @@ class TestPagesWithFallback:
 
     def test_falls_back_to_plain_text_when_markdown_is_nearly_empty(self):
         """Markdown returning almost no text is replaced with page.get_text()."""
-        raw = self._pdf_with_text("hello world this is a longer sentence to exceed the threshold")
+        raw = _pdf_with_text("hello world this is a longer sentence to exceed the threshold")
         with pymupdf.open(stream=raw, filetype="pdf") as doc:
             plain_text = doc[0].get_text().strip()
             # Simulate pymupdf4llm returning nearly nothing
@@ -174,6 +189,43 @@ class TestPagesWithFallback:
     def test_threshold_constant_is_below_one(self):
         """Sanity check: the threshold must be a fraction in (0, 1)."""
         assert 0 < _MARKDOWN_TEXT_RATIO_THRESHOLD < 1
+
+    def test_only_one_warning_for_two_pages_that_fallback(self):
+        """Two pages falling back log one warning listing both."""
+        from loguru import logger
+
+        records = []
+        sink_id = logger.add(lambda m: records.append(m.record))
+
+        try:
+            pdf_doc = pymupdf.open()
+            try:
+                page0 = pdf_doc.new_page()
+                page0.insert_text((72, 72), "hello world this is a long sentence")
+                page1 = pdf_doc.new_page()
+                page1.insert_text((72, 72), "another page with text")
+                raw = pdf_doc.tobytes()
+            finally:
+                pdf_doc.close()
+
+            with pymupdf.open(stream=raw, filetype="pdf") as doc:
+                plain0 = doc[0].get_text().strip()
+                plain1 = doc[1].get_text().strip()
+                chunks = [{"text": "y"}, {"text": "z"}]
+                pages = _pages_with_fallback(doc, chunks, "two_pages_fallback.pdf")
+
+        finally:
+            logger.remove(sink_id)
+
+        warnings = [record for record in records if record["level"].name == "WARNING"]
+
+        assert len(warnings) == 1
+        extra = warnings[0]["extra"]
+        assert extra["fallen_back_pages"] == [1, 2]
+        assert extra["fallen_back_pages_count"] == 2
+
+        assert pages[0] == plain0
+        assert pages[1] == plain1
 
 
 class TestExtractMarkdownPerPageFallback:

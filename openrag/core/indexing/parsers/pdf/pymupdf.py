@@ -71,22 +71,22 @@ def _pages_with_fallback(doc: pymupdf.Document, chunks: list[dict], filename: st
     page and log a warning so the silent data-loss is visible in logs.
     """
     pages: list[str] = []
+    fallen_back_pages = []
     for i, (chunk, page) in enumerate(zip(chunks, doc)):
         md_text = (chunk.get("text") or "").strip()
         plain_text = page.get_text().strip()
         plain_len = len(plain_text)
         if plain_len > 0 and len(md_text) < plain_len * _MARKDOWN_TEXT_RATIO_THRESHOLD:
-            logger.bind(
-                filename=filename,
-                page=i + 1,
-                md_chars=len(md_text),
-                plain_chars=plain_len,
-            ).warning(
-                "pymupdf4llm returned much less text than the text layer; falling back to page.get_text() for this page"
-            )
+            fallen_back_pages.append(i + 1)
             pages.append(plain_text)
         else:
             pages.append(md_text)
+    if len(fallen_back_pages) > 0:
+        logger.bind(
+            filename=filename, fallen_back_pages=fallen_back_pages, fallen_back_pages_count=len(fallen_back_pages)
+        ).warning(
+            f"pymupdf4llm returned much less text than the text layer on {len(fallen_back_pages)} page{'s' if len(fallen_back_pages) > 1 else ''}: {fallen_back_pages}; using page.get_text() for them"
+        )
     return pages
 
 
