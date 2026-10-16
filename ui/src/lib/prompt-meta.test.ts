@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
   PROMPT_GROUPS,
@@ -63,6 +66,33 @@ describe("validatePlaceholders", () => {
     );
     expect(v.unknown).toEqual([]);
     expect(v.missing).toEqual([]);
+  });
+
+  it("rejects a query cap placeholder the API does not accept", () => {
+    expect(validatePlaceholders("{max_query_subqueries}", "query_contextualizer").unknown).toEqual([
+      "max_query_subqueries",
+    ]);
+  });
+
+  it("accepts the bundled query contextualizer template", () => {
+    const template = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../../openrag/prompts/templates/query_contextualizer_tmpl.txt",
+      ),
+      "utf8",
+    );
+
+    const v = validatePlaceholders(template, "query_contextualizer");
+
+    expect(v.unknown).toEqual([]);
+    expect(v.malformed).toBe(false);
+    expect(
+      renderPreview(template, "query_contextualizer")
+        .filter((segment) => segment.varName === "max_query_subqueries")
+        .map((segment) => segment.value),
+    ).toEqual([]);
+    expect(template).toContain("Return no more than 8 sub-queries total");
   });
 
   it("accepts any literal text for verbatim prompt types", () => {

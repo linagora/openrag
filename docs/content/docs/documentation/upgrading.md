@@ -26,6 +26,13 @@ Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
 the actors on its own. See
 [Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
 
+When web search is enabled, `WEBSEARCH_MAX_QUERIES` allows up to three provider
+calls per request by default (maximum `8`), keeping separate searches for common
+two- or three-facet queries. Additional facets are combined as needed without
+being dropped. Earlier 2.3.x versions could make one provider call for each
+sub-query, so results may differ. Check the provider's per-request and aggregate
+replica quotas before raising the limit.
+
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
 From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
