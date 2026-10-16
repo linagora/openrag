@@ -673,7 +673,7 @@ class ServiceContainer:
 
         Shares the same core LLM construction as ``retrieval_service``
         (built from ``settings.llm``); the named ``llm_factory`` lets the
-        service honor a partition's ``chat_llm`` model-endpoint preset for
+        service honor a partition's ``chat_llm`` model endpoint for
         query generation and answer generation. The web-search service
         comes from the
         ``WebSearchFactory`` (provider is ``None`` when
