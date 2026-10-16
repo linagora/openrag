@@ -18,7 +18,7 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
-from core.utils.child_process import kill_process_group, tie_to_parent
+from core.utils.child_process import kill_orphaned_group, kill_process_group, tie_to_parent
 from core.utils.logging import get_logger
 from marker.converters.pdf import PdfConverter
 from ray.exceptions import TaskCancelledError
@@ -49,9 +49,11 @@ def _force_kill_executor(executor, log) -> None:
     procs = list(getattr(executor, "_processes", {}).values())
     for proc in procs:
         try:
-            # A broken pool keeps its crashed child, already reaped: its pid is
-            # free, and may now belong to another process group.
+            # A broken pool keeps its crashed child, already reaped: its pid may
+            # belong to another process now, but what pdftext started in it may
+            # still be running.
             if proc.exitcode is not None:
+                kill_orphaned_group(proc.pid)
                 continue
             kill_process_group(proc.pid)
         except Exception:  # noqa: BLE001 - one unkillable proc must not block the rest
