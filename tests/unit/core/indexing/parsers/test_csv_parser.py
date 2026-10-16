@@ -22,7 +22,9 @@ Tests call the parser directly, not the upload/dispatcher or chunking pipeline.
 """
 
 import csv
+import sys
 from contextlib import closing
+from types import ModuleType
 
 import pytest
 from core.indexing.parsers.tabular.csv_parser import CsvParser
@@ -305,14 +307,31 @@ async def test_unclosed_quote_in_header_raises():
         await CsvParser().parse(Document(text='a,"b\n1,2\n'))
 
     assert exc_info.value.code == "NO_INDEXABLE_CONTENT"
-    assert exc_info.value.extra == {"skipped_rows": 1}
+    assert exc_info.value.extra == {"skipped_rows": 2}
 
 
-async def test_trailing_empty_header_names_are_removed():
-    result = await CsvParser().parse(Document(text="a,b,\n1,2\n"))
+async def test_trailing_empty_header_names_are_preserved_with_generated_names():
+    result = await CsvParser().parse(Document(text="a,b,\n1,2,x\n3,4,y\n"))
 
-    assert result.text_blocks[0].text == "| a | b |\n| --- | --- |\n| 1 | 2 |"
-    assert result.text_blocks[0].metadata["csv_columns"] == ["a", "b"]
+    assert result.text_blocks[0].text == ("| a | b | column_3 |\n| --- | --- | --- |\n| 1 | 2 | x |\n| 3 | 4 | y |")
+    assert result.text_blocks[0].metadata["csv_columns"] == ["a", "b", "column_3"]
+
+
+async def test_unclosed_quote_reports_consumed_physical_lines():
+    with pytest.raises(NoIndexableContentError) as exc_info:
+        await CsvParser().parse(Document(text='id,note\n1,"5 inch screen\n2,ok\n3,also\n'))
+
+    assert exc_info.value.extra == {"skipped_rows": 3}
+    assert "starting at physical line 2" in exc_info.value.message
+    assert "consumed 3 physical line(s)" in exc_info.value.message
+
+
+async def test_malformed_quote_reports_all_consumed_lines_and_keeps_later_rows():
+    result = await CsvParser().parse(Document(text='id,note\n1,"5 inch screen\n2,ok\n3,"later\n4,good\n'))
+
+    assert result.text_blocks[0].text.endswith("| 4 | good |")
+    assert result.text_blocks[0].metadata["csv_bad_rows"] == 3
+    assert result.text_blocks[0].metadata["csv_row_numbers"] == [5]
 
 
 async def test_cell_larger_than_python_csv_default_limit_is_accepted():
@@ -333,3 +352,42 @@ async def test_late_cp1252_character_is_not_replaced(tmp_path):
 
     assert "café" in result.text_blocks[0].text
     assert "\ufffd" not in result.text_blocks[0].text
+
+
+async def test_valid_utf8_path_does_not_run_chardet(tmp_path, monkeypatch):
+    fake_chardet = ModuleType("chardet")
+
+    def fail_if_called(_raw):
+        raise AssertionError("chardet must not run for valid UTF-8")
+
+    fake_chardet.detect = fail_if_called
+    monkeypatch.setitem(sys.modules, "chardet", fake_chardet)
+    path = tmp_path / "valid-utf8.csv"
+    path.write_text("id,name\n1,café\n", encoding="utf-8")
+
+    result = await CsvParser().parse(Document(source_path=str(path)))
+
+    assert "café" in result.text_blocks[0].text
+
+
+async def test_mostly_utf8_path_replaces_a_stray_cp1252_byte(tmp_path, monkeypatch):
+    samples: list[bytes] = []
+    fake_chardet = ModuleType("chardet")
+
+    def detect(raw):
+        samples.append(raw)
+        return {"encoding": "utf-8", "confidence": 0.99}
+
+    fake_chardet.detect = detect
+    monkeypatch.setitem(sys.modules, "chardet", fake_chardet)
+    path = tmp_path / "mixed-encoding.csv"
+    utf8_rows = "".join(f"{number},café\n" for number in range(7_000)).encode("utf-8")
+    path.write_bytes(b"id,name\n" + utf8_rows + b"7000,Rep\xe9\n")
+
+    result = await CsvParser(batch_size=10_000).parse(Document(source_path=str(path)))
+
+    assert "café" in result.text_blocks[0].text
+    assert "Rep\ufffd" in result.text_blocks[0].text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 1
+    assert len(samples) == 1
+    assert len(samples[0]) <= 128 * 1024

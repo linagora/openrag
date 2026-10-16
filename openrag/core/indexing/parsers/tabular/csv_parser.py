@@ -17,6 +17,7 @@ from core.utils.logging import get_logger
 logger = get_logger()
 
 _ENCODING_SAMPLE_SIZE = 64 * 1024
+_ENCODING_DETECTION_LIMIT = 2 * _ENCODING_SAMPLE_SIZE
 _DIALECT_SAMPLE_SIZE = 64 * 1024
 _CSV_FIELD_SIZE_LIMIT = 16 * 1024 * 1024
 csv.field_size_limit(max(csv.field_size_limit(), _CSV_FIELD_SIZE_LIMIT))
@@ -34,45 +35,57 @@ def _detect_bytes_encoding(raw: bytes) -> str:
     return "utf-8-sig"
 
 
-def _detect_stream_encoding(raw_stream) -> str:
+def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
     """Inspect the complete stream without retaining it in memory.
 
     A 64 KiB ASCII prefix is not evidence that the rest of a file is UTF-8.
-    Validate UTF-8 incrementally and feed the same blocks to chardet so a late
-    cp1252 character cannot silently become a replacement character.
+    Validate UTF-8 incrementally first. Only if validation fails, run chardet
+    on a bounded prefix plus the failing block.
     """
     decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
     utf8_valid = True
-    try:
-        from chardet.universaldetector import UniversalDetector
-    except ImportError:
-        detector = None
-    else:
-        detector = UniversalDetector()
+    prefix = bytearray()
+    failing_block = b""
+    blocks_read = 0
 
     raw_stream.seek(0)
     while block := raw_stream.read(_ENCODING_SAMPLE_SIZE):
-        if detector is not None:
-            detector.feed(block)
-        if utf8_valid:
-            try:
-                decoder.decode(block, final=False)
-            except UnicodeDecodeError:
-                utf8_valid = False
+        blocks_read += 1
+        if len(prefix) < _ENCODING_SAMPLE_SIZE:
+            prefix.extend(block[: _ENCODING_SAMPLE_SIZE - len(prefix)])
+        try:
+            decoder.decode(block, final=False)
+        except UnicodeDecodeError:
+            utf8_valid = False
+            failing_block = block
+            break
     if utf8_valid:
         try:
             decoder.decode(b"", final=True)
         except UnicodeDecodeError:
             utf8_valid = False
 
-    if detector is not None:
-        detector.close()
     raw_stream.seek(0)
     if utf8_valid:
-        return "utf-8-sig"
-    encoding = (detector.result.get("encoding") if detector is not None else None) or "cp1252"
+        return "utf-8-sig", "strict"
+
+    detection_sample = bytes(prefix)
+    remaining = _ENCODING_DETECTION_LIMIT - len(detection_sample)
+    if remaining > 0 and failing_block and blocks_read > 1:
+        detection_sample += failing_block[:remaining]
+    try:
+        import chardet
+    except ImportError:
+        encoding = "cp1252"
+    else:
+        encoding = chardet.detect(detection_sample).get("encoding") or "cp1252"
+
+    normalized_encoding = encoding.lower().replace("_", "-")
+    if normalized_encoding in {"ascii", "utf-8", "utf-8-sig"}:
+        logger.bind(encoding=encoding).warning("CSV contains invalid UTF-8 bytes; replacing undecodable bytes")
+        return "utf-8-sig", "replace"
     logger.bind(encoding=encoding).warning("CSV is not valid UTF-8; using detected fallback encoding")
-    return encoding
+    return encoding, "replace"
 
 
 def markdown_row(cells: list[str]) -> str:
@@ -107,8 +120,8 @@ class CsvParser(DocumentParser):
         if document.source_path is not None:
             raw_stream = Path(document.source_path).open("rb")
             try:
-                encoding = _detect_stream_encoding(raw_stream)
-                return io.TextIOWrapper(raw_stream, encoding=encoding, errors="strict", newline="")
+                encoding, errors = _detect_stream_encoding(raw_stream)
+                return io.TextIOWrapper(raw_stream, encoding=encoding, errors=errors, newline="")
             except Exception:
                 raw_stream.close()
                 raise
@@ -156,30 +169,41 @@ class CsvParser(DocumentParser):
             )
             record_number = 0
             bad_rows = 0
+            decode_replacements = 0
+            last_parse_error: str | None = None
             headers = None
             while headers is None:
                 record_number += 1
+                previous_line_number = reader.line_num
                 try:
                     row = next(reader)
                 except StopIteration:
                     if bad_rows:
+                        detail = f" {last_parse_error}" if last_parse_error else ""
                         raise NoIndexableContentError(
-                            "CSV contains no valid header row.",
+                            f"CSV contains no valid header row.{detail}",
                             skipped_rows=bad_rows,
                         )
                     return
                 except csv.Error as exc:
-                    bad_rows += 1
-                    logger.bind(record=record_number, line=reader.line_num).warning(
-                        f"Skipping malformed CSV record: {exc}"
+                    consumed_lines = max(1, reader.line_num - previous_line_number)
+                    bad_rows += consumed_lines
+                    record_number += consumed_lines - 1
+                    last_parse_error = (
+                        f"Malformed record starting at physical line {previous_line_number + 1} "
+                        f"consumed {consumed_lines} physical line(s): {exc}."
                     )
+                    logger.bind(
+                        record=record_number,
+                        start_line=previous_line_number + 1,
+                        end_line=reader.line_num,
+                        skipped_lines=consumed_lines,
+                    ).warning(last_parse_error)
                     continue
                 if row:
                     headers = row
-            while headers and headers[-1] == "":
-                headers.pop()
-            if not headers:
-                raise NoIndexableContentError("CSV contains no named columns.", skipped_rows=bad_rows)
+            headers = [header if header else f"column_{index}" for index, header in enumerate(headers, start=1)]
+            decode_replacements += sum(header.count("\ufffd") for header in headers)
             header_lines = [
                 markdown_row(headers),
                 markdown_row(["---"] * len(headers)),  # markdown table separator row
@@ -195,18 +219,29 @@ class CsvParser(DocumentParser):
 
             while True:
                 record_number += 1
+                previous_line_number = reader.line_num
                 try:
                     row = next(reader)
                 except StopIteration:
                     break
                 except csv.Error as exc:
-                    bad_rows += 1
-                    logger.bind(record=record_number, line=reader.line_num).warning(
-                        f"Skipping malformed CSV record: {exc}"
+                    consumed_lines = max(1, reader.line_num - previous_line_number)
+                    bad_rows += consumed_lines
+                    record_number += consumed_lines - 1
+                    last_parse_error = (
+                        f"Malformed record starting at physical line {previous_line_number + 1} "
+                        f"consumed {consumed_lines} physical line(s): {exc}."
                     )
+                    logger.bind(
+                        record=record_number,
+                        start_line=previous_line_number + 1,
+                        end_line=reader.line_num,
+                        skipped_lines=consumed_lines,
+                    ).warning(last_parse_error)
                     continue
                 if not row:
                     continue
+                decode_replacements += sum(cell.count("\ufffd") for cell in row)
                 if len(row) < len(headers):
                     row.extend([""] * (len(headers) - len(row)))
                 elif len(row) > len(headers):
@@ -238,6 +273,7 @@ class CsvParser(DocumentParser):
                             "csv_row_end": batch_last_record,
                             "csv_row_numbers": list(batch_record_numbers),
                             "csv_bad_rows": bad_rows,
+                            "csv_decode_replacements": decode_replacements,
                         },
                     )
                     batches_emitted += 1
@@ -256,15 +292,21 @@ class CsvParser(DocumentParser):
                         "csv_row_end": batch_last_record,
                         "csv_row_numbers": list(batch_record_numbers),
                         "csv_bad_rows": bad_rows,
+                        "csv_decode_replacements": decode_replacements,
                     },
                 )
             elif batches_emitted == 0:
+                detail = f" {last_parse_error}" if last_parse_error else ""
                 raise NoIndexableContentError(
-                    "CSV contains a header but no indexable data rows.",
+                    f"CSV contains a header but no indexable data rows.{detail}",
                     skipped_rows=bad_rows,
                 )
             if bad_rows:
                 logger.bind(skipped_rows=bad_rows).warning("CSV parsing completed with malformed records skipped")
+            if decode_replacements:
+                logger.bind(replacements=decode_replacements).warning(
+                    "CSV parsing completed with undecodable bytes replaced"
+                )
 
     def _parse(self, document: Document) -> ProcessedDocument:
         return ProcessedDocument(
