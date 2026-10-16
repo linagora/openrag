@@ -32,6 +32,13 @@ worker. Remove the setting; the Marker worker logs a warning while it is above 1
 `MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
 `1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
 
+When web search is enabled, contextualized sub-queries are combined as needed
+to stay within `WEBSEARCH_MAX_QUERIES` provider calls per request (default `1`,
+maximum `8`). Earlier 2.3.x versions could make one provider call for each
+sub-query. Keep the default if provider quota is tight; raise the limit only
+after checking the provider's per-request and aggregate replica quotas. A
+single combined query can return different results from separate facet searches.
+
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
 From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
