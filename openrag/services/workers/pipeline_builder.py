@@ -5,6 +5,7 @@ import inspect
 import time
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -13,13 +14,15 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
+from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.ray_metrics import observe_stage_duration
-from core.utils.exceptions import NoIndexableContentError, PipelineError
+from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.csv_pipeline import run_csv_batches
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
@@ -57,6 +60,23 @@ class PipelineTimeouts:
     store: float | None = None
     store_per_chunk: float = 0.0
     topic_tag: float | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class BatchIndexingContext:
+    """Resolved per-file dependencies reused by every parsed CSV batch."""
+
+    config: IndexationPipelineConfig | None
+    parser: DocumentParser
+    embedder_name: str
+    embedder: Embedder
+    embedder_window: int | None
+    chunker: ChunkingStrategy
+    vector_field: str | None
+    contextualizer: ChunkContextualizer | None
+    contextualization_llm: str | None
+    topic_tagger: TopicTagger | None
+    topic_tagging_llm: str | None
 
 
 def _accepts_embedder_window(factory: Callable[..., Any]) -> bool:
@@ -113,6 +133,7 @@ class IndexingPipeline:
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
     defer_replace_cleanup: bool = False
+    collection_name: str = "default"
     # How many of a document's images may contend for the shared VLM gate at
     # once. ``None`` leaves the fan-out unbounded (one caller per image).
     caption_concurrency: int | None = None
@@ -123,7 +144,17 @@ class IndexingPipeline:
     # under it; anything else (e.g. MCP ``index_url`` temp downloads) is skipped.
     data_dir: Path | None = None
 
-    async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    async def run(
+        self,
+        row: MutableMapping[str, Any],
+        *,
+        _processed: ProcessedDocument | None = None,
+        _chunk_offset: int = 0,
+        _indexed_at: datetime | None = None,
+        _skip_topic_tagging: bool = False,
+        _skip_contextualization: bool = False,
+        _batch_context: BatchIndexingContext | None = None,
+    ) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
 
         Each stage is timed and a single structured line is logged per file
@@ -142,19 +173,68 @@ class IndexingPipeline:
         — index one file at a time for accurate numbers; for a batch, read the
         first-finishing (least-contended) file.
         """
-        config = self._effective_indexation_config(row)
-        parser = self._select_parser(config)
-        embedder_name = str(row.get("embedder_name") or "default")
-        embedder = self._select_embedder(row)
-        configured_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
-        embedder_window = await self._embedded_window(embedder, configured_window)
-        chunker = self._select_chunker(
-            config, embedder_name, embedder_window, window_lowered=embedder_window != configured_window
-        )
-        # Resolved up front, so a file with nowhere to store its vectors fails before it is parsed and embedded.
-        vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
-        contextualizer, contextualization_llm = self._select_contextualizer(config)
-        topic_tagger, topic_tagging_llm = self._select_topic_tagger(config)
+        if _batch_context is None:
+            config = self._effective_indexation_config(row)
+            parser = self._select_parser(config)
+            embedder_name = str(row.get("embedder_name") or "default")
+            embedder = self._select_embedder(row)
+            configured_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
+            embedder_window = await self._embedded_window(embedder, configured_window)
+            chunker = self._select_chunker(
+                config, embedder_name, embedder_window, window_lowered=embedder_window != configured_window
+            )
+            # Resolved up front, so a file with nowhere to store its vectors fails before parsing and embedding.
+            vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
+            contextualizer, contextualization_llm = (
+                (None, None) if _skip_contextualization else self._select_contextualizer(config)
+            )
+            topic_tagger, topic_tagging_llm = (None, None) if _skip_topic_tagging else self._select_topic_tagger(config)
+        else:
+            config = _batch_context.config
+            parser = _batch_context.parser
+            embedder_name = _batch_context.embedder_name
+            embedder = _batch_context.embedder
+            embedder_window = _batch_context.embedder_window
+            chunker = _batch_context.chunker
+            vector_field = _batch_context.vector_field
+            contextualizer = _batch_context.contextualizer
+            contextualization_llm = _batch_context.contextualization_llm
+            topic_tagger = _batch_context.topic_tagger
+            topic_tagging_llm = _batch_context.topic_tagging_llm
+            configured_window = embedder_window
+
+        document = row.get("document")
+        if _processed is None and isinstance(document, Document) and document.content_type is DocumentType.CSV:
+            if contextualizer is not None:
+                message = "CSV streaming skips chunk contextualization"
+                row.setdefault("degraded_stages", {})["contextualize"] = message
+                logger.bind(task_id=row.get("task_id"), filename=row.get("filename", "")).warning(
+                    f"{message}; continuing with labelled row chunks"
+                )
+            concrete_parser = parser.resolve(document) if hasattr(parser, "resolve") else parser
+            if not isinstance(concrete_parser, CsvParser):
+                raise ConfigError("CSV indexing requires a configured CsvParser")
+            batch_context = BatchIndexingContext(
+                config=config,
+                parser=parser,
+                embedder_name=embedder_name,
+                embedder=embedder,
+                embedder_window=embedder_window,
+                chunker=chunker,
+                vector_field=vector_field,
+                contextualizer=None,
+                contextualization_llm=None,
+                topic_tagger=None,
+                topic_tagging_llm=None,
+            )
+            return await run_csv_batches(
+                self,
+                row,
+                concrete_parser,
+                batch_context=batch_context,
+                topic_tagger=topic_tagger,
+                max_topic_tags=config.max_topic_tags if config is not None else 7,
+            )
 
         timings: dict[str, float] = {}
 
@@ -205,7 +285,12 @@ class IndexingPipeline:
                 ).warning(f"{name} stage failed; indexing the file without it: {exc}")
 
         try:
-            await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
+            if _processed is None:
+                await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
+            else:
+                row["processed_document"] = _processed
+                row["stage"] = "parsed"
+                row.pop("error", None)
             _release_raw_bytes(row)
             # The caption decision needs the parsed document (standalone images
             # always caption), so the VLM is resolved after parse.
@@ -245,13 +330,18 @@ class IndexingPipeline:
             # Outside the ``vlm is not None`` branch on purpose: if captioning
             # was skipped, the bytes were never going to be read at all.
             _release_image_bytes(row)
-            if self.save_markdown:
+            # A streamed CSV is parsed one batch at a time. Saving here would
+            # overwrite the same sidecar for every batch and leave only the
+            # final rows, so CSV sidecars are intentionally skipped.
+            if self.save_markdown and _batch_context is None:
                 await _save_markdown(row, self.data_dir)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             # Emptiness is the chunk count. Caption is the only enrichment that
             # has run, and only run() knows whether it ran (#1077).
             if not row["chunks"]:
                 _raise_nothing_to_index(row, caption_ran=vlm is not None)
+            for chunk in row["chunks"]:
+                chunk.chunk_index += _chunk_offset
             if contextualizer is not None:
                 await _timed_enrichment(
                     "contextualize",
@@ -334,12 +424,13 @@ class IndexingPipeline:
             row.pop(REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY, None)
             row.pop(REPLACE_OLD_CHUNK_IDS_ROW_KEY, None)
             replace = bool(row.get("replace"))
-            old_chunk_ids = await self._existing_chunk_ids(row) if replace else []
+            old_chunk_ids = await self.existing_chunk_ids(row) if replace else []
             await _timed(
                 "store",
                 store_stage(
                     row,
                     self.vector_store,
+                    indexed_at=_indexed_at,
                     timeout=self.timeouts.store,
                     per_chunk_timeout=self.timeouts.store_per_chunk,
                     vector_field=vector_field,
@@ -357,11 +448,7 @@ class IndexingPipeline:
             # Gating on ``stored_count`` ensures cleanup only runs once we know
             # the new set actually replaced the old one.
             if replace and old_chunk_ids and row.get("stored_count"):
-                if self.defer_replace_cleanup:
-                    row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
-                    row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = old_chunk_ids
-                else:
-                    await self._delete_replaced_chunks(row, old_chunk_ids)
+                await self.finalize_replacement(row, old_chunk_ids)
             return row
         finally:
             logger.bind(
@@ -372,7 +459,31 @@ class IndexingPipeline:
                 ms_total=round(sum(timings.values())),
             ).info("indexing stage timings (ms)")
 
-    async def _existing_chunk_ids(self, row: MutableMapping[str, Any]) -> list[str]:
+    async def run_processed_batch(
+        self,
+        row: MutableMapping[str, Any],
+        processed: ProcessedDocument,
+        *,
+        chunk_offset: int,
+        indexed_at: datetime,
+        context: BatchIndexingContext,
+    ) -> MutableMapping[str, Any]:
+        """Index one already-parsed CSV batch through the normal stages.
+
+        CSV orchestration uses this public seam instead of depending on the
+        internal keyword arguments of :meth:`run`.
+        """
+        return await self.run(
+            row,
+            _processed=processed,
+            _chunk_offset=chunk_offset,
+            _indexed_at=indexed_at,
+            _skip_topic_tagging=True,
+            _skip_contextualization=True,
+            _batch_context=context,
+        )
+
+    async def existing_chunk_ids(self, row: MutableMapping[str, Any]) -> list[str]:
         """Snapshot the chunk ids currently stored for this file (re-index only).
 
         Returns an empty list — skipping stale-chunk cleanup — when the target
@@ -385,9 +496,11 @@ class IndexingPipeline:
             return []
 
         async def _lookup() -> list[str]:
-            if not await self.vector_store.collection_exists("default"):
+            if not await self.vector_store.collection_exists(self.collection_name):
                 return []
-            return await self.vector_store.query_ids_by_filter("default", {"partition": partition, "file_id": file_id})
+            return await self.vector_store.query_ids_by_filter(
+                self.collection_name, {"partition": partition, "file_id": file_id}
+            )
 
         try:
             # Bound the lookup by the store budget so a stalled Milvus can't hang
@@ -399,11 +512,15 @@ class IndexingPipeline:
             )
             return []
 
-    async def _delete_replaced_chunks(self, row: MutableMapping[str, Any], ids: list[str]) -> None:
+    async def finalize_replacement(self, row: MutableMapping[str, Any], ids: list[str]) -> None:
         """Delete the pre-re-index chunk set after the new chunks are stored."""
+        if self.defer_replace_cleanup:
+            row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = self.collection_name
+            row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = ids
+            return
         try:
             deleted = await run_with_optional_timeout(
-                lambda: self.vector_store.delete(ids, "default"), self.timeouts.store
+                lambda: self.vector_store.delete(ids, self.collection_name), self.timeouts.store
             )
             logger.bind(task_id=row.get("task_id")).debug(f"re-index: removed {deleted} stale chunk(s) after replace")
         except Exception as exc:  # noqa: BLE001 - new chunks are stored; cleanup is best-effort
@@ -420,7 +537,7 @@ class IndexingPipeline:
             return raw_config
         if isinstance(raw_config, dict):
             return IndexationPipelineConfig(**raw_config)
-        raise TypeError("indexation_config must be an IndexationPipelineConfig or dict")
+        raise ConfigError("indexation_config must be an IndexationPipelineConfig or dict")
 
     def _select_parser(self, config: IndexationPipelineConfig | None) -> DocumentParser:
         # parsing_strategy is None => the preset doesn't override PDF parsing, so

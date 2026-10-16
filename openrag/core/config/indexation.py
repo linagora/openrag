@@ -115,6 +115,7 @@ class MimetypesConfig(ConfigMixin):
     """
 
     text_plain: str = Field(default=".txt", alias="text/plain")
+    text_csv: str = Field(default=".csv", alias="text/csv")
     text_markdown: str = Field(default=".md", alias="text/markdown")
     application_pdf: str = Field(default=".pdf", alias="application/pdf")
     message_rfc822: str = Field(default=".eml", alias="message/rfc822")
@@ -157,6 +158,8 @@ class MimetypesConfig(ConfigMixin):
 
 
 class LoaderConfig(ConfigMixin):
+    csv_batch_size: int = Field(default=10_000, gt=0, strict=True)
+    csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
     image_captioning: bool = True
     image_captioning_url: bool = True
     save_markdown: bool = False
@@ -204,6 +207,14 @@ class LoaderConfig(ConfigMixin):
     docling_timeout: int = 3600
     docling_max_task_retry: int = 3
     docling_retry_base_delay: float = 2.0
+
+    @field_validator("csv_delimiter")
+    @classmethod
+    def _validate_csv_delimiter(cls, value: str | None) -> str | None:
+        if value in {"\r", "\n"}:
+            raise ValueError("csv_delimiter must not be a newline")
+        return value
+
     # Outer wall-clock bound (seconds) for a single file's parse stage. Unlike
     # marker/docling — which self-limit at marker_timeout/docling_timeout — the
     # pymupdf backend has no internal timeout, so without this a wedged pymupdf
