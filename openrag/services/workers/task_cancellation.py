@@ -247,10 +247,13 @@ async def _cancel_refs(
             file_id=file_id,
         )
         remaining = _remaining_timeout(deadline, partition=partition, file_id=file_id)
+        set_cancelled_if_active = _remote_actor_method(task_state_manager, "set_cancelled_if_active")
+        if set_cancelled_if_active is None:
+            raise RuntimeError("TaskStateManager does not expose active-task cancellation")
         await call_ray_actor_method_with_timeout(
-            submit=lambda task_id=task_id: task_state_manager.set_state.remote(task_id, "CANCELLED"),
+            submit=lambda task_id=task_id: set_cancelled_if_active(task_id),
             timeout=remaining,
-            task_description=f"set_state({task_id}, CANCELLED)",
+            task_description=f"set_cancelled_if_active({task_id})",
         )
         finish_cancellation_remote = _remote_actor_method(task_state_manager, "finish_cancellation")
         if finish_cancellation_remote is not None:
