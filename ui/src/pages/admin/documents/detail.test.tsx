@@ -85,6 +85,7 @@ describe("DocumentDetailPage", () => {
     expect(screen.getByText("7")).not.toBeNull();
   });
 
+  /** Older backends omit topic_tags; the group still renders with an empty state. */
   it("shows an empty state when the file has no topic tags", async () => {
     renderDocumentDetail();
 
@@ -92,6 +93,7 @@ describe("DocumentDetailPage", () => {
     expect(screen.getByText("No topic tags")).not.toBeNull();
   });
 
+  /** Stored tags arrive top-level on the file-detail response and render as badges. */
   it("renders stored topic tags as badges", async () => {
     getFileDetailMock.mockResolvedValue({
       metadata: { filename: "catalog.pdf" },

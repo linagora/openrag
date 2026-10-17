@@ -279,11 +279,13 @@ class FakeVectorStore:
 
 class FakeTopicTagRepo:
     def __init__(self, rows: list[dict] | None = None, error: Exception | None = None):
+        """Seed canned tag rows, an optional error to raise, and record calls."""
         self._rows = rows if rows is not None else []
         self._error = error
         self.calls: list[tuple[str, str]] = []
 
     async def get_by_document(self, document_id: str, partition: str) -> list[dict]:
+        """Record the lookup, then replay the canned rows or raise."""
         self.calls.append((document_id, partition))
         if self._error is not None:
             raise self._error
@@ -340,6 +342,7 @@ def _svc(
     config=None,
     trepo=None,
 ) -> PartitionService:
+    """Build a service over fake repos with an optional topic-tag repo."""
     return PartitionService(
         partition_repo=prepo or FakePartitionRepo(),
         membership_repo=mrepo or FakeMembershipRepo(),
@@ -865,6 +868,7 @@ async def test_get_file_metadata_rejects_a_missing_catalog_row() -> None:
 
 @pytest.mark.asyncio
 async def test_get_file_topic_tags_returns_stored_tags_in_order() -> None:
+    """Stored tag rows survive the read path in their stored order."""
     trepo = FakeTopicTagRepo(
         rows=[
             {"document_id": "f", "partition": "p", "tag": "finance"},
@@ -879,6 +883,7 @@ async def test_get_file_topic_tags_returns_stored_tags_in_order() -> None:
 
 @pytest.mark.asyncio
 async def test_get_file_topic_tags_returns_empty_when_untagged() -> None:
+    """A file with no stored tags reads back as an empty list."""
     svc = _svc(trepo=FakeTopicTagRepo(rows=[]))
 
     assert await svc.get_file_topic_tags("p", "f") == []
@@ -886,11 +891,13 @@ async def test_get_file_topic_tags_returns_empty_when_untagged() -> None:
 
 @pytest.mark.asyncio
 async def test_get_file_topic_tags_returns_empty_without_a_repo() -> None:
+    """A service built without a topic-tag repo answers [] instead of failing."""
     assert await _svc(trepo=None).get_file_topic_tags("p", "f") == []
 
 
 @pytest.mark.asyncio
 async def test_get_file_topic_tags_propagates_repository_errors() -> None:
+    """Repository failures surface as-is, never masked as 'no tags'."""
     svc = _svc(trepo=FakeTopicTagRepo(error=RuntimeError("db down")))
 
     with pytest.raises(RuntimeError, match="db down"):

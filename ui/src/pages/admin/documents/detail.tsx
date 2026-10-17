@@ -129,6 +129,7 @@ function DetailsCard({ metadata }: { metadata: Record<string, unknown> }) {
   );
 }
 
+/** Admin file-detail page: authoritative catalog metadata, chunk links and topic tags. */
 export default function DocumentDetailPage() {
   const { partition, fileId } = useParams<{ partition: string; fileId: string }>();
   const navigate = useNavigate();

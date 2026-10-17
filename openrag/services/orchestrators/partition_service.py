@@ -109,6 +109,7 @@ class PartitionService:
         prompt_repo: Any = None,
         topic_tag_repo: Any = None,
     ) -> None:
+        """Wire the repositories and optional collaborators used by every method."""
         self._partition_repo = partition_repo
         self._prompt_repo = prompt_repo
         self._topic_tag_repo = topic_tag_repo

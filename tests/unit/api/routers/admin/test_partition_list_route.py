@@ -43,6 +43,7 @@ class _FakeService:
     """Minimal partition service exposing only what the list route calls."""
 
     def __init__(self, summaries: dict[str, dict]) -> None:
+        """Seed the canned summaries and record per-file call sites."""
         self._summaries = summaries
         self.file_calls: list[dict] = []
         self.file_chunks: list[dict] = []
@@ -61,6 +62,7 @@ class _FakeService:
         return {"filename": "catalog.pdf", "degraded_stages": ["caption"]}
 
     async def get_file_topic_tags(self, partition: str, file_id: str) -> list[str]:
+        """Record the lookup and replay the canned tags."""
         self.topic_tag_calls.append({"partition": partition, "file_id": file_id})
         return list(self.topic_tags)
 
@@ -172,6 +174,7 @@ async def test_file_list_rejects_an_unbounded_degraded_stage(async_client_factor
 
 @pytest.mark.asyncio
 async def test_file_detail_uses_authoritative_catalog_metadata(async_client_factory) -> None:
+    """Chunk-stored stale columns are replaced by the catalog metadata and tags are read."""
     service = _FakeService({})
     service.file_chunks = [
         {
@@ -203,6 +206,7 @@ async def test_file_detail_uses_authoritative_catalog_metadata(async_client_fact
 
 @pytest.mark.asyncio
 async def test_file_detail_with_zero_limit_skips_chunk_storage(async_client_factory) -> None:
+    """A limit of 0 skips the vector-store round trip and still returns tags."""
     service = _FakeService({})
     service.file_chunks = [{"_id": "chunk-1", "filename": "stale.pdf"}]
     app = _build_app(service, [])
@@ -223,6 +227,7 @@ async def test_file_detail_with_zero_limit_skips_chunk_storage(async_client_fact
 @pytest.mark.parametrize("limit", [0, 2000])
 @pytest.mark.parametrize("stale_metadata", [{}, {"partition": "old-partition", "indexed_at": "old-timestamp"}])
 async def test_file_detail_preserves_catalog_columns(async_client_factory, limit, stale_metadata) -> None:
+    """The real service stamps catalog columns onto metadata without merging chunk fields."""
     indexed_at = datetime(2026, 10, 1, tzinfo=UTC)
     file_metadata = {"filename": "catalog.pdf", **stale_metadata}
     pool = AsyncMock()
@@ -284,6 +289,7 @@ async def test_file_detail_still_requires_partition_viewer(async_client_factory)
     """Authorization is unchanged: a denied viewer gets 403 and no tags leak."""
 
     async def _deny() -> dict:
+        """Deny the viewer dependency with a 403."""
         raise HTTPException(status_code=403, detail="Forbidden")
 
     service = _FakeService({})
@@ -304,6 +310,7 @@ async def test_file_detail_does_not_mask_catalog_errors_with_empty_tags(async_cl
 
     class _MissingFileService(_FakeService):
         async def get_file_metadata(self, partition: str, file_id: str) -> dict:
+            """Mimic the catalog raising for an unknown file."""
             raise NotFoundError("'file-1' not found in partition 'legal'", code="FILE_NOT_FOUND")
 
     app = _build_app(_MissingFileService({}), [])
