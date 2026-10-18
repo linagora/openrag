@@ -73,6 +73,8 @@ KNOWN_DEFAULT_SECRETS: frozenset[str] = frozenset(
         "your_secret_value",
         "your-api-key",
         "xxxxxxxxxxxxxxxxxxxxxxxx",
+        "replace-with-a-random-secret",
+        "<random secret>",
         # tests/integration/api/api_run
         "test-admin-token",
         # The marker the example env files carry where a credential belongs, so
@@ -136,6 +138,12 @@ SECRET_SPECS: tuple[SecretSpec, ...] = (
     SecretSpec(
         env_var="GRAFANA_ADMIN_PASSWORD",
         purpose="Grafana administrator password",
+        enforce_min_length=True,
+    ),
+    SecretSpec(
+        env_var="METRICS_TOKEN",
+        purpose="bearer token that protects the metrics endpoint",
+        settings_path="server.metrics_token",
         enforce_min_length=True,
     ),
     SecretSpec(
