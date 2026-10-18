@@ -272,57 +272,90 @@ class BaseChunker(ChunkingStrategy):
             )
         return self.text_splitter.split_text(text)
 
-    def _prepare_md_elements(self, content: str) -> tuple[list[MDElement], list[MDElement]]:
-        """Separate markdown into (inline-able texts) and (standalone tables/images)."""
-        md_elements = split_md_elements(content)
-        tables_and_images: list[MDElement] = []
-        texts: list[MDElement] = []
+    def _prepare_md_elements(self, content: str) -> list[MDElement]:
+        """Return the document's markdown elements in source order.
 
-        for element in md_elements:
-            if element.type in ("table", "image"):
-                if element.type == "image":
-                    if is_placeholder_image(element.content):
-                        continue
-                    element.content = strip_placeholder_markers(element.content)
-                if self.length_function(element.content) <= _INLINE_ELEMENT_TOKEN_THRESHOLD:
-                    texts.append(element)
-                else:
-                    tables_and_images.append(element)
-            else:
-                texts.append(element)
-
-        return texts, tables_and_images
+        Images are normalized in place: a placeholder-only caption block is
+        dropped, real caption text keeps but without the marker. The list is
+        strictly ordered (#353) — ``_get_chunks`` walks it in a single pass,
+        so inline-vs-standalone is decided per element there rather than by
+        bucketing, which would lose the position of each element in the
+        document and scramble the emitted chunk order.
+        """
+        elements: list[MDElement] = []
+        for element in split_md_elements(content):
+            if element.type == "image":
+                if is_placeholder_image(element.content):
+                    continue
+                element.content = strip_placeholder_markers(element.content)
+            elements.append(element)
+        return elements
 
     def _get_chunks(self, content: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
         """Produce per-chunk dicts with ``page_content`` + metadata fields.
 
-        The dict shape is intentional — it lets ``chunk()`` build ``Chunk``
-        objects without leaking domain types into the lower-level helpers.
+        Elements are consumed in source order (#353): inline-able pieces
+        accumulate in a text buffer that is flushed — sanitized, split, and
+        emitted — right before each standalone table/image, so no prose is
+        ever joined across a standalone element and the list this returns
+        IS the document's reading order (``chunk()`` numbers ``chunk_index``
+        from it). The dict shape is intentional — it lets ``chunk()`` build
+        ``Chunk`` objects without leaking domain types into the lower-level
+        helpers.
         """
-        texts, tables_and_images = self._prepare_md_elements(content=content)
-        # Reflow PDF line-wraps within each element, then join elements as
-        # paragraphs (blank line) so the splitter cuts on paragraph/sentence
-        # boundaries rather than mid-sentence line-wraps (#579).
-        combined_texts = "\n\n".join(dewrap_paragraphs(e.content) for e in texts)
-
-        sanitized = sanitize_text(
-            combined_texts,
-            normalize_whitespace=True,
-            remove_control_chars=True,
-            remove_zero_width_chars=True,
-            max_consecutive_newlines=2,
-            normalize_unicode=True,
-        )
-        text_chunks = self.split_text(sanitized)
+        elements = self._prepare_md_elements(content=content)
 
         chunks: list[dict[str, Any]] = []
+        buffer: list[str] = []  # dewrapped inline pieces awaiting the next flush
+        prev_page = 1
 
         # Reserved per-chunk keys must win over arbitrary `metadata` values —
         # a stray "chunk_type" / "page" / "page_content" in the document's
         # metadata would otherwise clobber the resolved value (and crash
         # `chunk()` when ChunkType(...) is fed an out-of-enum string). Same
         # defensive pattern as `_chunk_metadata_base`.
-        for element in tables_and_images:
+
+        def flush_text() -> None:
+            """Sanitize and split the buffered prose, emitting its chunks."""
+            nonlocal prev_page
+            if not buffer:
+                return
+            # Reflow PDF line-wraps within each piece, then join them as
+            # paragraphs (blank line) so the splitter cuts on paragraph/
+            # sentence boundaries rather than mid-sentence line-wraps (#579).
+            combined_texts = "\n\n".join(buffer)
+            buffer.clear()
+            sanitized = sanitize_text(
+                combined_texts,
+                normalize_whitespace=True,
+                remove_control_chars=True,
+                remove_zero_width_chars=True,
+                max_consecutive_newlines=2,
+                normalize_unicode=True,
+            )
+            for text_chunk in self.split_text(sanitized):
+                page_info = get_chunk_page_number(chunk_str=text_chunk, previous_chunk_ending_page=prev_page)
+                prev_page = page_info["end_page"]
+                chunks.append(
+                    {
+                        **metadata,
+                        "page_content": text_chunk.strip(),
+                        "page": page_info["start_page"],
+                        "chunk_type": "text",
+                    }
+                )
+
+        for element in elements:
+            # Tables/images under the inline threshold join the surrounding
+            # prose instead of becoming chunks of their own; only standalone
+            # elements flush what came before and take their place in order.
+            if element.type not in ("table", "image") or (
+                self.length_function(element.content) <= _INLINE_ELEMENT_TOKEN_THRESHOLD
+            ):
+                buffer.append(dewrap_paragraphs(element.content))
+                continue
+
+            flush_text()
             if element.type == "table" and self.length_function(element.content) > self.chunk_size:
                 subtables = chunk_table(
                     table_element=element,
@@ -338,6 +371,7 @@ class BaseChunker(ChunkingStrategy):
                     }
                     for subtable in subtables
                 )
+                prev_page = subtables[-1].page_number or prev_page
             else:
                 # MDElement.type is the source-markdown literal ("image"/"table");
                 # ChunkType uses "image_caption" for image blocks.
@@ -350,23 +384,12 @@ class BaseChunker(ChunkingStrategy):
                         "chunk_type": ct,
                     }
                 )
+                prev_page = element.page_number or prev_page
 
-        prev_page = 1
-        for c in text_chunks:
-            page_info = get_chunk_page_number(chunk_str=c, previous_chunk_ending_page=prev_page)
-            prev_page = page_info["end_page"]
-            chunks.append(
-                {
-                    **metadata,
-                    "page_content": c.strip(),
-                    "page": page_info["start_page"],
-                    "chunk_type": "text",
-                }
-            )
+        flush_text()
 
         if not chunks:
             return []
-        chunks.sort(key=lambda d: d.get("page") or 0)
         return chunks
 
 
