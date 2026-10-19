@@ -19,15 +19,24 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import validate_file_id
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
+from api.routers.user.chat import check_tokens_limit
+from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAIMessage
+from api.schemas.user.retrieval_diagnostics import (
+    RetrievalDiagnosticRequest,
+    RetrievalDiagnosticResponse,
+)
 from core.retrieval.trace import (
     TRACE_FILE_SCOPE_KIND_KEY,
     RetrievalDiagnosticsContext,
     RetrievalTraceBuilder,
     canonical_fingerprint,
 )
+from core.utils.consts import MAX_RERANK_CANDIDATES, RETRIEVAL_SCORE_KEYS
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import (
+    get_config,
+    get_query_service,
     get_retrieval_service,
     get_retrieval_snapshot_service,
     get_workspace_service,
@@ -75,6 +84,15 @@ class CommonSearchParams:
             default=None,
             description="""Milvus filter expression string.""",
         ),
+        rerank: bool = Query(False, description="Rerank the vector search candidates and return the best `top_k`"),
+        rerank_candidates: int | None = Query(
+            None,
+            ge=1,
+            le=MAX_RERANK_CANDIDATES,
+            description="Number of vector search candidates sent to the reranker (only with `rerank=true`). "
+            "Defaults to the partition's retrieval `top_k` (`retriever.top_k` for a search over several "
+            f"partitions); never lower than `top_k`, never above {MAX_RERANK_CANDIDATES}.",
+        ),
         include_retrieval_trace: bool = Query(
             False,
             description="Include opt-in retrieval diagnostics. This performs additional search legs.",
@@ -93,6 +111,8 @@ class CommonSearchParams:
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         self.filter = filter
+        self.rerank = rerank
+        self.rerank_candidates = rerank_candidates
         self.include_retrieval_trace = include_retrieval_trace
 
 
@@ -105,11 +125,15 @@ def _documents(request: Request, chunks) -> list[dict]:
         # the API contract (metadata.file_id, _id, …) matches the
         # pre-Phase-8 router that returned the raw Document metadata.
         meta = c.to_langchain().metadata
+        # Scores describe how this query ranked the chunk, not the chunk
+        # itself: lift them out of metadata to sit beside it, as chat sources do.
+        scores = {key: meta.pop(key) for key in RETRIEVAL_SCORE_KEYS if key in meta}
         docs.append(
             {
                 "link": str(request.url_for("get_extract", extract_id=meta.get("_id") or c.id)),
                 "metadata": meta,
                 "content": c.text,
+                **scores,
             }
         )
     return docs
@@ -143,6 +167,8 @@ def _effective_search_options(
         "include_ancestors": related_params.include_ancestors if related_params is not None else False,
         "related_limit": related_params.related_limit if related_params is not None else 20,
         "max_ancestor_depth": related_params.max_ancestor_depth if related_params is not None else None,
+        "rerank": search_params.rerank,
+        "rerank_candidates": search_params.rerank_candidates,
     }
 
 
@@ -210,6 +236,50 @@ async def retrieval_snapshot(
     return await service.snapshot(partition, include_document_ids=include_document_ids)
 
 
+@router.post(
+    "/partition/{partition}/diagnostics",
+    response_model=RetrievalDiagnosticResponse,
+    description="Run administrator-only retrieval diagnostics without answer generation.",
+)
+async def retrieval_diagnostics(
+    request: Request,
+    partition: str,
+    payload: RetrievalDiagnosticRequest,
+    partition_viewer=Depends(require_partition_viewer),
+    service=Depends(get_query_service),
+    config=Depends(get_config),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+):
+    await diagnostics_guard.authorize(partition_viewer)
+    await service.refresh_partition_configs()
+    token_request = OpenAIChatCompletionRequest(
+        messages=[OpenAIMessage(**message.model_dump()) for message in payload.messages],
+        max_tokens=config.rag.max_contextualized_query_len,
+    )
+    check_tokens_limit(
+        token_request,
+        logger.bind(endpoint="/search/partition/{partition}/diagnostics"),
+        config,
+        partitions=[partition],
+    )
+    request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
+    trace = await service.diagnose_retrieval(
+        partitions=[partition],
+        messages=[message.model_dump() for message in payload.messages],
+        query_mode=payload.query_mode,
+        top_k=payload.top_k,
+        similarity_threshold=payload.similarity_threshold,
+        disable_reranker=payload.disable_reranker,
+        disable_expansion=payload.disable_expansion,
+        request_id=request_id,
+    )
+    return RetrievalDiagnosticResponse(
+        partition=partition,
+        query_mode=payload.query_mode,
+        retrieval_trace=trace,
+    )
+
+
 @router.get(
     "",
     description="""Perform semantic search across multiple partitions.
@@ -219,6 +289,8 @@ async def retrieval_snapshot(
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
 - similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `rerank`: Rerank the vector search candidates and return the best `top_k` (default: false). A search over one partition uses that partition's reranker preset, a search over several partitions uses the default reranker. Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
+- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, or `retriever.top_k` for a search over several partitions; at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
 - `include_ancestors`: Include chunks from ancestor files in hierarchy (default: false)
 - `related_limit`: Maximum number of related/ancestor chunks to fetch per result (default: 20). This is used when `include_related` or `include_ancestors` is true.
@@ -253,6 +325,7 @@ Returns matching documents with:
 - `content`: Document chunk text
 - `metadata`: File and chunk metadata
 - `link`: URL to detailed chunk view
+- `rerank_score`: Reranker score, only on documents reranked with `rerank=true`
 
 **Use Case:**
 Find relevant information across your entire document collection.
@@ -338,6 +411,8 @@ async def search_multiple_partitions(
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
 - similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
+- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
 - `include_ancestors`: Include chunks from ancestor files in hierarchy (default: false)
 - `related_limit`: Maximum number of related/ancestor chunks to fetch per result (default: 20). This is used when `include_related` or `include_ancestors` is true.
@@ -361,6 +436,7 @@ Returns matching documents with:
 - `content`: Document chunk text
 - `metadata`: File and chunk metadata (file_id, filename, page, timestamps, etc.)
 - `link`: URL to detailed chunk view
+- `rerank_score`: Reranker score, only on documents reranked with `rerank=true`
 
 **Use Case:**
 Search within a specific document collection or project partition.
@@ -436,6 +512,8 @@ async def search_one_partition(
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
 - similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only.
+- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `filter`: Milvus filter expression string for additional filtering (optional)
     Milvus supports the following operators:
     - Comparison: ==, !=, >, <, >=, <=
@@ -455,6 +533,7 @@ Returns matching chunks from the file with:
 - `content`: Chunk text content
 - `metadata`: Chunk metadata (page number, timestamps, etc.)
 - `link`: URL to detailed chunk view
+- `rerank_score`: Reranker score, only on documents reranked with `rerank=true`
 
 **Use Case:**
 Find specific information within a single document using semantic search.
