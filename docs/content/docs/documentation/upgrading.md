@@ -13,6 +13,48 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## 2.3.0 or 2.3.1 to a later 2.3.x
+
+The fence that holds a file while an orphaned indexing worker may still write to
+it lives in the Ray actors, and these upgrades keep the indexer generation `v13`,
+so actors already running are not replaced. On a shared Ray cluster
+(`ray.enabled: true`, or an external cluster) restart the Ray cluster once after
+the upgrade, at a time when no indexing is running, so the actors are recreated.
+Until then the API logs a warning that the running Ray actors predate the fence.
+With Ray inside the OpenRAG pod or container (`ray.enabled: false`, or Docker
+Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
+the actors on its own. See
+[Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
+
+From OpenRAG 2.3.2, `MARKER_PDFTEXT_WORKERS` is ignored: Marker runs pdftext with
+one worker, inside the Marker child, so its processes no longer outlive a crashed
+worker. Remove the setting; the Marker worker logs a warning while it is above 1.
+`MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
+`1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
+
+## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
+
+From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
+render values that leave them unapplied or that it cannot honour. `helm upgrade`
+then stops before it changes anything in the cluster, and the error names the
+setting to change. Render the new chart with your values first, as in
+[Render the new chart offline](#render-the-new-chart-offline), to find out before
+the upgrade.
+
+| The chart refuses | What to change |
+|---|---|
+| `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` that disagrees with `postgresProvisioning.runMigrationsInApp`. This includes `POSTGRES_RUN_MIGRATIONS: "false"` set for a managed PostgreSQL while `runMigrationsInApp` is left at its default, `true`. | Remove `POSTGRES_RUN_MIGRATIONS` and set `runMigrationsInApp`, which the chart turns into that variable. |
+| `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` with a value the app rejects at startup: anything but `true`, `1`, `yes`, `false`, `0`, `no` (in any case), or blank. | The same. |
+| `runMigrationsInApp` set to anything but `true`, `1`, `yes`, `false`, `0` or `no`. | Set it to `true` or `false`. |
+| `runMigrationsInApp: false` with `migrationJob.enabled: false`: nothing would apply the migrations. | Enable one of them, or set `postgresProvisioning.externalMigrations: true` if you apply them yourself. |
+| `migrationJob.enabled: true` with `postgresql.enabled: true`: the Job runs before Helm creates the bundled PostgreSQL. | Turn the Job off and let the app apply the migrations. |
+| With the Job on, a fullname ending in `-migration` of 50, 51, 58 or 59 characters, which would give a copy of the env the name of the app's ConfigMap or Secret. | Change the release name or `fullnameOverride`. |
+
+The chart can check `env.secrets` only when it renders the Secret itself. Do not
+put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an
+external secrets operator: that value replaces `runMigrationsInApp` unchecked.
+See [Managed PostgreSQL](/openrag/documentation/kubernetes/#managed-postgresql).
+
 ## Changes in 2.3.0 for every deployment
 
 This section applies to every upgrade from OpenRAG 2.2.1 or 2.2.2, on Kubernetes
@@ -400,9 +442,9 @@ Your values decide what applies the PostgreSQL migrations:
 
 | `postgresProvisioning` | What applies the migrations |
 |---|---|
-| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. |
+| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. With an external PostgreSQL only: [the chart released with OpenRAG 2.3.2 and later](#openrag-232-on-kubernetes-migration-settings-the-chart-refuses) refuses it with `postgresql.enabled`. |
 | `runMigrationsInApp: true` (the default), Job off | The new OpenRAG pod, when it starts. Under Ray Serve, the Serve replicas on the Ray pods, once you scale OpenRAG back up. |
-| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. |
+| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. [The chart released with OpenRAG 2.3.2 and later](#openrag-232-on-kubernetes-migration-settings-the-chart-refuses) refuses this unless you also set `externalMigrations: true`. |
 
 If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, before
 `helm upgrade`:
@@ -415,19 +457,24 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
    ```
 
    With an external PostgreSQL, run the same `ALTER ROLE` with your client.
-2. Update the Secret OpenRAG reads now, rather than letting `helm upgrade` do it:
-   if the migration Job is enabled, it runs before Helm updates that Secret, and
-   would log in with the old password. For the Secret the chart renders from
-   your values:
+2. If the migration Job is enabled, make sure it logs in with the new password.
+   It runs before Helm updates the release's Secret. With `env.existingSecret`,
+   it reads that Secret: update it now. With an external secrets provider,
+   update the source. With the Secret the chart renders from your values, the
+   Job reads a copy rendered from your new values, so there is nothing to do.
+
+   When you upgrade to chart 0.7.1 (OpenRAG 2.3.1) or earlier, there is no copy:
+   the Job reads the release's Secret, so update that one now, rather than
+   letting `helm upgrade` do it.
+   With an external secrets provider, wait until it has synced. For the Secret
+   the chart renders from your values:
 
    ```bash
    kubectl patch secret -n "$NS" "$FULLNAME-env-secrets" \
      -p '{"stringData":{"POSTGRES_PASSWORD":"<new password>"}}'
    ```
 
-   With `env.existingSecret`, update that Secret; with an external secrets
-   provider, update the source and wait until the Secret has synced. Your values
-   already carry the new value, from
+   Your values already carry the new value, from
    [Render the new chart offline](#render-the-new-chart-offline); with
    `postgresql.auth.existingSecret`, update that Secret's password too.
 

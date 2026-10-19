@@ -24,7 +24,9 @@ enabled: true
 # ports below. Isolates the Ray dashboard, Postgres, Milvus, etc.
 networkPolicy:
   enabled: true
-  # Ports reachable from outside the namespace (e.g. via the Ingress controller).
+  # Ports reachable from outside the namespace (e.g. via the Ingress controller),
+  # on every pod. cert-manager's HTTP-01 solver port (8089) does not belong
+  # here: acmeHttp01 below opens it on the solver pods only.
   externalPorts:
     - 8080  # openrag API/UI & admin-ui
     # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
@@ -57,6 +59,25 @@ networkPolicy:
   #   - ipBlock:
   #       cidr: 10.0.0.0/24
   webhookFrom: []
+  # cert-manager's HTTP-01 solver: the pod it starts in this namespace to answer
+  # an ACME challenge, on 8089, reached through the Ingress controller. Opens
+  # that port on the solver pods only (label
+  # acme.cert-manager.io/http01-solver: "true"), and selects nothing while no
+  # challenge is pending, so it is harmless with DNS-01 or your own
+  # certificates. Turn it off only if no Issuer here uses HTTP-01.
+  acmeHttp01:
+    enabled: true
+    # Empty means any source: a host-network Ingress controller (ingress-nginx
+    # with hostNetwork, for one) connects from a node address, which no
+    # namespaceSelector matches. Narrow it with standard NetworkPolicyPeers:
+    # a namespaceSelector when the controller runs on the pod network, an
+    # ipBlock with the node addresses when it runs with hostNetwork, e.g.
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: ingress-nginx
+    #   - ipBlock:
+    #       cidr: 10.0.0.0/24
+    from: []
 
 # === Monitoring artifacts ===
 # One set of dashboards, dashboards/ in this chart — the directory the Compose
@@ -478,12 +499,23 @@ postgresProvisioning:
   # at a pre-created database.
   autoCreateDatabase: true
   # Leave app-start migrations enabled for compose-like installs. Operators can
-  # disable this when they run migrations through the Helm hook below.
+  # disable this when they run migrations through the Helm hook below. Sets
+  # POSTGRES_RUN_MIGRATIONS: the chart refuses an env.config or env.secrets
+  # entry for it that disagrees, since the entry would silently replace this
+  # value.
   runMigrationsInApp: true
+  # A pre-install/pre-upgrade hook, for an external PostgreSQL only: it runs
+  # before Helm creates the bundled one, so the chart refuses it with
+  # postgresql.enabled.
   migrationJob:
     enabled: false
     backoffLimit: 3
     hookDeletePolicy: before-hook-creation,hook-succeeded
+  # Set true when you apply the migrations yourself (`python -m
+  # services.persistence.migrations.run`), with runMigrationsInApp and
+  # migrationJob both off. Without it the chart refuses that combination,
+  # since then nothing applies them and the app answers 503.
+  externalMigrations: false
 
 # === Milvus ===
 milvus:
@@ -1151,6 +1183,15 @@ env:
 
     # Loaders
     PDFLOADER: "PyMuPDFLoader"
+    # PyMuPDF parses one PDF at a time per indexer worker unless asked: each
+    # slot is then a child process (~80 MiB inside a Ray worker before parsing,
+    # up to what its largest parse needs while parsing; between parses its RSS
+    # drops back near that, its VmData not always).
+    # The ceiling (MiB) makes an oversized PDF fail on its own instead of
+    # OOM-killing the worker; each child logs its baseline when it starts. See
+    # env_vars.md.
+    # PYMUPDF_POOL_SIZE: "4"
+    # PYMUPDF_PARSE_MEMORY_LIMIT_MB: "1024"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
     # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse
