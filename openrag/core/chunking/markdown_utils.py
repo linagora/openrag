@@ -380,6 +380,42 @@ def _markdown_table(columns: list[str], cells: list[str]) -> str:
     )
 
 
+def _tabular_row_metadata(
+    metadata: dict,
+    row_numbers: list[int],
+    *,
+    columns: list[str] | None = None,
+) -> dict:
+    """Update both generic table metadata and transitional CSV aliases."""
+    updated = {
+        **metadata,
+        "csv_row_start": row_numbers[0],
+        "csv_row_end": row_numbers[-1],
+        "csv_row_numbers": list(row_numbers),
+    }
+    if columns is not None:
+        updated["csv_columns"] = list(columns)
+    if metadata.get("tabular_format"):
+        updated.update(
+            {
+                "table_row_start": row_numbers[0],
+                "table_row_end": row_numbers[-1],
+                "table_row_numbers": list(row_numbers),
+            }
+        )
+        if columns is not None:
+            updated["table_columns"] = list(columns)
+    if len(row_numbers) == 1:
+        updated["csv_row_number"] = row_numbers[0]
+        if metadata.get("tabular_format"):
+            updated["table_row_number"] = row_numbers[0]
+    return updated
+
+
+def _tabular_label(table_element: MDElement) -> str:
+    return str((table_element.metadata or {}).get("tabular_format") or "CSV").upper()
+
+
 def _identity_column_indexes(columns: list[str]) -> list[int]:
     """Choose compact, generic row identifiers for a CSV column group.
 
@@ -486,12 +522,7 @@ def _chunk_wide_csv_row(
         group_cells = [cells[index] for index in indexes]
         group_text = _markdown_table(group_columns, group_cells)
         metadata = {
-            **(table_element.metadata or {}),
-            "csv_columns": group_columns,
-            "csv_row_start": row_number,
-            "csv_row_end": row_number,
-            "csv_row_numbers": [row_number],
-            "csv_row_number": row_number,
+            **_tabular_row_metadata(table_element.metadata or {}, [row_number], columns=group_columns),
             "csv_column_group": group_number,
             "csv_column_groups_total": total_groups,
         }
@@ -514,7 +545,8 @@ def _chunk_wide_csv_row(
         split_index = payload_in_group[0]
         split_position = indexes.index(split_index)
         column_name = columns[split_index]
-        label = f"[CSV row {row_number}; {column_name} continuation 999/999]"
+        source_label = _tabular_label(table_element)
+        label = f"[{source_label} row {row_number}; {column_name} continuation 999/999]"
         reserved_cells = list(group_cells)
         reserved_cells[split_position] = label
         cell_budget = chunk_size - length_function(_markdown_table(group_columns, reserved_cells))
@@ -531,7 +563,7 @@ def _chunk_wide_csv_row(
         for part_number, part in enumerate(parts, start=1):
             continuation_cells = list(group_cells)
             continuation_cells[split_position] = (
-                f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+                f"[{source_label} row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
             )
             chunks.append(
                 MDElement(
@@ -564,12 +596,7 @@ def _chunk_csv_row_per_column(
     for group_number, (column_name, cell) in enumerate(zip(columns, cells, strict=True), start=1):
         group_columns = [column_name]
         metadata = {
-            **(table_element.metadata or {}),
-            "csv_columns": group_columns,
-            "csv_row_start": row_number,
-            "csv_row_end": row_number,
-            "csv_row_numbers": [row_number],
-            "csv_row_number": row_number,
+            **_tabular_row_metadata(table_element.metadata or {}, [row_number], columns=group_columns),
             "csv_column_group": group_number,
             "csv_column_groups_total": total_groups,
         }
@@ -585,13 +612,16 @@ def _chunk_csv_row_per_column(
             )
             continue
 
-        label = f"[CSV row {row_number}; {column_name} continuation 999/999]"
+        source_label = _tabular_label(table_element)
+        label = f"[{source_label} row {row_number}; {column_name} continuation 999/999]"
         cell_budget = chunk_size - length_function(_markdown_table(group_columns, [label]))
         if cell_budget <= 0:
             raise PipelineError(f"CSV column {column_name!r} leaves no room for content within the chunk token budget")
         parts = _split_to_budget(cell, cell_budget, length_function)
         for part_number, part in enumerate(parts, start=1):
-            continuation = f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+            continuation = (
+                f"[{source_label} row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+            )
             chunks.append(
                 MDElement(
                     type="table",
@@ -679,9 +709,17 @@ def _chunk_csv_table(
     data_rows = lines[2:]
     header_text = "\n".join(header_lines)
     header_tokens = length_function(header_text)
-    columns = list(table_element.metadata.get("csv_columns") or _table_cells(header_lines[0]))
-    first_row_number = int(table_element.metadata.get("csv_row_start", 2))
-    source_row_numbers = table_element.metadata.get("csv_row_numbers")
+    columns = list(
+        table_element.metadata.get("table_columns")
+        or table_element.metadata.get("csv_columns")
+        or _table_cells(header_lines[0])
+    )
+    first_row_number = int(
+        table_element.metadata.get("table_row_start", table_element.metadata.get("csv_row_start", 2))
+    )
+    source_row_numbers = table_element.metadata.get("table_row_numbers") or table_element.metadata.get(
+        "csv_row_numbers"
+    )
     if not isinstance(source_row_numbers, list) or len(source_row_numbers) != len(data_rows):
         source_row_numbers = list(range(first_row_number, first_row_number + len(data_rows)))
     else:
@@ -697,12 +735,7 @@ def _chunk_csv_table(
         nonlocal current_rows, current_row_numbers, current_start, current_end
         if not current_rows:
             return
-        metadata = {
-            **table_element.metadata,
-            "csv_row_start": current_start,
-            "csv_row_end": current_end,
-            "csv_row_numbers": list(current_row_numbers),
-        }
+        metadata = _tabular_row_metadata(table_element.metadata, list(current_row_numbers))
         chunks.append(
             MDElement(
                 type="table",
@@ -737,12 +770,7 @@ def _chunk_csv_table(
                     type="table",
                     content="\n".join([header_text, row]),
                     page_number=table_element.page_number,
-                    metadata={
-                        **table_element.metadata,
-                        "csv_row_start": row_number,
-                        "csv_row_end": row_number,
-                        "csv_row_numbers": [row_number],
-                    },
+                    metadata=_tabular_row_metadata(table_element.metadata, [row_number]),
                 )
             )
             continue
@@ -770,7 +798,8 @@ def _chunk_csv_table(
         cell_index = max(range(len(cells)), key=lambda index: length_function(cells[index]))
         column_name = columns[cell_index]
         base_cells = list(cells)
-        base_cells[cell_index] = f"[CSV row {row_number}; {column_name} continuation 999/999]"
+        source_label = _tabular_label(table_element)
+        base_cells[cell_index] = f"[{source_label} row {row_number}; {column_name} continuation 999/999]"
         label_reserve = length_function(_markdown_row(base_cells))
         cell_budget = body_budget - label_reserve
         if cell_budget <= 0:
@@ -789,7 +818,7 @@ def _chunk_csv_table(
         for part_number, part in enumerate(parts, start=1):
             continuation_cells = list(cells)
             continuation_cells[cell_index] = (
-                f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+                f"[{source_label} row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
             )
             continuation_row = _markdown_row(continuation_cells)
             chunks.append(
@@ -798,11 +827,7 @@ def _chunk_csv_table(
                     content="\n".join([header_text, continuation_row]),
                     page_number=table_element.page_number,
                     metadata={
-                        **table_element.metadata,
-                        "csv_row_start": row_number,
-                        "csv_row_end": row_number,
-                        "csv_row_numbers": [row_number],
-                        "csv_row_number": row_number,
+                        **_tabular_row_metadata(table_element.metadata, [row_number]),
                         "csv_column": column_name,
                         "csv_part": part_number,
                         "csv_parts_total": len(parts),

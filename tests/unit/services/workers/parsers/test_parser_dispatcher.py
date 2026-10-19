@@ -50,6 +50,9 @@ def _config(
         image_captioning=image_captioning,
         openai=openai,
         transcriber=transcriber,
+        xlsx_batch_size=512,
+        xlsx_backend="calamine",
+        xlsx_fallback_backend="openpyxl",
     )
     vlm = SimpleNamespace(
         base_url=vlm_base_url,
@@ -82,6 +85,7 @@ class _FakeParser:
         ("a.docx", DocumentType.DOCX, "docx"),
         ("a.doc", DocumentType.DOC, "doc"),
         ("a.pptx", DocumentType.PPTX, "pptx"),
+        ("a.xlsx", DocumentType.XLSX, "xlsx"),
         ("a.eml", DocumentType.EML, "eml"),
         ("a.png", DocumentType.IMAGE, "image"),
         ("a.svg", DocumentType.IMAGE, "image"),
@@ -107,6 +111,18 @@ def test_resolve_pdf_backend_variants() -> None:
 def test_resolve_audio_backend_openai() -> None:
     disp = ParserDispatcher(_config(audio="OpenAIAudioLoader"))
     assert disp._resolve_audio_backend("mp3") == "audio_client"
+
+
+def test_xlsx_builder_passes_streaming_backend_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.parsers.parser_dispatcher as dispatcher
+
+    monkeypatch.setattr(dispatcher, "_create", lambda module, name, **kwargs: (module, name, kwargs))
+
+    module, name, kwargs = ParserDispatcher(_config())._build("xlsx")
+
+    assert module == "core.indexing.parsers.tabular.xlsx_parser"
+    assert name == "xlsx"
+    assert kwargs == {"batch_size": 512, "backend": "calamine", "fallback_backend": "openpyxl"}
 
 
 def test_audio_client_receives_live_transcription_prompt_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
