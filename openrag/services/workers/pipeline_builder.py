@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.config.indexation_pipeline import IndexationPipelineConfig
@@ -17,7 +17,7 @@ from core.indexing.topic_tags import TopicTagger
 from core.models.catalog import normalize_stage_timings
 from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.ray_metrics import observe_stage_duration
-from core.utils.exceptions import PipelineError
+from core.utils.exceptions import NoIndexableContentError, PipelineError
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
@@ -249,6 +249,10 @@ class IndexingPipeline:
             if self.save_markdown:
                 await _save_markdown(row, self.data_dir)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
+            # Emptiness is the chunk count. Caption is the only enrichment that
+            # has run, and only run() knows whether it ran (#1077).
+            if not row["chunks"]:
+                _raise_nothing_to_index(row, caption_ran=vlm is not None)
             if contextualizer is not None:
                 await _timed_enrichment(
                     "contextualize",
@@ -785,6 +789,18 @@ def _render_markdown(processed: ProcessedDocument) -> str:
             last_page = block.page_number
         parts.append(text)
     return "\n\n".join(parts)
+
+
+def _raise_nothing_to_index(row: MutableMapping[str, Any], *, caption_ran: bool) -> NoReturn:
+    caption_error = (row.get("degraded_stages") or {}).get("caption")
+    if caption_error is not None:
+        raise PipelineError(f"Nothing to index: image captioning failed: {caption_error}")
+    images = getattr(row.get("processed_document"), "images", None) or []
+    if images and not caption_ran:
+        raise NoIndexableContentError(
+            f"No text was extracted and the document's {len(images)} image(s) were not captioned."
+        )
+    raise NoIndexableContentError("No indexable content was extracted from this document.")
 
 
 def _release_image_bytes(row: MutableMapping[str, Any]) -> None:

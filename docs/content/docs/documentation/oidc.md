@@ -143,7 +143,7 @@ Pick the value by deployment shape:
   OIDC_REDIRECT_URI=http://<ip_addr>:<APP_PORT>/auth/callback
   ```
 
-- **Reverse proxy / single public hostname** (production, TLS terminated): the proxy serves the UI and forwards `/auth/*` to the backend, so use the public hostname:
+- **Reverse proxy / single public hostname** (production, TLS terminated): the proxy serves the UI and forwards `/auth/*` to the backend, so use the public hostname. This includes the opt-in Compose proxy overlay ([Reverse proxy (TLS)](/openrag/installation/docker/#reverse-proxy-tls)), which binds `ADMIN_UI_PORT` and `APP_PORT` to loopback, so the two URLs above stop working from outside the host:
 
   ```bash
   OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback

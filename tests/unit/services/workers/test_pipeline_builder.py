@@ -8,7 +8,7 @@ from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
-from core.utils.exceptions import ConfigError, InferenceError
+from core.utils.exceptions import ConfigError, InferenceError, NoIndexableContentError, PipelineError
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stages import caption as caption_module
 
@@ -1178,13 +1178,8 @@ async def test_reindex_defers_cleanup_delete_to_worker():
 
 @pytest.mark.asyncio
 async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
-    # Regression guard: a blank/whitespace-only file, or a parser that extracts
-    # no text, legitimately chunks down to [] without raising (chunk_stage /
-    # BaseChunker.chunk both treat this as success). If the old snapshot were
-    # deleted whenever it was merely non-empty, a re-index that stores zero new
-    # chunks would wipe the file's entire previous chunk set — worse than the
-    # pre-fix duplication bug, and a violation of the "no empty window"
-    # guarantee. The old chunks must survive when nothing new was stored.
+    # A blank file chunks to [] without chunk_stage raising. run() fails before
+    # store, so the previous chunk set is never deleted.
     vs = RecordingVectorStore(existing_ids=["101", "102"])
     document = Document(filename="blank.txt", text="", partition="tenant-a")
     processed = ProcessedDocument(document_id=document.id, text_blocks=[])
@@ -1195,11 +1190,66 @@ async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
         vector_store=vs,
     )
 
-    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted"):
+        await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
 
-    assert row["stored_count"] == 0
     assert vs.deleted == []
     assert "delete" not in vs.events
+
+
+@pytest.mark.asyncio
+async def test_empty_chunks_after_a_failed_caption_name_the_caption_error():
+    document = Document(filename="photo.png", text="", content_type=DocumentType.IMAGE, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    embedder = FakeEmbedder([])
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([]),
+        embedder=embedder,
+        vector_store=vector_store,
+        vlm=FailingVLM(),
+    )
+
+    with pytest.raises(PipelineError, match="image captioning failed: vlm unreachable") as exc_info:
+        await pipeline.run({"document": document, "partition": "tenant-a", "filename": "photo.png"})
+
+    assert type(exc_info.value) is PipelineError
+    assert embedder.calls == []
+    assert vector_store.calls == []
+
+
+@pytest.mark.asyncio
+async def test_empty_chunks_name_images_that_were_never_captioned():
+    document = Document(filename="scan.pdf", text="", content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[],
+        images=[ImageBlock(image_bytes=b"png"), ImageBlock(image_bytes=b"png")],
+    )
+    embedder = FakeEmbedder([])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([]),
+        embedder=embedder,
+        vector_store=FakeVectorStore(),
+    )
+
+    with pytest.raises(NoIndexableContentError, match=r"document's 2 image\(s\) were not captioned"):
+        await pipeline.run(
+            {
+                "document": document,
+                "partition": "tenant-a",
+                "filename": "scan.pdf",
+                "indexation_config": {"enable_image_captioning": False},
+            }
+        )
+
+    assert embedder.calls == []
 
 
 def test_ingest_flag_defaults_come_from_the_model_not_from_absence():
