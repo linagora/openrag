@@ -314,6 +314,7 @@
     {
       "id": 7,
       "title": "System Load",
+      "description": "Linux load average over the last 1, 5 and 15 minutes: the number of processes running or waiting for a CPU, plus those blocked on disk I/O. It is not a percentage. As a rough guide, read it against the host's core count: sustained load above it suggests CPU pressure, but check CPU usage before concluding so — high load with low CPU usage points to I/O waits rather than CPU. Load 1m above Load 15m means load is rising, below means it is easing. Covers the whole host, not only OpenRAG.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },

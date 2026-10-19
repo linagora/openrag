@@ -15,13 +15,19 @@ user's prompt name ahead of the partition's without changing this signature.
 
 from __future__ import annotations
 
+import hashlib
 import string
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
+from core.config.infrastructure import _DEFAULT_PROMPTS_DIR
 from core.models.prompt import Prompt, PromptType
 from core.prompts.template_loader import load_template_by_key
-from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
+from core.utils.exceptions import ConfigError, NotFoundError, ServiceUnavailableError, ValidationError
 from core.utils.logging import get_logger
+from services.orchestrators.prompt_seed_hashes import _PROMPT_SEED_HASH_HISTORY, _PROMPT_TEMPLATE_METADATA
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -32,6 +38,32 @@ if TYPE_CHECKING:
     from services.orchestrators.preset_service import PresetService
 
 logger = get_logger()
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPrompt:
+    """Prompt text plus stable, content-free provenance for diagnostics."""
+
+    content: str
+    name: str | None
+    source: Literal["named", "default", "disk-seed", "native"]
+    content_hash: str
+
+    @classmethod
+    def create(
+        cls,
+        content: str,
+        *,
+        name: str | None,
+        source: Literal["named", "default", "disk-seed", "native"],
+    ) -> ResolvedPrompt:
+        return cls(
+            content=content,
+            name=name,
+            source=source,
+            content_hash=hashlib.sha256(content.encode()).hexdigest(),
+        )
+
 
 _VALID_TYPES = frozenset(t.value for t in PromptType)
 
@@ -119,22 +151,10 @@ def _validate_template(prompt_type: str, content: str) -> None:
         )
 
 
-# Canonical ``prompt_type`` (a ``PromptType`` value, and the DB key) → the
-# ``PromptsConfig`` attribute the on-disk template loader looks up. Identity for
-# every type except image captioning, whose config attribute is historically
-# ``image_describer`` while its prompt type is ``image_captioning``. This map is
-# the single reconciliation point between the DB type namespace and the disk
-# filename namespace; keep it exhaustive over PromptType.
+# The shared metadata is exhaustive over PromptType and also supplies the
+# filenames used by the standard-library release-history check.
 _TYPE_TO_CONFIG_KEY: dict[str, str] = {
-    PromptType.SYS_PROMPT.value: "sys_prompt",
-    PromptType.QUERY_CONTEXTUALIZER.value: "query_contextualizer",
-    PromptType.CHUNK_CONTEXTUALIZER.value: "chunk_contextualizer",
-    PromptType.IMAGE_CAPTIONING.value: "image_describer",
-    PromptType.HYDE.value: "hyde",
-    PromptType.MULTI_QUERY.value: "multi_query",
-    PromptType.SPOKEN_STYLE_ANSWER.value: "spoken_style_answer",
-    PromptType.TOPIC_TAGGER.value: "topic_tagger",
-    PromptType.ASR_TRANSCRIPTION.value: "asr_transcription",
+    prompt_type: config_key for prompt_type, (config_key, _) in _PROMPT_TEMPLATE_METADATA.items()
 }
 
 
@@ -189,14 +209,15 @@ class PromptService:
     # ------------------------------------------------------------------
 
     async def seed_defaults(self) -> None:
-        """Create one default library prompt per type from its disk template.
+        """Create defaults and refresh unchanged copies of older bundled seeds.
 
-        Idempotent per type: if a default already exists for a type it is left
-        untouched, so an admin's edits survive restarts. A type whose disk
-        template is missing is skipped with a warning rather than aborting boot.
+        An admin's edits and custom prompt directories survive restarts. A type
+        whose disk template is missing is skipped rather than aborting boot.
         """
         for prompt_type in _TYPE_TO_CONFIG_KEY:
-            if await self._repo.get_default(prompt_type) is not None:
+            existing = await self._repo.get_default(prompt_type)
+            if existing is not None:
+                await self._refresh_default_if_pristine(prompt_type, existing)
                 continue
             try:
                 content = self._disk_seed(prompt_type)
@@ -233,6 +254,43 @@ class PromptService:
                 logger.info(f"Default prompt for '{prompt_type}' was seeded concurrently; skipping.")
                 continue
             logger.info(f"Seeded default prompt for '{prompt_type}'.")
+
+    async def _refresh_default_if_pristine(self, prompt_type: str, existing: Prompt) -> None:
+        if Path(self._config.paths.prompts_dir).resolve() != _DEFAULT_PROMPTS_DIR.resolve():
+            return
+        expected_name = f"default_{prompt_type}"
+        if existing.name != expected_name:
+            return
+        old_hash = sha256(existing.content.encode("utf-8")).hexdigest()
+        seed_history = _PROMPT_SEED_HASH_HISTORY.get(prompt_type, ())
+        if not seed_history or old_hash == seed_history[-1] or old_hash not in seed_history[:-1]:
+            return
+        if not self._config.prompts.refresh_defaults:
+            logger.warning(f"Default prompt for '{prompt_type}' is outdated; automatic refresh is disabled.")
+            return
+        try:
+            seed_content = self._disk_seed(prompt_type)
+            canonical_filename = _PROMPT_TEMPLATE_METADATA[prompt_type][1]
+            canonical_content = (_DEFAULT_PROMPTS_DIR / canonical_filename).read_text(encoding="utf-8")
+            if seed_content != canonical_content:
+                logger.warning(
+                    f"Configured template for '{prompt_type}' differs from the bundled default; leaving old default in place."
+                )
+                return
+            content = _validate_and_normalize_content(prompt_type, seed_content)
+            if sha256(content.encode("utf-8")).hexdigest() != seed_history[-1]:
+                logger.warning(
+                    f"Bundled template for '{prompt_type}' does not match its recorded seed hash; leaving old default in place."
+                )
+                return
+        except (OSError, ValueError, ValidationError) as exc:
+            logger.warning(f"Could not refresh default prompt for '{prompt_type}': {exc}")
+            return
+        updated = await self._repo.update_default_content_if_unchanged(
+            existing.id, expected_name, existing.content, content
+        )
+        if updated:
+            logger.info(f"Refreshed unchanged default prompt for '{prompt_type}' from hash {old_hash}.")
 
     def _disk_seed(self, prompt_type: str) -> str:
         """Read a prompt type's bundled template from disk (honours PROMPTS_DIR)."""
@@ -288,6 +346,23 @@ class PromptService:
         never fail (the ingest path) catch it and fall back to their own
         disk-loaded prompt.
         """
+        return (
+            await self.resolve_prompt_with_identity(
+                prompt_type,
+                names=names,
+                strict_names=strict_names,
+            )
+        ).content
+
+    async def resolve_prompt_with_identity(
+        self,
+        prompt_type: str,
+        names: Sequence[str | None] | None = None,
+        *,
+        strict_names: bool = False,
+        strict_errors: bool = False,
+    ) -> ResolvedPrompt:
+        """Resolve a prompt while retaining its stable public identity."""
         candidates = [n for n in (names or ()) if n]
         missing_strict_selection = False
         try:
@@ -295,19 +370,24 @@ class PromptService:
                 prompt = await self._repo.get_by_name(prompt_type, name)
                 if prompt is not None:
                     self._log_resolution(prompt_type, candidates, "named", name, prompt.content)
-                    return prompt.content
+                    return ResolvedPrompt.create(prompt.content, name=name, source="named")
             if strict_names and candidates:
                 missing_strict_selection = True
             else:
                 default = await self._repo.get_default(prompt_type)
                 if default is not None:
                     self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
-                    return default.content
+                    return ResolvedPrompt.create(default.content, name=default.name, source="default")
         except Exception as exc:  # noqa: BLE001 - a DB blip must not fail the request
+            if strict_errors:
+                raise ServiceUnavailableError(
+                    f"Prompt lookup for type '{prompt_type}' is temporarily unavailable.",
+                    code="PROMPT_LOOKUP_UNAVAILABLE",
+                ) from exc
             if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
                 logger.warning(f"Prompt lookup failed for '{prompt_type}'; using the provider's native prompt: {exc}")
                 self._log_resolution(prompt_type, candidates, "native", None, "")
-                return ""
+                return ResolvedPrompt.create("", name=None, source="native")
             logger.warning(f"Prompt lookup failed for '{prompt_type}'; falling back to the bundled template: {exc}")
         if missing_strict_selection:
             raise NotFoundError(f"Selected prompt '{candidates[0]}' for type '{prompt_type}' no longer exists.")
@@ -320,7 +400,10 @@ class PromptService:
                 code="PROMPT_UNAVAILABLE",
             ) from exc
         self._log_resolution(prompt_type, candidates, "disk-seed", None, content)
-        return content
+        source: Literal["disk-seed", "native"] = (
+            "native" if prompt_type == PromptType.ASR_TRANSCRIPTION.value and not content else "disk-seed"
+        )
+        return ResolvedPrompt.create(content, name=None, source=source)
 
     @staticmethod
     def _log_resolution(prompt_type: str, candidates: list[str], source: str, name: str | None, content: str) -> None:

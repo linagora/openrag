@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from core.config.base import ConfigMixin
+from core.utils.redaction import RedactedExtraRepr
 from pydantic import BaseModel, Field
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
@@ -29,11 +30,15 @@ DEFAULT_ENDPOINT_ALIAS = "default"
 
 
 def is_placeholder_api_key(value: object) -> bool:
-    """Return whether a configured API key represents anonymous access."""
+    """Return whether a configured API key is unset or the config default ``EMPTY``.
+
+    Boot sync uses this to avoid overwriting stored credentials with a placeholder.
+    Default STT seeding also uses it to omit unset and placeholder keys.
+    """
     return value is None or (isinstance(value, str) and value.strip() in PLACEHOLDER_API_KEYS)
 
 
-class ModelEndpointConfig(BaseModel):
+class ModelEndpointConfig(RedactedExtraRepr, BaseModel):
     """A single registered inference endpoint.
 
     ``name`` is the stable registry identity when this config came from the
@@ -149,12 +154,18 @@ class ModelsConfig(ConfigMixin):
     # truth after first boot" behavior.
     sync_on_boot: bool = False
 
+    # When True, /ready fails while the default embedder is unavailable or
+    # unresolvable. Off by default: every replica shares the embedder, so under
+    # Kubernetes its outage or restart takes all of them out of the Service at
+    # once, admin API and UI included, and no healthy replica is left (#1106).
+    readiness_requires_embedder: bool = False
+
     def llm_extra(self, name: str = "default") -> dict[str, Any]:
         """``extra`` payload of the named LLM endpoint (``{}`` if unregistered).
 
         ``name`` defaults to the ``"default"`` alias (see ``ModelEndpointService``),
         but any catalogued endpoint name works — in particular a partition's
-        ``chat_llm`` preset, so the token preflight can read that endpoint's
+        ``chat_llm`` endpoint, so the token preflight can read that endpoint's
         budget instead of always falling back to the global default.
         """
         endpoint = self.llm.get(name)
@@ -169,7 +180,7 @@ class ModelsConfig(ConfigMixin):
         return _positive_int(self.llm_extra(name).get(LLM_OUTPUT_TOKENS_KEY))
 
 
-class ModelEndpointRow(BaseModel):
+class ModelEndpointRow(RedactedExtraRepr, BaseModel):
     """DB representation of a model endpoint (returned by the repository)."""
 
     name: str

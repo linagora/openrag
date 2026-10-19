@@ -18,6 +18,7 @@ from services.inference._circuit_breaker import _breakers
 from services.inference._retry import _is_retryable
 from services.inference.vllm_client import (
     _SUSPECT_UNICODE_ESCAPE,
+    TEIEmbedder,
     VLLMClient,
     VLLMEmbedder,
     VLLMVision,
@@ -112,15 +113,16 @@ class TestVLLMClient:
         assert 'data: {"choices":[{"delta":{"content":" world"}}]}' in lines
 
     @pytest.mark.asyncio
-    async def test_stream_chat_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_stream_chat_sends_enable_thinking_as_chat_template_kwargs_when_configured(self, enable_thinking):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             assert body["stream"] is True
-            assert body["chat_template_kwargs"] == {"enable_thinking": True}
+            assert body["chat_template_kwargs"] == {"enable_thinking": enable_thinking}
             assert "enable_thinking" not in body
             return httpx.Response(200, text="data: [DONE]\n")
 
-        client = self._make_client(handler, enable_thinking=True)
+        client = self._make_client(handler, enable_thinking=enable_thinking)
         lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
 
         assert lines == ["data: [DONE]"]
@@ -166,20 +168,22 @@ class TestVLLMClient:
         assert captured["temperature"] == 0.3
 
     @pytest.mark.asyncio
-    async def test_enable_thinking_is_sent_as_chat_template_kwargs_when_configured(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_enable_thinking_is_sent_as_chat_template_kwargs_when_configured(self, enable_thinking):
         captured: dict = {}
 
         def capture(req: httpx.Request) -> httpx.Response:
             captured.update(json.loads(req.content))
             return _chat_response()
 
-        await self._make_client(capture, enable_thinking=True).chat([{"role": "user", "content": "hi"}])
+        await self._make_client(capture, enable_thinking=enable_thinking).chat([{"role": "user", "content": "hi"}])
 
-        assert captured["chat_template_kwargs"] == {"enable_thinking": True}
+        assert captured["chat_template_kwargs"] == {"enable_thinking": enable_thinking}
         assert "enable_thinking" not in captured
 
     @pytest.mark.asyncio
-    async def test_enable_thinking_merges_with_existing_chat_template_kwargs(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_enable_thinking_merges_with_existing_chat_template_kwargs(self, enable_thinking):
         captured: dict = {}
 
         def capture(req: httpx.Request) -> httpx.Response:
@@ -188,11 +192,11 @@ class TestVLLMClient:
 
         await self._make_client(
             capture,
-            enable_thinking=True,
+            enable_thinking=enable_thinking,
             chat_template_kwargs={"custom": "value"},
         ).chat([{"role": "user", "content": "hi"}])
 
-        assert captured["chat_template_kwargs"] == {"custom": "value", "enable_thinking": True}
+        assert captured["chat_template_kwargs"] == {"custom": "value", "enable_thinking": enable_thinking}
 
     @pytest.mark.asyncio
     async def test_chat_template_kwargs_omitted_by_default(self):
@@ -412,6 +416,33 @@ class TestVLLMClientOverrides:
         assert model == "custom-model"
         assert base_url == "http://default:8000/v1"
         assert headers == {"Authorization": "Bearer default-key"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "caller_shaped"),
+    [
+        ({}, False),
+        ({"model": "another-model"}, False),
+        ({"base_url": "https://caller-llm.example/v1", "api_key": "caller-key"}, True),
+    ],
+)
+async def test_a_refused_stream_says_whether_the_key_was_the_callers(
+    monkeypatch: pytest.MonkeyPatch, override: dict, caller_shaped: bool
+) -> None:
+    """The streaming path marks its provider errors like chat and generate do
+    (``InferenceError.caller_shaped``, read by the API's error handler): only
+    an honoured endpoint override sends the caller's own key."""
+    monkeypatch.setenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", "true")
+    client = VLLMClient(endpoint="http://vllm:8000/v1", model_name="test-model", api_key="k")
+    client._client = httpx.AsyncClient(transport=_make_transport(lambda req: httpx.Response(401, json={})))
+
+    with pytest.raises(InferenceError) as info:
+        async for _ in client.stream_chat([{"role": "user", "content": "hi"}], metadata={"llm_override": override}):
+            pass
+
+    assert info.value.status_code == 401
+    assert info.value.caller_shaped is caller_shaped
 
 
 class TestCallerShapedRefusalAndTheSharedBreaker:
@@ -818,9 +849,10 @@ class TestVLLMEmbedder:
         assert result == [[0.1, 0.2], [0.3, 0.4]]
 
     @pytest.mark.asyncio
-    async def test_a_refused_key_counts_toward_the_embedder_breaker(self):
-        """Callers cannot shape an embedding request, so a 401 there is our key
-        refused: it counts, unlike on the LLM breaker."""
+    async def test_a_refused_key_does_not_count_toward_the_embedder_breaker(self):
+        """The ``embedder`` breaker is shared by every embedder endpoint: one
+        endpoint's 401 counted here opened it for every partition (#1100). The
+        metrics still record it against that endpoint."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(401, json={"error": "invalid key"})
@@ -828,7 +860,7 @@ class TestVLLMEmbedder:
         with pytest.raises(EmbeddingAPIError):
             await self._make_embedder(handler).embed(["hello"])
 
-        assert _breakers["embedder"].fail_counter == 1
+        assert _breakers["embedder"].fail_counter == 0
 
     @pytest.mark.asyncio
     async def test_embed_splits_large_input_into_batches(self):
@@ -1044,6 +1076,25 @@ class TestVLLMEmbedder:
         assert len(gets) == 1
 
     @pytest.mark.asyncio
+    async def test_tei_embeds_without_asking_for_a_model_list(self):
+        from core.embeddings import embedder_registry
+
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1, 0.2]}]})
+
+        embedder = embedder_registry.create("tei", endpoint="http://tei:80/v1", model_name="bge-m3", max_model_len=8192)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        assert isinstance(embedder, TEIEmbedder)
+        # TEI has no /models: the configured window stands, with no request for it.
+        assert await embedder.served_window() is None
+        assert await embedder.embed(["a"]) == [[0.1, 0.2]]
+        assert [(request.method, request.url.path) for request in requests] == [("POST", "/v1/embeddings")]
+
+    @pytest.mark.asyncio
     async def test_other_bad_requests_are_raised_without_probing(self):
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.method == "POST", "a 400 unrelated to truncation must not probe /models"
@@ -1173,25 +1224,27 @@ class TestVLLMVision:
         await vision.caption_image(b"img")
 
     @pytest.mark.asyncio
-    async def test_caption_image_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_caption_image_sends_enable_thinking_as_chat_template_kwargs_when_configured(self, enable_thinking):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            assert body["chat_template_kwargs"] == {"enable_thinking": True}
+            assert body["chat_template_kwargs"] == {"enable_thinking": enable_thinking}
             assert "enable_thinking" not in body
             return _chat_response("ok")
 
-        await self._make_vision(handler, enable_thinking=True).caption_image(b"img")
+        await self._make_vision(handler, enable_thinking=enable_thinking).caption_image(b"img")
 
     @pytest.mark.asyncio
-    async def test_caption_image_merges_enable_thinking_with_existing_chat_template_kwargs(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_caption_image_merges_enable_thinking_with_existing_chat_template_kwargs(self, enable_thinking):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            assert body["chat_template_kwargs"] == {"custom": "value", "enable_thinking": True}
+            assert body["chat_template_kwargs"] == {"custom": "value", "enable_thinking": enable_thinking}
             return _chat_response("ok")
 
         await self._make_vision(
             handler,
-            enable_thinking=True,
+            enable_thinking=enable_thinking,
             chat_template_kwargs={"custom": "value"},
         ).caption_image(b"img")
 

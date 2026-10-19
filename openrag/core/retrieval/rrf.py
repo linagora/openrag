@@ -9,7 +9,9 @@ Formula:
 
 with ``rank_i`` the 1-based rank of the item in list ``i``. Smaller ``k``
 amplifies the top of each list; ``k=60`` is the canonical default and
-balances rank sensitivity across lists.
+balances rank sensitivity across lists. A list can stand for several lists
+merged into one: with a rank scale ``n_i`` its ranks count as
+``rank_i / n_i``.
 
 Identification of "the same item" is delegated to the caller via
 ``key_fn`` — typically returning the chunk id, document id, or URL.
@@ -18,7 +20,12 @@ Identification of "the same item" is delegated to the caller via
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Sequence
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
+
+from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason, TraceStageName
+
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
 
 T = TypeVar("T")
 
@@ -27,6 +34,10 @@ def rrf_reranking(
     ranked_lists: Sequence[Sequence[T]],
     key_fn: Callable[[T], Hashable] | None = None,
     k: int = 60,
+    top_k: int | None = None,
+    trace: RetrievalTraceBuilder | None = None,
+    trace_stage: TraceStageName = "hybrid_fused",
+    rank_scales: Sequence[float] | None = None,
 ) -> list[T]:
     """Fuse multiple ranked lists into one via Reciprocal Rank Fusion.
 
@@ -37,6 +48,14 @@ def rrf_reranking(
                 ``id(item)`` (object identity), which prevents fusion across
                 lists for items lacking a logical id.
         k: RRF dampening constant. ``60`` is canonical.
+        rank_scales: One per list, default 1 each. A list that ranks together
+                what ``n`` lists would have ranked separately (one ranking over
+                ``n`` sources) passes ``n``: an item at rank ``r`` in it scores
+                ``1 / (k + r / n)``, so the list takes about ``n`` times the
+                share of the fused top a scale-1 list takes, as its ``n`` lists
+                would have. Weighting the score by ``n`` instead would not:
+                scores fall so slowly that the list's first ``(n - 1)(k + 1)``
+                items would all outrank another list's best.
 
     Returns:
         A single ranked list, best first. Empty input -> empty list.
@@ -44,23 +63,156 @@ def rrf_reranking(
 
     Raises:
         ValueError: if ``k < 0`` (would produce a zero or negative
-        denominator at rank 1 or below and crash with ZeroDivisionError).
+        denominator at rank 1 or below and crash with ZeroDivisionError),
+        or if ``rank_scales`` does not hold one positive scale per list.
     """
     if k < 0:
         raise ValueError(f"RRF k must be non-negative, got {k}")
+    if rank_scales is not None and (len(rank_scales) != len(ranked_lists) or any(scale <= 0 for scale in rank_scales)):
+        raise ValueError(f"RRF needs one positive rank scale per list, got {list(rank_scales)}")
     if not ranked_lists:
+        _record_rrf_trace(trace, [], {}, {}, top_k, trace_stage)
         return []
     if len(ranked_lists) == 1:
-        return list(ranked_lists[0])
+        result = list(ranked_lists[0])
+        _record_single_list_trace(trace, result, key_fn, k, top_k, trace_stage)
+        return result[:top_k] if top_k is not None else result
 
     if key_fn is None:
         key_fn = id  # type: ignore[assignment]
 
     fused: dict[Hashable, tuple[float, T]] = {}
-    for ranked in ranked_lists:
+    occurrences: dict[Hashable, list[T]] = {}
+    for index, ranked in enumerate(ranked_lists):
+        scale = rank_scales[index] if rank_scales is not None else 1
         for rank, item in enumerate(ranked, start=1):
             key = key_fn(item)
+            occurrences.setdefault(key, []).append(item)
             score, kept = fused.get(key, (0.0, item))
-            fused[key] = (score + 1.0 / (rank + k), kept)
+            fused[key] = (score + 1.0 / (rank / scale + k), kept)
 
-    return [item for _, item in sorted(fused.values(), key=lambda x: x[0], reverse=True)]
+    ordered = sorted(fused.items(), key=lambda entry: entry[1][0], reverse=True)
+    result = [item for _, (_, item) in ordered]
+    _record_rrf_trace(trace, result, {key: score for key, (score, _) in fused.items()}, occurrences, top_k, trace_stage)
+    return result[:top_k] if top_k is not None else result
+
+
+def _record_rrf_trace(
+    trace: RetrievalTraceBuilder | None,
+    ordered: Sequence[T],
+    scores: dict[Hashable, float],
+    occurrences: dict[Hashable, list[T]],
+    top_k: int | None,
+    trace_stage: TraceStageName,
+) -> None:
+    """Record fused membership without letting optional telemetry affect RRF."""
+    if trace is None:
+        return
+    try:
+        candidates: list[TraceCandidate] = []
+        candidate_limit = trace.candidate_capacity_for_stage(trace_stage)
+        candidate_count = sum(len(items) for items in occurrences.values())
+        key_for_object: dict[int, Hashable] = {id(item): key for key, items in occurrences.items() for item in items}
+        for rank, item in enumerate(ordered, start=1):
+            if len(candidates) >= candidate_limit:
+                break
+            key = key_for_object.get(id(item), id(item))
+            removal = None
+            if top_k is not None and rank > top_k:
+                removal = TraceRemovalReason(
+                    code="final_top_n",
+                    explanation="Excluded by the final public result cutoff.",
+                )
+            candidate = TraceCandidate(
+                id=str(getattr(item, "id", key)),
+                document_id=getattr(item, "document_id", None) or None,
+                partition=getattr(item, "partition", None) or None,
+                rank=rank,
+                scores={"fused": scores.get(key, 0.0)},
+                removal_reason=removal,
+            )
+            candidates.append(candidate)
+            for duplicate in occurrences.get(key, [])[1:]:
+                if len(candidates) >= candidate_limit:
+                    break
+                candidates.append(
+                    TraceCandidate(
+                        id=str(getattr(duplicate, "id", key)),
+                        document_id=getattr(duplicate, "document_id", None) or None,
+                        partition=getattr(duplicate, "partition", None) or None,
+                        rank=rank,
+                        scores={"fused": scores.get(key, 0.0)},
+                        duplicate_of=str(getattr(item, "id", key)),
+                        removal_reason=TraceRemovalReason(
+                            code="duplicate",
+                            explanation="Duplicate identity merged during reciprocal-rank fusion.",
+                        ),
+                    )
+                )
+        trace.record_stage(
+            trace_stage,
+            status="complete",
+            candidates=candidates,
+            candidate_count=candidate_count,
+        )
+    except Exception as error:
+        try:
+            trace.record_error(trace_stage, error)
+        except Exception:
+            pass
+
+
+def _record_single_list_trace(
+    trace: RetrievalTraceBuilder | None,
+    ordered: Sequence[T],
+    key_fn: Callable[[T], Hashable] | None,
+    k: int,
+    top_k: int | None,
+    trace_stage: TraceStageName,
+) -> None:
+    """Trace a pass-through list while retaining duplicate occurrences once."""
+    if trace is None:
+        return
+    try:
+        keys = [key_fn(item) if key_fn is not None else id(item) for item in ordered]
+        scores: dict[Hashable, float] = {}
+        for rank, key in enumerate(keys, start=1):
+            scores[key] = scores.get(key, 0.0) + 1.0 / (rank + k)
+
+        first_ids: dict[Hashable, str] = {}
+        candidates: list[TraceCandidate] = []
+        candidate_limit = trace.candidate_capacity_for_stage(trace_stage)
+        for rank, (key, item) in enumerate(zip(keys, ordered, strict=True), start=1):
+            if len(candidates) >= candidate_limit:
+                break
+            candidate_id = str(getattr(item, "id", key))
+            duplicate_of = first_ids.get(key)
+            removal = None
+            if top_k is not None and rank > top_k:
+                removal = TraceRemovalReason(
+                    code="final_top_n",
+                    explanation="Excluded by the final public result cutoff.",
+                )
+            first_ids.setdefault(key, candidate_id)
+            candidates.append(
+                TraceCandidate(
+                    id=candidate_id,
+                    document_id=getattr(item, "document_id", None) or None,
+                    partition=getattr(item, "partition", None) or None,
+                    rank=rank,
+                    scores={"fused": scores[key]},
+                    duplicate_of=duplicate_of,
+                    removal_reason=removal,
+                )
+            )
+        trace.record_stage(
+            trace_stage,
+            status="complete",
+            candidates=candidates,
+            candidate_count=len(ordered),
+        )
+    except Exception as error:
+        try:
+            trace.record_error(trace_stage, error)
+        except Exception:
+            pass

@@ -43,10 +43,10 @@ semaphore:
   vlm_semaphore: 10
 
 # --- Embedder ---
-# Env: EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY, MAX_MODEL_LEN,
-#      EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
+# Env: EMBEDDER_PROVIDER, EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY,
+#      MAX_MODEL_LEN, EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
 embedder:
-  provider: openai
+  provider: vllm # client: vllm (any server with GET /models), ollama, or tei (no /models)
   model_name: Qwen/Qwen3-Embedding-0.6B
   base_url: http://vllm:8000/v1
   api_key: EMPTY
@@ -124,9 +124,10 @@ verbose:
   format: text
 
 # --- Server ---
-# Env: PREFERRED_URL_SCHEME
+# Env: PREFERRED_URL_SCHEME, ASSISTANT_NAME
 server:
   preferred_url_scheme: null
+  assistant_name: ""
 
 # --- LLM Context ---
 # Env: MAX_LLM_CONTEXT_SIZE, MAX_OUTPUT_TOKENS
@@ -145,6 +146,8 @@ paths:
 
 # --- Prompt template filenames ---
 prompts:
+  # Refresh saved defaults only when they still match an older bundled version.
+  refresh_defaults: true
   sys_prompt: sys_prompt_tmpl.txt
   query_contextualizer: query_contextualizer_tmpl.txt
   chunk_contextualizer: chunk_contextualizer_tmpl.txt
@@ -220,9 +223,19 @@ loader:
     mp4: LocalWhisperLoader
     md: MarkdownLoader
 
+  # Env: PYMUPDF_POOL_SIZE, PYMUPDF_PARSE_MEMORY_LIMIT_MB,
+  #      PYMUPDF_MAX_TASKS_PER_CHILD (indexing only; pool size 1, at least 1,
+  #      with no memory limit (0) = one thread, as before; more workers or a
+  #      ceiling parse in child processes — see env_vars.md)
+  pymupdf_pool_size: 1
+  pymupdf_parse_memory_limit_mb: 0
+  pymupdf_max_tasks_per_child: 20
+
   # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_POOL_SIZE, MARKER_MAX_PROCESSES,
   #      MARKER_NUM_GPUS, MARKER_TIMEOUT, MARKER_CHILD_TIMEOUT_RATIO,
-  #      MARKER_PDFTEXT_WORKERS, MARKER_CHUNK_SIZE
+  #      MARKER_CHUNK_SIZE,
+  #      MARKER_PARSE_MEMORY_LIMIT_MB (0 = off; per-child RLIMIT_DATA ceiling,
+  #      must sit well above the child's baseline — see env_vars.md)
   marker_max_tasks_per_child: 20
   marker_pool_size: 1
   marker_max_processes: 2
@@ -232,7 +245,6 @@ loader:
   # to the child process. Keep below 1.0 so a wedged child times out first and
   # recycles its slot.
   marker_child_timeout_ratio: 0.9
-  marker_pdftext_workers: 2
   # Split large PDFs into chunks of this many pages for parallel processing across workers.
   # 0 = no chunking (process entire PDF in one worker).
   marker_chunk_size: 10
@@ -382,3 +394,15 @@ mcp:
   similarity_threshold: 0.8
   download_timeout: 30.0
   max_download_bytes: 104857600  # 100 MiB
+
+# Operator-managed accounts provisioned by the API at startup. Each entry names
+# the env var carrying its token (token_env), never the token. The SEED_USERS
+# env var (a JSON list) replaces this list; see docs/documentation/user_auth.md.
+auth:
+  seed_users: []
+  #  - external_user_id: svc-cozy-stack
+  #    display_name: cozy-stack
+  #    token_env: COZY_STACK_TOKEN
+  #    is_admin: false
+  #    partitions:
+  #      - { name: twake, role: editor }

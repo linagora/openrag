@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from core.utils.exceptions import InferenceConnectionError, InferenceTimeoutError
-from services.inference.reranker_clients import InfinityReranker, OpenAIReranker, TEIReranker
+from core.utils.exceptions import CircuitBreakerOpenError, InferenceConnectionError, InferenceTimeoutError
+from services.inference import _metrics
+from services.inference._circuit_breaker import _breakers, _is_excluded
+from services.inference._metrics import outcome_for
+from services.inference._retry import _is_retryable
+from services.inference.reranker_clients import (
+    InfinityReranker,
+    OpenAIReranker,
+    TEIReranker,
+    _raise_reranker_http_error,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_breakers():
+    yield
+    for breaker in _breakers.values():
+        breaker.close()
+    _breakers.clear()
 
 
 def _rerank_response(results: list[dict] | None = None) -> httpx.Response:
@@ -304,3 +322,98 @@ class TestRegistryIntegration:
         from core.rerankers import reranker_registry
 
         assert "tei" in reranker_registry
+
+
+def _reranker_http_error(status: int) -> InferenceConnectionError:
+    """The exception every reranker client raises for a non-2xx *status*."""
+    request = httpx.Request("POST", "http://reranker.invalid/rerank")
+    response = httpx.Response(status, request=request)
+    try:
+        _raise_reranker_http_error(
+            "http://reranker.invalid", httpx.HTTPStatusError("refused", request=request, response=response)
+        )
+    except InferenceConnectionError as exc:
+        return exc
+    raise AssertionError("_raise_reranker_http_error returned")
+
+
+class TestRerankerHttpErrorStatus:
+    """The breaker, the retry and the metrics all read ``status_code``. Without
+    the upstream status every reranker reply read as 503: a 401 from one
+    endpoint opened the ``reranker`` breaker every endpoint shares (#1100)."""
+
+    @pytest.mark.parametrize(
+        ("status", "counts_on_breaker", "outcome", "retried"),
+        [
+            (400, False, "rejected", False),
+            (401, False, "error", False),
+            (403, False, "rejected", False),
+            (404, False, "rejected", False),
+            (408, False, "error", False),
+            (429, False, "error", True),
+            (500, True, "error", False),
+            (503, True, "error", True),
+        ],
+    )
+    def test_the_upstream_status_reaches_the_breaker_retry_and_metrics(
+        self, status: int, counts_on_breaker: bool, outcome: str, retried: bool
+    ) -> None:
+        exc = _reranker_http_error(status)
+
+        assert exc.status_code == status
+        assert _is_excluded(exc) is not counts_on_breaker
+        assert outcome_for(exc, operation="rerank") == outcome
+        assert _is_retryable(exc) is retried
+
+
+class TestRerankerBreakerEndToEnd:
+    @pytest.fixture
+    def recorded(self, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+        calls: list[dict] = []
+        monkeypatch.setattr(_metrics, "record_inference", lambda **kw: calls.append(kw))
+        return calls
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_backoff(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_sleep = asyncio.sleep
+        monkeypatch.setattr(asyncio, "sleep", lambda _seconds, *a, **kw: real_sleep(0))
+
+    @staticmethod
+    def _reranker(endpoint: str, handler) -> InfinityReranker:
+        reranker = InfinityReranker(endpoint=endpoint, model_name="gte-reranker")
+        reranker._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return reranker
+
+    @pytest.mark.asyncio
+    async def test_one_endpoints_bad_key_does_not_stop_the_others(self, recorded: list[dict]) -> None:
+        """More refused calls than the breaker's ``fail_max`` (50): the healthy
+        endpoint behind the same breaker still answers, and each refusal is
+        recorded as the refusing endpoint's ``error``."""
+        revoked = self._reranker("http://revoked:7997", lambda req: httpx.Response(401, json={"error": "bad key"}))
+        healthy = self._reranker("http://healthy:7997", lambda req: _rerank_response())
+
+        for _ in range(60):
+            with pytest.raises(InferenceConnectionError) as info:
+                await revoked.rerank("query", DOCS)
+            assert not isinstance(info.value, CircuitBreakerOpenError)
+
+        assert _breakers["reranker"].fail_counter == 0
+        assert await healthy.rerank("query", DOCS) == [(0, 0.9), (2, 0.7), (1, 0.3)]
+        assert [c["outcome"] for c in recorded] == ["error"] * 60 + ["success"]
+
+    @pytest.mark.asyncio
+    async def test_provider_failures_still_open_the_breaker(self) -> None:
+        """Control for the test above: a 503 is the provider failing, and trips
+        the shared breaker for every reranker endpoint."""
+        down = self._reranker("http://down:7997", lambda req: httpx.Response(503))
+        healthy = self._reranker("http://healthy:7997", lambda req: _rerank_response())
+
+        # The 50th failure trips it and is itself reported as open.
+        for _ in range(49):
+            with pytest.raises(InferenceConnectionError):
+                await down.rerank("query", DOCS)
+        with pytest.raises(CircuitBreakerOpenError):
+            await down.rerank("query", DOCS)
+
+        with pytest.raises(CircuitBreakerOpenError):
+            await healthy.rerank("query", DOCS)

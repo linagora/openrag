@@ -11,7 +11,9 @@ text, metadata and the BM25 ``sparse`` vector are untouched.
    ``c4e8f2a6b913``, which must have run first). Anything that cannot be
    routed aborts the migration before it changes anything.
 2. **Add and index each field**, with ``vector``'s dimension.
-3. **Copy** each partition's vectors with a partial upsert of ``{_id, <field>}``.
+3. **Copy** each partition's vectors with a partial upsert of ``{_id, <field>}``,
+   plus the chunk's section IDs folded below 2**53 (see :data:`SECTION_ID_MASK`).
+   A partial upsert keeps ``_id``, which a full-row upsert would reassign.
 4. **Verify** by reading every copied partition back (Milvus rejects
    ``IS NULL`` on vector fields).
 5. **Drop ``vector``** and stamp version 3.
@@ -20,11 +22,18 @@ Safe to re-run after a failure; only the final drop is irreversible. Rows whose
 partition is not in Postgres are already unreachable and lose their vector.
 OpenRAG must be stopped: the migration aborts if the row count moves.
 
-Usage — prefer the generic runner (from repo root, inside the container). It
-reads Postgres as well as Milvus, so both must be up (``docker compose up -d rdb
-milvus``) even though ``--no-deps`` does not start them:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py [--dry-run]
+The partial upsert rewrites every number in a chunk's dynamic field as a
+float64, so any other integer above 2**53 in its metadata comes back rounded.
+Postgres keeps the exact upload metadata of each file.
+
+Usage — prefer the generic runner (from infra/compose, with DC and SVC set as in the upgrade guide:
+``DC="docker compose"; SVC=openrag`` on a GPU host,
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host; add ``-p <project>`` and
+your ``-f`` overlays to DC if you start the stack with them). It
+reads Postgres as well as Milvus, so both must be up (``$DC up -d rdb milvus``) even though
+``--no-deps`` does not start them:
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run]
 """
 
 import argparse
@@ -70,6 +79,16 @@ INDEX_WAIT_SECONDS = 300.0
 #: Upper bound on rows per copy page, further capped by the vector payload.
 MAX_COPY_BATCH = 1_000
 _COPY_PAGE_BUDGET_BYTES = 32 * 1024 * 1024
+
+#: Dynamic keys that link a chunk to its neighbours in the same file.
+SECTION_ID_KEYS = ("section_id", "prev_section_id", "next_section_id")
+
+#: A partial upsert rewrites every number in the dynamic field as a float64,
+#: which rounds integers above 2**53. Section IDs used to be about 1.8e18, where
+#: that rounding makes a few hundred neighbouring chunks share one ID, so the
+#: copy keeps only their low 53 bits. Applied to all three keys, the links still
+#: match, and a file's consecutive IDs stay distinct.
+SECTION_ID_MASK = 2**53 - 1
 
 logger = get_logger()
 
@@ -151,11 +170,26 @@ def _field_for_partition(catalog: Catalog, partition: str) -> tuple[str | None, 
 
 
 def _get_stored_version(client: MilvusClient, collection_name: str) -> int:
+    """The collection's schema version: 0 when it was never stamped.
+
+    Raises ValueError when ``int()`` rejects the stamp or it is negative, rather
+    than reading it as 0 and migrating a collection whose version is unknown.
+    """
     raw = client.describe_collection(collection_name).get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
-    try:
-        return int(raw) if raw is not None else 0
-    except ValueError:
+    if raw is None:
         return 0
+    unknown = (
+        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set the collection's real "
+        f"version first: MilvusClient(uri).alter_collection_properties('{collection_name}', "
+        f"properties={{'{SCHEMA_VERSION_PROPERTY_KEY}': '<version>'}}). Nothing was changed."
+    )
+    try:
+        version = int(raw)
+    except ValueError:
+        raise ValueError(unknown) from None
+    if version < 0:
+        raise ValueError(unknown)
+    return version
 
 
 def _fields(desc: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -180,8 +214,12 @@ def _dense_fields(desc: dict[str, Any]) -> dict[str, int]:
 
 
 def _literal(value: str) -> str:
-    """A Milvus string literal — JSON escaping is the escaping Milvus parses."""
-    return json.dumps(value)
+    """A Milvus string literal — JSON escaping is the escaping Milvus parses.
+
+    Non-ASCII stays raw UTF-8: Milvus rejects the surrogate-pair escapes
+    ``json.dumps`` emits for astral characters (emoji) by default.
+    """
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _count(client: MilvusClient, collection_name: str, filter_expr: str = "") -> int:
@@ -334,12 +372,12 @@ def _wait_for_indexes(client: MilvusClient, collection_name: str, plan: Plan, ti
             time.sleep(2)
 
 
-def _iter_pages(client: MilvusClient, collection_name: str, filter_expr: str, output_field: str, dim: int):
+def _iter_pages(client: MilvusClient, collection_name: str, filter_expr: str, output_fields: list[str], dim: int):
     iterator = client.query_iterator(
         collection_name=collection_name,
         filter=filter_expr,
         batch_size=_batch_size(dim),
-        output_fields=[output_field],
+        output_fields=output_fields,
     )
     try:
         while True:
@@ -351,12 +389,22 @@ def _iter_pages(client: MilvusClient, collection_name: str, filter_expr: str, ou
         iterator.close()
 
 
+def _folded_section_ids(row: dict[str, Any]) -> dict[str, int]:
+    """The row's section IDs as the copy writes them back — see :data:`SECTION_ID_MASK`."""
+    return {key: row[key] & SECTION_ID_MASK for key in SECTION_ID_KEYS if isinstance(row.get(key), int)}
+
+
 def _copy_partition(
     client: MilvusClient, collection_name: str, partition: str, source: str, target: str, dim: int
 ) -> int:
     copied = 0
-    for page in _iter_pages(client, collection_name, f"partition == {_literal(partition)}", source, dim):
-        rows = [{"_id": row["_id"], target: row[source]} for row in page if row.get(source) is not None]
+    filter_expr = f"partition == {_literal(partition)}"
+    for page in _iter_pages(client, collection_name, filter_expr, [source, *SECTION_ID_KEYS], dim):
+        rows = [
+            {"_id": row["_id"], target: row[source], **_folded_section_ids(row)}
+            for row in page
+            if row.get(source) is not None
+        ]
         if rows:
             client.upsert(collection_name=collection_name, data=rows, partial_update=True)
         copied += len(rows)
@@ -367,7 +415,7 @@ def _non_null(client: MilvusClient, collection_name: str, partitions: Iterable[s
     names = ", ".join(_literal(p) for p in partitions)
     return sum(
         1
-        for page in _iter_pages(client, collection_name, f"partition in [{names}]", field_name, dim)
+        for page in _iter_pages(client, collection_name, f"partition in [{names}]", [field_name], dim)
         for row in page
         if row.get(field_name) is not None
     )
@@ -538,6 +586,38 @@ def downgrade(client: MilvusClient, collection_name: str, dry_run: bool = False)
     logger.info("Downgrade complete.")
 
 
+def _refuse_out_of_order(client: MilvusClient, collection_name: str, downgrade: bool) -> None:
+    """Refuse a standalone run that would apply or revert this step out of order.
+
+    Run on its own, this script applies or reverts only its own step, whatever
+    version the collection is at: out of order, that skips the steps before it or
+    undoes an older step under a newer one. ``migrate.py`` walks the steps in turn.
+    """
+    try:
+        stored = _get_stored_version(client, collection_name)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(2)
+    if downgrade and stored < TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}, below this script's version {TARGET_VERSION}: "
+            "there is nothing for it to revert."
+        )
+        sys.exit(2)
+    if downgrade and stored > TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts a collection "
+            f"at version {TARGET_VERSION}. Use migrate.py --downgrade --target N, from the release that migrated it."
+        )
+        sys.exit(2)
+    if not downgrade and stored < TARGET_VERSION - 1:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}; this script only upgrades a collection at version "
+            f"{TARGET_VERSION - 1} or later. Use migrate.py, which applies the steps in turn."
+        )
+        sys.exit(2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Milvus migration: one dense field per embedder (v2 → v3)")
     parser.add_argument("--dry-run", action="store_true", help="Inspect only, make no changes")
@@ -552,6 +632,7 @@ def main() -> None:
     if not client.has_collection(collection_name):
         logger.error(f"Collection '{collection_name}' does not exist. Aborting.")
         sys.exit(1)
+    _refuse_out_of_order(client, collection_name, args.downgrade)
     if args.downgrade:
         downgrade(client, collection_name, dry_run=args.dry_run)
     else:

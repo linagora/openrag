@@ -86,7 +86,7 @@ async def _startup() -> None:
                 dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
                 ignore_reinit_error=True,
             )
-    ensure_worker_bootstrap()
+    ensure_worker_bootstrap(config)
     container = ServiceContainer(config)
     try:
         await container.initialize()

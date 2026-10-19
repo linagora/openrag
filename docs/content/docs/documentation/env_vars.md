@@ -70,7 +70,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 |----------|------|---------|-------------|
 | `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/openrag/prompts/templates/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
 | `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
-| `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
+| `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy, so URLs indexed through MCP are skipped. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
 |`SAVE_UPLOADED_FILES`|`bool`|`true`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
 | `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
@@ -82,6 +82,15 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 :::
 
 #### PDF Loader
+##### PyMuPDF Loader Configuration
+These settings apply wherever PyMuPDF parses a PDF during indexing — the default `PyMuPDFLoader`, and a preset whose parsing strategy is `pymupdf` whatever `PDFLOADER` says — and during indexing only: the API's direct-extract path always parses on a single thread. With nothing set, parsing runs one PDF at a time on a single thread per indexer worker, as before.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PYMUPDF_POOL_SIZE` | int | 1 | PDFs one indexer worker parses at once; minimum `1`. PyMuPDF is not thread-safe, so above `1` each parse runs in its own child process (about 60 MiB of `VmData` before it parses anything, about 80 MiB inside a Ray worker). A child uses more while it parses: up to what the largest single parse needs, which a JPEG 2000 image can dominate, since it is decoded whole (a child peaked at about 775 MiB RSS on one 8000×6000 image). After each parse it succeeds at, or fails at for another reason than memory or, under `PYMUPDF_PARSE_MEMORY_LIMIT_MB`, an unreadable JPEG 2000 image, a child empties MuPDF's cache and, on glibc, returns freed memory to the system. That brings its RSS back near its baseline, but not always its `VmData`, which is what `PYMUPDF_PARSE_MEMORY_LIMIT_MB` counts: measured after a 60-page PDF of large images, RSS fell from 349 MiB to 84, but `VmData` only from 333 to between 224 and 282, varying from run to run; after one large JPEG 2000 image, `VmData` was back at 75. Measured on a 300-page PDF, 4 parses ran about 3.5x faster with `4` than with `1`. Each indexer worker runs its own pool, so a node runs up to `RAY_POOL_SIZE` × this many children. |
+| `PYMUPDF_PARSE_MEMORY_LIMIT_MB` | int | 0 | Ceiling on what one PyMuPDF child may allocate (`RLIMIT_DATA`), so an oversized PDF fails on its own instead of OOM-killing the worker and every file sharing it. That file fails at once with a `MemoryError` naming this setting, and its child is replaced before the next parse. A JPEG 2000 image that fails under the ceiling is reported the same way when OpenJPEG logs that it ran out of memory, and the error adds that the image is damaged if a higher limit does not help: a damaged image whose header declares more than the ceiling runs out of memory before decoding reaches the damage. When OpenJPEG logs nothing about memory, the error says the image is either over the ceiling or damaged (if the file still fails with the ceiling off, it is damaged), and its child is replaced as well. A damaged image under the ceiling therefore gets that hedged error, and costs a child. `0` disables it; setting it moves parsing into a child process even at `PYMUPDF_POOL_SIZE=1`. It bounds the child's **whole** memory, imports included: each child logs that baseline when it starts (at its slot's first parse, and again whenever it is replaced), refuses a value at or below it, and warns when less than 128 MiB is left above it. The child opens the PDF from disk rather than receiving a copy of it, so the file is not held in memory up front; what MuPDF builds while parsing still counts, and so does the cleaned copy a retry on a malformed PDF writes out. Parsing can then use up to `RAY_POOL_SIZE` × `PYMUPDF_POOL_SIZE` × this value. |
+| `PYMUPDF_MAX_TASKS_PER_CHILD` | int | 20 | Parses a PyMuPDF child handles before it is replaced, releasing memory it does not hand back. `0` keeps each child for the worker's lifetime. Used only when parsing runs in child processes. |
+
 ##### Marker Loader Configuration
 These settings apply when `MarkerLoader` is selected (`PDFLOADER=MarkerLoader`; the default is `PyMuPDFLoader`). It can be configured using the following environment variables:
 
@@ -91,7 +100,8 @@ These settings apply when `MarkerLoader` is selected (`PDFLOADER=MarkerLoader`; 
 | `MARKER_MAX_PROCESSES` | int | 2 | Number of subprocesses <-> Number of concurrent PDFs per worker (to increase depending on your available GPU resources)|
 | `MARKER_MAX_TASKS_PER_CHILD` | int | 20 | Number of tasks a child (PDF worker) has to process before it gets restarted to clean up memory leaks |
 | `MARKER_TIMEOUT` | int | 3600 | Timeout in seconds for marker processes |
-| `MARKER_PDFTEXT_WORKERS` | int | 2 | Number of PDF text extractor workers inside marker. |
+| `MARKER_PDFTEXT_WORKERS` | int | 1 | Deprecated and ignored since OpenRAG 2.3.2: Marker runs pdftext with one worker, inside the Marker child, and logs a warning when this is set above 1. Remove it. |
+| `MARKER_PARSE_MEMORY_LIMIT_MB` | int | 0 | Ceiling on what one Marker child may allocate (`RLIMIT_DATA`), so a single oversized parse raises `MemoryError` in that child instead of OOM-killing the pod. The file then fails at once, without retries, with a `MemoryError` that names this setting. `0` disables it. Bounds the child's **whole** memory — torch and Marker's startup included — so it must sit well above the child's baseline; the worker logs that baseline at startup, and warns when the headroom is too small. With page chunking on, each chunk runs under the same per-child bound; the limit is set once per child and persists across chunks until that child is restarted (`MARKER_MAX_TASKS_PER_CHILD`). The ceiling is per process: Marker runs pdftext inside the child, so it bounds a chunk's whole parse. Measure per deployment before enabling. |
 | `MARKER_CHUNK_SIZE` | int | 10 | Split large PDFs into chunks of this many pages for parallel processing across workers. Use <= 0 to deactivate chunking. |
 
 :::note[Page chunking with `MARKER_CHUNK_SIZE`]
@@ -249,8 +259,9 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 
 | Variable | Type | Default | Description  |
 |----------|------|---------|--------------|
-| `EMBEDDER_MODEL_NAME` | `str` | Qwen/Qwen3-Embedding-0.6B | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`. The default was `jinaai/jina-embeddings-v3` up to 2.2.x under Docker Compose: an install indexed with it keeps it by setting this variable in `.env` **before** upgrading, since changing the model needs a reindex. Without it the vLLM container serves Qwen while the saved endpoint still asks for jina, and every embedding call fails; with `MODEL_ENDPOINT_SYNC_ON_BOOT=true` the endpoint follows to Qwen instead and queries no longer match the stored vectors, with no error. The Helm chart has defaulted to Qwen since before 2.2.x; there the embedder's model is `vllm.embedderModelName` together with the embedder entry of `vllm.servingEngineSpec.modelSpec`, which an override must restate in full.|
+| `EMBEDDER_MODEL_NAME` | `str` | Qwen/Qwen3-Embedding-0.6B | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`. **Upgrading from 2.2.x under Docker Compose:** the default was `jinaai/jina-embeddings-v3`. If your `.env` does not set this variable, set it to the model your data was indexed with **before** upgrading, since changing the model needs a reindex. Without it the vLLM container serves Qwen while the saved endpoint still asks for jina: every embedding call fails and `/ready` reports `checks.embedder: unavailable`. `MODEL_ENDPOINT_SYNC_ON_BOOT=true` does not get around this: the sync refuses to move an endpoint that holds indexed files to another model and logs a warning. The legacy `EMBEDDING_MODEL`, when set, takes precedence over this variable. The Helm chart has defaulted to Qwen since before 2.2.x; there the embedder's model is `vllm.embedderModelName` together with the embedder entry of `vllm.servingEngineSpec.modelSpec`, which an override must restate in full.|
 | `EMBEDDER_BASE_URL` | `str` | http://vllm:8000/v1 | Base URL of the embedder (OpenAI-style).|
+| `EMBEDDER_PROVIDER` | `str` | vllm | Client for the embedder: `vllm` for any OpenAI-compatible server with a `GET /models` route, `ollama`, or `tei` for Hugging Face text-embeddings-inference, which has none (its readiness probe then checks `/health` rather than the model name). It sets the env-seeded endpoint's vendor (`extra.implementation`). With `MODEL_ENDPOINT_SYNC_ON_BOOT=true`, a set value also replaces the vendor chosen in the admin UI on every boot; unset, that choice is kept. |
 | `EMBEDDER_API_KEY`  | `str` | EMPTY | API key for authenticating embedder calls.|
 | `EMBEDDER_EXTRA_ARGS` | `str` | (empty) | Extra `vllm serve` flags appended to the **bundled** vLLM embedder's command (`vllm-gpu` / `vllm-cpu` in `infra/compose/docker-compose.yaml`). They come after the built-in flags, so repeating one overrides it, e.g. `--gpu_memory_utilization 0.1`. |
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
@@ -266,14 +277,15 @@ Model endpoints (embedder, LLM, VLM, reranker) are stored in a **database-backed
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the endpoint each type was auto-seeded with is re-synced from the environment on **every** boot — its `endpoint`, `model_name` and `api_key` are refreshed from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` values, and `batch_size` / `timeout` follow only when their own env var is set. This lets operators manage that endpoint via env vars + a pod rollout (e.g. a Helm values change), including **changing the model** and **rotating the API key**. Any endpoint created by hand is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. |
+| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the endpoint each type was auto-seeded with is re-synced from the environment on **every** boot — its `endpoint`, `model_name` and `api_key` are refreshed from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` values, and `batch_size` / `timeout` follow only when their own env var is set. This lets operators manage that endpoint via env vars + a pod rollout (e.g. a Helm values change), including **changing the model** and **rotating the API key**. Any endpoint created by hand is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. An embedder that already holds indexed files does not change model through the sync: the model change is refused and logged as a warning on every boot while env and the database disagree (`EMBEDDER_EDIT_AFFECTS_INDEXED_DATA`, as in the admin API), the row keeps its model, and its URL, API key and env-set tunables are still synced. A URL change alone syncs; if the new server serves another model, `/ready` reports `checks.embedder: unavailable`, except for a `tei` embedder, whose probe checks only `/health` and cannot see the model. To change the model of indexed data, use the admin API with `acknowledge_indexed_data=true`. While an embedder swap re-embeds a partition into that embedder, neither its URL nor its model is synced (`EMBEDDER_SWAP_IN_PROGRESS`, logged as a warning) and the rest of the row still is; restart once the swap ends to sync them. |
+| `READINESS_REQUIRE_EMBEDDER` | `bool` | `false` | When `true`, `/ready` returns 503 while the default embedder is `unavailable` or `unresolvable` (not on a probe timeout, nor when model discovery itself fails). Off by default because every replica shares the embedder: under Kubernetes its outage, or a restart while the model loads, takes every replica out of the Service at once, admin API and admin UI included. `checks.embedder` in the `/ready` body reports the embedder either way. Before enabling it, check that `/ready` reports `checks.embedder: ok` on your deployment: the probe looks the configured model name up in the endpoint's `GET /models` list, so an embedder that works can still read `unavailable`, for example behind a gateway that lists the model under another name, or on another endpoint that has no `/models` route. A text-embeddings-inference (TEI) embedder has no such route: set `EMBEDDER_PROVIDER=tei` (or the `tei` vendor in the admin UI) and its `/health` is probed instead, without checking the model name. On Ollama, recognized by its `GET /api/version`, an untagged name also matches its `:latest` tag, as Ollama resolves it. |
 
 :::note[How the synced endpoint is identified]
-The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker in the endpoint's `extra`), and boot-time sync finds it by that marker rather than by name. Changing the model in env therefore re-points that same endpoint instead of stranding it.
+The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker in the endpoint's `extra`), and boot-time sync finds it by that marker rather than by name. Changing the model in env therefore re-points that same endpoint instead of stranding it, unless it is an embedder holding indexed files (see above).
 
 The endpoint's **name never changes** — partitions (`chat_llm`) and presets store endpoint names by value and nothing cascades a rename, so a renamed row would leave those references dangling. After a model change the endpoint keeps its original name while serving the new model.
 
-Sync only writes what the environment actually owns: `endpoint`, `model_name` and `api_key` always, and `batch_size`/`timeout` only when their env var (`EMBEDDER_BATCH_SIZE`, `EMBEDDER_TIMEOUT`, `VLM_TIMEOUT`, `RERANKER_TIMEOUT`) is set — otherwise a value you tuned in the admin UI would be replaced by the config default. The API key is likewise only overwritten when env supplies a real one, so an unset `*_API_KEY` (or its `EMPTY` placeholder) will not wipe a key you set by hand.
+Sync only writes what the environment actually owns: `endpoint`, `model_name` and `api_key` always, and `batch_size`/`timeout` only when their env var (`EMBEDDER_BATCH_SIZE`, `EMBEDDER_TIMEOUT`, `VLM_TIMEOUT`, `RERANKER_TIMEOUT`) is set, as is the embedder's vendor (`EMBEDDER_PROVIDER`) — otherwise a value you tuned in the admin UI would be replaced by the config default. The API key is likewise only overwritten when env supplies a real one, so an unset `*_API_KEY` (or its `EMPTY` placeholder) will not wipe a key you set by hand.
 
 An endpoint created by hand is never modified or deleted. An endpoint seeded before the marker existed is adopted on the first sync **only if it still matches the environment exactly** — if you have edited it, it is left alone rather than silently taken over.
 :::
@@ -312,7 +324,7 @@ The PostgreSQL database is configured using the following environment variables:
 | `POSTGRES_PASSWORD` | str | root_password | Password for database authentication |
 | `POSTGRES_DATABASE` | str | `partitions_for_collection_<VDB_COLLECTION_NAME>` | Database used for OpenRAG relational metadata. If unset, OpenRAG derives the historical name from the vector collection. |
 | `POSTGRES_AUTO_CREATE_DB` | bool | true | Creates the database automatically when it is missing. Keep this for local compose; set it to `false` for managed Postgres where the app role has no `CREATEDB`. |
-| `POSTGRES_RUN_MIGRATIONS` | bool | true | Runs Alembic migrations during app startup. Set it to `false` when migrations are applied by a deployment Job or init step. |
+| `POSTGRES_RUN_MIGRATIONS` | bool | true | Runs Alembic migrations during app startup. Set it to `false` when migrations are applied by a deployment Job or init step. With the Helm chart, set `postgresProvisioning.runMigrationsInApp` instead: the chart sets this variable from it, and refuses a `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` that disagrees. |
 | `POSTGRES_POOL_MIN_SIZE` | int | 5 | Minimum size of the async PostgreSQL connection pool. |
 | `POSTGRES_POOL_MAX_SIZE` | int | 20 | Maximum size of the async PostgreSQL connection pool. |
 | `POSTGRES_COMMAND_TIMEOUT` | int | 30 | Timeout in seconds for PostgreSQL commands issued through the async pool. |
@@ -370,7 +382,7 @@ These are external services to provide !!!
 | `LLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `LLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the LLM service |
 | `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` | bool | `false` | Honor a client-supplied `base_url`/`api_key` in `metadata.llm_override`. Off by default; read the trade-off below before enabling. |
-| `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback maximum token limit for chat/completion requests. At startup, the `/v1/models` endpoint is queried for the model's `max_model_len`; if that query fails this value is used instead. Requests whose total token count (prompt + `max_tokens`) exceeds the limit are rejected with a **413** error. |
+| `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback context window of the LLM answering a request. An LLM endpoint's own **Max context size** (Model Endpoints) wins; without one, the `max_model_len` the endpoint reports on `/v1/models` is used (vLLM reports it, most gateways and hosted APIs don't), and this value only when neither is known. The admin UI shows which one applies to each endpoint. Requests whose prompt (with the `tools` definitions and tool-call history a client sends) + `max_tokens` exceed the window are rejected with a **413** error, as are those the answer instructions push over it (`CONTEXT_WINDOW_EXCEEDED`, sent as an error event on a streaming request). The documents and web results given to the LLM are cut to fit what the window leaves, so a value smaller than the model's real window means the LLM gets fewer chunks than the retrieval preset's `top_n`. |
 | `MAX_OUTPUT_TOKENS` | `int` | `1024` | Default output-token budget (`max_tokens`) applied to chat completions when the request doesn't set one explicitly. |
 
 
@@ -443,7 +455,7 @@ The retriever fetches relevant documents from the vector database based on query
 | `RELATED_LIMIT` | `int` | 10 | Maximum number of related/ancestor chunks fetched per matched result when expansion is enabled. |
 | `MAX_DEPTH` | `int` | 10 | Maximum ancestor depth traversed when `INCLUDE_ANCESTORS` is enabled. |
 | `RETRIEVER_ALLOW_FILTERLESS_FALLBACK` | `bool` | true | When a temporally-filtered retrieval returns no documents, re-run the query without the filter. Set to `false` for strict temporal retrieval. |
-| `RETRIEVER_MAX_PARTITION_CONCURRENCY` | `int` | 16 | Upper bound on how many per-partition retrievals run concurrently **per retrieval call**. Bounds fan-out for multi-partition / `openrag-all` searches; small fan-outs stay fully parallel. Note: a multi-query request (multiQuery/hyde) issues one such call per sub-query, so peak concurrency can reach `N × this value`, not a flat per-request cap. |
+| `RETRIEVER_MAX_PARTITION_CONCURRENCY` | `int` | 16 | Upper bound on how many partition-group retrievals run concurrently **per retrieval call**. Partitions sharing an embedder (and, for chat, a retrieval preset) are retrieved together, so a multi-partition / `openrag-all` search fans out one retrieval per group; small fan-outs stay fully parallel. Note: a multi-query request (multiQuery/hyde) issues one such call per sub-query, so peak concurrency can reach `N × this value`, not a flat per-request cap. |
 
 #### Retrieval Strategies
 
@@ -462,7 +474,7 @@ The reranker enhances search quality by re-scoring and reordering retrieved docu
 | `RERANKER_ENABLED` | `bool` | true | Enable or disable the reranking mechanism |
 | `RERANKER_PROVIDER` | `str` | `infinity` | Reranker backend to use. Accepted values: `infinity`, `openai`, `tei` |
 | `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents. Ignored by the `tei` provider (a TEI instance serves a single fixed model) |
-| `RERANKER_TOP_K` | `int` | 10 | Number of top documents to return after reranking. Increase for better results if your LLM has a wider context window |
+| `RERANKER_TOP_K` | `int` | 10 | Number of chunks kept after reranking and given to the LLM, for every retrieval preset that leaves `top_n` empty (a preset's own `top_n` overrides it), as many of them as fit in the answering LLM's context window (see `MAX_LLM_CONTEXT_SIZE`). Must be greater than 0. The retrieval presets an earlier release seeded store `top_n: 10` and keep it on upgrade: clear the field in the admin UI for them to follow this value. Increase for better results if your LLM has a wider context window |
 | `RERANKER_BASE_URL` | `str` | `http://reranker:7997` | Base URL of the reranker service |
 | `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service, sent as a `Bearer` token when set. Whether a key is required depends on your endpoint |
 | `RERANKER_TIMEOUT` | `float` | 60.0 | HTTP timeout in seconds for reranker requests |
@@ -508,6 +520,9 @@ To customize prompt:
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `PROMPTS_DIR` | str | (bundled `openrag/prompts/templates`) | Path to a directory of prompt templates. Unset uses the templates bundled in the package; set it only to override with a custom directory. |
+| `PROMPTS_REFRESH_DEFAULTS` | bool | `true` | Refresh a saved default only when it still matches an older bundled version. Set `false` during a staged rollout if old instances must keep using their existing prompt; re-enable after they stop. Stale defaults remain visible in startup warnings. |
+
+Refreshing a default changes the saved database value. Turning the switch off or rolling back the image does not restore its earlier text; restore that text from the earlier release if you need the old behavior. Presets and partitions that fall back to the global default use the refreshed text; prompts they select by name keep their own text.
 
 ### Logging
 OpenRAG logs with Loguru on the process **stderr**, and nowhere else. Docker
@@ -678,11 +693,13 @@ The following environment variables configure the FastAPI server and control acc
 | `APP_PORT` | `number` | `8000` | Port number on which the FastAPI application listens for incoming requests. |
 | `AUTH_TOKEN` | `string` | `EMPTY` | Authentication token used to bootstrap the admin user and access protected API endpoints. If it is empty, the API fails closed unless `ALLOW_NO_AUTH=true` is explicitly set for local development. |
 | `ALLOW_NO_AUTH` | `boolean` | `false` | Enables the no-auth local development bypass when `AUTH_MODE=token` and `AUTH_TOKEN` is unset. Never enable this in production. |
+| `SEED_USERS` | `string` | _(unset)_ | JSON (or YAML) list of operator-managed accounts, replacing `auth.seed_users` from `conf/config.yaml`. Each entry names the env var holding its token (`token_env`), never the token itself, for example `[{"external_user_id": "svc-cozy-stack", "token_env": "COZY_STACK_TOKEN", "partitions": [{"name": "twake", "role": "editor"}]}]`. The env var each entry names (here `COZY_STACK_TOKEN`) carries the token and is rewritten into the account at every startup. See [Operator-managed accounts](/openrag/documentation/user_auth/#operator-managed-accounts-authseed_users). |
 | `SUPER_ADMIN_MODE` | `boolean` | `false` | Enables super admin privileges when set to `true`, [granting unrestricted access](/openrag/documentation/data_model/#access-control) to all operations and bypassing standard access controls. This is for debugging |
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
 | `METRICS_TOKEN` | `string` | unset | Bearer a Prometheus scraper must send on `GET /metrics`. The route bypasses the auth middleware and admin tokens are not accepted there. It fails closed: with the token unset and `METRICS_ALLOW_UNAUTHENTICATED` off, every scrape gets `403`. The compose monitoring overlay forwards this value to its Prometheus. See [Prometheus metrics](/openrag/documentation/prometheus_metrics/). |
 | `METRICS_ALLOW_UNAUTHENTICATED` | `boolean` | `false` | Serve `GET /metrics` to anyone who can reach the API port when `METRICS_TOKEN` is unset. Only for deployments that block `/metrics` at the edge and scrape from inside the network; a configured token always wins. |
+| `ASSISTANT_NAME` | `string` | empty | Name used in the assistant's greeting. Leave unset for a neutral introduction; set it for a white-label deployment. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
 | `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. **Set this to your proxy's subnet, not `*`** — see the proxy-trust caution under [Rate Limiting](#rate-limiting) for why `*` can be spoofed. |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
@@ -698,16 +715,17 @@ Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it 
 
 ### Rate Limiting
 
-Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). **Admin users bypass rate limiting entirely.** Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.
+Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). Admin users bypass the general tiers, but retrieval diagnostics have their own administrator limit. Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.
 
 Limit values use the `<count>/<period>` format from the [`limits`](https://limits.readthedocs.io/) library (e.g. `120/minute`, `10/second`).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `RATE_LIMIT_ENABLED` | `bool` | `true` | Master switch for request rate limiting. When `false`, no limits are applied and malformed limit values are ignored. |
+| `RATE_LIMIT_ENABLED` | `bool` | `true` | Master switch for the general path-based limits. When `false`, those limits are not applied and malformed `RATE_LIMIT_*` values are ignored. The separate administrator retrieval-diagnostics limit remains active. |
 | `RATE_LIMIT_DEFAULT` | `str` | `600/minute` | Limit applied to every path except the tiers below. |
 | `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
 | `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
+| `RETRIEVAL_DIAGNOSTICS_RATE_LIMIT` | `str` | `120/minute` | Separate per-administrator limit for retrieval traces, original-query comparisons, and retrieval snapshots. This limit applies even though administrators bypass the general tiers. It is enforced per API process, so the deployment-wide capacity scales with the number of replicas. |
 | `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP (brute-force protection). Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 
@@ -790,7 +808,7 @@ OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol
 
 #### Model-endpoint seed overrides (legacy aliases)
 
-On first startup, OpenRAG seeds its model-endpoint catalog from the canonical variables documented above. The following **legacy aliases** are still read at seed time for backward compatibility and, when set, take precedence over their canonical counterpart **during that initial seeding only**. Prefer the canonical variables in new deployments — do not set both.
+On first startup, OpenRAG seeds its model-endpoint catalog from the canonical variables documented above. The following **legacy aliases** are still read at seed time for backward compatibility and, when set, take precedence over their canonical counterpart, at that initial seeding and, with `MODEL_ENDPOINT_SYNC_ON_BOOT=true`, at every boot's sync. Prefer the canonical variables in new deployments — do not set both.
 
 | Legacy alias | Falls back to (canonical) |
 |--------------|---------------------------|
@@ -815,6 +833,15 @@ Deployment-level knobs; most deployments never need to touch these — the compo
 | `OPENRAG_CONTAINER_STARTUP_TIMEOUT` | `float` | `max(60, 4 × POSTGRES_COMMAND_TIMEOUT)` (= 120 with defaults) | Seconds the API's service container (DB pools, Ray actors, …) is allowed to initialize at startup before the app fails fast. |
 | `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
 | `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |
+
+#### TLS proxy overlay (opt-in)
+
+Read only by the opt-in proxy compose file (`infra/compose/proxy.docker-compose.yaml`). Relative paths resolve against `infra/compose/`:
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PROXY_DATA_DIR` | `str` | `../../nginx_data` | Host directory for Nginx Proxy Manager's state (config and `database.sqlite`). |
+| `PROXY_LETSENCRYPT_DIR` | `str` | `../../letsencrypt` | Host directory for the Let's Encrypt certificates NPM issues. |
 
 #### Monitoring profile (opt-in)
 

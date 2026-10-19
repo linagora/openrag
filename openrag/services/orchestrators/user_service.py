@@ -22,9 +22,11 @@ matches the legacy endpoint again.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
-from core.utils.exceptions import UserNotFoundError, ValidationError
+from core.models.user import PartitionRole, User, UserPartition
+from core.utils.consts import DEFAULT_ADMIN_USER_ID, DEFAULT_PARTITION_NAME
+from core.utils.exceptions import ConflictError, UserNotFoundError, ValidationError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -60,6 +62,7 @@ class UserService:
         partition_service: PartitionService,
         membership_repo: PartitionMembershipRepository,
         job_service: JobService,
+        seed_user_ids: frozenset[str] = frozenset(),
     ) -> None:
         self._user_repo = user_repo
         # Injected so future phases can consolidate authz decisions
@@ -81,6 +84,9 @@ class UserService:
         # UserService) — so UserService composes JobService rather than
         # holding a Ray handle itself.
         self._job_service = job_service
+        # external_user_id of every auth.seed_users entry this process booted
+        # with: a managed account still listed there cannot be deleted.
+        self._seed_user_ids = seed_user_ids
 
     # ------------------------------------------------------------------
     # Validation
@@ -174,21 +180,73 @@ class UserService:
 
         Mirrors the legacy Ray ``delete_user``: every partition where the
         user holds the ``owner`` role is deleted (vectors + relational
-        rows, via PartitionService) before the user row is removed.
+        rows, via PartitionService) before the user row is removed. The
+        ``default`` partition is kept, since it cannot be deleted; only the
+        user's membership in it goes, with the user row. If the user owned
+        it, the seeded admin is made its owner so it never ends up without
+        anyone allowed to manage its members.
         """
         await self._ensure_exists(user_id)
-        owned = [
+        existing_user = await self._user_repo.get_user(user_id)
+        if existing_user is None:
+            raise UserNotFoundError(f"User '{user_id}' not found")
+        if existing_user.managed_by_config and existing_user.external_user_id in self._seed_user_ids:
+            # The next startup would recreate the entry under a new id with
+            # only its listed memberships, after its partitions were deleted.
+            # Once the entry is removed (and the token revoked at startup) the
+            # row is no longer listed and can be deleted.
+            raise ConflictError(
+                f"User '{user_id}' is managed by configuration (auth.seed_users): "
+                "remove its entry there and restart the API before deleting it"
+            )
+        owned_all = [
             p["partition"]
             for p in await self._membership_repo.list_user_partitions_dict(user_id)
             if p.get("role") == "owner"
         ]
+        owned = [p for p in owned_all if p != DEFAULT_PARTITION_NAME]
         for partition in owned:
             await self._partition_service.delete_partition(partition)
+        if DEFAULT_PARTITION_NAME in owned_all and user_id != DEFAULT_ADMIN_USER_ID:
+            await self._membership_repo.assign_partition(
+                UserPartition(
+                    user_id=DEFAULT_ADMIN_USER_ID,
+                    partition=DEFAULT_PARTITION_NAME,
+                    role=PartitionRole.OWNER,
+                )
+            )
         await self._user_repo.delete_user(user_id)
         logger.info("Deleted user", user_id=user_id, cascaded_partitions=len(owned))
 
+    def _refuse_managed_change(self, user: User, setting: str) -> NoReturn:
+        """Raise a 409: ``setting`` of a managed account is decided by auth.seed_users.
+
+        Startup seeding rewrites it on every boot, so an API change would only
+        last until the next restart. A listed account is changed in its entry.
+        A removed one keeps ``managed_by_config`` and is revoked at every
+        startup: listing it again restores it, deleting it ends it.
+        """
+        if user.external_user_id in self._seed_user_ids:
+            raise ConflictError(
+                f"User '{user.id}' is managed by configuration (auth.seed_users): "
+                f"change its {setting} there, not through the API"
+            )
+        raise ConflictError(
+            f"User '{user.id}' was removed from auth.seed_users and is revoked at every API startup: "
+            "list it there again, or delete the account"
+        )
+
     async def regenerate_token(self, user_id: int) -> dict:
         await self._ensure_exists(user_id)
+        existing_user = await self._user_repo.get_user(user_id)
+        if (
+            existing_user is not None
+            and existing_user.managed_by_config
+            and existing_user.external_user_id not in self._seed_user_ids
+        ):
+            # A listed account may still be regenerated: it cuts a leaked token
+            # at once, until the next startup writes its secret again.
+            self._refuse_managed_change(existing_user, "token")
         revoked = await self._auth_service.revoke_oidc_sessions_by_user(user_id)
         user = await self._user_repo.regenerate_user_token(user_id)
         if user is None:
@@ -205,6 +263,12 @@ class UserService:
         existing_user = await self._user_repo.get_user(user_id)
         if existing_user is None:
             raise UserNotFoundError(f"User '{user_id}' not found")
+        if existing_user.managed_by_config:
+            # auth.seed_users matches its rows on external_user_id, and startup
+            # seeding sets the admin flag (or drops it, for a removed entry).
+            for setting in ("external_user_id", "is_admin"):
+                if setting in updates and updates[setting] != getattr(existing_user, setting):
+                    self._refuse_managed_change(existing_user, setting)
         demotes_admin = existing_user.is_admin and updates.get("is_admin") is False
 
         revoked = 0

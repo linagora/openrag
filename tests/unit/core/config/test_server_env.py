@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core.config import load_config
+from core.config.infrastructure import ServerConfig
 
 
 def _write_minimal_config(tmp_path):
@@ -58,3 +59,9 @@ def test_metrics_allow_unauthenticated_from_env(monkeypatch, tmp_path):
     settings = load_config(config_path=tmp_path)
 
     assert settings.server.metrics_allow_unauthenticated is True
+
+
+def test_metrics_token_is_left_out_of_repr():
+    server = ServerConfig(metrics_token="prom-scrape-secret")
+
+    assert "prom-scrape-secret" not in repr(server)

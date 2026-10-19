@@ -81,6 +81,16 @@ export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
   ],
   query_contextualizer: [
     { name: "current_date", description: "Today's date, injected at request time", sample: "2026-07-27" },
+    {
+      name: "calendar_anchors",
+      description: "Pre-computed date ranges (today, last/this week, month, year, recent) for temporal filters",
+      sample:
+        "Calendar anchors (use verbatim, do not recompute):\n" +
+        "- today 2026-07-27T00:00:00+00:00, tomorrow 2026-07-28T00:00:00+00:00, yesterday 2026-07-26T00:00:00+00:00\n" +
+        "- last week [2026-07-20, 2026-07-27)\n" +
+        "- this week [2026-07-27, 2026-08-03)\n" +
+        "- past N days/weeks/months/years: [today − N, tomorrow)",
+    },
     { name: "query_language", description: "Detected language of the user's query", sample: "English" },
   ],
   chunk_contextualizer: [],

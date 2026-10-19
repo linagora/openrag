@@ -119,6 +119,10 @@ def _supports_task_state_recovery(actor) -> bool:
         # The Boolean contract cannot distinguish a cancellation from actor
         # eviction after the catalog commit, so those actors are incompatible.
         and getattr(actor, "supports_explicit_completion_outcomes", None) is not None
+        # Admission is fenced against a task already indexing the same file at
+        # queue time. The dispatcher degrades to the unfenced method against an
+        # older actor, so keeping one would silently readmit duplicate uploads.
+        and getattr(actor, "set_queued_details_v2", None) is not None
     )
 
 

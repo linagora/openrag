@@ -175,6 +175,26 @@ class AmbiguousWorkspaceError(ValidationError):
         )
 
 
+class ContextWindowExceededError(ValidationError):
+    """The answer instructions and the request alone don't fit in the answering model's context window.
+
+    The router's preflight counts the caller's messages and the output budget,
+    not the instructions the answer prompt adds; this catches what that leaves,
+    instead of sending the provider a request it would reject.
+    """
+
+    def __init__(self, prompt_tokens: int, max_prompt_tokens: int, **kwargs):
+        super().__init__(
+            f"Request exceeds the answering model's context window: the instructions and the request take "
+            f"{prompt_tokens} tokens, and {max_prompt_tokens} are left once the requested output is reserved.",
+            status_code=413,
+            code="CONTEXT_WINDOW_EXCEEDED",
+            prompt_tokens=prompt_tokens,
+            max_prompt_tokens=max_prompt_tokens,
+            **kwargs,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Not found
 # ---------------------------------------------------------------------------
@@ -268,10 +288,27 @@ class CircuitBreakerOpenError(ServiceUnavailableError):
 
 
 class InferenceError(OpenRAGError):
-    """Base for all inference service failures. Maps to HTTP 503."""
+    """Base for all inference service failures. Maps to HTTP 503.
 
-    def __init__(self, message: str, *, code: str = "INFERENCE_ERROR", status_code: int = 503, **kwargs):
+    ``caller_shaped`` marks a call sent with the caller's own endpoint and key
+    (an honoured ``llm_override.base_url``): the API answers its 401 or 403 as
+    the caller's error rather than an upstream failure. A model-only override
+    still sends OpenRag's key, and a 401 there cannot be told from that key
+    being revoked, so it is not caller-shaped. Kept off ``extra``, which is
+    serialised into the response body.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "INFERENCE_ERROR",
+        status_code: int = 503,
+        caller_shaped: bool = False,
+        **kwargs,
+    ):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
+        self.caller_shaped = caller_shaped
 
 
 class LLMParsingError(InferenceError):

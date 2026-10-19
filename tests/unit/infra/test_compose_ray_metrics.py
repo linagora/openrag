@@ -26,7 +26,7 @@ API_SERVICES = ("openrag", "openrag-cpu")
 PORT_VARIABLE = "RAY_METRICS_EXPORT_PORT"
 
 # The jobs OpenRagTargetDown watches.
-TARGET_DOWN_JOBS = ".*openrag.*"
+TARGET_DOWN_JOBS = ".*openrag.*|ray"
 
 
 def _embedded_ray_init(tree: ast.Module) -> ast.Call:
@@ -111,7 +111,7 @@ def test_ray_serve_starts_ray_with_the_same_settings():
 
 
 def test_the_ray_job_is_watched_by_the_target_down_alert():
-    """OpenRagTargetDown watches the jobs matching job=~".*openrag.*". Outside it,
+    """OpenRagTargetDown watches the jobs matching job=~".*openrag.*|ray". Outside it,
     the Ray scrape can fail unnoticed: the ingestion tiles then read Idle rather
     than anything that looks broken.
     """

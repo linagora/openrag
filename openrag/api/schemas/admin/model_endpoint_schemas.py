@@ -12,7 +12,7 @@ from core.config.model_endpoints import (
     MOSS_SPEAKER_AWARE_KEY,
     STT_LANGUAGE_KEY,
 )
-from core.utils.redaction import redact_secret_mapping
+from core.utils.redaction import RedactedExtraRepr, redact_secret_mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
@@ -123,7 +123,7 @@ def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) ->
         raise ValueError(f"extra.{MOSS_SPEAKER_AWARE_KEY} must be a boolean")
 
 
-class CreateModelEndpointRequest(BaseModel):
+class CreateModelEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body for registering a model endpoint."""
 
     model_config = ConfigDict(extra="forbid")
@@ -175,7 +175,7 @@ class CreateModelEndpointRequest(BaseModel):
         return self
 
 
-class UpdateModelEndpointRequest(BaseModel):
+class UpdateModelEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body for updating a registered model endpoint."""
 
     model_config = ConfigDict(extra="forbid")
@@ -265,12 +265,27 @@ class ModelEndpointResponse(BaseModel):
     extra: dict[str, Any]
     has_api_key: bool = False
     is_default: bool
+    # Dense vector field this embedder owns; null for other model types. Set
+    # when the endpoint is created and kept through renames. The admin UI
+    # compares it with the field each file was indexed into.
+    vector_field: str | None = None
     # Partitions whose resolved reference is this endpoint — those naming it
     # plus, for the default endpoint, those riding the `default` alias. Zero
     # for types with no partition column (reranker/vlm/stt), which are
     # referenced through presets instead. Every route returning this model
     # fills it, through ModelEndpointService.with_partition_usage.
     used_by_partitions: int = 0
+    # LLM endpoints only (None otherwise): what a blank max context size /
+    # max output tokens resolves to, so the admin UI can show the value in
+    # effect instead of a generic "System default". The window is the
+    # ``max_model_len`` the endpoint reported on ``/v1/models`` (vLLM does,
+    # most gateways don't), else ``default_max_llm_context_size``.
+    detected_max_llm_context_size: int | None = None
+    # An endpoint write cleared the detected values and the re-probe hasn't
+    # landed yet: ``detected_max_llm_context_size`` is unknown, not absent.
+    context_size_detection_pending: bool = False
+    default_max_llm_context_size: int | None = None
+    default_max_output_tokens: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -289,7 +304,7 @@ class ModelEndpointResponse(BaseModel):
         return data
 
 
-class ValidateEndpointRequest(BaseModel):
+class ValidateEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body to validate endpoint values before they are saved (draft)."""
 
     endpoint: str
@@ -297,7 +312,7 @@ class ValidateEndpointRequest(BaseModel):
     model_name: str | None = None
     timeout: float | None = Field(default=None, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
     stored_api_key_model_type: ModelEndpointType | None = None
     stored_api_key_name: str | None = None
 
@@ -342,7 +357,7 @@ class ValidateEndpointResponse(BaseModel):
 class RevealApiKeyResponse(BaseModel):
     """Response body for explicitly revealing a stored endpoint API key."""
 
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
 
 
 __all__ = [

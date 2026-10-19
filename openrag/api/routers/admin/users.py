@@ -17,6 +17,7 @@ service once the queue is de-Ray'd.
 from api.dependencies.auth import current_user, require_admin, require_admin_or_self
 from api.runtime_flags import WITH_CHAINLIT_UI
 from api.schemas.admin.users import UserCreate, UserPublic, UserUpdate
+from core.utils.consts import DEFAULT_ADMIN_USER_ID
 from core.utils.logging import get_logger
 from di.providers import get_user_service
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -177,7 +178,9 @@ async def get_user(
 **Response:**
 Returns 204 No Content on successful deletion.
 
-**Note:** Cannot delete the default admin user (ID: 1).
+**Note:** Cannot delete the default admin user (ID: 1). An account still
+listed in `auth.seed_users` cannot be deleted either (409): remove its entry
+and restart the API first.
 """,
 )
 async def delete_user(
@@ -186,7 +189,7 @@ async def delete_user(
     service=Depends(get_user_service),
 ):
     """Delete a user."""
-    if user_id == 1:
+    if user_id == DEFAULT_ADMIN_USER_ID:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete default admin user.",
@@ -217,6 +220,9 @@ Returns user details including the new token:
 - Additional user details
 
 **Note:** Store the new token securely - the old token is now invalid.
+An account removed from `auth.seed_users` is refused (409): startup revokes
+its token again. One still listed is accepted, and its configured token is
+written again at the next startup.
 """,
 )
 async def regenerate_user_token(
@@ -244,6 +250,8 @@ async def regenerate_user_token(
     * `>= 0`: Specific file limit for this user
 
 Only fields explicitly provided in the request body are updated.
+Changing `external_user_id` or `is_admin` of an account managed by
+`auth.seed_users` is refused (409): change its entry there instead.
 
 **Permissions:**
 - Requires admin role
@@ -267,7 +275,7 @@ async def update_user(
 ) -> UserPublic:
     """Update a user's profile fields."""
     # Only block if is_admin was explicitly set to False in the request.
-    if user_id == 1 and "is_admin" in body.model_fields_set and body.is_admin is False:
+    if user_id == DEFAULT_ADMIN_USER_ID and "is_admin" in body.model_fields_set and body.is_admin is False:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot revoke admin privileges from the default admin user.",

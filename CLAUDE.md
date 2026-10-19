@@ -137,13 +137,13 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
 The `extra` field in API responses is a JSON object with these keys. It was a
-JSON-encoded *string* up to and including v2.2.0 — a breaking change for readers
+JSON-encoded *string* up to and including v2.2.2 — a breaking change for readers
 written against the old shape, which must stop calling `json.loads` on it:
 
-- `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when no `[Sources: ...]` tag was found.
+- `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when the model reported no citations — neither a `[Sources: ...]` tag nor an inline `[Source N]` marker — or the request skips citation reporting (structured output, direct LLM, web search with no results).
 - `presented_sources` — every source actually shown to the LLM (after `format_context()`/`format_web_context()` truncation), regardless of citation. Always present; a client can fall back to this ("sources consulted") when nothing was cited.
-- `cited_sources` — strictly what the model cited via the tag; unlike `sources`, this never falls back to "everything" — it's `[]` whenever no tag was found. Chainlit uses this field directly so its source panel never presents uncited retrieval candidates.
-- `citations_reported` (bool) — `true` only when the model actually emitted a `[Sources: ...]` tag (even an empty/`none` one); `false` when the tag was missing entirely, which is the only case where `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
+- `cited_sources` — strictly what the model cited, in the tag or inline `[Source N]` markers; unlike `sources`, this never falls back to "everything" — it's `[]` whenever nothing was cited or citations weren't reported. Chainlit uses this field directly so its source panel never presents uncited retrieval candidates.
+- `citations_reported` (bool) — `true` when the model reported citations: a `[Sources: ...]` tag with sources or `none`, or inline `[Source N]` markers (an empty `[Sources: ]` counts as no tag); `false` otherwise, which is exactly when `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
 - `all_retrieved_sources` — the complete retrieval set, captured before the context-token-budget truncation, so it also includes documents/web results that didn't fit in the prompt (and, on the map-reduce path, the original retrieved docs rather than the LLM-generated summaries). Only included when the request sets `metadata.include_all_retrieved_sources: true` — it's debug/eval telemetry, gated off by default since retrieval is uncapped up to `retriever.top_k` while the context budget only fits a handful of documents.
 
 Each document source entry (`build_document_source_link`) is shaped:
@@ -225,7 +225,7 @@ Grafana dashboards live once, in `infra/charts/openrag-stack/dashboards/` (Helm'
 The system uses token-based authentication with role-based access control (RBAC) for multi-tenant partition access.
 
 **Database Schema** (PostgreSQL with SQLAlchemy, in `openrag/services/persistence/schema.py`):
-- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`
+- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`, `managed_by_config` (provisioned from `auth.seed_users`)
 - `files` - File records with `file_id`, `partition_name`, `file_metadata`, `created_by` (FK to users), `relationship_id`, `parent_id`
 - `partition_memberships` - Join table linking users to partitions with roles (`owner`, `editor`, `viewer`)
 - `partitions` - Document collections with cascade delete to files and memberships
@@ -283,6 +283,8 @@ await vectordb.list_partition_members.remote(partition)
 **Token Format**: `"or-" + secrets.token_hex(16)` (34-char string, shown only once on creation/regeneration)
 
 **Bootstrap**: On startup, ensures admin user (id=1) exists using `AUTH_TOKEN` env var or generates a random token.
+
+**Seed users** (#1153): `auth.seed_users` (or the `SEED_USERS` env var, rendered by the chart from `openrag.seedUsers`) declares operator-managed accounts, provisioned by `PgUserRepository.ensure_seed_users` at API startup only, with each token read from the env var the entry names. Seeding only upserts rows it created (`users.managed_by_config`) and listed memberships; it never deletes, and a removed entry just has its token revoked. Full semantics: `docs/content/docs/documentation/user_auth.md`.
 
 **Multi-Partition Search**: Users can search across all their accessible partitions:
 - Search endpoint: `GET /search?partitions=all&text=query`
