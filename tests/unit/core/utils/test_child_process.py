@@ -14,7 +14,7 @@ import sys
 import time
 
 import pytest
-from core.utils.child_process import kill_orphaned_group, kill_process_group, run_tied, tie_to_parent
+from core.utils.child_process import kill_process_group, run_tied, tie_to_parent
 
 linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux-only")
 
@@ -148,63 +148,6 @@ def test_killing_a_process_that_is_already_gone_does_not_raise():
     child.join(timeout=10)
 
     kill_process_group(child.pid)
-
-
-def _lead_a_group_then_exit(grandchild_pids) -> None:
-    """Lead a group, start a process in it, and die leaving that process behind."""
-    os.setpgrp()
-    grandchild = multiprocessing.get_context("fork").Process(target=time.sleep, args=(600,))
-    grandchild.start()
-    grandchild_pids.put(grandchild.pid)
-    # os._exit skips the queue's flush, which would lose the pid.
-    grandchild_pids.close()
-    grandchild_pids.join_thread()
-    os._exit(0)
-
-
-@linux_only
-def test_what_a_reaped_child_left_in_its_group_is_killed():
-    ctx = multiprocessing.get_context("fork")
-    grandchild_pids = ctx.Queue()
-    child = ctx.Process(target=_lead_a_group_then_exit, args=(grandchild_pids,))
-    child.start()
-    grandchild = grandchild_pids.get(timeout=60)
-    # Not join(): it waits for a pipe the grandchild inherited and keeps open.
-    deadline = time.monotonic() + 10
-    while child.exitcode is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    try:
-        assert child.exitcode == 0 and _alive(grandchild)
-
-        kill_orphaned_group(child.pid)
-
-        assert not _alive_after(grandchild, 2)
-    finally:
-        _kill_quietly(grandchild)
-
-
-def _lead_a_group_and_wait() -> None:
-    os.setpgrp()
-    time.sleep(600)
-
-
-@linux_only
-def test_a_process_holding_the_pid_of_a_reaped_child_is_left_alone():
-    """A process with that pid means the pid was reused: the group is gone."""
-    unrelated = multiprocessing.get_context("fork").Process(target=_lead_a_group_and_wait)
-    unrelated.start()
-    deadline = time.monotonic() + 10
-    while os.getpgid(unrelated.pid) != unrelated.pid and time.monotonic() < deadline:
-        time.sleep(0.05)
-    try:
-        assert os.getpgid(unrelated.pid) == unrelated.pid
-
-        kill_orphaned_group(unrelated.pid)
-
-        assert _alive_after(unrelated.pid, 1)
-    finally:
-        _kill_quietly(unrelated.pid)
-        unrelated.join(timeout=10)
 
 
 def _group_and_pool(tied: bool, worker_info) -> None:

@@ -128,9 +128,7 @@ def test_force_kill_executor_treats_a_crashed_child_as_gone(monkeypatch):
     """A broken pool keeps its crashed child after reaping it, so its pid is
     free: killing it as a live child could hit an unrelated process."""
     killed: list[int] = []
-    orphaned: list[int] = []
     monkeypatch.setattr(marker_workers, "kill_process_group", killed.append)
-    monkeypatch.setattr(marker_workers, "kill_orphaned_group", orphaned.append)
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("fork"))
     with pytest.raises(concurrent.futures.process.BrokenProcessPool):
         executor.submit(os._exit, 9).result(timeout=60)
@@ -140,7 +138,6 @@ def test_force_kill_executor_treats_a_crashed_child_as_gone(monkeypatch):
     marker_workers._force_kill_executor(executor, _NullLogger())
 
     assert killed == []
-    assert orphaned == [crashed.pid]
 
 
 # Kept alive in a pool child, so the processes it started keep running.
@@ -213,35 +210,6 @@ def test_recycling_a_slot_kills_what_its_child_started():
         while any(_running(pid) for pid in [child, *grandchildren]) and time.monotonic() < deadline:
             time.sleep(0.1)
         assert not any(_running(pid) for pid in [child, *grandchildren])
-    finally:
-        for pid in grandchildren:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process groups and /proc as on the workers")
-def test_recycling_a_slot_whose_child_crashed_kills_what_it_started():
-    """A child that dies mid-extraction leaves pdftext's processes running in
-    its group; the recycle of the broken slot must still reach them."""
-    executor = _real_slot_executor()
-    grandchildren = executor.submit(_start_grandchildren, 2).result(timeout=120)
-    child = next(iter(executor._processes))
-    crashed = executor._processes[child]
-    os.kill(child, signal.SIGKILL)
-    deadline = time.monotonic() + 10
-    while crashed.exitcode is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    try:
-        assert crashed.exitcode == -signal.SIGKILL
-
-        marker_workers._force_kill_executor(executor, _NullLogger())
-
-        deadline = time.monotonic() + 5
-        while any(_running(pid) for pid in grandchildren) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        assert not any(_running(pid) for pid in grandchildren)
     finally:
         for pid in grandchildren:
             try:

@@ -9,8 +9,7 @@ any more (#1167). Ray stops a worker's children when it stops the worker itself
 :func:`tie_to_parent` runs first in each child. :func:`run_tied` does the same for
 the processes a child starts in turn, such as pdftext's own process pool inside a
 Marker child, without moving them out of the child's group. :func:`kill_process_group`
-is how the parent reclaims a child together with whatever the child started, and
-:func:`kill_orphaned_group` reclaims what a child that already died left behind.
+is how the parent reclaims a child together with whatever the child started.
 """
 
 from __future__ import annotations
@@ -91,9 +90,10 @@ def run_tied(parent_pid: int, initializer: Callable[..., object] | None, initarg
 def kill_process_group(pid: int) -> None:
     """``SIGKILL`` the process group led by *pid*, or *pid* alone if it leads none.
 
-    A child killed before its initializer ran :func:`tie_to_parent` leads no group
-    yet, and is killed by itself. Linux does not reuse a pid while a group still
-    carries it, so the group killed is always this child's.
+    *pid* must be a child that has not been reaped: until then its pid stays
+    taken, so the group or process killed is always this child's. A child killed
+    before its initializer ran :func:`tie_to_parent` leads no group yet, and is
+    killed by itself.
     """
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -102,26 +102,3 @@ def kill_process_group(pid: int) -> None:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-
-
-def kill_orphaned_group(pid: int) -> None:
-    """``SIGKILL`` what is left of the process group a reaped child led.
-
-    Linux does not give a pid to a new process while any process still carries it
-    as a group id. So if a process with *pid* exists, the group is gone and the pid
-    now belongs to an unrelated process, which is left alone. Otherwise every
-    process in group *pid* was started by that child. The one exposure is the pid
-    being reused in the few microseconds between the two calls.
-    """
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        return
-    else:
-        return
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
