@@ -180,6 +180,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("WEBSEARCH_BASE_URL", "websearch.base_url", str),
     ("WEBSEARCH_TOP_K", "websearch.top_k", int),
     ("WEBSEARCH_LANG", "websearch.lang", str),
+    ("WEBSEARCH_MAX_QUERIES", "websearch.max_queries", int),
     ("WEBSEARCH_MAX_TOKENS", "websearch.max_tokens", int),
     ("WEBSEARCH_FETCH_CONTENT", "websearch.fetch_content", bool),
     ("WEBSEARCH_FETCH_MAX_RESULTS", "websearch.fetch_max_results", int),

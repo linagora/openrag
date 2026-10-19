@@ -752,9 +752,7 @@ DELETE /presets/{preset_type}/{name}
 
 ### 📝 Prompt Library
 
-Every prompt the pipeline sends to a model is a stored, editable row rather than a bundled file. On first boot each type is seeded from its bundled template as that type's **default**; an admin can add named variants and select one per preset or per partition.
-
-On startup, an unchanged default seeded from an older bundled template is refreshed in place. Edited or renamed defaults and named prompts are preserved. For staged rollouts, set `PROMPTS_REFRESH_DEFAULTS=false` until older application instances have stopped, then enable refresh again.
+Every prompt the pipeline sends to a model is a stored, editable row rather than a bundled file. On first boot each type is seeded from its bundled template as that type's **default**. On upgrade, unchanged defaults seeded from recognized earlier bundled versions are refreshed in place; edited defaults and named prompts are preserved. An admin can add named variants and select one per preset or per partition. For staged rollouts, set `PROMPTS_REFRESH_DEFAULTS=false` until older application instances have stopped, then enable refresh again.
 
 All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `hyde` | `multi_query` | `topic_tagger` | `asr_transcription`.
 
