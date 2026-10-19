@@ -102,12 +102,14 @@ class RetrievalSearcher(ABC):
         relationship_id: str,
         limit: int,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         """Fetch other chunks belonging to the same relationship group.
 
         ``allowed_file_ids``, when not ``None``, restricts results to that
         file-id set (workspace scoping) — expansion must never surface a
-        related file outside the caller's authorized scope.
+        related file outside the caller's authorized scope. ``filter`` is the
+        same expression the initial search used, such as a temporal predicate.
         """
         ...
 
@@ -119,11 +121,13 @@ class RetrievalSearcher(ABC):
         limit: int,
         max_ancestor_depth: int | None = None,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         """Walk parent links up the document tree from a file.
 
         ``allowed_file_ids``, when not ``None``, restricts results to that
         file-id set (workspace scoping) — expansion must never surface an
-        ancestor file outside the caller's authorized scope.
+        ancestor file outside the caller's authorized scope. ``filter`` is the
+        same expression the initial search used, such as a temporal predicate.
         """
         ...

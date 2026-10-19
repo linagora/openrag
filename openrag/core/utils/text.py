@@ -31,16 +31,21 @@ def get_num_tokens():
             llm_kwargs = config.llm.model_dump()
             llm_kwargs.pop("enable_thinking", None)
             llm = ChatOpenAI(**llm_kwargs)
+            if llm.custom_get_token_ids is None:
+                # Keep LangChain's model/encoding selection, but count literal
+                # control-token spellings as ordinary user text.
+                _, encoding = llm._get_encoding_model()
+                llm.custom_get_token_ids = encoding.encode_ordinary
             _cached_length_function = llm.get_num_tokens
         except Exception as exc:
             import tiktoken
 
             logger.warning(
                 "ChatOpenAI unavailable for token counting, falling back to tiktoken cl100k_base",
-                error=str(exc),
+                error_type=type(exc).__name__,
             )
             encoding = tiktoken.get_encoding("cl100k_base")
-            _cached_length_function = lambda text: len(encoding.encode(text))  # noqa: E731
+            _cached_length_function = lambda text: len(encoding.encode_ordinary(text))  # noqa: E731
     return _cached_length_function
 
 

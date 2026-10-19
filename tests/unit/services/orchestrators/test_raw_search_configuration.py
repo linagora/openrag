@@ -153,3 +153,32 @@ def test_raw_search_configuration_uses_factory_embedder_per_partition():
     ]
     assert before != after_model_change
     assert after_model_change != after_field_change
+
+
+def test_raw_search_fingerprint_tracks_the_effective_rerank():
+    config = _config()
+    config.reranker.enabled = True
+    config.models.reranker = {
+        "default": SimpleNamespace(model_name="default-model"),
+        "fast": SimpleNamespace(model_name="fast-model"),
+    }
+    retrieval = RetrievalPipelineConfig(top_k=20)
+    config.partitions = {"tenant-a": _partition(retrieval=retrieval)}
+    service = RetrievalService(
+        searcher=_Searcher(), reranker=None, llm=None, config=config, reranker_factory=lambda _name: object()
+    )
+    # rerank_candidates omitted: the count used comes from the preset's top_k.
+    options = {"top_k": 5, "similarity_threshold": 0.4, "rerank": True, "rerank_candidates": None}
+
+    assert service.public_search_configuration(["tenant-a"], options)["rerank"] == {
+        "reranker": {"name": "default", "model": "default-model"},
+        "candidates": 20,
+    }
+    baseline = service.search_configuration_fingerprint(["tenant-a"], options)
+    retrieval.reranker = "fast"
+    changed_reranker = service.search_configuration_fingerprint(["tenant-a"], options)
+    retrieval.top_k = 30
+    changed_candidates = service.search_configuration_fingerprint(["tenant-a"], options)
+
+    assert len({baseline, changed_reranker, changed_candidates}) == 3
+    assert "rerank" not in service.public_search_configuration(["tenant-a"], {**options, "rerank": False})
