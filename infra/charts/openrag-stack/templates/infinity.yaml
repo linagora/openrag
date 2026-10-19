@@ -114,10 +114,11 @@ spec:
           resources:
             {{- toYaml .Values.reranker.resources | nindent 12 }}
           {{- $probes := $reranker.probes }}
-          {{- if not (hasKey $reranker "probes") }}
+          {{- if kindIs "invalid" $probes }}
           {{- /* Values without a probes block, e.g. from `helm upgrade
              --reuse-values`, which keeps the previous chart's values and
-             drops this chart's defaults. Earlier charts hardcoded these
+             drops this chart's defaults; there, probes: null stays a null
+             instead of deleting the block. Earlier charts hardcoded these
              probes, so they must not vanish on upgrade. Keep this equal to
              reranker.probes in values.yaml. */}}
           {{- $probes = fromYaml `
@@ -141,6 +142,18 @@ liveness:
   periodSeconds: 30
   failureThreshold: 3
 ` }}
+          {{- end }}
+          {{- /* After --reuse-values from an earlier chart, a probe set in part,
+             e.g. --set reranker.probes.startup.failureThreshold=120, is all
+             the probes block holds: this chart's defaults, its handler
+             included, are not loaded, and Kubernetes refuses a probe without
+             one. A probe left out there cannot be told from one set to null,
+             so it is not filled in either. */}}
+          {{- range $name := list "startup" "readiness" "liveness" }}
+          {{- $probe := index $probes $name }}
+          {{- if and $probe (not (or $probe.httpGet $probe.tcpSocket $probe.exec $probe.grpc)) }}
+          {{- fail (printf "reranker.probes.%s has no handler (httpGet, tcpSocket, exec or grpc). After helm upgrade --reuse-values from an earlier chart, this chart's default probes are not loaded: upgrade with --reset-then-reuse-values (Helm 3.14 or later) instead, or set the whole probe." $name) }}
+          {{- end }}
           {{- end }}
           {{- with $probes.startup }}
           startupProbe:

@@ -86,6 +86,14 @@ The reranker also has a startup probe now, and `reranker.probes` sets all three 
 its probes. A start that hangs is restarted after 10 minutes instead of 2. See
 [Kubernetes](/openrag/documentation/kubernetes/#notes).
 
+Upgrade with `--reset-then-reuse-values` (Helm 3.14 or later) rather than
+`--reuse-values`. `--reuse-values` keeps the earlier chart's defaults, which have
+no `reranker.probes`: the reranker still gets the default probes, but once you set
+any value under `reranker.probes`, that value is all the block holds. A probe set
+in part, such as `--set reranker.probes.startup.failureThreshold=120`, then has no
+handler and the install fails; a probe set in full is the only one the reranker
+gets.
+
 ## Changes in 2.3.0 for every deployment
 
 This section applies to every upgrade from OpenRAG 2.2.1 or 2.2.2, on Kubernetes

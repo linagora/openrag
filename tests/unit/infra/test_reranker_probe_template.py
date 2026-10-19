@@ -169,21 +169,69 @@ def _probes(container: dict) -> dict:
     }
 
 
-@requires_helm
-def test_values_without_a_probes_block_keep_the_default_probes(tmp_path: Path) -> None:
-    """`helm upgrade --reuse-values` keeps the previous chart's values, which have
-    no probes block; the probes were hardcoded then and must not vanish now."""
+def _render_without_default_probes(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Render as `helm upgrade --reuse-values` from an earlier chart does: with
+    that chart's defaults, which have no probes block."""
     chart = _isolated_chart(tmp_path)
     values = yaml.safe_load((chart / "values.yaml").read_text(encoding="utf-8"))
     del values["reranker"]["probes"]
     (chart / "values.yaml").write_text(yaml.safe_dump(values), encoding="utf-8")
     assert HELM is not None
-    result = subprocess.run([HELM, "template", "test", str(chart)], check=False, capture_output=True, text=True)
+    return subprocess.run([HELM, "template", "test", str(chart), *args], check=False, capture_output=True, text=True)
+
+
+def _container_without_default_probes(tmp_path: Path, *args: str) -> dict:
+    result = _render_without_default_probes(tmp_path, *args)
     assert result.returncode == 0, result.stderr
+    return _reranker_container([document for document in yaml.safe_load_all(result.stdout) if document])
 
-    documents = [document for document in yaml.safe_load_all(result.stdout) if document]
 
-    assert _probes(_reranker_container(documents)) == _default_probes()
+@requires_helm
+def test_values_without_a_probes_block_keep_the_default_probes(tmp_path: Path) -> None:
+    """`helm upgrade --reuse-values` keeps the previous chart's values, which have
+    no probes block; the probes were hardcoded then and must not vanish now."""
+    assert _probes(_container_without_default_probes(tmp_path)) == _default_probes()
+
+
+@requires_helm
+def test_a_null_probes_block_without_default_probes_keeps_the_default_probes(tmp_path: Path) -> None:
+    """Without a default to delete, Helm keeps probes: null as a null."""
+    container = _container_without_default_probes(tmp_path, "--set", "reranker.probes=null")
+
+    assert _probes(container) == _default_probes()
+
+
+@requires_helm
+def test_a_probe_set_in_part_without_default_probes_is_refused(tmp_path: Path) -> None:
+    result = _render_without_default_probes(tmp_path, "--set", "reranker.probes.startup.failureThreshold=120")
+
+    assert result.returncode != 0
+    assert (
+        "reranker.probes.startup has no handler (httpGet, tcpSocket, exec or grpc). After helm upgrade "
+        "--reuse-values from an earlier chart, this chart's default probes are not loaded: upgrade with "
+        "--reset-then-reuse-values (Helm 3.14 or later) instead, or set the whole probe."
+    ) in result.stderr
+
+
+@requires_helm
+def test_a_probe_set_in_full_without_default_probes_is_rendered(tmp_path: Path) -> None:
+    container = _container_without_default_probes(
+        tmp_path,
+        "--set",
+        "reranker.probes.startup.tcpSocket.port=reranker",
+        "--set",
+        "reranker.probes.startup.failureThreshold=120",
+    )
+
+    assert container["startupProbe"] == {"tcpSocket": {"port": "reranker"}, "failureThreshold": 120}
+
+
+@requires_helm
+def test_a_probe_whose_handler_is_null_without_another_is_refused(tmp_path: Path) -> None:
+    result = _render(tmp_path, "--set", "reranker.probes.liveness.httpGet=null")
+
+    assert result.returncode != 0
+    assert "reranker.probes.liveness has no handler" in result.stderr
 
 
 @requires_helm
