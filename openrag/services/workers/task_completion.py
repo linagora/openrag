@@ -12,6 +12,7 @@ from core.models.catalog import (
     DocumentStatus,
     IndexationJob,
     normalize_degraded_stages,
+    normalize_stage_timings,
 )
 from core.utils.error_summary import extract_task_error_reason
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
@@ -349,6 +350,7 @@ class TaskCompletionTracker:
                 error=error,
                 error_reason=error_reason,
                 degraded_stages=normalize_degraded_stages(details.get("degraded_stages")),
+                stage_timings=normalize_stage_timings(details.get("stage_timings")) or None,
                 completed_at=datetime.now(UTC),
             )
         except Exception as exc:
