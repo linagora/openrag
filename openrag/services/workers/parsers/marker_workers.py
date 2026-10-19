@@ -18,7 +18,7 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
-from core.utils.child_process import kill_process_group, run_tied, tie_to_parent
+from core.utils.child_process import kill_process_group, tie_to_parent
 from core.utils.logging import get_logger
 from core.utils.process_limits import apply_parse_memory_limit
 from marker.converters.pdf import PdfConverter
@@ -41,8 +41,7 @@ def _force_kill_executor(executor, log) -> None:
     own single-process executor: killing one never touches another slot's parse.
 
     Each worker leads its own process group (``tie_to_parent``), and the whole
-    group is killed: killing the worker alone left the processes pdftext had
-    started inside it running (#1167).
+    group is killed, so nothing a worker started outlives it (#1167).
     """
     if executor is None:
         return
@@ -51,8 +50,8 @@ def _force_kill_executor(executor, log) -> None:
     for proc in procs:
         try:
             # A broken pool keeps its crashed child, already reaped: its pid may
-            # belong to another process now. What pdftext started in it died
-            # with it (``run_tied``).
+            # belong to another process now. Nothing it started is left to
+            # reclaim, since pdftext runs inside the child (``pdftext_workers``).
             if proc.exitcode is not None:
                 continue
             kill_process_group(proc.pid)
@@ -67,29 +66,6 @@ def _force_kill_executor(executor, log) -> None:
             proc.join(timeout=5)
         except Exception:  # noqa: BLE001 - a stuck join must not block the rebuild
             pass
-
-
-def _tie_pdftext_workers() -> None:
-    """Make the processes pdftext starts inside this slot child die with it.
-
-    pdftext extracts text with its own ``ProcessPoolExecutor`` and its own
-    initializer, so nothing ties those processes to the slot child: when the
-    actor dies abruptly, the kernel kills the child and they keep running
-    (#1167). Replacing the pool class pdftext looks up in its module gives each
-    of them :func:`run_tied` as initializer, ahead of pdftext's own. They stay in
-    the child's process group, so recycling the slot still kills them. pdftext
-    builds the pool inside the parse, on this child's main thread, which lives as
-    long as the child.
-    """
-    import pdftext.extraction
-
-    base = pdftext.extraction.ProcessPoolExecutor
-
-    class _TiedProcessPoolExecutor(base):
-        def __init__(self, *args, initializer=None, initargs=(), **kwargs):
-            super().__init__(*args, initializer=run_tied, initargs=(os.getpid(), initializer, initargs), **kwargs)
-
-    pdftext.extraction.ProcessPoolExecutor = _TiedProcessPoolExecutor
 
 
 def _marker_num_gpus(config) -> float:
@@ -170,18 +146,9 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     not ``RLIMIT_AS``: that also counts file-backed mappings, so it would refuse
     the model weights and CUDA's device maps and break the parse outright.
 
-    **The ceiling is per process, and children inherit it.** Marker runs with
-    ``disable_multiprocessing: False`` and ``pdftext_workers``, so pdftext starts
-    its own processes, each of which gets its own full allowance rather than a
-    share of one. A chunk's process tree can therefore reach roughly
-    ``(1 + marker_pdftext_workers) x MARKER_PARSE_MEMORY_LIMIT_MB``, which can
-    still trip the pod-level OOM kill this exists to prevent. Size it as
-    ``pod budget / (1 + marker_pdftext_workers)``, not as the pod budget.
-
-    The startup diagnostics measure only the slot's own child: a pdftext
-    process created by fork inherits the parent's ``VmData`` and its baseline is
-    never reported, so under a tight ceiling it can fail immediately with nothing
-    logged about why.
+    The ceiling is per process. Marker runs pdftext with one worker, which
+    extracts text inside the child instead of starting processes, so one ceiling
+    bounds a chunk's whole parse.
 
     Best-effort — a platform without ``RLIMIT_DATA``, or an existing limit
     below the request, must not stop the worker from starting.
@@ -221,9 +188,17 @@ class MarkerWorker:
             "output_format": "markdown",
             "paginate_output": True,
             "page_separator": self.page_sep,
-            "pdftext_workers": self.config.loader.marker_pdftext_workers,
-            "disable_multiprocessing": False,
+            # One worker: pdftext extracts in the slot child itself. With more,
+            # it starts processes of its own, which do not die with the child
+            # and each get a full memory ceiling (#1167). The slots already
+            # parse chunks in parallel.
+            "pdftext_workers": 1,
         }
+        if self.config.loader.marker_pdftext_workers > 1:
+            self.logger.warning(
+                f"MARKER_PDFTEXT_WORKERS={self.config.loader.marker_pdftext_workers} is ignored: "
+                "Marker runs pdftext with one worker. Remove the setting."
+            )
         os.environ["RAY_ADDRESS"] = "auto"
 
         # One single-process executor per slot. MarkerPool hands each slot to at
@@ -254,7 +229,7 @@ class MarkerWorker:
         We use ProcessPoolExecutor instead of multiprocessing.Pool because:
         - Ray actors run as daemon processes
         - Pool workers are daemonic by default and cannot spawn children
-        - The pdftext library (used by Marker) internally spawns processes
+        - Libraries used in a parse may start processes of their own
         - ProcessPoolExecutor workers are non-daemon, allowing nested process creation
 
         ``old_executor`` guards against concurrent resets cascading: a timeout
@@ -302,7 +277,6 @@ class MarkerWorker:
         # anything, and one whose actor dies later dies with it (#1167).
         if parent_pid is not None:
             tie_to_parent(parent_pid)
-            _tie_pdftext_workers()
         worker_model_dict = model_dict
         # Logged before the ceiling, like `_apply_parse_memory_limit`'s own lines:
         # under a tight limit the log call's allocation could raise MemoryError,

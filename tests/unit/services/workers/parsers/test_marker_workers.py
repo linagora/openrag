@@ -144,16 +144,12 @@ def test_force_kill_executor_treats_a_crashed_child_as_gone(monkeypatch):
 _grandchild_pool: concurrent.futures.ProcessPoolExecutor | None = None
 
 
-def _start_grandchildren(count: int, through_pdftext: bool = False) -> list[int]:
-    """Start a pool inside the slot's child, as pdftext does inside Marker's.
-
-    ``through_pdftext`` builds it with the class pdftext looks up, as its parse does.
-    """
-    import pdftext.extraction
-
+def _start_grandchildren(count: int) -> list[int]:
+    """Start a pool inside the slot's child, as a library used in a parse could."""
     global _grandchild_pool
-    pool_class = pdftext.extraction.ProcessPoolExecutor if through_pdftext else concurrent.futures.ProcessPoolExecutor
-    _grandchild_pool = pool_class(max_workers=count, mp_context=multiprocessing.get_context("spawn"))
+    _grandchild_pool = concurrent.futures.ProcessPoolExecutor(
+        max_workers=count, mp_context=multiprocessing.get_context("spawn")
+    )
     for _ in range(count):
         _grandchild_pool.submit(time.sleep, 600)
     deadline = time.monotonic() + 60
@@ -198,8 +194,8 @@ def test_a_slot_child_leads_its_own_process_group():
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process groups and /proc as on the workers")
 def test_recycling_a_slot_kills_what_its_child_started():
-    """A recycle used to kill the slot's child alone, leaving pdftext's
-    processes running inside nothing (#1167)."""
+    """A recycle used to kill the slot's child alone, leaving what it had
+    started running inside nothing (#1167)."""
     executor = _real_slot_executor()
     grandchildren = executor.submit(_start_grandchildren, 2).result(timeout=120)
     child = next(iter(executor._processes))
@@ -218,59 +214,46 @@ def test_recycling_a_slot_kills_what_its_child_started():
                 pass
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG and /proc as on the workers")
-def test_pdftext_workers_die_with_the_slot_child():
-    """An actor that dies abruptly takes its slot child with it (tie_to_parent);
-    the processes pdftext started inside the child must follow (#1167)."""
-    executor = _real_slot_executor()
-    grandchildren = executor.submit(_start_grandchildren, 2, True).result(timeout=120)
-    child = next(iter(executor._processes))
-    try:
-        os.kill(child, signal.SIGKILL)
+def _initialized_marker_worker(monkeypatch, pdftext_workers: int):
+    """A MarkerWorker through its real __init__, minus the models and pools."""
+    import core.config
+    import core.utils.logging
 
-        deadline = time.monotonic() + 5
-        while any(_running(pid) for pid in grandchildren) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        assert not any(_running(pid) for pid in grandchildren)
-    finally:
-        for pid in grandchildren:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        executor.shutdown(wait=False, cancel_futures=True)
+    log = _RecordingLogger()
+    config = SimpleNamespace(loader=SimpleNamespace(marker_max_processes=1, marker_pdftext_workers=pdftext_workers))
+    monkeypatch.setattr(core.config, "load_config", lambda: config)
+    monkeypatch.setattr(core.utils.logging, "get_logger", lambda: log)
+    monkeypatch.setenv("RAY_ADDRESS", "")
+    actor_class = marker_workers.MarkerWorker.__ray_metadata__.modified_class
+    monkeypatch.setattr(actor_class, "init_resources", lambda self: None)
+    worker = actor_class.__new__(actor_class)
+    worker.__init__()
+    return worker, log
 
 
-def _pdftext_worker_group() -> int:
-    """The process group of a worker pdftext's pool class starts, read once its
-    initializer has run: a task only starts after that."""
-    import pdftext.extraction
+@pytest.mark.parametrize("configured", [1, 4])
+def test_marker_runs_pdftext_with_one_worker_whatever_is_configured(monkeypatch, configured):
+    """More workers would make pdftext start processes that outlive the slot
+    child and each get a full memory ceiling (#1167)."""
+    worker, log = _initialized_marker_worker(monkeypatch, configured)
 
-    with pdftext.extraction.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
-        return pool.submit(os.getpgid, 0).result(timeout=60)
-
-
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process groups as on the workers")
-def test_pdftext_workers_stay_in_the_slot_childs_group():
-    """So a slot recycle, which kills the child's group, reaches them too."""
-    executor = _real_slot_executor()
-    try:
-        group = executor.submit(_pdftext_worker_group).result(timeout=120)
-
-        assert group == next(iter(executor._processes))
-    finally:
-        executor.shutdown(wait=True)
+    assert worker.converter_config["pdftext_workers"] == 1
+    assert [record for record in log.records if "MARKER_PDFTEXT_WORKERS" in record[1]] == (
+        []
+        if configured == 1
+        else [
+            ("warning", "MARKER_PDFTEXT_WORKERS=4 is ignored: Marker runs pdftext with one worker. Remove the setting.")
+        ]
+    )
 
 
-def test_pdftext_builds_its_pool_through_the_replaced_class(monkeypatch, tmp_path):
-    """The tie relies on pdftext looking its pool class up in its module at
-    parse time; a pdftext release that stops doing so fails here. Real text
-    extraction also shows pdftext's own initializer still runs."""
+def test_pdftext_with_one_worker_starts_no_process(monkeypatch, tmp_path):
+    """The pin relies on pdftext extracting in-process with one worker, even
+    over the 20 pages from which it otherwise starts a pool; a pdftext release
+    that changes this fails here."""
     import pdftext.extraction
     import pypdfium2
 
-    monkeypatch.setattr(pdftext.extraction, "ProcessPoolExecutor", pdftext.extraction.ProcessPoolExecutor)
-    marker_workers._tie_pdftext_workers()
     built: list[dict] = []
 
     class _Recording(pdftext.extraction.ProcessPoolExecutor):
@@ -280,15 +263,16 @@ def test_pdftext_builds_its_pool_through_the_replaced_class(monkeypatch, tmp_pat
 
     monkeypatch.setattr(pdftext.extraction, "ProcessPoolExecutor", _Recording)
     pdf = pypdfium2.PdfDocument.new()
-    for _ in range(20):
+    for _ in range(40):
         pdf.new_page(200, 200)
     path = tmp_path / "blank.pdf"
     pdf.save(path)
     pdf.close()
 
-    pages = pdftext.extraction._get_pages(str(path), workers=2)
-
-    assert len(pages) == 20
+    one = pdftext.extraction.dictionary_output(str(path), workers=1)
+    assert (len(one), built) == (40, [])
+    # The recorder sees a pool when pdftext does build one.
+    pdftext.extraction.dictionary_output(str(path), workers=2)
     assert len(built) == 1
 
 

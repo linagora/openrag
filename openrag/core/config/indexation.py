@@ -201,7 +201,9 @@ class LoaderConfig(ConfigMixin):
     # Headroom keeping the child bound under the bounds that wrap it, so a
     # wedged child times out first and recycles the pool (#659, #894).
     marker_child_timeout_ratio: float = Field(default=0.9, gt=0, lt=1)
-    marker_pdftext_workers: int = 2
+    # Deprecated, ignored: Marker runs pdftext with one worker (#1167). Kept so
+    # MARKER_PDFTEXT_WORKERS still loads; MarkerWorker warns when it is above 1.
+    marker_pdftext_workers: int = 1
     marker_chunk_size: int = 10
     marker_max_task_retry: int = 3
     marker_retry_base_delay: float = 2.0
