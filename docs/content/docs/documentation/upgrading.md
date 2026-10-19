@@ -55,6 +55,37 @@ put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an
 external secrets operator: that value replaces `runMigrationsInApp` unchecked.
 See [Managed PostgreSQL](/openrag/documentation/kubernetes/#managed-postgresql).
 
+## OpenRAG 2.3.2 on Kubernetes: one value for the reranker's model and port
+
+The bundled reranker's model and port each have one value now:
+
+- `reranker.model.id` replaces `reranker.rerankerModelName`. `env.config.RERANKER_MODEL`
+  defaults to `'{{ .Values.reranker.model.id }}'`.
+- `reranker.service.port` replaces `reranker.servicePort`. `env.config.RERANKER_BASE_URL`
+  reads it.
+- `reranker.command` is removed. The chart never read it; extra Infinity flags go in
+  the new `reranker.extraArgs`.
+
+A values file copied from an earlier chart still installs while each removed key
+holds the same value as the key that replaces it, which is the case unless you
+changed one of them. When they differ, the install fails and names the value to
+fix. With the bundled reranker, that configuration was already broken: OpenRAG
+named one model while Infinity reranked with another, or called a port Infinity
+did not listen on. With an external reranker, `reranker.rerankerModelName` was
+the model OpenRAG asked for: move it to `reranker.model.id`. Extra flags left in
+`reranker.command` fail the same way, since they never applied.
+
+When you delete a removed key, also check `env.config` and `env.secrets`: a copied
+`env.config` still sets `RERANKER_MODEL` to `'{{ .Values.reranker.rerankerModelName }}'`
+and `RERANKER_BASE_URL` from `reranker.servicePort`. The install fails while any
+value reads a key you deleted, since it would render empty, and names the value to
+change. Set `RERANKER_MODEL` to `'{{ .Values.reranker.model.id }}'` and
+`RERANKER_BASE_URL` to the chart default, or remove both to take the defaults.
+
+The reranker also has a startup probe now, and `reranker.probes` sets all three of
+its probes. A start that hangs is restarted after 10 minutes instead of 2. See
+[Kubernetes](/openrag/documentation/kubernetes/#notes).
+
 ## Changes in 2.3.0 for every deployment
 
 This section applies to every upgrade from OpenRAG 2.2.1 or 2.2.2, on Kubernetes
