@@ -26,6 +26,12 @@ Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
 the actors on its own. See
 [Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
 
+From OpenRAG 2.3.2, `MARKER_PDFTEXT_WORKERS` is ignored: Marker runs pdftext with
+one worker, inside the Marker child, so its processes no longer outlive a crashed
+worker. Remove the setting; the Marker worker logs a warning while it is above 1.
+`MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
+`1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
+
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
 From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
