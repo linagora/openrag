@@ -37,6 +37,7 @@ from urllib.parse import quote
 
 from core.auth.chainlit import CHAINLIT_TOKEN_COOKIE_NAME
 from core.config.auth import AuthBypassConfig
+from core.utils.consts import DEFAULT_ADMIN_USER_ID
 from core.utils.logging import get_logger
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -255,8 +256,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             auth_service, unavailable = self._resolve_auth_service(request)
             if unavailable is not None:
                 return unavailable
-            user = await auth_service.get_user_for_request(1)
-            user_partitions = await auth_service.list_user_partitions_for_request(1)
+            user = await auth_service.get_user_for_request(DEFAULT_ADMIN_USER_ID)
+            user_partitions = await auth_service.list_user_partitions_for_request(DEFAULT_ADMIN_USER_ID)
             request.state.user = user
             request.state.user_partitions = user_partitions
             request.state.oidc_session = None

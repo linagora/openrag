@@ -1,6 +1,14 @@
 PARTITION_PREFIX = "openrag-"
 LEGACY_PARTITION_PREFIX = "ragondin-"
 
+# Seeded at startup and never deletable, so a deployment always has at least
+# one partition and the in-memory partition cache is never empty.
+DEFAULT_PARTITION_NAME = "default"
+
+# The admin account seeded at startup: undeletable, cannot lose admin rights,
+# and the owner the default partition is seeded with.
+DEFAULT_ADMIN_USER_ID = 1
+
 FILE_READ_CHUNK_SIZE = 1024 * 1024  # Read file in blocks of 1MB to preserve RAM
 
 
@@ -98,3 +106,12 @@ UPLOAD_METADATA_SERVER_KEYS: frozenset[str] = frozenset(
 #
 # A tuple, not a frozenset: the promotion order is the response's key order.
 RETRIEVAL_SCORE_KEYS: tuple[str, ...] = ("vector_score", "rerank_score", "combined_score")
+
+
+# Upper bound on the vector candidates an explicit ``/search?rerank=true`` hands
+# to the reranker, whatever ``rerank_candidates`` or ``top_k`` the caller asks
+# for. Each candidate is scored by the reranker (TEI sends every 32-document
+# batch concurrently), so an unbounded value turns one request into thousands of
+# reranker calls. Same ceiling as a retrieval preset's ``top_k``, the candidate
+# count an admin can already give the chat pipeline.
+MAX_RERANK_CANDIDATES = 1000
