@@ -361,14 +361,19 @@ class BaseChunker(ChunkingStrategy):
         # chunk that follows a trailing [PAGE_N] one page too low, and one that
         # overlap starts before that marker one page too high.
         page_markers = [(match.start(), int(match.group(1))) for match in PAGE_RE.finditer(sanitized)]
-        search_from = 0
+        previous_start = -1
+        previous_end = 0
         for c in text_chunks:
-            # The splitter returns substrings of `sanitized` in order, overlap
-            # included, so the next one starts after this one's first character.
+            # The splitter returns substrings of `sanitized` in order, each
+            # starting after the previous one and, overlap or not, ending past
+            # it. Requiring both keeps repeated text from matching inside the
+            # previous chunk, where it would read that chunk's page.
+            search_from = max(previous_start + 1, previous_end - len(c) + 1)
             start = sanitized.find(c, search_from)
             if start < 0:
                 start = search_from
-            search_from = start + 1
+            previous_start = start
+            previous_end = start + len(c)
             first_word = start + _LEADING_PAGE_MARKERS_RE.match(c).end()
             chunks.append(
                 {

@@ -287,6 +287,23 @@ def test_overlap_keeps_a_chunk_on_the_page_it_starts_on():
     assert [c.page_number for c in chunks] == [1, 1]
 
 
+def test_repeated_text_is_not_found_inside_the_previous_chunk():
+    """#1204: page 2's 30 words all appear in page 1's chunk too. The page 2
+    chunk must not be located there, which would put it on page 1."""
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=" ".join(["foo"] * 31), page_number=1),
+            TextBlock(text=" ".join(["foo"] * 30), page_number=2),
+        ],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert chunks[1].text in chunks[0].text
+    assert [c.page_number for c in chunks] == [1, 2]
+
+
 def test_a_chunk_opening_on_two_page_markers_is_on_the_page_after_both():
     """#1204: page 2 holds only an image, which becomes its own chunk, so the
     text chunk after page 1 opens on [PAGE_1] and [PAGE_2]. Its text is on page 3."""
