@@ -749,8 +749,8 @@ reranker:
   # Environment variables for the reranker container alone (Kubernetes EnvVar
   # objects). They take precedence over the shared env.config ConfigMap the
   # container also reads. On CPU, INFINITY_MODEL_WARMUP: "false" skips the
-  # warmup benchmark: on 4 CPUs the start dropped from 100-125 s to under 20 s
-  # in our tests.
+  # warmup benchmark: on 4 CPUs Infinity then answered /health in under 20 s
+  # instead of 100-125 s in our tests.
   extraEnv: []
   replicas: 1
   runtimeClassName: ""
@@ -793,7 +793,6 @@ reranker:
       httpGet:
         path: /health
         port: reranker
-      initialDelaySeconds: 30
       periodSeconds: 10
       failureThreshold: 6
     liveness:

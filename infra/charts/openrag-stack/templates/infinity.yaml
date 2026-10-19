@@ -131,7 +131,6 @@ readiness:
   httpGet:
     path: /health
     port: reranker
-  initialDelaySeconds: 30
   periodSeconds: 10
   failureThreshold: 6
 liveness:

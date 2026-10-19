@@ -88,6 +88,14 @@ def test_a_slow_start_is_covered_by_the_startup_probe(tmp_path: Path) -> None:
 
 
 @requires_helm
+def test_readiness_starts_once_the_startup_probe_passes(tmp_path: Path) -> None:
+    """An initial delay counts from the container's start, so it would hold a fast start back."""
+    container = _reranker_container(_documents(tmp_path))
+
+    assert "initialDelaySeconds" not in container["readinessProbe"]
+
+
+@requires_helm
 def test_probe_values_are_rendered(tmp_path: Path) -> None:
     container = _reranker_container(
         _documents(

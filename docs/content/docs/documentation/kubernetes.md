@@ -270,7 +270,7 @@ All three probes are set under `reranker.probes`. Raise
 Set a probe to `null` to drop it, and its `httpGet` to `null` to give it another
 handler. Setting `reranker.probes` itself to `null` keeps the default probes.
 On CPU, `reranker.extraEnv` with `INFINITY_MODEL_WARMUP: "false"` skips the
-warmup benchmark: on 4 CPUs the start dropped to under 20 s.
+warmup benchmark: on 4 CPUs Infinity then answered `/health` in under 20 s.
 
 The reranker's model is set once, in `reranker.model.id`: Infinity loads it and
 OpenRAG names it (`RERANKER_MODEL`). Its port is set once, in
