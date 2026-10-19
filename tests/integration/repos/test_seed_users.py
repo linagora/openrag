@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import asyncpg
 import pytest
 import pytest_asyncio
 from core.config.auth import SeedUserConfig
@@ -130,6 +131,36 @@ class TestCreateAndRotate:
         )
         assert any("admin rights" in line for line in logs)
 
+    async def test_two_entries_can_swap_tokens(self, postgres_store: PostgresStore):
+        """Each new token is the other row's until both are written: clearing the
+        replaced tokens first lets the swap land in one run."""
+        repo = postgres_store.user_repo
+        auth = _auth_service(postgres_store)
+        seeds = [_seed(is_admin=True, partitions=[]), _seed("svc-b", "SVC_B_TOKEN", partitions=[])]
+        await repo.ensure_seed_users(seeds, env={"SVC_A_TOKEN": TOKEN_A, "SVC_B_TOKEN": TOKEN_B})
+
+        outcome = await repo.ensure_seed_users(seeds, env={"SVC_A_TOKEN": TOKEN_B, "SVC_B_TOKEN": TOKEN_A})
+
+        assert outcome == {"svc-a": "updated", "svc-b": "updated"}
+        assert (await auth.get_user_by_token_for_request(TOKEN_B))["external_user_id"] == "svc-a"
+        assert (await auth.get_user_by_token_for_request(TOKEN_A))["external_user_id"] == "svc-b"
+
+    @pytest.mark.parametrize("order", ["a-first", "b-first"])
+    async def test_a_token_handed_down_to_another_entry_lands_in_one_run(self, postgres_store: PostgresStore, order):
+        repo = postgres_store.user_repo
+        auth = _auth_service(postgres_store)
+        seeds = [_seed(partitions=[]), _seed("svc-b", "SVC_B_TOKEN", partitions=[])]
+        await repo.ensure_seed_users(seeds, env={"SVC_A_TOKEN": TOKEN_A, "SVC_B_TOKEN": TOKEN_B})
+        if order == "b-first":
+            seeds.reverse()
+
+        outcome = await repo.ensure_seed_users(seeds, env={"SVC_A_TOKEN": TOKEN_A2, "SVC_B_TOKEN": TOKEN_A})
+
+        assert outcome == {"svc-a": "updated", "svc-b": "updated"}
+        assert (await auth.get_user_by_token_for_request(TOKEN_A2))["external_user_id"] == "svc-a"
+        assert (await auth.get_user_by_token_for_request(TOKEN_A))["external_user_id"] == "svc-b"
+        assert await auth.get_user_by_token_for_request(TOKEN_B) is None
+
     async def test_concurrent_runs_converge(self, postgres_store: PostgresStore):
         await _partitions(postgres_store, "twake")
         repo = postgres_store.user_repo
@@ -141,7 +172,7 @@ class TestCreateAndRotate:
 
 
 class TestEnvUnset:
-    async def test_existing_account_is_left_untouched(self, postgres_store: PostgresStore, logs):
+    async def test_existing_account_keeps_its_token(self, postgres_store: PostgresStore, logs):
         await _partitions(postgres_store, "twake")
         repo = postgres_store.user_repo
         await repo.ensure_seed_users([_seed()], env={"SVC_A_TOKEN": TOKEN_A})
@@ -153,6 +184,28 @@ class TestEnvUnset:
         assert row["display_name"] == "svc-a"
         assert await _memberships(postgres_store, row["id"]) == {"twake": "editor"}
         assert any("unset" in line for line in logs)
+
+    @pytest.mark.parametrize(
+        ("env", "expected"),
+        [
+            pytest.param({}, "untouched", id="env-unset"),
+            pytest.param({"SVC_A_TOKEN": "weak-tk1"}, "skipped", id="token-refused"),
+        ],
+    )
+    async def test_rights_taken_away_apply_without_a_usable_token(self, postgres_store: PostgresStore, env, expected):
+        """A compromised account demoted in the config while its Secret is
+        missing (or its new value refused) must not keep its rights."""
+        await _partitions(postgres_store, "twake")
+        repo = postgres_store.user_repo
+        await repo.ensure_seed_users([_seed(is_admin=True)], env={"SVC_A_TOKEN": TOKEN_A})
+
+        outcome = await repo.ensure_seed_users([_seed(partitions=[{"name": "twake", "role": "viewer"}])], env=env)
+
+        assert outcome == {"svc-a": expected}
+        row = await _row(postgres_store, "svc-a")
+        assert row["is_admin"] is False
+        assert await _memberships(postgres_store, row["id"]) == {"twake": "viewer"}
+        assert row["token"] == _hash_token(TOKEN_A)
 
     async def test_new_account_is_not_created(self, postgres_store: PostgresStore):
         outcome = await postgres_store.user_repo.ensure_seed_users([_seed()], env={"SVC_A_TOKEN": "  "})
@@ -188,6 +241,23 @@ class TestNeverTakesOver:
         admin = await postgres_store.pool.fetchrow("SELECT token, is_admin FROM users WHERE id = 1")
         assert admin["token"] == _hash_token(ADMIN_TOKEN)
         assert admin["is_admin"] is True
+
+    async def test_a_rotation_to_a_token_held_by_another_account_keeps_the_previous_one(
+        self, postgres_store: PostgresStore
+    ):
+        repo = postgres_store.user_repo
+        await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_A})
+        other = await repo.create_user(User(display_name="Bob"))
+        await postgres_store.pool.execute("UPDATE users SET token = $1 WHERE id = $2", _hash_token(TOKEN_B), other.id)
+
+        outcome = await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_B})
+
+        assert outcome == {"svc-a": "skipped"}
+        assert (await _row(postgres_store, "svc-a"))["token"] == _hash_token(TOKEN_A)
+        assert (await repo.get_user(other.id)).id == other.id
+        assert await postgres_store.pool.fetchval("SELECT token FROM users WHERE id = $1", other.id) == _hash_token(
+            TOKEN_B
+        )
 
     async def test_token_already_held_by_another_account_is_skipped(self, postgres_store: PostgresStore):
         repo = postgres_store.user_repo
@@ -304,6 +374,35 @@ class TestMemberships:
 
         assert await _memberships(postgres_store, row["id"]) == {"twake": "editor", "svc-owned": "owner"}
 
+    async def test_a_listed_partition_the_account_owns_alone_keeps_its_owner(self, postgres_store: PostgresStore, logs):
+        """user_auth.md's example: twake is listed before it exists, then the
+        account creates it through the API and becomes its owner."""
+        repo = postgres_store.user_repo
+        env = {"SVC_A_TOKEN": TOKEN_A}
+        await repo.ensure_seed_users([_seed()], env=env)
+        row = await _row(postgres_store, "svc-a")
+        await postgres_store.partition_repo.create_partition("twake", user_id=row["id"])
+
+        await repo.ensure_seed_users([_seed()], env=env)
+
+        assert await _memberships(postgres_store, row["id"]) == {"twake": "owner"}
+        assert any("only owner" in line for line in logs)
+
+    async def test_a_listed_partition_with_another_owner_gets_the_listed_role(self, postgres_store: PostgresStore):
+        repo = postgres_store.user_repo
+        env = {"SVC_A_TOKEN": TOKEN_A}
+        await repo.ensure_seed_users([_seed()], env=env)
+        row = await _row(postgres_store, "svc-a")
+        await postgres_store.partition_repo.create_partition("twake", user_id=row["id"])
+        await postgres_store.pool.execute(
+            "INSERT INTO partition_memberships (partition_name, user_id, role, added_at) VALUES ('twake', 1, 'owner', NOW())"
+        )
+
+        await repo.ensure_seed_users([_seed()], env=env)
+
+        assert await _memberships(postgres_store, row["id"]) == {"twake": "editor"}
+        assert await _memberships(postgres_store, 1) == {"twake": "owner"}
+
     async def test_missing_partition_is_skipped_not_created(self, postgres_store: PostgresStore, logs):
         await _partitions(postgres_store, "twake")
         partitions = [{"name": "twake", "role": "editor"}, {"name": "nowhere", "role": "viewer"}]
@@ -414,6 +513,78 @@ class TestRemoval:
         assert row["token"] == _hash_token(TOKEN_A)
         user = await _auth_service(postgres_store).get_user_by_token_for_request(TOKEN_A)
         assert user is not None and user["id"] == row["id"]
+
+    async def test_a_revocation_survives_a_failure_later_in_the_run(self, postgres_store: PostgresStore, monkeypatch):
+        """The documented way to cut a leaked token is removing the entry: a lock
+        timeout while the remaining entries are applied must not undo it."""
+        repo = postgres_store.user_repo
+        auth = _auth_service(postgres_store)
+        seeds = [_seed(is_admin=True, partitions=[]), _seed("svc-b", "SVC_B_TOKEN", partitions=[])]
+        await repo.ensure_seed_users(seeds, env={"SVC_A_TOKEN": TOKEN_A, "SVC_B_TOKEN": TOKEN_B})
+
+        async def timeout(*args, **kwargs):
+            raise asyncpg.exceptions.LockNotAvailableError("lock timeout")
+
+        monkeypatch.setattr(repo, "_apply_seed_user", timeout)
+        with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
+            await repo.ensure_seed_users(seeds[1:], env={"SVC_B_TOKEN": TOKEN_A2})
+
+        assert await auth.get_user_by_token_for_request(TOKEN_A) is None
+        assert (await _row(postgres_store, "svc-a"))["is_admin"] is False
+        # The token svc-b is rotating away from is cut too; the new one was never written.
+        assert await auth.get_user_by_token_for_request(TOKEN_B) is None
+        assert await auth.get_user_by_token_for_request(TOKEN_A2) is None
+
+    async def test_a_removed_account_is_revoked_again_at_every_startup(self, postgres_store: PostgresStore):
+        """It stays managed, so a token set through the API does not outlive the
+        next boot (the API refuses to regenerate it, see UserService)."""
+        repo = postgres_store.user_repo
+        await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_A})
+        await repo.ensure_seed_users([], env={})
+        row = await _row(postgres_store, "svc-a")
+        await postgres_store.pool.execute(
+            "UPDATE users SET token = $1, is_admin = TRUE WHERE id = $2", _hash_token(TOKEN_A2), row["id"]
+        )
+
+        assert await repo.ensure_seed_users([], env={}) == {"svc-a": "revoked"}
+
+        row = await _row(postgres_store, "svc-a")
+        assert row["token"] is None and row["is_admin"] is False and row["managed_by_config"] is True
+
+
+class TestAdminToken:
+    async def test_auth_token_taken_from_a_managed_account_does_not_block_the_boot(
+        self, postgres_store: PostgresStore, logs
+    ):
+        """Both read from one OpenBao key by mistake: AUTH_TOKEN wins, as it does
+        in _resolve_seed_tokens, instead of the unique index keeping the API at 503."""
+        repo = postgres_store.user_repo
+        await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_A})
+
+        assert await repo.ensure_admin_user(TOKEN_A) == TOKEN_A
+
+        admin = await postgres_store.pool.fetchrow("SELECT token, is_admin FROM users WHERE id = 1")
+        assert admin["token"] == _hash_token(TOKEN_A) and admin["is_admin"] is True
+        assert (await _row(postgres_store, "svc-a"))["token"] is None
+        assert any("AUTH_TOKEN is also the token of a managed account" in line for line in logs)
+        # Seeding then refuses that entry's token, so the admin keeps it.
+        outcome = await repo.ensure_seed_users(
+            [_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_A, "AUTH_TOKEN": TOKEN_A}
+        )
+        assert outcome == {"svc-a": "skipped"}
+        assert (await _auth_service(postgres_store).get_user_by_token_for_request(TOKEN_A))["id"] == 1
+
+    async def test_an_unmanaged_account_is_never_cleared(self, postgres_store: PostgresStore):
+        repo = postgres_store.user_repo
+        other = await repo.create_user(User(display_name="Bob"))
+        await postgres_store.pool.execute("UPDATE users SET token = $1 WHERE id = $2", _hash_token(TOKEN_A), other.id)
+
+        with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+            await repo.ensure_admin_user(TOKEN_A)
+
+        assert await postgres_store.pool.fetchval("SELECT token FROM users WHERE id = $1", other.id) == _hash_token(
+            TOKEN_A
+        )
 
 
 class TestOidcLogin:
