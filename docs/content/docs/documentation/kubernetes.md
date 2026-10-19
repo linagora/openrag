@@ -259,6 +259,28 @@ for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.
 
+The bundled Infinity reranker answers `/health` only once its model is loaded
+and its warmup benchmark has run. On our test machines that took 100 to 125 s on
+its default 4 CPUs, 180 to 210 s on 2 and 340 to 380 s on 1, whether or not the
+model was already cached. Its startup probe allows 10 minutes for that, plus a
+first-boot model download, and the liveness and readiness probes start only
+once it passes. A start that hangs is therefore restarted after 10 minutes.
+All three probes are set under `reranker.probes`, where each is merged over its
+default, so set only what you change: raise
+`reranker.probes.startup.failureThreshold` for slower CPUs or a slow download.
+Set a probe to `null` to drop it, a field to `null` to remove it, and another
+handler (`tcpSocket`, `exec` or `grpc`) to replace `httpGet`. The defaults are
+listed in `values.yaml`.
+On CPU, `reranker.extraEnv` with `INFINITY_MODEL_WARMUP: "false"` skips the
+warmup benchmark: on 4 CPUs Infinity then answered `/health` in under 20 s.
+
+The reranker's model is set once, in `reranker.model.id`: Infinity loads it and
+OpenRAG names it (`RERANKER_MODEL`). Its port is set once, in
+`reranker.service.port`: Infinity listens on it, the Service exposes it, and
+`RERANKER_BASE_URL` calls it. Extra Infinity flags go in `reranker.extraArgs`,
+which refuses `--model-id` and `--port`, and environment variables for the
+reranker alone in `reranker.extraEnv`.
+
 Readiness uses the configured model endpoints and API keys, just like inference.
 HTTP endpoints do not encrypt those credentials; configure HTTPS when transport
 encryption is required.
@@ -269,10 +291,32 @@ Prometheus exposes aggregate endpoint state through
 and the public readiness endpoint reports aggregate configuration-reference
 counts without exposing partition or preset names.
 
-- If using a public IP instead of a hostname, you can leave `ingress.host` empty in your `values.yaml`.  
-  The ingress will then match all hosts.
+- `openrag.ingress.host` is required when `openrag.ingress.enabled` is true: the chart refuses to
+  render without it. To reach OpenRAG by public IP only, disable the chart's ingress and expose the
+  service another way.
 
-- If you later configure a hostname + TLS (via cert-manager), just update `ingress.host` and redeploy.
+- If you later configure a hostname + TLS (via cert-manager), update `openrag.ingress.host` and redeploy.
+  With an HTTP-01 issuer, cert-manager answers the challenge from a solver pod it starts in the
+  release namespace, on port 8089. The chart's `<fullname>-acme-http01-solver` NetworkPolicy lets
+  that port through on the solver pods only, from any source by default, since a host-network
+  Ingress controller (ingress-nginx with `hostNetwork`, for one) connects from a node address.
+  Narrow it with `networkPolicy.acmeHttp01.from`: a `namespaceSelector` when the controller runs
+  on the pod network, an `ipBlock` with the node addresses when it uses `hostNetwork`, which no
+  selector can match. Do not add 8089 to `networkPolicy.externalPorts`, which would open it on
+  every pod.
+
+  ```yaml
+  networkPolicy:
+    acmeHttp01:
+      from:
+        # Controller on the pod network:
+        # - namespaceSelector:
+        #     matchLabels:
+        #       kubernetes.io/metadata.name: ingress-nginx
+        # Controller with hostNetwork, the node addresses:
+        # - ipBlock:
+        #     cidr: 10.0.0.0/24
+  ```
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
   The bundled vLLM engines run CUDA 12.9 builds (`v0.30.0-cu129`, and `v0.11.2` for the VLM). The
@@ -513,9 +557,13 @@ Pre-create the database before installing the release. If `POSTGRES_DATABASE` is
 
 In `values.yaml`, disable the bundled PostgreSQL chart, set `postgresProvisioning.autoCreateDatabase` to `false`, set `postgresProvisioning.runMigrationsInApp` to `false`, and enable `postgresProvisioning.migrationJob`. Then provide the managed database connection through `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and optionally `POSTGRES_DATABASE`.
 
-The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema.
+The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema. Because a `pre-install` hook runs before Helm creates the release's own resources, the Job reads its own copies of the env ConfigMap and Secret, created as hooks just before it and deleted once it succeeds. With `env.secretsProvider` set to `externalSecret` or `vaultStaticSecret`, the copy is a second `ExternalSecret` or `VaultStaticSecret`, and the Job's pod cannot start until the operator has created that Secret. Helm does not wait for the operator itself, only for the Job, within `--timeout` (5 minutes by default), so raise `--timeout` if your operator can take longer to sync. An `env.existingSecret` is read directly.
 
-When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them.
+If the Job fails, Helm 3.19 and later delete its copies along with the failure. Helm 3.18 and earlier, and Argo CD, leave them in the namespace, as does any Helm version that is interrupted or cannot create the Job, and `helm uninstall` does not remove them, since Helm does not track hook resources. The Secret copy holds the same credentials as the app's Secret. The next install, upgrade or sync replaces the copies. To remove them before that, delete the ConfigMap and the Secret whose names end in `-migration-env` and `-migration-env-secrets`, and with `externalSecret` or `vaultStaticSecret` also the `ExternalSecret` or `VaultStaticSecret` named like the Secret. Find them by that suffix, `kubectl get configmap,secret -n <namespace> | grep migration-env` (add `externalsecret` or `vaultstaticsecret` to the list with that provider), rather than by `<fullname>`: the chart shortens the fullname in these names, to 49 characters for the ConfigMap and 41 for the Secret, so with a long fullname they don't start with the full `<fullname>`.
+
+The Job is for an external PostgreSQL only. It runs before Helm creates any of the release's own resources, the bundled PostgreSQL included, so the chart refuses `migrationJob.enabled` together with `postgresql.enabled`.
+
+When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them, so the chart refuses to render unless you set `postgresProvisioning.externalMigrations: true` to say you run `python -m services.persistence.migrations.run` yourself. Set the app's side through `runMigrationsInApp` only: the chart also refuses an `env.config.POSTGRES_RUN_MIGRATIONS` or `env.secrets.POSTGRES_RUN_MIGRATIONS` that disagrees with it, since that entry would silently replace it. Do not put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an external secrets operator: the pods read the Secret after the ConfigMap, so its value wins, and the chart cannot read it to check it.
 
 ## GPU metrics
 

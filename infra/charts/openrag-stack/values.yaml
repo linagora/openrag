@@ -24,7 +24,9 @@ enabled: true
 # ports below. Isolates the Ray dashboard, Postgres, Milvus, etc.
 networkPolicy:
   enabled: true
-  # Ports reachable from outside the namespace (e.g. via the Ingress controller).
+  # Ports reachable from outside the namespace (e.g. via the Ingress controller),
+  # on every pod. cert-manager's HTTP-01 solver port (8089) does not belong
+  # here: acmeHttp01 below opens it on the solver pods only.
   externalPorts:
     - 8080  # openrag API/UI & admin-ui
     # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
@@ -57,6 +59,25 @@ networkPolicy:
   #   - ipBlock:
   #       cidr: 10.0.0.0/24
   webhookFrom: []
+  # cert-manager's HTTP-01 solver: the pod it starts in this namespace to answer
+  # an ACME challenge, on 8089, reached through the Ingress controller. Opens
+  # that port on the solver pods only (label
+  # acme.cert-manager.io/http01-solver: "true"), and selects nothing while no
+  # challenge is pending, so it is harmless with DNS-01 or your own
+  # certificates. Turn it off only if no Issuer here uses HTTP-01.
+  acmeHttp01:
+    enabled: true
+    # Empty means any source: a host-network Ingress controller (ingress-nginx
+    # with hostNetwork, for one) connects from a node address, which no
+    # namespaceSelector matches. Narrow it with standard NetworkPolicyPeers:
+    # a namespaceSelector when the controller runs on the pod network, an
+    # ipBlock with the node addresses when it runs with hostNetwork, e.g.
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: ingress-nginx
+    #   - ipBlock:
+    #       cidr: 10.0.0.0/24
+    from: []
 
 # === Monitoring artifacts ===
 # One set of dashboards, dashboards/ in this chart — the directory the Compose
@@ -478,12 +499,23 @@ postgresProvisioning:
   # at a pre-created database.
   autoCreateDatabase: true
   # Leave app-start migrations enabled for compose-like installs. Operators can
-  # disable this when they run migrations through the Helm hook below.
+  # disable this when they run migrations through the Helm hook below. Sets
+  # POSTGRES_RUN_MIGRATIONS: the chart refuses an env.config or env.secrets
+  # entry for it that disagrees, since the entry would silently replace this
+  # value.
   runMigrationsInApp: true
+  # A pre-install/pre-upgrade hook, for an external PostgreSQL only: it runs
+  # before Helm creates the bundled one, so the chart refuses it with
+  # postgresql.enabled.
   migrationJob:
     enabled: false
     backoffLimit: 3
     hookDeletePolicy: before-hook-creation,hook-succeeded
+  # Set true when you apply the migrations yourself (`python -m
+  # services.persistence.migrations.run`), with runMigrationsInApp and
+  # migrationJob both off. Without it the chart refuses that combination,
+  # since then nothing applies them and the app answers 503.
+  externalMigrations: false
 
 # === Milvus ===
 milvus:
@@ -723,25 +755,31 @@ reranker:
   # remember to also set enabled: false so the local Deployment/Service
   # aren't created alongside it.
   externalUrl: ""
-  rerankerModelName: &rerankerModel "Alibaba-NLP/gte-multilingual-reranker-base"
-  servicePort: &rerankerPort 7997
   image:
     repository: "michaelf34/infinity"
     tag: "0.0.77"
   nodeSelector: {}
+  # The model Infinity serves and OpenRAG asks for (RERANKER_MODEL), including
+  # an external reranker's. It replaces rerankerModelName.
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
-  command:
-    - v2
-    - --model-id
-    - *rerankerModel
-    - --port
-    - *rerankerPort
+  # Flags appended to `v2 --model-id <model.id> --port <service.port>`, e.g.
+  # ["--batch-size", "16"]. They replace `command`, which was never read.
+  # --model-id and --port are refused: set model.id and service.port.
+  extraArgs: []
+  # Environment variables for the reranker container alone (Kubernetes EnvVar
+  # objects). They take precedence over the shared env.config ConfigMap the
+  # container also reads. On CPU, INFINITY_MODEL_WARMUP: "false" skips the
+  # warmup benchmark: on 4 CPUs Infinity then answered /health in under 20 s
+  # instead of 100-125 s in our tests.
+  extraEnv: []
   replicas: 1
   runtimeClassName: ""
+  # service.port is the port Infinity listens on, the Service port, and the one
+  # in RERANKER_BASE_URL. It replaces servicePort.
   service:
     type: ClusterIP
-    port: *rerankerPort
+    port: 7997
   resources:
     requests:
       cpu: "4"
@@ -758,6 +796,20 @@ reranker:
   # security.containerSecurityContext defaults for this workload specifically.
   # automountServiceAccountToken: false
   # containerSecurityContext: {}
+  # Infinity serves /health only once the model is loaded and its warmup
+  # benchmark has run, which took 100-125 s on 4 CPUs, 180-210 s on 2 and
+  # 340-380 s on 1 in our tests, cached model or not. The startup probe allows
+  # 10 minutes for that (plus a first-boot download); liveness and readiness
+  # start only after it passes. The default probes are in
+  # templates/infinity.yaml, all on /health at the reranker port:
+  #   startup:   periodSeconds 10, failureThreshold 60
+  #   readiness: periodSeconds 10, failureThreshold 6
+  #   liveness:  initialDelaySeconds 60, periodSeconds 30, failureThreshold 3
+  # Set only what you change, e.g. startup: {failureThreshold: 120}: each
+  # probe is merged over its default. Set a probe to null to drop it, a field
+  # to null to remove it, and another handler (tcpSocket, exec, grpc) to
+  # replace httpGet.
+  probes: {}
 
 # === Admin UI (replaces indexer-ui) ===
 # React SPA served by an nginx bundled inside the image. VITE_BASE_PATH=/app/
@@ -1106,13 +1158,13 @@ env:
     # EMBEDDER_PROVIDER: "tei"
 
     # Reranker
-    RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
+    RERANKER_MODEL: '{{ .Values.reranker.model.id }}'
     # True when either the local Infinity reranker is deployed or an external
     # one is configured — false (and RERANKER_BASE_URL below moot) when
     # neither applies, so this never points at a Service that doesn't exist.
     RERANKER_ENABLED: '{{ or .Values.reranker.enabled (ne .Values.reranker.externalUrl "") }}'
     RERANKER_TOP_K: "4"
-    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}{{ end }}'
+    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.service.port }}{{ end }}'
     RERANKER_PROVIDER: "infinity"
 
     # Model Endpoint Registry: when true, re-syncs each type's env-seeded
@@ -1138,6 +1190,15 @@ env:
 
     # Loaders
     PDFLOADER: "PyMuPDFLoader"
+    # PyMuPDF parses one PDF at a time per indexer worker unless asked: each
+    # slot is then a child process (~80 MiB inside a Ray worker before parsing,
+    # up to what its largest parse needs while parsing; between parses its RSS
+    # drops back near that, its VmData not always).
+    # The ceiling (MiB) makes an oversized PDF fail on its own instead of
+    # OOM-killing the worker; each child logs its baseline when it starts. See
+    # env_vars.md.
+    # PYMUPDF_POOL_SIZE: "4"
+    # PYMUPDF_PARSE_MEMORY_LIMIT_MB: "1024"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
     # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse
