@@ -292,6 +292,37 @@ async def test_expansion_fetches_and_orders_csv_column_groups():
 
 
 @pytest.mark.asyncio
+async def test_spreadsheet_sibling_expansion_is_scoped_to_its_sheet():
+    s = FakeSearcher()
+    initial = Chunk(
+        id="sheet-1-part-1",
+        text="first part",
+        document_id="workbook-1",
+        partition="p1",
+        metadata={
+            "table_id": "sheet:1",
+            "csv_row_number": 3,
+            "csv_part": 1,
+            "csv_parts_total": 2,
+        },
+    )
+    s.csv_row_result = [initial]
+
+    await SingleRetriever(searcher=s).expand_search_results([initial])
+
+    assert s.csv_row_calls == [
+        {
+            "partition": "p1",
+            "file_id": "workbook-1",
+            "row_number": 3,
+            "limit": 10,
+            "allowed_file_ids": None,
+            "table_id": "sheet:1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_csv_sibling_expansion_skips_chunks_without_document_id():
     s = FakeSearcher()
     initial = [

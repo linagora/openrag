@@ -103,11 +103,13 @@ class RetrievalSearcher(ABC):
         row_number: int,
         limit: int = 10,
         allowed_file_ids: list[str] | None = None,
+        table_id: str | None = None,
     ) -> list[Chunk]:
-        """Fetch every continuation chunk for one logical CSV row.
+        """Fetch every continuation chunk for one logical tabular row.
 
         ``row_number`` is the CSV record number (including its header offset),
-        not a chunk index. ``allowed_file_ids`` keeps expansion inside the same
+        not a chunk index. ``table_id`` prevents equal row numbers in separate
+        workbook sheets from becoming siblings. ``allowed_file_ids`` keeps expansion inside the same
         workspace scope as the original vector search. ``limit`` prevents one
         very wide row from consuming the entire answer context.
         """
