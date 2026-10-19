@@ -167,6 +167,7 @@ class CatalogSearcher(RetrievalSearcher):
         row_number: int,
         limit: int = 10,
         allowed_file_ids: list[str] | None = None,
+        table_id: str | None = None,
     ) -> list[Chunk]:
         return await self._filter(
             await self._searcher.get_csv_row_chunks(
@@ -175,6 +176,7 @@ class CatalogSearcher(RetrievalSearcher):
                 row_number=row_number,
                 limit=limit,
                 allowed_file_ids=allowed_file_ids,
+                table_id=table_id,
             )
         )
 

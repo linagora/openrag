@@ -160,10 +160,14 @@ prompts:
 # --- Document loader ---
 loader:
   # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
-  #      CONTENT_DEDUPLICATION_ENABLED, CSV_BATCH_SIZE, CSV_DELIMITER
+  #      CONTENT_DEDUPLICATION_ENABLED, CSV_BATCH_SIZE, CSV_DELIMITER,
+  #      XLSX_BATCH_SIZE, XLSX_BACKEND, XLSX_FALLBACK_BACKEND
   csv_batch_size: 10000
   # Null enables delimiter sniffing. Set one character to force a delimiter.
   csv_delimiter: null
+  xlsx_batch_size: 10000
+  xlsx_backend: calamine
+  xlsx_fallback_backend: openpyxl
   image_captioning: true
   image_captioning_url: true
   save_markdown: false
@@ -180,6 +184,7 @@ loader:
     message/rfc822: .eml
     application/vnd.openxmlformats-officedocument.wordprocessingml.document: .docx
     application/vnd.openxmlformats-officedocument.presentationml.presentation: .pptx
+    application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: .xlsx
     application/msword: .doc
     image/png: .png
     image/jpeg: .jpeg
@@ -211,6 +216,7 @@ loader:
     eml: EmlLoader
     docx: DocxLoader
     pptx: PPTXLoader
+    xlsx: XlsxParser
     doc: DocLoader
     png: ImageLoader
     jpeg: ImageLoader

@@ -14,7 +14,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
-from core.indexing.parsers.tabular.csv_parser import CsvParser
+from core.indexing.parsers.tabular.base import TabularBatchParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.ray_metrics import observe_stage_duration
@@ -22,7 +22,6 @@ from core.utils.exceptions import ConfigError, NoIndexableContentError, Pipeline
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
-from services.workers.csv_pipeline import run_csv_batches
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
@@ -32,6 +31,7 @@ from services.workers.stages.embed import embed_stage
 from services.workers.stages.parse import parse_stage
 from services.workers.stages.store import store_stage
 from services.workers.stages.topic_tag import topic_tag_stage
+from services.workers.tabular_pipeline import run_tabular_batches
 
 logger = get_logger()
 
@@ -64,7 +64,7 @@ class PipelineTimeouts:
 
 @dataclass(slots=True, frozen=True)
 class BatchIndexingContext:
-    """Resolved per-file dependencies reused by every parsed CSV batch."""
+    """Resolved per-file dependencies reused by every parsed tabular batch."""
 
     config: IndexationPipelineConfig | None
     parser: DocumentParser
@@ -204,16 +204,25 @@ class IndexingPipeline:
             configured_window = embedder_window
 
         document = row.get("document")
-        if _processed is None and isinstance(document, Document) and document.content_type is DocumentType.CSV:
+        if (
+            _processed is None
+            and isinstance(document, Document)
+            and document.content_type
+            in {
+                DocumentType.CSV,
+                DocumentType.XLSX,
+            }
+        ):
+            format_label = document.content_type.value.upper()
             if contextualizer is not None:
-                message = "CSV streaming skips chunk contextualization"
+                message = f"{format_label} streaming skips chunk contextualization"
                 row.setdefault("degraded_stages", {})["contextualize"] = message
                 logger.bind(task_id=row.get("task_id"), filename=row.get("filename", "")).warning(
                     f"{message}; continuing with labelled row chunks"
                 )
             concrete_parser = parser.resolve(document) if hasattr(parser, "resolve") else parser
-            if not isinstance(concrete_parser, CsvParser):
-                raise ConfigError("CSV indexing requires a configured CsvParser")
+            if not isinstance(concrete_parser, TabularBatchParser):
+                raise ConfigError(f"{format_label} indexing requires a configured tabular batch parser")
             batch_context = BatchIndexingContext(
                 config=config,
                 parser=parser,
@@ -227,7 +236,7 @@ class IndexingPipeline:
                 topic_tagger=None,
                 topic_tagging_llm=None,
             )
-            return await run_csv_batches(
+            return await run_tabular_batches(
                 self,
                 row,
                 concrete_parser,

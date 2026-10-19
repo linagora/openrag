@@ -87,6 +87,7 @@ class FileLoadersConfig(ConfigMixin):
     eml: str = "EmlLoader"
     docx: str = "DocxLoader"
     pptx: str = "PPTXLoader"
+    xlsx: str = "XlsxParser"
     doc: str = "DocLoader"
     png: str = "ImageLoader"
     jpeg: str = "ImageLoader"
@@ -127,6 +128,10 @@ class MimetypesConfig(ConfigMixin):
         default=".pptx",
         alias="application/vnd.openxmlformats-officedocument.presentationml.presentation",
     )
+    application_xlsx: str = Field(
+        default=".xlsx",
+        alias="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
     application_msword: str = Field(default=".doc", alias="application/msword")
     image_png: str = Field(default=".png", alias="image/png")
     image_jpeg: str = Field(default=".jpeg", alias="image/jpeg")
@@ -160,6 +165,9 @@ class MimetypesConfig(ConfigMixin):
 class LoaderConfig(ConfigMixin):
     csv_batch_size: int = Field(default=10_000, gt=0, strict=True)
     csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
+    xlsx_batch_size: int = Field(default=10_000, gt=0, strict=True)
+    xlsx_backend: str = "calamine"
+    xlsx_fallback_backend: str | None = "openpyxl"
     image_captioning: bool = True
     image_captioning_url: bool = True
     save_markdown: bool = False
