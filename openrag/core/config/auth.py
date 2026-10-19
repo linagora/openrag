@@ -380,7 +380,14 @@ class SeedUserConfig(BaseModel):
 
 
 class AuthConfig(ConfigMixin):
-    """The ``auth:`` section of ``conf/config.yaml``."""
+    """The ``auth:`` section of ``conf/config.yaml``.
+
+    Unknown keys are refused: a misspelt ``seed_users`` (the chart's
+    ``seedUsers`` spelling, say) would otherwise load as an empty list, and
+    the next startup would revoke every managed account.
+    """
+
+    model_config = {**ConfigMixin.model_config, "extra": "forbid"}
 
     seed_users: list[SeedUserConfig] = Field(default_factory=list)
 

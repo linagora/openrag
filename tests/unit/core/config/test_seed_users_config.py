@@ -87,6 +87,11 @@ class TestAuthConfig:
         with pytest.raises(ValidationError, match="COZY_STACK_TOKEN"):
             AuthConfig(seed_users=[_entry(), _entry(external_user_id="svc-other")])
 
+    def test_unknown_key_is_rejected(self):
+        """A misspelt key would load as seed_users=[] and revoke every managed account."""
+        with pytest.raises(ValidationError, match="seedUsers"):
+            AuthConfig(seedUsers=[_entry()])
+
 
 class TestLoading:
     def test_read_from_config_yaml(self, monkeypatch, tmp_path):
@@ -97,6 +102,16 @@ class TestLoading:
         )
         settings = load_config(config_path=tmp_path)
         assert [s.external_user_id for s in settings.auth.seed_users] == ["svc-a"]
+
+    def test_the_charts_spelling_in_config_yaml_fails_the_boot(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SEED_USERS", raising=False)
+        _write_minimal_config(
+            tmp_path,
+            "auth:\n  seedUsers:\n    - external_user_id: svc-a\n      token_env: sk-leaked-3\n",
+        )
+        with pytest.raises(ValidationError, match="auth.seedUsers") as excinfo:
+            load_config(config_path=tmp_path)
+        assert "sk-leaked-3" not in str(excinfo.value)
 
     def test_seed_users_env_replaces_the_config_list(self, monkeypatch, tmp_path):
         _write_minimal_config(
