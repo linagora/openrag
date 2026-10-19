@@ -2055,7 +2055,7 @@ async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup(
 
     tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="tenant-a", file_id="file-1")
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
 
@@ -2087,7 +2087,7 @@ async def test_delete_file_waits_for_matching_task_ref_before_cleanup() -> None:
 
     assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2121,7 +2121,7 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
     assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2281,7 +2281,7 @@ async def test_delete_file_waits_for_cancelled_task_to_settle_before_cleanup() -
         await delete_task
 
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2353,7 +2353,7 @@ async def test_delete_file_uses_legacy_task_state_lookup_when_matching_api_missi
     tsm.get_all_info.remote.assert_called_once_with()
     tsm.get_object_ref.remote.assert_called_once_with("task-1")
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
