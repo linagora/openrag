@@ -22,9 +22,9 @@ matches the legacy endpoint again.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
-from core.models.user import PartitionRole, UserPartition
+from core.models.user import PartitionRole, User, UserPartition
 from core.utils.consts import DEFAULT_ADMIN_USER_ID, DEFAULT_PARTITION_NAME
 from core.utils.exceptions import ConflictError, UserNotFoundError, ValidationError
 from core.utils.logging import get_logger
@@ -218,8 +218,35 @@ class UserService:
         await self._user_repo.delete_user(user_id)
         logger.info("Deleted user", user_id=user_id, cascaded_partitions=len(owned))
 
+    def _refuse_managed_change(self, user: User, setting: str) -> NoReturn:
+        """Raise a 409: ``setting`` of a managed account is decided by auth.seed_users.
+
+        Startup seeding rewrites it on every boot, so an API change would only
+        last until the next restart. A listed account is changed in its entry.
+        A removed one keeps ``managed_by_config`` and is revoked at every
+        startup: listing it again restores it, deleting it ends it.
+        """
+        if user.external_user_id in self._seed_user_ids:
+            raise ConflictError(
+                f"User '{user.id}' is managed by configuration (auth.seed_users): "
+                f"change its {setting} there, not through the API"
+            )
+        raise ConflictError(
+            f"User '{user.id}' was removed from auth.seed_users and is revoked at every API startup: "
+            "list it there again, or delete the account"
+        )
+
     async def regenerate_token(self, user_id: int) -> dict:
         await self._ensure_exists(user_id)
+        existing_user = await self._user_repo.get_user(user_id)
+        if (
+            existing_user is not None
+            and existing_user.managed_by_config
+            and existing_user.external_user_id not in self._seed_user_ids
+        ):
+            # A listed account may still be regenerated: it cuts a leaked token
+            # at once, until the next startup writes its secret again.
+            self._refuse_managed_change(existing_user, "token")
         revoked = await self._auth_service.revoke_oidc_sessions_by_user(user_id)
         user = await self._user_repo.regenerate_user_token(user_id)
         if user is None:
@@ -236,17 +263,12 @@ class UserService:
         existing_user = await self._user_repo.get_user(user_id)
         if existing_user is None:
             raise UserNotFoundError(f"User '{user_id}' not found")
-        if (
-            existing_user.managed_by_config
-            and "external_user_id" in updates
-            and updates["external_user_id"] != existing_user.external_user_id
-        ):
-            # auth.seed_users matches its rows on external_user_id: a rename
-            # would detach the row from its entry and keep its token alive.
-            raise ConflictError(
-                f"User '{user_id}' is managed by configuration (auth.seed_users): "
-                "change its external_user_id there, not through the API"
-            )
+        if existing_user.managed_by_config:
+            # auth.seed_users matches its rows on external_user_id, and startup
+            # seeding sets the admin flag (or drops it, for a removed entry).
+            for setting in ("external_user_id", "is_admin"):
+                if setting in updates and updates[setting] != getattr(existing_user, setting):
+                    self._refuse_managed_change(existing_user, setting)
         demotes_admin = existing_user.is_admin and updates.get("is_admin") is False
 
         revoked = 0

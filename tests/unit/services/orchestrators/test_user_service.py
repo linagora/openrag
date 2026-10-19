@@ -472,17 +472,86 @@ async def test_update_user_does_not_revoke_oidc_sessions_for_regular_profile_upd
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("new_external_id", ["svc-renamed", ""])
-async def test_update_user_refuses_external_id_change_on_a_managed_account(new_external_id):
+@pytest.mark.parametrize(
+    ("seed_user_ids", "message"),
+    [
+        pytest.param(frozenset({"svc-a"}), "change its external_user_id there", id="listed"),
+        pytest.param(frozenset(), "removed from auth.seed_users", id="removed"),
+    ],
+)
+async def test_update_user_refuses_external_id_change_on_a_managed_account(new_external_id, seed_user_ids, message):
     """auth.seed_users matches its rows on external_user_id: renaming or clearing
     it would orphan the row from its config entry (#1153)."""
     repo = FakeUserRepo(existing={2})
     repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
 
-    with pytest.raises(ConflictError, match="managed by configuration"):
-        await _svc(repo).update_user(2, UserUpdate(external_user_id=new_external_id))
+    with pytest.raises(ConflictError, match=message):
+        await _svc(repo, seed_user_ids=seed_user_ids).update_user(2, UserUpdate(external_user_id=new_external_id))
 
     assert repo.updated == []
     assert repo._users[2].external_user_id == "svc-a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("is_admin", "seed_user_ids", "message"),
+    [
+        pytest.param(False, frozenset({"svc-a"}), "change its is_admin there", id="listed-demote"),
+        pytest.param(True, frozenset(), "removed from auth.seed_users", id="removed-promote"),
+    ],
+)
+async def test_update_user_refuses_admin_change_on_a_managed_account(is_admin, seed_user_ids, message):
+    """Startup seeding sets the admin flag of a managed account on every boot
+    (and drops it for a removed entry), so an API change would not last."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(
+        id=2, display_name="svc", external_user_id="svc-a", is_admin=not is_admin, managed_by_config=True
+    )
+    auth = FakeAuthService()
+
+    with pytest.raises(ConflictError, match=message):
+        await _svc(repo, auth_service=auth, seed_user_ids=seed_user_ids).update_user(2, UserUpdate(is_admin=is_admin))
+
+    assert repo.updated == []
+    assert auth.revoked_users == []
+
+
+@pytest.mark.asyncio
+async def test_update_user_allows_restating_the_admin_flag_of_a_managed_account():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", is_admin=True, managed_by_config=True)
+
+    out = await _svc(repo).update_user(2, UserUpdate(display_name="Renamed", is_admin=True))
+
+    assert out["display_name"] == "Renamed"
+
+
+@pytest.mark.asyncio
+async def test_regenerate_token_refuses_a_removed_managed_account():
+    """Its token is revoked again at every startup: a new one would not last."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+    repo.regen_results[2] = {"id": 2, "token": "or-new"}
+    auth = FakeAuthService()
+
+    with pytest.raises(ConflictError, match="removed from auth.seed_users"):
+        await _svc(repo, auth_service=auth).regenerate_token(2)
+
+    assert repo.regenerated == []
+    assert auth.revoked_users == []
+
+
+@pytest.mark.asyncio
+async def test_regenerate_token_allows_a_listed_managed_account():
+    """The way to cut a leaked token at once (user_auth.md)."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+    repo.regen_results[2] = {"id": 2, "token": "or-new"}
+
+    out = await _svc(repo, seed_user_ids=frozenset({"svc-a"})).regenerate_token(2)
+
+    assert out == {"id": 2, "token": "or-new"}
+    assert repo.regenerated == [2]
 
 
 @pytest.mark.asyncio
