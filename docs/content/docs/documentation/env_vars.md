@@ -82,6 +82,15 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 :::
 
 #### PDF Loader
+##### PyMuPDF Loader Configuration
+These settings apply wherever PyMuPDF parses a PDF during indexing — the default `PyMuPDFLoader`, and a preset whose parsing strategy is `pymupdf` whatever `PDFLOADER` says — and during indexing only: the API's direct-extract path always parses on a single thread. With nothing set, parsing runs one PDF at a time on a single thread per indexer worker, as before.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PYMUPDF_POOL_SIZE` | int | 1 | PDFs one indexer worker parses at once; minimum `1`. PyMuPDF is not thread-safe, so above `1` each parse runs in its own child process (about 60 MiB of `VmData` before it parses anything, about 80 MiB inside a Ray worker). A child uses more while it parses: up to what the largest single parse needs, which a JPEG 2000 image can dominate, since it is decoded whole (a child peaked at about 775 MiB RSS on one 8000×6000 image). After each parse it succeeds at, or fails at for another reason than memory or, under `PYMUPDF_PARSE_MEMORY_LIMIT_MB`, an unreadable JPEG 2000 image, a child empties MuPDF's cache and, on glibc, returns freed memory to the system. That brings its RSS back near its baseline, but not always its `VmData`, which is what `PYMUPDF_PARSE_MEMORY_LIMIT_MB` counts: measured after a 60-page PDF of large images, RSS fell from 349 MiB to 84, but `VmData` only from 333 to between 224 and 282, varying from run to run; after one large JPEG 2000 image, `VmData` was back at 75. Measured on a 300-page PDF, 4 parses ran about 3.5x faster with `4` than with `1`. Each indexer worker runs its own pool, so a node runs up to `RAY_POOL_SIZE` × this many children. |
+| `PYMUPDF_PARSE_MEMORY_LIMIT_MB` | int | 0 | Ceiling on what one PyMuPDF child may allocate (`RLIMIT_DATA`), so an oversized PDF fails on its own instead of OOM-killing the worker and every file sharing it. That file fails at once with a `MemoryError` naming this setting, and its child is replaced before the next parse. A JPEG 2000 image that fails under the ceiling is reported the same way when OpenJPEG logs that it ran out of memory, and the error adds that the image is damaged if a higher limit does not help: a damaged image whose header declares more than the ceiling runs out of memory before decoding reaches the damage. When OpenJPEG logs nothing about memory, the error says the image is either over the ceiling or damaged (if the file still fails with the ceiling off, it is damaged), and its child is replaced as well. A damaged image under the ceiling therefore gets that hedged error, and costs a child. `0` disables it; setting it moves parsing into a child process even at `PYMUPDF_POOL_SIZE=1`. It bounds the child's **whole** memory, imports included: each child logs that baseline when it starts (at its slot's first parse, and again whenever it is replaced), refuses a value at or below it, and warns when less than 128 MiB is left above it. The child opens the PDF from disk rather than receiving a copy of it, so the file is not held in memory up front; what MuPDF builds while parsing still counts, and so does the cleaned copy a retry on a malformed PDF writes out. Parsing can then use up to `RAY_POOL_SIZE` × `PYMUPDF_POOL_SIZE` × this value. |
+| `PYMUPDF_MAX_TASKS_PER_CHILD` | int | 20 | Parses a PyMuPDF child handles before it is replaced, releasing memory it does not hand back. `0` keeps each child for the worker's lifetime. Used only when parsing runs in child processes. |
+
 ##### Marker Loader Configuration
 These settings apply when `MarkerLoader` is selected (`PDFLOADER=MarkerLoader`; the default is `PyMuPDFLoader`). It can be configured using the following environment variables:
 
@@ -315,7 +324,7 @@ The PostgreSQL database is configured using the following environment variables:
 | `POSTGRES_PASSWORD` | str | root_password | Password for database authentication |
 | `POSTGRES_DATABASE` | str | `partitions_for_collection_<VDB_COLLECTION_NAME>` | Database used for OpenRAG relational metadata. If unset, OpenRAG derives the historical name from the vector collection. |
 | `POSTGRES_AUTO_CREATE_DB` | bool | true | Creates the database automatically when it is missing. Keep this for local compose; set it to `false` for managed Postgres where the app role has no `CREATEDB`. |
-| `POSTGRES_RUN_MIGRATIONS` | bool | true | Runs Alembic migrations during app startup. Set it to `false` when migrations are applied by a deployment Job or init step. |
+| `POSTGRES_RUN_MIGRATIONS` | bool | true | Runs Alembic migrations during app startup. Set it to `false` when migrations are applied by a deployment Job or init step. With the Helm chart, set `postgresProvisioning.runMigrationsInApp` instead: the chart sets this variable from it, and refuses a `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` that disagrees. |
 | `POSTGRES_POOL_MIN_SIZE` | int | 5 | Minimum size of the async PostgreSQL connection pool. |
 | `POSTGRES_POOL_MAX_SIZE` | int | 20 | Maximum size of the async PostgreSQL connection pool. |
 | `POSTGRES_COMMAND_TIMEOUT` | int | 30 | Timeout in seconds for PostgreSQL commands issued through the async pool. |
@@ -823,6 +832,15 @@ Deployment-level knobs; most deployments never need to touch these — the compo
 | `OPENRAG_CONTAINER_STARTUP_TIMEOUT` | `float` | `max(60, 4 × POSTGRES_COMMAND_TIMEOUT)` (= 120 with defaults) | Seconds the API's service container (DB pools, Ray actors, …) is allowed to initialize at startup before the app fails fast. |
 | `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
 | `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |
+
+#### TLS proxy overlay (opt-in)
+
+Read only by the opt-in proxy compose file (`infra/compose/proxy.docker-compose.yaml`). Relative paths resolve against `infra/compose/`:
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PROXY_DATA_DIR` | `str` | `../../nginx_data` | Host directory for Nginx Proxy Manager's state (config and `database.sqlite`). |
+| `PROXY_LETSENCRYPT_DIR` | `str` | `../../letsencrypt` | Host directory for the Let's Encrypt certificates NPM issues. |
 
 #### Monitoring profile (opt-in)
 

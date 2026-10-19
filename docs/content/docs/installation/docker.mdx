@@ -67,3 +67,125 @@ docker compose -f docker-compose.yaml -f logging.docker-compose.yaml up -d
 
 Set `LOKI_URL` (and the optional `LOKI_USERNAME`, `LOKI_PASSWORD`,
 `LOKI_TENANT_ID`) in `.env`. See [Loki logs](/openrag/documentation/loki_logs/).
+
+## Reverse proxy (TLS)
+
+An opt-in overlay adds [Nginx Proxy Manager](https://nginxproxymanager.com/)
+as the TLS front door on ports 80/443:
+
+```bash
+docker compose -f docker-compose.yaml -f proxy.docker-compose.yaml up -d                # GPU
+docker compose -f docker-compose.yaml -f proxy.docker-compose.yaml --profile cpu up -d  # CPU
+```
+
+It also rebinds the API, Chainlit and Admin UI ports to `127.0.0.1`, so those
+services are reachable from outside the host only through the proxy. Services
+added through the optional `*_COMPOSE` includes keep their own port bindings.
+The overlay needs Docker Compose 2.24.4 or newer, for the `!override` tag. Use
+the overlay, not a `proxy` profile: an explicit profile deselects the API's
+default profile.
+
+Pass `-f proxy.docker-compose.yaml` on every `docker compose` command that
+recreates a container. Without it, the container comes back on the base file's
+`0.0.0.0` ports.
+
+NPM keeps its state in `nginx_data/` and its certificates in `letsencrypt/` at
+the repository root. Set `PROXY_DATA_DIR` and `PROXY_LETSENCRYPT_DIR` to move
+them. Both hold private keys: back them up, and keep them readable by root only.
+
+### Configure OpenRAG for the proxy
+
+Set these in `.env`:
+
+- **`UVICORN_FORWARDED_ALLOW_IPS`**: `172.16.0.0/12`, the range Docker assigns
+  Compose networks from by default. NPM reaches the API from that network, not
+  from loopback. Without this setting, uvicorn ignores NPM's `X-Forwarded-For`
+  and `X-Forwarded-Proto`. All users then share one failed-login rate-limit
+  bucket, and links built by the API use `http://`. Prefer the range to the
+  network's exact subnet: Docker can assign a different one when the network
+  is re-created, and the setting would then stop matching without any error.
+  Check that the subnet falls in the range with
+  `docker network inspect <project>_default -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'`;
+  if Docker gave it a `192.168.x.x` subnet, use that subnet instead. Do not use
+  `*`; see [Rate Limiting](/openrag/documentation/env_vars/#rate-limiting).
+- **`OIDC_REDIRECT_URI`** (OIDC mode only): `https://<domain>/auth/callback`.
+  The `ADMIN_UI_PORT` URL from the [OIDC guide](/openrag/documentation/oidc/)
+  no longer works from outside the host. Register the same URL in the IdP's
+  client.
+
+Then recreate the API container, with both files:
+
+```bash
+docker compose -f docker-compose.yaml -f proxy.docker-compose.yaml up -d openrag                    # GPU
+docker compose -f docker-compose.yaml -f proxy.docker-compose.yaml --profile cpu up -d openrag-cpu  # CPU
+```
+
+### Configure NPM
+
+NPM's admin UI listens on `127.0.0.1:81` only, so reach it through an SSH
+tunnel (`ssh -L 81:127.0.0.1:81 <host>`). Create a proxy host for your domain:
+
+1. **Details:** forward to `openrag` on port `8080` (or `APP_iPORT` if you set
+   it). Turn on **Websockets Support**. NPM only sends the `Upgrade` and
+   `Connection` headers when it is on, and Chainlit's chat needs them.
+2. **Custom locations:** add the paths below. A custom location has no
+   Websockets Support toggle of its own: it inherits the proxy host's setting
+   from step 1.
+3. **SSL:** request a Let's Encrypt certificate (or select an existing one),
+   and turn on **Force SSL** so that plain-HTTP requests are redirected to
+   HTTPS instead of forwarded.
+4. **Advanced:** add the following, so that the Prometheus endpoint stays
+   private as it does behind the Admin UI:
+
+   ```nginx
+   location = /metrics { return 404; }
+   ```
+
+| Path        | Forward to                | When                                                                                |
+|-------------|---------------------------|-------------------------------------------------------------------------------------|
+| `/`         | `openrag:<APP_iPORT>`     | Always. Serves the API, `/auth`, `/v1` and Chainlit at `/chainlit`. `APP_iPORT` is `8080` unless you set it. |
+| `/app`      | `admin-ui:8080`           | Always. Serves the Admin UI. Do not strip the `/app` prefix.                        |
+| `/grafana`  | `admin-ui:8080`           | With the monitoring overlay. The Admin UI proxies it on to Grafana. See below.      |
+| `/chainlit` | `openrag:<CHAINLIT_PORT>` | With `ENABLE_RAY_SERVE=true` only. Chainlit then runs as its own server on that port. |
+
+Send `/` straight to `openrag`, not through `admin-ui`. The Admin UI's own
+catch-all proxy would add a second hop on every API call.
+
+The monitoring overlay serves Grafana from the root of `http://localhost:3000`,
+so `/grafana` also needs these in `.env`. `GRAFANA_URL` is the link on the Admin
+UI's **System** page:
+
+```dotenv
+GF_SERVER_ROOT_URL=https://<domain>/grafana/
+GF_SERVER_SERVE_FROM_SUB_PATH=true
+GRAFANA_URL=https://<domain>/grafana/d/openrag-http/openrag-http-metrics
+```
+
+Then recreate Grafana and the API (`openrag-cpu` with `--profile cpu` on CPU):
+
+```bash
+docker compose -f docker-compose.yaml -f proxy.docker-compose.yaml \
+  -f monitoring.docker-compose.yaml up -d grafana openrag
+```
+
+### Check the setup
+
+The Chainlit WebSocket must answer `101 Switching Protocols`, and plain HTTP
+must redirect to HTTPS. Keep `--http1.1` in the first check: with **HTTP/2
+Support** on in NPM, curl would otherwise use HTTP/2, which drops the
+`Connection` and `Upgrade` headers, and the check would fail even though
+browsers connect. Once the WebSocket is open, curl keeps reading it until it is
+interrupted, so `--max-time 5` ends the check. The `(28) Operation timed out`
+it prints after the `101` line is expected.
+
+```bash
+curl -sS --http1.1 --max-time 5 -o /dev/null -D- \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" \
+  -H "Sec-WebSocket-Version: 13" \
+  "https://<domain>/chainlit/ws/socket.io/?EIO=4&transport=websocket" | grep -i '^HTTP'
+# expect: HTTP/1.1 101 Switching Protocols, then curl: (28) Operation timed out
+
+curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' "http://<domain>/v1/models"
+# expect: 301 https://<domain>/v1/models
+```

@@ -223,16 +223,19 @@ def get_logger(config=None):
 
     logger.remove()
 
+    # ``diagnose=False`` on every sink: loguru's default annotates each
+    # traceback frame with its variables' values, which writes whatever a
+    # frame holds (tokens, settings, request bodies, prompts) to the log.
     if getattr(config.verbose, "format", "text") == "json":
         # Machine format for collectors: Docker / the kubelet capture stderr
         # and Alloy/Promtail parse each line (docs: loki_logs.md).
-        logger.add(json_sink, level=config.verbose.level)
+        logger.add(json_sink, level=config.verbose.level, diagnose=False)
         intercept_stdlib_logging(config.verbose.level)
     else:
         # Pretty, colorized logs to the terminal (stderr): the level label is
         # colored by severity via loguru's <level> tag and the call site is
         # cyan. colorize=True forces ANSI on even when stderr isn't a TTY
         # (e.g. under ``docker compose up``).
-        logger.add(sys.stderr, format=terminal_formatter, level=config.verbose.level, colorize=True)
+        logger.add(sys.stderr, format=terminal_formatter, level=config.verbose.level, colorize=True, diagnose=False)
 
     return logger
