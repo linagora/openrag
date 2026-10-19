@@ -76,89 +76,12 @@ def _budget_seconds(probe: dict) -> int:
 
 # Probes
 
-
-@requires_helm
-def test_a_slow_start_is_covered_by_the_startup_probe(tmp_path: Path) -> None:
-    """Liveness used to kill Infinity before its warmup ended; it now waits for the startup probe."""
-    container = _reranker_container(_documents(tmp_path))
-
-    for kind in ("startupProbe", "readinessProbe", "livenessProbe"):
-        assert container[kind]["httpGet"] == {"path": "/health", "port": "reranker"}
-    assert _budget_seconds(container["startupProbe"]) > SLOWEST_MEASURED_START_SECONDS
-
-
-@requires_helm
-def test_readiness_starts_once_the_startup_probe_passes(tmp_path: Path) -> None:
-    """An initial delay counts from the container's start, so it would hold a fast start back."""
-    container = _reranker_container(_documents(tmp_path))
-
-    assert "initialDelaySeconds" not in container["readinessProbe"]
-
-
-@requires_helm
-def test_probe_values_are_rendered(tmp_path: Path) -> None:
-    container = _reranker_container(
-        _documents(
-            tmp_path,
-            "--set",
-            "reranker.probes.startup.failureThreshold=120",
-            "--set",
-            "reranker.probes.readiness.timeoutSeconds=5",
-            "--set",
-            "reranker.probes.liveness.periodSeconds=15",
-        )
-    )
-
-    assert container["startupProbe"]["failureThreshold"] == 120
-    assert container["readinessProbe"]["timeoutSeconds"] == 5
-    assert container["livenessProbe"]["periodSeconds"] == 15
-    assert container["livenessProbe"]["httpGet"]["path"] == "/health"
-
-
-@requires_helm
-def test_a_null_probe_is_dropped(tmp_path: Path) -> None:
-    container = _reranker_container(_documents(tmp_path, "--set", "reranker.probes.startup=null"))
-
-    assert "startupProbe" not in container
-    assert "livenessProbe" in container
-
-
-@requires_helm
-def test_a_probe_takes_another_handler_once_http_get_is_null(tmp_path: Path) -> None:
-    container = _reranker_container(
-        _documents(
-            tmp_path,
-            "--set",
-            "reranker.probes.liveness.httpGet=null",
-            "--set",
-            "reranker.probes.liveness.tcpSocket.port=reranker",
-        )
-    )
-
-    assert container["livenessProbe"]["tcpSocket"] == {"port": "reranker"}
-    assert "httpGet" not in container["livenessProbe"]
-
-
-@requires_helm
-def test_every_probe_set_to_null_renders_without_probes(tmp_path: Path) -> None:
-    container = _reranker_container(
-        _documents(
-            tmp_path,
-            "--set",
-            "reranker.probes.startup=null",
-            "--set",
-            "reranker.probes.readiness=null",
-            "--set",
-            "reranker.probes.liveness=null",
-        )
-    )
-
-    assert not {"startupProbe", "readinessProbe", "livenessProbe"} & container.keys()
-
-
-def _default_probes() -> dict:
-    values = yaml.safe_load((CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
-    return values["reranker"]["probes"]
+HEALTH = {"path": "/health", "port": "reranker"}
+DEFAULT_PROBES = {
+    "startup": {"httpGet": HEALTH, "periodSeconds": 10, "failureThreshold": 60},
+    "readiness": {"httpGet": HEALTH, "periodSeconds": 10, "failureThreshold": 6},
+    "liveness": {"httpGet": HEALTH, "initialDelaySeconds": 60, "periodSeconds": 30, "failureThreshold": 3},
+}
 
 
 def _probes(container: dict) -> dict:
@@ -186,59 +109,155 @@ def _container_without_default_probes(tmp_path: Path, *args: str) -> dict:
     return _reranker_container([document for document in yaml.safe_load_all(result.stdout) if document])
 
 
-@requires_helm
-def test_values_without_a_probes_block_keep_the_default_probes(tmp_path: Path) -> None:
-    """`helm upgrade --reuse-values` keeps the previous chart's values, which have
-    no probes block; the probes were hardcoded then and must not vanish now."""
-    assert _probes(_container_without_default_probes(tmp_path)) == _default_probes()
+def _containers(tmp_path: Path, *args: str) -> list[dict]:
+    """The reranker container with this chart's values and, as after
+    `helm upgrade --reuse-values` from an earlier chart, without its probes block."""
+    return [
+        _reranker_container(_documents(tmp_path / "chart", *args)),
+        _container_without_default_probes(tmp_path / "reused", *args),
+    ]
 
 
 @requires_helm
-def test_a_null_probes_block_without_default_probes_keeps_the_default_probes(tmp_path: Path) -> None:
-    """Without a default to delete, Helm keeps probes: null as a null."""
-    container = _container_without_default_probes(tmp_path, "--set", "reranker.probes=null")
-
-    assert _probes(container) == _default_probes()
+def test_the_default_probes_are_rendered_with_or_without_a_probes_block(tmp_path: Path) -> None:
+    for container in _containers(tmp_path):
+        assert _probes(container) == DEFAULT_PROBES
 
 
-@requires_helm
-def test_a_probe_set_in_part_without_default_probes_is_refused(tmp_path: Path) -> None:
-    result = _render_without_default_probes(tmp_path, "--set", "reranker.probes.startup.failureThreshold=120")
-
-    assert result.returncode != 0
-    assert (
-        "reranker.probes.startup has no handler (httpGet, tcpSocket, exec or grpc). After helm upgrade "
-        "--reuse-values from an earlier chart, this chart's default probes are not loaded: upgrade with "
-        "--reset-then-reuse-values (Helm 3.14 or later) instead, or set the whole probe."
-    ) in result.stderr
+def test_values_yaml_lists_the_default_probes() -> None:
+    """The defaults live in the template; values.yaml documents them in a comment."""
+    text = (CHART_DIR / "values.yaml").read_text(encoding="utf-8")
+    for name, probe in DEFAULT_PROBES.items():
+        timings = ", ".join(f"{key} {value}" for key, value in probe.items() if key != "httpGet")
+        assert f"#   {f'{name}:':<10} {timings}\n" in text
 
 
 @requires_helm
-def test_a_probe_set_in_full_without_default_probes_is_rendered(tmp_path: Path) -> None:
-    container = _container_without_default_probes(
-        tmp_path,
+def test_a_slow_start_is_covered_by_the_startup_probe(tmp_path: Path) -> None:
+    """Liveness used to kill Infinity before its warmup ended; it now waits for the startup probe."""
+    container = _reranker_container(_documents(tmp_path))
+
+    assert _budget_seconds(container["startupProbe"]) > SLOWEST_MEASURED_START_SECONDS
+
+
+@requires_helm
+def test_readiness_starts_once_the_startup_probe_passes(tmp_path: Path) -> None:
+    """An initial delay counts from the container's start, so it would hold a fast start back."""
+    container = _reranker_container(_documents(tmp_path))
+
+    assert "initialDelaySeconds" not in container["readinessProbe"]
+
+
+@requires_helm
+def test_a_field_set_alone_keeps_the_rest_of_every_probe(tmp_path: Path) -> None:
+    """--reuse-values from an earlier chart has no probes block: a field set
+    alone must not leave the probe without its handler and timings."""
+    for container in _containers(tmp_path, "--set", "reranker.probes.startup.failureThreshold=120"):
+        assert _probes(container) == {
+            **DEFAULT_PROBES,
+            "startup": {**DEFAULT_PROBES["startup"], "failureThreshold": 120},
+        }
+
+
+@requires_helm
+def test_a_handler_set_alone_keeps_the_timings(tmp_path: Path) -> None:
+    args = (
         "--set",
-        "reranker.probes.startup.tcpSocket.port=reranker",
+        "reranker.probes.startup.httpGet.path=/health",
         "--set",
-        "reranker.probes.startup.failureThreshold=120",
+        "reranker.probes.startup.httpGet.port=reranker",
+    )
+    for container in _containers(tmp_path, *args):
+        assert _probes(container) == DEFAULT_PROBES
+
+
+@requires_helm
+def test_a_handler_field_set_alone_keeps_the_rest_of_the_handler(tmp_path: Path) -> None:
+    for container in _containers(tmp_path, "--set", "reranker.probes.liveness.httpGet.path=/ready"):
+        assert container["livenessProbe"]["httpGet"] == {"path": "/ready", "port": "reranker"}
+
+
+@requires_helm
+def test_probe_values_are_rendered(tmp_path: Path) -> None:
+    container = _reranker_container(
+        _documents(
+            tmp_path,
+            "--set",
+            "reranker.probes.startup.failureThreshold=120",
+            "--set",
+            "reranker.probes.readiness.timeoutSeconds=5",
+            "--set",
+            "reranker.probes.liveness.periodSeconds=15",
+        )
     )
 
-    assert container["startupProbe"] == {"tcpSocket": {"port": "reranker"}, "failureThreshold": 120}
+    assert container["startupProbe"]["failureThreshold"] == 120
+    assert container["readinessProbe"]["timeoutSeconds"] == 5
+    assert container["livenessProbe"]["periodSeconds"] == 15
+    assert container["livenessProbe"]["httpGet"] == HEALTH
 
 
 @requires_helm
-def test_a_probe_whose_handler_is_null_without_another_is_refused(tmp_path: Path) -> None:
-    result = _render(tmp_path, "--set", "reranker.probes.liveness.httpGet=null")
+def test_a_null_probe_is_dropped(tmp_path: Path) -> None:
+    for container in _containers(tmp_path, "--set", "reranker.probes.startup=null"):
+        assert _probes(container) == {**DEFAULT_PROBES, "startup": None}
 
-    assert result.returncode != 0
-    assert "reranker.probes.liveness has no handler" in result.stderr
+
+@requires_helm
+def test_a_null_probe_is_dropped_from_a_values_file(tmp_path: Path) -> None:
+    values = tmp_path / "probes.yaml"
+    values.write_text("reranker:\n  probes:\n    startup: null\n", encoding="utf-8")
+
+    container = _reranker_container(_documents(tmp_path, "-f", str(values)))
+
+    assert _probes(container) == {**DEFAULT_PROBES, "startup": None}
+
+
+@requires_helm
+def test_a_null_field_is_removed(tmp_path: Path) -> None:
+    for container in _containers(tmp_path, "--set", "reranker.probes.liveness.initialDelaySeconds=null"):
+        assert container["livenessProbe"] == {"httpGet": HEALTH, "periodSeconds": 30, "failureThreshold": 3}
+
+
+@requires_helm
+def test_another_handler_replaces_http_get(tmp_path: Path) -> None:
+    for args in (
+        ("--set", "reranker.probes.liveness.tcpSocket.port=reranker"),
+        ("--set", "reranker.probes.liveness.httpGet=null", "--set", "reranker.probes.liveness.tcpSocket.port=reranker"),
+    ):
+        for container in _containers(tmp_path / str(len(args)), *args):
+            assert container["livenessProbe"] == {
+                "tcpSocket": {"port": "reranker"},
+                "initialDelaySeconds": 60,
+                "periodSeconds": 30,
+                "failureThreshold": 3,
+            }
+
+
+@requires_helm
+def test_a_probe_without_a_handler_is_refused(tmp_path: Path) -> None:
+    message = (
+        "reranker.probes.liveness has no handler: set httpGet, tcpSocket, exec or grpc, "
+        "or set the probe to null to drop it."
+    )
+    args = ("--set", "reranker.probes.liveness.httpGet=null")
+
+    for result in (_render(tmp_path / "chart", *args), _render_without_default_probes(tmp_path / "reused", *args)):
+        assert result.returncode != 0
+        assert message in result.stderr
+
+
+@requires_helm
+def test_every_probe_set_to_null_renders_without_probes(tmp_path: Path) -> None:
+    args = ("--set", "reranker.probes.startup=null", "--set", "reranker.probes.readiness=null")
+    for container in _containers(tmp_path, *args, "--set", "reranker.probes.liveness=null"):
+        assert not {"startupProbe", "readinessProbe", "livenessProbe"} & container.keys()
 
 
 @requires_helm
 def test_a_null_probes_block_keeps_the_default_probes(tmp_path: Path) -> None:
-    container = _reranker_container(_documents(tmp_path, "--set", "reranker.probes=null"))
-
-    assert _probes(container) == _default_probes()
+    for container in _containers(tmp_path, "--set", "reranker.probes=null"):
+        assert _probes(container) == DEFAULT_PROBES
 
 
 # One source for the model and the port
@@ -387,7 +406,9 @@ def test_a_copied_env_reading_the_deleted_model_key_names_the_replacement(tmp_pa
 @requires_helm
 def test_a_secret_reading_a_deleted_key_is_refused(tmp_path: Path) -> None:
     values = tmp_path / "secret.yaml"
-    values.write_text("env:\n  secrets:\n    RERANKER_API_KEY: '{{ .Values.reranker.rerankerModelName }}'\n", encoding="utf-8")
+    values.write_text(
+        "env:\n  secrets:\n    RERANKER_API_KEY: '{{ .Values.reranker.rerankerModelName }}'\n", encoding="utf-8"
+    )
 
     result = _render(tmp_path, "-f", str(values))
 
@@ -397,7 +418,9 @@ def test_a_secret_reading_a_deleted_key_is_refused(tmp_path: Path) -> None:
 
 @requires_helm
 def test_command_flags_that_never_applied_are_refused(tmp_path: Path) -> None:
-    result = _render(tmp_path, "--set", f"reranker.command={{v2,--model-id,{DEFAULT_MODEL},--port,7997,--batch-size,8}}")
+    result = _render(
+        tmp_path, "--set", f"reranker.command={{v2,--model-id,{DEFAULT_MODEL},--port,7997,--batch-size,8}}"
+    )
 
     assert result.returncode != 0
     assert "reranker.command is not read by the chart" in result.stderr

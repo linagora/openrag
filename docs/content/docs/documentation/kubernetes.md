@@ -265,10 +265,12 @@ its default 4 CPUs, 180 to 210 s on 2 and 340 to 380 s on 1, whether or not the
 model was already cached. Its startup probe allows 10 minutes for that, plus a
 first-boot model download, and the liveness and readiness probes start only
 once it passes. A start that hangs is therefore restarted after 10 minutes.
-All three probes are set under `reranker.probes`. Raise
+All three probes are set under `reranker.probes`, where each is merged over its
+default, so set only what you change: raise
 `reranker.probes.startup.failureThreshold` for slower CPUs or a slow download.
-Set a probe to `null` to drop it, and its `httpGet` to `null` to give it another
-handler. Setting `reranker.probes` itself to `null` keeps the default probes.
+Set a probe to `null` to drop it, a field to `null` to remove it, and another
+handler (`tcpSocket`, `exec` or `grpc`) to replace `httpGet`. The defaults are
+listed in `values.yaml`.
 On CPU, `reranker.extraEnv` with `INFINITY_MODEL_WARMUP: "false"` skips the
 warmup benchmark: on 4 CPUs Infinity then answered `/health` in under 20 s.
 
