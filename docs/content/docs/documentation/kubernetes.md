@@ -291,10 +291,32 @@ Prometheus exposes aggregate endpoint state through
 and the public readiness endpoint reports aggregate configuration-reference
 counts without exposing partition or preset names.
 
-- If using a public IP instead of a hostname, you can leave `ingress.host` empty in your `values.yaml`.  
-  The ingress will then match all hosts.
+- `openrag.ingress.host` is required when `openrag.ingress.enabled` is true: the chart refuses to
+  render without it. To reach OpenRAG by public IP only, disable the chart's ingress and expose the
+  service another way.
 
-- If you later configure a hostname + TLS (via cert-manager), just update `ingress.host` and redeploy.
+- If you later configure a hostname + TLS (via cert-manager), update `openrag.ingress.host` and redeploy.
+  With an HTTP-01 issuer, cert-manager answers the challenge from a solver pod it starts in the
+  release namespace, on port 8089. The chart's `<fullname>-acme-http01-solver` NetworkPolicy lets
+  that port through on the solver pods only, from any source by default, since a host-network
+  Ingress controller (ingress-nginx with `hostNetwork`, for one) connects from a node address.
+  Narrow it with `networkPolicy.acmeHttp01.from`: a `namespaceSelector` when the controller runs
+  on the pod network, an `ipBlock` with the node addresses when it uses `hostNetwork`, which no
+  selector can match. Do not add 8089 to `networkPolicy.externalPorts`, which would open it on
+  every pod.
+
+  ```yaml
+  networkPolicy:
+    acmeHttp01:
+      from:
+        # Controller on the pod network:
+        # - namespaceSelector:
+        #     matchLabels:
+        #       kubernetes.io/metadata.name: ingress-nginx
+        # Controller with hostNetwork, the node addresses:
+        # - ipBlock:
+        #     cidr: 10.0.0.0/24
+  ```
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
   The bundled vLLM engines run CUDA 12.9 builds (`v0.30.0-cu129`, and `v0.11.2` for the VLM). The
