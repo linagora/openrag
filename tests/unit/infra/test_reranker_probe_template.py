@@ -282,6 +282,63 @@ def test_a_removed_key_or_env_value_unlike_its_replacement_is_refused(
     assert message in result.stderr
 
 
+# The env.config block a values file copied from chart 0.7.1 or earlier
+# carries, once the removed keys themselves have been deleted.
+COPIED_LEGACY_ENV = """
+env:
+  config:
+    RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
+    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}{{ end }}'
+"""
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param((), id="bundled-reranker"),
+        # Nothing else checks an external reranker's model: it would be asked for "".
+        pytest.param(
+            ("--set", "reranker.enabled=false", "--set", "reranker.externalUrl=http://reranker.example:8000"),
+            id="external-reranker",
+        ),
+    ],
+)
+def test_a_copied_env_reading_a_deleted_key_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
+    legacy = tmp_path / "legacy-env.yaml"
+    legacy.write_text(COPIED_LEGACY_ENV, encoding="utf-8")
+
+    result = _render(tmp_path, "-f", str(legacy), *args)
+
+    assert result.returncode != 0
+    assert "env.config.RERANKER_BASE_URL reads reranker.servicePort" in result.stderr
+
+
+@requires_helm
+def test_a_copied_env_reading_the_deleted_model_key_names_the_replacement(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy-env.yaml"
+    legacy.write_text(COPIED_LEGACY_ENV, encoding="utf-8")
+
+    result = _render(tmp_path, "-f", str(legacy), "--set", "reranker.servicePort=7997")
+
+    assert result.returncode != 0
+    assert (
+        "env.config.RERANKER_MODEL reads reranker.rerankerModelName, which this chart removed, "
+        "so it would render empty. Set env.config.RERANKER_MODEL to '{{ .Values.reranker.model.id }}'."
+    ) in result.stderr
+
+
+@requires_helm
+def test_a_secret_reading_a_deleted_key_is_refused(tmp_path: Path) -> None:
+    values = tmp_path / "secret.yaml"
+    values.write_text("env:\n  secrets:\n    RERANKER_API_KEY: '{{ .Values.reranker.rerankerModelName }}'\n", encoding="utf-8")
+
+    result = _render(tmp_path, "-f", str(values))
+
+    assert result.returncode != 0
+    assert "env.secrets.RERANKER_API_KEY reads reranker.rerankerModelName" in result.stderr
+
+
 @requires_helm
 def test_command_flags_that_never_applied_are_refused(tmp_path: Path) -> None:
     result = _render(tmp_path, "--set", f"reranker.command={{v2,--model-id,{DEFAULT_MODEL},--port,7997,--batch-size,8}}")

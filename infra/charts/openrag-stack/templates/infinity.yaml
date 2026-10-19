@@ -10,6 +10,20 @@
 {{- if and (hasKey $reranker "servicePort") (ne (toString $reranker.servicePort) (toString $reranker.service.port)) }}
 {{- fail (printf "reranker.servicePort is %q but reranker.service.port is %q. This chart reads only reranker.service.port: set the port there and delete reranker.servicePort." (toString $reranker.servicePort) (toString $reranker.service.port)) }}
 {{- end }}
+{{- /* A values file copied from an earlier chart also carries env.config
+   templates that read those keys. Once a key is deleted, they render empty:
+   an external reranker would be asked for no model, which no check below
+   sees. Equal values, kept alongside, still pass above. */}}
+{{- $replacements := dict "rerankerModelName" "'{{ .Values.reranker.model.id }}'" "servicePort" "the chart default, which reads reranker.service.port" }}
+{{- range $section := list "config" "secrets" }}
+{{- range $name, $value := (index $.Values.env $section | default dict) }}
+{{- range $key := list "rerankerModelName" "servicePort" }}
+{{- if and (not (hasKey $reranker $key)) (contains (printf ".Values.reranker.%s" $key) (printf "%v" $value)) }}
+{{- fail (printf "env.%s.%s reads reranker.%s, which this chart removed, so it would render empty. Set env.%s.%s to %s." $section $name $key $section $name (get $replacements $key)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if .Values.reranker.enabled }}
 {{- $port := toString $reranker.service.port }}
 {{- $args := list "v2" "--model-id" (toString $reranker.model.id) "--port" $port }}

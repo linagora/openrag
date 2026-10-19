@@ -69,6 +69,13 @@ did not listen on. With an external reranker, `reranker.rerankerModelName` was
 the model OpenRAG asked for: move it to `reranker.model.id`. Extra flags left in
 `reranker.command` fail the same way, since they never applied.
 
+When you delete a removed key, also check `env.config` and `env.secrets`: a copied
+`env.config` still sets `RERANKER_MODEL` to `'{{ .Values.reranker.rerankerModelName }}'`
+and `RERANKER_BASE_URL` from `reranker.servicePort`. The install fails while any
+value reads a key you deleted, since it would render empty, and names the value to
+change. Set `RERANKER_MODEL` to `'{{ .Values.reranker.model.id }}'` and
+`RERANKER_BASE_URL` to the chart default, or remove both to take the defaults.
+
 The reranker also has a startup probe now, and `reranker.probes` sets all three of
 its probes. A start that hangs is restarted after 10 minutes instead of 2. See
 [Kubernetes](/openrag/documentation/kubernetes/#notes).
