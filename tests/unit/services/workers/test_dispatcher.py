@@ -116,6 +116,7 @@ def _task_state_manager() -> MagicMock:
         "begin_file_delete",
         "renew_file_delete",
         "end_file_delete",
+        "has_worker_settled",
     }
     tsm.set_state = _remote_mock()
     tsm.set_failed_if_not_cancelled = _remote_mock()
