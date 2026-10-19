@@ -26,6 +26,12 @@ Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
 the actors on its own. See
 [Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
 
+From OpenRAG 2.3.2, `MARKER_PDFTEXT_WORKERS` is ignored: Marker runs pdftext with
+one worker, inside the Marker child, so its processes no longer outlive a crashed
+worker. Remove the setting; the Marker worker logs a warning while it is above 1.
+`MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
+`1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
+
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
 From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
@@ -48,6 +54,37 @@ The chart can check `env.secrets` only when it renders the Secret itself. Do not
 put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an
 external secrets operator: that value replaces `runMigrationsInApp` unchecked.
 See [Managed PostgreSQL](/openrag/documentation/kubernetes/#managed-postgresql).
+
+## OpenRAG 2.3.2 on Kubernetes: one value for the reranker's model and port
+
+The bundled reranker's model and port each have one value now:
+
+- `reranker.model.id` replaces `reranker.rerankerModelName`. `env.config.RERANKER_MODEL`
+  defaults to `'{{ .Values.reranker.model.id }}'`.
+- `reranker.service.port` replaces `reranker.servicePort`. `env.config.RERANKER_BASE_URL`
+  reads it.
+- `reranker.command` is removed. The chart never read it; extra Infinity flags go in
+  the new `reranker.extraArgs`.
+
+A values file copied from an earlier chart still installs while each removed key
+holds the same value as the key that replaces it, which is the case unless you
+changed one of them. When they differ, the install fails and names the value to
+fix. With the bundled reranker, that configuration was already broken: OpenRAG
+named one model while Infinity reranked with another, or called a port Infinity
+did not listen on. With an external reranker, `reranker.rerankerModelName` was
+the model OpenRAG asked for: move it to `reranker.model.id`. Extra flags left in
+`reranker.command` fail the same way, since they never applied.
+
+When you delete a removed key, also check `env.config` and `env.secrets`: a copied
+`env.config` still sets `RERANKER_MODEL` to `'{{ .Values.reranker.rerankerModelName }}'`
+and `RERANKER_BASE_URL` from `reranker.servicePort`. The install fails while any
+value reads a key you deleted, since it would render empty, and names the value to
+change. Set `RERANKER_MODEL` to `'{{ .Values.reranker.model.id }}'` and
+`RERANKER_BASE_URL` to the chart default, or remove both to take the defaults.
+
+The reranker also has a startup probe now, and `reranker.probes` sets all three of
+its probes. A start that hangs is restarted after 10 minutes instead of 2. See
+[Kubernetes](/openrag/documentation/kubernetes/#notes).
 
 ## Changes in 2.3.0 for every deployment
 
