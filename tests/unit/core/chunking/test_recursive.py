@@ -482,3 +482,64 @@ def test_recursive_splitter_small_table_inline_keeps_source_order():
     table_pos = next(i for i, c in enumerate(chunks) if "| 1 | 2 |" in c.text)
     outro_pos = next(i for i, c in enumerate(chunks) if "Outro paragraph two." in c.text)
     assert intro_pos <= table_pos <= outro_pos
+
+
+def _strip_page_markers(text: str) -> str:
+    """Remove ``[PAGE_N]`` markers and surrounding whitespace from ``text``."""
+    import re
+
+    return re.sub(r"\[PAGE_\d+\]", "", text).strip()
+
+
+def test_page_starting_with_standalone_table_emits_no_marker_only_text_chunk():
+    """A document that opens on a table-only page used to emit a text chunk
+    holding nothing but the page's ``[PAGE_1]`` marker: the buffer flushed
+    ahead of the standalone table contained only the marker. That chunk must
+    be dropped — the standalone table keeps its place in order, and the page
+    transition must not strand content or rewind page attribution."""
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=_standalone_table(), page_number=2),
+            TextBlock(text="Outro paragraph two.", page_number=3),
+        ],
+        metadata={"source": "table-first.md"},
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    text_chunks = [c for c in chunks if c.chunk_type == ChunkType.TEXT]
+    for c in text_chunks:
+        assert _strip_page_markers(c.text), f"text chunk holds nothing but a page marker: {c.text!r}"
+    # The standalone table is emitted before the prose that follows it, and
+    # the marker-only flush did not push it around.
+    table_chunks = [c for c in chunks if c.chunk_type == ChunkType.TABLE]
+    assert table_chunks
+    assert chunks[0].chunk_type == ChunkType.TABLE
+    outro_chunks = [c for c in text_chunks if "Outro paragraph two." in c.text]
+    assert len(outro_chunks) == 1, f"outro lost or duplicated: {[c.text for c in text_chunks]}"
+
+
+def test_consecutive_standalone_pages_emit_no_marker_only_text_chunks():
+    """Pages whose entire content is a standalone image description used to
+    emit ``[PAGE_1]``/``[PAGE_2]`` text chunks between the image chunks — the
+    marker flushed alone as each next standalone element took over (#353
+    review). The images must come out alone, one per page, in order."""
+    splitter = RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    caption = "<image_description>\n" + " ".join(["caption"] * 120) + "\n</image_description>"
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=caption, page_number=page) for page in (1, 2, 3)],
+        metadata={"source": "images-only.md"},
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    assert [c.page_number for c in chunks] == [1, 2, 3]
+    assert all(c.chunk_type == ChunkType.IMAGE_CAPTION for c in chunks), [
+        f"{c.chunk_type.name}: {c.text[:40]!r}" for c in chunks
+    ]
+    # Nothing was lost: every page's caption made it into exactly one chunk.
+    chunks_per_page = {page: [c for c in chunks if c.page_number == page] for page in (1, 2, 3)}
+    assert all(len(parts) == 1 for parts in chunks_per_page.values())

@@ -18,6 +18,7 @@ from typing import Any
 
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.chunking.markdown_utils import (
+    PAGE_RE,
     MDElement,
     chunk_table,
     get_chunk_page_number,
@@ -333,9 +334,17 @@ class BaseChunker(ChunkingStrategy):
                 max_consecutive_newlines=2,
                 normalize_unicode=True,
             )
+            # A page that opens on a standalone table/image leaves the buffer
+            # holding nothing but the page's "[PAGE_N]" marker: flushing that
+            # used to emit a text chunk of just the marker (#353 review).
+            # Advance prev_page as if the marker chunk had run the same
+            # `get_chunk_page_number` logic, but emit nothing.
+            has_prose = bool(PAGE_RE.sub("", sanitized).strip())
             for text_chunk in self.split_text(sanitized):
                 page_info = get_chunk_page_number(chunk_str=text_chunk, previous_chunk_ending_page=prev_page)
                 prev_page = page_info["end_page"]
+                if not has_prose:
+                    continue
                 chunks.append(
                     {
                         **metadata,
