@@ -3,14 +3,13 @@
 import asyncio
 import codecs
 import csv
-import html
 import io
 import re
 from collections.abc import Iterator
 from pathlib import Path
 
-from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.parsers.registry import parser_registry
+from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row, normalize_headers
 from core.models.document import Document, ProcessedDocument, TextBlock
 from core.utils.exceptions import ConfigError, NoIndexableContentError
 from core.utils.logging import get_logger
@@ -107,39 +106,13 @@ def _detect_bytes_encoding(raw: bytes) -> tuple[str, str]:
     return _detect_stream_encoding(io.BytesIO(raw))
 
 
-def _normalize_headers(headers: list[str]) -> list[str]:
-    """Give blank headers stable names without colliding with explicit names."""
-    used_names = {header for header in headers if header}
-    normalized = []
-    for index, header in enumerate(headers, start=1):
-        if header:
-            normalized.append(header)
-            continue
-        base_name = f"column_{index}"
-        generated_name = base_name
-        suffix = 2
-        while generated_name in used_names:
-            generated_name = f"{base_name}_{suffix}"
-            suffix += 1
-        normalized.append(generated_name)
-        used_names.add(generated_name)
-    return normalized
-
-
-def markdown_row(cells: list[str]) -> str:
-    escaped = []
-    for cell in cells:
-        cell = html.escape(cell, quote=False)  #
-        cell = cell.replace("|", "&#124;")  # escape pipe characters to avoid breaking the table
-        cell = cell.replace("\r\n", "\n")  # removing carriage returns from windows line endings
-        cell = cell.replace("\r", "\n")  # removing carriage returns from mac line endings
-        cell = cell.replace("\n", "<br>")  # replacing newlines with <br> to preserve line breaks in table cells
-        escaped.append(cell)
-    return "| " + " | ".join(escaped) + " |"
+_normalize_headers = normalize_headers
 
 
 @parser_registry.register("csv")
-class CsvParser(DocumentParser):
+class CsvParser(TabularBatchParser):
+    tabular_format = "csv"
+
     def __init__(self, delimiter: str | None = None, *, batch_size: int = 10_000):
         if type(batch_size) is not int or batch_size < 1:
             raise ConfigError("CSV batch_size must be a positive integer")

@@ -486,7 +486,7 @@ async def _load_document(
     # document metadata so it never leaks into chunk metadata.
     filename = _display_filename(path, metadata)
     content_type = Document.detect_content_type(filename, metadata.get("mimetype"))
-    raw_bytes = None if content_type is DocumentType.CSV else await asyncio.to_thread(p.read_bytes)
+    raw_bytes = None if content_type in {DocumentType.CSV, DocumentType.XLSX} else await asyncio.to_thread(p.read_bytes)
     return Document(
         id=file_id,
         filename=filename,
