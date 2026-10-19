@@ -78,7 +78,9 @@ def _resolve_seed_tokens(
     share it, in which case both are refused since neither can be told apart
     from the other at lookup time. A refused token is never written, but the
     entry still applies its admin flag and roles to an existing account. Log
-    lines name the entry and the env var, never the value.
+    lines name the entry by ``external_user_id`` only: neither the token nor
+    the ``token_env`` name is logged, since a token pasted where the name
+    belongs can pass the name pattern.
     """
     allow_insecure = env.get(ALLOW_INSECURE_SECRETS_ENV_VAR, "").strip().lower() == "true"
     admin_token = env.get(ADMIN_TOKEN_ENV_VAR) or None
@@ -86,7 +88,7 @@ def _resolve_seed_tokens(
     refused: set[str] = set()
 
     def refuse(seed: SeedUserConfig, reason: str) -> None:
-        logger.bind(external_user_id=seed.external_user_id, token_env=seed.token_env).error(
+        logger.bind(external_user_id=seed.external_user_id).error(
             f"Seed user token refused: {reason}; the token is not written"
         )
         tokens[seed.external_user_id] = None
@@ -106,7 +108,7 @@ def _resolve_seed_tokens(
             )
             continue
         if weak:
-            logger.bind(external_user_id=seed.external_user_id, token_env=seed.token_env).warning(
+            logger.bind(external_user_id=seed.external_user_id).warning(
                 f"{ALLOW_INSECURE_SECRETS_ENV_VAR}=true: seeding a token that fails the secret policy"
             )
         if admin_token is not None and value == admin_token:
@@ -700,7 +702,7 @@ class PgUserRepository(UserRepository):
         refused: bool,
         present: set[str],
     ) -> str:
-        log = logger.bind(external_user_id=seed.external_user_id, token_env=seed.token_env)
+        log = logger.bind(external_user_id=seed.external_user_id)
         existing = await conn.fetchrow(
             "SELECT id, managed_by_config FROM users WHERE external_user_id = $1",
             seed.external_user_id,

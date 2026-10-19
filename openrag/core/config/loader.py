@@ -351,8 +351,11 @@ def _without_auth_inputs(exc: ValidationError) -> ValidationError:
     """Drop the offending values when an ``auth`` entry fails validation.
 
     A token typed under ``token:`` or pasted where a ``token_env`` name belongs
-    would otherwise reach the boot log as ``input_value``.
+    would otherwise reach the boot log as ``input_value``, or the ``input`` of
+    :meth:`ValidationError.errors` for a caller that logs those.
     """
-    if not any(error["loc"][:1] == ("auth",) for error in exc.errors()):
+    errors = exc.errors(include_url=False)
+    if not any(error["loc"][:1] == ("auth",) for error in errors):
         return exc
-    return ValidationError.from_exception_data(exc.title, exc.errors(include_url=False), hide_input=True)
+    scrubbed = [{**error, "input": None} if error["loc"][:1] == ("auth",) else error for error in errors]
+    return ValidationError.from_exception_data(exc.title, scrubbed, hide_input=True)

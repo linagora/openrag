@@ -84,8 +84,9 @@ class TestAuthConfig:
             AuthConfig(seed_users=[_entry(), _entry(token_env="OTHER_TOKEN")])
 
     def test_duplicate_token_env_is_rejected(self):
-        with pytest.raises(ValidationError, match="COZY_STACK_TOKEN"):
+        with pytest.raises(ValidationError, match="same token_env") as excinfo:
             AuthConfig(seed_users=[_entry(), _entry(external_user_id="svc-other")])
+        assert "COZY_STACK_TOKEN" not in str(excinfo.value)
 
     def test_unknown_key_is_rejected(self):
         """A misspelt key would load as seed_users=[] and revoke every managed account."""

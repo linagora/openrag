@@ -393,11 +393,18 @@ class AuthConfig(ConfigMixin):
 
     @model_validator(mode="after")
     def _unique_keys(self) -> AuthConfig:
+        # Duplicates are reported by entry, never by ``token_env`` value: a
+        # token pasted where the env var name belongs can pass the name
+        # pattern, and this message reaches the boot log.
         for field in ("external_user_id", "token_env"):
-            seen: set[str] = set()
-            for seed in self.seed_users:
+            first: dict[str, int] = {}
+            for index, seed in enumerate(self.seed_users):
                 value = getattr(seed, field)
-                if value in seen:
-                    raise ValueError(f"auth.seed_users: {field} {value!r} is used by more than one entry")
-                seen.add(value)
+                if value in first:
+                    earlier = self.seed_users[first[value]]
+                    raise ValueError(
+                        f"auth.seed_users: entries {first[value]} ({earlier.external_user_id!r}) and "
+                        f"{index} ({seed.external_user_id!r}) have the same {field}"
+                    )
+                first[value] = index
         return self
