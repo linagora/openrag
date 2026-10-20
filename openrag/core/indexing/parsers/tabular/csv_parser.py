@@ -30,33 +30,42 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
     Validate UTF-8 incrementally first. Only if validation fails, run chardet
     on a bounded prefix plus the failing block.
     """
-    decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
+    # ``surrogateescape`` lets validation continue after an invalid byte while
+    # keeping invalid bytes distinguishable from valid Unicode characters.
+    # Stopping at the first error would miss UTF-8 multibyte text later in the
+    # file and let chardet silently reinterpret that text as a single-byte
+    # encoding.
+    decoder = codecs.getincrementaldecoder("utf-8-sig")("surrogateescape")
     utf8_valid = True
     prefix = bytearray()
     failing_block = b""
-    blocks_read = 0
+    previous_tail = b""
     saw_utf8_multibyte = False
 
     raw_stream.seek(0)
     while block := raw_stream.read(_ENCODING_SAMPLE_SIZE):
-        blocks_read += 1
         if len(prefix) < _ENCODING_SAMPLE_SIZE:
             prefix.extend(block[: _ENCODING_SAMPLE_SIZE - len(prefix)])
-        try:
-            decoded = decoder.decode(block, final=False)
-            saw_utf8_multibyte |= not decoded.isascii()
-        except UnicodeDecodeError as exc:
+        decoded = decoder.decode(block, final=False)
+        contains_invalid_bytes = any("\udc80" <= character <= "\udcff" for character in decoded)
+        if contains_invalid_bytes:
             utf8_valid = False
-            failing_block = block
-            # ``exc.object`` includes any bytes buffered by the incremental
-            # decoder. Everything before ``exc.start`` was valid UTF-8.
-            saw_utf8_multibyte |= any(byte >= 0x80 for byte in exc.object[: exc.start])
-            break
-    if utf8_valid:
-        try:
-            decoder.decode(b"", final=True)
-        except UnicodeDecodeError:
-            utf8_valid = False
+            if not failing_block:
+                # Include the possible beginning of a sequence buffered from
+                # the previous block. Four bytes cover the longest UTF-8 code
+                # point and keep the chardet sample bounded.
+                failing_block = previous_tail + block
+        saw_utf8_multibyte |= any(
+            ord(character) > 0x7F and not "\udc80" <= character <= "\udcff" for character in decoded
+        )
+        previous_tail = block[-4:]
+
+    decoded = decoder.decode(b"", final=True)
+    if any("\udc80" <= character <= "\udcff" for character in decoded):
+        utf8_valid = False
+        if not failing_block:
+            failing_block = previous_tail
+    saw_utf8_multibyte |= any(ord(character) > 0x7F and not "\udc80" <= character <= "\udcff" for character in decoded)
 
     raw_stream.seek(0)
     if utf8_valid:
@@ -71,7 +80,7 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
 
     detection_sample = bytes(prefix)
     remaining = _ENCODING_DETECTION_LIMIT - len(detection_sample)
-    if remaining > 0 and failing_block and blocks_read > 1:
+    if remaining > 0 and failing_block:
         detection_sample += failing_block[:remaining]
     try:
         import chardet
