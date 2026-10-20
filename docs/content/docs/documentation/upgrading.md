@@ -32,6 +32,15 @@ worker. Remove the setting; the Marker worker logs a warning while it is above 1
 `MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
 `1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
 
+From OpenRAG 2.3.2, the bundled object store runs SILO, the maintained MinIO
+fork, instead of the unpatched MinIO build. The switch is one-way, so back up
+the MinIO, etcd and Milvus data first. On Kubernetes, stop every MinIO pod
+before `helm upgrade`, and set `minioCredentials.accessKey` and `secretKey`: the
+chart refuses to install without them. Deployments on an external S3 store are
+not affected. Follow
+[Object storage upgrade (MinIO to SILO)](/openrag/documentation/minio_silo_upgrade/)
+before upgrading.
+
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
 From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
