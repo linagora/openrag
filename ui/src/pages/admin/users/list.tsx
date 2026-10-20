@@ -1,10 +1,17 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Trash2, Eye, Plus, Copy, Search, X, AlertCircle, RefreshCw } from "lucide-react";
-import { listUsers, deleteUser, createUser, effectiveQuota } from "@/lib/api/users";
+import {
+  listUsers,
+  getUser,
+  deleteUser,
+  deleteUserDescription,
+  createUser,
+  effectiveQuota,
+} from "@/lib/api/users";
 import type { UserResponse, UserWithToken } from "@/lib/api/users";
 import { getConfig } from "@/lib/api/system";
 import { PageHeader } from "@/components/shared/page-header";
@@ -74,6 +81,38 @@ function formatUsage(
   if (eff === "unlimited") return { text: `${count} / ∞`, over: false };
   if (eff === "unknown") return { text: `${count} / default`, over: false };
   return { text: `${count} / ${eff}`, over: count > eff };
+}
+
+// The list endpoint has no memberships, so the user's detail is fetched when
+// the dialog opens to name the partitions that deleting them also deletes.
+function DeleteUserAction({
+  userId,
+  label,
+  onConfirm,
+  children,
+}: {
+  userId: number;
+  label: string;
+  onConfirm: () => void;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const { data: detail } = useQuery({
+    queryKey: ["user", String(userId)],
+    queryFn: () => getUser(userId),
+    enabled: open,
+  });
+
+  return (
+    <ConfirmDialog
+      title="Delete user?"
+      description={deleteUserDescription(label, detail?.memberships)}
+      onConfirm={onConfirm}
+      onOpenChange={setOpen}
+    >
+      {children}
+    </ConfirmDialog>
+  );
 }
 
 export default function UserListPage() {
@@ -194,9 +233,9 @@ export default function UserListPage() {
                 <Eye className="h-3.5 w-3.5" />
               </Link>
             </Button>
-            <ConfirmDialog
-              title="Delete user?"
-              description={`Permanently delete "${label}"? This removes them from all partitions and invalidates their token.`}
+            <DeleteUserAction
+              userId={row.original.id}
+              label={label}
               onConfirm={() => deleteMut.mutate(row.original.id)}
             >
               <Button
@@ -209,7 +248,7 @@ export default function UserListPage() {
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </Button>
-            </ConfirmDialog>
+            </DeleteUserAction>
           </div>
         );
       },

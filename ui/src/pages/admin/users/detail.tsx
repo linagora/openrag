@@ -7,6 +7,7 @@ import {
   getUser,
   updateUser,
   deleteUser,
+  deleteUserDescription,
   regenerateUserToken,
   listUserMemberships,
   grantMembership,
@@ -136,7 +137,7 @@ function UserDetail() {
             </Button>
             <ConfirmDialog
               title="Delete user?"
-              description={`Permanently delete "${title}"? This removes them from all partitions and invalidates their token.`}
+              description={deleteUserDescription(title, user.memberships)}
               onConfirm={() => deleteMut.mutate()}
             >
               <Button variant="destructive" disabled={user.id === 1}>
@@ -255,6 +256,7 @@ function PartitionsTab({ userId }: { userId: number }) {
     mutationFn: () => grantMembership(partition, userId, role),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      queryClient.invalidateQueries({ queryKey: ["user", String(userId)] });
       toast.success(`Granted ${role} on ${partition}`);
       setDialogOpen(false);
       setPartition("");
@@ -267,6 +269,7 @@ function PartitionsTab({ userId }: { userId: number }) {
     mutationFn: (part: string) => revokeMembership(part, userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      queryClient.invalidateQueries({ queryKey: ["user", String(userId)] });
       toast.success("Access removed");
     },
     onError: (e) => toast.error((e as Error).message),
@@ -277,6 +280,7 @@ function PartitionsTab({ userId }: { userId: number }) {
       changeMembershipRole(part, userId, newRole),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      queryClient.invalidateQueries({ queryKey: ["user", String(userId)] });
       toast.success("Role updated");
     },
     onError: (e) => toast.error((e as Error).message),

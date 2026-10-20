@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listUsers } from "@/lib/api/users";
+import { getUser, listUsers } from "@/lib/api/users";
 import type { UserResponse } from "@/lib/api/users";
 import UserListPage from "./list";
 
@@ -23,12 +23,14 @@ vi.mock("@/lib/api/users", async () => {
   return {
     ...actual,
     listUsers: vi.fn(),
+    getUser: vi.fn(),
     deleteUser: vi.fn(),
     createUser: vi.fn(),
   };
 });
 
 const listUsersMock = vi.mocked(listUsers);
+const getUserMock = vi.mocked(getUser);
 
 function makeUser(overrides: Partial<UserResponse> = {}): UserResponse {
   return {
@@ -80,6 +82,32 @@ describe("UserListPage", () => {
 
     expect(view.getAttribute("data-size")).toBe("icon-xs");
     expect(deleteAction.getAttribute("data-size")).toBe("icon-xs");
+  });
+
+  it("names the partitions that deleting a user also deletes", async () => {
+    getUserMock.mockResolvedValue(
+      makeUser({
+        memberships: [
+          { partition: "default", role: "owner", added_at: null },
+          { partition: "research", role: "owner", added_at: null },
+          { partition: "shared", role: "editor", added_at: null },
+          { partition: "archive", role: "owner", added_at: null },
+        ],
+      }),
+    );
+    renderUsers();
+
+    await userEvent.click(await screen.findByRole("button", { name: /delete ada lovelace/i }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(
+      await within(dialog).findByText(
+        /This also deletes the 2 partitions they own, with all their documents: research, archive\./,
+      ),
+    ).toBeTruthy();
+    expect(dialog.textContent).toContain("The default partition is kept");
+    expect(dialog.textContent).not.toContain("shared");
+    expect(getUserMock).toHaveBeenCalledWith(2);
   });
 
   it("searches visible identifiers across paginated rows", async () => {
