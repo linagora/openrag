@@ -627,6 +627,8 @@ Manage who can access a partition and with which role — all **owner** only.
 
 `POST` no longer updates an existing member's role. Use the `PATCH` endpoint when changing a role.
 
+A partition always keeps at least one owner: removing or demoting its last owner returns `409 Conflict` (`LAST_PARTITION_OWNER`). Make another member owner first.
+
 #### Document Relationships
 
 * Get Files by Relationship
