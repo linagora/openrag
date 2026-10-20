@@ -360,6 +360,49 @@ describe("DocumentListPage", () => {
     expect(screen.getByTestId("location").textContent).toBe("/jobs");
   });
 
+  it("keeps failed files in the dialog after a partial upload failure and retries only those", async () => {
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "bad.txt") throw new Error("Unsupported file type");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["good"], "good.txt", { type: "text/plain" }),
+      new File(["bad"], "bad.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(screen.getByText("good.txt: uploaded")).toBeTruthy();
+    expect(screen.getByText("bad.txt: Unsupported file type")).toBeTruthy();
+    expect(screen.getByText("1 failed file(s) ready to retry")).toBeTruthy();
+
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-2" });
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(3));
+    expect((uploadFileMock.mock.calls[2][2] as File).name).toBe("bad.txt");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("closes the upload dialog when every file is accepted", async () => {
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["one"], "one.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("refreshes the active Jobs count as soon as uploads are accepted", async () => {
     uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
     getQueueInfoMock.mockResolvedValueOnce(queueInfo(0)).mockResolvedValue(queueInfo(3));
