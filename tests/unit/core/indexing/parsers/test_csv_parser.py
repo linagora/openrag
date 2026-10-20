@@ -416,6 +416,27 @@ async def test_utf8_french_text_with_a_stray_byte_keeps_utf8(tmp_path, monkeypat
     assert result.text_blocks[0].metadata["csv_decode_replacements"] == 1
 
 
+async def test_stray_byte_before_utf8_text_keeps_utf8(tmp_path, monkeypatch):
+    fake_chardet = ModuleType("chardet")
+
+    def fail_if_called(_raw):
+        raise AssertionError("chardet must not reinterpret valid UTF-8 found after an invalid byte")
+
+    fake_chardet.detect = fail_if_called
+    monkeypatch.setitem(sys.modules, "chardet", fake_chardet)
+    path = tmp_path / "stray-byte-before-utf8.csv"
+    utf8_rows = "".join(f"{number},café\n" for number in range(1, 30_001)).encode()
+    path.write_bytes(b"id,note\n0,Ren\xe9\n" + utf8_rows)
+
+    result = await CsvParser(batch_size=40_000).parse(Document(source_path=str(path)))
+
+    text = result.text_blocks[0].text
+    assert "Ren\ufffd" in text
+    assert text.count("café") == 30_000
+    assert "caf\ufffd" not in text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 1
+
+
 async def test_plain_ascii_prefix_uses_bounded_chardet_sample(tmp_path, monkeypatch):
     samples: list[bytes] = []
     fake_chardet = ModuleType("chardet")
