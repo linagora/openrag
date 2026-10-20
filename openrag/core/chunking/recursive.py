@@ -334,16 +334,18 @@ class BaseChunker(ChunkingStrategy):
                 max_consecutive_newlines=2,
                 normalize_unicode=True,
             )
-            # A page that opens on a standalone table/image leaves the buffer
-            # holding nothing but the page's "[PAGE_N]" marker: flushing that
-            # used to emit a text chunk of just the marker (#353 review).
-            # Advance prev_page as if the marker chunk had run the same
-            # `get_chunk_page_number` logic, but emit nothing.
-            has_prose = bool(PAGE_RE.sub("", sanitized).strip())
+            # A page that opens on a standalone table/image can leave page
+            # markers in the buffer (#353 review): where it holds only them,
+            # or where a piece splits off carrying nothing more, emitting it
+            # produced a text chunk of just the marker. The check must be per
+            # split piece, not per buffer — prose in the buffer does not stop
+            # one of its pieces from being marker-only. `prev_page` advances
+            # for every piece before one is skipped, so page attribution is
+            # untouched by the drop.
             for text_chunk in self.split_text(sanitized):
                 page_info = get_chunk_page_number(chunk_str=text_chunk, previous_chunk_ending_page=prev_page)
                 prev_page = page_info["end_page"]
-                if not has_prose:
+                if not PAGE_RE.sub("", text_chunk).strip():
                     continue
                 chunks.append(
                     {

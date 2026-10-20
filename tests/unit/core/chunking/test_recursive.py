@@ -543,3 +543,48 @@ def test_consecutive_standalone_pages_emit_no_marker_only_text_chunks():
     # Nothing was lost: every page's caption made it into exactly one chunk.
     chunks_per_page = {page: [c for c in chunks if c.page_number == page] for page in (1, 2, 3)}
     assert all(len(parts) == 1 for parts in chunks_per_page.values())
+
+
+def test_page_break_isolating_a_trailing_marker_emits_no_marker_only_text_chunk():
+    """Prose that fills ``chunk_size`` just before a page break makes the
+    splitter emit ``[PAGE_N]`` as a piece of its own: the guard that checked
+    the whole flushed buffer froze ``has_prose`` at ``True`` and let that
+    marker-only text chunk through. The check must happen per split piece —
+    the page state still advances for every piece before one is skipped."""
+    prose = " ".join(f"word{i}" for i in range(40))  # 40 tokens, fills chunk_size
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=prose, page_number=1),
+            TextBlock(text=_standalone_table(), page_number=2),
+            TextBlock(text="Outro paragraph two.", page_number=3),
+        ],
+        metadata={"source": "dense-prose-then-table.md"},
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert chunks, "expected chunks to be produced"
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    # No text chunk may hold nothing but page markers. This is what the
+    # buffer-level guard missed: the marker piece split off a prose-bearing
+    # buffer still only carries the marker.
+    text_chunks = [c for c in chunks if c.chunk_type == ChunkType.TEXT]
+    assert text_chunks
+    for c in text_chunks:
+        assert _strip_page_markers(c.text), f"text chunk holds nothing but a page marker: {c.text!r}"
+    # The prose survives exactly once, on the page it was written on.
+    prose_chunks = [c for c in text_chunks if "word0 " in c.text and "word39" in c.text]
+    assert len(prose_chunks) == 1, f"prose lost or duplicated: {[c.text[:60] for c in text_chunks]}"
+    assert prose_chunks[0].chunk_index == 0
+    assert prose_chunks[0].page_number == 1
+    # The standalone table follows the prose in source order, on its page.
+    table_chunks = [c for c in chunks if c.chunk_type == ChunkType.TABLE]
+    assert table_chunks
+    assert prose_chunks[0].chunk_index < table_chunks[0].chunk_index
+    assert all(c.page_number == 2 for c in table_chunks)
+    # The outro's page resolves through the untouched prev_page chain — the
+    # skipped marker piece must not have rewound or lost the page state.
+    outro_chunks = [c for c in text_chunks if "Outro paragraph two." in c.text]
+    assert len(outro_chunks) == 1
+    assert outro_chunks[0].page_number == 3
