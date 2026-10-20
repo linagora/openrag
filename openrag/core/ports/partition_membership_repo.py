@@ -21,8 +21,7 @@ class PartitionMembershipRepository(ABC):
     async def assign_partition(self, assignment: UserPartition) -> UserPartition: ...
 
     @abstractmethod
-    async def remove_partition(self, user_id: int, partition: str) -> bool:
-        """Raises ``ConflictError`` (``LAST_PARTITION_OWNER``) for the partition's only owner."""
+    async def remove_partition(self, user_id: int, partition: str) -> bool: ...
 
     @abstractmethod
     async def list_user_partitions(self, user_id: int) -> list[UserPartition]: ...
@@ -31,8 +30,7 @@ class PartitionMembershipRepository(ABC):
     async def list_partition_users(self, partition: str) -> list[UserPartition]: ...
 
     @abstractmethod
-    async def update_partition_role(self, user_id: int, partition: str, role: PartitionRole) -> bool:
-        """Raises ``ConflictError`` (``LAST_PARTITION_OWNER``) when demoting the only owner."""
+    async def update_partition_role(self, user_id: int, partition: str, role: PartitionRole) -> bool: ...
 
     @abstractmethod
     async def count_partition_users(self, partition: str) -> int: ...

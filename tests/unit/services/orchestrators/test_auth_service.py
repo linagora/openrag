@@ -8,13 +8,10 @@ faked. Each test asserts behaviour the legacy router used to own.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
-
 import pytest
 from core.config.auth import OIDCConfig
 from core.models.user import PartitionRole, User, UserPartition
-from core.utils.exceptions import ConflictError, OpenRAGError
+from core.utils.exceptions import OpenRAGError
 from cryptography.fernet import Fernet
 from services.auth import StateCookieSerializer, hash_session_token
 from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY, LogoutTokenClaims, TokenBundle
@@ -176,21 +173,12 @@ class FakeMembershipRepo:
         self.assigned.append((assignment.user_id, assignment.partition, assignment.role.value))
         return assignment
 
-    def _refuse_last_owner(self, user_id: int, partition: str) -> None:
-        # Mirrors the real repo, which refuses to leave a partition ownerless.
-        owners = {uid for (uid, part), role in self._rows.items() if part == partition and role == "owner"}
-        if owners == {user_id}:
-            raise ConflictError(f"User {user_id} is the last owner of '{partition}'.", code="LAST_PARTITION_OWNER")
-
     async def update_partition_role(self, user_id: int, partition: str, role: PartitionRole) -> bool:
-        if role != PartitionRole.OWNER:
-            self._refuse_last_owner(user_id, partition)
         self._rows[(user_id, partition)] = role.value
         self.updated.append((user_id, partition, role.value))
         return True
 
     async def remove_partition(self, user_id: int, partition: str) -> bool:
-        self._refuse_last_owner(user_id, partition)
         existed = self._rows.pop((user_id, partition), None) is not None
         self.removed.append((user_id, partition))
         return existed
@@ -796,50 +784,6 @@ async def test_membership_sync_survives_list_failure():
     # Must not raise.
     await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner"]})
     assert repo.assigned == []
-
-
-@contextmanager
-def _captured_warnings() -> Iterator[list[str]]:
-    from loguru import logger
-
-    messages: list[str] = []
-    sink = logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
-    try:
-        yield messages
-    finally:
-        logger.remove(sink)
-
-
-@pytest.mark.asyncio
-async def test_membership_sync_does_not_demote_the_last_owner():
-    """The IdP demoting the partition's only owner would leave nobody able to
-    manage its members; that one change is skipped and the rest still apply."""
-    repo = FakeMembershipRepo(seed=[(1, "alpha", "owner"), (1, "beta", "viewer")])
-    svc = _service(cfg=_group_cfg(), membership_repo=repo)
-    with _captured_warnings() as messages:
-        await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/viewer", "/openrag/beta/editor"]})
-
-    assert repo.updated == [(1, "beta", "editor")]
-    assert any("kept the last owner" in message for message in messages)
-
-
-@pytest.mark.asyncio
-async def test_membership_sync_does_not_prune_the_last_owner():
-    repo = FakeMembershipRepo(seed=[(1, "alpha", "owner"), (1, "beta", "editor")])
-    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
-    with _captured_warnings() as messages:
-        await svc._sync_oidc_memberships(User(id=1), {"groups": []})
-
-    assert repo.removed == [(1, "beta")]
-    assert any("kept the last owner" in message for message in messages)
-
-
-@pytest.mark.asyncio
-async def test_membership_sync_demotes_an_owner_when_another_owner_remains():
-    repo = FakeMembershipRepo(seed=[(1, "alpha", "owner"), (2, "alpha", "owner")])
-    svc = _service(cfg=_group_cfg(), membership_repo=repo)
-    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/viewer"]})
-    assert repo.updated == [(1, "alpha", "viewer")]
 
 
 class _RacingUserRepo(FakeUserRepo):

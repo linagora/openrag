@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from core.models.user import PartitionRole
-from core.utils.exceptions import ConflictError
 from services.persistence.partition_membership_repo import PgPartitionMembershipRepository
 
 
@@ -109,52 +107,3 @@ async def test_last_owner_keeping_owner_role_is_allowed():
     pool = _FakePool(owners=[1])
 
     assert await _repo(pool).update_partition_member_role("p", 1, "owner") == "ok"
-
-
-# The typed port methods are what OIDC group sync writes through. They keep
-# their bool return and raise the 409 instead, so the sync can skip the change.
-
-
-@pytest.mark.asyncio
-async def test_port_remove_of_last_owner_raises_without_writing():
-    pool = _FakePool(owners=[1])
-
-    with pytest.raises(ConflictError) as ei:
-        await _repo(pool).remove_partition(1, "alpha")
-
-    assert ei.value.code == "LAST_PARTITION_OWNER"
-    assert pool.conn.executed == []
-    assert "FOR UPDATE" in pool.conn.fetched[0]
-
-
-@pytest.mark.asyncio
-async def test_port_remove_of_owner_with_another_owner_left_succeeds():
-    pool = _FakePool(owners=[1, 2])
-
-    assert await _repo(pool).remove_partition(1, "alpha") is True
-
-
-@pytest.mark.asyncio
-async def test_port_demote_of_last_owner_raises_without_writing():
-    pool = _FakePool(owners=[1])
-
-    with pytest.raises(ConflictError) as ei:
-        await _repo(pool).update_partition_role(1, "alpha", PartitionRole.VIEWER)
-
-    assert ei.value.code == "LAST_PARTITION_OWNER"
-    assert pool.conn.executed == []
-    assert "FOR UPDATE" in pool.conn.fetched[0]
-
-
-@pytest.mark.asyncio
-async def test_port_demote_of_owner_with_another_owner_left_succeeds():
-    pool = _FakePool(owners=[1, 2])
-
-    assert await _repo(pool).update_partition_role(1, "alpha", PartitionRole.EDITOR) is True
-
-
-@pytest.mark.asyncio
-async def test_port_promote_to_owner_is_allowed():
-    pool = _FakePool(owners=[1])
-
-    assert await _repo(pool).update_partition_role(1, "alpha", PartitionRole.OWNER) is True

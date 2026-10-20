@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
 from core.models.user import OIDCSession, PartitionRole, User, UserPartition
-from core.utils.exceptions import AuthError, ConflictError, OpenRAGError
+from core.utils.exceptions import AuthError, OpenRAGError
 from core.utils.logging import get_logger, mask_email
 from services.auth import (
     OIDCClient,
@@ -48,11 +48,6 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 SESSION_COOKIE_NAME = "openrag_session"
-
-
-def _is_last_owner_refusal(error: Exception) -> bool:
-    """The membership repo refused to leave a partition without an owner."""
-    return isinstance(error, ConflictError) and error.code == "LAST_PARTITION_OWNER"
 
 
 class OIDCFlowError(OpenRAGError):
@@ -844,9 +839,7 @@ class AuthService:
         the token actually carries the groups claim — memberships absent from
         the token are removed (the IdP becomes the sole source of truth). A
         missing claim never prunes, to avoid mass-revocation on a
-        misconfiguration. ``is_admin`` is never touched here. A demotion or
-        prune that would leave a partition without an owner is skipped, so
-        someone can still manage its members.
+        misconfiguration. ``is_admin`` is never touched here.
 
         Never raises: a single bad/unknown group (e.g. a partition that does
         not exist yet, which trips the FK) is logged and skipped so it cannot
@@ -883,11 +876,6 @@ class AuthService:
                         "OIDC group sync: added partition membership"
                     )
             except Exception as e:
-                if _is_last_owner_refusal(e):
-                    logger.bind(user_id=user.id, partition=partition, role=role).warning(
-                        "OIDC group sync: kept the last owner of the partition instead of demoting them"
-                    )
-                    continue
                 logger.bind(user_id=user.id, partition=partition, role=role).warning(
                     f"OIDC group sync: could not apply membership (partition may not exist or other error): {e}"
                 )
@@ -925,11 +913,6 @@ class AuthService:
                         "OIDC group sync: pruned partition membership"
                     )
                 except Exception as e:
-                    if _is_last_owner_refusal(e):
-                        logger.bind(user_id=user.id, partition=partition).warning(
-                            "OIDC group sync: kept the last owner of the partition instead of pruning them"
-                        )
-                        continue
                     logger.bind(user_id=user.id, partition=partition).warning(f"OIDC group sync: prune failed: {e}")
 
 

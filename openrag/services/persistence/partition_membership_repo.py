@@ -27,17 +27,9 @@ from typing import TYPE_CHECKING
 
 from core.models.user import PartitionRole, UserPartition
 from core.ports.partition_membership_repo import PartitionMembershipRepository
-from core.utils.exceptions import ConflictError
 
 if TYPE_CHECKING:
     import asyncpg
-
-
-def _last_owner_error(partition: str, user_id: int) -> ConflictError:
-    return ConflictError(
-        f"User {user_id} is the last owner of partition '{partition}'. Make another member owner first.",
-        code="LAST_PARTITION_OWNER",
-    )
 
 
 class PgPartitionMembershipRepository(PartitionMembershipRepository):
@@ -80,19 +72,14 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
         return self._row_to_user_partition(row)
 
     async def remove_partition(self, user_id: int, partition: str) -> bool:
-        """Raises ``ConflictError`` (``LAST_PARTITION_OWNER``) for the only owner."""
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                if await self._is_last_owner(conn, partition, user_id):
-                    raise _last_owner_error(partition, user_id)
-                result = await conn.execute(
-                    """
-                    DELETE FROM partition_memberships
-                    WHERE user_id = $1 AND partition_name = $2
-                    """,
-                    user_id,
-                    partition,
-                )
+        result = await self.pool.execute(
+            """
+            DELETE FROM partition_memberships
+            WHERE user_id = $1 AND partition_name = $2
+            """,
+            user_id,
+            partition,
+        )
         return result.endswith(" 1")
 
     async def list_user_partitions(self, user_id: int) -> list[UserPartition]:
@@ -119,20 +106,15 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
         partition: str,
         role: PartitionRole,
     ) -> bool:
-        """Raises ``ConflictError`` (``LAST_PARTITION_OWNER``) when demoting the only owner."""
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                if role != PartitionRole.OWNER and await self._is_last_owner(conn, partition, user_id):
-                    raise _last_owner_error(partition, user_id)
-                result = await conn.execute(
-                    """
-                    UPDATE partition_memberships SET role = $3
-                    WHERE user_id = $1 AND partition_name = $2
-                    """,
-                    user_id,
-                    partition,
-                    role.value,
-                )
+        result = await self.pool.execute(
+            """
+            UPDATE partition_memberships SET role = $3
+            WHERE user_id = $1 AND partition_name = $2
+            """,
+            user_id,
+            partition,
+            role.value,
+        )
         return result.endswith(" 1")
 
     async def count_partition_users(self, partition: str) -> int:
