@@ -110,14 +110,15 @@ class ConnectionManager:
         if self._pool is not None:
             return
 
-        if self._auto_create_database:
-            await asyncio.to_thread(self._ensure_database_exists)
-        else:
+        if not self._auto_create_database:
             logger.info(f"Skipping Postgres database auto-creation for {self._dsn_log}")
 
         last_exc: Exception | None = None
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             try:
+                # Inside the loop: the existence check needs the server up too (#1159).
+                if self._auto_create_database:
+                    await self._ensure_database_exists()
                 self._pool = await asyncpg.create_pool(
                     **self._conn_kwargs,
                     min_size=self._min_size,
@@ -145,11 +146,28 @@ class ConnectionManager:
             f"Failed to connect to Postgres at {self._dsn_log} after {_RETRY_ATTEMPTS} attempts: {last_exc}",
         ) from last_exc
 
-    def _ensure_database_exists(self) -> None:
+    async def _database_exists(self) -> bool:
+        """Whether the configured database exists.
+
+        Connects to it directly so only "database does not exist" counts as
+        missing; connection errors propagate to the retry loop.
+        ``sqlalchemy_utils.database_exists`` returns False on any connection
+        error, which would make us try to create a database we can't reach.
+        """
+        try:
+            conn = await asyncpg.connect(**self._conn_kwargs)
+        except asyncpg.InvalidCatalogNameError:
+            return False
+        await conn.close()
+        return True
+
+    async def _ensure_database_exists(self) -> None:
         """Create the configured database before opening the asyncpg pool."""
         from sqlalchemy import URL
-        from sqlalchemy_utils import create_database, database_exists
+        from sqlalchemy_utils import create_database
 
+        if await self._database_exists():
+            return
         url = URL.create(
             drivername="postgresql",
             username=self._conn_kwargs["user"],
@@ -158,14 +176,12 @@ class ConnectionManager:
             port=self._conn_kwargs["port"],
             database=self._conn_kwargs["database"],
         )
-        if database_exists(url):
-            return
         try:
-            create_database(url)
+            await asyncio.to_thread(create_database, url)
         except Exception as exc:
             # Another process starting against the same fresh Postgres can
             # create the database between our check and our create (#1045).
-            if not database_exists(url):
+            if not await self._database_exists():
                 raise
             logger.info(
                 f"Postgres database `{self._conn_kwargs['database']}` was created by another process: {exc}",
