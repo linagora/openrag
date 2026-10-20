@@ -2197,10 +2197,18 @@ async def test_delete_file_fails_closed_when_pending_task_details_do_not_settle(
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=5.0,
     )
 
-    with pytest.raises(TimeoutError, match="routing details"), patch("ray.cancel") as cancel:
+    # The interval above the timeout sends the first pass straight to the final
+    # check, so the test doesn't wait out the deadline, and each lookup gets the
+    # whole budget: with 0.01 s a slow CI runner timed out the first lookup
+    # instead, before the routing-details check.
+    with (
+        pytest.raises(TimeoutError, match="routing details"),
+        patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 999),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
