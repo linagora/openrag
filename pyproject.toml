@@ -1,6 +1,6 @@
 [project]
 name = "openrag"
-version = "2.3.1"
+version = "2.3.2"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -20,6 +20,8 @@ dependencies = [
     "marker-pdf>=0.2.17",
     "pypdfium2>=4.30.0",
     "pydub>=0.25.1",
+    # pydub imports audioop, which Python 3.13 removed from the stdlib.
+    "audioop-lts>=0.2.1; python_version >= '3.13'",
     "pymupdf4llm>=0.0.17",
     "spire-doc>=13.1.0",
     "openai>=1.64.0",

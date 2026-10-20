@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import os
 import re
 import threading
 import time
@@ -17,11 +18,13 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
+from core.utils.child_process import kill_process_group, tie_to_parent
 from core.utils.logging import get_logger
+from core.utils.process_limits import apply_parse_memory_limit
 from marker.converters.pdf import PdfConverter
 from ray.exceptions import TaskCancelledError
 
-from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+from ..ray_utils import call_ray_actor_with_timeout, caused_by, retry_with_backoff
 
 logger = get_logger()
 
@@ -36,6 +39,9 @@ def _force_kill_executor(executor, log) -> None:
     reclaim a wedged worker. ``ProcessPoolExecutor`` doesn't expose which
     process ran a given task, which is why ``MarkerWorker`` gives every slot its
     own single-process executor: killing one never touches another slot's parse.
+
+    Each worker leads its own process group (``tie_to_parent``), and the whole
+    group is killed, so nothing a worker started outlives it (#1167).
     """
     if executor is None:
         return
@@ -43,7 +49,12 @@ def _force_kill_executor(executor, log) -> None:
     procs = list(getattr(executor, "_processes", {}).values())
     for proc in procs:
         try:
-            proc.kill()
+            # A broken pool keeps its crashed child, already reaped: its pid may
+            # belong to another process now. Nothing it started is left to
+            # reclaim, since pdftext runs inside the child (``pdftext_workers``).
+            if proc.exitcode is not None:
+                continue
+            kill_process_group(proc.pid)
         except Exception:  # noqa: BLE001 - one unkillable proc must not block the rest
             log.warning("Failed to kill Marker worker process", exc_info=True)
     try:
@@ -75,6 +86,81 @@ def _marker_num_gpus(config) -> float:
         return requested_gpus if torch.cuda.is_available() else 0
 
 
+#: Headroom the ceiling must leave above the child's baseline ``VmData`` before a
+#: parse has room to work. Below this the limit is far more likely to be a
+#: misconfiguration than a tight budget, so it is reported rather than left to
+#: surface as a 100% Marker failure rate.
+_MIN_PARSE_HEADROOM_MB = 256
+
+
+#: Torch's CPU allocator reports a refused allocation as a ``RuntimeError`` with
+#: this text, not as ``MemoryError`` — measured under ``RLIMIT_DATA`` with torch
+#: 2.7.1. CUDA's out-of-memory error is also a ``RuntimeError`` subclass, but it is
+#: a different failure (device memory, not this ceiling), so the match is on this
+#: message and never on the type.
+_TORCH_CPU_ALLOC_FAILURE = "DefaultCPUAllocator: can't allocate memory"
+
+
+def _as_parse_memory_error(exc: BaseException) -> MemoryError | None:
+    """The ``MemoryError`` a child failure stands for, or ``None``.
+
+    Only the top-level exception *type* crosses the process pool back to the
+    parent — ``concurrent.futures`` replaces the chain with a remote traceback —
+    so the guards in ``_process_chunk`` see ``MemoryError`` only if the child
+    raises exactly that. Two shapes would otherwise arrive as something else:
+    torch's allocator ``RuntimeError``, and a ``MemoryError`` a library wrapped in
+    its own exception. ``None`` when *exc* already is one, or is unrelated.
+    """
+    if isinstance(exc, MemoryError):
+        return None
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, MemoryError) or (
+            isinstance(current, RuntimeError) and _TORCH_CPU_ALLOC_FAILURE in str(current)
+        ):
+            return MemoryError(str(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
+    """Cap what this child process may allocate, so one parse cannot take the pod.
+
+    Runs in the slot's child process, which ``MarkerPool`` hands at most one chunk
+    at a time — so with page chunking on each chunk runs under this bound rather
+    than a whole document doing so. The limit is set once per child and persists
+    across chunks until that child is recycled, so it is a per-*child* ceiling
+    that each chunk shares, not a fresh allowance per chunk. A chunk that blows through it
+    raises ``MemoryError`` in the process responsible instead of tripping a
+    pod-level OOM kill that takes every file sharing the worker with it (#997).
+
+    The limit covers the child's *whole* ``VmData`` — torch, Marker's startup
+    allocations and the parse together — and Linux accepts a limit below what the
+    process already uses, after which every allocation fails. The baseline is
+    logged beside the ceiling and thin headroom is reported, because otherwise a
+    plausible-looking value yields 100% Marker failures with nothing saying why.
+
+    ``RLIMIT_DATA`` bounds the heap and private anonymous mappings. Deliberately
+    not ``RLIMIT_AS``: that also counts file-backed mappings, so it would refuse
+    the model weights and CUDA's device maps and break the parse outright.
+
+    The ceiling is per process. Marker runs pdftext with one worker, which
+    extracts text inside the child instead of starting processes, so one ceiling
+    bounds a chunk's whole parse.
+
+    Best-effort — a platform without ``RLIMIT_DATA``, or an existing limit
+    below the request, must not stop the worker from starting.
+    """
+    apply_parse_memory_limit(
+        memory_limit_mb,
+        process="Marker child",
+        setting="MARKER_PARSE_MEMORY_LIMIT_MB",
+        min_headroom_mb=_MIN_PARSE_HEADROOM_MB,
+    )
+
+
 # Parser-bomb cap: never process more than this many pages from one PDF, so a
 # crafted high-page-count file can't exhaust CPU/memory during ingestion.
 # 0 or negative disables the cap.
@@ -89,8 +175,6 @@ _RECYCLE_CANCEL_RETRY_DELAY = 0.5
 @ray.remote
 class MarkerWorker:
     def __init__(self):
-        import os
-
         from core.config import load_config
         from core.utils.logging import get_logger
 
@@ -104,9 +188,17 @@ class MarkerWorker:
             "output_format": "markdown",
             "paginate_output": True,
             "page_separator": self.page_sep,
-            "pdftext_workers": self.config.loader.marker_pdftext_workers,
-            "disable_multiprocessing": False,
+            # One worker: pdftext extracts in the slot child itself. With more,
+            # it starts processes of its own, which do not die with the child
+            # and each get a full memory ceiling (#1167). The slots already
+            # parse chunks in parallel.
+            "pdftext_workers": 1,
         }
+        if self.config.loader.marker_pdftext_workers > 1:
+            self.logger.warning(
+                f"MARKER_PDFTEXT_WORKERS={self.config.loader.marker_pdftext_workers} is ignored: "
+                "Marker runs pdftext with one worker. Remove the setting."
+            )
         os.environ["RAY_ADDRESS"] = "auto"
 
         # One single-process executor per slot. MarkerPool hands each slot to at
@@ -137,7 +229,7 @@ class MarkerWorker:
         We use ProcessPoolExecutor instead of multiprocessing.Pool because:
         - Ray actors run as daemon processes
         - Pool workers are daemonic by default and cannot spawn children
-        - The pdftext library (used by Marker) internally spawns processes
+        - Libraries used in a parse may start processes of their own
         - ProcessPoolExecutor workers are non-daemon, allowing nested process creation
 
         ``old_executor`` guards against concurrent resets cascading: a timeout
@@ -172,17 +264,25 @@ class MarkerWorker:
             self.executors[slot] = ProcessPoolExecutor(
                 max_workers=1,
                 initializer=self._worker_init,
-                initargs=(self.model_dict,),
+                initargs=(self.model_dict, self.config.loader.marker_parse_memory_limit_mb, os.getpid()),
                 mp_context=mp.get_context("spawn"),
                 max_tasks_per_child=self.config.loader.marker_max_tasks_per_child,
             )
             self.logger.debug(f"MarkerWorker slot {slot} executor ready")
 
     @staticmethod
-    def _worker_init(model_dict):
+    def _worker_init(model_dict, memory_limit_mb: int = 0, parent_pid: int | None = None):
         global worker_model_dict
+        # First, so a child whose actor is already gone exits before loading
+        # anything, and one whose actor dies later dies with it (#1167).
+        if parent_pid is not None:
+            tie_to_parent(parent_pid)
         worker_model_dict = model_dict
+        # Logged before the ceiling, like `_apply_parse_memory_limit`'s own lines:
+        # under a tight limit the log call's allocation could raise MemoryError,
+        # and nothing catches it in the pool initializer.
         logger.debug("Worker initialized with model dictionary")
+        _apply_parse_memory_limit(memory_limit_mb)
 
     @staticmethod
     def _process_pdf(file_path, config):
@@ -204,6 +304,9 @@ class MarkerWorker:
             return render
         except Exception as e:
             logger.exception("Error processing PDF", path=file_path, label=label, error=str(e))
+            ceiling = _as_parse_memory_error(e)
+            if ceiling is not None:
+                raise ceiling from e
             raise
         finally:
             gc.collect()
@@ -223,6 +326,12 @@ class MarkerWorker:
         # actually runs instead of being cancelled from outside (#894).
         timeout = self.config.loader.marker_child_timeout
 
+        # Runs on the event loop's default thread pool, whose threads live as
+        # long as the actor. A slot's child is started either here by
+        # ``submit``, or by the executor's manager thread when it replaces a
+        # child after ``max_tasks_per_child``; both threads outlive the child.
+        # The child is tied to the thread that started it (``tie_to_parent``):
+        # a short-lived thread would take the child with it when it ends.
         def run_with_timeout():
             with self._executor_locks[slot]:
                 current_executor = self.executors[slot]
@@ -408,6 +517,24 @@ class MarkerPool:
             except (TimeoutError, asyncio.CancelledError, TaskCancelledError):
                 child_may_still_run = True
                 raise
+            except Exception as exc:
+                # The parse ceiling (#997) is the one failure that leaves the child
+                # *alive*: it raises inside the child rather than killing it, and
+                # freeing the objects afterwards need not bring VmData back below
+                # the limit — one long-lived allocation near the top of the heap
+                # keeps it from shrinking. Returning this slot to the pool would
+                # hand the next, innocent chunk a child that fails for a reason
+                # that is not its own, so recycle it the way a timeout does.
+                #
+                # Matched through the cause chain, not with `except MemoryError`:
+                # the child's error reaches here as RayTaskError(MemoryError),
+                # which `call_ray_actor_with_timeout` re-raises as RuntimeError
+                # with the Ray error only as __cause__. A bare isinstance check
+                # never fires in production, however well it passes in a test
+                # that raises MemoryError directly.
+                if caused_by(exc, MemoryError):
+                    child_may_still_run = True
+                raise
             finally:
                 if completed:
                     await self._queue.put(worker)
@@ -416,18 +543,33 @@ class MarkerPool:
                     self.logger.warning(f"MarkerWorker for {label} did not complete cleanly; recycling before reuse")
                     asyncio.create_task(self._recycle_and_release(worker, label))
                 else:
-                    # An ordinary exception (parse error, OOM) means the child
-                    # already stopped on its own; nothing to reclaim, and a
-                    # recycle would only cost a respawn of the slot's child.
+                    # An ordinary exception (a parse error, or an OOM the kernel
+                    # resolved by killing the child) means the child already
+                    # stopped on its own; nothing to reclaim, and a recycle would
+                    # only cost a respawn of the slot's child. The parse ceiling's
+                    # MemoryError is handled above precisely because it is the one
+                    # case where the child survives.
                     await self._queue.put(worker)
                     self.logger.debug(f"MarkerWorker returned to pool for {label} without recycling")
 
-        return await retry_with_backoff(
-            attempt,
-            max_retries=self.config.loader.marker_max_task_retry,
-            base_delay=self.config.loader.marker_retry_base_delay,
-            task_description=f"MarkerPool PDF {label} ({file_path})",
-        )
+        try:
+            return await retry_with_backoff(
+                attempt,
+                max_retries=self.config.loader.marker_max_task_retry,
+                base_delay=self.config.loader.marker_retry_base_delay,
+                task_description=f"MarkerPool PDF {label} ({file_path})",
+                # A chunk over the ceiling is over it again every time, so retrying
+                # costs ~4x the parse plus backoff and ends with the same error.
+                no_retry=(MemoryError,),
+            )
+        except Exception as exc:
+            # Raise the type itself: this exception crosses one more actor
+            # boundary to `MarkerLoader`, and Ray carries the type across but
+            # not `__cause__`, so a RuntimeError caused by a MemoryError arrives
+            # there as a plain RuntimeError.
+            if not caused_by(exc, MemoryError):
+                raise
+            raise MemoryError(f"Marker parse of {label} ran out of memory") from exc
 
     async def process_pdf(self, file_path: str):
         chunk_size = self.config.loader.marker_chunk_size
@@ -567,11 +709,29 @@ class MarkerLoader(BasePooledParser):
 
     async def _convert_pdf(self, file_path: str):
         pool = self._pool()
-        return await call_ray_actor_with_timeout(
-            pool.process_pdf.remote(file_path),
-            timeout=self.config.loader.marker_timeout,
-            task_description=f"MarkerLoader PDF loading ({file_path})",
-        )
+        try:
+            return await call_ray_actor_with_timeout(
+                pool.process_pdf.remote(file_path),
+                timeout=self.config.loader.marker_timeout,
+                task_description=f"MarkerLoader PDF loading ({file_path})",
+            )
+        except Exception as exc:
+            # The Ray wrapper's message names the remote cause, but only as
+            # "MemoryError" at the end of a chain of task names. Name the memory
+            # failure up front, and the setting that decides it, so an admin
+            # can act from the jobs view.
+            if not caused_by(exc, MemoryError):
+                raise
+            raise MemoryError(self._out_of_memory_message()) from exc
+
+    def _out_of_memory_message(self) -> str:
+        limit_mb = self.config.loader.marker_parse_memory_limit_mb
+        if limit_mb > 0:
+            return (
+                "Marker ran out of memory parsing this PDF: the parse exceeded "
+                f"MARKER_PARSE_MEMORY_LIMIT_MB={limit_mb} MiB. Raise that limit to index this file."
+            )
+        return "Marker ran out of memory parsing this PDF."
 
     async def _dispatch(self, file_path: str) -> tuple[str, dict]:
         start = time.time()

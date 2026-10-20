@@ -105,7 +105,7 @@ class ServerConfig(ConfigMixin):
     # (METRICS_ALLOW_UNAUTHENTICATED=true) opens the endpoint to anyone who can
     # reach the API port — a deliberate opt-in for deployments that block the
     # path at the edge and scrape in-cluster. When both are set, the token wins.
-    metrics_token: str | None = None
+    metrics_token: str | None = Field(default=None, repr=False)
     metrics_allow_unauthenticated: bool = False
 
     @field_validator("metrics_token", mode="before")
@@ -142,6 +142,7 @@ class VerboseConfig(ConfigMixin):
 
 
 class PromptsConfig(ConfigMixin):
+    refresh_defaults: bool = True
     sys_prompt: str = "sys_prompt_tmpl.txt"
     query_contextualizer: str = "query_contextualizer_tmpl.txt"
     chunk_contextualizer: str = "chunk_contextualizer_tmpl.txt"

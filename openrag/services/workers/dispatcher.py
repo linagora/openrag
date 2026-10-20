@@ -27,7 +27,11 @@ from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.failure_reporting import submit_task_failure
-from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
+from services.workers.ray_utils import (
+    RemoteTimeoutError,
+    call_ray_actor_with_timeout,
+    retry_idempotent_ray_actor_method,
+)
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING
@@ -143,6 +147,12 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             return _queue_admitted(accepted is not False)
 
+        # Unreachable while bootstrap replaces any TaskStateManager without
+        # set_queued_details_v2; kept for a handle that somehow predates both.
+        logger.bind(task_id=task_id, file_id=file_id, partition=partition).warning(
+            "TaskStateManager has no atomic queue registration; registering state and details separately, "
+            "without the file admission fence"
+        )
         await self._call_method(
             lambda: self._tsm.set_state.remote(task_id, "QUEUED"),
             task_description=f"set_state({task_id})",
@@ -576,15 +586,17 @@ class WorkerDispatcher(IndexingDispatcher):
             )
         except TaskCancelledError:
             return True
-        except TimeoutError as exc:
-            logger.warning(
-                "Timed out waiting for submitted indexing task to settle after dispatch failure",
-                task_id=task_id,
-            )
-            raise TimeoutError(
-                f"Timed out waiting for submitted indexing task {task_id} to settle after dispatch failure"
-            ) from exc
         except Exception as exc:
+            # A RemoteTimeoutError is the task failing on a timeout of its own:
+            # it has settled, so only our own wait running out is a timeout here.
+            if isinstance(exc, TimeoutError) and not isinstance(exc, RemoteTimeoutError):
+                logger.warning(
+                    "Timed out waiting for submitted indexing task to settle after dispatch failure",
+                    task_id=task_id,
+                )
+                raise TimeoutError(
+                    f"Timed out waiting for submitted indexing task {task_id} to settle after dispatch failure"
+                ) from exc
             logger.info(
                 "Submitted indexing task settled after dispatch failure cancellation request",
                 task_id=task_id,
@@ -736,7 +748,10 @@ class WorkerDispatcher(IndexingDispatcher):
             # The source's record, embedder included, still describes vectors copied as they are.
             indexation_config = await self._document_repo.get_indexation_config(file_id, partition)
             catalog_kwargs: dict[str, Any] = {}
-            if vector_field is not None and await self._move_to_vector_field(entities, vector_field, embedder):
+            recorded_field = (indexation_config or {}).get("embedder_vector_field")
+            if vector_field is not None and await self._move_to_vector_field(
+                entities, vector_field, embedder, recorded_field
+            ):
                 indexation_config = {
                     **(indexation_config or {}),
                     **self._copy_provenance(entities, vector_field, embedder, embedder_reference),
@@ -777,14 +792,31 @@ class WorkerDispatcher(IndexingDispatcher):
                     claim_token=claim_token,
                 )
 
-    async def _move_to_vector_field(self, entities: list[dict[str, Any]], vector_field: str, embedder: Any) -> bool:
+    async def _move_to_vector_field(
+        self,
+        entities: list[dict[str, Any]],
+        vector_field: str,
+        embedder: Any,
+        recorded_field: str | None = None,
+    ) -> bool:
         """Give copied chunks a vector in ``vector_field`` and in no other field.
 
         A partition only searches its embedder's field, so a chunk copied from a
         partition on another embedder is re-embedded from its stored text.
         Returns whether any chunk was.
+
+        A vector already in ``vector_field`` is reused only when the source file
+        is recorded there (``recorded_field``). An embedder swap leaves the old
+        field's vectors behind: after one, the chunks hold vectors in both
+        fields, and the old ones may come from a model the endpoint was since
+        edited away from — while the file's record names the new field, so
+        copying them under it would make a later swap skip a file with nothing
+        in the field it searches. For a file recorded in no field — indexed
+        before the record existed — whether a vector is there is all there is
+        to go on.
         """
-        missing = [entity for entity in entities if entity.get(vector_field) is None]
+        reuse = recorded_field is None or recorded_field == vector_field
+        missing = [entity for entity in entities if not reuse or entity.get(vector_field) is None]
         if missing:
             vectors = await embedder.embed([entity.get("text") or "" for entity in missing])
             await self._vector_store.ensure_vector_field(vector_field, len(vectors[0]))
@@ -800,7 +832,7 @@ class WorkerDispatcher(IndexingDispatcher):
         entities: list[dict[str, Any]], vector_field: str, embedder: Any, embedder_reference: str | None
     ) -> dict[str, Any]:
         """The embedder record of a copy that was re-embedded: the target's, not the source's."""
-        provenance = embedder_provenance(embedder, embedder_reference)
+        provenance = embedder_provenance(embedder, embedder_reference, vector_field)
         if provenance["embedder_dimension"] is None:
             # An embedder that does not report its width: the vectors it just made do.
             widths = {len(entity[vector_field]) for entity in entities}

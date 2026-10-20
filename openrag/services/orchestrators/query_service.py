@@ -36,7 +36,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import unicodedata
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from datetime import UTC, datetime
@@ -45,6 +47,13 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
+from core.models.retrieval_trace import (
+    ContextualizationTrace,
+    ContextualizedSubqueryTrace,
+    PromptTrace,
+    TemporalFilterTrace,
+    TraceError,
+)
 from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
@@ -54,6 +63,12 @@ from core.prompts import (
     message_tokens,
     prepend_system_prompt,
     tool_definition_tokens,
+)
+from core.retrieval.trace import (
+    TRACE_FILE_SCOPE_KIND_KEY,
+    RetrievalDiagnosticsContext,
+    RetrievalTraceBuilder,
+    canonical_fingerprint,
 )
 from core.utils.exceptions import ContextWindowExceededError, ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
@@ -65,6 +80,7 @@ from core.utils.source_filtering import (
 from core.utils.text import get_num_tokens
 from core.utils.web_url import normalize_web_url
 from services.inference.runtime import detect_language, get_llm_semaphore
+from services.orchestrators.prompt_service import ResolvedPrompt
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -191,6 +207,7 @@ class _PrepareChatResult(NamedTuple):
     retrieved_web_results: list
     citation_protocol_active: bool
     indexed_attachment_ids: list[str]
+    configuration_fingerprint: str
     retry_empty_response: bool = True
 
 
@@ -280,6 +297,9 @@ class QueryService:
         self._mr_expansion = mr.expansion_batch_size
         self._mr_max = mr.max_total_documents
 
+    async def refresh_partition_configs(self) -> None:
+        await self._retrieval.refresh_partition_configs()
+
     def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
         """Effective chat-history depth for this request.
 
@@ -315,10 +335,12 @@ class QueryService:
         """How many sources this request's prompt takes: the retrieval preset's ``top_n``.
 
         ``reranker.top_k`` when the preset leaves it unset. Retrieval already
-        cuts each partition to its own ``top_n``; this matters for a request
-        over several partitions, or ``"all"``, whose fused results can hold up
-        to the *sum* of them. It takes the largest ``top_n`` among them, so
-        about one partition's worth (in RRF order) reaches the prompt.
+        cuts each group of partitions it retrieves together (one embedder, the
+        same retrieval settings) to the group's ``top_n``; this matters for a
+        request whose partitions, or ``"all"``, span several groups, whose fused
+        results can hold up to the *sum* of them. It takes the largest ``top_n``
+        among the partitions, so about one group's worth (in RRF order) reaches
+        the prompt.
         """
         default = self._config.reranker.top_k
         configs = self._config.partitions
@@ -355,9 +377,9 @@ class QueryService:
 
         Resolution order:
 
-        1. A partition's configured ``chat_llm`` model-endpoint preset (set
+        1. A partition's configured ``chat_llm`` model endpoint (set
            via the admin API) wins when the request scopes to one or more
-           named partitions that agree on a single preset. Resolved once per
+           named partitions that agree on a single endpoint. Resolved once per
            request (``chat`` / ``chat_stream`` / ``complete``) and used for
            both the query-contextualization call and the final answer.
            Map-reduce is the exception: its relevancy/summarisation passes
@@ -370,8 +392,8 @@ class QueryService:
            resolved fresh per request so promoting a new default endpoint at
            runtime takes effect immediately. This covers a direct/web-only
            request (no partition), the cross-partition ``"all"`` sentinel,
-           partitions that set no preset, and partitions whose presets
-           conflict (no single owning partition). Same partition semantics as
+           partitions that set no ``chat_llm``, and partitions whose ``chat_llm``
+           endpoints conflict (no single owning partition). Same partition semantics as
            ``_resolve_chat_history_depth``.
         3. The static ``self._llm`` (built from ``settings.llm`` at startup)
            only as a last resort — no endpoint factory is wired (unit tests)
@@ -384,7 +406,7 @@ class QueryService:
         unresolvable name here must not fail the chat request; it falls
         through to the catalog default with a warning.
 
-        The resolved preset name is always logged (at debug), including for
+        The resolved endpoint name is always logged (at debug), including for
         the default, so "which model answered?" is answerable from the logs.
         """
         chat_llm = self._agreed_partition_chat_llm(partition)
@@ -393,25 +415,25 @@ class QueryService:
                 llm = self._llm_factory(chat_llm)  # factory is not None when chat_llm is set
             except KeyError:
                 logger.warning(
-                    "Partition chat_llm preset not found in the model-endpoint catalog — "
+                    "Partition chat_llm endpoint not found in the model-endpoint catalog — "
                     "falling back to the default LLM",
                     chat_llm=chat_llm,
                     partitions=partition,
                 )
             else:
                 logger.bind(chat_llm=chat_llm, partitions=partition).debug(
-                    "Answering with the partition's chat_llm preset"
+                    "Answering with the partition's chat_llm endpoint"
                 )
                 return llm
         return self._default_llm(partition)
 
     def _agreed_partition_chat_llm(self, partition: list[str] | None) -> str | None:
-        """The single ``chat_llm`` preset the request's partitions agree on, else None.
+        """The single ``chat_llm`` endpoint the request's partitions agree on, else None.
 
         Returns None — meaning "use the catalog default" — when no endpoint
         factory is wired, the request has no partition or uses the ``"all"``
-        sentinel, no named partition sets a preset, or the named partitions
-        name more than one preset (a conflict with no single owning partition).
+        sentinel, no named partition sets one, or the named partitions
+        name more than one endpoint (a conflict with no single owning partition).
 
         The partition-consensus decision itself is delegated to the shared
         ``resolve_partition_chat_llm`` — the same rule the chat-completions
@@ -443,7 +465,7 @@ class QueryService:
                 pass
             else:
                 logger.bind(chat_llm=self._default_llm_name(), partitions=partition).debug(
-                    "Answering with the default chat_llm preset"
+                    "Answering with the default chat_llm endpoint"
                 )
                 return llm
         logger.bind(partitions=partition).debug("Answering with the static default LLM (no catalog default endpoint)")
@@ -503,22 +525,30 @@ class QueryService:
         messages: list[dict],
         llm: LLM | None = None,
         partition: list[str] | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> SearchQueries:
         llm = llm or self._llm
         last_user = messages[-1]["content"]
         if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
-            return SearchQueries(query_list=[Query(query=last_user)])
+            queries = SearchQueries(query_list=[Query(query=last_user)])
+            self._record_contextualization(trace, queries, original_query=last_user)
+            return queries
 
         chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages)
-        contextualizer = await self._prompt_service.resolve_prompt(
-            "query_contextualizer",
-            names=[self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)],
-        )
+        prompt_name = self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)
+        resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
+        if resolve_with_identity is not None:
+            contextualizer = await resolve_with_identity("query_contextualizer", names=[prompt_name])
+        else:
+            content = await self._prompt_service.resolve_prompt("query_contextualizer", names=[prompt_name])
+            contextualizer = ResolvedPrompt.create(
+                content, name=prompt_name, source="named" if prompt_name else "default"
+            )
         # UTC, not the host clock: the anchors are compared against UTC
         # created_at timestamps, and near midnight the local date is a
         # different day.
         now = datetime.now(UTC)
-        prompt = contextualizer.format(
+        prompt = contextualizer.content.format(
             query_language=detect_language(last_user),
             current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
             # Pre-computed week/month/year ranges: the model must not do the
@@ -536,12 +566,24 @@ class QueryService:
             # question flip between a date filter and none across requests.
             "temperature": 0,
         }
+        started = time.perf_counter()
+        last_error: Exception | None = None
         for attempt in (1, 2):
             try:
                 resp = await llm.chat(llm_messages, **params)
                 content = resp["choices"][0]["message"]["content"]
-                return SearchQueries.model_validate_json(_json_slice(content))
+                queries = SearchQueries.model_validate_json(_json_slice(content))
+                self._record_contextualization(
+                    trace,
+                    queries,
+                    original_query=last_user,
+                    duration_seconds=time.perf_counter() - started,
+                    llm=llm,
+                    prompt=contextualizer,
+                )
+                return queries
             except Exception as exc:
+                last_error = exc
                 if attempt == 1:
                     logger.warning("Query generation parse error — retrying", error=str(exc))
                 else:
@@ -549,7 +591,100 @@ class QueryService:
                         "Query generation failed twice — falling back to raw user query",
                         error=str(exc),
                     )
-        return SearchQueries(query_list=[Query(query=last_user)])
+        queries = SearchQueries(query_list=[Query(query=last_user)])
+        self._record_contextualization(
+            trace,
+            queries,
+            original_query=last_user,
+            duration_seconds=time.perf_counter() - started,
+            llm=llm,
+            prompt=contextualizer,
+            fallback_used=True,
+            error=last_error,
+        )
+        return queries
+
+    @staticmethod
+    def _record_contextualization(
+        trace: RetrievalTraceBuilder | None,
+        queries: SearchQueries,
+        *,
+        original_query: str,
+        duration_seconds: float = 0.0,
+        llm: LLM | None = None,
+        prompt: ResolvedPrompt | None = None,
+        fallback_used: bool = False,
+        error: Exception | None = None,
+    ) -> None:
+        if trace is None:
+            return
+        try:
+            trace.contextualization = ContextualizationTrace(
+                original_query=original_query,
+                subqueries=[
+                    ContextualizedSubqueryTrace(
+                        query=query.query,
+                        temporal_filters=[
+                            TemporalFilterTrace(operator=item.operator, value=item.value)
+                            for item in (query.temporal_filters or [])
+                        ],
+                    )
+                    for query in queries.query_list
+                ],
+                intent=queries.intent,
+                requires_retrieval=queries.requires_retrieval,
+                fallback_used=fallback_used,
+                error=(
+                    TraceError(stage="contextualization", message="redacted", kind=type(error).__name__)
+                    if error is not None
+                    else None
+                ),
+                duration_seconds=duration_seconds,
+                model=getattr(llm, "_model", None),
+                prompt=(
+                    PromptTrace(content_hash=prompt.content_hash, name=prompt.name, source=prompt.source)
+                    if prompt is not None
+                    else None
+                ),
+            )
+            trace.timings["contextualization"] = duration_seconds
+            trace.record_stage("original_query", status="complete", candidates=[])
+            trace.record_stage("contextualized_query", status="complete", candidates=[])
+        except Exception as trace_error:
+            trace.record_error("contextualization", trace_error)
+
+    @staticmethod
+    def _record_contextualization_bypass(
+        trace: RetrievalTraceBuilder | None,
+        *,
+        original_query: str,
+    ) -> None:
+        if trace is None:
+            return
+        try:
+            trace.contextualization = ContextualizationTrace(
+                original_query=original_query,
+                bypassed=True,
+            )
+            trace.record_stage("original_query", status="complete", candidates=[])
+            trace.record_stage("contextualized_query", status="not_run", candidates=[])
+        except Exception as trace_error:
+            trace.record_error("contextualization", trace_error)
+
+    @staticmethod
+    def _record_contextualization_not_run(
+        trace: RetrievalTraceBuilder | None,
+        *,
+        original_query: str,
+    ) -> None:
+        if trace is None:
+            return
+        try:
+            trace.contextualization = ContextualizationTrace(original_query=original_query)
+            trace.record_stage("original_query", status="complete", candidates=[])
+            trace.record_stage("contextualized_query", status="not_run", candidates=[])
+        except Exception as trace_error:
+            trace.record_error("contextualization", trace_error)
 
     # ------------------------------------------------------------------
     # Map-reduce (was map_reduce.RAGMapReduce — no LangChain)
@@ -614,6 +749,7 @@ class QueryService:
         partition: list[str] | None,
         payload: dict,
         llm: LLM | None = None,
+        trace: RetrievalTraceBuilder | None = None,
         max_prompt_tokens: int | None = None,
     ):
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
@@ -628,7 +764,10 @@ class QueryService:
         workspace = metadata.get("workspace")
         attachment_ids = _extract_attachment_ids(metadata)
 
+        effective_retrieval_options = self._effective_retrieval_options(metadata)
+        retrieval_top_k = effective_retrieval_options.get("top_k")
         top_k = self._mr_max if use_map_reduce else None
+        retrieval_overrides = {key: value for key, value in effective_retrieval_options.items() if key != "top_k"}
 
         filter_params = None
         indexed_attachment_ids: list[str] = []
@@ -646,13 +785,19 @@ class QueryService:
                 # attached files that belong to it are searched.
                 indexed_attachment_ids = _within_workspace(attachment_ids, scope.file_ids)
                 filter_params = {"file_id": indexed_attachment_ids}
+                scope_kind = "attachment"
             else:
                 filter_params = {"file_id": scope.file_ids}
+                scope_kind = "workspace"
+            if trace is not None:
+                filter_params[TRACE_FILE_SCOPE_KIND_KEY] = scope_kind
         elif attachment_ids and partition:
             # No ownership check needed: file_id is ANDed with the server-fixed
             # partition (or, for the "all" wildcard, SUPER_ADMIN_MODE-only).
             indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
             filter_params = {"file_id": indexed_attachment_ids}
+            if trace is not None:
+                filter_params[TRACE_FILE_SCOPE_KIND_KEY] = "attachment"
 
         last_user_message = messages[-1].get("content") or ""
         casual_policy = casual_message_policy(last_user_message)
@@ -671,9 +816,15 @@ class QueryService:
 
         retrieval_forced = explicitly_required or existing_force_retrieval
         queries: SearchQueries | None = None
+        bypass_contextualization = metadata.get("bypass_query_contextualization") is True
+        configuration_fingerprint = "unavailable"
+        resolved_retrieval_plan = None
 
-        if casual_policy is None or retrieval_forced:
-            queries = await self.generate_query(messages, llm=llm, partition=partition)
+        if bypass_contextualization:
+            queries = SearchQueries(query_list=[Query(query=last_user_message)])
+            self._record_contextualization_bypass(trace, original_query=last_user_message)
+        elif casual_policy is None or retrieval_forced:
+            queries = await self.generate_query(messages, llm=llm, partition=partition, trace=trace)
             usable_queries = [query for query in queries.query_list if query.query.strip()]
             if (
                 acknowledgement_candidate
@@ -685,16 +836,45 @@ class QueryService:
                 casual_policy = CasualMessagePolicy(
                     "acknowledgement", _acknowledgement_language(messages, last_user_message)
                 )
-            else:
-                if not usable_queries:
-                    queries = SearchQueries(query_list=[Query(query=last_user_message)])
-                elif len(usable_queries) != len(queries.query_list):
-                    queries = queries.model_copy(update={"query_list": usable_queries})
+            elif not usable_queries:
+                queries = SearchQueries(query_list=[Query(query=last_user_message)])
+                self._mark_contextualization_fallback(trace, queries)
+            elif len(usable_queries) != len(queries.query_list):
+                queries = queries.model_copy(update={"query_list": usable_queries})
+
+        if trace is not None:
+            contextualizer_prompt = trace.contextualization.prompt if trace.contextualization is not None else None
+            resolve_plan = getattr(self._retrieval, "resolve_retrieval_plan", None)
+            if partition is not None and resolve_plan is not None:
+                try:
+                    resolved_retrieval_plan = await resolve_plan(
+                        partition,
+                        top_k=retrieval_top_k,
+                        contextualizer_prompt=contextualizer_prompt,
+                        **retrieval_overrides,
+                    )
+                except Exception as error:  # noqa: BLE001 - legacy resolution below keeps telemetry optional
+                    trace.record_error("configuration_resolution", error)
+            configuration_fingerprint = await self._configuration_fingerprint(
+                partition,
+                effective_options=effective_retrieval_options,
+                contextualizer_prompt=contextualizer_prompt,
+                resolved_plan=resolved_retrieval_plan,
+            )
 
         # The history as the model gets it, so the window is checked against what is sent.
         messages = self._sanitize_messages(messages)
 
         if casual_policy is not None and not retrieval_forced:
+            if trace is not None and trace.contextualization is None:
+                trace.contextualization = ContextualizationTrace(
+                    original_query=last_user_message,
+                    subqueries=[],
+                    intent=casual_policy.intent,
+                    requires_retrieval=False,
+                )
+                trace.record_stage("original_query", status="complete", candidates=[])
+                trace.record_stage("contextualized_query", status="not_run", candidates=[])
             casual_prompt = build_casual_response_prompt(
                 casual_policy.intent, casual_policy.language, assistant_name=self._config.server.assistant_name
             )
@@ -717,6 +897,7 @@ class QueryService:
                 [],
                 True,
                 indexed_attachment_ids,
+                configuration_fingerprint,
                 True,
             )
 
@@ -725,18 +906,57 @@ class QueryService:
 
         web_results: list = []
         if partition is not None and use_websearch:
-            chunks, web_lists = await self._gather_rag_and_web(queries, partition, top_k, filter_params)
+            chunks, web_lists = await self._gather_rag_and_web(
+                queries,
+                partition,
+                top_k,
+                filter_params,
+                retrieval_top_k=retrieval_top_k,
+                trace=trace,
+                resolved_plan=resolved_retrieval_plan,
+                **retrieval_overrides,
+            )
             web_results = _dedupe_web(web_lists)
         elif partition is not None:
+            trace_kwargs = {"trace": trace} if trace is not None else {}
             chunks = await self._retrieval.retrieve_multi(
-                partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
+                partitions=partition,
+                search_queries=queries,
+                top_k=top_k,
+                retrieval_top_k=retrieval_top_k,
+                filter_params=filter_params,
+                **retrieval_overrides,
+                **trace_kwargs,
+                **({"resolved_plan": resolved_retrieval_plan} if resolved_retrieval_plan is not None else {}),
             )
         else:
             web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
             chunks = []
 
+        if trace is not None and partition is not None and metadata.get("compare_original_query") is True:
+            await self._compare_original_query(
+                trace,
+                original_query=last_user_message,
+                partition=partition,
+                top_k=top_k,
+                retrieval_top_k=retrieval_top_k,
+                filter_params=filter_params,
+                configuration_fingerprint=configuration_fingerprint,
+                resolved_plan=resolved_retrieval_plan,
+                **retrieval_overrides,
+            )
+
         if not chunks and not web_results and partition is None:
-            return _PrepareChatResult(payload, [], [], [], [], False, indexed_attachment_ids)
+            return _PrepareChatResult(
+                payload,
+                [],
+                [],
+                [],
+                [],
+                False,
+                indexed_attachment_ids,
+                configuration_fingerprint,
+            )
 
         docs = [c.to_langchain() for c in chunks]
 
@@ -822,7 +1042,14 @@ class QueryService:
             new_messages, web_results = assemble(docs, web_candidates)
         payload["messages"] = new_messages
         return _PrepareChatResult(
-            payload, docs, web_results, retrieved_docs, retrieved_web_results, True, indexed_attachment_ids
+            payload,
+            docs,
+            web_results,
+            retrieved_docs,
+            retrieved_web_results,
+            True,
+            indexed_attachment_ids,
+            configuration_fingerprint,
         )
 
     async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
@@ -840,18 +1067,180 @@ class QueryService:
             found = {fid for r in results for fid in r}
         return [fid for fid in dict.fromkeys(file_ids) if fid in found]
 
-    async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
+    async def _gather_rag_and_web(
+        self,
+        queries,
+        partition,
+        top_k,
+        filter_params,
+        retrieval_top_k=None,
+        trace=None,
+        resolved_plan=None,
+        **retrieval_overrides,
+    ):
         # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
         # its sub-query fusion here too (#707). Previously this used
         # retrieve_per_query + fuse() at the hardcoded 60, so enabling websearch
         # silently ignored rrf_k and the same preset fused differently depending
         # on the websearch toggle.
+        trace_kwargs = {"trace": trace} if trace is not None else {}
         rag = self._retrieval.retrieve_multi(
-            partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
+            partitions=partition,
+            search_queries=queries,
+            top_k=top_k,
+            retrieval_top_k=retrieval_top_k,
+            filter_params=filter_params,
+            **retrieval_overrides,
+            **trace_kwargs,
+            **({"resolved_plan": resolved_plan} if resolved_plan is not None else {}),
         )
         web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
         chunks, web_lists = await asyncio.gather(rag, web)
         return chunks, web_lists
+
+    @staticmethod
+    def _mark_contextualization_fallback(
+        trace: RetrievalTraceBuilder | None,
+        queries: SearchQueries,
+    ) -> None:
+        if trace is None or trace.contextualization is None:
+            return
+        trace.contextualization = trace.contextualization.model_copy(
+            update={
+                "fallback_used": True,
+                "subqueries": [
+                    ContextualizedSubqueryTrace(query=query.query, temporal_filters=[]) for query in queries.query_list
+                ],
+            }
+        )
+
+    async def _compare_original_query(
+        self,
+        trace: RetrievalTraceBuilder,
+        *,
+        original_query: str,
+        partition: list[str],
+        top_k: int | None,
+        retrieval_top_k: int | None,
+        filter_params: dict | None,
+        configuration_fingerprint: str,
+        resolved_plan=None,
+        **retrieval_overrides,
+    ) -> None:
+        """Run an isolated diagnostic retrieval that cannot alter the answer."""
+        diagnostics = trace.diagnostics
+        shadow = RetrievalTraceBuilder(
+            request_id=f"{trace.request_id}:original",
+            original_query=original_query,
+            diagnostics=RetrievalDiagnosticsContext(
+                candidate_limit=diagnostics.candidate_limit,
+                query_mode=diagnostics.query_mode,
+                compare_original_query=diagnostics.compare_original_query,
+                effective_options=diagnostics.effective_options,
+            ),
+        )
+        started = time.perf_counter()
+        status = "complete"
+        try:
+            await self._retrieval.retrieve_multi(
+                partitions=partition,
+                search_queries=SearchQueries(query_list=[Query(query=original_query)]),
+                top_k=top_k,
+                retrieval_top_k=retrieval_top_k,
+                filter_params=filter_params,
+                trace=shadow,
+                **retrieval_overrides,
+                **({"resolved_plan": resolved_plan} if resolved_plan is not None else {}),
+            )
+        except Exception as error:  # noqa: BLE001 - comparison is optional telemetry
+            status = "error"
+            shadow.record_error("original_query", error)
+        shadow.timings["total"] = time.perf_counter() - started
+        finished = shadow.finish(configuration_fingerprint=configuration_fingerprint)
+        trace.comparisons["original_query"] = {
+            "status": status,
+            "stages": finished["stages"],
+            "timings": finished["timings"],
+            "errors": finished["errors"],
+            "query_traces": finished.get("query_traces", []),
+            "configuration_fingerprint": finished["configuration_fingerprint"],
+            **{
+                key: finished[key]
+                for key in (
+                    "candidate_limit",
+                    "candidates_truncated",
+                    "query_trace_limit",
+                    "query_traces_truncated",
+                    "trace_truncated",
+                    "serialized_size_limit",
+                )
+                if key in finished
+            },
+        }
+
+    def _effective_retrieval_options(self, metadata: dict) -> dict[str, object]:
+        options: dict[str, object] = {}
+        top_k = metadata.get("retrieval_top_k")
+        if top_k is not None:
+            options["top_k"] = top_k
+        threshold = metadata.get("retrieval_similarity_threshold")
+        if threshold is not None:
+            options["similarity_threshold"] = float(threshold)
+        if metadata.get("retrieval_disable_reranker") is True:
+            options["disable_reranker"] = True
+        if metadata.get("retrieval_disable_expansion") is True:
+            options["disable_expansion"] = True
+        return options
+
+    def _retrieval_diagnostics_context(self, metadata: dict) -> RetrievalDiagnosticsContext:
+        if metadata.get("compare_original_query") is True:
+            query_mode = "compare"
+        elif metadata.get("bypass_query_contextualization") is True:
+            query_mode = "original"
+        else:
+            query_mode = "contextualized"
+        return RetrievalDiagnosticsContext(
+            query_mode=query_mode,
+            compare_original_query=metadata.get("compare_original_query") is True,
+            effective_options=self._effective_retrieval_options(metadata),
+        )
+
+    async def _configuration_fingerprint(
+        self,
+        partitions: list[str] | None,
+        *,
+        effective_options: dict[str, object] | None = None,
+        contextualizer_prompt: PromptTrace | None = None,
+        resolved_plan=None,
+    ) -> str:
+        if not partitions:
+            return "unavailable"
+        if resolved_plan is not None:
+            return str(resolved_plan.configuration_fingerprint)
+        resolved_fingerprint = getattr(self._retrieval, "resolved_configuration_fingerprint", None)
+        fingerprint = getattr(self._retrieval, "configuration_fingerprint", None)
+        if resolved_fingerprint is None and fingerprint is None:
+            return "unavailable"
+        try:
+            if resolved_fingerprint is not None:
+                stored_fingerprint = str(
+                    await resolved_fingerprint(
+                        partitions,
+                        contextualizer_prompt=contextualizer_prompt,
+                    )
+                )
+            else:
+                stored_fingerprint = str(fingerprint(partitions))
+            if not effective_options:
+                return stored_fingerprint
+            return canonical_fingerprint(
+                {
+                    "stored_configuration_fingerprint": stored_fingerprint,
+                    "effective_request_overrides": effective_options,
+                }
+            )
+        except Exception:  # noqa: BLE001 - telemetry must never fail a request
+            return "unavailable"
 
     async def _prepare_completions(
         self,
@@ -965,6 +1354,52 @@ class QueryService:
     # Public API (router = transport)
     # ------------------------------------------------------------------
 
+    async def diagnose_retrieval(
+        self,
+        *,
+        partitions: list[str],
+        messages: list[dict],
+        query_mode: str = "contextualized",
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+        request_id: str | None = None,
+    ) -> dict[str, object]:
+        """Run contextualization and retrieval diagnostics without answer generation."""
+        if query_mode not in {"contextualized", "original", "compare"}:
+            raise ValueError(f"Unsupported diagnostic query mode: {query_mode}")
+        metadata: dict[str, object] = {
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+            "bypass_query_contextualization": query_mode == "original",
+            "compare_original_query": query_mode == "compare",
+        }
+        if top_k is not None:
+            metadata["retrieval_top_k"] = top_k
+        if similarity_threshold is not None:
+            metadata["retrieval_similarity_threshold"] = similarity_threshold
+        if disable_reranker:
+            metadata["retrieval_disable_reranker"] = True
+        if disable_expansion:
+            metadata["retrieval_disable_expansion"] = True
+
+        original_query = _latest_user_query(messages)
+        trace = RetrievalTraceBuilder(
+            request_id=request_id or str(uuid.uuid4()),
+            original_query=original_query,
+            diagnostics=self._retrieval_diagnostics_context(metadata),
+        )
+        started = time.perf_counter()
+        result = await self._prepare_chat(
+            partitions,
+            {"messages": messages, "metadata": metadata},
+            self._resolve_llm(partitions),
+            trace=trace,
+        )
+        trace.timings["total"] = time.perf_counter() - started
+        return trace.finish(configuration_fingerprint=result.configuration_fingerprint)
+
     async def chat(
         self,
         *,
@@ -972,6 +1407,7 @@ class QueryService:
         payload: dict,
         prepare_sources: PrepareSources,
         model_name: str,
+        request_id: str | None = None,
         max_prompt_tokens: int | None = None,
     ) -> dict:
         """Non-streaming chat completion → finalized OpenAI dict.
@@ -982,16 +1418,32 @@ class QueryService:
         Raises ``ContextWindowExceededError`` (413) when the instructions and
         the conversation alone don't fit in it.
         """
+        request_started = time.perf_counter()
         metadata = payload.get("metadata") or {}
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
+        include_trace = metadata.get("include_retrieval_trace") is True
+        original_query = _latest_user_query(payload.get("messages", []))
+        trace = (
+            RetrievalTraceBuilder(
+                request_id=request_id or str(uuid.uuid4()),
+                original_query=original_query,
+                diagnostics=self._retrieval_diagnostics_context(metadata),
+            )
+            if include_trace
+            else None
+        )
+        configuration_fingerprint = "unavailable"
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         retry_empty_response = True
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
+            self._record_contextualization_not_run(trace, original_query=original_query)
         else:
-            result = await self._prepare_chat(partitions, payload, llm, max_prompt_tokens)
+            result = await self._prepare_chat(
+                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens
+            )
             payload = result.payload
             docs = result.docs
             web_results = result.web_results
@@ -999,6 +1451,7 @@ class QueryService:
             retrieved_web_results = result.retrieved_web_results
             citation_protocol_active = result.citation_protocol_active
             attachments = result.indexed_attachment_ids
+            configuration_fingerprint = result.configuration_fingerprint
             retry_empty_response = result.retry_empty_response
         sources = prepare_sources(docs, web_results)
         # `all_retrieved_sources` is debug/eval telemetry, not needed by most
@@ -1066,6 +1519,15 @@ class QueryService:
         if metadata.get("attachments"):
             # Indicate which attachments were actually searched to generate the answer.
             extra["attachments"] = attachments
+        if trace is not None:
+            if trace.contextualization is None:
+                self._record_contextualization(
+                    trace,
+                    SearchQueries(query_list=[Query(query=original_query)]),
+                    original_query=original_query,
+                )
+            trace.timings["total"] = time.perf_counter() - request_started
+            extra["retrieval_trace"] = trace.finish(configuration_fingerprint=configuration_fingerprint)
         chunk["extra"] = extra
         return chunk
 
@@ -1076,19 +1538,36 @@ class QueryService:
         payload: dict,
         prepare_sources: PrepareSources,
         model_name: str,
+        request_id: str | None = None,
         max_prompt_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         """Streaming chat completion → SSE strings with filtered sources (*max_prompt_tokens*: see ``chat``)."""
+        request_started = time.perf_counter()
         metadata = payload.get("metadata") or {}
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
+        include_trace = metadata.get("include_retrieval_trace") is True
+        original_query = _latest_user_query(payload.get("messages", []))
+        trace = (
+            RetrievalTraceBuilder(
+                request_id=request_id or str(uuid.uuid4()),
+                original_query=original_query,
+                diagnostics=self._retrieval_diagnostics_context(metadata),
+            )
+            if include_trace
+            else None
+        )
+        configuration_fingerprint = "unavailable"
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         retry_empty_response = True
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
+            self._record_contextualization_not_run(trace, original_query=original_query)
         else:
-            result = await self._prepare_chat(partitions, payload, llm, max_prompt_tokens)
+            result = await self._prepare_chat(
+                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens
+            )
             payload = result.payload
             docs = result.docs
             web_results = result.web_results
@@ -1096,12 +1575,27 @@ class QueryService:
             retrieved_web_results = result.retrieved_web_results
             citation_protocol_active = result.citation_protocol_active
             attachments = result.indexed_attachment_ids
+            configuration_fingerprint = result.configuration_fingerprint
             retry_empty_response = result.retry_empty_response
         sources = prepare_sources(docs, web_results)
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
 
-        extra_fields = {"attachments": attachments} if metadata.get("attachments") else None
+        extra_fields = {"attachments": attachments} if metadata.get("attachments") else {}
+        terminal_extra_fields = None
+        if trace is not None:
+            if trace.contextualization is None:
+                self._record_contextualization(
+                    trace,
+                    SearchQueries(query_list=[Query(query=original_query)]),
+                    original_query=original_query,
+                )
+
+            def finish_trace() -> dict:
+                trace.timings["total"] = time.perf_counter() - request_started
+                return {"retrieval_trace": trace.finish(configuration_fingerprint=configuration_fingerprint)}
+
+            terminal_extra_fields = finish_trace
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
 
@@ -1113,7 +1607,8 @@ class QueryService:
                 all_sources=all_sources,
                 include_all_retrieved=include_all_retrieved,
                 citation_protocol_active=citation_protocol_active and not structured_output,
-                extra_fields=extra_fields,
+                extra_fields=extra_fields or None,
+                terminal_extra_fields=terminal_extra_fields,
             )
 
         response_stream = filtered_stream(payload["messages"])
@@ -1221,7 +1716,7 @@ def _fallback_stream_lines(template, fallback_text: str, extra: dict, model_name
     choices = base.get("choices") or [{"index": 0, "delta": {}, "finish_reason": "stop"}]
     original_choice = dict(choices[0])
     base["choices"] = [{**original_choice, "delta": {"content": fallback_text}, "finish_reason": None}]
-    base["extra"] = dict(extra)
+    base["extra"] = {key: value for key, value in extra.items() if key != "retrieval_trace"}
     yield f"data: {json.dumps(base)}\n\n"
 
     finish = dict(template or base)
@@ -1338,6 +1833,15 @@ def _json_slice(text: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
     return text[start : end + 1] if start != -1 and end > start else text
+
+
+def _latest_user_query(messages: list[dict]) -> str:
+    """Return the latest user text without retaining any other message content."""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            content = message.get("content")
+            return content if isinstance(content, str) else ""
+    return ""
 
 
 def _summary_doc(chunk, summary: str):

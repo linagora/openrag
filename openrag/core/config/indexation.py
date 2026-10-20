@@ -174,6 +174,24 @@ class LoaderConfig(ConfigMixin):
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)
     marker_max_tasks_per_child: int = 20
+    # Hard ceiling on what one Marker parse may allocate, enforced as RLIMIT_DATA
+    # in the slot's child process (#997). ``RLIMIT_DATA``, not ``RLIMIT_AS``:
+    # measured, ``RLIMIT_AS`` also refuses file-backed mappings, which would break
+    # the model weights and CUDA's device maps, while ``RLIMIT_DATA`` bounds the
+    # heap and private anonymous mappings the parse itself grows.
+    #
+    # 0 disables it. Off by default deliberately: too low a ceiling turns rare pod
+    # OOM kills into routine parse failures, and the right number depends on the
+    # documents and the GPU, so it has to be measured per deployment rather than
+    # guessed here.
+    marker_parse_memory_limit_mb: int = Field(default=0, ge=0)
+    # PyMuPDF (the default PDF backend) is not thread-safe, so one shared thread
+    # serializes every PDF in a worker. More than one worker, or a memory
+    # ceiling, moves parsing into child processes, which lift that and take the
+    # ceiling (#997, audit A2). 1 worker / 0 MiB keeps the single thread.
+    pymupdf_pool_size: int = Field(default=1, ge=1)
+    pymupdf_parse_memory_limit_mb: int = Field(default=0, ge=0)
+    pymupdf_max_tasks_per_child: int = Field(default=20, ge=0)
     marker_pool_size: int = 1
     marker_max_processes: int = 2
     marker_num_gpus: float = 0.01
@@ -183,7 +201,9 @@ class LoaderConfig(ConfigMixin):
     # Headroom keeping the child bound under the bounds that wrap it, so a
     # wedged child times out first and recycles the pool (#659, #894).
     marker_child_timeout_ratio: float = Field(default=0.9, gt=0, lt=1)
-    marker_pdftext_workers: int = 2
+    # Deprecated, ignored: Marker runs pdftext with one worker (#1167). Kept so
+    # MARKER_PDFTEXT_WORKERS still loads; MarkerWorker warns when it is above 1.
+    marker_pdftext_workers: int = 1
     marker_chunk_size: int = 10
     marker_max_task_retry: int = 3
     marker_retry_base_delay: float = 2.0

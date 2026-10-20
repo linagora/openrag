@@ -8,6 +8,10 @@ up with the on-disk filenames for all managed types.
 
 from __future__ import annotations
 
+import hashlib
+import shutil
+from hashlib import sha256
+from pathlib import Path
 from types import SimpleNamespace
 from typing import get_args
 
@@ -15,8 +19,10 @@ import pytest
 from api.schemas.admin.prompt_schemas import PromptTypeName
 from core.config.infrastructure import PathsConfig, PromptsConfig
 from core.models.prompt import Prompt, PromptType
-from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
+from core.utils.exceptions import ConfigError, NotFoundError, ServiceUnavailableError, ValidationError
 from loguru import logger
+from services.orchestrators import prompt_seed_hashes as seed_hash_module
+from services.orchestrators import prompt_service as prompt_module
 from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
 
 
@@ -54,6 +60,15 @@ class FakePromptRepo:
                 setattr(p, k, fields[k])
         return p
 
+    async def update_default_content_if_unchanged(
+        self, prompt_id: str, expected_name: str, old_content: str, new_content: str
+    ) -> bool:
+        p = self.prompts.get(prompt_id)
+        if p is None or not p.is_default or p.name != expected_name or p.content != old_content:
+            return False
+        p.content = new_content
+        return True
+
     async def delete(self, prompt_id: str) -> bool:
         return self.prompts.pop(prompt_id, None) is not None
 
@@ -83,6 +98,20 @@ class FakePromptRepo:
 def _service(repo: FakePromptRepo | None = None) -> PromptService:
     config = SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig())
     return PromptService(prompt_repo=repo or FakePromptRepo(), config=config)
+
+
+def _service_with_bundled_templates(repo: FakePromptRepo, tmp_path: Path, monkeypatch):
+    bundled_dir = tmp_path / "templates"
+    shutil.copytree(prompt_module._DEFAULT_PROMPTS_DIR, bundled_dir)
+    monkeypatch.setattr(prompt_module, "_DEFAULT_PROMPTS_DIR", bundled_dir)
+    config = SimpleNamespace(paths=PathsConfig(prompts_dir=bundled_dir), prompts=PromptsConfig())
+    return PromptService(prompt_repo=repo, config=config), bundled_dir
+
+
+def _set_seed_history(monkeypatch, prompt_type: str, *hashes: str) -> None:
+    history = dict(seed_hash_module._PROMPT_SEED_HASH_HISTORY)
+    history[prompt_type] = tuple(hashes)
+    monkeypatch.setattr(prompt_module, "_PROMPT_SEED_HASH_HISTORY", history)
 
 
 class _ReloadRecorder:
@@ -118,6 +147,60 @@ class _RefreshRecorder:
 
 
 class TestSeeding:
+    async def test_shared_template_metadata_covers_every_prompt_type(self):
+        metadata = seed_hash_module._PROMPT_TEMPLATE_METADATA
+        assert set(metadata) == {prompt_type.value for prompt_type in PromptType}
+        assert set(seed_hash_module._PROMPT_SEED_HASH_HISTORY) == set(metadata)
+        assert {prompt_type: config_key for prompt_type, (config_key, _) in metadata.items()} == (
+            prompt_module._TYPE_TO_CONFIG_KEY
+        )
+
+    async def test_final_seed_history_hashes_match_the_bundled_templates(self):
+        svc = _service()
+        for prompt_type, history in seed_hash_module._PROMPT_SEED_HASH_HISTORY.items():
+            actual = sha256(svc._disk_seed(prompt_type).encode("utf-8")).hexdigest()
+            assert history[-1] == actual
+
+    async def test_known_pre_calendar_template_is_refreshed(self):
+        old_text = (Path(__file__).parent / "fixtures/query_contextualizer_before_calendar_anchors.txt").read_text()
+        old_hash = sha256(old_text.encode("utf-8")).hexdigest()
+        assert old_hash in prompt_module._PROMPT_SEED_HASH_HISTORY["query_contextualizer"][:-1]
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content=old_text,
+                is_default=True,
+            )
+        )
+
+        await _service(repo).seed_defaults()
+
+        assert old.content == _service(repo)._disk_seed("query_contextualizer")
+        assert "{calendar_anchors}" in old.content
+
+    async def test_refresh_can_be_disabled_without_hiding_stale_defaults(self, monkeypatch):
+        old_text = (Path(__file__).parent / "fixtures/query_contextualizer_before_calendar_anchors.txt").read_text()
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content=old_text,
+                is_default=True,
+            )
+        )
+        warnings = []
+        monkeypatch.setattr(prompt_module.logger, "warning", warnings.append)
+        svc = _service(repo)
+        svc._config.prompts = PromptsConfig(refresh_defaults=False)
+
+        await svc.seed_defaults()
+
+        assert old.content == old_text
+        assert any("query_contextualizer" in warning and "outdated" in warning for warning in warnings)
+
     async def test_seeds_all_prompt_types_from_disk(self):
         repo = FakePromptRepo()
         await _service(repo).seed_defaults()
@@ -142,6 +225,191 @@ class TestSeeding:
         await svc.seed_defaults()
         assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
         assert len(repo.prompts) == 9
+
+    async def test_seed_defaults_propagates_repository_read_failure(self):
+        class FailingRepo(FakePromptRepo):
+            async def get_default(self, prompt_type: str) -> Prompt | None:
+                raise RuntimeError("database unavailable")
+
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await _service(FailingRepo()).seed_defaults()
+
+    async def test_upgrades_untouched_older_default_in_place(self, monkeypatch, tmp_path):
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer", name="default_query_contextualizer", content="old", is_default=True
+            )
+        )
+        svc, bundled_dir = _service_with_bundled_templates(repo, tmp_path, monkeypatch)
+        (bundled_dir / "query_contextualizer_tmpl.txt").write_text("new")
+        _set_seed_history(monkeypatch, "query_contextualizer", sha256(b"old").hexdigest(), sha256(b"new").hexdigest())
+
+        await svc.seed_defaults()
+
+        refreshed = await repo.get_default("query_contextualizer")
+        assert refreshed.id == old.id
+        assert refreshed.name == old.name
+        assert refreshed.content == "new"
+        await svc.seed_defaults()
+        assert refreshed.content == "new"
+
+    async def test_preserves_edited_default_even_when_an_old_seed_exists(self, monkeypatch):
+        repo = FakePromptRepo()
+        edited = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content="admin edit",
+                is_default=True,
+            )
+        )
+        svc = _service(repo)
+        await svc.seed_defaults()
+        assert edited.content == "admin edit"
+
+    async def test_preserves_renamed_default_even_if_its_content_is_old(self, monkeypatch):
+        repo = FakePromptRepo()
+        renamed = await repo.create(
+            Prompt(prompt_type="query_contextualizer", name="my_contextualizer", content="old", is_default=True)
+        )
+        await _service(repo).seed_defaults()
+        assert renamed.content == "old"
+
+    async def test_admin_edit_during_refresh_wins(self, monkeypatch, tmp_path):
+        class EditingRepo(FakePromptRepo):
+            async def update_default_content_if_unchanged(self, prompt_id, expected_name, old_content, new_content):
+                self.prompts[prompt_id].content = "admin edit"
+                return await super().update_default_content_if_unchanged(
+                    prompt_id, expected_name, old_content, new_content
+                )
+
+        repo = EditingRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer", name="default_query_contextualizer", content="old", is_default=True
+            )
+        )
+        svc, bundled_dir = _service_with_bundled_templates(repo, tmp_path, monkeypatch)
+        (bundled_dir / "query_contextualizer_tmpl.txt").write_text("new")
+        _set_seed_history(monkeypatch, "query_contextualizer", sha256(b"old").hexdigest(), sha256(b"new").hexdigest())
+        await svc.seed_defaults()
+        assert old.content == "admin edit"
+
+    async def test_refresh_write_failure_propagates_and_preserves_old_default(self, monkeypatch, tmp_path):
+        class FailingRepo(FakePromptRepo):
+            async def update_default_content_if_unchanged(self, prompt_id, expected_name, old_content, new_content):
+                raise RuntimeError("database write failed")
+
+        repo = FailingRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer", name="default_query_contextualizer", content="old", is_default=True
+            )
+        )
+        svc, bundled_dir = _service_with_bundled_templates(repo, tmp_path, monkeypatch)
+        (bundled_dir / "query_contextualizer_tmpl.txt").write_text("new")
+        _set_seed_history(monkeypatch, "query_contextualizer", sha256(b"old").hexdigest(), sha256(b"new").hexdigest())
+
+        with pytest.raises(RuntimeError, match="database write failed"):
+            await svc.seed_defaults()
+
+        assert old.content == "old"
+
+    async def test_refresh_read_failure_keeps_old_default_and_other_types_seed(self, monkeypatch):
+        old_text = (Path(__file__).parent / "fixtures/query_contextualizer_before_calendar_anchors.txt").read_text()
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content=old_text,
+                is_default=True,
+            )
+        )
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        def unreadable_seed(prompt_type):
+            if prompt_type == "query_contextualizer":
+                raise PermissionError("permission denied")
+            return disk_seed(prompt_type)
+
+        monkeypatch.setattr(svc, "_disk_seed", unreadable_seed)
+        await svc.seed_defaults()
+
+        assert old.content == old_text
+        assert len(repo.prompts) == len(PROMPT_TYPE_KEYS)
+
+    async def test_custom_prompt_directory_disables_automatic_refresh(self, monkeypatch, tmp_path):
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer", name="default_query_contextualizer", content="old", is_default=True
+            )
+        )
+        config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
+        svc = PromptService(prompt_repo=repo, config=config)
+        await svc.seed_defaults()
+        assert old.content == "old"
+
+    async def test_custom_filename_in_bundled_directory_disables_automatic_refresh(self, monkeypatch, tmp_path):
+        (tmp_path / "query_contextualizer_tmpl.txt").write_text("canonical template")
+        (tmp_path / "operator_custom.txt").write_text("operator template")
+        monkeypatch.setattr(prompt_module, "_DEFAULT_PROMPTS_DIR", tmp_path)
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content="old",
+                is_default=True,
+            )
+        )
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(
+                paths=PathsConfig(prompts_dir=tmp_path),
+                prompts=PromptsConfig(query_contextualizer="operator_custom.txt"),
+            ),
+        )
+        _set_seed_history(
+            monkeypatch,
+            "query_contextualizer",
+            sha256(b"old").hexdigest(),
+            sha256(b"canonical template").hexdigest(),
+        )
+
+        await svc._refresh_default_if_pristine("query_contextualizer", old)
+
+        assert old.content == "old"
+
+    async def test_in_place_edit_of_bundled_template_does_not_refresh_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(prompt_module, "_DEFAULT_PROMPTS_DIR", tmp_path)
+        (tmp_path / "query_contextualizer_tmpl.txt").write_text("operator-modified template")
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content="old",
+                is_default=True,
+            )
+        )
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig()),
+        )
+        _set_seed_history(
+            monkeypatch,
+            "query_contextualizer",
+            sha256(b"old").hexdigest(),
+            sha256(b"trusted bundled template").hexdigest(),
+        )
+
+        await svc._refresh_default_if_pristine("query_contextualizer", old)
+
+        assert old.content == "old"
 
     async def test_seeding_skips_blank_non_asr_template(self, monkeypatch):
         repo = FakePromptRepo()
@@ -187,6 +455,30 @@ class TestSeeding:
 
 
 class TestResolution:
+    async def test_resolution_with_identity_preserves_prompt_provenance(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(Prompt(prompt_type="query_contextualizer", name="legal", content="LEGAL"))
+
+        resolved = await svc.resolve_prompt_with_identity("query_contextualizer", names=["legal"])
+
+        assert resolved.content == "LEGAL"
+        assert resolved.name == "legal"
+        assert resolved.source == "named"
+        assert resolved.content_hash == hashlib.sha256(b"LEGAL").hexdigest()
+
+    async def test_strict_identity_resolution_propagates_database_outage_as_503(self):
+        class BrokenRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type: str, name: str) -> Prompt | None:
+                raise RuntimeError("postgres unreachable")
+
+        svc = _service(BrokenRepo())
+
+        with pytest.raises(ServiceUnavailableError) as exc:
+            await svc.resolve_prompt_with_identity("query_contextualizer", names=["legal"], strict_errors=True)
+
+        assert exc.value.code == "PROMPT_LOOKUP_UNAVAILABLE"
+
     async def test_precedence_named_then_default_then_disk(self):
         repo = FakePromptRepo()
         svc = _service(repo)

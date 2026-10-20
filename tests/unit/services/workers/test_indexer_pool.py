@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1637,7 +1639,8 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        paths=SimpleNamespace(data_dir="/tmp/data"),
         semaphore=SimpleNamespace(vlm_semaphore=7),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
@@ -1670,6 +1673,8 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", fake_postgres_store)
+    pymupdf_pool_configs = []
+    monkeypatch.setattr(parser_dispatcher, "configure_pymupdf_pool", pymupdf_pool_configs.append)
     monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg, **_kwargs: object())
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: object())
     monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
@@ -1699,6 +1704,9 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     # Without this the actor could stop forwarding it and every test still passed.
     assert captured["caption_concurrency"] == 7
     assert captured["caption_concurrency"] == cfg.semaphore.vlm_semaphore
+    # The PyMuPDF process pool belongs to the indexer: the API replicas build the
+    # same dispatcher and must keep the single thread (#997).
+    assert pymupdf_pool_configs == [cfg]
 
 
 def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1732,7 +1740,8 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        paths=SimpleNamespace(data_dir="/tmp/data"),
         semaphore=SimpleNamespace(vlm_semaphore=10),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
@@ -1760,6 +1769,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
+    monkeypatch.setattr(parser_dispatcher, "configure_pymupdf_pool", lambda _cfg: None)
     monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg, **_kwargs: object())
     # No global default VLM endpoint configured.
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: None)
@@ -2292,6 +2302,41 @@ async def test_actor_purges_upload_on_worker_failure(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, RuntimeError("boom")])
+async def test_actor_keeps_markdown_copy_when_purging_upload(tmp_path, error) -> None:
+    # SAVE_MARKDOWN is independent of save_uploaded_files: inspecting parser
+    # output must not require keeping every raw upload.
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=_RecordingWorker(error=error))
+
+    if error is None:
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+    else:
+        with pytest.raises(RuntimeError, match="boom"):
+            await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert not path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_markdown_copy_when_saving(tmp_path) -> None:
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
+
+
+@pytest.mark.asyncio
 async def test_actor_purges_upload_on_pre_worker_failure(tmp_path) -> None:
     # The gap the old worker-level finally missed: catalog/registry init (or the
     # SERIALIZING state update) fails *before* the worker runs. The upload must
@@ -2541,3 +2586,454 @@ def test_a_missing_default_embedder_reloads_the_registry_despite_a_global_embedd
     pool._last_miss_reload_at = None
 
     assert pool._reload_decision({"embedder": ["default"]}) == "miss"
+
+
+class _BlockingWorker(_RecordingWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def process_file(self, **kwargs) -> dict:
+        await self.release.wait()
+        return await super().process_file(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_actor_renews_the_worker_lease_only_while_the_file_is_processing(monkeypatch, tmp_path) -> None:
+    """The lease is how the task state tells a live worker from a dead one once the pool actor died."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+    while renew.await_count < 3:
+        await asyncio.sleep(0.01)
+    worker.release.set()
+    assert await processing == {"stored_count": 1, "stage": "stored"}
+    renewals = renew.await_count
+    await asyncio.sleep(0.05)
+
+    assert renew.await_count == renewals
+    renew.assert_awaited_with("t")
+
+
+def _renewals(outcomes: list[Any], then: Any) -> Callable[[str], Awaitable[Any]]:
+    """A renew_worker_lease answering ``outcomes`` in turn, then ``then`` for good; exceptions are raised."""
+    answers = iter(outcomes)
+
+    async def renew(_task_id: str) -> Any:
+        answer = next(answers, then)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return renew
+
+
+class _StartRecordingWorker(_BlockingWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started_at: float | None = None
+        self.cancelled_at: float | None = None
+
+    async def process_file(self, **kwargs) -> dict:
+        self.started_at = asyncio.get_running_loop().time()
+        try:
+            return await super().process_file(**kwargs)
+        except asyncio.CancelledError:
+            self.cancelled_at = asyncio.get_running_loop().time()
+            raise
+
+
+def _lease_timing(monkeypatch, *, interval: float, ttl: float) -> None:
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", interval)
+    monkeypatch.setattr(worker_lease, "_WORKER_LEASE_TTL_SECONDS", ttl)
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_processing_when_a_lease_renewal_fails(monkeypatch, tmp_path) -> None:
+    _lease_timing(monkeypatch, interval=0.01, ttl=5.0)
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(side_effect=_renewals([True, RuntimeError("task state unavailable")], then=True))
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+    while renew.await_count < 4:
+        await asyncio.sleep(0.01)
+    worker.release.set()
+
+    assert await processing == {"stored_count": 1, "stage": "stored"}
+
+
+@pytest.mark.asyncio
+async def test_actor_starts_only_once_a_failed_first_renewal_is_answered(monkeypatch, tmp_path) -> None:
+    """Until the task state recorded the pickup, it may settle the task as abandoned and release its file."""
+    _lease_timing(monkeypatch, interval=0.01, ttl=5.0)
+    worker = _StartRecordingWorker()
+    worker.release.set()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    attempts: list[float] = []
+
+    async def renew(_task_id: str) -> bool:
+        attempts.append(asyncio.get_running_loop().time())
+        if len(attempts) <= 2:
+            raise RuntimeError("task state unavailable")
+        return True
+
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    result = await actor.process_file(
+        task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    assert worker.started_at is not None
+    assert worker.started_at >= attempts[2]
+
+
+@pytest.mark.asyncio
+async def test_actor_fails_a_task_whose_first_renewal_is_never_answered(monkeypatch, tmp_path) -> None:
+    from services.workers.worker_lease import WorkerLeaseLostError
+
+    _lease_timing(monkeypatch, interval=0.01, ttl=0.1)
+    worker = _StartRecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(side_effect=RuntimeError("task state unavailable"))
+    end = AsyncMock()
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed))
+
+    with pytest.raises(WorkerLeaseLostError):
+        await asyncio.wait_for(
+            actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"),
+            timeout=5,
+        )
+
+    assert worker.started_at is None
+    assert renew.await_count >= 2
+    actor._task_state_manager.get_object_ref.remote.assert_not_awaited()
+    set_failed.assert_awaited_once()
+    assert set_failed.await_args.args[0] == "t"
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_actor_stops_before_its_lease_lapses_when_renewals_keep_failing(monkeypatch, tmp_path) -> None:
+    """The task state releases the file once the lease lapses; a worker still writing then could undo a delete."""
+    from services.workers.worker_lease import WorkerLeaseLostError
+
+    ttl = 0.3
+    _lease_timing(monkeypatch, interval=0.05, ttl=ttl)
+    worker = _StartRecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    sent_at: list[float] = []
+
+    async def renew(_task_id: str) -> bool:
+        sent_at.append(asyncio.get_running_loop().time())
+        if len(sent_at) > 2:
+            raise RuntimeError("task state unavailable")
+        return True
+
+    end = AsyncMock()
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed))
+
+    with pytest.raises(WorkerLeaseLostError):
+        await asyncio.wait_for(
+            actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"),
+            timeout=5,
+        )
+
+    last_answered = sent_at[1]
+    assert worker.cancelled_at is not None
+    assert worker.cancelled_at < last_answered + ttl
+    assert worker.calls == 0
+    set_failed.assert_awaited_once()
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_actor_reports_the_worker_returned_once_the_file_settles(monkeypatch, tmp_path) -> None:
+    """Ending the lease settles an orphaned ref at once instead of after the TTL."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    events: list[str] = []
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    async def renew(_task_id: str) -> bool:
+        events.append("renew")
+        return True
+
+    async def end(_task_id: str) -> None:
+        events.append("end")
+
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+    while "renew" not in events:
+        await asyncio.sleep(0.01)
+    worker.release.set()
+    await processing
+
+    assert events[0] == "renew"
+    assert events[-1] == "end"
+    assert events.count("end") == 1
+
+
+@pytest.mark.asyncio
+async def test_actor_stops_its_own_file_once_the_task_is_cancelled(monkeypatch, tmp_path) -> None:
+    """ray.cancel cannot reach a worker whose ref lost its owner; the lease renewal is how it learns."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(side_effect=[True, True, False])
+    end = AsyncMock()
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(processing, timeout=5)
+    assert renew.await_count == 3
+    assert worker.calls == 0
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_pool_registers_the_worker_actor_with_the_ref(monkeypatch) -> None:
+    """The task state needs the worker actor to settle a task that is still queued when the pool dies."""
+    import services.workers.worker_lease as worker_lease
+    from services.workers.task_state import WORKER_ACTOR_ID_KEY, WORKER_RESTARTS_KEY
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", lambda actor_id: (True, 3))
+    loop = asyncio.get_running_loop()
+    ref = loop.create_future()
+    worker = SimpleNamespace(
+        process_file=SimpleNamespace(remote=lambda **_kwargs: ref),
+        _actor_id=SimpleNamespace(hex=lambda: "ab" * 16),
+    )
+    pool = _bare_pool([worker])
+
+    assert await pool.submit(task_id="task-1", path="/tmp/doc.txt", metadata={}, partition="p") == [ref]
+
+    pool._task_state_manager.set_object_ref.remote.assert_awaited_once_with(
+        "task-1", {"ref": ref, WORKER_ACTOR_ID_KEY: "ab" * 16, WORKER_RESTARTS_KEY: 3}
+    )
+    await _settle_pool_release_tasks(pool, ref)
+
+
+@pytest.mark.asyncio
+async def test_pool_reads_the_worker_registration_off_the_event_loop(monkeypatch) -> None:
+    """A slow GCS read must not stall other submissions; their slots are reserved meanwhile."""
+    import threading
+
+    import services.workers.worker_lease as worker_lease
+
+    loop_thread = threading.get_ident()
+    read_threads: list[int] = []
+    first_read_started = threading.Event()
+    release_first_read = threading.Event()
+
+    def slow_read(actor_id: str) -> tuple[bool, int]:
+        read_threads.append(threading.get_ident())
+        if actor_id == "ab" * 16:
+            first_read_started.set()
+            release_first_read.wait(timeout=5)
+        return True, 0
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", slow_read)
+    loop = asyncio.get_running_loop()
+    refs = [loop.create_future(), loop.create_future()]
+    workers = [
+        SimpleNamespace(
+            process_file=SimpleNamespace(remote=lambda _ref=ref, **_kwargs: _ref),
+            _actor_id=SimpleNamespace(hex=lambda _hex=hex_id: _hex),
+        )
+        for ref, hex_id in zip(refs, ("ab" * 16, "cd" * 16))
+    ]
+    pool = _bare_pool(workers)
+
+    first = asyncio.create_task(pool.submit(task_id="task-1", metadata={}, partition="p"))
+    assert await asyncio.to_thread(first_read_started.wait, 5)
+    # The loop is free while the first read blocks, and the first slot is taken.
+    assert (await pool.status())["inflight_jobs"] == 1
+    assert await pool.submit(task_id="task-2", metadata={}, partition="p") == [refs[1]]
+    release_first_read.set()
+    assert await first == [refs[0]]
+
+    assert pool._inflight == [1, 1]
+    assert loop_thread not in read_threads
+    await _settle_pool_release_tasks(pool, *refs)
+
+
+@pytest.mark.asyncio
+async def test_pool_rolls_back_inflight_when_the_registration_read_raises(monkeypatch) -> None:
+    import services.workers.worker_lease as worker_lease
+
+    def failing_read(_actor_id: str) -> tuple[bool, int]:
+        raise RuntimeError("gcs unavailable")
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", failing_read)
+    submitted = []
+    worker = SimpleNamespace(
+        process_file=SimpleNamespace(remote=lambda **kwargs: submitted.append(kwargs)),
+        _actor_id=SimpleNamespace(hex=lambda: "ab" * 16),
+    )
+    pool = _bare_pool([worker])
+
+    with pytest.raises(RuntimeError, match="gcs unavailable"):
+        await pool.submit(task_id="a", metadata={}, partition="p")
+
+    assert submitted == []
+    assert pool._inflight == [0]
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("a")
+
+
+@pytest.mark.asyncio
+async def test_pool_reads_the_worker_restart_count_before_it_submits(monkeypatch) -> None:
+    """Read after, a restart that drops the task would count as its incarnation and hold its file for good."""
+    import services.workers.worker_lease as worker_lease
+    from services.workers.task_state import WORKER_RESTARTS_KEY
+
+    restarts = [3]
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", lambda actor_id: (True, restarts[0]))
+    ref = asyncio.get_running_loop().create_future()
+
+    def submit_then_restart(**_kwargs: Any) -> asyncio.Future[Any]:
+        # The worker actor restarts right after the task is sent, dropping it.
+        restarts[0] += 1
+        return ref
+
+    worker = SimpleNamespace(
+        process_file=SimpleNamespace(remote=submit_then_restart),
+        _actor_id=SimpleNamespace(hex=lambda: "ab" * 16),
+    )
+    pool = _bare_pool([worker])
+
+    await pool.submit(task_id="task-1", path="/tmp/doc.txt", metadata={}, partition="p")
+
+    (_task_id, registration), _ = pool._task_state_manager.set_object_ref.remote.await_args
+    assert registration[WORKER_RESTARTS_KEY] == 3
+    await _settle_pool_release_tasks(pool, ref)
+
+
+def test_worker_registration_omits_the_restart_count_when_the_gcs_cannot_be_read(monkeypatch) -> None:
+    import services.workers.worker_lease as worker_lease
+    from services.workers.task_state import WORKER_ACTOR_ID_KEY
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", lambda actor_id: None)
+    worker = SimpleNamespace(_actor_id=SimpleNamespace(hex=lambda: "cd" * 16))
+
+    assert worker_lease.worker_registration(worker) == {WORKER_ACTOR_ID_KEY: "cd" * 16}
+    assert worker_lease.worker_registration(SimpleNamespace()) == {}
+
+
+@pytest.mark.asyncio
+async def test_worker_lease_warns_that_an_older_task_state_manager_needs_a_ray_restart() -> None:
+    from services.workers.worker_lease import keep_worker_lease
+
+    logger = MagicMock()
+    started = asyncio.Event()
+
+    await keep_worker_lease(SimpleNamespace(), "t", worker_task=MagicMock(), logger=logger, started=started)
+
+    assert started.is_set()
+    logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in logger.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_actor_drops_a_task_whose_pickup_the_task_state_refuses(monkeypatch, tmp_path) -> None:
+    """A queued orphan already settled by its worker actor's restart count must not index late."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(return_value=False)
+    end = AsyncMock()
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(
+            actor.process_file(
+                task_id="t",
+                path=str(tmp_path / "doc.txt"),
+                metadata={"file_id": "f", "content_sha256": "abc123", CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1"},
+                partition="p",
+            ),
+            timeout=5,
+        )
+
+    assert worker.calls == 0
+    renew.assert_awaited_once_with("t")
+    actor._task_state_manager.get_object_ref.remote.assert_not_awaited()
+    actor._catalog_store.document_repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="f", partition="p", content_sha256="abc123", claim_token="attempt-1"
+    )
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelling_renewal_during_cleanup_does_not_cut_it_short(monkeypatch, tmp_path) -> None:
+    """Once the file settled, a late False must not cancel the claim release or skip ending the lease."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    cleaning_up = asyncio.Event()
+    released: list[str] = []
+
+    async def renew(_task_id: str) -> bool:
+        return not cleaning_up.is_set()
+
+    async def release(**_kwargs) -> None:
+        cleaning_up.set()
+        await asyncio.sleep(0.1)
+        released.append("claim")
+
+    end = AsyncMock()
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._catalog_store.document_repo.release_content_sha256_claim = release
+
+    result = await asyncio.wait_for(
+        actor.process_file(
+            task_id="t",
+            path=str(tmp_path / "doc.txt"),
+            metadata={"file_id": "f", "content_sha256": "abc123", CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1"},
+            partition="p",
+        ),
+        timeout=5,
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    assert released == ["claim"]
+    end.assert_awaited_once_with("t")

@@ -106,17 +106,27 @@ Upload a new file to a specific partition for indexing.
 **Responses:**
 - `201 Created`: Returns task status URL
 - `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
-- `409 Conflict`: File already exists in partition. Two more cases name a code,
+- `409 Conflict`: File already exists in partition. Three more cases name a code,
   as the `[CODE]` prefix of `detail` (`"[CODE]: message"`):
   - `DOCUMENT_INDEXING_IN_PROGRESS`: another task is still indexing this `file_id`.
-    `extra.existing_task_id` and `extra.task_status_url` point at it, so a client
-    that re-sent after a timeout can poll the first task instead of re-uploading.
+    `extra.existing_task_id` points at it, so a client that re-sent after a
+    timeout can poll the first task instead of re-uploading. `extra.task_status_url`
+    is added only when the caller owns that task or is an admin, since the
+    task-status route answers anyone else with `403`.
     Earlier releases answered such a retry with `409 DOCUMENT_CONTENT_EXISTS`
     naming the retried `file_id` itself when content deduplication is on (the
     default) and the bytes are the same; with deduplication off, or different
     bytes, they accepted it with `201` and let it fail at the end of the pipeline.
-  - `DOCUMENT_CONTENT_EXISTS`: content deduplication matched another file
-    (`extra.existing_file_id`).
+    A task counts as indexing until its worker has stopped, so a worker that hangs
+    keeps the `file_id` busy until it actually stops. Cancelling the task
+    (`DELETE /indexer/task/{task_id}`) asks it to stop, but the `file_id` stays
+    busy until the worker has settled; a `PUT` is not refused meanwhile.
+  - `DOCUMENT_CONTENT_EXISTS`: content deduplication matched a file that already
+    holds these bytes (`extra.existing_file_id`). That can be the `file_id` you
+    sent, when an earlier upload of it still holds the content reservation but no
+    task is indexing it any more, for example because it settled a moment ago.
+  - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
+    expired before indexing started. Nothing was queued; retry the upload.
 
 ##### Indexing status callback
 
@@ -226,11 +236,15 @@ Replace an existing file in the partition. Deletes the current entry and creates
 **Request Body:** Same as POST endpoint
 **Responses:**
 - `202 Accepted`: Returns task status URL
+- `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
 - `404 Not Found`: File not found in partition
-- `409 Conflict`: `DOCUMENT_CONTENT_EXISTS`, when content deduplication finds the
-  same bytes held by another file, or by a task still indexing this one
-  (`extra.existing_file_id`). A replace is not refused for a task already
-  indexing the file, so it never returns `DOCUMENT_INDEXING_IN_PROGRESS`.
+- `409 Conflict`, with the code as the `[CODE]` prefix of `detail`:
+  - `DOCUMENT_CONTENT_EXISTS`: content deduplication finds the same bytes held by
+    another file, or by a task still indexing this one (`extra.existing_file_id`).
+    A replace is not refused for a task already indexing the file, so it never
+    returns `DOCUMENT_INDEXING_IN_PROGRESS`.
+  - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
+    expired before indexing started. Nothing was queued; retry the request.
 
 #### Update File Metadata
 ```http
@@ -286,11 +300,14 @@ Perform semantic search across specified partitions.
 |---------------------|---------|---------|-------------|
 | `partitions` (optional)        | array   | ["all"] | Partitions to search. (optional) |
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results (minimum 1; maximum 1000 when retrieval tracing is enabled) (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
+| `rerank` (optional)            | boolean | `false`   | Rerank the vector search candidates and return the best `top_k`. See [reranking](#reranking-search-results) |
+| `rerank_candidates` (optional) | integer | partition's retrieval `top_k`, or `retriever.top_k` over several partitions | Candidates fetched from the vector search and sent to the reranker, only with `rerank=true`. Never lower than `top_k`, at most 1000 |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
+| `include_retrieval_trace` (optional) | boolean | `false` | Add bounded retrieval diagnostics for administrators, including the submitted query text. This may execute additional search work. |
 
 **Responses:**
 - `200 OK`: JSON list of document links (HATEOAS format)
@@ -308,13 +325,49 @@ Search within a specific partition only.
 | Parameter           | Type    | Default | Description |
 |---------------------|---------|---------|-------------|
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results (minimum 1; maximum 1000 when retrieval tracing is enabled) (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
+| `rerank` (optional)            | boolean | `false`   | Rerank the vector search candidates and return the best `top_k`. See [reranking](#reranking-search-results) |
+| `rerank_candidates` (optional) | integer | partition's retrieval `top_k` | Candidates fetched from the vector search and sent to the reranker, only with `rerank=true`. Never lower than `top_k`, at most 1000 |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
+| `include_retrieval_trace` (optional) | boolean | `false` | Add bounded retrieval diagnostics for administrators, including the submitted query text. This may execute additional search work. |
 
 **Response:** Same as multi-partition search
+
+Tracing is opt-in and administrator-only because it includes submitted or rewritten query text, candidate identifiers, and
+extra diagnostic searches. It reports ranks, public scores, decisions, timings, and configuration identity. Candidate
+records omit document content; prompt content, credentials, and internal endpoint addresses are excluded.
+
+* Retrieval Snapshot
+```http
+GET /search/partition/{partition}/snapshot
+```
+
+Returns the public retrieval, model, and index identity needed to reproduce a benchmark run. The endpoint is
+administrator-only. Document identifiers are optional, bounded, and excluded from the snapshot fingerprint so compact
+and expanded snapshots remain comparable.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `include_document_ids` (optional) | boolean | `false` | Include indexed document identifiers in the snapshot, up to 10,000 IDs. |
+
+When requested, `index.document_ids` contains at most 10,000 identifiers, `index.document_ids_limit` reports that limit,
+and `index.document_ids_truncated` indicates whether additional identifiers were omitted.
+
+* Retrieval Diagnostics
+```http
+POST /search/partition/{partition}/diagnostics
+```
+
+Runs contextualization, retrieval, and reranking without generating an answer. This experimental administrator-only
+endpoint is intended for reproducible evaluations that should not pay for an unused answer. It supports contextualized,
+original, and paired comparison modes with bounded retrieval overrides. Responses contain only the sanitized trace.
+Requests accept up to 100 plain-text messages with non-empty content and roles `system`, `developer`, `user`, or `assistant`;
+the last message must be a non-empty user turn. Tool-role messages and tool-call payloads are not supported.
 
 * Search Within Specific File
 ```http
@@ -325,6 +378,30 @@ Search within a particular file in a partition.
 
 **Query Parameters:** Same as partition search, including `filter`.
 **Response:** Same as other search endpoints
+
+#### Reranking search results
+
+With `rerank=true`, each search fetches `rerank_candidates` chunks instead of `top_k`, the reranker reorders them, and only the best `top_k` are returned, best first.
+
+- `rerank_candidates` defaults to the partition's retrieval preset `top_k` (`retriever.top_k` for a search over several partitions). It is raised to `top_k` when lower, and the candidate count never goes above 1000: a `top_k` above 1000 returns at most 1000 reranked documents.
+- A single-partition search uses that partition's reranker preset. A search over several partitions reranks all candidates as one list with the default reranker.
+- Reranking is available when the deployment enables the reranker (`RERANKER_ENABLED=true`), or, for a single-partition search, when that partition's retrieval preset sets `enable_reranker: true`. Otherwise the request fails with `503 RERANKER_UNAVAILABLE`. The preset can only switch reranking on: with the deployment's reranker enabled, `enable_reranker: false` governs the chat pipeline and an explicit `rerank=true` still reranks.
+- Reranker failures on this route count toward the same `reranker` circuit breaker as chat completions: a burst of failing `rerank=true` searches opens it for chat too.
+- Each reranked document carries a `rerank_score` beside `metadata`. Its scale depends on the reranker, so compare it within one response only and don't threshold on an absolute value.
+- Surrounding chunks are not added on this path. Related and ancestor chunks (`include_related`, `include_ancestors`) are appended after the reranked `top_k`, without a `rerank_score`, so the response can hold more than `top_k` documents.
+
+```json title="A reranked document"
+{
+  "link": "https://host/extract/<chunk id>",
+  "metadata": { "file_id": "report.pdf", "page": 3 },
+  "content": "...",
+  "rerank_score": 0.87
+}
+```
+
+**Responses:**
+- `422 Unprocessable Entity`: `rerank_candidates` below 1 or above 1000
+- `503 Service Unavailable`, code `RERANKER_UNAVAILABLE`: reranking was requested but the reranker is disabled on the deployment (and the partition's preset does not enable it), or no reranker endpoint is configured
 
 ---
 
@@ -386,6 +463,8 @@ DELETE /partition/{partition}
 ```
 Permanently delete a partition and **all** its files and chunks. **Owner** only. Returns `204 No Content`. This cannot be undone.
 
+The `default` partition, created at startup, cannot be deleted: the request returns `409 Conflict` (`DEFAULT_PARTITION_PROTECTED`). Delete its files instead. Deleting a user who owns it keeps the partition, removes their membership and makes the default admin (user 1) its owner.
+
 #### List Files in a Partition
 ```http
 GET /partition/{partition}
@@ -439,6 +518,100 @@ curl -X PATCH http://localhost:8080/partition/my_partition \
   -H "Content-Type: application/json" \
   -d '{"indexation_preset": "legal", "retrieval_preset": "hyde"}'
 ```
+
+:::tip
+To move a partition that holds files to another embedder, use the embedder swap below, which re-embeds them
+first.
+:::
+
+#### Partition Embedder Swap
+
+Re-embed a partition's files with an embedder, then point the partition at it. Each chunk's **stored text** is
+embedded again — nothing is re-parsed or re-chunked — and searches keep using the current embedder until every
+file is done, so no query returns results from a half-filled index.
+
+| Endpoint | Method | Role | Description |
+|----------|--------|------|-------------|
+| `/partition/{partition}/embedder-swap` | POST | Owner | Start a swap → `202` with the swap |
+| `/partition/{partition}/embedder-swap` | GET | Viewer | Progress, or how the last one ended → `null` if the partition never had one |
+| `/partition/{partition}/embedder-swap` | DELETE | Owner | Cancel a running swap → `409 EMBEDDER_SWAP_NOT_RUNNING` otherwise |
+
+The same `POST` does two jobs. Only `embedder` in the body tells them apart:
+
+| Goal | `embedder` in the body | Files re-embedded | Partition afterwards |
+|------|------------------------|-------------------|----------------------|
+| Move to another embedder | another endpoint | nearly all: none has vectors in that embedder's field yet | on the new embedder |
+| Repair drift | the partition's current endpoint | only the drifted ones | on the same embedder |
+
+```bash frame="none"
+# Move my_partition to bge-m3
+curl -X POST http://localhost:8080/partition/my_partition/embedder-swap \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"embedder": "bge-m3"}'
+
+# Repair drift: name the embedder my_partition already uses
+curl -X POST http://localhost:8080/partition/my_partition/embedder-swap \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"embedder": "e5-large"}'
+```
+
+A file is skipped when the model and vector field it was indexed with both match the target endpoint as it is
+now. Every other file is re-embedded, including files indexed before the vector field was recorded, since nothing
+says where their vectors are. Drift shows in `GET /partition/{partition}/config`, as an `indexed_embedders` entry
+whose `model_name` or `vector_field` differs from the partition's embedder.
+
+The response is the swap:
+
+```json
+{
+  "partition": "my_partition",
+  "source_embedder": "e5-large",
+  "target_embedder": "bge-m3",
+  "status": "running",
+  "files_total": 19,
+  "files_done": 7,
+  "chunks_over_window": 0,
+  "error": null,
+  "started_at": "2026-09-22T14:13:34Z",
+  "updated_at": "2026-09-22T14:13:38Z",
+  "finished_at": null
+}
+```
+
+- `status`: `running`, `completed`, `failed` (see `error`) or `cancelled`.
+- `files_done` of `files_total`: files re-embedded so far, of those the swap re-embeds. Skipped files are not
+  counted, so a drift repair on 19 files with 8 drifted counts to 8.
+- `chunks_over_window`: chunks of those files longer than the target embedder's context window. They are cut
+  before they are embedded, as at indexing, and their tail is not retrievable. An estimate, counted from each
+  chunk's token count at indexing.
+- `source_embedder` equals `target_embedder` on a drift repair.
+
+There is no push notification: poll the `GET` route for progress.
+
+`embedder` must name a registered embedder endpoint, not the `default` alias (422 otherwise) — the alias can
+move to another model later, which would leave the partition pointing at a field it never filled.
+
+Writing the new vectors makes Milvus rewrite every number in a chunk's metadata as a 64-bit float, so an integer
+beyond ±2^53 in upload metadata comes back rounded on the re-embedded chunks, as after
+[Milvus migration version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
+The file's metadata in Postgres keeps the exact value. Each rounding is logged as a warning naming the file and
+the metadata keys.
+
+:::caution
+While a swap runs, uploads, file replacements, metadata updates and copies **into** that partition return
+`409 EMBEDDER_SWAP_IN_PROGRESS`, and so does changing its `embedder`; deleting files stays allowed. Deleting the
+target embedder, or editing its `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len`, returns
+the same 409. Starting one is refused with `409 INDEXING_IN_PROGRESS` while files are still being indexed or
+copied into it.
+
+Cancelling leaves the partition on its current embedder. What the files re-embedded before it are worth depends on
+which of the two jobs was cancelled: on a **drift repair** the target field is the one the partition already
+searches, so those files are repaired and stay searchable; on a **move to another embedder** their new vectors sit
+in a field nothing reads until a later swap to that embedder, which skips them. Deleting that embedder meanwhile
+drops those vectors, and a later swap re-embeds the files.
+:::
 
 #### Partition Members
 
@@ -581,6 +754,8 @@ DELETE /presets/{preset_type}/{name}
 
 Every prompt the pipeline sends to a model is a stored, editable row rather than a bundled file. On first boot each type is seeded from its bundled template as that type's **default**; an admin can add named variants and select one per preset or per partition.
 
+On startup, an unchanged default seeded from an older bundled template is refreshed in place. Edited or renamed defaults and named prompts are preserved. For staged rollouts, set `PROMPTS_REFRESH_DEFAULTS=false` until older application instances have stopped, then enable refresh again.
+
 All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `hyde` | `multi_query` | `topic_tagger` | `asr_transcription`.
 
 **Resolution order** for a given type: the name selected for the request → the type's global default → the bundled template. A selection naming a prompt that no longer exists falls back to the default rather than failing.
@@ -681,7 +856,7 @@ DELETE /model-endpoints/{model_type}/{name}    # 204 No Content
 
 An **LLM** endpoint's token budgets live in `extra.max_llm_context_size` and `extra.max_output_tokens`. Every route returning an LLM endpoint also reports what a missing value falls back to: `detected_max_llm_context_size` (the `max_model_len` the endpoint reported on `/v1/models`, `null` when it reports none, as most gateways and hosted APIs don't), `default_max_llm_context_size` and `default_max_output_tokens` (the deployment's `MAX_LLM_CONTEXT_SIZE` and `MAX_OUTPUT_TOKENS`). The context size that applies is `max_llm_context_size`, else `detected_max_llm_context_size`, else `default_max_llm_context_size`. A write to an LLM endpoint re-probes `/v1/models` after responding; until that lands, `context_size_detection_pending` is `true` and `detected_max_llm_context_size` is `null`. These fields are `null` on other endpoint types.
 
-Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len` changes the vectors it produces. While partitions hold files indexed with it, such an edit returns `409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA` naming the partitions and file counts; resend it with `"acknowledge_indexed_data": true` to apply it anyway. The existing vectors are not rebuilt, so queries on those partitions are then compared against vectors from the previous configuration. `GET /model-endpoints/{model_type}/{name}/indexed-usage` returns the same counts ahead of time.
+Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len` changes the vectors it produces. While partitions hold files indexed with it, such an edit returns `409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA` naming the partitions and file counts; resend it with `"acknowledge_indexed_data": true` to apply it anyway. The existing vectors are not rebuilt, so queries on those partitions are then compared against vectors from the previous configuration. `GET /model-endpoints/{model_type}/{name}/indexed-usage` returns the same counts ahead of time. While a partition embedder swap re-embeds with that embedder, such an edit returns `409 EMBEDDER_SWAP_IN_PROGRESS` instead, acknowledged or not: wait for the swap to finish, or cancel it.
 
 Files still indexing when such an edit is saved are not counted, since a file is only counted once indexing finishes. Instead, when the file is recorded, the indexer checks that the partition's embedder still has the configuration it embedded with. If it doesn't, the file fails with `EMBEDDER_CHANGED_DURING_INDEXING`, its vectors are removed, and it has to be indexed again. Indexers reload an edited endpoint before embedding, so only files already embedding during the edit are affected.
 
@@ -839,6 +1014,20 @@ ambiguous, mixed, and factual messages retrieve. Text completions retain their c
 | `use_map_reduce` | Chat only | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
 | `llm_override` | Chat and text completions | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
 | `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Combined with `workspace`, only the attached files that belong to the workspace are searched. Unknown, unindexed or foreign IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
+| `include_retrieval_trace` | Chat only | `bool` | `false` | For administrators, adds trace schema version 1 to `extra.retrieval_trace`, including the original and rewritten query text. Streaming responses emit it only in terminal metadata. |
+| `compare_original_query` | Chat only | `bool` | `false` | Runs an isolated retrieval for the original message without changing the documents used for the answer. Requires tracing. |
+| `bypass_query_contextualization` | Chat only | `bool` | `false` | Uses the latest user message as the exact retrieval query. Requires tracing and forced retrieval, and cannot be combined with original-query comparison. |
+| `retrieval_similarity_threshold` | Chat only | `number` | `null` | Per-request diagnostic threshold from `0` to `1`. Requires tracing and forced retrieval. |
+| `retrieval_top_k` | Chat only | `integer` | `null` | Per-request diagnostic retrieval depth from `1` to `1000`. Requires tracing and forced retrieval. |
+| `retrieval_disable_reranker` | Chat only | `bool` | `false` | Disables reranking for this diagnostic request. Requires tracing and forced retrieval. |
+| `retrieval_disable_expansion` | Chat only | `bool` | `false` | Disables related and ancestor expansion for this diagnostic request. Requires tracing and forced retrieval. |
+
+Chat tracing persists the original and contextualized query text, retrieval decision, fallback state, prompt identity, and
+retrieval stages. Candidate records omit document content. The `timings.total` value covers the complete endpoint
+operation: chat includes answer generation, while the retrieval diagnostics endpoint includes contextualization,
+retrieval, and answer prompt assembly but skips generation. Original-query comparison performs an additional full search
+before answer generation, adding latency before the first streamed token. Tracing is intended for evaluation and
+diagnostics.
 
 Only allowlisted English and French casual messages skip retrieval; other phrasing retrieves by default. Casual
 replies use a dedicated instruction in the detected language. Only greetings include an

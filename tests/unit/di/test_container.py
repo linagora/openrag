@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from core.config.auth import AuthConfig, SeedUserConfig
 from core.config.infrastructure import RDBConfig, VectorDBConfig
 from core.config.model_endpoints import ModelEndpointConfig, ModelsConfig
 from core.config.root import Settings
@@ -33,6 +34,7 @@ from di.container import ServiceContainer
 from di.repositories import create_catalog_store
 from di.vector_stores import create_vector_store
 from fastapi import HTTPException
+from loguru import logger
 
 
 def _settings(database: str | None = None, collection: str = "vdb_test") -> Settings:
@@ -250,6 +252,9 @@ class TestCatalogStoreWiring:
             seed_default_partition=lambda: _async_call(calls, "partition.seed"),
             load_partitions=lambda: _async_call(calls, "partition.load"),
         )
+        c._embedder_swap_service = SimpleNamespace(
+            watch=lambda: _async_call(calls, "swaps.watch"),
+        )
 
         await c.initialize()
 
@@ -263,7 +268,100 @@ class TestCatalogStoreWiring:
             "prompt.seed",
             "partition.seed",
             "partition.load",
+            "swaps.watch",
         ]
+
+    @staticmethod
+    def _seeding_container(calls: list, seed_users: list, seed_error: Exception | None = None) -> ServiceContainer:
+        """A container whose startup steps only record their order."""
+
+        async def ensure_admin_user(token):
+            calls.append("admin")
+
+        async def ensure_seed_users(configured):
+            calls.append(("seed_users", [s.external_user_id for s in configured]))
+            if seed_error is not None:
+                raise seed_error
+
+        class FakeCatalogStore:
+            user_repo = SimpleNamespace(ensure_admin_user=ensure_admin_user, ensure_seed_users=ensure_seed_users)
+
+            async def initialize(self):
+                calls.append("initialize")
+
+        settings = _settings().model_copy(update={"auth": AuthConfig(seed_users=seed_users)})
+        c = ServiceContainer(settings)
+        c._catalog_store = FakeCatalogStore()
+        c._model_endpoint_service = SimpleNamespace(
+            seed_defaults=lambda: _async_call(calls, "endpoint.seed"),
+            load_all=lambda: _async_call(calls, "endpoint.load"),
+        )
+        c._preset_service = SimpleNamespace(
+            seed_defaults=lambda: _async_call(calls, "preset.seed"),
+            load_all=lambda: _async_call(calls, "preset.load"),
+        )
+        c._prompt_service = SimpleNamespace(seed_defaults=lambda: _async_call(calls, "prompt.seed"))
+        c._partition_service = SimpleNamespace(
+            seed_default_partition=lambda: _async_call(calls, "partition.seed"),
+            load_partitions=lambda: _async_call(calls, "partition.load"),
+        )
+        c._embedder_swap_service = SimpleNamespace(watch=lambda: _async_call(calls, "swaps.watch"))
+        return c
+
+    @pytest.mark.asyncio
+    async def test_seed_users_run_after_the_partitions_when_asked(self):
+        """The API process seeds auth.seed_users once the partitions exist."""
+        calls: list = []
+        seeds = [SeedUserConfig(external_user_id="svc-a", token_env="SVC_A_TOKEN")]
+        c = self._seeding_container(calls, seeds)
+
+        await c.initialize(seed_users=True)
+
+        assert calls.index(("seed_users", ["svc-a"])) == calls.index("partition.seed") + 1
+        assert calls.index("partition.load") == calls.index("partition.seed") + 2
+
+    @pytest.mark.asyncio
+    async def test_seed_users_are_not_run_by_default(self):
+        """Chainlit and the MCP server initialise without the flag: no second writer."""
+        calls: list = []
+        c = self._seeding_container(calls, [SeedUserConfig(external_user_id="svc-a", token_env="SVC_A_TOKEN")])
+
+        await c.initialize()
+
+        assert not [call for call in calls if isinstance(call, tuple)]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_seed_list_still_runs_the_step(self):
+        """Removing the last entry must revoke it: the repo is called with []."""
+        calls: list = []
+        c = self._seeding_container(calls, [])
+
+        await c.initialize(seed_users=True)
+
+        assert ("seed_users", []) in calls
+
+    @pytest.mark.asyncio
+    async def test_a_failed_seeding_step_does_not_fail_startup(self):
+        """Seeding errors are logged, never raised: the API still starts (#1153)."""
+        calls: list = []
+        secret = "or-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        c = self._seeding_container(
+            calls,
+            [SeedUserConfig(external_user_id="svc-a", token_env="SVC_A_TOKEN")],
+            seed_error=RuntimeError(f"duplicate key value (token)=({secret})"),
+        )
+        records: list[str] = []
+        sink = logger.add(lambda m: records.append(str(m) + repr(m.record["extra"])), level="DEBUG")
+        try:
+            await c.initialize(seed_users=True)
+        finally:
+            logger.remove(sink)
+
+        assert c._initialized is True
+        assert "partition.load" in calls and "swaps.watch" in calls
+        joined = "\n".join(records)
+        assert "Seed users not provisioned" in joined
+        assert secret not in joined
 
 
 class TestVectorStoreWiring:
@@ -344,8 +442,10 @@ _ORCHESTRATORS = [
     ("auth_service", "get_auth_service"),
     ("user_service", "get_user_service"),
     ("partition_service", "get_partition_service"),
+    ("embedder_swap_service", "get_embedder_swap_service"),
     ("workspace_service", "get_workspace_service"),
     ("retrieval_service", "get_retrieval_service"),
+    ("retrieval_snapshot_service", "get_retrieval_snapshot_service"),
     ("query_service", "get_query_service"),
     ("indexing_service", "get_indexing_service"),
     ("job_service", "get_job_service"),
@@ -649,6 +749,61 @@ class TestPhase14NamedComponentFactories:
 
         assert c.embedder_factory("embed-a").kwargs["batch_size"] == 128
 
+    @pytest.mark.asyncio
+    async def test_a_partition_switched_elsewhere_resolves_its_endpoint_created_elsewhere(self):
+        """Another process created embed-b, swapped p1 onto it and bumped the revision.
+
+        This one reloads p1 on that revision, then builds embed-b for it, an
+        endpoint it never loaded (#1016). Without the endpoint load, the factory
+        raises ``KeyError`` and every search of p1 is a 500.
+        """
+        from datetime import UTC, datetime
+
+        from core.config.model_endpoints import ModelEndpointRow
+
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        settings = _settings_with_named_models()
+        created_elsewhere = ModelEndpointRow(
+            name="embed-b",
+            model_type="embedder",
+            endpoint="http://embedder-b:8000/v1",
+            model_name="embed-model-b",
+            extra={"implementation": "phase14i-test"},
+            vector_field="vector_embed_b",
+            created_at=now,
+            updated_at=now,
+        )
+
+        class PresetRepo:
+            revision = 0
+
+            async def latest_revision(self):
+                return self.revision
+
+            async def load_all_with_revision(self):
+                return [], self.revision
+
+        class EndpointRepo:
+            async def list_all(self, model_type=None):
+                return [created_elsewhere]
+
+        class SwappedPartitions:
+            async def load_partitions(self):
+                settings.partitions["p1"] = SimpleNamespace(embedder="embed-b")
+
+        c = ServiceContainer(settings)
+        preset_repo = PresetRepo()
+        c._catalog_store = SimpleNamespace(preset_repo=preset_repo, model_endpoint_repo=EndpointRepo())
+        c._partition_service = SwappedPartitions()
+        c._prompt_service = object()
+        await c.preset_service.load_all()
+
+        preset_repo.revision += 1
+        await c.preset_service.refresh_if_stale()
+
+        embedder = c.embedder_factory(settings.partitions["p1"].embedder)
+        assert embedder.kwargs["model_name"] == "embed-model-b"
+
     def test_named_factories_cache_by_endpoint_name(self):
         """Repeated factory calls for the same endpoint return one client."""
         c = ServiceContainer(_settings_with_named_models())
@@ -843,6 +998,13 @@ class TestPhase14ServiceWiring:
                 """Record partition config loading."""
                 calls.append("partition.load")
 
+        class FakeEmbedderSwapService:
+            """Embedder swap resume recorder."""
+
+            async def watch(self):
+                """Record resuming interrupted swaps — after partitions load, which a swap completes into."""
+                calls.append("swaps.watch")
+
         monkeypatch.setenv("AUTH_TOKEN", "admin-token")
         c = ServiceContainer(_settings())
         c._catalog_store = FakeCatalogStore()
@@ -850,6 +1012,7 @@ class TestPhase14ServiceWiring:
         c._preset_service = FakePresetService()
         c._prompt_service = FakePromptService()
         c._partition_service = FakePartitionService()
+        c._embedder_swap_service = FakeEmbedderSwapService()
 
         await c.initialize()
 
@@ -863,5 +1026,6 @@ class TestPhase14ServiceWiring:
             "prompt.seed",
             "partition.seed",
             "partition.load",
+            "swaps.watch",
         ]
         assert c.is_initialized is True

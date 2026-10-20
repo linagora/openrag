@@ -24,7 +24,9 @@ enabled: true
 # ports below. Isolates the Ray dashboard, Postgres, Milvus, etc.
 networkPolicy:
   enabled: true
-  # Ports reachable from outside the namespace (e.g. via the Ingress controller).
+  # Ports reachable from outside the namespace (e.g. via the Ingress controller),
+  # on every pod. cert-manager's HTTP-01 solver port (8089) does not belong
+  # here: acmeHttp01 below opens it on the solver pods only.
   externalPorts:
     - 8080  # openrag API/UI & admin-ui
     # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
@@ -57,6 +59,25 @@ networkPolicy:
   #   - ipBlock:
   #       cidr: 10.0.0.0/24
   webhookFrom: []
+  # cert-manager's HTTP-01 solver: the pod it starts in this namespace to answer
+  # an ACME challenge, on 8089, reached through the Ingress controller. Opens
+  # that port on the solver pods only (label
+  # acme.cert-manager.io/http01-solver: "true"), and selects nothing while no
+  # challenge is pending, so it is harmless with DNS-01 or your own
+  # certificates. Turn it off only if no Issuer here uses HTTP-01.
+  acmeHttp01:
+    enabled: true
+    # Empty means any source: a host-network Ingress controller (ingress-nginx
+    # with hostNetwork, for one) connects from a node address, which no
+    # namespaceSelector matches. Narrow it with standard NetworkPolicyPeers:
+    # a namespaceSelector when the controller runs on the pod network, an
+    # ipBlock with the node addresses when it runs with hostNetwork, e.g.
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: ingress-nginx
+    #   - ipBlock:
+    #       cidr: 10.0.0.0/24
+    from: []
 
 # === Monitoring artifacts ===
 # One set of dashboards, dashboards/ in this chart — the directory the Compose
@@ -373,7 +394,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.1"
+    tag: "v2.3.2"
   resources:
     head:
       requests:
@@ -478,12 +499,42 @@ postgresProvisioning:
   # at a pre-created database.
   autoCreateDatabase: true
   # Leave app-start migrations enabled for compose-like installs. Operators can
-  # disable this when they run migrations through the Helm hook below.
+  # disable this when they run migrations through the Helm hook below. Sets
+  # POSTGRES_RUN_MIGRATIONS: the chart refuses an env.config or env.secrets
+  # entry for it that disagrees, since the entry would silently replace this
+  # value.
   runMigrationsInApp: true
+  # A pre-install/pre-upgrade hook, for an external PostgreSQL only: it runs
+  # before Helm creates the bundled one, so the chart refuses it with
+  # postgresql.enabled.
   migrationJob:
     enabled: false
     backoffLimit: 3
     hookDeletePolicy: before-hook-creation,hook-succeeded
+  # Set true when you apply the migrations yourself (`python -m
+  # services.persistence.migrations.run`), with runMigrationsInApp and
+  # migrationJob both off. Without it the chart refuses that combination,
+  # since then nothing applies them and the app answers 503.
+  externalMigrations: false
+
+# === MinIO credentials ===
+# Root credentials of the bundled MinIO. The chart writes them to the Secret
+# named by milvus.minio.existingSecret, which MinIO and every Milvus component
+# read, so they stay out of the Milvus ConfigMap. Required while the bundled
+# MinIO is enabled: no value published by this project (such as "minioadmin"),
+# an access key of at least 3 characters (SILO's own floor) and a secret key of
+# at least 12 (templates/secrets-env.yaml).
+# Pass them from a values file kept out of git.
+# Unused with milvus.externalS3: the chart writes milvus.externalS3.accessKey
+# and secretKey to that Secret instead, since Milvus reads it either way.
+minioCredentials:
+  # false: create that Secret yourself, with the keys `accesskey` and
+  # `secretkey` (External Secrets, Vault, sealed-secrets...). The chart then
+  # renders none and can't check the values. With milvus.externalS3, its keys
+  # override milvus.externalS3.accessKey / secretKey.
+  create: true
+  accessKey: ""
+  secretKey: ""
 
 # === Milvus ===
 milvus:
@@ -509,17 +560,29 @@ milvus:
   pulsarv3: { enabled: false }
   woodpecker: { enabled: true }
   streaming: { enabled: true }
-  indexNode: { enabled: false }
   minio:
     mode: distributed
     replicas: 3
-    # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
-    # linagoraai/minio is an unmodified mirror of the same upstream release,
-    # matching the compose stacks. The digest keeps deployments on the
-    # verified image even if the mirror's tag changes.
+    # SILO, the maintained MinIO fork, matching the compose stacks. Pinned here
+    # rather than left to the Milvus chart's default (a MinIO image that is no
+    # longer published), and by digest: the chart renders "repository:tag", so
+    # the digest rides in `tag`. linagoraai/silo holds a copy with the same
+    # digest if pgsty/silo ever disappears: only `repository` changes. Moving an
+    # existing release onto it is one-way and needs every MinIO pod stopped
+    # first: see docs/content/docs/documentation/minio_silo_upgrade.md.
     image:
-      repository: linagoraai/minio
-      tag: RELEASE.2024-12-18T13-15-44Z@sha256:34c8e2f52a5984492555427fee07254c80036bdb7079bb91679232abd7a4fa20
+      repository: pgsty/silo
+      tag: RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+    # MinIO reads its credentials from this Secret, rendered from
+    # minioCredentials above. Spelled out rather than derived because
+    # sub-chart values can't be templated. The extraEnv entries below reuse it
+    # through a YAML anchor, which an override in another values file doesn't
+    # follow: rename it there too, or the install fails.
+    existingSecret: &minioCredentialsSecret openrag-minio-credentials
+    # Leave both empty: the Milvus chart copies them into its ConfigMap in
+    # plain text, so the install fails when they are set. Use minioCredentials.
+    accessKey: ""
+    secretKey: ""
     persistence:
       enabled: true
       size: 20Gi
@@ -530,10 +593,35 @@ milvus:
       enabled: true
       size: 10Gi
       storageClass: *storageClass
+  # Every component that runs Milvus reads the object store's credentials from
+  # the same Secret, for the bundled MinIO and for milvus.externalS3 alike.
+  # Environment variables override Milvus's config file (MINIO_ACCESS_KEY_ID
+  # is minio.accessKeyID), as in the compose stack. `optional` keeps a missing
+  # Secret from blocking the pods: they then use the config file's credentials.
+  # Overriding a component's extraEnv replaces this list: keep both entries,
+  # or, with the bundled MinIO, the install fails (templates/secrets-env.yaml).
+  standalone:
+    extraEnv: &minioCredentialsEnv
+      - name: MINIO_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef: { name: *minioCredentialsSecret, key: accesskey, optional: true }
+      - name: MINIO_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef: { name: *minioCredentialsSecret, key: secretkey, optional: true }
   proxy:
+    extraEnv: *minioCredentialsEnv
     service:
       type: ClusterIP
       port: 19530
+  mixCoordinator: { extraEnv: *minioCredentialsEnv }
+  rootCoordinator: { extraEnv: *minioCredentialsEnv }
+  queryCoordinator: { extraEnv: *minioCredentialsEnv }
+  dataCoordinator: { extraEnv: *minioCredentialsEnv }
+  indexCoordinator: { extraEnv: *minioCredentialsEnv }
+  queryNode: { extraEnv: *minioCredentialsEnv }
+  dataNode: { extraEnv: *minioCredentialsEnv }
+  indexNode: { enabled: false, extraEnv: *minioCredentialsEnv }
+  streamingNode: { extraEnv: *minioCredentialsEnv }
   # Every Milvus component already serves /metrics on 9091 (the sub-chart's
   # metrics.enabled defaults to true); only the Operator object is off.
   metrics:
@@ -723,25 +811,31 @@ reranker:
   # remember to also set enabled: false so the local Deployment/Service
   # aren't created alongside it.
   externalUrl: ""
-  rerankerModelName: &rerankerModel "Alibaba-NLP/gte-multilingual-reranker-base"
-  servicePort: &rerankerPort 7997
   image:
     repository: "michaelf34/infinity"
     tag: "0.0.77"
   nodeSelector: {}
+  # The model Infinity serves and OpenRAG asks for (RERANKER_MODEL), including
+  # an external reranker's. It replaces rerankerModelName.
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
-  command:
-    - v2
-    - --model-id
-    - *rerankerModel
-    - --port
-    - *rerankerPort
+  # Flags appended to `v2 --model-id <model.id> --port <service.port>`, e.g.
+  # ["--batch-size", "16"]. They replace `command`, which was never read.
+  # --model-id and --port are refused: set model.id and service.port.
+  extraArgs: []
+  # Environment variables for the reranker container alone (Kubernetes EnvVar
+  # objects). They take precedence over the shared env.config ConfigMap the
+  # container also reads. On CPU, INFINITY_MODEL_WARMUP: "false" skips the
+  # warmup benchmark: on 4 CPUs Infinity then answered /health in under 20 s
+  # instead of 100-125 s in our tests.
+  extraEnv: []
   replicas: 1
   runtimeClassName: ""
+  # service.port is the port Infinity listens on, the Service port, and the one
+  # in RERANKER_BASE_URL. It replaces servicePort.
   service:
     type: ClusterIP
-    port: *rerankerPort
+    port: 7997
   resources:
     requests:
       cpu: "4"
@@ -758,6 +852,20 @@ reranker:
   # security.containerSecurityContext defaults for this workload specifically.
   # automountServiceAccountToken: false
   # containerSecurityContext: {}
+  # Infinity serves /health only once the model is loaded and its warmup
+  # benchmark has run, which took 100-125 s on 4 CPUs, 180-210 s on 2 and
+  # 340-380 s on 1 in our tests, cached model or not. The startup probe allows
+  # 10 minutes for that (plus a first-boot download); liveness and readiness
+  # start only after it passes. The default probes are in
+  # templates/infinity.yaml, all on /health at the reranker port:
+  #   startup:   periodSeconds 10, failureThreshold 60
+  #   readiness: periodSeconds 10, failureThreshold 6
+  #   liveness:  initialDelaySeconds 60, periodSeconds 30, failureThreshold 3
+  # Set only what you change, e.g. startup: {failureThreshold: 120}: each
+  # probe is merged over its default. Set a probe to null to drop it, a field
+  # to null to remove it, and another handler (tcpSocket, exec, grpc) to
+  # replace httpGet.
+  probes: {}
 
 # === Admin UI (replaces indexer-ui) ===
 # React SPA served by an nginx bundled inside the image. VITE_BASE_PATH=/app/
@@ -773,7 +881,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.3.1"
+    tag: "v2.3.2"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -830,7 +938,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.1"
+    tag: "v2.3.2"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -917,6 +1025,19 @@ openrag:
   # bundles into one file on a shared emptyDir before the main container
   # starts (see values-openrag.yaml's kc-ca-bundle example).
   extraInitContainers: []
+  # Operator-managed accounts provisioned by the API at startup (auth.seed_users,
+  # see docs/documentation/user_auth.md). Each entry names the env var holding
+  # its token (token_env), never the token: put the value in the chart's Secret
+  # (env.secrets, or the KV path read by externalSecret / vaultStaticSecret).
+  # Rendered as SEED_USERS in the env ConfigMap, only when non-empty.
+  #   seedUsers:
+  #     - external_user_id: svc-cozy-stack
+  #       display_name: cozy-stack
+  #       token_env: COZY_STACK_TOKEN
+  #       is_admin: false
+  #       partitions:
+  #         - { name: twake, role: editor }
+  seedUsers: []
   serviceAccountName: ""
   # Uncomment to override the shared security.automountServiceAccountToken /
   # security.containerSecurityContext defaults for this workload specifically.
@@ -1101,15 +1222,18 @@ env:
     # Embedder
     EMBEDDER_MODEL_NAME: '{{ .Values.vllm.embedderModelName }}'
     EMBEDDER_BASE_URL: 'http://{{ .Release.Name }}-embedder-engine-service/v1'
+    # Client for an external embedder: vllm (default, needs GET /models), ollama,
+    # or tei (Hugging Face text-embeddings-inference, which has no /models).
+    # EMBEDDER_PROVIDER: "tei"
 
     # Reranker
-    RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
+    RERANKER_MODEL: '{{ .Values.reranker.model.id }}'
     # True when either the local Infinity reranker is deployed or an external
     # one is configured — false (and RERANKER_BASE_URL below moot) when
     # neither applies, so this never points at a Service that doesn't exist.
     RERANKER_ENABLED: '{{ or .Values.reranker.enabled (ne .Values.reranker.externalUrl "") }}'
     RERANKER_TOP_K: "4"
-    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}{{ end }}'
+    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.service.port }}{{ end }}'
     RERANKER_PROVIDER: "infinity"
 
     # Model Endpoint Registry: when true, re-syncs each type's env-seeded
@@ -1118,11 +1242,15 @@ env:
     # false to let endpoints edited from the admin UI stay as the source of
     # truth. See docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     MODEL_ENDPOINT_SYNC_ON_BOOT: "false"
+
+    # Refresh only saved defaults that still match a previous bundled prompt.
+    # Disable during a staged rollout while older application pods run.
+    PROMPTS_REFRESH_DEFAULTS: "true"
     # When true, /ready (the readiness probe) fails while the default embedder is
     # unavailable. Every replica shares it, so its outage or restart then takes
     # all of them out of the Service, admin API and UI included. Before enabling,
-    # check that /ready reports checks.embedder: ok (the probe needs the model
-    # name verbatim in GET /models). See
+    # check that /ready reports checks.embedder: ok (the probe looks the model
+    # name up in GET /models, or checks /health for EMBEDDER_PROVIDER=tei). See
     # docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     READINESS_REQUIRE_EMBEDDER: "false"
 
@@ -1131,8 +1259,23 @@ env:
 
     # Loaders
     PDFLOADER: "PyMuPDFLoader"
+    # PyMuPDF parses one PDF at a time per indexer worker unless asked: each
+    # slot is then a child process (~80 MiB inside a Ray worker before parsing,
+    # up to what its largest parse needs while parsing; between parses its RSS
+    # drops back near that, its VmData not always).
+    # The ceiling (MiB) makes an oversized PDF fail on its own instead of
+    # OOM-killing the worker; each child logs its baseline when it starts. See
+    # env_vars.md.
+    # PYMUPDF_POOL_SIZE: "4"
+    # PYMUPDF_PARSE_MEMORY_LIMIT_MB: "1024"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
+    # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse
+    # raises MemoryError in that child instead of OOM-killing the pod. Left unset
+    # (off) on purpose: it bounds the child's whole memory, torch included, so a
+    # value below its baseline fails every parse. The worker logs the baseline at
+    # startup — measure there first, then set this well above it.
+    # MARKER_PARSE_MEMORY_LIMIT_MB: "6144"
     MARKER_MAX_PROCESSES: "15"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"

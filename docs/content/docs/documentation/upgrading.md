@@ -13,6 +13,109 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## 2.3.0 or 2.3.1 to a later 2.3.x
+
+The fence that holds a file while an orphaned indexing worker may still write to
+it lives in the Ray actors, and these upgrades keep the indexer generation `v13`,
+so actors already running are not replaced. On a shared Ray cluster
+(`ray.enabled: true`, or an external cluster) restart the Ray cluster once after
+the upgrade, at a time when no indexing is running, so the actors are recreated.
+Until then the API logs a warning that the running Ray actors predate the fence.
+With Ray inside the OpenRAG pod or container (`ray.enabled: false`, or Docker
+Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
+the actors on its own. See
+[Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
+
+From OpenRAG 2.3.2, `MARKER_PDFTEXT_WORKERS` is ignored: Marker runs pdftext with
+one worker, inside the Marker child, so its processes no longer outlive a crashed
+worker. Remove the setting; the Marker worker logs a warning while it is above 1.
+`MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
+`1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
+
+From OpenRAG 2.3.2, the bundled object store runs SILO, the maintained MinIO
+fork, instead of the unpatched MinIO build. The switch is one-way, so back up
+the MinIO, etcd and Milvus data first. On Kubernetes, stop every MinIO pod
+before `helm upgrade`, and set `minioCredentials.accessKey` and `secretKey`: the
+chart refuses to install without them. Deployments on an external S3 store are
+not affected. Follow
+[Object storage upgrade (MinIO to SILO)](/openrag/documentation/minio_silo_upgrade/)
+before upgrading.
+
+From OpenRAG 2.3.2, a default prompt that still holds the text an earlier release
+seeded is replaced with the bundled template at startup. Defaults you edited or
+renamed, and named prompts, are kept. In every deployment this replaces an
+untouched `query_contextualizer` default; in one first installed on 2.1.x, also
+the `sys_prompt` and `spoken_style_answer` defaults. To keep an earlier text, copy it
+into a named prompt before you upgrade: rolling the image back does not restore
+it. While 2.3.0 or 2.3.1 instances still run beside 2.3.2 ones, set
+`PROMPTS_REFRESH_DEFAULTS=false`, and remove it once they have stopped. See the
+[Prompt Library](/openrag/documentation/api/#-prompt-library).
+
+From OpenRAG 2.3.2, `enable_thinking: false` reaches the model's chat template;
+earlier releases dropped it. A model with a Mistral tokenizer rejects it with a
+400, so remove `enable_thinking` from the `extra` of that model's endpoint, on the
+Models page or with `PUT /model-endpoints/{model_type}/{name}`, which replaces
+`extra`: send the rest of it back. `LLM_ENABLE_THINKING` and `VLM_ENABLE_THINKING`
+are only copied into an endpoint when it is first created, so changing them does
+not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
+`"enable_thinking": false` in its `extra` the same way. `OPENAI_LOADER_ENABLE_THINKING`
+is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
+See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
+
+## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
+
+From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
+render values that leave them unapplied or that it cannot honour. `helm upgrade`
+then stops before it changes anything in the cluster, and the error names the
+setting to change. Render the new chart with your values first, as in
+[Render the new chart offline](#render-the-new-chart-offline), to find out before
+the upgrade.
+
+| The chart refuses | What to change |
+|---|---|
+| `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` that disagrees with `postgresProvisioning.runMigrationsInApp`. This includes `POSTGRES_RUN_MIGRATIONS: "false"` set for a managed PostgreSQL while `runMigrationsInApp` is left at its default, `true`. | Remove `POSTGRES_RUN_MIGRATIONS` and set `runMigrationsInApp`, which the chart turns into that variable. |
+| `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` with a value the app rejects at startup: anything but `true`, `1`, `yes`, `false`, `0`, `no` (in any case), or blank. | The same. |
+| `runMigrationsInApp` set to anything but `true`, `1`, `yes`, `false`, `0` or `no`. | Set it to `true` or `false`. |
+| `runMigrationsInApp: false` with `migrationJob.enabled: false`: nothing would apply the migrations. | Enable one of them, or set `postgresProvisioning.externalMigrations: true` if you apply them yourself. |
+| `migrationJob.enabled: true` with `postgresql.enabled: true`: the Job runs before Helm creates the bundled PostgreSQL. | Turn the Job off and let the app apply the migrations. |
+| With the Job on, a fullname ending in `-migration` of 50, 51, 58 or 59 characters, which would give a copy of the env the name of the app's ConfigMap or Secret. | Change the release name or `fullnameOverride`. |
+
+The chart can check `env.secrets` only when it renders the Secret itself. Do not
+put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an
+external secrets operator: that value replaces `runMigrationsInApp` unchecked.
+See [Managed PostgreSQL](/openrag/documentation/kubernetes/#managed-postgresql).
+
+## OpenRAG 2.3.2 on Kubernetes: one value for the reranker's model and port
+
+The bundled reranker's model and port each have one value now:
+
+- `reranker.model.id` replaces `reranker.rerankerModelName`. `env.config.RERANKER_MODEL`
+  defaults to `'{{ .Values.reranker.model.id }}'`.
+- `reranker.service.port` replaces `reranker.servicePort`. `env.config.RERANKER_BASE_URL`
+  reads it.
+- `reranker.command` is removed. The chart never read it; extra Infinity flags go in
+  the new `reranker.extraArgs`.
+
+A values file copied from an earlier chart still installs while each removed key
+holds the same value as the key that replaces it, which is the case unless you
+changed one of them. When they differ, the install fails and names the value to
+fix. With the bundled reranker, that configuration was already broken: OpenRAG
+named one model while Infinity reranked with another, or called a port Infinity
+did not listen on. With an external reranker, `reranker.rerankerModelName` was
+the model OpenRAG asked for: move it to `reranker.model.id`. Extra flags left in
+`reranker.command` fail the same way, since they never applied.
+
+When you delete a removed key, also check `env.config` and `env.secrets`: a copied
+`env.config` still sets `RERANKER_MODEL` to `'{{ .Values.reranker.rerankerModelName }}'`
+and `RERANKER_BASE_URL` from `reranker.servicePort`. The install fails while any
+value reads a key you deleted, since it would render empty, and names the value to
+change. Set `RERANKER_MODEL` to `'{{ .Values.reranker.model.id }}'` and
+`RERANKER_BASE_URL` to the chart default, or remove both to take the defaults.
+
+The reranker also has a startup probe now, and `reranker.probes` sets all three of
+its probes. A start that hangs is restarted after 10 minutes instead of 2. See
+[Kubernetes](/openrag/documentation/kubernetes/#notes).
+
 ## Changes in 2.3.0 for every deployment
 
 This section applies to every upgrade from OpenRAG 2.2.1 or 2.2.2, on Kubernetes
@@ -38,7 +141,7 @@ finishes. Each procedure has three parts:
 | Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` while OpenRAG reports ready, and uploads fail. The old `vector` field is dropped. |
 | New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job if you enabled it. |
 | Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
-| `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`. |
+| `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`, unless unauthenticated scrapes are enabled (see [Metrics scraping](#metrics-scraping)). |
 | Secret checks | OpenRAG refuses to start if a secret is too short or still set to a published example value; see [Secrets](#secrets). |
 | Ray | Indexer actors change protocol: tasks running when the old version stops are lost. |
 | Readiness | `GET /ready` is new: it fails while PostgreSQL, Milvus or Ray is unreachable, and reports the model endpoints. |
@@ -400,9 +503,9 @@ Your values decide what applies the PostgreSQL migrations:
 
 | `postgresProvisioning` | What applies the migrations |
 |---|---|
-| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. |
+| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. With an external PostgreSQL only: [the chart released with OpenRAG 2.3.2 and later](#openrag-232-on-kubernetes-migration-settings-the-chart-refuses) refuses it with `postgresql.enabled`. |
 | `runMigrationsInApp: true` (the default), Job off | The new OpenRAG pod, when it starts. Under Ray Serve, the Serve replicas on the Ray pods, once you scale OpenRAG back up. |
-| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. |
+| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. [The chart released with OpenRAG 2.3.2 and later](#openrag-232-on-kubernetes-migration-settings-the-chart-refuses) refuses this unless you also set `externalMigrations: true`. |
 
 If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, before
 `helm upgrade`:
@@ -415,19 +518,24 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
    ```
 
    With an external PostgreSQL, run the same `ALTER ROLE` with your client.
-2. Update the Secret OpenRAG reads now, rather than letting `helm upgrade` do it:
-   if the migration Job is enabled, it runs before Helm updates that Secret, and
-   would log in with the old password. For the Secret the chart renders from
-   your values:
+2. If the migration Job is enabled, make sure it logs in with the new password.
+   It runs before Helm updates the release's Secret. With `env.existingSecret`,
+   it reads that Secret: update it now. With an external secrets provider,
+   update the source. With the Secret the chart renders from your values, the
+   Job reads a copy rendered from your new values, so there is nothing to do.
+
+   When you upgrade to chart 0.7.1 (OpenRAG 2.3.1) or earlier, there is no copy:
+   the Job reads the release's Secret, so update that one now, rather than
+   letting `helm upgrade` do it.
+   With an external secrets provider, wait until it has synced. For the Secret
+   the chart renders from your values:
 
    ```bash
    kubectl patch secret -n "$NS" "$FULLNAME-env-secrets" \
      -p '{"stringData":{"POSTGRES_PASSWORD":"<new password>"}}'
    ```
 
-   With `env.existingSecret`, update that Secret; with an external secrets
-   provider, update the source and wait until the Secret has synced. Your values
-   already carry the new value, from
+   Your values already carry the new value, from
    [Render the new chart offline](#render-the-new-chart-offline); with
    `postgresql.auth.existingSecret`, update that Secret's password too.
 
