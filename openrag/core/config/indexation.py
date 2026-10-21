@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 
@@ -166,8 +166,13 @@ class LoaderConfig(ConfigMixin):
     csv_batch_size: int = Field(default=10_000, gt=0, strict=True)
     csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
     xlsx_batch_size: int = Field(default=10_000, gt=0, strict=True)
-    xlsx_backend: str = "calamine"
-    xlsx_fallback_backend: str | None = "openpyxl"
+    xlsx_header_row: int | None = Field(default=None, ge=1, le=1_048_576, strict=True)
+    xlsx_sheet_header_rows: dict[
+        Annotated[str, Field(min_length=1)], Annotated[int, Field(ge=1, le=1_048_576, strict=True)] | None
+    ] = Field(default_factory=dict)
+    xlsx_backend: Literal["openpyxl", "calamine"] = "openpyxl"
+    xlsx_fallback_backend: Literal["openpyxl", "calamine"] | None = None
+    xlsx_limits: dict[str, Annotated[int, Field(gt=0, strict=True)]] = Field(default_factory=dict)
     image_captioning: bool = True
     image_captioning_url: bool = True
     save_markdown: bool = False

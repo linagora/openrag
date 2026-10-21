@@ -114,6 +114,43 @@ class FakeStore:
         return 1
 
 
+def _use_workbook(pipeline, row):
+    from io import BytesIO
+
+    from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
+    from openpyxl import Workbook
+
+    class RecordingWorkbookParser(XlsxParser):
+        closed = False
+
+        async def parse(self, document):
+            raise AssertionError("Workbook ingestion must not collect all batches")
+
+        def iter_batches(self, document):
+            try:
+                with closing(super().iter_batches(document)) as batches:
+                    yield from batches
+            finally:
+                self.closed = True
+
+    workbook = Workbook()
+    workbook.active.append(["id", "name"])
+    for index in range(5):
+        workbook.active.append([index, f"Person {index}"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    row["document"] = row["document"].model_copy(
+        update={
+            "filename": "people.xlsx",
+            "content_type": DocumentType.XLSX,
+            "raw_bytes": output.getvalue(),
+            "source_path": None,
+        }
+    )
+    return replace(pipeline, parser=RecordingWorkbookParser(batch_size=2))
+
+
 @pytest.fixture
 def setup_pipeline():
     events = []
@@ -241,8 +278,11 @@ async def test_long_csv_cell_is_stored_as_labelled_continuations(setup_pipeline)
 
 
 @pytest.mark.parametrize("defer", [False, True])
-async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_pipeline, defer):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_pipeline, defer, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     pipeline = replace(pipeline, defer_replace_cleanup=defer)
     row["replace"] = True
     await pipeline.run(row)
@@ -258,8 +298,11 @@ async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_
 
 
 @pytest.mark.parametrize("failure", ["parse", "chunk", "embed", "store"])
-async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     row["replace"] = True
     if failure == "parse":
         original = pipeline.parser.iter_batches
@@ -466,8 +509,11 @@ async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline)
     assert "topic_tags" not in row and "chunks" not in row
 
 
-async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     started, release = threading.Event(), threading.Event()
     original = pipeline.parser.iter_batches
 

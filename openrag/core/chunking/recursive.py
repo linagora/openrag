@@ -179,6 +179,9 @@ class BaseChunker(ChunkingStrategy):
     # ------------------------------------------------------------------
     def chunk(self, document: ProcessedDocument, partition: str = "default") -> list[Chunk]:
         """Split a processed document into ``Chunk`` objects."""
+        workbook_chunks = self._chunk_workbook_blocks(document, partition)
+        if workbook_chunks is not None:
+            return workbook_chunks
         content = self._content_from(document)
         if not content.strip():
             return []
@@ -205,6 +208,19 @@ class BaseChunker(ChunkingStrategy):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _chunk_workbook_blocks(self, document: ProcessedDocument, partition: str) -> list[Chunk] | None:
+        """The collecting parse API must not merge different sheets/batches."""
+        if len(document.text_blocks) <= 1 or not any(
+            block.metadata.get("tabular_format") == "xlsx" for block in document.text_blocks
+        ):
+            return None
+        chunks = []
+        for block in document.text_blocks:
+            single = document.model_copy(update={"text_blocks": [block]})
+            for chunk in self.chunk(single, partition=partition):
+                chunks.append(chunk.model_copy(update={"chunk_index": len(chunks)}))
+        return chunks
+
     @staticmethod
     def _content_from(document: ProcessedDocument) -> str:
         """Reconstruct chunkable markdown from a ProcessedDocument.
@@ -250,8 +266,12 @@ class BaseChunker(ChunkingStrategy):
         # Reserved identity fields must win — `chunk()` later reads
         # metadata["file_id"] to set Chunk.document_id, so a stray key in
         # `document.metadata` would silently reassign chunks to the wrong doc.
+        block_metadata = {}
+        if len(document.text_blocks) == 1 and document.text_blocks[0].metadata.get("tabular_format") == "xlsx":
+            block_metadata = document.text_blocks[0].metadata
         return {
             **document.metadata,
+            **block_metadata,
             "file_id": document.document_id,
             "partition": partition,
         }
@@ -299,6 +319,24 @@ class BaseChunker(ChunkingStrategy):
         The dict shape is intentional — it lets ``chunk()`` build ``Chunk``
         objects without leaking domain types into the lower-level helpers.
         """
+        if metadata.get("tabular_format") == "xlsx":
+            # Canonical workbook tables must never enter prose sanitization or
+            # lose sheet metadata, even when below the inline-table threshold.
+            pieces = chunk_table(
+                MDElement(type="table", content=content, metadata=metadata),
+                chunk_size=self.chunk_size,
+                length_function=self.length_function,
+            )
+            return [
+                {
+                    **metadata,
+                    **(piece.metadata or {}),
+                    "page_content": piece.content,
+                    "page": piece.page_number,
+                    "chunk_type": "table",
+                }
+                for piece in pieces
+            ]
         texts, tables_and_images = self._prepare_md_elements(content=content)
         # Reflow PDF line-wraps within each element, then join elements as
         # paragraphs (blank line) so the splitter cuts on paragraph/sentence

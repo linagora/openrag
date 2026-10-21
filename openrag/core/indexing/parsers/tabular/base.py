@@ -17,7 +17,7 @@ class TabularBatchParser(DocumentParser, ABC):
 
     @abstractmethod
     def iter_batches(self, document: Document) -> Iterator[TextBlock]:
-        """Yield bounded table batches without materialising the whole file."""
+        """Yield bounded output batches; backend memory behavior is parser-specific."""
 
 
 def normalize_headers(headers: list[str]) -> list[str]:

@@ -166,8 +166,12 @@ loader:
   # Null enables delimiter sniffing. Set one character to force a delimiter.
   csv_delimiter: null
   xlsx_batch_size: 10000
-  xlsx_backend: calamine
-  xlsx_fallback_backend: openpyxl
+  xlsx_header_row: null  # Detect headers per sheet; set an Excel row number to override.
+  xlsx_sheet_header_rows: {}  # Exact sheet names; null restores automatic header selection.
+  xlsx_backend: openpyxl
+  xlsx_fallback_backend: null
+  # Optional overrides of the OOXML and batch resource limits.
+  xlsx_limits: {}
   image_captioning: true
   image_captioning_url: true
   save_markdown: false

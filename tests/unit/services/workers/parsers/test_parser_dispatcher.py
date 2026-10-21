@@ -51,6 +51,9 @@ def _config(
         openai=openai,
         transcriber=transcriber,
         xlsx_batch_size=512,
+        xlsx_header_row=3,
+        xlsx_sheet_header_rows={"People": 2},
+        xlsx_limits={"max_batch_bytes": 1024},
         xlsx_backend="calamine",
         xlsx_fallback_backend="openpyxl",
     )
@@ -122,7 +125,14 @@ def test_xlsx_builder_passes_streaming_backend_configuration(monkeypatch: pytest
 
     assert module == "core.indexing.parsers.tabular.xlsx_parser"
     assert name == "xlsx"
-    assert kwargs == {"batch_size": 512, "backend": "calamine", "fallback_backend": "openpyxl"}
+    assert kwargs == {
+        "batch_size": 512,
+        "header_row": 3,
+        "sheet_header_rows": {"People": 2},
+        "backend": "calamine",
+        "fallback_backend": "openpyxl",
+        "limits": {"max_batch_bytes": 1024},
+    }
 
 
 def test_audio_client_receives_live_transcription_prompt_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
