@@ -89,7 +89,7 @@ describe("DocumentDetailPage", () => {
   it("shows an empty state when the file has no topic tags", async () => {
     renderDocumentDetail();
 
-    expect(await screen.findByLabelText("Topic tags")).not.toBeNull();
+    await screen.findByRole("group", { name: "Topic tags" });
     expect(screen.getByText("No topic tags")).not.toBeNull();
   });
 
@@ -102,8 +102,7 @@ describe("DocumentDetailPage", () => {
     });
     renderDocumentDetail();
 
-    const group = await screen.findByLabelText("Topic tags");
-    expect(group).not.toBeNull();
+    await screen.findByRole("group", { name: "Topic tags" });
     expect(screen.getByText("finance")).not.toBeNull();
     expect(screen.getByText("risk")).not.toBeNull();
   });

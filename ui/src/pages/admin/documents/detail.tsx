@@ -268,7 +268,11 @@ export default function DocumentDetailPage() {
         )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2" aria-label="Topic tags">
+      <div
+        className="flex flex-wrap items-center gap-2"
+        role="group"
+        aria-label="Topic tags"
+      >
         <Tag className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
         {topicTags.length > 0 ? (
           topicTags.map((tag) => (
