@@ -456,4 +456,65 @@ async def test_plain_ascii_prefix_uses_bounded_chardet_sample(tmp_path, monkeypa
     assert "René" in result.text_blocks[0].text
     assert result.text_blocks[0].metadata["csv_decode_replacements"] == 0
     assert len(samples) == 1
-    assert len(samples[0]) <= 128 * 1024
+    assert len(samples[0]) <= 4096
+
+
+@pytest.mark.parametrize("source_kind", ["path", "bytes"])
+@pytest.mark.parametrize("accidental_utf8_first", [False, True])
+async def test_cp1252_accents_outweigh_accidental_utf8(tmp_path, source_kind, accidental_utf8_first):
+    rows = "1,Renée à Noël\n" * 5000
+    accidental = "2,RÉSUMÉ…\n"
+    body = accidental + rows if accidental_utf8_first else rows + accidental
+    raw = ("id,note\n" + body).encode("cp1252")
+    path = tmp_path / "real-cp1252.csv"
+    path.write_bytes(raw)
+    document = Document(source_path=str(path)) if source_kind == "path" else Document(raw_bytes=raw)
+
+    result = await CsvParser().parse(document)
+
+    text = result.text_blocks[0].text
+    assert text.count("Renée à Noël") == 5000
+    assert "RÉSUMÉ…" in text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 0
+
+
+async def test_encoding_sample_excludes_long_ascii_runs_and_is_not_duplicated(monkeypatch):
+    import chardet
+
+    samples = []
+
+    def detect(sample):
+        samples.append(sample)
+        return {"encoding": "Windows-1252"}
+
+    monkeypatch.setattr(chardet, "detect", detect)
+    for raw in (b"id,note\n1," + b"x" * 70000 + b" caf\xe9\n", b"id,note\n1,caf\xe9\n"):
+        result = await CsvParser().parse(Document(raw_bytes=raw))
+        assert "café" in result.text_blocks[0].text
+    assert len(samples) == 2
+    assert len(samples[0]) < 256
+    assert samples[1] == b"id,note\n1,caf\xe9\n"
+
+
+@pytest.mark.parametrize("text", ["café", "東京", "🌍"])
+@pytest.mark.parametrize("stray_first", [True, False])
+async def test_mixed_utf8_evidence_counts_characters_across_blocks(tmp_path, text, stray_first):
+    valid = (f"1,{text}\n" * 10000).encode()
+    stray = b"2,Ren\xe9\n"
+    path = tmp_path / "mixed.csv"
+    path.write_bytes(b"id,note\n" + (stray + valid if stray_first else valid + stray))
+
+    result = await CsvParser(batch_size=20000).parse(Document(source_path=str(path)))
+
+    assert result.text_blocks[0].text.count(text) == 10000
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 1
+
+
+async def test_low_confidence_encoding_guess_uses_cp1252(monkeypatch):
+    import chardet
+
+    monkeypatch.setattr(chardet, "detect", lambda _: {"encoding": "MacCyrillic", "confidence": 0.08})
+    result = await CsvParser().parse(Document(raw_bytes="id,note\n1,Renée à Noël\n".encode("cp1252")))
+
+    assert "Renée à Noël" in result.text_blocks[0].text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 0
