@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from core.models.catalog import DocumentRecord, DocumentStatus
 from services.storage.postgres_store import PostgresStore
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
+
+
+async def test_reconciliation_lookup_and_pages(postgres_store):
+    for partition in ("a", "b"):
+        await _seed_partition(postgres_store, partition)
+    repo = postgres_store.document_repo
+    for partition, file_id in (("a", "a1"), ("a", "a2"), ("a", "recent"), ("b", "b1")):
+        await repo.create_document(_doc(file_id, partition))
+    before = datetime.now(UTC) - timedelta(hours=1)
+    await repo.pool.execute("UPDATE files SET indexed_at = $1 WHERE file_id != 'recent'", before - timedelta(hours=1))
+    existing = await repo.get_indexed_documents({("a", "a1"), ("b", "b1"), ("a", "b1"), ("b", "a1")})
+    assert set(existing) == {("a", "a1"), ("b", "b1")}
+    assert await repo.list_indexed_documents("a", before=before, limit=1) == ["a1"]
+    assert await repo.list_indexed_documents("a", before=before, after="a1", limit=1) == ["a2"]
+    assert await repo.list_indexed_documents("a", before=before, after="a2", limit=1) == []
 
 
 async def _seed_partition(store: PostgresStore, name: str = "p") -> str:
@@ -28,12 +45,13 @@ def _doc(file_id: str, partition: str = "p", **extra) -> DocumentRecord:
 class TestCreateGetDelete:
     async def test_create_then_get(self, postgres_store: PostgresStore):
         partition = await _seed_partition(postgres_store)
-        await postgres_store.document_repo.create_document(_doc("f1", partition))
+        await postgres_store.document_repo.create_document(_doc("f1", partition, chunk_count=4))
         fetched = await postgres_store.document_repo.get_document("f1")
         assert fetched is not None
         assert fetched.file_id == "f1"
         assert fetched.partition == partition
         assert fetched.filename == "f1.pdf"
+        assert fetched.chunk_count == 4
 
     async def test_get_missing_returns_none(self, postgres_store: PostgresStore):
         assert await postgres_store.document_repo.get_document("nope") is None
@@ -86,6 +104,16 @@ class TestListFilter:
 
 
 class TestUpdate:
+    async def test_update_chunk_count(self, postgres_store: PostgresStore):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+        await repo.create_document(_doc("chunks", partition, chunk_count=2))
+
+        updated = await repo.update_document("chunks", chunk_count=5)
+
+        assert updated is not None
+        assert updated.chunk_count == 5
+
     async def test_update_status_folds_into_metadata(
         self,
         postgres_store: PostgresStore,
@@ -114,6 +142,32 @@ class TestUpdate:
     async def test_update_missing_returns_none(self, postgres_store: PostgresStore):
         assert await postgres_store.document_repo.update_document("nope") is None
 
+    async def test_metadata_patch_preserves_concurrently_written_degradation(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+        await repo.create_document(_doc("metadata-race", partition, metadata={"title": "old"}))
+        stale_metadata = await repo.get_file_metadata("metadata-race", partition)
+        assert stale_metadata is not None
+
+        await repo.update_file_in_partition(
+            "metadata-race",
+            partition,
+            file_metadata={**stale_metadata, "degraded_stages": ["caption"]},
+        )
+        await repo.update_file_metadata_in_db(
+            "metadata-race",
+            partition,
+            {**stale_metadata, "title": "new", "degraded_stages": []},
+        )
+
+        metadata = await repo.get_file_metadata("metadata-race", partition)
+        assert metadata is not None
+        assert metadata["title"] == "new"
+        assert metadata["degraded_stages"] == ["caption"]
+
 
 class TestDeleteByPartition:
     async def test_returns_deletion_count(self, postgres_store: PostgresStore):
@@ -124,3 +178,171 @@ class TestDeleteByPartition:
         deleted = await repo.delete_documents_by_partition(partition)
         assert deleted == 2
         assert await repo.count_documents(partition=partition) == 0
+
+
+class TestContentClaims:
+    async def test_recovers_orphaned_claim_after_registration_grace(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="abandoned-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:abandoned-task",
+            )
+            is None
+        )
+        assert (
+            await repo.claim_content_sha256(
+                file_id="early-retry",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:early-retry-task",
+            )
+            == "abandoned-file"
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "a" * 64,
+        )
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="retry-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:retry-task",
+            )
+            == "abandoned-file"
+        )
+        lease = await repo.get_recoverable_content_sha256_claim(
+            partition=partition,
+            content_sha256="a" * 64,
+        )
+        assert lease is not None
+        assert await repo.release_recoverable_content_sha256_claim(lease) is True
+        assert (
+            await repo.claim_content_sha256(
+                file_id="retry-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:retry-task",
+            )
+            is None
+        )
+
+    async def test_preserves_claim_owned_by_active_task(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="active-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="task:active-task",
+            )
+            is None
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "b" * 64,
+        )
+
+        lease = await repo.get_recoverable_content_sha256_claim(
+            partition=partition,
+            content_sha256="b" * 64,
+        )
+        assert lease is not None
+        assert (
+            await repo.renew_content_sha256_claim(
+                file_id="active-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="task:active-task",
+            )
+            is True
+        )
+        assert await repo.release_recoverable_content_sha256_claim(lease) is False
+        assert (
+            await repo.claim_content_sha256(
+                file_id="duplicate-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="task:duplicate-task",
+            )
+            == "active-file"
+        )
+
+    async def test_preserves_legacy_non_task_claim(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="copy-file",
+                partition=partition,
+                content_sha256="c" * 64,
+                claim_token="legacy-copy-uuid",
+            )
+            is None
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "c" * 64,
+        )
+
+        assert (
+            await repo.get_recoverable_content_sha256_claim(
+                partition=partition,
+                content_sha256="c" * 64,
+            )
+            is None
+        )
+        assert (
+            await repo.claim_content_sha256(
+                file_id="duplicate-file",
+                partition=partition,
+                content_sha256="c" * 64,
+                claim_token="task:duplicate-task",
+            )
+            == "copy-file"
+        )
+
+
+async def test_get_indexation_config_reads_one_partitions_row(postgres_store):
+    a = await _seed_partition(postgres_store, "a")
+    b = await _seed_partition(postgres_store, "b")
+    repo = postgres_store.document_repo
+    await repo.add_file_to_partition(file_id="f1", partition=a, indexation_config={"embedder": "e5"})
+    await repo.add_file_to_partition(file_id="f1", partition=b)
+
+    assert await repo.get_indexation_config("f1", a) == {"embedder": "e5"}
+    assert await repo.get_indexation_config("f1", b) is None
+    assert await repo.get_indexation_config("missing", a) is None

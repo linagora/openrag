@@ -8,24 +8,141 @@ so the system works without any admin interaction.
 
 from __future__ import annotations
 
+import functools
+import io
 import os
+import wave
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.config.model_endpoints import (
+    ENV_MANAGED_KEY,
+    ENV_MANAGED_VALUE,
+    STT_LANGUAGE_KEY,
+    STT_REQUEST_CONTROL_EXTRA_KEYS,
+    ModelEndpointConfig,
+    ModelEndpointRow,
+    is_placeholder_api_key,
+    material_embedder_changes,
+)
+from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.redaction import preserve_existing_secrets
 
 if TYPE_CHECKING:
     from core.config.root import Settings
     from core.ports.model_endpoint_repo import ModelEndpointRepository
+    from core.vector_stores import VectorStore
 
 logger = get_logger()
 
-_VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm"})
+_VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm", "stt"})
 _SAMPLING_TYPES = frozenset({"llm", "vlm"})
+_STT_VALIDATION_TIMEOUT_SECONDS = 15.0
+_STT_TEXT_RESPONSE_FORMATS = frozenset({"text", "srt", "vtt"})
+# Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
+# always fills these from Settings, so their presence in the seed says nothing about
+# whether the *environment* set them — without this table sync would write the config
+# default over an admin's value (an llm row tuned to timeout=99 came back as 60).
+# Absent from this table (e.g. llm timeout, which has no env var at all) means env
+# does not own the field and sync must leave it alone.
+_ENV_OWNED_TUNABLES: dict[str, dict[str, str]] = {
+    "embedder": {"batch_size": "EMBEDDER_BATCH_SIZE", "timeout": "EMBEDDER_TIMEOUT"},
+    "vlm": {"timeout": "VLM_TIMEOUT"},
+    "reranker": {"timeout": "RERANKER_TIMEOUT"},
+    "stt": {
+        "batch_size": "TRANSCRIBER_MAX_CONCURRENT_CHUNKS",
+        "timeout": "TRANSCRIBER_TIMEOUT",
+    },
+    "llm": {},
+}
+# The same rule for the ``extra`` keys env owns. The embedder's client only:
+# ``RERANKER_PROVIDER`` is set by default, so owning it would undo every admin's
+# reranker choice on each boot.
+_ENV_OWNED_EXTRA: dict[str, dict[str, str]] = {
+    "embedder": {"implementation": "EMBEDDER_PROVIDER"},
+}
+
+
+def _build_stt_validation_wav() -> bytes:
+    """Build a portable one-second WAV sample for STT endpoint validation."""
+    sample_rate = 16_000
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * sample_rate)
+    return buffer.getvalue()
+
+
+# Created once rather than encoding/transcoding a file for each Admin UI validation.
+_STT_VALIDATION_WAV = _build_stt_validation_wav()
+
+
+def _flatten_multipart_field(key: str, value: Any) -> list[tuple[str, str]]:
+    """Serialize JSON-like values as OpenAI-style multipart form fields."""
+    if isinstance(value, Mapping):
+        return [
+            item
+            for nested_key, nested_value in value.items()
+            for item in _flatten_multipart_field(f"{key}[{nested_key}]", nested_value)
+        ]
+    if isinstance(value, (list, tuple)):
+        return [item for nested_value in value for item in _flatten_multipart_field(f"{key}[]", nested_value)]
+    if value is True:
+        serialized = "true"
+    elif value is False:
+        serialized = "false"
+    elif value is None:
+        serialized = ""
+    else:
+        serialized = str(value)
+    return [(key, serialized)] if serialized else []
+
+
+def _stt_validation_form_data(
+    model_name: str,
+    extra: dict[str, Any] | None,
+    prompt: str | None = None,
+) -> dict[str, Any]:
+    """Build the sanitized multipart fields used by an STT runtime request."""
+    request_options: dict[str, Any] = {"model": model_name}
+    if prompt and prompt.strip():
+        request_options["prompt"] = prompt.strip()
+    if extra:
+        language = extra.get(STT_LANGUAGE_KEY)
+        if isinstance(language, str) and language.strip():
+            request_options[STT_LANGUAGE_KEY] = language.strip()
+        request_options.update(
+            {key: value for key, value in extra.items() if key not in STT_REQUEST_CONTROL_EXTRA_KEYS}
+        )
+
+    serialized: dict[str, Any] = {}
+    for key, value in request_options.items():
+        for field_name, field_value in _flatten_multipart_field(key, value):
+            existing = serialized.get(field_name)
+            if existing is None:
+                serialized[field_name] = field_value
+            elif isinstance(existing, list):
+                existing.append(field_value)
+            else:
+                serialized[field_name] = [existing, field_value]
+    return serialized
+
+
+def _stt_validation_response_is_compatible(response: Any, extra: dict[str, Any] | None) -> bool:
+    """Check that the probe response has the shape consumed at runtime."""
+    response_format = extra.get("response_format") if extra else None
+    if response_format in _STT_TEXT_RESPONSE_FORMATS:
+        return isinstance(response.text, str)
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, Mapping) and isinstance(payload.get("text"), str)
 
 
 def _slug(model_name: str) -> str:
@@ -34,8 +151,11 @@ def _slug(model_name: str) -> str:
 
 
 def _with_api_key(extra: dict[str, Any], api_key: str | None) -> dict[str, Any]:
-    """Add ``api_key`` to endpoint extras when configured."""
-    if api_key:
+    """Add ``api_key`` to endpoint extras when configured.
+
+    ``EMPTY`` is kept: it is a key the bundled reranker enforces (#1113).
+    """
+    if api_key and api_key.strip():
         return {**extra, "api_key": api_key}
     return extra
 
@@ -69,6 +189,82 @@ def _with_sampling_params(extra: dict[str, Any], llm_cfg: Any) -> dict[str, Any]
     return {**extra, **_sampling_params(llm_cfg)}
 
 
+_API_REPOINT_REMEDY = (
+    "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move partitions to it."
+)
+_BOOT_REPOINT_REMEDY = (
+    "To keep the database's model, set EMBEDDER_MODEL_NAME (or the legacy EMBEDDING_MODEL, when set; "
+    "vllm.embedderModelName in the Helm chart) to it. To switch models, change it through the admin API with "
+    "acknowledge_indexed_data=true."
+)
+
+
+async def _refuse_unacknowledged_repoint(
+    locked: ModelEndpointRow,
+    indexed_file_usage: Callable[[], Awaitable[list[dict]]],
+    *,
+    fields: Mapping[str, object],
+    remedy: str = _API_REPOINT_REMEDY,
+) -> None:
+    """Raise unless this embedder edit leaves every indexed file's vectors valid.
+
+    Runs inside the repo's update, on the row as locked there, so the usage it
+    reads cannot go stale before the edit commits: a file being indexed against
+    this endpoint is either counted here or refused when the indexer records it
+    (#958). What counts as a change is ``material_embedder_changes``, the same
+    fingerprint the indexer compares. *remedy* ends the message: the way out
+    differs for an admin-API caller and an operator reading the boot log.
+    """
+    changed = material_embedder_changes(locked, fields)
+    if not changed:
+        return
+    usage = await indexed_file_usage()
+    total = sum(row["file_count"] for row in usage)
+    if not total:
+        return
+    shown = ", ".join(row["partition"] for row in usage[:5])
+    if len(usage) > 5:
+        shown += f" and {len(usage) - 5} more"
+    raise ConflictError(
+        f"Changing {', '.join(changed)} on embedder '{locked.name}' leaves {total} indexed file(s) in "
+        f"{len(usage)} partition(s) ({shown}) with vectors a different configuration no longer matches. {remedy}",
+        code="EMBEDDER_EDIT_AFFECTS_INDEXED_DATA",
+    )
+
+
+def _is_unmodified_seed(row: ModelEndpointRow, data: dict[str, Any]) -> bool:
+    """Is *row* still byte-identical to what the seeder would have written?
+
+    Rows created before the marker existed carry no provenance, so the slug is
+    the only handle on them — but a slug match alone cannot tell an old seed from
+    an endpoint an admin happened to name after the model. Adopting the latter
+    would overwrite their URL and model on the first synced restart.
+
+    Requiring the row to still match env exactly makes adoption safe by
+    construction: if it matches, taking ownership changes nothing; if an admin
+    has touched it, it is left alone and simply never adopted.
+    """
+    return row.endpoint == data["endpoint"] and (row.model_name or "") == (data["model_name"] or "")
+
+
+def _with_usage(row: ModelEndpointRow, counts: Mapping[tuple[str, str], int]) -> dict[str, Any]:
+    # Types with no partition column (reranker/vlm/stt) count 0: partitions
+    # reference them through presets, not by name.
+    return {**row.model_dump(), "used_by_partitions": counts.get((row.name, row.model_type), 0)}
+
+
+def _endpoint_config(row: ModelEndpointRow) -> ModelEndpointConfig:
+    return ModelEndpointConfig(
+        name=row.name,
+        endpoint=row.endpoint,
+        model_name=row.model_name,
+        batch_size=row.batch_size,
+        timeout=row.timeout,
+        extra=row.extra,
+        vector_field=row.vector_field,
+    )
+
+
 class ModelEndpointService:
     """CRUD and lifecycle management for named model endpoints."""
 
@@ -78,12 +274,29 @@ class ModelEndpointService:
         model_endpoint_repo: ModelEndpointRepository,
         config: Settings,
         partition_service: Any = None,
+        preset_service: Any = None,
+        prompt_service: Any = None,
         client_caches: dict[str, dict[str, Any]] | None = None,
+        vector_store: VectorStore | None = None,
     ) -> None:
         self._repo = model_endpoint_repo
         self._config = config
         self._partition_service = partition_service
+        self._preset_service = preset_service
+        self._prompt_service = prompt_service
         self._client_caches: dict[str, dict[str, Any]] = client_caches or {}
+        self._vector_store = vector_store
+
+    async def _resolve_stt_validation_prompt(self) -> str | None:
+        """Resolve the same managed prompt used by runtime transcription."""
+        if self._prompt_service is None:
+            return None
+        try:
+            prompt = await self._prompt_service.resolve_prompt("asr_transcription")
+        except Exception as exc:  # noqa: BLE001 - match runtime's provider-native fallback
+            logger.bind(error=str(exc)).warning("STT validation prompt resolution failed")
+            return None
+        return prompt.strip() if prompt and prompt.strip() else None
 
     # ------------------------------------------------------------------
     # Startup lifecycle
@@ -101,34 +314,167 @@ class ModelEndpointService:
         from their ``extra`` first (see ``_backfill_sampling_params``), since
         endpoints created before #720's fix never had them written and would
         otherwise keep silently running at the provider default forever.
+
+        When ``models.sync_on_boot`` is set (env ``MODEL_ENDPOINT_SYNC_ON_BOOT``),
+        the endpoint the seeder created is instead refreshed from Settings/env on
+        every boot, so operators can manage it via env vars + a pod rollout.
+
+        That row is found by its ``ENV_MANAGED_KEY`` marker rather than by name,
+        because the name is derived from the model slug: keying off the slug meant
+        that changing the model produced a name that matched nothing, so the sync
+        silently did nothing and the old model stayed live. Rows seeded before the
+        marker existed are adopted on first sync by matching the slug once.
+
+        For the marked row the sync also rotates ``api_key`` inside ``extra`` —
+        env is the source of truth for the credential it owns, and without this a
+        rotated key never reached the DB, so requests kept using the stale key and
+        failed once the provider revoked it. Every other ``extra`` key an admin set
+        is preserved. Endpoints created by hand (no marker) are never touched.
         """
         seeds = self._build_default_seeds()
         now = datetime.now(UTC)
+        sync_on_boot = self._config.models.sync_on_boot
         for model_type, data in seeds.items():
             existing = await self._repo.list_all(model_type=model_type)
-            if existing:
-                if model_type in _SAMPLING_TYPES:
-                    await self._backfill_sampling_params(existing, getattr(self._config, model_type))
-                continue
+            if existing and model_type in _SAMPLING_TYPES:
+                # #720: rows created before the fix never had the sampling params
+                # written, so backfill them before anything else — independent of
+                # whether the env still points anywhere or sync_on_boot is set.
+                await self._backfill_sampling_params(existing, getattr(self._config, model_type))
+
             endpoint: str = data["endpoint"]
             model_name: str = data["model_name"]
             if not endpoint:
                 logger.info(f"No {model_type} endpoint configured — skipping seed.")
                 continue
+
+            name = _slug(model_name or "")
+            # The marker survives a model change; the slug does not, so look for
+            # the marker first and fall back to the slug only to adopt a row
+            # seeded before the marker existed.
+            managed_row = next((r for r in existing if r.extra.get(ENV_MANAGED_KEY) == ENV_MANAGED_VALUE), None)
+            existing_row = managed_row or await self._repo.get(name, model_type)
+            if existing_row is not None:
+                if sync_on_boot and (managed_row is not None or _is_unmodified_seed(existing_row, data)):
+                    await self._sync_env_managed(existing_row, model_type, data)
+                continue
+
+            if existing:
+                # Some other endpoint of this type already exists (hand-created
+                # via the admin API) — don't create a competing default. Reuses
+                # the list fetched above (nothing added/removed a row since).
+                continue
+
             row = ModelEndpointRow(
-                name=_slug(model_name or ""),
+                name=name,
                 model_type=model_type,
                 endpoint=endpoint,
                 model_name=model_name or None,
                 batch_size=data.get("batch_size", 32),
                 timeout=data.get("timeout", 30.0),
-                extra=data.get("extra", {}),
+                extra={**data.get("extra", {}), ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
                 is_default=True,
                 created_at=now,
                 updated_at=now,
             )
-            await self._repo.create(row)
+            try:
+                await self._repo.create(row)
+            except ValidationError as exc:
+                if exc.status_code != 409:
+                    raise
+                # Another replica can seed the same empty endpoint type
+                # between our read above and this insert. The winner's row is
+                # the desired default, so losing that race must not fail boot.
+                logger.info(f"Default {model_type} endpoint was seeded concurrently; skipping.")
+                continue
             logger.info(f"Seeded default {model_type} endpoint '{row.name}'.")
+
+    async def _sync_env_managed(self, row: ModelEndpointRow, model_type: str, data: dict[str, Any]) -> None:
+        """Refresh the env-seeded row from Settings/env.
+
+        Only fields the environment actually owns are written. ``endpoint`` and
+        ``model_name`` always are — they are what "point this at the configured
+        model" means. ``batch_size``/``timeout`` are written only when their env
+        var is set (see ``_ENV_OWNED_TUNABLES``), and the embedder's client only
+        when ``EMBEDDER_PROVIDER`` is (``_ENV_OWNED_EXTRA``); the seed carries a
+        value for them regardless, so trusting the seed would overwrite an
+        admin's choice with the config default.
+
+        ``extra`` is merged, never replaced: the marker and the API key come from
+        env, everything else an admin put there survives. The key is only
+        overwritten when env supplies a *real* one, so neither an unset
+        ``*_API_KEY`` nor its ``EMPTY`` placeholder can clear a working credential.
+
+        The row is deliberately **not renamed** when the model changes. The name
+        is a stable identifier that partitions (``chat_llm``) and presets store by
+        value, and nothing cascades a rename — so renaming would strand those
+        references and the next job could not resolve the endpoint.
+        """
+        seed_extra: dict = data.get("extra", {}) or {}
+        new_extra = {**row.extra, ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
+        env_api_key = seed_extra.get("api_key")
+        if not is_placeholder_api_key(env_api_key):
+            new_extra["api_key"] = env_api_key
+        for key, env_var in _ENV_OWNED_EXTRA.get(model_type, {}).items():
+            # Empty is unset, as for the config loader.
+            if os.getenv(env_var) and key in seed_extra:
+                new_extra[key] = seed_extra[key]
+
+        fields: dict[str, Any] = {
+            "endpoint": data["endpoint"],
+            "model_name": data["model_name"] or None,
+            "extra": new_extra,
+        }
+        for field, env_var in _ENV_OWNED_TUNABLES.get(model_type, {}).items():
+            if os.getenv(env_var) is not None and field in data:
+                fields[field] = data[field]
+
+        # An embedder holding indexed files changes model only through the guard
+        # the admin API enforces: env changing under it (a new default model
+        # after an upgrade, #1099) would otherwise write vectors from another
+        # model into the field every indexed file was embedded with, and search
+        # would compare the two. Only the model is guarded. A new URL is how an
+        # operator moves the same model to another server, and EMBEDDER_PROVIDER
+        # how they name the client that server needs; if that server serves
+        # another model the readiness probe reports the embedder unavailable
+        # (not for tei: its probe checks only /health). Refused, the row keeps
+        # its model and takes the rest.
+        guard = None
+        if model_type == "embedder":
+            guard = functools.partial(
+                _refuse_unacknowledged_repoint,
+                fields={"model_name": fields["model_name"]},
+                remedy=_BOOT_REPOINT_REMEDY,
+            )
+        try:
+            await self._repo.update(row.name, model_type, guard=guard, **fields)
+        except ConflictError as exc:
+            if exc.code == "EMBEDDER_SWAP_IN_PROGRESS":
+                # A running swap refuses any change to its target's vectors, the
+                # URL included, so holding back the model alone would be refused
+                # again and fail boot before the swap resumes. Both wait for it.
+                held, label = ("endpoint", "model_name"), "URL and model"
+                logger.bind(endpoint=row.name, model_type=model_type).warning(
+                    f"Not syncing the {label} of embedder '{row.name}' from env "
+                    f"(MODEL_ENDPOINT_SYNC_ON_BOOT=true): env asks for '{fields['endpoint']}' and "
+                    f"'{fields['model_name']}', the database keeps '{row.endpoint}' and '{row.model_name}'. "
+                    f"{exc.message} Restart once the swap ends to sync them."
+                )
+            else:
+                # A warning, and worded as a disagreement: the database's model may
+                # be the stale one (#1099) or an admin's deliberate, acknowledged
+                # change that env was never updated for; this cannot tell which.
+                held, label = ("model_name",), "model"
+                logger.bind(endpoint=row.name, model_type=model_type).warning(
+                    f"Not syncing the model of embedder '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true): "
+                    f"env asks for '{fields['model_name']}', the database keeps '{row.model_name}'. {exc.message}"
+                )
+            for field in held:
+                del fields[field]
+            await self._repo.update(row.name, model_type, **fields)
+            logger.info(f"Synced {model_type} endpoint '{row.name}' from env, except its {label}.")
+            return
+        logger.info(f"Synced {model_type} endpoint '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true).")
 
     def _build_default_seeds(self) -> dict[str, dict[str, Any]]:
         """Build seed data from env overrides + existing Settings fallbacks.
@@ -148,7 +494,7 @@ class ModelEndpointService:
                 "model_name": os.getenv("EMBEDDING_MODEL", s.embedder.model_name),
                 "batch_size": s.embedder.batch_size,
                 "timeout": s.embedder.timeout,
-                "extra": _with_api_key({"implementation": "vllm"}, s.embedder.api_key),
+                "extra": _with_api_key({"implementation": s.embedder.provider}, s.embedder.api_key),
             },
             "llm": {
                 "endpoint": os.getenv("LLM_ENDPOINT", s.llm.base_url),
@@ -179,6 +525,24 @@ class ModelEndpointService:
                 "model_name": os.getenv("RERANKER_MODEL", s.reranker.model_name),
                 "timeout": s.reranker.timeout,
                 "extra": _with_api_key({"implementation": s.reranker.provider}, s.reranker.api_key),
+            },
+            "stt": {
+                # Keep the existing TRANSCRIBER_* configuration as the source
+                # for the first seed, so upgrades preserve a working Whisper,
+                # MOSS, or other OpenAI-compatible transcription setup.
+                "endpoint": s.loader.transcriber.base_url,
+                "model_name": s.loader.transcriber.model_name,
+                # ``batch_size`` is the common registry column; for STT it is
+                # the per-worker concurrent-transcription limit used by
+                # OpenAIAudioClient.
+                "batch_size": s.loader.transcriber.max_concurrent_chunks,
+                "timeout": s.loader.transcriber.timeout,
+                # STT omits placeholder keys at seed time. Its audio client trims
+                # stored keys and uses an empty key for anonymous endpoints.
+                "extra": _with_api_key(
+                    {},
+                    None if is_placeholder_api_key(s.loader.transcriber.api_key) else s.loader.transcriber.api_key,
+                ),
             },
         }
 
@@ -217,13 +581,7 @@ class ModelEndpointService:
             bucket = buckets.get(row.model_type)
             if bucket is None:
                 continue
-            cfg = ModelEndpointConfig(
-                endpoint=row.endpoint,
-                model_name=row.model_name,
-                batch_size=row.batch_size,
-                timeout=row.timeout,
-                extra=row.extra,
-            )
+            cfg = _endpoint_config(row)
             bucket[row.name] = cfg
             if row.is_default:
                 default_cfgs[row.model_type] = cfg
@@ -232,7 +590,7 @@ class ModelEndpointService:
             buckets[model_type]["default"] = default_cfg
 
         models = self._config.models
-        for attr in ("embedder", "reranker", "llm", "vlm"):
+        for attr in ("embedder", "reranker", "llm", "vlm", "stt"):
             target: dict = getattr(models, attr)
             target.clear()
             target.update(buckets[attr])
@@ -243,7 +601,31 @@ class ModelEndpointService:
             n_llm=len(buckets["llm"]),
             n_reranker=len(buckets["reranker"]),
             n_vlm=len(buckets["vlm"]),
+            n_stt=len(buckets["stt"]),
         )
+
+    async def load_new(self) -> None:
+        """Register the endpoints another process created since this one loaded them.
+
+        Called when the configuration revision moves, before the presets and
+        partitions reload: a partition a swap switched elsewhere, or a preset,
+        can name an endpoint created on that other process, which a factory
+        here would refuse with ``KeyError`` (#1016). Loaded endpoints and the
+        ``default`` aliases are left as they are. Their clients are cached by
+        name, so replacing the config under one would leave the two disagreeing,
+        and a rename here keeps the old name aliased until its own ``load_all()``.
+        """
+        rows = await self._repo.list_all()
+        models = self._config.models
+        for row in rows:
+            if row.model_type not in _VALID_TYPES:
+                continue
+            bucket: dict = getattr(models, row.model_type)
+            if row.name not in bucket:
+                bucket[row.name] = _endpoint_config(row)
+                logger.bind(endpoint=row.name, model_type=row.model_type).info(
+                    "Loaded a model endpoint created by another process."
+                )
 
     # ------------------------------------------------------------------
     # CRUD
@@ -261,6 +643,8 @@ class ModelEndpointService:
                 code="ENDPOINT_EXISTS",
             )
         result = await self._repo.create(row)
+        if row.is_default:
+            await self._reload_partitions_after_default_change(row.model_type)
         await self.load_all()
         if row.is_default:
             # The new endpoint became the default (repo demoted the previous one in
@@ -276,15 +660,85 @@ class ModelEndpointService:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         return row
 
-    async def list_model_endpoints(self, model_type: str | None = None) -> list[ModelEndpointRow]:
-        return await self._repo.list_all(model_type=model_type)
+    async def list_model_endpoints(self, model_type: str | None = None) -> list[dict[str, Any]]:
+        """List endpoints, each annotated with ``used_by_partitions``.
 
-    async def update_model_endpoint(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow:
+        One aggregate query for the counts rather than one per endpoint. The
+        count is what makes the delete dialog honest: an embedder with a
+        nonzero count cannot be deleted (the repo refuses it), so the UI can
+        say so up front instead of offering a button that 409s.
+        """
+        rows = await self._repo.list_all(model_type=model_type)
+        counts = await self._repo.usage_counts()
+        return [_with_usage(row, counts) for row in rows]
+
+    async def with_partition_usage(self, row: ModelEndpointRow) -> dict[str, Any]:
+        """One endpoint annotated with ``used_by_partitions``, as the list has it.
+
+        For every other route answering with an endpoint (get, create, update,
+        set-default), so an endpoint never reads as unused on one route and in
+        use on another. Same aggregate query as the list, so the two counts
+        cannot disagree.
+        """
+        return _with_usage(row, await self._repo.usage_counts())
+
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict[str, Any]]:
+        """Per-partition indexed-file counts for one endpoint, most files first.
+
+        Sizes what an in-place edit would strand, so the confirmation can name a
+        real number instead of warning in the abstract (#762 C). Empty when the
+        endpoint holds no indexed data — nothing is at stake and the UI can say
+        so rather than warning anyway.
+        """
+        return await self._repo.indexed_file_usage(name, model_type)
+
+    async def update_model_endpoint(
+        self,
+        name: str,
+        model_type: str,
+        *,
+        acknowledge_indexed_data: bool = False,
+        **fields: object,
+    ) -> ModelEndpointRow:
         """Update endpoint fields and/or rename it.
 
         Pass ``new_name=`` to rename. After any change the in-memory config is
         reloaded and the stale cached client instance is evicted so the next
         request builds a fresh client against the updated config.
+
+        A rename also cascades to every stored reference — ``partitions.embedder``
+        / ``partitions.chat_llm`` and endpoint-name fields embedded in
+        ``pipeline_presets.config`` — inside the repo's own rename transaction
+        (see ``PgModelEndpointRepository.rename``, #770). Those writes are
+        invisible until the referencing services reload their in-memory caches,
+        which is why a rename also refreshes presets then partitions here —
+        the same order ``PresetService.update_preset`` uses, since partition
+        resolution reads the presets dict.
+
+        Both reload calls ``await``, so a concurrent request can run between
+        them — and the DB rename has *already* committed by that point. Without
+        ``_alias_renamed_name``, a request landing in that window could resolve
+        a partition/preset that the cascade already repointed at ``new_name``
+        against a registry that (until the final ``load_all()`` below) still
+        only knows ``name`` — a bare ``KeyError``. The alias makes both ``name``
+        and ``new_name`` resolve immediately, built from the row this call just
+        wrote — not whatever the in-memory bucket held before it — so a rename
+        combined with a field change (e.g. a new ``endpoint``) aliases the
+        *updated* config, not a stale pre-update one. That also covers a reload
+        call above raising: the registry stays queryable under both names,
+        correctly, instead of the update's failure leaving it stuck on a stale
+        config until process restart.
+
+        An embedder edit that changes what its vectors are — URL, model,
+        ``implementation`` or ``max_model_len`` — while partitions resolving to
+        it hold indexed files is refused with ``EMBEDDER_EDIT_AFFECTS_INDEXED_DATA``
+        (409) unless ``acknowledge_indexed_data`` is set (#762). Nothing errors
+        after such an edit: queries are just embedded with another model than
+        the stored vectors, so the caller has to have seen that first. The
+        admin UI's confirmation dialog is one such caller, not the guard. The
+        check runs in the repo's update transaction with the row locked, and
+        the indexer refuses a file whose embedder changed under it, so a file
+        still indexing during the edit cannot slip past it (#958).
         """
         existing = await self._repo.get(name, model_type)
         if existing is None:
@@ -301,8 +755,12 @@ class ModelEndpointService:
         if isinstance(fields.get("extra"), dict):
             fields["extra"] = preserve_existing_secrets(existing.extra, fields["extra"])  # type: ignore[arg-type]
 
+        guard = None
+        if model_type == "embedder" and not acknowledge_indexed_data:
+            guard = functools.partial(_refuse_unacknowledged_repoint, fields=fields)
+
         if fields:
-            updated = await self._repo.update(name, model_type, **fields)
+            updated = await self._repo.update(name, model_type, guard=guard, **fields)
         else:
             updated = existing
 
@@ -312,11 +770,36 @@ class ModelEndpointService:
             await self._repo.rename(name, model_type, new_name)
             effective_name = new_name
             renamed_from = name
+            self._alias_renamed_name(model_type, name, new_name, updated or existing)
+            # A cached *client instance* under either name would otherwise survive
+            # this alias — the factory checks its cache before consulting the
+            # config registry, so a stale pre-rename/pre-update client would keep
+            # serving until the eviction at the end of this method, which a
+            # reload call below raising would skip entirely. The config alias
+            # above is already fresh, so evicting now is safe: anything rebuilt
+            # from either name resolves through the up-to-date config, not stale
+            # cached state.
+            self._invalidate_client_cache(model_type, name)
+            self._invalidate_client_cache(model_type, new_name)
+            # `refresh_if_stale` reloads partitions itself, but only when the
+            # preset revision moved. A rename cascades into `pipeline_presets`
+            # (and so bumps the revision) only for the model types listed in
+            # model_endpoint_repo's preset-key maps — `embedder` is in neither,
+            # yet `partitions.embedder` still holds the old name. Fall back to a
+            # direct partition reload whenever the revision did not move, or that
+            # rename leaves every partition pointing at a name the registry no
+            # longer knows until the process restarts.
+            preset_refreshed = False
+            if self._preset_service is not None:
+                preset_refreshed = await self._preset_service.refresh_if_stale()
+            if not preset_refreshed and self._partition_service is not None:
+                await self._partition_service.load_partitions()
 
         if promote_to_default:
             # Clears any prior default and sets this row in one transaction, then
             # re-points the 'default' alias to it — never leaves two defaults.
             await self._repo.set_default(model_type, effective_name)
+            await self._reload_partitions_after_default_change(model_type)
         # The 'default' alias client is stale when this endpoint becomes the default
         # OR was already the default (its config just changed).
         evict_default = bool(promote_to_default or existing.is_default)
@@ -331,18 +814,55 @@ class ModelEndpointService:
             self._invalidate_client_cache(model_type, "default")
         return await self._repo.get(effective_name, model_type) or (updated or existing)
 
+    async def _reload_partitions_after_default_change(self, model_type: str) -> None:
+        """Show this replica the partitions a new default embedder pinned (#762).
+
+        Changing the default embedder writes the old default's name onto
+        indexed partitions still riding the alias (see
+        ``PgModelEndpointRepository.set_default``); the in-memory partition
+        configs would otherwise keep resolving them through the moved alias.
+
+        Call it before ``load_all()`` moves the alias. The other way round, a
+        query landing while this reload awaits its read still finds an indexed
+        partition on ``default`` and embeds with the new model; this way round,
+        an empty partition briefly keeps the old default, which holds no vectors
+        to mismatch.
+        """
+        if model_type == "embedder" and self._partition_service is not None:
+            await self._partition_service.load_partitions()
+
     async def delete_model_endpoint(self, name: str, model_type: str) -> None:
         """Delete an endpoint.
 
         Raises 404 if not found, 422 if it is the last endpoint of its type
         (would leave components with no fallback).
+
+        Deleting an endpoint a preset still names would otherwise leave a
+        dangling reference: indexation resolves an explicit selection strictly,
+        so every audio upload on a preset whose ``stt`` names the deleted
+        endpoint would fail permanently, with nothing surfaced here. The repo
+        clears those selections in the delete's own transaction (see
+        ``_clear_preset_references``), returning the preset to the default
+        fallback; the cache reloads below make that visible to this replica.
+
+        Partition references are settled in that same transaction, and not the
+        same way for both columns (#762). An ``embedder`` a partition still
+        names — or, for the default, that an alias partition with indexed files
+        resolves to — refuses the delete outright — ConflictError, 409 — because
+        clearing it would repoint indexed vectors at a different embedding
+        model without saying so. Empty partitions on the alias just follow the
+        promoted default. A ``chat_llm`` reference is cleared to NULL,
+        which is precisely the request-time default it would have fallen back
+        to anyway. See ``PgModelEndpointRepository._settle_partition_references``.
+
+        A deleted embedder's vector field is dropped once the delete commits.
         """
         # The last-endpoint guard and the survivor/default choice are made INSIDE
         # the repo's locked transaction (not from a stale snapshot here), so
         # concurrent deletes of the same type can't both pass the count check or
         # promote an already-deleted survivor — which would leave the type with no
         # endpoint / no default. The repo reports what happened.
-        status, promoted = await self._repo.delete_and_promote_default(name, model_type)
+        status, promoted, vector_field = await self._repo.delete_and_promote_default(name, model_type)
         if status == "not_found":
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         if status == "last":
@@ -353,10 +873,37 @@ class ModelEndpointService:
         # config and re-caches it; evicting after the reload drops any such stale
         # client so the next request rebuilds from the fresh config.
         await self.load_all()
+        # The repo cleared every preset selection naming the deleted endpoint, so
+        # the in-memory preset/partition configs still carry it until they are
+        # re-read. Without this, indexation keeps resolving the dead name and
+        # fails strictly (audio uploads on that preset) even though the DB has
+        # already restored the default fallback.
+        preset_refreshed = False
+        if self._preset_service is not None:
+            preset_refreshed = await self._preset_service.refresh_if_stale()
+        if not preset_refreshed and self._partition_service is not None:
+            await self._partition_service.load_partitions()
         self._invalidate_client_cache(model_type, name)
         if promoted is not None:
             # The deleted endpoint was the default; its 'default' alias client is now stale.
             self._invalidate_client_cache(model_type, "default")
+        if vector_field:
+            await self._drop_vector_field(name, vector_field)
+
+    async def _drop_vector_field(self, name: str, field: str) -> None:
+        """Free the collection's vector-field slot, without failing the committed delete.
+
+        The field is empty: the delete is refused while a partition uses the
+        embedder. A failure only leaves that empty field behind.
+        """
+        if self._vector_store is None:
+            return
+        try:
+            await self._vector_store.drop_vector_field(field)
+        except Exception as exc:  # noqa: BLE001 - the delete has committed; report, don't undo
+            logger.bind(endpoint=name, vector_field=field, error=str(exc)).warning(
+                "Deleted embedder but kept its empty vector field"
+            )
 
     async def set_default(self, model_type: str, name: str) -> None:
         """Promote ``name`` to the default endpoint for ``model_type``."""
@@ -364,6 +911,7 @@ class ModelEndpointService:
         if existing is None:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         await self._repo.set_default(model_type, name)
+        await self._reload_partitions_after_default_change(model_type)
         # Reload before evicting so a client rebuilt during the window can't survive.
         await self.load_all()
         self._invalidate_client_cache(model_type, "default")
@@ -378,11 +926,15 @@ class ModelEndpointService:
         model_name: str | None = None,
         *,
         api_key: str | None = None,
+        model_type: str | None = None,
+        timeout: float | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Probe ``{url}/models`` to verify the endpoint is reachable and serving.
+        """Probe an endpoint's model list and, for STT, transcription route.
 
         Returns a dict with ``reachable``, ``model_found``, ``models_served``,
-        and ``detail`` keys — suitable as a ``ValidateEndpointResponse`` payload.
+        ``transcription_supported``, and ``detail`` keys — suitable as a
+        ``ValidateEndpointResponse`` payload.
         """
         import httpx  # local import to avoid hard dep in tests that mock it
 
@@ -390,8 +942,14 @@ class ModelEndpointService:
             "reachable": False,
             "model_found": None,
             "models_served": None,
+            "transcription_supported": None,
             "detail": None,
         }
+        normalized_model_name = model_name.strip() if model_name is not None else None
+        if model_type == "stt" and not normalized_model_name:
+            result["transcription_supported"] = False
+            result["detail"] = "A model name is required to validate audio transcription."
+            return result
         try:
             parsed = urlsplit(url)
         except ValueError:
@@ -403,24 +961,158 @@ class ModelEndpointService:
         if parsed.username or parsed.password:
             result["detail"] = "Endpoint URL must not include credentials."
             return result
-        models_url = url.rstrip("/") + "/models"
+        if model_type != "stt":
+            from services.orchestrators.readiness_service import (
+                LatestAliasTimeoutError,
+                ModelEndpointProbeError,
+                ModelListUnavailableError,
+                ModelNotFoundError,
+                check_model_endpoint,
+            )
+
+            config = ModelEndpointConfig(
+                endpoint=url,
+                model_name=normalized_model_name,
+                timeout=timeout or 5.0,
+                extra={
+                    **(extra or {}),
+                    **({"api_key": api_key} if api_key else {}),
+                },
+            )
+            try:
+                model_ids = await check_model_endpoint(config, model_type=model_type, timeout=timeout or 5.0)
+            except httpx.TimeoutException:
+                result["detail"] = "Model list request timed out."
+            except ModelEndpointProbeError as exc:
+                result["reachable"] = True
+                result["detail"] = f"Model list returned HTTP {exc.status_code}."
+            except ModelListUnavailableError as exc:
+                result["reachable"] = True
+                result["detail"] = str(exc)
+            except ModelNotFoundError as exc:
+                result["reachable"] = True
+                result["models_served"] = exc.model_ids
+                result["model_found"] = False
+            except LatestAliasTimeoutError as exc:
+                result["reachable"] = True
+                result["models_served"] = exc.model_ids
+                result["detail"] = (
+                    f'Reachable, but the endpoint did not say in time whether it serves "{normalized_model_name}" '
+                    f'as "{normalized_model_name}:latest".'
+                )
+            except Exception as exc:
+                result["detail"] = str(exc)
+            else:
+                result["reachable"] = True
+                result["models_served"] = model_ids
+                # check_model_endpoint raises ModelNotFoundError for a model it does not serve.
+                result["model_found"] = None if model_ids is None or not normalized_model_name else True
+            return result
+        base_url = url.rstrip("/")
+        models_url = base_url + "/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
             async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
-                resp = await client.get(models_url)
-            result["reachable"] = True
-            if resp.status_code == 200:
-                data = resp.json()
-                served = [m["id"] for m in data.get("data", []) if "id" in m]
-                result["models_served"] = served
-                if model_name is not None:
-                    result["model_found"] = model_name in served
-            else:
-                result["detail"] = f"HTTP {resp.status_code}"
+                try:
+                    resp = await client.get(models_url)
+                except httpx.TimeoutException:
+                    if model_type != "stt":
+                        raise
+                    # Model discovery is intentionally short. STT validation
+                    # can still be proven by the real audio request below.
+                    result["detail"] = "Model list request timed out."
+                else:
+                    if resp.status_code in {401, 403} and model_type == "stt":
+                        result["transcription_supported"] = False
+                        result["detail"] = (
+                            f"Model list request was rejected with HTTP {resp.status_code}. Check the API key."
+                        )
+                        return result
+                    result["reachable"] = True
+                    if resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                            models = data.get("data") if isinstance(data, dict) else None
+                            if not isinstance(models, list):
+                                raise ValueError("missing list-valued data field")
+                        except (TypeError, ValueError):
+                            # A reachable endpoint may expose a non-standard or
+                            # broken /models response while still implementing the
+                            # audio route. Do not let that prevent the STT probe.
+                            result["detail"] = "Endpoint returned an invalid model list."
+                        else:
+                            served = [
+                                item["id"]
+                                for item in models
+                                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                            ]
+                            result["models_served"] = served
+                            if normalized_model_name is not None:
+                                result["model_found"] = normalized_model_name in served
+                    else:
+                        result["detail"] = f"Model list returned HTTP {resp.status_code}."
+                if model_type == "stt":
+                    # The UI already rejects an unavailable model, so avoid a
+                    # needless upload and inference request in that case.
+                    if result["model_found"] is False:
+                        return result
+                    prompt = await self._resolve_stt_validation_prompt()
+                    # A well-formed request is required to validate credentials:
+                    # some providers reject a missing file/model with 400/422
+                    # before they authenticate the request.
+                    transcription_response = await client.post(
+                        base_url + "/audio/transcriptions",
+                        data=_stt_validation_form_data(normalized_model_name, extra, prompt),
+                        files={
+                            "file": (
+                                "openrag-stt-validation.wav",
+                                _STT_VALIDATION_WAV,
+                                "audio/wav",
+                            )
+                        },
+                        follow_redirects=True,
+                        timeout=httpx.Timeout(
+                            connect=5.0,
+                            read=timeout if timeout is not None else _STT_VALIDATION_TIMEOUT_SECONDS,
+                            write=5.0,
+                            pool=5.0,
+                        ),
+                    )
+                    result["reachable"] = True
+                    transcription_status = transcription_response.status_code
+                    if 200 <= transcription_status < 300:
+                        if _stt_validation_response_is_compatible(transcription_response, extra):
+                            result["transcription_supported"] = True
+                        else:
+                            result["transcription_supported"] = False
+                            result["detail"] = "Transcription endpoint returned an incompatible response."
+                    elif transcription_status in {401, 403}:
+                        result["transcription_supported"] = False
+                        result["detail"] = (
+                            f"Transcription capability check was rejected with HTTP {transcription_status}. "
+                            "Check the API key."
+                        )
+                    elif transcription_status in {404, 405}:
+                        result["transcription_supported"] = False
+                        result["detail"] = "Endpoint does not support OpenAI-compatible audio transcriptions."
+                    elif 300 <= transcription_status < 400 or transcription_status >= 500:
+                        result["transcription_supported"] = False
+                        result["detail"] = f"Transcription capability check returned HTTP {transcription_status}."
+                    else:
+                        result["transcription_supported"] = False
+                        result["detail"] = f"Transcription validation request returned HTTP {transcription_status}."
         except httpx.ConnectError as exc:
-            result["detail"] = f"Connection error: {exc}"
+            if result["reachable"] and model_type == "stt":
+                result["transcription_supported"] = False
+                result["detail"] = f"Transcription capability check failed: {exc}"
+            else:
+                result["detail"] = f"Connection error: {exc}"
         except httpx.TimeoutException:
-            result["detail"] = "Connection timed out"
+            if result["reachable"] and model_type == "stt":
+                result["transcription_supported"] = False
+                result["detail"] = "Transcription capability check timed out"
+            else:
+                result["detail"] = "Connection timed out"
         except Exception as exc:  # noqa: BLE001
             result["detail"] = str(exc)
         return result
@@ -428,6 +1120,46 @@ class ModelEndpointService:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _alias_renamed_name(self, model_type: str, old_name: str, new_name: str, row: ModelEndpointRow) -> None:
+        """Make both ``old_name`` and ``new_name`` resolve to *row* before any reload runs.
+
+        Runs synchronously right after the rename ``await`` returns — no
+        further ``await`` happens before this executes, so no concurrent
+        request can observe the DB already renamed while the registry still
+        only answers to ``old_name``.
+
+        Built from ``row`` — the just-written DB state — rather than copying
+        whatever the in-memory bucket currently holds under ``old_name``: a
+        rename can land in the same call as a field update (e.g. a new
+        ``endpoint`` URL), applied to the DB *before* this runs, so the stale
+        in-memory entry would alias both names to the pre-update config. If a
+        reload below then raises, that staleness would never get corrected
+        by the final ``load_all()`` this call never reaches — the registry
+        would keep serving the old endpoint under the new (DB-authoritative)
+        name until process restart. The next full ``load_all()`` (below, or
+        from any later CRUD call) rebuilds the bucket straight from DB and
+        drops the ``old_name`` entry on its own.
+        """
+        bucket: dict[str, Any] | None = getattr(self._config.models, model_type, None)
+        if bucket is None:
+            return
+        cfg = ModelEndpointConfig(
+            # ``row`` predates the rename (it is the pre-rename read, or the
+            # update applied before it), so ``row.name`` is still ``old_name``.
+            # The registry identity after the rename is ``new_name`` — and it is
+            # what keys the STT limiter/client caches — so name the config for
+            # what the DB now calls it, not for the alias it is also filed under.
+            name=new_name,
+            endpoint=row.endpoint,
+            model_name=row.model_name,
+            batch_size=row.batch_size,
+            timeout=row.timeout,
+            extra=row.extra,
+            vector_field=row.vector_field,
+        )
+        bucket[old_name] = cfg
+        bucket[new_name] = cfg
 
     def _invalidate_client_cache(self, model_type: str, name: str) -> None:
         """Evict ``name`` from the component-factory cache for ``model_type``."""

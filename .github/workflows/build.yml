@@ -11,9 +11,98 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
-  build-and-push-image:
+  # GA images build for release tags (vX.Y.Z), never for RC tags (build_rc.yml
+  # owns those). This job also enforces "the tag is on main": we can't use
+  # github.event.base_ref for that — it is empty for a tag pushed to a
+  # branch-protected main (which only receives PR-merge commits, not client
+  # pushes), so the old base_ref guard silently skipped every release build.
+  # Instead we verify reachability from origin/main explicitly and fail loud.
+  verify-tag:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc.')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Tag name and SHA are passed as env data, never interpolated into the
+      # script body: ${{ }} expands before the shell runs, and git permits
+      # ; $ ` " | & in ref names — so a crafted tag could otherwise execute
+      # arbitrary code in this privileged publishing workflow.
+      - name: Verify this is an exact GA release tag on main
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          # The job-level `if` only filters well-formed `-rc.` tags (owned by
+          # build_rc.yml). Anything else reaching here must be an exact GA tag:
+          # a near-miss like `v1.2.3-rc1` matches neither workflow's intent and
+          # would otherwise publish a prerelease as GA and move `latest`.
+          if ! printf '%s' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::$TAG_NAME is not an exact GA release tag (vMAJOR.MINOR.PATCH) — refusing to publish GA images."
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if git merge-base --is-ancestor "$TAG_SHA" FETCH_HEAD; then
+            echo "OK: $TAG_NAME ($TAG_SHA) is an exact GA tag on main"
+          else
+            echo "::error::$TAG_NAME is not on main — refusing to publish GA images."
+            exit 1
+          fi
+
+      # A NEW badge is data, not markup: each entry in ui/src/lib/whats-new.ts
+      # records the version its feature shipped in, and the badge expires on its
+      # own once the running version is far enough past it. An entry still
+      # reading UNRELEASED has no version to expire against, so it badges every
+      # user forever — and silently, because nobody inspects a dropdown
+      # expecting an option *not* to say NEW. Resolving them belongs to the
+      # release branch, in the same commit that bumps pyproject.toml (see
+      # "Releases" in CONTRIBUTING.md). This is the gate that turns forgetting
+      # that step into a failed release rather than a permanent badge.
+      - name: Verify every NEW badge has been resolved to a version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          registry=ui/src/lib/whats-new.ts
+
+          # A registry we cannot read is not a clean registry. Asked as an `if`
+          # condition, grep's "file missing" (exit 2) is indistinguishable from
+          # "no matches" (exit 1), so a moved or renamed file would report OK
+          # here and the backstop would be gone without anyone noticing.
+          if [ ! -r "$registry" ]; then
+            echo "::error::$registry is missing or unreadable, so the NEW badge gate cannot run. If the registry moved, update this step."
+            exit 1
+          fi
+
+          # Anchored to a whole registry line — indent, quoted key, colon, and
+          # an optional trailing comma, which the last entry in the object may
+          # legally omit — so the sentinel's own definition and the prose that
+          # explains it cannot trip the gate, and an entry written without the
+          # comma cannot slip past it.
+          set +e
+          unresolved=$(grep -nE '^ *"[^"]+": *"UNRELEASED",? *$' "$registry")
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "::error::$registry has unresolved NEW badge entries; they would badge forever. Set them to ${TAG_NAME#v} on the release branch (CONTRIBUTING.md -> Releases) before tagging."
+            echo "$unresolved"
+            exit 1
+          fi
+
+          # Only exit 1 means a genuine no-match; anything else is grep failing.
+          if [ "$status" -ne 1 ]; then
+            echo "::error::could not search $registry for unresolved NEW badge entries (grep exited $status)."
+            exit 1
+          fi
+
+          echo "OK: no unresolved NEW badge entries"
+
+  build-and-push-image:
+    needs: verify-tag
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -60,6 +149,8 @@ jobs:
         with:
           context: .
           file: infra/docker/api.Dockerfile
+          build-args: |
+            OPENRAG_COMMIT=${{ github.sha }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -68,8 +159,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-and-push-image-ray:
+    needs: verify-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
@@ -116,8 +207,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-and-push-image-admin-ui:
+    needs: verify-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write

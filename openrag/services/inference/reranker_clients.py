@@ -17,6 +17,7 @@ from core.utils.exceptions import InferenceConnectionError, InferenceTimeoutErro
 from core.utils.logging import get_logger
 
 from ._circuit_breaker import with_circuit_breaker
+from ._metrics import with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
@@ -44,11 +45,16 @@ def _raise_reranker_http_error(endpoint: str, exc: httpx.HTTPStatusError) -> NoR
     The response body is logged for operators but deliberately kept out of the
     raised message: ``InferenceConnectionError.message`` reaches API clients
     verbatim (SSE error events, 503 ``detail``), and an upstream error body can
-    carry internals — stack traces, proxy pages, hostnames — that must not leak."""
+    carry internals — stack traces, proxy pages, hostnames — that must not leak.
+
+    The upstream status is kept, as the other inference clients keep it: the
+    breaker, the retry and the metrics all read it. Without it every reply read
+    as 503, so a 401 from one reranker endpoint opened the ``reranker`` breaker
+    for every endpoint behind it (#1100)."""
     status = exc.response.status_code
     detail = _response_detail(exc.response)
     logger.bind(endpoint=endpoint, status=status, body=detail).error("Reranker returned HTTP error")
-    raise InferenceConnectionError(f"Reranker at {endpoint} returned HTTP {status}") from exc
+    raise InferenceConnectionError(f"Reranker at {endpoint} returned HTTP {status}", status_code=status) from exc
 
 
 @reranker_registry.register("infinity")
@@ -71,6 +77,7 @@ class InfinityReranker(Reranker):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
 
+    @with_inference_metrics("rerank")
     @with_circuit_breaker("reranker")
     @with_retry(max_attempts=2)
     async def rerank(self, query: str, documents: list[str], top_k: int | None = None) -> list[tuple[int, float]]:
@@ -145,6 +152,7 @@ class TEIReranker(Reranker):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
 
+    @with_inference_metrics("rerank")
     @with_circuit_breaker("reranker")
     @with_retry(max_attempts=2)
     async def rerank(self, query: str, documents: list[str], top_k: int | None = None) -> list[tuple[int, float]]:
@@ -199,6 +207,7 @@ class OpenAIReranker(Reranker):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
 
+    @with_inference_metrics("rerank")
     @with_circuit_breaker("reranker")
     @with_retry(max_attempts=2)
     async def rerank(self, query: str, documents: list[str], top_k: int | None = None) -> list[tuple[int, float]]:

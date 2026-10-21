@@ -1,0 +1,26 @@
+# gitleaks configuration, used by .github/workflows/security.yml.
+#
+# Extends the upstream default rule set rather than replacing it, so a gitleaks
+# upgrade brings its new rules with it. The only addition is an allowlist for
+# the placeholder shapes our docs and examples use in place of a real token —
+# without it every curl example in the API docs trips `curl-auth-header`.
+#
+# Keep these anchored to the whole secret: a pattern that matches a prefix
+# (say `or-`) would also let a real `or-<hex>` token through. Findings that are
+# genuine but already in public history are not allowlisted here; they are
+# fingerprinted one by one in .gitleaksignore.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documentation placeholders standing in for a real credential"
+regexTarget = "secret"
+regexes = [
+  '''^YOUR_[A-Z0-9_]+$''',       # YOUR_AUTH_TOKEN
+  '''^__GENERATE_ME__$''',       # .env.example value an operator must replace
+  '''^or-x+(\.\.\.)?$''',        # or-xxx...  (API token format, elided)
+  '''^\{[a-z_]+\}$''',           # {admin_token}  (Python format field)
+  '''^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$''', # $TOKEN / ${AUTH_TOKEN}  (shell variable)
+  '''^<[^<>]+>$''',              # <your-token>
+]

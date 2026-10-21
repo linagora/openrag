@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from openrag.core.models.chunk import Chunk
-from openrag.core.models.document import ProcessedDocument
+from core.models.chunk import Chunk
+from core.models.document import ProcessedDocument
 
 
 class ChunkingStrategy(ABC):

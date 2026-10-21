@@ -15,7 +15,7 @@ from .base import ConfigMixin
 
 class _BaseRerankerConfig(ConfigMixin):
     model_name: str = "Alibaba-NLP/gte-multilingual-reranker-base"
-    top_k: int = 10
+    top_k: int = Field(default=10, gt=0)  # RERANKER_TOP_K: top_n of presets that leave it unset
     api_key: str = Field(default="EMPTY", repr=False)
     timeout: float = 60.0
     semaphore: int = 5
@@ -67,12 +67,13 @@ class _BaseRetrieverConfig(ConfigMixin):
     # document hierarchies.
     max_ancestor_depth_cap: int = 1000
     allow_filterless_fallback: bool = True
-    # Upper bound on how many per-partition retrievals run concurrently within a
-    # single request. A multi-partition search (notably a SUPER_ADMIN_MODE
+    # Upper bound on how many partition-group retrievals run concurrently within
+    # a single request. A multi-partition search (notably a SUPER_ADMIN_MODE
     # ``openrag-all`` that expands to every partition) fans out one embed+search
-    # per partition; without a cap that is proportional to the partition count
-    # and can exhaust the Milvus/embedder pools from one request. Small fan-outs
-    # (the common case) stay fully parallel — the cap only engages past it.
+    # per group of partitions sharing an embedder (and, for chat, a retrieval
+    # preset); without a cap that is proportional to the group count and can
+    # exhaust the Milvus/embedder pools from one request. Small fan-outs (the
+    # common case) stay fully parallel — the cap only engages past it.
     max_partition_concurrency: int = Field(default=16, gt=0)
 
 

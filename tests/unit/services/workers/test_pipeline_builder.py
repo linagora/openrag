@@ -1,9 +1,14 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.indexing.contextualize import ChunkContextualizer
+from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from core.prompts.vlm_prompt_builder import wrap_caption
+from core.utils.exceptions import ConfigError, InferenceError, NoIndexableContentError, PipelineError
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stages import caption as caption_module
 
@@ -60,7 +65,9 @@ class FakeVectorStore:
         self.calls: list[tuple[list[Chunk], str]] = []
         self.ensure_calls: list[tuple[str, int]] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.calls.append((chunks, collection))
         return len(chunks)
 
@@ -83,7 +90,15 @@ class FakeContextualizer:
     def __init__(self) -> None:
         self.calls: list[tuple[list[Chunk], str, str]] = []
 
-    async def contextualize(self, chunks, *, filename: str = "", lang: str = "en") -> list[Chunk]:
+    async def contextualize(
+        self,
+        chunks,
+        *,
+        filename: str = "",
+        lang: str = "en",
+        system_prompt: str | None = None,
+        on_failure=None,
+    ) -> list[Chunk]:
         self.calls.append((list(chunks), filename, lang))
         return [chunk.model_copy(update={"text": f"ctx {chunk.text}", "context": "ctx"}) for chunk in chunks]
 
@@ -100,6 +115,8 @@ class FakeTopicTagger:
         filename: str = "",
         max_tags: int = 7,
         lang: str = "en",
+        system_prompt: str | None = None,
+        on_failure=None,
     ) -> list[str]:
         self.calls.append((list(chunks), filename, max_tags, lang))
         return self.tags
@@ -134,6 +151,173 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     assert row["stored_count"] == 1
     assert row["chunks"][0].embedding == [1.0, 0.0]
     assert "token" not in row
+
+
+def _save_markdown_pipeline(save_markdown: bool, data_dir, processed: ProcessedDocument | None = None):
+    if processed is None:
+        processed = ProcessedDocument(
+            text_blocks=[TextBlock(text="# Title"), TextBlock(text=""), TextBlock(text="body")]
+        )
+    return build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        vector_store=FakeVectorStore(),
+        save_markdown=save_markdown,
+        data_dir=data_dir,
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_writes_parsed_text_next_to_the_upload(tmp_path):
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"%PDF-1.4")
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(True, tmp_path).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == "# Title\n\nbody"
+    assert upload.read_bytes() == b"%PDF-1.4"
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_does_not_overwrite_a_markdown_upload(tmp_path):
+    upload = tmp_path / "notes.md"
+    upload.write_text("original", encoding="utf-8")
+    document = Document(filename="notes.md", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(True, tmp_path).run({"document": document, "partition": "tenant-a"})
+
+    assert upload.read_text(encoding="utf-8") == "original"
+    assert (tmp_path / "notes.md.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_off_writes_nothing(tmp_path):
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"%PDF-1.4")
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(False, tmp_path).run({"document": document, "partition": "tenant-a"})
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["report.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_write_failure_does_not_fail_the_file(tmp_path):
+    missing_dir_upload = tmp_path / "gone" / "report.pdf"
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(missing_dir_upload))
+    row = {"document": document, "partition": "tenant-a"}
+
+    await _save_markdown_pipeline(True, tmp_path).run(row)
+
+    assert row["stage"] == "stored"
+
+
+def _upload(tmp_path) -> Document:
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"%PDF-1.4")
+    return Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(upload))
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_skips_a_source_path_outside_the_data_dir(tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    temp_download = tmp_path / "tmp" / "tmpk3x9q2"
+    temp_download.parent.mkdir()
+    temp_download.write_bytes(b"%PDF-1.4")
+    document = Document(filename="page.pdf", text="x", partition="tenant-a", source_path=str(temp_download))
+    row = {"document": document, "partition": "tenant-a"}
+
+    await _save_markdown_pipeline(True, data_dir).run(row)
+
+    assert row["stage"] == "stored"
+    assert sorted(p.name for p in temp_download.parent.iterdir()) == ["tmpk3x9q2"]
+    assert list(data_dir.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_marks_page_changes(tmp_path):
+    document = _upload(tmp_path)
+    processed = ProcessedDocument(
+        text_blocks=[
+            TextBlock(text="intro", page_number=1),
+            TextBlock(text="more intro", page_number=1),
+            TextBlock(text="results", page_number=2),
+            TextBlock(text="appendix", page_number=4),
+        ]
+    )
+
+    await _save_markdown_pipeline(True, tmp_path, processed).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == (
+        "<!-- page 1 -->\n\nintro\n\nmore intro\n\n<!-- page 2 -->\n\nresults\n\n<!-- page 4 -->\n\nappendix"
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_adds_no_page_marker_to_a_single_page_document(tmp_path):
+    document = _upload(tmp_path)
+    processed = ProcessedDocument(text_blocks=[TextBlock(text="a", page_number=1), TextBlock(text="b", page_number=1)])
+
+    await _save_markdown_pipeline(True, tmp_path, processed).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == "a\n\nb"
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_replaces_undescribed_image_placeholders(tmp_path):
+    document = _upload(tmp_path)
+    processed = ProcessedDocument(
+        text_blocks=[
+            TextBlock(text="before ![](docling_img_1) after"),
+            TextBlock(text="![chart](openrag-embedded-image-1)"),
+            TextBlock(text="![logo](https://example.com/logo.png)"),
+        ],
+        images=[
+            ImageBlock(image_bytes=b"png", metadata={"markdown_ref": "![](docling_img_1)"}),
+            ImageBlock(
+                image_bytes=b"png",
+                metadata={"markdown_ref": "![chart](openrag-embedded-image-1)", "alt": "chart"},
+            ),
+            ImageBlock(
+                source_url="https://example.com/logo.png",
+                metadata={"markdown_ref": "![logo](https://example.com/logo.png)", "alt": "logo"},
+            ),
+        ],
+    )
+
+    await _save_markdown_pipeline(True, tmp_path, processed).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == (
+        "before [Image] after\n\nchart\n\n![logo](https://example.com/logo.png)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_file_with_no_vector_field_to_index_into_fails_before_it_is_parsed():
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    parser = FakeParser(processed)
+    embedder = FakeEmbedder([[1.0, 0.0]])
+
+    def no_field(name: str) -> str | None:
+        raise ConfigError(f"Embedder '{name}' is not registered")
+
+    pipeline = build_indexing_pipeline(
+        parser=parser,
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=embedder,
+        vector_store=FakeVectorStore(),
+        vector_field_resolver=no_field,
+    )
+
+    with pytest.raises(ConfigError, match="'default' is not registered"):
+        await pipeline.run({"document": document, "partition": "tenant-a"})
+
+    assert parser.calls == []
+    assert embedder.calls == []
 
 
 @pytest.mark.asyncio
@@ -189,6 +373,74 @@ async def test_pipeline_indexation_config_disables_caption_and_contextualization
     assert vlm.calls == []
     assert contextualizer.calls == []
     assert row["stage"] == "stored"
+
+
+class PeakTrackingVLM:
+    """Records the peak number of caption calls running at once."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.in_flight = 0
+        self.peak = 0
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        self.calls += 1
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0.01)
+        finally:
+            self.in_flight -= 1
+        return "caption"
+
+
+def _many_image_pipeline(vlm, *, caption_concurrency: int | None, image_count: int = 20):
+    document = Document(filename="album.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png") for _ in range(image_count)],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        caption_concurrency=caption_concurrency,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_forwards_caption_concurrency_to_the_caption_stage():
+    # caption_stage's own bound is covered in test_pipeline_stages; this covers
+    # the forwarding hop. Drop ``max_concurrency=self.caption_concurrency`` from
+    # ``run()`` and the stage silently goes unbounded again.
+    vlm = PeakTrackingVLM()
+    pipeline, document = _many_image_pipeline(vlm, caption_concurrency=3)
+
+    row = {"document": document, "partition": "tenant-a", "filename": "album.txt"}
+    await pipeline.run(row)
+
+    # Captioning is a best-effort enrichment: a raising stage is swallowed and
+    # would leave peak at 0, so assert the work actually happened.
+    assert vlm.calls == 20
+    assert "degraded_stages" not in row
+    assert vlm.peak <= 3
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_leaves_caption_fan_out_unbounded_without_a_limit():
+    # Guards the test above against passing for the wrong reason (the stage
+    # having gone serial), and preserves the pre-cap default.
+    vlm = PeakTrackingVLM()
+    pipeline, document = _many_image_pipeline(vlm, caption_concurrency=None)
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "album.txt"})
+
+    assert vlm.calls == 20
+    assert vlm.peak > 3
 
 
 def _caption_pipeline(vlm: FakeVLM, caption_prompt: str | None):
@@ -760,7 +1012,9 @@ class RecordingVectorStore:
             raise self.query_error
         return list(self.existing_ids)
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.events.append("upsert")
         return len(chunks)
 
@@ -879,13 +1133,8 @@ async def test_reindex_defers_cleanup_delete_to_worker():
 
 @pytest.mark.asyncio
 async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
-    # Regression guard: a blank/whitespace-only file, or a parser that extracts
-    # no text, legitimately chunks down to [] without raising (chunk_stage /
-    # BaseChunker.chunk both treat this as success). If the old snapshot were
-    # deleted whenever it was merely non-empty, a re-index that stores zero new
-    # chunks would wipe the file's entire previous chunk set — worse than the
-    # pre-fix duplication bug, and a violation of the "no empty window"
-    # guarantee. The old chunks must survive when nothing new was stored.
+    # A blank file chunks to [] without chunk_stage raising. run() fails before
+    # store, so the previous chunk set is never deleted.
     vs = RecordingVectorStore(existing_ids=["101", "102"])
     document = Document(filename="blank.txt", text="", partition="tenant-a")
     processed = ProcessedDocument(document_id=document.id, text_blocks=[])
@@ -896,8 +1145,820 @@ async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
         vector_store=vs,
     )
 
-    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted"):
+        await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
 
-    assert row["stored_count"] == 0
     assert vs.deleted == []
     assert "delete" not in vs.events
+
+
+@pytest.mark.asyncio
+async def test_empty_chunks_after_a_failed_caption_name_the_caption_error():
+    document = Document(filename="photo.png", text="", content_type=DocumentType.IMAGE, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    embedder = FakeEmbedder([])
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([]),
+        embedder=embedder,
+        vector_store=vector_store,
+        vlm=FailingVLM(),
+    )
+
+    with pytest.raises(PipelineError, match="image captioning failed: vlm unreachable") as exc_info:
+        await pipeline.run({"document": document, "partition": "tenant-a", "filename": "photo.png"})
+
+    assert type(exc_info.value) is PipelineError
+    assert embedder.calls == []
+    assert vector_store.calls == []
+
+
+@pytest.mark.asyncio
+async def test_empty_chunks_name_images_that_were_never_captioned():
+    document = Document(filename="scan.pdf", text="", content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[],
+        images=[ImageBlock(image_bytes=b"png"), ImageBlock(image_bytes=b"png")],
+    )
+    embedder = FakeEmbedder([])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([]),
+        embedder=embedder,
+        vector_store=FakeVectorStore(),
+    )
+
+    with pytest.raises(NoIndexableContentError, match=r"document's 2 image\(s\) were not captioned"):
+        await pipeline.run(
+            {
+                "document": document,
+                "partition": "tenant-a",
+                "filename": "scan.pdf",
+                "indexation_config": {"enable_image_captioning": False},
+            }
+        )
+
+    assert embedder.calls == []
+
+
+def test_ingest_flag_defaults_come_from_the_model_not_from_absence():
+    """A sparse indexation config that omits enable_image_captioning still
+    captions during ingest (the model default is True). Reading the flag with a
+    bare .get() treated that as disabled and skipped prompt resolution, leaving
+    captioning silently on the disk seed while the preset named another prompt.
+    """
+    from services.workers.indexer_pool import _ingest_flag_default
+
+    assert _ingest_flag_default("enable_image_captioning") is True
+    assert _ingest_flag_default("enable_contextualization") is False
+    assert _ingest_flag_default("enable_topic_tagging") is False
+
+
+def _capture_warnings():
+    """Collect loguru records — loguru does not propagate to pytest's caplog."""
+    from loguru import logger as _logger
+
+    messages: list[str] = []
+    sink_id = _logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    return messages, sink_id
+
+
+def test_warns_when_a_chunk_exceeds_the_embedder_window():
+    """A chunk past truncate_prompt_tokens is silently cut by vLLM — surface it."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    row = {
+        "task_id": "t1",
+        "filename": "big.pdf",
+        "partition": "p",
+        "chunks": [
+            SimpleNamespace(token_count=100, chunk_index=0, chunk_type=None),
+            SimpleNamespace(token_count=2500, chunk_index=1, chunk_type=None),
+        ],
+    }
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow(row, 2047)
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)
+    assert any("2046-token limit" in m for m in messages)
+
+
+def test_no_warning_when_chunks_fit_or_window_unknown():
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    messages, sink_id = _capture_warnings()
+    try:
+        # Comfortably inside the window.
+        IndexingPipeline._warn_on_embedder_overflow(
+            {"chunks": [SimpleNamespace(token_count=500, chunk_index=0, chunk_type=None)]}, 2047
+        )
+        # Window unknown => nothing to compare against, so stay quiet.
+        IndexingPipeline._warn_on_embedder_overflow(
+            {"chunks": [SimpleNamespace(token_count=99999, chunk_index=0, chunk_type=None)]}, None
+        )
+    finally:
+        _logger.remove(sink_id)
+    assert not [m for m in messages if "truncated before embedding" in m]
+
+
+def test_overflow_warning_measures_text_not_stale_token_count():
+    """Contextualization rewrites ``text`` with the [CONTEXT] envelope via
+    model_copy and does not refresh ``token_count``, so trusting the stored
+    count misses exactly the chunks the envelope pushes over the limit."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    # Realistic stale case: the chunker sized this at 2000 (just under the
+    # 2046 limit) and contextualization then prepended the [CONTEXT] envelope
+    # without refreshing the count. A stored count far below the limit is not
+    # re-tokenised on purpose — no envelope can close that gap.
+    chunk = SimpleNamespace(token_count=2000, text="x " * 3000, chunk_index=0, chunk_type=None)
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": [chunk]}, 2047, lambda s: len(s.split()))
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)
+
+
+def test_overflow_warning_falls_back_to_token_count_without_a_counter():
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    chunk = SimpleNamespace(token_count=3000, text="short", chunk_index=0, chunk_type=None)
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": [chunk]}, 2047, None)
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)
+
+
+def _pipeline_with_chunker_factory(factory):
+    """Minimal IndexingPipeline carrying only what _select_chunker touches."""
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    return IndexingPipeline(
+        parser=object(),
+        chunker=object(),
+        embedder=object(),
+        vector_store=object(),
+        chunker_factory=factory,
+    )
+
+
+def test_chunker_factory_arity_is_decided_by_signature_not_by_catching():
+    """A compatible factory that raises TypeError internally must surface that
+    error, not be silently retried with one argument (building twice and
+    reporting the arity fallback instead of the real failure)."""
+    from types import SimpleNamespace
+
+    import pytest
+    from services.workers.pipeline_builder import _accepts_embedder_window
+
+    calls = []
+
+    def modern(config, window=None):
+        calls.append(window)
+        raise TypeError("boom inside the factory")
+
+    assert _accepts_embedder_window(modern) is True
+    assert _accepts_embedder_window(lambda config: None) is False
+    assert _accepts_embedder_window(lambda *args: None) is True
+
+    pipeline = _pipeline_with_chunker_factory(modern)
+    with pytest.raises(TypeError, match="boom inside the factory"):
+        pipeline._select_chunker(SimpleNamespace(chunking=object()), "default", 2047)
+    assert len(calls) == 1, "the factory must not be invoked twice"
+
+
+def test_legacy_single_argument_chunker_factory_still_works():
+    from types import SimpleNamespace
+
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    sentinel = object()
+    pipeline = _pipeline_with_chunker_factory(lambda config: sentinel)
+    assert pipeline._select_chunker(SimpleNamespace(chunking=object()), "default", 2047) is sentinel
+    assert isinstance(pipeline, IndexingPipeline)
+
+
+def test_overflow_warning_skips_chunks_far_below_the_limit():
+    """The pass runs synchronously on the event loop for every file, including
+    partitions using nothing else from this feature. Re-tokenising every chunk
+    cost ~360 ms per 3000-chunk document; the stored count settles all but the
+    band near the limit."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    counted = []
+
+    def counter(text: str) -> int:
+        counted.append(text)
+        return len(text.split())
+
+    chunks = [SimpleNamespace(token_count=500, text="w " * 500, chunk_index=i, chunk_type=None) for i in range(100)]
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": chunks}, 2047, counter)
+    finally:
+        _logger.remove(sink_id)
+    assert counted == [], "chunks far below the limit must not be re-tokenised"
+    assert not messages
+
+
+class FailingVLM:
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        raise RuntimeError("vlm unreachable")
+
+
+class FailingContextualizer:
+    async def contextualize(self, chunks, *, filename="", lang="en", system_prompt=None, on_failure=None):
+        raise RuntimeError("llm unreachable")
+
+
+class FailingTopicTagger:
+    async def tag(self, chunks, *, filename="", max_tags=7, lang="en", system_prompt=None, on_failure=None):
+        raise RuntimeError("llm unreachable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "components", "config"),
+    [
+        ("caption", {"vlm": FailingVLM()}, {"enable_image_captioning": True}),
+        (
+            "contextualize",
+            {"contextualizer": FailingContextualizer()},
+            {"enable_contextualization": True},
+        ),
+        ("topic_tag", {"topic_tagger": FailingTopicTagger()}, {"enable_topic_tagging": True}),
+    ],
+)
+async def test_enrichment_stage_failure_does_not_lose_the_file(stage, components, config):
+    # #702: an enrichment failure (VLM/LLM timeout, unreachable endpoint, bad
+    # response) must not abort parse->chunk->embed->store. The file is still
+    # indexed from its base content, minus that enrichment.
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        **components,
+    )
+    row = {
+        "document": document,
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "indexation_config": config,
+    }
+
+    result = await pipeline.run(row)
+
+    assert result["stage"] == "stored"
+    assert result["stored_count"] == 1
+    assert vector_store.calls, "chunks were never stored"
+    assert stage in result["degraded_stages"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["contextualize", "topic_tag"])
+async def test_enrichment_records_failures_swallowed_by_best_effort_helpers(stage: str):
+    class UnreachableLLM:
+        async def chat(self, messages, **kwargs):
+            raise InferenceError("llm unavailable")
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    vector_store = FakeVectorStore()
+    components = (
+        {"contextualizer": ChunkContextualizer(UnreachableLLM(), "context prompt")}
+        if stage == "contextualize"
+        else {"topic_tagger": TopicTagger(UnreachableLLM(), "topic prompt")}
+    )
+    config = {"enable_contextualization": True} if stage == "contextualize" else {"enable_topic_tagging": True}
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        **components,
+    )
+
+    result = await pipeline.run(
+        {
+            "document": document,
+            "partition": "tenant-a",
+            "filename": "note.txt",
+            "indexation_config": config,
+        }
+    )
+
+    assert result["stored_count"] == 1
+    assert set(result["degraded_stages"]) == {stage}
+    assert "llm unavailable" in result["degraded_stages"][stage]
+
+
+@pytest.mark.asyncio
+async def test_enrichment_cancellation_still_aborts_the_pipeline():
+    # Degrading on failure must not swallow cancellation: a cancelled task has
+    # to stop, not quietly index a half-enriched file.
+    class CancelledVLM:
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            raise asyncio.CancelledError
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        vlm=CancelledVLM(),
+    )
+    row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.run(row)
+
+    assert vector_store.calls == []
+
+
+# ---------------------------------------------------------------------------
+# #846 — the file payload must not outlive the parse
+# ---------------------------------------------------------------------------
+
+
+def _payload_pipeline(parser=None, vector_store=None, **kwargs):
+    document = Document(
+        filename="report.pdf",
+        raw_bytes=b"x" * 4096,
+        content_type=DocumentType.PDF,
+        partition="tenant-a",
+    )
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    pipeline = build_indexing_pipeline(
+        parser=parser or FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store or FakeVectorStore(),
+        **kwargs,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_raw_bytes_are_released_once_parsing_has_consumed_them():
+    """The payload is the whole file. Holding it to the end of ``run()`` kept it
+    resident through embed and store — the slow stages — so up to
+    ``max_tasks_per_worker`` whole files piled up in one worker process."""
+    pipeline, document = _payload_pipeline()
+
+    row = {"document": document, "partition": "tenant-a", "filename": "report.pdf"}
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
+    assert row["document"] is document, "the Document itself stays — only the payload goes"
+    assert document.raw_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_the_parser_still_receives_the_payload():
+    """Guards the test above against passing for the wrong reason: freeing the
+    bytes *before* the parser reads them would also satisfy it."""
+    seen: list[int | None] = []
+
+    class RecordingParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            seen.append(len(document.raw_bytes) if document.raw_bytes is not None else None)
+            return ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.PDF.value]
+
+    pipeline, document = _payload_pipeline(parser=RecordingParser())
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf"})
+
+    assert seen == [4096]
+    assert document.raw_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_parse_leaves_the_payload_intact():
+    """``parse_stage`` re-raises, so the release is never reached. The caller
+    still owns the bytes for error reporting or a retry decision."""
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.PDF.value]
+
+    pipeline, document = _payload_pipeline(parser=BrokenParser())
+
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf"})
+
+    assert document.raw_bytes is not None
+
+
+@pytest.mark.asyncio
+async def test_reindex_still_resolves_its_delete_target_after_the_release():
+    """The re-index snapshot reads ``row["document"].id`` after the release.
+    Dropping the whole Document instead of its payload would silently skip the
+    snapshot and leave the file's old chunks duplicated (#657)."""
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    pipeline, document = _payload_pipeline(vector_store=vs)
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf", "replace": True})
+
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert vs.deleted == [["101", "102"]]
+
+
+@pytest.mark.asyncio
+async def test_reindex_falls_back_to_the_documents_own_partition_after_the_release():
+    """``_replace_target`` scopes the delete by ``row["partition"] or
+    document.partition``. The fallback is the branch the release could break
+    without anything noticing: ``indexer_actor`` always sets ``row["partition"]``,
+    so every other test takes the first arm and a cleared ``document.partition``
+    stays invisible.
+
+    An unscoped or wrongly-scoped delete on the re-index path is the dangerous
+    kind, so the defensive arm gets its own coverage rather than being trusted
+    because production does not reach it.
+    """
+    vs = RecordingVectorStore(existing_ids=["201"])
+    pipeline, document = _payload_pipeline(vector_store=vs)
+
+    # No "partition" key: the resolver must read it off the Document.
+    await pipeline.run({"document": document, "filename": "report.pdf", "replace": True})
+
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert vs.deleted == [["201"]]
+
+
+# ---------------------------------------------------------------------------
+# #846 — extracted image payloads must not outlive the caption decision
+# ---------------------------------------------------------------------------
+
+
+def _image_pipeline(vlm=None, image_count: int = 6, **kwargs):
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="body")],
+        images=[ImageBlock(image_bytes=b"\x89PNG" + b"y" * 4096, page_number=i) for i in range(image_count)],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        **kwargs,
+    )
+    return pipeline, document
+
+
+def _row(document):
+    return {"document": document, "partition": "tenant-a", "filename": "figs.pdf"}
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_after_captioning():
+    """The only consumer is ``ImageBlock.image_url`` for the VLM request. Held to
+    the end of ``run()`` they survive embed and store — the larger half of the
+    payload ``_release_raw_bytes`` frees."""
+    vlm = FakeVLM()
+    pipeline, document = _image_pipeline(vlm=vlm)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
+    # ``FakeVLM.calls`` stores the payload, so a count alone would pass against
+    # six empty ones — i.e. against the release running *before* the caption.
+    assert len(vlm.calls) == 6, "guard: the VLM must have been called once per image"
+    assert all(call.startswith(b"\x89PNG") and len(call) > 4096 for call in vlm.calls), (
+        "the VLM received empty payloads — the release ran before captioning"
+    )
+    images = row["processed_document"].images
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_even_when_captioning_never_runs():
+    """No VLM means nothing was ever going to read them, so holding them is pure
+    waste. This is why the release sits outside the ``vlm is not None`` branch."""
+    pipeline, document = _image_pipeline(vlm=None)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored"
+    images = row["processed_document"].images
+    # ``all`` is vacuously true over an empty list, so a release that dropped the
+    # ImageBlocks outright would satisfy the payload assertion below.
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_when_captioning_fails():
+    """``_timed_enrichment`` swallows the failure and indexes the file anyway; a
+    failed caption makes the bytes no more useful than a successful one."""
+    pipeline, document = _image_pipeline(vlm=FailingVLM())
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert "caption" in row.get("degraded_stages", {}), "guard: captioning must have failed"
+    images = row["processed_document"].images
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
+
+
+@pytest.mark.asyncio
+async def test_release_keeps_everything_the_caption_substitution_reads():
+    """Only the payload goes.
+
+    The previous version of this test asserted ``page_number`` and ``caption``
+    and never ran a substitution, so it did not cover the fields
+    ``_release_image_bytes`` actually promises to keep — ``metadata``,
+    ``mime_type`` and ``source_url`` — nor the thing they exist to serve.
+
+    Here each image carries a ``markdown_ref`` that ``_replace_markdown_ref``
+    must find in the text block and swap for the wrapped caption, so the test
+    exercises the substitution its name refers to and fails if the release
+    disturbs ``text_blocks``.
+
+    Note the two halves guard different things. The release runs *after*
+    ``caption_stage``, so clearing ``metadata`` could not un-substitute text
+    that is already written — the text assertions cannot stand in for the field
+    assertions. The per-field checks below are what pin a release that clears
+    more than the payload.
+    """
+    refs = [f"![](figure-{i}.png)" for i in range(3)]
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text=f"intro {refs[0]} middle {refs[1]} tail {refs[2]} end", page_number=1)],
+        images=[
+            ImageBlock(
+                image_bytes=b"\x89PNG" + b"y" * 4096,
+                page_number=i,
+                mime_type="image/jpeg",
+                source_url=f"https://example.com/figure-{i}.png",
+                metadata={"markdown_ref": ref},
+            )
+            for i, ref in enumerate(refs)
+        ],
+    )
+    vlm = FakeVLM()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+    )
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    images = row["processed_document"].images
+    assert len(images) == 3, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images), "guard: the payload must have been released"
+
+    # The substitution itself — what the surviving metadata is for.
+    text = " ".join(block.text for block in row["processed_document"].text_blocks)
+    assert text.count(wrap_caption("caption")) == 3, "the captions were not substituted into the text"
+    for ref in refs:
+        assert ref not in text, f"{ref} survived unsubstituted"
+
+    # Every field the release docstring promises to keep.
+    assert [image.page_number for image in images] == [0, 1, 2]
+    assert all(image.caption == "caption" for image in images)
+    assert all(image.mime_type == "image/jpeg" for image in images)
+    assert [image.source_url for image in images] == [f"https://example.com/figure-{i}.png" for i in range(3)]
+    assert [image.metadata.get("markdown_ref") for image in images] == refs
+
+
+class ServingEmbedder(FakeEmbedder):
+    """An embedder whose endpoint reports its own window; the last value repeats."""
+
+    def __init__(self, vectors: list[list[float]], *served: int | None) -> None:
+        super().__init__(vectors)
+        self._served = list(served)
+
+    async def served_window(self) -> int | None:
+        return self._served.pop(0) if len(self._served) > 1 else self._served[0]
+
+
+def _served_window_pipeline(
+    embedder, *, configured: int, chunks: list[Chunk] | None = None, chunker=None, text: str = "hello"
+):
+    document = Document(filename="note.txt", text=text, partition="p")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text=text)])
+    chunks = chunks or [Chunk(id="c1", text="hello", partition="p")]
+    startup_chunker = chunker or FakeChunker(chunks)
+    rebuilt_chunker = FakeChunker(chunks)
+    factory_calls: list[tuple[object, int | None]] = []
+
+    def chunker_factory(chunking, window=None):
+        factory_calls.append((chunking, window))
+        return rebuilt_chunker
+
+    default_chunking = object()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=startup_chunker,
+        embedder=embedder,
+        vector_store=FakeVectorStore(),
+        chunker_factory=chunker_factory,
+        default_chunking=default_chunking,
+        embedder_window_resolver=lambda name: configured,
+    )
+    return pipeline, {"document": document, "partition": "p"}, factory_calls, default_chunking, startup_chunker
+
+
+@pytest.mark.asyncio
+async def test_chunks_are_sized_for_a_served_window_below_the_configured_one():
+    """An endpoint configured for 8192 against a server started with
+    --max-model-len 2048: sized for 8192, a chunk's tail past 2047 tokens would
+    never be embedded, so the default chunking is rebuilt for 2048."""
+    pipeline, row, factory_calls, default_chunking, startup_chunker = _served_window_pipeline(
+        ServingEmbedder([[1.0]], 2048), configured=8192
+    )
+
+    await pipeline.run(row)
+
+    assert factory_calls == [(default_chunking, 2048)]
+    assert startup_chunker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_preset_chunks_for_the_served_window_too():
+    pipeline, row, factory_calls, _, _ = _served_window_pipeline(ServingEmbedder([[1.0]], 2048), configured=8192)
+    config = IndexationPipelineConfig()
+    row["indexation_config"] = config
+
+    await pipeline.run(row)
+
+    assert factory_calls == [(config.chunking, 2048)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("served", [None, 2048, 32768])
+async def test_the_configured_window_stands_unless_the_server_serves_less(served):
+    pipeline, row, factory_calls, _, startup_chunker = _served_window_pipeline(
+        ServingEmbedder([[1.0]], served), configured=2047
+    )
+
+    await pipeline.run(row)
+
+    assert factory_calls == []
+    assert len(startup_chunker.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_overflow_warning_measures_against_the_served_window():
+    from loguru import logger as _logger
+
+    chunk = Chunk(id="c1", text="hello", partition="p", token_count=3000)
+    pipeline, row, _, _, _ = _served_window_pipeline(ServingEmbedder([[1.0]], 2048), configured=8192, chunks=[chunk])
+    messages, sink_id = _capture_warnings()
+    try:
+        await pipeline.run(row)
+    finally:
+        _logger.remove(sink_id)
+
+    assert any("2047-token limit" in m for m in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "served",
+    [
+        pytest.param((None, 2048), id="unreachable-when-chunked"),
+        pytest.param((32768, 2048), id="redeployed-smaller-after-it-was-read"),
+    ],
+)
+async def test_a_window_that_shrinks_during_the_embed_fails_the_file_before_the_store(served):
+    """The server reports 2048 only after refusing the configured truncation
+    mid-embed, so the chunks were sized for 8192. Stored, a 3000-token chunk
+    would be searchable on its first 2047 tokens only: fail the file instead,
+    so a retry chunks it for 2048."""
+    from core.utils.exceptions import PipelineError
+
+    chunk = Chunk(id="c1", text="hello", partition="p", token_count=3000)
+    pipeline, row, factory_calls, _, _ = _served_window_pipeline(
+        ServingEmbedder([[1.0]], *served), configured=8192, chunks=[chunk]
+    )
+
+    with pytest.raises(PipelineError, match="Retry the file") as exc_info:
+        await pipeline.run(row)
+
+    assert exc_info.value.code == "EMBEDDER_WINDOW_SHRANK"
+    assert factory_calls == []
+    assert pipeline.vector_store.calls == []
+    assert "stored_count" not in row
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_shrinks_during_the_embed_keeps_a_file_whose_chunks_all_fit():
+    pipeline, row, _, _, _ = _served_window_pipeline(
+        ServingEmbedder([[1.0]], None, 2048),
+        configured=8192,
+        chunks=[Chunk(id="c1", text="hello", partition="p", token_count=500)],
+    )
+
+    await pipeline.run(row)
+
+    assert row["stored_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_shrinks_during_the_embed_fails_a_recursive_splitter_file_before_the_store():
+    """The real recursive_splitter: its 3000-token chunk is caught like any
+    other, because the chunker stores each chunk's token count."""
+    from core.chunking.recursive import RecursiveSplitter
+    from core.utils.exceptions import PipelineError
+
+    chunker = RecursiveSplitter(chunk_size=4000, chunk_overlap_rate=0.0, length_function=lambda s: len(s.split()))
+    pipeline, row, _, _, _ = _served_window_pipeline(
+        ServingEmbedder([[1.0]], None, 2048), configured=8192, chunker=chunker, text=" ".join(["w"] * 3000)
+    )
+
+    with pytest.raises(PipelineError, match="Retry the file") as exc_info:
+        await pipeline.run(row)
+
+    assert exc_info.value.code == "EMBEDDER_WINDOW_SHRANK"
+    assert pipeline.vector_store.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("words", "has_counter", "stored"),
+    [
+        pytest.param(3000, True, False, id="measured-over-the-window"),
+        pytest.param(5, True, True, id="measured-within-the-window"),
+        pytest.param(5, False, False, id="cannot-be-measured"),
+    ],
+)
+async def test_a_window_that_shrinks_during_the_embed_measures_chunks_with_no_stored_count(words, has_counter, stored):
+    """A chunk with no stored token count is measured. With no counter to
+    measure it, the file fails rather than risk storing a cut chunk."""
+    from core.utils.exceptions import PipelineError
+
+    chunk = Chunk(id="c1", text=" ".join(["w"] * words), partition="p")
+    pipeline, row, _, _, startup_chunker = _served_window_pipeline(
+        ServingEmbedder([[1.0]], None, 2048), configured=8192, chunks=[chunk]
+    )
+    if has_counter:
+        startup_chunker.length_function = lambda s: len(s.split())
+
+    if stored:
+        await pipeline.run(row)
+        assert row["stored_count"] == 1
+    else:
+        with pytest.raises(PipelineError, match="Retry the file") as exc_info:
+            await pipeline.run(row)
+        assert exc_info.value.code == "EMBEDDER_WINDOW_SHRANK"
+        assert pipeline.vector_store.calls == []

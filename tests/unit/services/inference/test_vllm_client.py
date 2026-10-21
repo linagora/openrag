@@ -15,7 +15,16 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from services.inference._circuit_breaker import _breakers
-from services.inference.vllm_client import VLLMClient, VLLMEmbedder, VLLMVision
+from services.inference._retry import _is_retryable
+from services.inference.vllm_client import (
+    _SUSPECT_UNICODE_ESCAPE,
+    TEIEmbedder,
+    VLLMClient,
+    VLLMEmbedder,
+    VLLMVision,
+    _find_suspect_escapes,
+    _log_safe_error_detail,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -104,15 +113,16 @@ class TestVLLMClient:
         assert 'data: {"choices":[{"delta":{"content":" world"}}]}' in lines
 
     @pytest.mark.asyncio
-    async def test_stream_chat_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_stream_chat_sends_enable_thinking_as_chat_template_kwargs_when_configured(self, enable_thinking):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             assert body["stream"] is True
-            assert body["chat_template_kwargs"] == {"enable_thinking": True}
+            assert body["chat_template_kwargs"] == {"enable_thinking": enable_thinking}
             assert "enable_thinking" not in body
             return httpx.Response(200, text="data: [DONE]\n")
 
-        client = self._make_client(handler, enable_thinking=True)
+        client = self._make_client(handler, enable_thinking=enable_thinking)
         lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
 
         assert lines == ["data: [DONE]"]
@@ -158,20 +168,22 @@ class TestVLLMClient:
         assert captured["temperature"] == 0.3
 
     @pytest.mark.asyncio
-    async def test_enable_thinking_is_sent_as_chat_template_kwargs_when_configured(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_enable_thinking_is_sent_as_chat_template_kwargs_when_configured(self, enable_thinking):
         captured: dict = {}
 
         def capture(req: httpx.Request) -> httpx.Response:
             captured.update(json.loads(req.content))
             return _chat_response()
 
-        await self._make_client(capture, enable_thinking=True).chat([{"role": "user", "content": "hi"}])
+        await self._make_client(capture, enable_thinking=enable_thinking).chat([{"role": "user", "content": "hi"}])
 
-        assert captured["chat_template_kwargs"] == {"enable_thinking": True}
+        assert captured["chat_template_kwargs"] == {"enable_thinking": enable_thinking}
         assert "enable_thinking" not in captured
 
     @pytest.mark.asyncio
-    async def test_enable_thinking_merges_with_existing_chat_template_kwargs(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_enable_thinking_merges_with_existing_chat_template_kwargs(self, enable_thinking):
         captured: dict = {}
 
         def capture(req: httpx.Request) -> httpx.Response:
@@ -180,11 +192,11 @@ class TestVLLMClient:
 
         await self._make_client(
             capture,
-            enable_thinking=True,
+            enable_thinking=enable_thinking,
             chat_template_kwargs={"custom": "value"},
         ).chat([{"role": "user", "content": "hi"}])
 
-        assert captured["chat_template_kwargs"] == {"custom": "value", "enable_thinking": True}
+        assert captured["chat_template_kwargs"] == {"custom": "value", "enable_thinking": enable_thinking}
 
     @pytest.mark.asyncio
     async def test_chat_template_kwargs_omitted_by_default(self):
@@ -227,6 +239,94 @@ class TestVLLMClient:
         assert "max_retries" not in captured
 
     @pytest.mark.asyncio
+    async def test_falsy_config_logprobs_not_forwarded_on_chat(self):
+        """The DI container forwards LLMParamsConfig.logprobs (default False)
+        into self._defaults. `logprobs: false` is the OpenAI default, so it adds
+        nothing — but strict providers whose schema lacks the field reject it by
+        name whatever the value, e.g. Gemini"""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture, logprobs=False).chat([{"role": "user", "content": "hi"}])
+
+        assert "logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_falsy_config_logprobs_not_forwarded_on_generate(self):
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture, logprobs=False).generate("hi")
+
+        assert "logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_falsy_request_logprobs_dropped_with_top_logprobs(self):
+        """A client sending `logprobs: false` alongside `top_logprobs` must not
+        leak either: top_logprobs is only meaningful when logprobs is on."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture).chat([{"role": "user", "content": "hi"}], logprobs=False, top_logprobs=3)
+
+        assert "logprobs" not in captured
+        assert "top_logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded_on_chat(self):
+        """An explicit opt-in must keep flowing through unchanged."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture).chat([{"role": "user", "content": "hi"}], logprobs=True, top_logprobs=5)
+
+        assert captured["logprobs"] is True
+        assert captured["top_logprobs"] == 5
+
+    @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded_on_generate(self):
+        """Same opt-in guarantee on the completions path. `/completions` takes
+        an integer `logprobs` (not the chat API's bool + `top_logprobs`), so a
+        truthy int must survive untouched — the strip is falsy-only, not a
+        blanket removal of the field."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=5)
+
+        assert captured["logprobs"] == 5
+
+    @pytest.mark.asyncio
+    async def test_zero_logprobs_forwarded_on_generate(self):
+        """`/completions`' integer `logprobs` treats 0 as a deliberate request
+        (the sampled token's own logprob, no alternates) — distinct from
+        unset/False. A truthiness check would wrongly conflate 0 with off."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=0)
+
+        assert captured["logprobs"] == 0
+
+    @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
         c = VLLMClient(endpoint="http://vllm:8000/v1/", model_name="m")
         assert c._endpoint == "http://vllm:8000/v1"
@@ -258,10 +358,10 @@ class TestVLLMClientOverrides:
     def test_no_override_uses_defaults(self):
         client = self._make_client()
         kwargs: dict = {}
-        base_url, model, headers = client._resolve_overrides(kwargs)
+        base_url, model, headers, _ = client._resolve_overrides(kwargs)
         assert base_url == "http://default:8000/v1"
         assert model == "default-model"
-        assert headers is None
+        assert headers == {"Authorization": "Bearer default-key"}
 
     def test_llm_override_model_applied_endpoint_and_key_ignored(self):
         client = self._make_client()
@@ -273,11 +373,11 @@ class TestVLLMClientOverrides:
             },
         }
         kwargs: dict = {"metadata": original_metadata}
-        base_url, model, headers = client._resolve_overrides(kwargs)
+        base_url, model, headers, _ = client._resolve_overrides(kwargs)
         # Only `model` is honored; endpoint and credentials stay server-side.
         assert model == "custom-model"
         assert base_url == "http://default:8000/v1"
-        assert headers is None
+        assert headers == {"Authorization": "Bearer default-key"}
         # kwargs must not be mutated — retries depend on llm_override surviving.
         assert kwargs["metadata"] is original_metadata
         assert "llm_override" in kwargs["metadata"]
@@ -289,10 +389,10 @@ class TestVLLMClientOverrides:
             "use_map_reduce": True,
         }
         kwargs: dict = {"metadata": original_metadata}
-        base_url, model, headers = client._resolve_overrides(kwargs)
+        base_url, model, headers, _ = client._resolve_overrides(kwargs)
         assert base_url == "http://default:8000/v1"
         assert model == "override-model"
-        assert headers is None
+        assert headers == {"Authorization": "Bearer default-key"}
         assert kwargs["metadata"] is original_metadata
         assert kwargs["metadata"] == {
             "llm_override": {"model": "override-model"},
@@ -312,10 +412,410 @@ class TestVLLMClientOverrides:
                 }
             }
         }
-        base_url, model, headers = client._resolve_overrides(kwargs)
+        base_url, model, headers, _ = client._resolve_overrides(kwargs)
         assert model == "custom-model"
         assert base_url == "http://default:8000/v1"
-        assert headers is None
+        assert headers == {"Authorization": "Bearer default-key"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "caller_shaped"),
+    [
+        ({}, False),
+        ({"model": "another-model"}, False),
+        ({"base_url": "https://caller-llm.example/v1", "api_key": "caller-key"}, True),
+    ],
+)
+async def test_a_refused_stream_says_whether_the_key_was_the_callers(
+    monkeypatch: pytest.MonkeyPatch, override: dict, caller_shaped: bool
+) -> None:
+    """The streaming path marks its provider errors like chat and generate do
+    (``InferenceError.caller_shaped``, read by the API's error handler): only
+    an honoured endpoint override sends the caller's own key."""
+    monkeypatch.setenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", "true")
+    client = VLLMClient(endpoint="http://vllm:8000/v1", model_name="test-model", api_key="k")
+    client._client = httpx.AsyncClient(transport=_make_transport(lambda req: httpx.Response(401, json={})))
+
+    with pytest.raises(InferenceError) as info:
+        async for _ in client.stream_chat([{"role": "user", "content": "hi"}], metadata={"llm_override": override}):
+            pass
+
+    assert info.value.status_code == 401
+    assert info.value.caller_shaped is caller_shaped
+
+
+class TestCallerShapedRefusalAndTheSharedBreaker:
+    """Callers shape the LLM request: the model through llm_override, which
+    needs no opt-in, and any extra chat-body field, which is forwarded. LiteLLM
+    answers a refused model with 401 through v1.84, and reads credentials from
+    the body. Counting that 401 let any user open the shared "llm" breaker for
+    every tenant with one burst of requests."""
+
+    @staticmethod
+    def _gateway_client() -> VLLMClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if body["model"] != "default-model":
+                return httpx.Response(401, json={"error": {"type": "key_model_access_denied"}})
+            if "vertex_credentials" in body:
+                return httpx.Response(401, json={"error": {"message": "Invalid credentials"}})
+            return _chat_response()
+
+        client = VLLMClient(endpoint="http://gateway:4000/v1", model_name="default-model", api_key="k")
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return client
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "shaped",
+        [
+            pytest.param({"metadata": {"llm_override": {"model": "gpt-forbidden"}}}, id="refused-model"),
+            # api_key itself is stripped (TestCredentialBodyFields); any other
+            # forwarded field a proxy reads as a credential does the same.
+            pytest.param({"vertex_credentials": "bogus"}, id="body-credential-on-the-configured-model"),
+        ],
+    )
+    async def test_a_burst_of_caller_shaped_401s_leaves_the_breaker_closed(self, shaped):
+        from aiobreaker.state import CircuitBreakerState
+
+        client = self._gateway_client()
+
+        results = await asyncio.gather(
+            *(client.chat([{"role": "user", "content": "hi"}], **shaped) for _ in range(50)),
+            return_exceptions=True,
+        )
+
+        assert all(type(r) is InferenceError and r.status_code == 401 for r in results)
+        assert _breakers["llm"].current_state == CircuitBreakerState.CLOSED
+        assert _breakers["llm"].fail_counter == 0
+        assert (await client.chat([{"role": "user", "content": "hi"}]))["choices"][0]["message"]["content"] == "hello"
+
+
+class TestCredentialBodyFields:
+    """The chat schema forwards unknown fields, and a LiteLLM proxy takes an
+    ``api_key`` from the body over the deployment's key. None of the fields
+    that pick a credential or an endpoint may leave in the body, top-level or
+    under ``extra_body``, which LiteLLM spreads into the outbound call."""
+
+    _SENT = {
+        "api_key": "bogus",
+        "api_base": "https://attacker.invalid",
+        "base_url": "https://attacker.invalid",
+        "temperature": 0.2,
+        "extra_body": {"api_key": "bogus", "top_k": 5},
+    }
+
+    @staticmethod
+    def _capturing_client(bodies: list[dict], response: httpx.Response) -> VLLMClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return response
+
+        client = VLLMClient(endpoint="http://gateway:4000/v1", model_name="default-model", api_key="k")
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return client
+
+    def _assert_stripped(self, body: dict) -> None:
+        assert not {"api_key", "api_base", "base_url"} & body.keys()
+        assert body["temperature"] == 0.2
+        assert body["extra_body"] == {"top_k": 5}
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_no_credential_field(self):
+        bodies: list[dict] = []
+        sent = json.loads(json.dumps(self._SENT))
+
+        await self._capturing_client(bodies, _chat_response()).chat([{"role": "user", "content": "hi"}], **sent)
+
+        self._assert_stripped(bodies[0])
+        # The caller's own arguments are untouched: a retry sends them again.
+        assert sent == self._SENT
+
+    @pytest.mark.asyncio
+    async def test_generate_sends_no_credential_field(self):
+        bodies: list[dict] = []
+
+        await self._capturing_client(bodies, _completions_response()).generate("hi", **self._SENT)
+
+        self._assert_stripped(bodies[0])
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_sends_no_credential_field(self):
+        bodies: list[dict] = []
+        client = self._capturing_client(bodies, httpx.Response(200, text="data: [DONE]\n\n"))
+
+        async for _ in client.stream_chat([{"role": "user", "content": "hi"}], **self._SENT):
+            pass
+
+        self._assert_stripped(bodies[0])
+
+
+class TestCustomEndpointOverride:
+    """LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT restores the full llm_override contract.
+
+    The *host* is unrestricted; the request shape is not (https, fixed path), and
+    the server's own credential must never leak.
+    """
+
+    def _make_client(self, monkeypatch, enabled: bool, **kwargs):
+        if enabled:
+            monkeypatch.setenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", "true")
+        else:
+            monkeypatch.delenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", raising=False)
+        return VLLMClient(
+            endpoint="http://default:8000/v1",
+            model_name="default-model",
+            api_key="default-key",
+            **kwargs,
+        )
+
+    def _kwargs(self, **override):
+        return {"metadata": {"llm_override": override}}
+
+    @staticmethod
+    def _refusing_transport() -> httpx.AsyncClient:
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        return httpx.AsyncClient(transport=_make_transport(refuse))
+
+    @pytest.mark.asyncio
+    async def test_client_endpoint_failure_does_not_touch_the_shared_breaker(self, monkeypatch):
+        """A failing client endpoint must not count against the shared "llm" breaker.
+
+        It is one global instance guarding the *server's* endpoint, so otherwise any
+        caller could aim the override at an unresolvable host and open it for every
+        tenant.
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+        client._client = self._refusing_transport()
+
+        with pytest.raises(InferenceConnectionError):
+            await client.chat(
+                [{"role": "user", "content": "hi"}],
+                **self._kwargs(base_url="https://third-party.tld/v1", api_key="k"),
+            )
+
+        assert "llm" not in _breakers
+
+    @pytest.mark.asyncio
+    async def test_configured_endpoint_failure_still_counts_against_the_shared_breaker(self, monkeypatch):
+        """Skipping the breaker must be scoped to overridden endpoints, not a
+        blanket disable of the server's own."""
+        client = self._make_client(monkeypatch, enabled=True)
+        client._client = self._refusing_transport()
+
+        with pytest.raises(InferenceConnectionError):
+            await client.chat([{"role": "user", "content": "hi"}])
+
+        assert _breakers["llm"].fail_counter == 1
+
+    def test_arbitrary_endpoint_is_honored_with_client_key(self, monkeypatch):
+        client = self._make_client(monkeypatch, enabled=True)
+        base_url, model, headers, overridden = client._resolve_overrides(
+            self._kwargs(base_url="https://api.openai.com/v1/", api_key="sk-client", model="gpt-5.1")
+        )
+
+        assert base_url == "https://api.openai.com/v1"
+        assert model == "gpt-5.1"
+        assert headers == {"Authorization": "Bearer sk-client"}
+        assert overridden is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://169.254.169.254/latest/meta-data",
+            "https://internal-service.corp/v1",
+            "https://api.openai.com@evil.tld/v1",
+        ],
+    )
+    def test_no_host_allowlist_when_enabled(self, monkeypatch, url):
+        """Explicit: with the flag on there is no host allowlist. That residual SSRF
+        (host, not path) is what the flag trades away — asserted so it cannot
+        regress into a false sense of safety.
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+        base_url, _, _, _ = client._resolve_overrides(self._kwargs(base_url=url, api_key="k", model="m"))
+
+        assert base_url == url.rstrip("/")
+
+    def test_server_api_key_never_reaches_an_overridden_endpoint(self, monkeypatch):
+        """An override with no api_key sends no Authorization at all rather than
+        falling back to the server's credential."""
+        client = self._make_client(monkeypatch, enabled=True)
+        _, _, headers, _ = client._resolve_overrides(self._kwargs(base_url="https://evil.tld/v1", model="m"))
+
+        assert headers == {}
+
+    @pytest.mark.parametrize("base_url", ["http://milvus:19530/v2", "file:///etc/passwd"])
+    def test_non_https_scheme_is_rejected_without_retry(self, monkeypatch, base_url):
+        """https only: plaintext http is where the internal-infra SSRF payoff lives.
+        Failing here turns it into a 4xx `with_retry` will not re-attempt."""
+        client = self._make_client(monkeypatch, enabled=True)
+
+        with pytest.raises(InferenceError) as exc_info:
+            client._resolve_overrides(self._kwargs(base_url=base_url, api_key="k"))
+
+        assert exc_info.value.status_code == 400
+        assert not _is_retryable(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://milvus:19530/v2/vectordb/collections/list#",
+            "https://milvus:19530/v2/vectordb/collections/list?x=1",
+            "https://milvus:19530/v2/vectordb/../collections",
+            # Percent-encoded: httpx sends the octets verbatim, so a target that
+            # decodes before routing resolves these to the `..` form above.
+            "https://milvus:19530/v2/vectordb/%2e%2e/collections",
+            "https://milvus:19530/v2/vectordb/%2E%2E/collections",
+        ],
+    )
+    def test_client_controlled_path_is_rejected_without_retry(self, monkeypatch, base_url):
+        """The request is always issued as ``{base_url}/chat/completions``, so a
+        fragment or query truncates that suffix and a ``..`` traverses out of it —
+        either aims the override at an arbitrary internal path (here Milvus' REST
+        API, reading cross-partition vectors).
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+
+        with pytest.raises(InferenceError) as exc_info:
+            client._resolve_overrides(self._kwargs(base_url=base_url, api_key="k"))
+
+        assert exc_info.value.status_code == 400
+        assert not _is_retryable(exc_info.value)
+
+    def test_unparseable_base_url_is_rejected_without_retry(self, monkeypatch):
+        """``urlsplit`` raises on an unclosed IPv6 literal; uncaught, that
+        ``ValueError`` surfaces as an unstructured 500."""
+        client = self._make_client(monkeypatch, enabled=True)
+
+        with pytest.raises(InferenceError) as exc_info:
+            client._resolve_overrides(self._kwargs(base_url="https://[::1/v1", api_key="k"))
+
+        assert exc_info.value.status_code == 400
+        assert not _is_retryable(exc_info.value)
+
+    @pytest.mark.parametrize("llm_override", ["gpt-5.1", ["gpt-5.1"], 7])
+    def test_non_mapping_llm_override_is_ignored(self, monkeypatch, llm_override):
+        """Only the outer ``metadata`` is schema-validated, so this is a well-formed
+        request whose ``.get`` would raise ``AttributeError`` — a 500. The breaker
+        predicate reads it first, before the method body runs.
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+        kwargs = {"metadata": {"llm_override": llm_override}}
+
+        assert client._has_endpoint_override(kwargs) is False
+        base_url, model, headers, overridden = client._resolve_overrides(kwargs)
+
+        assert (base_url, model, overridden) == ("http://default:8000/v1", "default-model", False)
+        assert headers == {"Authorization": "Bearer default-key"}
+
+    def test_disabled_by_default_still_ignores_base_url(self, monkeypatch):
+        """Unset env keeps the hardened post-refactor behaviour, so an upgrade never
+        turns an untouched deployment into an SSRF surface."""
+        client = self._make_client(monkeypatch, enabled=False)
+        base_url, model, headers, overridden = client._resolve_overrides(
+            self._kwargs(base_url="https://api.openai.com/v1", api_key="sk-client", model="gpt-5.1")
+        )
+
+        assert base_url == "http://default:8000/v1"
+        assert model == "gpt-5.1"
+        assert headers == {"Authorization": "Bearer default-key"}
+        assert overridden is False
+
+    def test_override_does_not_mutate_caller_metadata(self, monkeypatch):
+        """Retries re-read the same kwargs, so the override must survive intact."""
+        client = self._make_client(monkeypatch, enabled=True)
+        kwargs = self._kwargs(base_url="https://api.openai.com/v1", api_key="sk-client", model="gpt-5.1")
+        original = kwargs["metadata"]["llm_override"].copy()
+
+        client._resolve_overrides(kwargs)
+
+        assert kwargs["metadata"]["llm_override"] == original
+
+    @pytest.mark.asyncio
+    async def test_override_reaches_the_wire_on_chat(self, monkeypatch):
+        """End-to-end: the request is issued to the overridden host with the
+        client's key, not the server's."""
+        client = self._make_client(monkeypatch, enabled=True)
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["auth"] = request.headers.get("Authorization")
+            return _chat_response("ok")
+
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        await client.chat(
+            [{"role": "user", "content": "hi"}],
+            metadata={
+                "llm_override": {
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key": "sk-client",
+                    "model": "gpt-5.1",
+                }
+            },
+        )
+
+        assert seen["url"] == "https://api.openai.com/v1/chat/completions"
+        assert seen["auth"] == "Bearer sk-client"
+
+    @pytest.mark.asyncio
+    async def test_server_sampling_defaults_are_not_sent_to_a_client_endpoint(self, monkeypatch):
+        """The server's sampling defaults must not ride along to another provider,
+        which may reject them outright — this is what made an otherwise-restored
+        override still fail in production."""
+        client = self._make_client(monkeypatch, enabled=True, temperature=0.3)
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return _chat_response("ok")
+
+        client._client = httpx.AsyncClient(transport=_make_transport(capture))
+        await client.chat(
+            [{"role": "user", "content": "hi"}],
+            metadata={"llm_override": {"base_url": "https://third-party.tld/v1", "api_key": "k", "model": "m"}},
+        )
+
+        assert "temperature" not in captured
+        assert captured["model"] == "m"
+
+    @pytest.mark.asyncio
+    async def test_keyless_override_sends_no_authorization_on_the_wire(self, monkeypatch):
+        """httpx merges client-level headers into every request, so this only holds
+        because Authorization is set per request."""
+        client = self._make_client(monkeypatch, enabled=True)
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("Authorization")
+            return _chat_response("ok")
+
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        await client.chat(
+            [{"role": "user", "content": "hi"}],
+            metadata={"llm_override": {"base_url": "https://no-auth.internal/v1", "model": "m"}},
+        )
+
+        assert seen["auth"] is None
+
+    @pytest.mark.asyncio
+    async def test_server_key_is_sent_when_there_is_no_override(self, monkeypatch):
+        """Moving Authorization off the client must not silently drop it."""
+        client = self._make_client(monkeypatch, enabled=True)
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("Authorization")
+            return _chat_response("ok")
+
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        await client.chat([{"role": "user", "content": "hi"}])
+
+        assert seen["auth"] == "Bearer default-key"
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +849,20 @@ class TestVLLMEmbedder:
         assert result == [[0.1, 0.2], [0.3, 0.4]]
 
     @pytest.mark.asyncio
+    async def test_a_refused_key_does_not_count_toward_the_embedder_breaker(self):
+        """The ``embedder`` breaker is shared by every embedder endpoint: one
+        endpoint's 401 counted here opened it for every partition (#1100). The
+        metrics still record it against that endpoint."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": "invalid key"})
+
+        with pytest.raises(EmbeddingAPIError):
+            await self._make_embedder(handler).embed(["hello"])
+
+        assert _breakers["embedder"].fail_counter == 0
+
+    @pytest.mark.asyncio
     async def test_embed_splits_large_input_into_batches(self):
         """Inputs larger than batch_size are split into multiple requests and
         the vectors are reassembled in the original input order."""
@@ -378,7 +892,7 @@ class TestVLLMEmbedder:
         started: list[str] = []
         cancelled: list[str] = []
 
-        async def fake_embed_batch(texts: list[str]) -> list[list[float]]:
+        async def fake_embed_batch(texts: list[str], *, offset: int = 0) -> list[list[float]]:
             value = texts[0]
             started.append(value)
             if value == "fail":
@@ -455,6 +969,140 @@ class TestVLLMEmbedder:
 
         await self._make_embedder(handler).embed(["test"])
 
+    @staticmethod
+    def _served_window_handler(served: int | None, sent: list[int], *, rejection: str | None = None):
+        """A vLLM that serves *served* tokens and rejects any truncation above it."""
+        rejection = rejection or "truncate_prompt_tokens value is greater than max_model_len."
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                assert request.url.path == "/v1/models"
+                entry = {"id": "bge-m3", "object": "model"}
+                if served is not None:
+                    entry["max_model_len"] = served
+                return httpx.Response(200, json={"object": "list", "data": [entry]})
+            body = json.loads(request.content)
+            sent.append(body["truncate_prompt_tokens"])
+            if served is None or body["truncate_prompt_tokens"] > served:
+                return httpx.Response(400, json={"error": {"message": rejection, "code": 400}})
+            return httpx.Response(
+                200, json={"data": [{"index": i, "embedding": [0.1]} for i in range(len(body["input"]))]}
+            )
+
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_truncation_drops_below_the_served_max_model_len(self):
+        """An endpoint configured for 8192 against a server started with
+        --max-model-len 2048 embeds at 2047 instead of failing every call,
+        and later calls go straight to 2047."""
+        sent: list[int] = []
+        embedder = self._make_embedder(self._served_window_handler(2048, sent), max_model_len=8192)
+
+        assert await embedder.embed(["a"]) == [[0.1]]
+        assert await embedder.embed(["b"]) == [[0.1]]
+        assert sent == [8191, 2047, 2047]
+
+    @pytest.mark.asyncio
+    async def test_concurrently_rejected_batches_all_resend(self):
+        sent: list[int] = []
+        embedder = self._make_embedder(
+            self._served_window_handler(2048, sent), max_model_len=8192, batch_size=1, embed_concurrency=3
+        )
+
+        assert await embedder.embed(["a", "b", "c"]) == [[0.1]] * 3
+        assert sent.count(2047) == 3
+
+    @pytest.mark.asyncio
+    async def test_truncation_rejection_is_raised_when_the_server_does_not_report_its_window(self):
+        sent: list[int] = []
+        embedder = self._make_embedder(self._served_window_handler(None, sent), max_model_len=8192)
+
+        with pytest.raises(EmbeddingAPIError) as exc_info:
+            await embedder.embed(["a"])
+        assert exc_info.value.status_code == 400
+        assert sent == [8191]
+
+    @pytest.mark.asyncio
+    async def test_served_window_reads_models_once_and_bounds_the_truncation(self):
+        sent: list[int] = []
+        gets: list[httpx.Request] = []
+        serve = self._served_window_handler(2048, sent)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                gets.append(request)
+            return serve(request)
+
+        embedder = self._make_embedder(handler, max_model_len=8192)
+
+        assert await asyncio.gather(*(embedder.served_window() for _ in range(3))) == [2048] * 3
+        assert await embedder.served_window() == 2048
+        assert len(gets) == 1
+        # Short deadline: the probe runs before chunking, so a blackholed
+        # embedder must not hold the file for the 120 s embed timeout.
+        assert gets[0].extensions["timeout"]["read"] == 10.0
+        await embedder.embed(["a"])
+        assert sent == [2047], "known before the first embed, so no rejection first"
+
+    @pytest.mark.asyncio
+    async def test_served_window_asks_again_after_the_server_was_unreachable(self):
+        attempts: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request)
+            if len(attempts) == 1:
+                raise httpx.ConnectError("refused")
+            return httpx.Response(200, json={"data": [{"id": "bge-m3", "max_model_len": 2048}]})
+
+        embedder = self._make_embedder(handler, max_model_len=8192)
+
+        assert await embedder.served_window() is None
+        assert await embedder.served_window() == 2048
+        assert len(attempts) == 2
+
+    @pytest.mark.asyncio
+    async def test_served_window_is_not_asked_again_when_the_server_does_not_report_it(self):
+        gets: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            gets.append(request)
+            return httpx.Response(200, json={"data": [{"id": "bge-m3"}]})
+
+        embedder = self._make_embedder(handler, max_model_len=8192)
+
+        assert await embedder.served_window() is None
+        assert await embedder.served_window() is None
+        assert len(gets) == 1
+
+    @pytest.mark.asyncio
+    async def test_tei_embeds_without_asking_for_a_model_list(self):
+        from core.embeddings import embedder_registry
+
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1, 0.2]}]})
+
+        embedder = embedder_registry.create("tei", endpoint="http://tei:80/v1", model_name="bge-m3", max_model_len=8192)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        assert isinstance(embedder, TEIEmbedder)
+        # TEI has no /models: the configured window stands, with no request for it.
+        assert await embedder.served_window() is None
+        assert await embedder.embed(["a"]) == [[0.1, 0.2]]
+        assert [(request.method, request.url.path) for request in requests] == [("POST", "/v1/embeddings")]
+
+    @pytest.mark.asyncio
+    async def test_other_bad_requests_are_raised_without_probing(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST", "a 400 unrelated to truncation must not probe /models"
+            return httpx.Response(400, json={"error": {"message": "input is empty"}})
+
+        with pytest.raises(EmbeddingAPIError):
+            await self._make_embedder(handler, max_model_len=8192).embed(["a"])
+
     @pytest.mark.asyncio
     async def test_embed_connection_error(self):
         async def fail(*a, **kw):
@@ -527,6 +1175,23 @@ class TestVLLMVision:
         await self._make_vision(handler).caption_image(b"\x89PNG\r\n\x1a\n")
 
     @pytest.mark.asyncio
+    async def test_caption_image_sends_the_configured_api_key(self):
+        """VLLMClient sets Authorization per request, not on the shared httpx
+        client, so an overridden llm endpoint never receives the server's key.
+        Captioning inherits that client but always calls the configured endpoint,
+        so it must pass the header explicitly or authenticate as nobody.
+        """
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("Authorization")
+            return _chat_response("ok")
+
+        await self._make_vision(handler).caption_image(b"img")
+
+        assert seen["auth"] == "Bearer test-key"
+
+    @pytest.mark.asyncio
     async def test_caption_images_batch(self):
         call_count = 0
 
@@ -559,25 +1224,27 @@ class TestVLLMVision:
         await vision.caption_image(b"img")
 
     @pytest.mark.asyncio
-    async def test_caption_image_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_caption_image_sends_enable_thinking_as_chat_template_kwargs_when_configured(self, enable_thinking):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            assert body["chat_template_kwargs"] == {"enable_thinking": True}
+            assert body["chat_template_kwargs"] == {"enable_thinking": enable_thinking}
             assert "enable_thinking" not in body
             return _chat_response("ok")
 
-        await self._make_vision(handler, enable_thinking=True).caption_image(b"img")
+        await self._make_vision(handler, enable_thinking=enable_thinking).caption_image(b"img")
 
     @pytest.mark.asyncio
-    async def test_caption_image_merges_enable_thinking_with_existing_chat_template_kwargs(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_caption_image_merges_enable_thinking_with_existing_chat_template_kwargs(self, enable_thinking):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            assert body["chat_template_kwargs"] == {"custom": "value", "enable_thinking": True}
+            assert body["chat_template_kwargs"] == {"custom": "value", "enable_thinking": enable_thinking}
             return _chat_response("ok")
 
         await self._make_vision(
             handler,
-            enable_thinking=True,
+            enable_thinking=enable_thinking,
             chat_template_kwargs={"custom": "value"},
         ).caption_image(b"img")
 
@@ -746,3 +1413,159 @@ class TestEmbedderRetryFires:
         with pytest.raises(EmbeddingAPIError):
             await embedder._embed_batch(["x"])
         assert calls["n"] == 1, "4xx must not be retried"
+
+
+class TestEmbedderErrorPayloadIsBounded:
+    """``EmbeddingAPIError.extra`` is not log-only — error_handlers.py serializes
+    it into the HTTP error body, so anything put there is client-visible and has
+    to stay bounded.
+    """
+
+    def _embedder(self, handler):
+        embedder = VLLMEmbedder(endpoint="http://embed.test/v1", model_name="embed-model", batch_size=8)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return embedder
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_body_is_truncated(self):
+        """A huge upstream error page (e.g. an HTML 400) must not be echoed whole."""
+        embedder = self._embedder(lambda request: httpx.Response(400, text="E" * 10_000))
+
+        with pytest.raises(EmbeddingAPIError) as excinfo:
+            await embedder._embed_batch(["x"])
+
+        assert len(excinfo.value.extra["error"]) == 500
+
+    def test_suspect_findings_are_capped(self):
+        r"""One snippet per offending chunk would mirror a whole batch of document
+        text into the payload; a few examples identify the problem just as well."""
+        findings = _find_suspect_escapes([f"bad \\umlaut {i}" for i in range(50)])
+
+        assert len(findings) == 5
+
+    def test_suspect_snippet_is_a_window_not_the_whole_chunk(self):
+        """The snippet is a window around the match, so a multi-KB chunk
+        contributes only its neighbourhood of the offending escape."""
+        findings = _find_suspect_escapes(["A" * 5_000 + "\\umlaut" + "B" * 5_000])
+
+        assert len(findings) == 1
+        # 15 chars either side of the 2-char `\u` match.
+        assert len(findings[0]["snippet"]) == 32
+
+
+class TestEmbedderFailureLogOmitsDocumentText:
+    """The log pipeline has a different audience from the API error: operators
+    read container / centralized logs across tenants, while the API error goes
+    back to the uploader who already owns the document. Document text may reach
+    the second but never the first.
+    """
+
+    def test_log_detail_carries_positions_not_snippets(self):
+        exc = EmbeddingAPIError(
+            "Embedder API error (400)",
+            status_code=400,
+            model_name="embed-model",
+            base_url="http://embed.test/v1",
+            error='{"message": "invalid character in \\u escape"}',
+            suspect_texts=[
+                {"index": 3, "snippet": "contrat de M. Dupont \\uXY salaire"},
+                {"index": 7, "snippet": "numero de securite sociale \\uZZ"},
+            ],
+        )
+
+        detail = _log_safe_error_detail(exc)
+
+        assert detail["suspect_count"] == 2
+        assert detail["suspect_indices"] == [3, 7]
+        assert detail["status_code"] == 400
+        assert detail["model_name"] == "embed-model"
+        # The point of the whole helper: no document text, and not the
+        # provider body either (it can echo the rejected input back).
+        flat = repr(detail)
+        assert "Dupont" not in flat
+        assert "securite sociale" not in flat
+        assert "snippet" not in flat
+        assert "invalid character" not in flat
+
+    def test_log_detail_is_empty_for_an_exception_without_extra(self):
+        """`except BaseException` also catches plain exceptions — no `.extra`,
+        nothing to summarize, and no crash in the failure path."""
+        assert _log_safe_error_detail(RuntimeError("boom")) == {}
+
+
+class TestSuspectIndexIsDocumentGlobal:
+    """The reported position must identify the chunk in the *document*.
+
+    `_embed_batch` only ever sees one batch, so a raw `enumerate` position is
+    batch-local: under `batch_size=32` the offending chunk 97 reports as 1, and
+    every batch reports the same 0..31 range. Since the failure log carries only
+    these positions, a batch-local one silently points at an innocent chunk.
+    """
+
+    def test_offset_shifts_reported_positions(self):
+        findings = _find_suspect_escapes(["fine", "bad \\umlaut"], offset=96)
+
+        assert [f["index"] for f in findings] == [97]
+
+    def test_offset_defaults_to_zero_for_a_single_batch(self):
+        findings = _find_suspect_escapes(["bad \\umlaut"])
+
+        assert [f["index"] for f in findings] == [0]
+
+    @pytest.mark.asyncio
+    async def test_multi_batch_embed_reports_the_document_position(self):
+        """End-to-end through `embed()`: the bad chunk sits in the fourth batch,
+        so a batch-local index would report 1 instead of 97."""
+        texts = ["clean chunk"] * 200
+        texts[97] = "contract \\umlaut clause"
+
+        def handler(request):
+            payload = json.loads(request.content.decode())
+            if any(_SUSPECT_UNICODE_ESCAPE.search(t) for t in payload["input"]):
+                return httpx.Response(400, text="invalid character in \\u escape")
+            return _embed_response([[0.1]] * len(payload["input"]))
+
+        embedder = VLLMEmbedder(endpoint="http://embed.test/v1", model_name="embed-model", batch_size=32)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        with pytest.raises(EmbeddingAPIError) as excinfo:
+            await embedder.embed(texts)
+
+        assert [f["index"] for f in excinfo.value.extra["suspect_texts"]] == [97]
+
+
+@pytest.mark.asyncio
+async def test_generate_is_counted_as_a_completion_not_a_chat(monkeypatch):
+    from services.inference import _metrics
+
+    calls: list[dict] = []
+    monkeypatch.setattr(_metrics, "record_inference", lambda **kw: calls.append(kw))
+    client = TestVLLMClient()._make_client(lambda req: _completions_response("done"))
+    await client.generate("say something")
+    assert [c["operation"] for c in calls] == ["completion"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
+        'data:{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
+    ],
+)
+def test_stream_usage_is_counted_with_or_without_the_space(monkeypatch, line):
+    """SSE allows `data:` followed by one optional space; both carry the usage."""
+    from services.inference import vllm_client
+
+    seen: list[dict] = []
+    monkeypatch.setattr(vllm_client, "record_usage_from_response", lambda payload, operation: seen.append(payload))
+    vllm_client._record_stream_usage(line)
+    assert seen and seen[0]["usage"] == {"prompt_tokens": 7, "completion_tokens": 3}
+
+
+def test_a_content_delta_without_usage_is_not_parsed(monkeypatch):
+    from services.inference import vllm_client
+
+    seen: list[dict] = []
+    monkeypatch.setattr(vllm_client, "record_usage_from_response", lambda payload, operation: seen.append(payload))
+    vllm_client._record_stream_usage('data:{"choices":[{"delta":{"content":"hi"}}]}')
+    assert seen == []

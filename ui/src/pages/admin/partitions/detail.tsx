@@ -1,10 +1,21 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2, Info } from "lucide-react";
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowLeft,
+  ArrowLeftRight,
+  Save,
+  UserPlus,
+  Trash2,
+  CheckCircle,
+  XCircle,
+  Loader2,
+  Info,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -35,24 +46,231 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { NewBadge } from "@/components/shared/new-badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { computeEmbedderDrift, driftSignature } from "./embedder-drift";
+import { ChangeEmbedderDialog, EmbedderSwapBanner } from "./embedder-swap";
+import { useEmbedderSwap } from "./use-embedder-swap";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   getPartitionConfig,
   updatePartition,
   listPartitions,
   listPartitionMembers,
-  addPartitionMember,
+  listPartitionMemberCandidates,
   removePartitionMember,
   updatePartitionMemberRole,
 } from "@/lib/api/partitions";
-import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
+import type {
+  PartitionConfig,
+  PartitionMemberCandidate,
+  PartitionRole,
+} from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
-import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
+import {
+  listModelEndpoints,
+  validateStoredModelEndpoint,
+  resolveEmbedderName,
+} from "@/lib/api/models";
+import { listAllPrompts } from "@/lib/api/prompts";
+import type { PromptResponse } from "@/lib/api/prompts";
+import {
+  PROMPT_DEFAULT_OPTION,
+  PROMPT_GROUPS,
+  promptOptionToName,
+  promptOptionValue,
+  promptSelectValue,
+} from "@/lib/prompt-meta";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
+import { MemberPicker } from "./member-picker";
+import { candidateLabel, candidateSecondaryLabel } from "./member-candidate";
+import { addPartitionMembers } from "./member-batch";
+import type { MemberAddFailure } from "./member-batch";
+import {
+  PartitionMemberEmail,
+  PartitionMemberIdentity,
+} from "./partition-member-identity";
+import { describePartitionMember } from "./partition-member";
+
+// The answer prompt is selected on the partition (keyed by prompt type). Mirrors
+// the "Final Answer" concern in the prompt library.
+const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Final Answer")!.types;
 
 // --- General Tab ---
+
+const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+
+/** Interrupts once when a partition's files no longer match its embedder.
+ *
+ *  The panel below states the same fact permanently, but it only speaks to
+ *  someone already looking at it. A swap is silent everywhere else — queries
+ *  keep returning results, just ranked in a vector space the files were not
+ *  built in — so the one case worth an interruption is the one where results
+ *  are already wrong and nobody has been told.
+ *
+ *  Once per browser session per drift state: re-opening the page does not
+ *  nag, but a *new* embedder appearing later does, because the acknowledgement
+ *  is keyed on which embedders drifted rather than on the partition alone.
+ */
+function EmbedderDriftDialog({
+  partition,
+  drift,
+  onReembed,
+}: {
+  partition: string;
+  drift: ReturnType<typeof computeEmbedderDrift>;
+  /** Offered when the viewer may start a re-embed; omitted otherwise. */
+  onReembed?: () => void;
+}) {
+  const storageKey = `openrag:embedder-drift:${partition}:${driftSignature(drift)}`;
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!drift.hasDrift) return;
+    let acknowledged = false;
+    try {
+      acknowledged = sessionStorage.getItem(storageKey) === "1";
+    } catch {
+      // Private windows and blocked site data throw on access. Showing the
+      // dialog is the safe fallback: a repeated warning beats a silent one.
+    }
+    // Opening is a reaction to sessionStorage, which React cannot read during render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- see above
+    if (!acknowledged) setOpen(true);
+  }, [drift.hasDrift, storageKey]);
+
+  const acknowledge = () => {
+    try {
+      sessionStorage.setItem(storageKey, "1");
+    } catch {
+      // Nothing to do — the dialog simply shows again next visit.
+    }
+    setOpen(false);
+  };
+
+  if (!drift.hasDrift) return null;
+
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => (next ? setOpen(true) : acknowledge())}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Search results in this partition may be wrong</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3">
+              <p>
+                {files(drift.driftedFiles)} in <span className="font-medium">{partition}</span> were
+                indexed with a different embedder than the one queries now use. Their vectors were
+                produced by another model, so they are searched in a vector space they were not built
+                in &mdash; nothing errors, the ranking is just no longer meaningful.
+              </p>
+              <ul className="space-y-1 text-sm">
+                {drift.drifted.map((g) => (
+                  <li key={g.id}>
+                    <span className="font-mono">{g.key}</span>
+                    <span className="text-muted-foreground"> &mdash; {files(g.file_count)}</span>
+                  </li>
+                ))}
+                <li>
+                  <span className="font-mono">{drift.current}</span>
+                  <span className="text-muted-foreground"> &mdash; used by queries now</span>
+                </li>
+              </ul>
+              <p>Re-embed those files to bring them back in line.</p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          {onReembed ? (
+            <>
+              <AlertDialogCancel onClick={acknowledge}>Later</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  acknowledge();
+                  onReembed();
+                }}
+              >
+                Re-embed drifted files
+              </AlertDialogAction>
+            </>
+          ) : (
+            <AlertDialogAction onClick={acknowledge}>Got it</AlertDialogAction>
+          )}
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** What a partition's files were *actually* indexed with, and whether that
+ *  still matches the embedder queries use.
+ */
+function EmbedderProvenance({
+  drift,
+  onReembed,
+}: {
+  drift: ReturnType<typeof computeEmbedderDrift>;
+  onReembed?: () => void;
+}) {
+  const { groups, current, hasDrift, driftedFiles: total } = drift;
+  if (groups.length === 0) return null;
+
+  // Shown either way: a panel that only appears during an incident is one
+  // nobody knows to look for. Drift escalates it rather than adding a new one.
+  return (
+    <Alert
+      className={
+        hasDrift
+          ? "mt-6 bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-900/60"
+          : "mt-6"
+      }
+    >
+      <Info className="h-4 w-4" />
+      <AlertTitle>
+        {hasDrift ? `${files(total)} were indexed with a different embedder` : "Indexed with"}
+      </AlertTitle>
+      <AlertDescription>
+        {hasDrift && (
+          <p className="mb-2">
+            Queries embed with <span className="font-medium">{current}</span>, so these files are
+            searched in a vector space they were not built in. Re-embed them to bring them back.
+          </p>
+        )}
+        <ul className="space-y-1">
+          {groups.map((g) => (
+            <li key={g.id} className="text-sm">
+              <span className="font-mono">{g.key}</span>
+              {g.dimension != null && <span className="text-muted-foreground"> · {g.dimension}-d</span>}
+              <span className="text-muted-foreground"> — {files(g.file_count)}</span>
+              {g.recorded && !g.drifted && <span className="text-muted-foreground"> · current</span>}
+            </li>
+          ))}
+        </ul>
+        {groups.some((g) => !g.recorded) && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            &ldquo;unrecorded&rdquo; means indexed before OpenRag tracked which embedder ran &mdash; not
+            necessarily drifted.
+          </p>
+        )}
+        {hasDrift && onReembed && (
+          <Button type="button" variant="outline" size="sm" className="mt-3" onClick={onReembed}>
+            Re-embed drifted files
+          </Button>
+        )}
+      </AlertDescription>
+    </Alert>
+  );
+}
 
 function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const queryClient = useQueryClient();
@@ -71,6 +289,16 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const [indexationPreset, setIndexationPreset] = useState(partition.indexation_preset);
   const [retrievalPreset, setRetrievalPreset] = useState(partition.retrieval_preset);
   const [chatLlm, setChatLlm] = useState(partition.chat_llm ?? "__default__");
+  // Only carry the generation types this editor manages — a stale key (e.g. a
+  // pre-move query_contextualizer) would be rejected by the partition PATCH.
+  const initialGenerationPrompts = useMemo(() => {
+    const allowed = new Set<string>(GENERATION_PROMPT_TYPES.map((t) => t.value));
+    return Object.fromEntries(
+      Object.entries(partition.generation_prompt_names ?? {}).filter(([k]) => allowed.has(k)),
+    );
+  }, [partition.generation_prompt_names]);
+  const [generationPrompts, setGenerationPrompts] =
+    useState<Record<string, string>>(initialGenerationPrompts);
   const [llmValidated, setLlmValidated] = useState<boolean | null>(
     partition.chat_llm ? null : true,
   );
@@ -95,6 +323,47 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     queryFn: () => listModelEndpoints("embedder"),
     enabled: isAdmin,
   });
+
+  // Computed once and handed to both the panel and the dialog, so a partition
+  // can never be flagged in one and clean in the other.
+  const embedderDrift = useMemo(
+    () =>
+      computeEmbedderDrift(partition.embedder, partition.indexed_embedders, embedderEndpoints, partition.dimension),
+    [partition.embedder, partition.indexed_embedders, embedderEndpoints, partition.dimension],
+  );
+
+  // Moving to another embedder re-embeds the files first. Starting one
+  // is owner-gated like any settings change, and picking the target needs the
+  // admin-only endpoint registry. `swapTarget` non-null = the dialog is open.
+  const { swap: embedderSwap, running: swapRunning } = useEmbedderSwap(partition.name);
+  const canSwapEmbedder = canEdit && isAdmin && !swapRunning && (embedderEndpoints?.length ?? 0) > 0;
+  const [swapTarget, setSwapTarget] = useState<string | null>(null);
+  const currentEmbedderName = resolveEmbedderName(partition.embedder, embedderEndpoints);
+  // Repairing drift is a swap onto the embedder the partition already uses: only
+  // the files recorded with another model or vector field are redone.
+  const reembedDrifted = canSwapEmbedder ? () => setSwapTarget(currentEmbedderName) : undefined;
+
+  const { data: promptsData } = useQuery({
+    queryKey: ["prompts-library"],
+    queryFn: () => listAllPrompts(),
+    enabled: isAdmin,
+  });
+  const promptsByType = (type: string): PromptResponse[] =>
+    (promptsData ?? []).filter((p) => p.prompt_type === type);
+
+  // Compared against what the partition was loaded with, so an untouched
+  // mapping is omitted from the PATCH entirely.
+  const generationPromptsChanged =
+    JSON.stringify(generationPrompts) !== JSON.stringify(initialGenerationPrompts);
+
+  const setGenerationPrompt = (type: string, name: string) => {
+    setGenerationPrompts((prev) => {
+      const next = { ...prev };
+      if (name) next[type] = name;
+      else delete next[type];
+      return next;
+    });
+  };
 
   const validateLlm = useCallback(
     async (name: string) => {
@@ -145,6 +414,12 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
         indexation_preset: indexationPreset,
         retrieval_preset: retrievalPreset,
         chat_llm: chatLlm === "__default__" ? null : chatLlm,
+        // Only sent when this editor actually changed it. The backend validates
+        // every name in the mapping, so resubmitting an untouched-but-stale
+        // reference (its prompt since renamed or deleted) would 422 the whole
+        // PATCH and block unrelated edits like the description — and a non-admin
+        // owner, for whom this picker is disabled, could never clear it.
+        ...(generationPromptsChanged ? { generation_prompt_names: generationPrompts } : {}),
       }),
     onSuccess: () => {
       toast.success("Partition updated");
@@ -176,7 +451,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
         <CardTitle className="text-base">General Settings</CardTitle>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="space-y-6 max-w-3xl">
+        <form onSubmit={handleSubmit} className="space-y-6 max-w-5xl">
           {!canEdit && (
             <p className="rounded-md border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
               You have read-only access to this partition's settings. Only an owner can change them.
@@ -197,27 +472,70 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               disabled={!canEdit}
             />
           </div>
-          <div className="grid grid-cols-3 gap-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label className="text-muted-foreground">Dimension</Label>
-              <p className="text-sm font-medium pt-1">{partition.dimension}</p>
+              <p className="text-sm font-medium pt-1">
+                {partition.dimension ?? (
+                  <span className="text-muted-foreground font-normal">Not indexed yet</span>
+                )}
+              </p>
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Embedder</Label>
-              <p className="text-sm font-medium pt-1">
-                {resolveEmbedderName(partition.embedder, embedderEndpoints)}
-              </p>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-1">
+                <p className="text-sm font-medium">{currentEmbedderName}</p>
+                {canSwapEmbedder && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-6 gap-1 px-2 text-xs font-normal text-muted-foreground hover:text-foreground"
+                          onClick={() => setSwapTarget("")}
+                        >
+                          <ArrowLeftRight className="h-3 w-3" />
+                          Change
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        Move this partition to another embedder. Its files are re-embedded first;
+                        searches keep using {currentEmbedderName} until that finishes.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+                {canSwapEmbedder && <NewBadge feature="partitions.embedder_swap" />}
+              </div>
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Documents</Label>
               <p className="text-sm font-medium pt-1">{partition.document_count}</p>
             </div>
           </div>
-          <div className="pt-2 grid grid-cols-3 gap-6">
+          <EmbedderSwapBanner swap={embedderSwap} canCancel={canEdit} endpoints={embedderEndpoints} />
+          <EmbedderProvenance drift={embedderDrift} onReembed={reembedDrifted} />
+          {/* A running swap is already the fix: no need to interrupt about the drift it repairs. */}
+          {!swapRunning && (
+            <EmbedderDriftDialog partition={partition.name} drift={embedderDrift} onReembed={reembedDrifted} />
+          )}
+          {swapTarget !== null && (
+            <ChangeEmbedderDialog
+              partition={partition.name}
+              currentEmbedder={partition.embedder}
+              documentCount={partition.document_count}
+              endpoints={embedderEndpoints ?? []}
+              initialTarget={swapTarget}
+              onClose={() => setSwapTarget(null)}
+            />
+          )}
+          <div className="pt-2 grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>
               <Select value={indexationPreset} onValueChange={setIndexationPreset} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select preset" />
                 </SelectTrigger>
                 <SelectContent>
@@ -232,7 +550,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             <div className="space-y-2">
               <Label>Retrieval Preset</Label>
               <Select value={retrievalPreset} onValueChange={setRetrievalPreset} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select preset" />
                 </SelectTrigger>
                 <SelectContent>
@@ -256,7 +574,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                 )}
               </Label>
               <Select value={chatLlm} onValueChange={handleChatLlmChange} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select LLM" />
                 </SelectTrigger>
                 <SelectContent>
@@ -269,6 +587,31 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                 </SelectContent>
               </Select>
             </div>
+            {GENERATION_PROMPT_TYPES.map((t) => {
+              const options = promptsByType(t.value);
+              return (
+                <div key={t.value} className="space-y-2">
+                  <Label>{t.label}</Label>
+                  <Select
+                    value={promptSelectValue(generationPrompts[t.value])}
+                    onValueChange={(v) => setGenerationPrompt(t.value, promptOptionToName(v))}
+                    disabled={!canEdit || !isAdmin}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
+                      {options.map((p) => (
+                        <SelectItem key={p.id} value={promptOptionValue(p.name)}>
+                          {p.name}{p.is_default ? " (default)" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              );
+            })}
           </div>
           <div className="space-y-2">
             <Label className="flex items-center gap-1.5">
@@ -290,6 +633,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               type="number"
               min={1}
               required
+              className="max-w-[8rem]"
               value={chatHistoryDepth}
               onChange={(e) => setChatHistoryDepth(e.target.value)}
               disabled={!canEdit}
@@ -337,9 +681,11 @@ function PipelineConfigTab({ partition }: { partition: PartitionConfig }) {
         ) : (
           <dl className="space-y-2">
             {Object.entries(pipeline).map(([key, value]) => (
-              <div key={key} className="flex justify-between gap-4 text-sm">
-                <dt className="text-muted-foreground font-mono text-xs min-w-0 break-all">{key}</dt>
-                <dd className="font-medium text-right shrink-0">{renderConfigValue(value)}</dd>
+              <div key={key} className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-sm">
+                <dt className="text-muted-foreground font-mono text-xs min-w-0 [overflow-wrap:anywhere]">{key}</dt>
+                <dd className="ml-auto font-medium text-right min-w-0 [overflow-wrap:anywhere]">
+                  {renderConfigValue(value)}
+                </dd>
               </div>
             ))}
           </dl>
@@ -378,8 +724,11 @@ function PipelineConfigTab({ partition }: { partition: PartitionConfig }) {
 
 function UsersTab({ partitionName }: { partitionName: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [userId, setUserId] = useState("");
+  const [selectedCandidates, setSelectedCandidates] = useState<PartitionMemberCandidate[]>([]);
+  const [addFailures, setAddFailures] = useState<MemberAddFailure[]>([]);
   const [role, setRole] = useState("viewer");
+  const [candidateSearch, setCandidateSearch] = useState("");
+  const [debouncedCandidateSearch, setDebouncedCandidateSearch] = useState("");
   const queryClient = useQueryClient();
   const { canManageMembers } = usePermissions();
 
@@ -395,19 +744,79 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   const callerRole = partitionsQuery.data?.partitions.find((p) => p.partition === partitionName)?.role;
   const canManage = canManageMembers(callerRole);
 
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setDebouncedCandidateSearch(candidateSearch.trim());
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [candidateSearch]);
+
+  const normalizedCandidateSearch = candidateSearch.trim();
+  const candidateSearchReady =
+    /^\d+$/.test(normalizedCandidateSearch) || normalizedCandidateSearch.length >= 3;
+
+  const candidatesQuery = useInfiniteQuery({
+    queryKey: ["partition", partitionName, "member-candidates", debouncedCandidateSearch],
+    queryFn: ({ pageParam }) =>
+      listPartitionMemberCandidates(partitionName, {
+        search: debouncedCandidateSearch,
+        cursor: pageParam ?? undefined,
+        limit: 25,
+      }),
+    initialPageParam: null as number | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    enabled:
+      dialogOpen &&
+      canManage &&
+      (/^\d+$/.test(debouncedCandidateSearch) || debouncedCandidateSearch.length >= 3),
+  });
+  const candidates = candidatesQuery.data?.pages.flatMap((page) => page.candidates) ?? [];
+  const candidateSearchPending =
+    candidateSearchReady && normalizedCandidateSearch !== debouncedCandidateSearch;
+
   const addMutation = useMutation({
-    mutationFn: () => addPartitionMember(partitionName, Number(userId), role as PartitionRole),
-    onSuccess: () => {
-      toast.success("User added to partition");
+    mutationFn: async ({
+      candidates: selected,
+      selectedRole,
+    }: {
+      candidates: PartitionMemberCandidate[];
+      selectedRole: PartitionRole;
+    }) =>
+      addPartitionMembers({
+        partitionName,
+        candidates: selected,
+        role: selectedRole,
+      }),
+    onError: (error: Error) => {
+      toast.error(`Failed to add users: ${error.message}`);
+    },
+    onSuccess: ({ addedCandidates, failures }) => {
       queryClient.invalidateQueries({
         queryKey: ["partition", partitionName, "users"],
       });
+      queryClient.invalidateQueries({
+        queryKey: ["partition", partitionName, "member-candidates"],
+      });
+
+      if (failures.length > 0) {
+        setSelectedCandidates(failures.map((failure) => failure.candidate));
+        setAddFailures(failures);
+        const firstFailure = failures[0];
+        toast.error(
+          `${addedCandidates.length > 0 ? `${addedCandidates.length} added; ` : ""}${failures.length} failed: ${firstFailure.message}`,
+        );
+        return;
+      }
+
+      toast.success(
+        `${addedCandidates.length} user${addedCandidates.length === 1 ? "" : "s"} added to partition`,
+      );
       setDialogOpen(false);
-      setUserId("");
+      setSelectedCandidates([]);
+      setAddFailures([]);
       setRole("viewer");
-    },
-    onError: (error: Error) => {
-      toast.error(`Failed to add user: ${error.message}`);
+      setCandidateSearch("");
+      setDebouncedCandidateSearch("");
     },
   });
 
@@ -436,12 +845,28 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     },
   });
 
-  const handleAddUser = () => {
-    if (!userId.trim() || Number.isNaN(Number(userId))) {
-      toast.error("A numeric user ID is required");
+  const handleAddUsers = () => {
+    if (selectedCandidates.length === 0) {
+      toast.error("Select at least one user");
       return;
     }
-    addMutation.mutate();
+    setAddFailures([]);
+    addMutation.mutate({
+      candidates: selectedCandidates,
+      selectedRole: role as PartitionRole,
+    });
+  };
+
+  const handleDialogOpenChange = (open: boolean) => {
+    if (!open && addMutation.isPending) return;
+    setDialogOpen(open);
+    if (!open) {
+      setSelectedCandidates([]);
+      setAddFailures([]);
+      setRole("viewer");
+      setCandidateSearch("");
+      setDebouncedCandidateSearch("");
+    }
   };
 
   return (
@@ -463,11 +888,12 @@ function UsersTab({ partitionName }: { partitionName: string }) {
             ))}
           </div>
         ) : usersQuery.data && usersQuery.data.members.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="overflow-x-auto rounded-md border">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>User ID</TableHead>
+                  <TableHead>User</TableHead>
+                  <TableHead>Email</TableHead>
                   <TableHead>Role</TableHead>
                   <TableHead>Added</TableHead>
                   {canManage && <TableHead>Actions</TableHead>}
@@ -476,8 +902,11 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <TableBody>
                 {usersQuery.data.members.map((user) => (
                   <TableRow key={user.user_id}>
-                    <TableCell className="font-mono text-sm">
-                      {user.user_id}
+                    <TableCell className="text-sm">
+                      <PartitionMemberIdentity member={user} />
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      <PartitionMemberEmail member={user} />
                     </TableCell>
                     <TableCell>
                       {canManage ? (
@@ -508,13 +937,14 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                       <TableCell>
                         <ConfirmDialog
                           title="Remove User"
-                          description={`Remove user "${user.user_id}" from this partition? They will lose access to partition data.`}
+                          description={`Remove ${describePartitionMember(user)} from this partition? They will lose access to partition data.`}
                           onConfirm={() => removeMutation.mutate(user.user_id)}
                         >
                           <Button
                             variant="ghost"
                             size="sm"
                             disabled={removeMutation.isPending}
+                            aria-label={`Remove ${describePartitionMember(user)} from partition`}
                           >
                             <Trash2 className="h-3 w-3 text-destructive" />
                           </Button>
@@ -532,26 +962,70 @@ function UsersTab({ partitionName }: { partitionName: string }) {
           </p>
         )}
 
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add User to Partition</DialogTitle>
+              <DialogTitle>Add Users to Partition</DialogTitle>
               <DialogDescription>
-                Assign a user to this partition with a specific role.
+                Select users and assign the same partition role to each of them.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
-              <div className="space-y-2">
-                <Label>User ID</Label>
-                <Input
-                  placeholder="Enter user ID..."
-                  value={userId}
-                  onChange={(e) => setUserId(e.target.value)}
-                />
-              </div>
+              <MemberPicker
+                candidates={candidates}
+                isLoading={candidatesQuery.isLoading || candidateSearchPending}
+                isInitialError={candidatesQuery.isError && candidatesQuery.data === undefined}
+                isRefreshError={
+                  candidatesQuery.isRefetchError &&
+                  candidatesQuery.data !== undefined &&
+                  !candidatesQuery.isFetchNextPageError
+                }
+                isLoadMoreError={candidatesQuery.isFetchNextPageError}
+                search={candidateSearch}
+                searchReady={candidateSearchReady}
+                onSearchChange={(search) => {
+                  setCandidateSearch(search);
+                  setAddFailures([]);
+                }}
+                onRetry={() => {
+                  void candidatesQuery.refetch();
+                }}
+                hasMore={Boolean(candidatesQuery.hasNextPage)}
+                isLoadingMore={candidatesQuery.isFetchingNextPage}
+                onLoadMore={() => {
+                  void candidatesQuery.fetchNextPage();
+                }}
+                selectedCandidates={selectedCandidates}
+                onSelectionChange={(selection) => {
+                  setSelectedCandidates(selection);
+                  setAddFailures([]);
+                }}
+              />
+              {addFailures.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Some users were not added</AlertTitle>
+                  <AlertDescription>
+                    <ul className="list-disc space-y-1 pl-4">
+                      {addFailures.map((failure) => (
+                        <li key={failure.candidate.user_id}>
+                          {candidateLabel(failure.candidate)} ({candidateSecondaryLabel(failure.candidate)}):
+                          {" "}
+                          {failure.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </AlertDescription>
+                </Alert>
+              )}
               <div className="space-y-2">
                 <Label>Role</Label>
-                <Select value={role} onValueChange={setRole}>
+                <Select
+                  value={role}
+                  onValueChange={(value) => {
+                    setRole(value);
+                    setAddFailures([]);
+                  }}
+                >
                   <SelectTrigger className="w-full">
                     <SelectValue placeholder="Select a role" />
                   </SelectTrigger>
@@ -567,12 +1041,20 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setDialogOpen(false)}
+                onClick={() => handleDialogOpenChange(false)}
+                disabled={addMutation.isPending}
               >
                 Cancel
               </Button>
-              <Button onClick={handleAddUser} disabled={addMutation.isPending}>
-                {addMutation.isPending ? "Adding..." : "Add User"}
+              <Button
+                onClick={handleAddUsers}
+                disabled={addMutation.isPending || selectedCandidates.length === 0}
+              >
+                {addMutation.isPending
+                  ? "Adding..."
+                  : selectedCandidates.length === 0
+                    ? "Add Users"
+                    : `Add ${selectedCandidates.length} User${selectedCandidates.length === 1 ? "" : "s"}`}
               </Button>
             </DialogFooter>
           </DialogContent>

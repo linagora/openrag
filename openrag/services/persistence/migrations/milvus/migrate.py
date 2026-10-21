@@ -5,23 +5,29 @@ Discovers all migration scripts in this directory (files matching ``N.*.py``),
 sorts them by their numeric prefix, and runs ``upgrade()`` / ``downgrade()``
 in order based on the current schema version stored in the collection.
 
-Usage (from repo root, inside the container):
+Usage (from infra/compose, with DC and SVC set as in the upgrade guide:
+``DC="docker compose"; SVC=openrag`` on a GPU host,
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host; add ``-p <project>`` and
+your ``-f`` overlays to DC if you start the stack with them):
 
     # Dry-run — inspect what would change, no writes:
-    docker compose run --no-deps --rm --build --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 
     # Upgrade to latest:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 
     # Upgrade to a specific version:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py --target 2
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
-    # Downgrade to version 0 (resets version property, drops indexes):
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
+    # Downgrade to version 2 (a downgrade always needs --target):
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
+
+The image must carry this checkout's migrations: the "Discovered N migration(s)" line
+it prints lists them. With a locally built image, add --build to the run command.
 
 Convention — each migration module must expose:
     TARGET_VERSION: int          # the version this script brings the DB to
@@ -86,14 +92,27 @@ def _validate_module(module: ModuleType, path: Path) -> None:
 
 
 def _get_stored_version(client: MilvusClient, collection_name: str) -> int:
+    """The collection's schema version: 0 when it was never stamped.
+
+    Raises ValueError when ``int()`` rejects the stamp or it is negative, rather
+    than reading it as 0 and migrating a collection whose version is unknown.
+    """
     desc = client.describe_collection(collection_name)
     raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
     if raw is None:
         return 0
+    unknown = (
+        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set the collection's real "
+        f"version first: MilvusClient(uri).alter_collection_properties('{collection_name}', "
+        f"properties={{'{SCHEMA_VERSION_PROPERTY_KEY}': '<version>'}}). Nothing was changed."
+    )
     try:
-        return int(raw)
+        version = int(raw)
     except ValueError:
-        return 0
+        raise ValueError(unknown) from None
+    if version < 0:
+        raise ValueError(unknown)
+    return version
 
 
 # ---------------------------------------------------------------------------
@@ -174,15 +193,20 @@ def main() -> None:
         "--target",
         type=int,
         default=None,
-        help=f"Target schema version (default: {latest_version} for upgrade, 0 for downgrade)",
+        help=f"Target schema version (default: {latest_version} for an upgrade; required with --downgrade)",
     )
     args = parser.parse_args()
 
-    # Resolve default target
-    if args.target is None:
-        target_version = 0 if args.downgrade else latest_version
-    else:
-        target_version = args.target
+    # A downgrade has no safe default. Going down to version 0 reverts every
+    # migration, and reverting version 2 swaps its pre-upgrade backup back in,
+    # taking every file indexed since then out of search.
+    if args.downgrade and args.target is None:
+        parser.error("--downgrade needs --target, the schema version to go back to (e.g. --target 2).")
+    target_version = latest_version if args.target is None else args.target
+    # A version outside the migrations' range is a typo, never a plan: a
+    # downgrade to -1 reverts every migration, version 2's backup swap included.
+    if not 0 <= target_version <= latest_version:
+        parser.error(f"--target must be between 0 and {latest_version}, got {target_version}.")
 
     if not migrations:
         logger.warning("No migration files found in this directory.")
@@ -202,6 +226,31 @@ def main() -> None:
     if not client.has_collection(collection_name):
         logger.error(f"Collection '{collection_name}' does not exist. Aborting.")
         sys.exit(1)
+
+    try:
+        current = _get_stored_version(client, collection_name)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(2)
+    # A newer release migrated it: this runner has no script for its version, so
+    # a downgrade would revert older steps under it, out of order.
+    if current > latest_version:
+        logger.error(
+            f"'{collection_name}' is at schema version {current}, newer than this runner's latest "
+            f"({latest_version}). Run the migration runner of the release that migrated it. Nothing was changed."
+        )
+        sys.exit(2)
+    if args.downgrade and target_version > current:
+        logger.error(
+            f"Cannot downgrade to version {target_version}: the collection is at version {current}. Nothing was changed."
+        )
+        sys.exit(2)
+    if not args.downgrade and target_version < current:
+        logger.error(
+            f"Cannot upgrade to version {target_version}: the collection is already at version {current}. "
+            "To go back, pass --downgrade. Nothing was changed."
+        )
+        sys.exit(2)
 
     if args.downgrade:
         run_downgrade(client, collection_name, migrations, target_version, dry_run=args.dry_run)

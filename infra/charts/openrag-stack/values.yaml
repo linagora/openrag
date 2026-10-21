@@ -1,81 +1,588 @@
+# Pinned so every resource name is deterministic regardless of the Helm
+# release name — required for ArgoCD, which by default sets .Release.Name to
+# the Application's own name (or whatever releaseName it's given), not
+# something this chart controls. postgresql.fullnameOverride and
+# milvus.fullnameOverride below are kept in sync with this value by hand
+# (subchart values.yaml is static, it can't reference this one).
+# NOTE: the vllm-stack sub-chart has no such override hook — its Service names
+# (.../*-engine-service) are permanently derived from the real Release.Name
+# (see BASE_URL/EMBEDDER_BASE_URL/VLM_BASE_URL/TRANSCRIBER_BASE_URL below). If
+# deploying via ArgoCD, set spec.source.helm.releaseName to this same value
+# ("openrag") so those URLs resolve too.
+fullnameOverride: "openrag"
+
+global:
+  image:
+    registry: "docker.io"
+
+# Chart-level toggle for umbrella charts that include openrag-stack as a
+# dependency with `condition: openrag-stack.enabled` — has no effect standalone.
+enabled: true
+
 # === Network isolation ===
-# Default-deny ingress for all pods in the release namespace, allowing only
-# intra-namespace traffic plus the public HTTP ports below. This isolates the
-# unauthenticated Ray dashboard (8265), GCS (6379), Postgres, Milvus, etc. from
-# outside the namespace. Disable only if you manage isolation elsewhere.
+# Default-deny ingress; allow only same-namespace traffic and the public HTTP
+# ports below. Isolates the Ray dashboard, Postgres, Milvus, etc.
 networkPolicy:
   enabled: true
-  # Ports reachable from outside the namespace (e.g. via the Ingress controller).
+  # Ports reachable from outside the namespace (e.g. via the Ingress controller),
+  # on every pod. cert-manager's HTTP-01 solver port (8089) does not belong
+  # here: acmeHttp01 below opens it on the solver pods only.
   externalPorts:
-    - 8080  # openrag API/UI
+    - 8080  # openrag API/UI & admin-ui
+    # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
+  # Peers allowed to scrape the datastore exporters: Ray (8090), Postgres (9187)
+  # and Milvus (9091). Pods in this namespace already can; a Prometheus in
+  # another one cannot until it is listed here, and its targets report
+  # `up == 0`. Each port opens only on the pods that export it, and only to
+  # these peers — never through externalPorts: none of the three
+  # authenticates, and Milvus's 9091 also serves /debug/pprof. Standard
+  # NetworkPolicyPeer entries, e.g.
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: monitoring
+  #     podSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: prometheus
+  metricsFrom: []
+  # Sources allowed to reach the bundled Prometheus Operator's admission
+  # webhook (monitoring.bundled only — see templates/networkpolicy.yaml). Its
+  # caller is the API server, which is not a pod and on a managed control plane
+  # is not on the cluster network at all, so no selector can name it: empty
+  # therefore means any source, which is what makes the webhook work on a
+  # cluster whose control plane is off-node. Unlike the ports above, this opens
+  # one port on the pod that serves the webhook, and nothing else: by default
+  # that is its own admission-webhook pod (see kubePrometheusStack below),
+  # which serves the webhook, /metrics and /healthz only. Turn that deployment
+  # off and the operator serves the webhook on its own listener, which also
+  # carries /debug/pprof/ — narrow this list then. Narrow it anyway where the
+  # control plane's address is known, with standard NetworkPolicyPeers:
+  #   - ipBlock:
+  #       cidr: 10.0.0.0/24
+  webhookFrom: []
+  # cert-manager's HTTP-01 solver: the pod it starts in this namespace to answer
+  # an ACME challenge, on 8089, reached through the Ingress controller. Opens
+  # that port on the solver pods only (label
+  # acme.cert-manager.io/http01-solver: "true"), and selects nothing while no
+  # challenge is pending, so it is harmless with DNS-01 or your own
+  # certificates. Turn it off only if no Issuer here uses HTTP-01.
+  acmeHttp01:
+    enabled: true
+    # Empty means any source: a host-network Ingress controller (ingress-nginx
+    # with hostNetwork, for one) connects from a node address, which no
+    # namespaceSelector matches. Narrow it with standard NetworkPolicyPeers:
+    # a namespaceSelector when the controller runs on the pod network, an
+    # ipBlock with the node addresses when it runs with hostNetwork, e.g.
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: ingress-nginx
+    #   - ipBlock:
+    #       cidr: 10.0.0.0/24
+    from: []
+
+# === Monitoring artifacts ===
+# One set of dashboards, dashboards/ in this chart — the directory the Compose
+# overlay mounts too — delivered to whichever Grafana is running:
+#   - integrated: the platform's Prometheus, Grafana and Alertmanager. Leave
+#     `bundled` off, enable `dashboards` and openrag.metrics.serviceMonitor,
+#     and give them the labels the platform selects on.
+#   - standalone: `bundled: true` installs kube-prometheus-stack in this
+#     release and points the same objects at it.
+# See docs/documentation/kubernetes.md, Monitoring.
+monitoring:
+  # Install kube-prometheus-stack (Prometheus Operator, Prometheus,
+  # Alertmanager, Grafana, node-exporter, kube-state-metrics) as a sub-chart,
+  # configured under `kubePrometheusStack:` below. Off by default: next to a
+  # Prometheus Operator the cluster already runs, a second one fights it over
+  # the same CRDs and objects.
+  # When on, it also turns on the dashboard ConfigMaps, the alert rules and the API
+  # ServiceMonitor, which then sends env.secrets.METRICS_TOKEN as its bearer
+  # (required, like the Compose overlay). Helm installs the operator's CRDs on
+  # the first install only: to turn this on for an existing release, apply
+  # them first (the docs give the command).
+  bundled: false
+  # One ConfigMap per dashboard, for a Grafana dashboard sidecar (the one
+  # kube-prometheus-stack's Grafana runs, or any k8s-sidecar).
+  dashboards:
+    enabled: false
+    # The label the sidecar watches (its sidecar.dashboards.label and
+    # labelValue). kube-prometheus-stack's default is grafana_dashboard: "1".
+    # A ConfigMap without the right one is created and never loaded.
+    label: grafana_dashboard
+    labelValue: "1"
+    labels: {}
+    # Grafana folder, written into the annotation the sidecar reads as its
+    # folderAnnotation (which also needs provider.foldersFromFilesStructure).
+    # A sidecar without one ignores it and uses its default folder. Same
+    # folder as the Compose provisioning.
+    folder: OpenRAG
+    folderAnnotation: grafana_folder
+    # Namespace for the ConfigMaps. Empty = the release namespace, which is
+    # enough for a sidecar searching every namespace (kube-prometheus-stack's
+    # default); set the Grafana namespace when the sidecar only watches its own.
+    # Helm does not create it, and installs into a namespace it does not own
+    # need the rights to write there.
+    namespace: ""
+  # Alert rules, as a PrometheusRule. They come from rules/openrag-alerts.yaml.tpl,
+  # the template the Compose stack's copy is generated from
+  # (scripts/gen_alert_rules.py), so both deployments alert on one definition.
+  prometheusRule:
+    # Needs the monitoring.coreos.com CRDs (kube-prometheus-stack or a
+    # standalone Prometheus Operator). Off by default: creating the CRD object
+    # without the operator present fails the install. monitoring.bundled turns
+    # it on as well.
+    enabled: false
+    # Labels the operator's ruleSelector matches on, e.g.
+    # release: kube-prometheus-stack. An unmatched PrometheusRule is created
+    # and never loaded, which is indistinguishable from having no alerts.
+    labels: {}
+    # Labels stamped onto every alert, to match the Alertmanager routing of the
+    # stack receiving them. A rule's own labels win on conflict.
+    # e.g. team: platform / service: openrag
+    commonLabels: {}
+    # Override the runbook_url base baked into the rules. Empty links the
+    # runbooks at this chart's release (…/blob/v<appVersion>/docs/deployment/
+    # runbooks) from appVersion 2.3.0, the first release that ships them, and
+    # at develop before that; set it for an air-gapped or mirrored copy.
+    runbookBaseUrl: ""
+    # Alert thresholds. Empty keeps what the rules ship with; set one to retune
+    # without cutting a chart release. Every threshold here was chosen against
+    # synthetic traffic, not yours — expect to move them in the first weeks.
+    # `for` durations are the other half of each decision; see below.
+    thresholds:
+      # 720 — no parse completed for this long, with work queued = stalled.
+      # Whole seconds only (5400, not 1h30m): a duration literal compared with
+      # time() needs Prometheus 2.54 or newer.
+      # Must exceed the longest NORMAL parse on this deployment: the rule sees
+      # completions only, so one legitimately long parse (a large scanned PDF on
+      # a single-GPU Marker worker; Marker's timeout is 3600s) pages while it
+      # runs. Single-GPU Marker deployments: set it above the expected longest
+      # parse.
+      ingestIdleSeconds: ""
+      ingestFailureRatio: ""   # 0.25 — share of terminal documents that failed
+      ingestVolumeFloor: ""    # 5 — terminal documents in 15m before judging the ratio
+      backlogDepth: ""         # 50 — queue depth below which growth is not worth alerting on
+      inferenceErrorRatio: ""  # 0.5 — share of a provider's calls erroring or timing out
+      inferenceVolumeFloor: "" # 5 — calls to a provider in 10m before judging its ratio
+    # How long a condition must hold before the alert fires, keyed by alert
+    # name. Shortening one trades false positives for detection speed; each
+    # default was measured against the failure shape it has to tolerate, so
+    # read the rule's comment before changing it.
+    #   OpenRagIngestStalled: 2m      OpenRagIngestFailureRate: 5m
+    #   OpenRagBacklogGrowing: 25m    OpenRagCatalogDriftDetected: 5m
+    #   OpenRagInferenceProviderDown: 5m
+    #   OpenRagCircuitBreakerOpen: 5m OpenRagTargetDown: 5m
+    for: {}
+    # Regex OpenRagTargetDown matches the `job` label on, default
+    # `.*openrag.*|ray` (the API, the chart's Ray PodMonitor, and Compose's
+    # `openrag-ray` job, named `ray` up to 2.2.x). The datastore exporters (a
+    # job whose own name, after any `<namespace>/`, is `*-postgresql*` or
+    # `*-milvus*`) are always excluded,
+    # whatever this is set to: they are not OpenRAG's targets.
+    # The label is assigned by whoever configures the scrape — the Operator
+    # derives it from the Service name, Compose sets job_name: "openrag" — so a
+    # platform that relabels `job` breaks the match. Set this to whatever `job`
+    # the scrape actually produces. Getting it wrong is silent: the alert simply
+    # never fires, and never firing is indistinguishable from healthy.
+    jobMatcher: ""
+
+# === Bundled monitoring stack (kube-prometheus-stack) ===
+# Sub-chart values, used only with monitoring.bundled=true. The chart is
+# aliased (see Chart.yaml), so an upstream key `kube-prometheus-stack.x.y` is
+# `kubePrometheusStack.x.y` here. The keys below are what OpenRAG relies on.
+#
+# Every workload gets requests and a memory limit: upstream sets none, which
+# leaves them BestEffort — nothing reserved, and evicted first under memory
+# pressure, so monitoring goes when a node is in trouble. Sized from a one-node
+# kind cluster (45k series, 249 rules) under the queries of every bundled
+# dashboard: each request is above what it used there, each limit leaves room
+# for a restart and heavier queries. No CPU limits: throttling delays scrapes
+# and rule evaluation, and protects nothing a request does not.
+kubePrometheusStack:
+  # The alias would otherwise become the chart name in every label, and the
+  # upstream dashboards and rules select on the real one.
+  nameOverride: "kube-prometheus-stack"
+  # Resource names (openrag-monitoring-prometheus, -alertmanager, -operator)
+  # would otherwise derive from the release name, truncated to 26 characters.
+  # Kept in sync with fullnameOverride by hand, like postgresql's.
+  fullnameOverride: "openrag-monitoring"
+  # Control-plane components a managed cluster (EKS, GKE, AKS...) runs out of
+  # reach. Each would render a Service in kube-system selecting pods that do
+  # not exist there, and its absent(up) alert (KubeControllerManagerDown,
+  # KubeSchedulerDown, and KubeProxyDown wherever kube-proxy is replaced)
+  # would fire forever. Turning one off also drops its rules and dashboard.
+  # On a self-managed control plane, turn them back on (kubernetes.md).
+  kubeControllerManager: { enabled: false }
+  kubeScheduler: { enabled: false }
+  kubeEtcd: { enabled: false }
+  kubeProxy: { enabled: false }
+  prometheusOperator:
+    # 28 Mi on kind; it caches the objects it watches, so it grows with
+    # the cluster.
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { memory: 512Mi }
+    admissionWebhooks:
+      deployment:
+        # Serve the admission webhook from its own pod, running the standalone
+        # admission-webhook binary. The API server must reach it through
+        # networkPolicy.webhookFrom, which is any source by default, and the
+        # operator's listener would expose /debug/pprof/ on the same port.
+        enabled: true
+        resources:
+          requests: { cpu: 10m, memory: 32Mi }
+          limits: { memory: 128Mi }
+      # The two hook Jobs that issue the webhook's certificate
+      # (admission-create) and hand its CA to the webhook configurations
+      # (admission-patch). 25 Mi peak on kind. A namespace whose ResourceQuota
+      # requires requests would refuse them, and the install with them.
+      patch:
+        resources:
+          requests: { cpu: 10m, memory: 32Mi }
+          limits: { memory: 128Mi }
+    # The config-reloader sidecar of Prometheus and of Alertmanager (15 Mi).
+    prometheusConfigReloader:
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+  prometheus:
+    prometheusSpec:
+      # Select every ServiceMonitor, PodMonitor and PrometheusRule instead of
+      # only those labelled release: <this release>. On a standalone cluster
+      # this Prometheus is the only one, so this chart's objects and
+      # third-party ones (the GPU Operator's DCGM exporter) are picked up
+      # without anyone having to know the label.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      # The Compose overlay's retention, on a volume rather than upstream's
+      # emptyDir, so a restart keeps the history. retentionSize stays under
+      # the volume: a full disk stops ingestion instead of dropping old blocks.
+      retention: 30d
+      retentionSize: 18GB
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 20Gi
+      # Memory follows the number of series, not the retention: 5.4 Ki per
+      # series on kind, where one node made 45k. Most of those were the API
+      # server's own (27k per replica); each pod adds about 270 (kubelet and
+      # kube-state-metrics), each node 1.7k (node-exporter). Three API servers,
+      # five nodes and 150 pods come to about 140k series, some 740 Mi. Watch
+      # prometheus_tsdb_head_series and raise both past about 190k.
+      resources:
+        requests: { cpu: 200m, memory: 1Gi }
+        limits: { memory: 3Gi }
+  alertmanager:
+    alertmanagerSpec:
+      # 21 Mi on kind. Replaces the operator's default request of 200 Mi.
+      resources:
+        requests: { cpu: 10m, memory: 64Mi }
+        limits: { memory: 256Mi }
+  kube-state-metrics:
+    # 20 Mi on kind; grows with the number of objects in the cluster.
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  prometheus-node-exporter:
+    # 9 Mi on kind, on every node.
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+  grafana:
+    # Pinned for the same reason as fullnameOverride; NOTES.txt reads it.
+    fullnameOverride: "openrag-grafana"
+    # The admin password is generated into the openrag-grafana Secret (key
+    # admin-password). Argo CD renders without cluster lookups, so it would
+    # regenerate on every sync: there, set admin.existingSecret instead.
+
+    # 270 Mi on kind; queries over long ranges pass through it.
+    resources:
+      requests: { cpu: 100m, memory: 384Mi }
+      limits: { memory: 1Gi }
+    sidecar:
+      # Each of its two sidecars (dashboards and data sources): 74 Mi on kind.
+      resources:
+        requests: { cpu: 20m, memory: 96Mi }
+        limits: { memory: 256Mi }
+      dashboards:
+        # Upstream's defaults, written out because monitoring.dashboards must
+        # match them: the chart refuses to render when the two differ, since a
+        # sub-chart's values cannot be derived from this chart's.
+        label: grafana_dashboard
+        labelValue: "1"
+        # Honour monitoring.dashboards.folder, as the Compose provisioning does.
+        folderAnnotation: grafana_folder
+        provider:
+          foldersFromFilesStructure: true
 
 # === Global shared persistence ===
 persistence:
   enabled: true
-  storageClass: &storageClass longhorn
+  storageClass: &storageClass ""  # empty = use cluster default StorageClass
+  annotations:
+    "helm.sh/resource-policy": keep
   accessMode: ReadWriteMany
   volumes:
     modelWeights: { size: 50Gi }
     data: { size: 20Gi }
     hydraConfig: { size: 10Mi }
-    logs: { size: 1Gi }
     venv: { size: 10Gi }
 
+# === Shared security defaults ===
+# Pod Security Standards "restricted" baseline, merged into each workload's
+# own podSecurityContext below via the openrag-stack.mergeSecurityContext
+# helper — components only set the runAsUser/runAsGroup/fsGroup specific to
+# their own Dockerfile (see e.g. openrag's OpenShift arbitrary-UID comment)
+# and inherit runAsNonRoot/seccompProfile from here. automountServiceAccountToken
+# and containerSecurityContext are identical for every workload today, so
+# templates read them directly from here with no per-component override.
+security:
+  automountServiceAccountToken: false
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    readOnlyRootFilesystem: false  # workloads write to runtime paths (openrag /tmp, ray .venv, reranker model cache, ...)
+
+# === Ray (KubeRay operator + RayCluster) ===
+kuberay:
+  enabled: false
+
 ray:
+  enabled: false
+  # The API attaches to a Ray cluster outside this release (RAY_ADDRESS). The
+  # chart detects that from env.config.RAY_ADDRESS or env.secrets.RAY_ADDRESS;
+  # set this when RAY_ADDRESS comes from env.existingSecret or an external
+  # secrets provider, which the chart cannot read. The openrag pod then starts
+  # no Ray, so the chart renders no embedded-Ray metrics port or PodMonitor
+  # (they would be a target that is always down). Ignored with enabled=true.
+  externalCluster: false
+  # 0.0.0.0 would expose the unauthenticated Ray dashboard on every pod
+  # interface (ShadowRay / CVE-2023-48022); loopback-only is safe because the
+  # dashboard is still reachable through ray.ingress / openrag.rayDashboard.ingress.
   dashboardHost: "127.0.0.1"
+  rayVersion: "2.47.1"
+  enableInTreeAutoscaling: false
+  annotations:
+    ray.io/overwrite-container-cmd: "true"
   workers:
     count: 1
     replicas: 1
     minReplicas: 1
     maxReplicas: 1
-  nodeSelector:
-    gpu-role: serving
+  serviceAccountName: ""
+  # infra/docker/ray.Dockerfile creates a plain uid/gid 10001 "app" user (no
+  # arbitrary-GID pattern like openrag's image) and chowns /app to it. Merged
+  # with the shared security.podSecurityContext defaults above.
+  podSecurityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
+  nodeSelector: {}
   image:
-    repository: ghcr.io/linagora/openrag-ray
+    registry: "ghcr.io"
+    repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "1.1.13"
+    tag: "v2.3.2"
+  resources:
+    head:
+      requests:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+    worker:
+      requests:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+      # nginx.ingress.kubernetes.io/rewrite-target: /
+      # nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+    tls: []
+    path: /
+    pathType: Prefix
+  # Every Ray node exports unauthenticated metrics on 8090 (ray_tasks,
+  # ray_actors, ray_resources, ray_node_*): the RayCluster's head and workers
+  # with ray.enabled=true, the Ray embedded in the openrag pod otherwise.
+  metrics:
+    # Prometheus Operator discovery; needs the monitoring.coreos.com CRDs.
+    # Scrapes Ray's metrics endpoint: the RayCluster's nodes with
+    # ray.enabled=true, the embedded Ray in the openrag pod otherwise (both on
+    # port 8090). The ingestion series and the worker-side inference series
+    # exist there only, so without it their alerts cannot fire.
+    # monitoring.bundled turns it on. With ray.enabled=false and RAY_ADDRESS
+    # set (an external cluster) the openrag pod exports no Ray metrics: scrape
+    # that cluster where it runs.
+    podMonitor:
+      enabled: false
+      # Labels the operator's podMonitorSelector matches, e.g.
+      # release: kube-prometheus-stack. Unmatched, the PodMonitor is created
+      # and never scraped — which looks exactly like one that works.
+      labels: {}
+      interval: 30s
+      scrapeTimeout: 10s
 
 # === PostgreSQL (bitnami) ===
 postgresql:
   enabled: true
+  # Kept in sync with the root fullnameOverride ("openrag") by hand — see the
+  # note above it. Without this, the postgresql sub-chart names its own
+  # Service from the real Release.Name instead, which won't match POSTGRES_HOST below.
+  fullnameOverride: "openrag-postgresql"
   auth:
     username: &pgUser root
-    # Must be supplied at install time; templates fail closed if it is empty.
-    password: &pgPass ""
+    # Must be supplied at install time, e.g. --set postgresql.auth.password=$(openssl rand -hex 16)
+    # — templates fail closed (secrets-env.yaml's requiredSecrets check) if left empty.
+    password: ""
   primary:
     persistence:
       enabled: true
       size: 10Gi
       storageClass: *storageClass
+    # The sub-chart's own policy defaults to allowExternal: true, which opens
+    # every port it lists to any source: 5432, and the exporter's 9187 once
+    # metrics.enabled is on. NetworkPolicies add up, so the default-deny above
+    # could not narrow it. Off, Postgres gets the same rules as every other pod.
+    networkPolicy:
+      enabled: false
+  # The same policy on the read replicas, rendered with architecture: replication.
+  readReplicas:
+    networkPolicy:
+      enabled: false
   service:
     port: &pgPort 5432
+  # postgres_exporter sidecar (port 9187) and its Service. Turning it on changes
+  # the StatefulSet's pod template, so the upgrade restarts Postgres.
+  # The exporter signs in as the `postgres` superuser, whose password the
+  # sub-chart regenerates on every render that cannot read the live Secret
+  # (helm template, Argo CD) while the server keeps the first one. So turning
+  # it on requires auth.postgresPassword or auth.existingSecret; on a running
+  # release, set the password Postgres already has:
+  #   kubectl get secret openrag-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d
+  metrics:
+    enabled: false
+    # Prometheus Operator discovery; requires metrics.enabled above. The
+    # sub-chart's key is `labels` (Milvus's below is `additionalLabels`).
+    serviceMonitor:
+      enabled: false
+      # e.g. release: kube-prometheus-stack — see ray.metrics.podMonitor.labels.
+      labels: {}
+      interval: 30s
 
+# === PostgreSQL provisioning & migrations ===
 postgresProvisioning:
   # Keep the bundled PostgreSQL chart self-contained by default. Managed
   # Postgres deployments should set this to false and point POSTGRES_* values
   # at a pre-created database.
   autoCreateDatabase: true
   # Leave app-start migrations enabled for compose-like installs. Operators can
-  # disable this when they run migrations through the Helm hook below.
+  # disable this when they run migrations through the Helm hook below. Sets
+  # POSTGRES_RUN_MIGRATIONS: the chart refuses an env.config or env.secrets
+  # entry for it that disagrees, since the entry would silently replace this
+  # value.
   runMigrationsInApp: true
+  # A pre-install/pre-upgrade hook, for an external PostgreSQL only: it runs
+  # before Helm creates the bundled one, so the chart refuses it with
+  # postgresql.enabled.
   migrationJob:
     enabled: false
     backoffLimit: 3
     hookDeletePolicy: before-hook-creation,hook-succeeded
+  # Set true when you apply the migrations yourself (`python -m
+  # services.persistence.migrations.run`), with runMigrationsInApp and
+  # migrationJob both off. Without it the chart refuses that combination,
+  # since then nothing applies them and the app answers 503.
+  externalMigrations: false
+
+# === MinIO credentials ===
+# Root credentials of the bundled MinIO. The chart writes them to the Secret
+# named by milvus.minio.existingSecret, which MinIO and every Milvus component
+# read, so they stay out of the Milvus ConfigMap. Required while the bundled
+# MinIO is enabled: no value published by this project (such as "minioadmin"),
+# an access key of at least 3 characters (SILO's own floor) and a secret key of
+# at least 12 (templates/secrets-env.yaml).
+# Pass them from a values file kept out of git.
+# Unused with milvus.externalS3: the chart writes milvus.externalS3.accessKey
+# and secretKey to that Secret instead, since Milvus reads it either way.
+minioCredentials:
+  # false: create that Secret yourself, with the keys `accesskey` and
+  # `secretkey` (External Secrets, Vault, sealed-secrets...). The chart then
+  # renders none and can't check the values. With milvus.externalS3, its keys
+  # override milvus.externalS3.accessKey / secretKey.
+  create: true
+  accessKey: ""
+  secretKey: ""
 
 # === Milvus ===
 milvus:
   enabled: true
+  # The 5.0.27 milvus-helm chart defaults to v3.0.1, which cannot compact
+  # segments written by OpenRAG's version 3 migration. Remove this pin once a
+  # milvus-helm release defaults to v3.0.2 or later.
   image:
-    all: { tag: v2.6.0 }
+    all:
+      tag: v3.0.2
+  # Kept in sync with the root fullnameOverride ("openrag") by hand — see the
+  # note on it above. Without this, the milvus sub-chart names its own proxy
+  # Service from the real Release.Name instead, which won't match VDB_HOST.
+  fullnameOverride: "openrag-milvus"
+  # Milvus 3 runs as UID/GID 999. Applying this group on every mount lets
+  # Kubernetes migrate supported existing volumes before the non-root process
+  # starts. Storage drivers that do not support fsGroup require an
+  # administrator-managed ownership migration before the Helm upgrade.
+  securityContext:
+    fsGroup: 999
+    fsGroupChangePolicy: Always
   cluster: { enabled: true }
   pulsarv3: { enabled: false }
   woodpecker: { enabled: true }
   streaming: { enabled: true }
-  indexNode: { enabled: false }
   minio:
     mode: distributed
     replicas: 3
+    # SILO, the maintained MinIO fork, matching the compose stacks. Pinned here
+    # rather than left to the Milvus chart's default (a MinIO image that is no
+    # longer published), and by digest: the chart renders "repository:tag", so
+    # the digest rides in `tag`. linagoraai/silo holds a copy with the same
+    # digest if pgsty/silo ever disappears: only `repository` changes. Moving an
+    # existing release onto it is one-way and needs every MinIO pod stopped
+    # first: see docs/content/docs/documentation/minio_silo_upgrade.md.
+    image:
+      repository: pgsty/silo
+      tag: RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+    # MinIO reads its credentials from this Secret, rendered from
+    # minioCredentials above. Spelled out rather than derived because
+    # sub-chart values can't be templated. The extraEnv entries below reuse it
+    # through a YAML anchor, which an override in another values file doesn't
+    # follow: rename it there too, or the install fails.
+    existingSecret: &minioCredentialsSecret openrag-minio-credentials
+    # Leave both empty: the Milvus chart copies them into its ConfigMap in
+    # plain text, so the install fails when they are set. Use minioCredentials.
+    accessKey: ""
+    secretKey: ""
     persistence:
       enabled: true
       size: 20Gi
@@ -86,17 +593,65 @@ milvus:
       enabled: true
       size: 10Gi
       storageClass: *storageClass
+  # Every component that runs Milvus reads the object store's credentials from
+  # the same Secret, for the bundled MinIO and for milvus.externalS3 alike.
+  # Environment variables override Milvus's config file (MINIO_ACCESS_KEY_ID
+  # is minio.accessKeyID), as in the compose stack. `optional` keeps a missing
+  # Secret from blocking the pods: they then use the config file's credentials.
+  # Overriding a component's extraEnv replaces this list: keep both entries,
+  # or, with the bundled MinIO, the install fails (templates/secrets-env.yaml).
+  standalone:
+    extraEnv: &minioCredentialsEnv
+      - name: MINIO_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef: { name: *minioCredentialsSecret, key: accesskey, optional: true }
+      - name: MINIO_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef: { name: *minioCredentialsSecret, key: secretkey, optional: true }
   proxy:
+    extraEnv: *minioCredentialsEnv
     service:
       type: ClusterIP
       port: 19530
+  mixCoordinator: { extraEnv: *minioCredentialsEnv }
+  rootCoordinator: { extraEnv: *minioCredentialsEnv }
+  queryCoordinator: { extraEnv: *minioCredentialsEnv }
+  dataCoordinator: { extraEnv: *minioCredentialsEnv }
+  indexCoordinator: { extraEnv: *minioCredentialsEnv }
+  queryNode: { extraEnv: *minioCredentialsEnv }
+  dataNode: { extraEnv: *minioCredentialsEnv }
+  indexNode: { enabled: false, extraEnv: *minioCredentialsEnv }
+  streamingNode: { extraEnv: *minioCredentialsEnv }
+  # Every Milvus component already serves /metrics on 9091 (the sub-chart's
+  # metrics.enabled defaults to true); only the Operator object is off.
+  metrics:
+    enabled: true
+    # One ServiceMonitor over all component Services: proxy, mixcoord,
+    # datanode, querynode, streamingnode.
+    serviceMonitor:
+      enabled: false
+      # e.g. release: kube-prometheus-stack — see ray.metrics.podMonitor.labels.
+      additionalLabels: {}
 
-# === vLLM (embedder) ===
+# === vLLM (embedder + whisper + llm + vlm) ===
 vllm:
+  enabled: true
   embedderModelName: &embedderModel "Qwen/Qwen3-Embedding-0.6B"
   vlmModelName: &vlmModel "Qwen/Qwen2.5-VL-7B-Instruct"
   whisperModelName: &whisperModel "openai/whisper-large-v3-turbo"
   llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
+
+  # Single source for the HF_TOKEN secret name passed to all four model specs.
+  # YAML anchor: editing this value propagates to all four hf_token.secretName entries below.
+  # Must match the chart env secret name ({{ include "openrag-stack.fullname" . }}-env-secrets by default).
+  # values.yaml is not templated, so if you override fullnameOverride ("openrag")
+  # this must be updated to match too — see templates/NOTES.txt for a warning if
+  # they ever drift, and NEVER use "--set vllm.servingEngineSpec.modelSpec[N]...":
+  # Helm replaces lists wholesale rather than merging them by index, so a
+  # partial override there silently wipes repository/tag/modelURL/resources
+  # for all four models (see NOTES.txt for the safe way to override this).
+  hfTokenSecretName: &vllmHfTokenSecretName "openrag-env-secrets"
+
   servingEngineSpec:
     enableEngine: true
     securityContext:
@@ -112,13 +667,29 @@ vllm:
       capabilities:
         drop:
           - ALL
-    # NOTE: the per-model `tag: "latest"` entries below are operator-supplied
-    # serving images — pin each to a specific vLLM release tag (or digest)
-    # before production use for reproducible deploys (see vlm, pinned to v0.11.2).
+    # The tags below are pinned, so a pod restart never changes the engine
+    # version; vllm-stack's default, Always, only re-checks the registry.
+    imagePullPolicy: "IfNotPresent"
+    # Run as uid 10001, the engines get HOME=/, which they cannot write:
+    # FlashInfer's JIT workspace (under HOME) and vLLM's cache (under
+    # XDG_CACHE_HOME, else HOME/.cache) fail at engine start with
+    # "Permission denied: '/.cache'". HF_HOME is vllm-stack's (/tmp, or /data
+    # with pvcStorage).
+    env:
+      - name: HOME
+        value: "/tmp"
+      - name: XDG_CACHE_HOME
+        value: "/tmp/.cache"
+    # The vllm/vllm-openai engines share one pinned version (vllmTag); vlm stays
+    # on the version it was validated with. v0.30.0 rejects `--task`: a pooling
+    # model takes `runner: "pooling"` and `--convert embed` instead.
+    # `-cu129` is v0.30.0's CUDA 12.9 build, the CUDA vlm's v0.11.2 runs on. The
+    # plain `v0.30.0` tag is the CUDA 13 build: it needs an NVIDIA driver >= 580,
+    # and on an older one the embedder fails CUDA init while vlm starts fine.
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: &vllmTag "v0.30.0-cu129"
         modelURL: *embedderModel
         replicaCount: 1
         requestCPU: 4
@@ -127,20 +698,41 @@ vllm:
         limitCPU: 4
         limitMemory: "16Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
-          gpuMemoryUtilization: 0.3
-          extraArgs: ["--trust-remote-code", "--task", "embed"]
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: gpu-role
-                operator: In
-                values: ["serving"]
+          # Measured on an L4 (24 GB) with vLLM v0.17.1 under an indexing-shaped
+          # load (batch 32, 16 in flight, inputs up to 2046 tokens):
+          #   0.3, default max-model-len (32768) -> 7.0 GiB reserved
+          #   0.1, maxModelLen 2048              -> 2.6 GiB peak, same throughput
+          # On v0.30.0, 0.1 / 2048 takes 2.1 GiB and leaves a 0.39 GiB KV cache
+          # (1.8x the longest request, was 3.4x): vLLM now counts CUDA graph
+          # memory inside the fraction.
+          # Weights are 1.1 GiB; the rest is KV cache, sized by maxModelLen.
+          # vLLM pre-allocates this fraction whatever the model's size, and the
+          # card is shared with Marker and the reranker, so keep it tight.
+          # Keep maxModelLen >= every OpenRag embedder max_model_len: the
+          # MAX_MODEL_LEN env (default 2047) *and* any per-endpoint
+          # extra.max_model_len set in the admin UI. vLLM rejects a request whose
+          # truncate_prompt_tokens (max_model_len - 1) exceeds it; OpenRag then
+          # embeds and sizes new chunks for this value instead.
+          # Re-measure when the embedder model or the GPU changes.
+          gpuMemoryUtilization: 0.1
+          maxModelLen: 2048
+          runner: "pooling"
+          # `--convert embed` adapts a *ForCausalLM checkpoint such as
+          # Qwen3-Embedding to embeddings, and changes nothing for a model that
+          # is already one. This is the command started on v0.30.0 (L4, #1087).
+          extraArgs: ["--trust-remote-code", "--convert", "embed"]
+        nodeSelectorTerms: []
 
       - name: "whisper"
         repository: "ghcr.io/linagora/vllm-whisper"
-        tag: "latest"
+        # No workflow builds this image yet (#1031), so it has no version tag;
+        # the digest pins the build `latest` pointed to on 25 Sep 2026 (built
+        # 2 Dec 2025). The shared imagePullPolicy (IfNotPresent) would otherwise
+        # keep whatever build a node happened to cache.
+        tag: "latest@sha256:d0c25f4aea64814171df29f51923be4e1e7fab529d141cb440f33a838e72e364"
         modelURL: *whisperModel
         replicaCount: 1
         requestCPU: 4
@@ -149,20 +741,16 @@ vllm:
         limitCPU: 4
         limitMemory: "16Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.5
           extraArgs: ["--trust-remote-code", "--async-scheduling"]
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: gpu-role
-                operator: In
-                values: ["serving"]
+        nodeSelectorTerms: []
 
       - name: "llm"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: *vllmTag
         modelURL: *llmModel
         replicaCount: 0
         requestCPU: 8
@@ -171,7 +759,7 @@ vllm:
         limitCPU: 8
         limitMemory: "32Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
           v1: 1
@@ -185,12 +773,9 @@ vllm:
             requestCPU: 8
             requestMemory: "32Gi"
             requestGPU: 2
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: gpu-role
-                operator: In
-                values: ["llm"]
+        nodeSelectorTerms: []
         pvcStorage: "50Gi"
+
       - name: "vlm"
         repository: "vllm/vllm-openai"
         tag: "v0.11.2"
@@ -202,7 +787,7 @@ vllm:
         limitCPU: 8
         limitMemory: "32Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
           v1: 1
@@ -211,38 +796,46 @@ vllm:
           maxModelLen: 8192
           extraArgs: ["--trust-remote-code"]
         shmSize: "20Gi"
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: gpu-role
-                operator: In
-                values: ["vlm"]
+        nodeSelectorTerms: []
   routerSpec:
     enableRouter: false
 
 # === Infinity reranker ===
 reranker:
-  rerankerModelName: &rerankerModel "Alibaba-NLP/gte-multilingual-reranker-base"
-  servicePort: &rerankerPort 7997
+  # Set to false to skip deploying the local Infinity reranker. Also set
+  # externalUrl below to point RERANKER_BASE_URL at an external one instead —
+  # otherwise RERANKER_ENABLED renders "false" and no reranker is used at all.
+  enabled: true
+  # URL of an external reranker (vLLM or any OpenAI-compatible reranker).
+  # When set, this overrides RERANKER_BASE_URL (see env.config below) —
+  # remember to also set enabled: false so the local Deployment/Service
+  # aren't created alongside it.
+  externalUrl: ""
   image:
-    repository: michaelf34/infinity
-    # Operator-supplied serving image: pin to a specific infinity release tag
-    # (or digest) before production use rather than tracking latest.
-    tag: latest
-  nodeSelector:
-    gpu-role: serving
+    repository: "michaelf34/infinity"
+    tag: "0.0.77"
+  nodeSelector: {}
+  # The model Infinity serves and OpenRAG asks for (RERANKER_MODEL), including
+  # an external reranker's. It replaces rerankerModelName.
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
-  command:
-    - v2
-    - --model-id
-    - *rerankerModel
-    - --port
-    - *rerankerPort
+  # Flags appended to `v2 --model-id <model.id> --port <service.port>`, e.g.
+  # ["--batch-size", "16"]. They replace `command`, which was never read.
+  # --model-id and --port are refused: set model.id and service.port.
+  extraArgs: []
+  # Environment variables for the reranker container alone (Kubernetes EnvVar
+  # objects). They take precedence over the shared env.config ConfigMap the
+  # container also reads. On CPU, INFINITY_MODEL_WARMUP: "false" skips the
+  # warmup benchmark: on 4 CPUs Infinity then answered /health in under 20 s
+  # instead of 100-125 s in our tests.
+  extraEnv: []
   replicas: 1
-  runtimeClassName: nvidia
+  runtimeClassName: ""
+  # service.port is the port Infinity listens on, the Service port, and the one
+  # in RERANKER_BASE_URL. It replaces servicePort.
   service:
     type: ClusterIP
-    port: *rerankerPort
+    port: 7997
   resources:
     requests:
       cpu: "4"
@@ -250,103 +843,375 @@ reranker:
     limits:
       cpu: "4"
       memory: "16Gi"
+  serviceAccountName: ""
+  # Merged with the shared security.podSecurityContext defaults above.
+  podSecurityContext:
+    runAsUser: 1000
+    fsGroup: 1000
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
+  # Infinity serves /health only once the model is loaded and its warmup
+  # benchmark has run, which took 100-125 s on 4 CPUs, 180-210 s on 2 and
+  # 340-380 s on 1 in our tests, cached model or not. The startup probe allows
+  # 10 minutes for that (plus a first-boot download); liveness and readiness
+  # start only after it passes. The default probes are in
+  # templates/infinity.yaml, all on /health at the reranker port:
+  #   startup:   periodSeconds 10, failureThreshold 60
+  #   readiness: periodSeconds 10, failureThreshold 6
+  #   liveness:  initialDelaySeconds 60, periodSeconds 30, failureThreshold 3
+  # Set only what you change, e.g. startup: {failureThreshold: 120}: each
+  # probe is merged over its default. Set a probe to null to drop it, a field
+  # to null to remove it, and another handler (tcpSocket, exec, grpc) to
+  # replace httpGet.
+  probes: {}
 
-# === Admin UI (React SPA + nginx) ===
-# Static SPA served by the admin-ui container (nginx-unprivileged, :8080). It is
-# same-origin: the SPA makes relative /v1, /auth, … calls that the Ingress routes
-# to the API (see ingress.paths below), so there is no CORS. Runs under the same
-# hardened security context as the rest of the stack.
+# === Admin UI (replaces indexer-ui) ===
+# React SPA served by an nginx bundled inside the image. VITE_BASE_PATH=/app/
+# and VITE_API_BASE_URL="" are compiled into the JS bundle at image build time
+# (see infra/docker/ui.Dockerfile) — the SPA assumes it is served under /app/
+# and makes same-origin, root-relative API calls (/v1, /auth, /chainlit, ...).
+# Changing the path prefix requires rebuilding the image with different
+# build-args; this chart cannot do it via runtime env.
 adminUi:
   enabled: true
   image:
-    repository: linagoraai/openrag-admin-ui
+    registry: ""
+    repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.0.0"
-  imagePullPolicy: IfNotPresent
+    tag: "v2.3.2"
+    pullPolicy: IfNotPresent
   replicaCount: 1
   service:
     type: ClusterIP
     port: 8080
     targetPort: 8080
+  # Routing note: admin-ui and openrag/ray-serve share a single optional
+  # Ingress resource (templates/openrag.yaml) — there is no separate Ingress
+  # for admin-ui. Off by default; this flag only adds the more specific
+  # "/app/" path onto openrag.ingress's Ingress ahead of its "/" catch-all,
+  # and has no effect unless openrag.ingress.enabled=true too.
+  # openrag.ingress.host/className/annotations/tls apply to both paths —
+  # there is no automatic "/" -> "/app/" redirect (unlike the compose
+  # front-door), so users must browse to /app/ directly.
+  ingress:
+    enabled: false
   resources: {}
+  serviceAccountName: ""
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
+  # Base image is nginxinc/nginx-unprivileged:1.27-alpine, listening on 8080 so
+  # it never needs root/NET_BIND_SERVICE. infra/docker/ui.Dockerfile chowns
+  # /var/cache/nginx, /etc/nginx/conf.d and /var/run to 10001:0 and makes them
+  # group-writable, so runAsGroup must stay 0 (not 10001) — the same
+  # arbitrary-UID pattern as openrag.podSecurityContext below: on OpenShift the
+  # restricted-v2 SCC replaces runAsUser with a UID from the namespace range but
+  # always keeps GID 0, and group 0 is what keeps those paths writable then.
+  # fsGroup would not help here instead (it only affects mounted volumes, not
+  # paths baked into the image, and this container has no volumeMounts at all).
+  # Merged with the shared security.podSecurityContext defaults above.
+  podSecurityContext:
+    runAsUser: 10001
+    runAsGroup: 0
+  probes:
+    startup: {}
+    readiness:
+      httpGet:
+        path: /app/
+        port: admin-ui
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    liveness:
+      httpGet:
+        path: /app/
+        port: admin-ui
+      initialDelaySeconds: 10
+      periodSeconds: 20
 
 # === OpenRAG main app ===
 openrag:
   image:
-    repository: linagoraai/openrag
+    registry: ""
+    repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "1.1.13"
+    tag: "v2.3.2"
+    pullPolicy: IfNotPresent
   service:
     type: ClusterIP
     port: 8080
+    targetPort: 8080
+  # Off by default: enabling requires an explicit openrag.ingress.host (see
+  # templates/openrag.yaml's `required` guard) so the chart never exposes an
+  # unauthenticated wildcard-host Ingress by accident.
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+      # For OpenShift HAProxy ingress — increase timeout for large file uploads
+      # (HAProxy default is 30s; uploads over slow links or large files need more):
+      # haproxy.router.openshift.io/timeout: 600s
+      #
+      # For nginx ingress — body size limit (default 1m, raise for large files):
+      # nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+      # nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    tls: []
+  # Ray dashboard ingress — only relevant when ray.enabled=false (embedded Ray via ray.init()).
+  # When ray.enabled=true the dashboard is on the RayCluster head and has its own ingress (ray.ingress).
+  rayDashboard:
+    ingress:
+      enabled: false
+      className: ""
+      host: ""
+      annotations: {}
+        # nginx.ingress.kubernetes.io/rewrite-target: /
+      tls: []
+      path: /
+      pathType: Prefix
+  # Prometheus scrapes GET /metrics on the API port (no extra port). The route
+  # fails closed: set env.secrets.METRICS_TOKEN and have the scraper send it
+  # as a bearer, or set env.config.METRICS_ALLOW_UNAUTHENTICATED="true" when
+  # the path is blocked at the Ingress and scraped in-cluster. Port 8080 is
+  # the one networkPolicy.externalPorts opens to the Ingress controller, so an
+  # open /metrics is reachable wherever the API is. See
+  # docs/documentation/prometheus_metrics.md.
+  #
+  # Uvicorn topology only (ray.enabled=false, the default). With Ray Serve
+  # (ray.enabled=true + ENABLE_RAY_SERVE=true, as in values-linagora.yaml) the
+  # API listens on the RayCluster head Service, not on this Deployment's 8080,
+  # and every Serve replica has its own registry: the annotations below are
+  # then not rendered and enabling the ServiceMonitor fails the install.
+  metrics:
+    # prometheus.io/* pod annotations for annotation-based discovery (plain
+    # Prometheus with a kubernetes_sd relabel config). The scrape job behind
+    # them must send METRICS_TOKEN as a bearer (authorization.credentials_file
+    # in its kubernetes_sd job) unless METRICS_ALLOW_UNAUTHENTICATED is on;
+    # otherwise every scrape gets 403.
+    prometheusAnnotations: true
+    # Prometheus Operator / kube-prometheus-stack discovery.
+    serviceMonitor:
+      enabled: false
+      # Labels the operator's serviceMonitorSelector expects, e.g.
+      # release: kube-prometheus-stack
+      labels: {}
+      interval: 30s
+      scrapeTimeout: 10s
+      # Read METRICS_TOKEN from the chart env Secret (or env.existingSecret)
+      # and send it as the scrape bearer. Enable together with the token.
+      bearerTokenFromSecret: false
   resources:
     requests:
       cpu: "4"
       memory: "16Gi"
+      nvidia.com/gpu: 1
     limits:
       cpu: "4"
       memory: "16Gi"
+      nvidia.com/gpu: 1
   replicas: 1
-
-ingress:
-  enabled: false
-  className: "nginx"
-  host: ""
-  tls:
-    enabled: false
-    secretName: ""
-
-  paths:
-    openrag:
-      enabled: true
-
-security:
-  automountServiceAccountToken: false
+  # Size of the /dev/shm emptyDir volume. Ray's plasma object store and Python
+  # multiprocessing both use /dev/shm for POSIX semaphores and shared memory.
+  # Kubernetes defaults /dev/shm to 64Mi which causes OOM/ENOSPC errors when
+  # running Marker workers. Set to ~30% of the container memory limit or more.
+  # Set to "" or null to disable (use the 64Mi kernel default).
+  shmSize: ""
+  extraVolumes: []
+  extraVolumeMounts: []
+  # Raw Kubernetes initContainer objects, e.g. to merge multiple mounted CA
+  # bundles into one file on a shared emptyDir before the main container
+  # starts (see values-openrag.yaml's kc-ca-bundle example).
+  extraInitContainers: []
+  # Operator-managed accounts provisioned by the API at startup (auth.seed_users,
+  # see docs/documentation/user_auth.md). Each entry names the env var holding
+  # its token (token_env), never the token: put the value in the chart's Secret
+  # (env.secrets, or the KV path read by externalSecret / vaultStaticSecret).
+  # Rendered as SEED_USERS in the env ConfigMap, only when non-empty.
+  #   seedUsers:
+  #     - external_user_id: svc-cozy-stack
+  #       display_name: cozy-stack
+  #       token_env: COZY_STACK_TOKEN
+  #       is_admin: false
+  #       partitions:
+  #         - { name: twake, role: editor }
+  seedUsers: []
+  serviceAccountName: ""
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
+  # infra/docker/api.Dockerfile bakes an "openrag" user as uid 10001, primary
+  # gid 0 (`useradd --uid 10001 --gid 0`), and grants group-write on the paths
+  # it writes at runtime (venv, egg-info, HOME, data/db, HF cache, uv
+  # cache) via `chgrp -R 0` + `chmod g=u` — the OpenShift arbitrary-UID
+  # pattern. runAsGroup must stay 0 (not 10001) to match, or e.g. the editable
+  # install's `openrag.egg-info` isn't writable and uv fails at startup
+  # ("Cannot update time stamp of directory 'openrag.egg-info'"). fsGroup can
+  # stay 10001: it's only applied (and added as a supplementary group) to the
+  # mounted PVCs (data/model_weights/venv), not to the image's own paths.
+  # Merged with the shared security.podSecurityContext defaults above.
   podSecurityContext:
-    runAsNonRoot: true
     runAsUser: 10001
-    runAsGroup: 10001
+    runAsGroup: 0
     fsGroup: 10001
-    seccompProfile:
-      type: RuntimeDefault
-  containerSecurityContext:
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop:
-        - ALL
+  # Probe configuration. The chart keeps these HTTP probes for the direct API
+  # and automatically converts them to exec probes against the Ray head when
+  # ENABLE_RAY_SERVE=true.
+  probes:
+    startup:
+      httpGet:
+        path: /health_check
+        port: openrag
+      timeoutSeconds: 5
+      failureThreshold: 30
+      periodSeconds: 10
+    readiness:
+      httpGet:
+        path: /ready
+        port: openrag
+      timeoutSeconds: 5
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 3
+    liveness:
+      httpGet:
+        path: /health_check
+        port: openrag
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      failureThreshold: 3
+
+# === Outbound proxy ===
+# Set enabled: true when the cluster has no direct internet access.
+# Both uppercase and lowercase forms are injected (HTTP_PROXY / http_proxy) for broad tool compatibility.
+# no_proxy excludes cluster-internal traffic from being routed through the proxy.
+proxy:
+  enabled: false
+  url: "http://192.168.100.100:80"
+  # Add your OpenShift apps domain to bypass the proxy for internal routes (e.g. .apps.mycluster.example.com)
+  noProxy: "localhost,127.0.0.1,.cluster.local,.svc,10.0.0.0/8,172.16.0.0/12"
 
 # === Shared env (config + secrets) ===
 env:
+  # Name of an existing K8s Secret to use as-is.
+  # When set, the chart creates no Secret/ExternalSecret/VaultStaticSecret resource.
+  existingSecret: ""
+
+  # Secrets provider — ignored when existingSecret is set.
+  # type: values (default) | externalSecret | vaultStaticSecret
+  secretsProvider:
+    type: values
+
+    # Option A: External Secrets Operator
+    externalSecret:
+      refreshInterval: "1h"
+      secretStore:
+        name: "vault-backend"
+        kind: "ClusterSecretStore"
+      # Option 1: fetch all keys from a path (recommended)
+      dataFrom: []
+      # - extract:
+      #     key: "openrag/secrets"
+      # Option 2: map individual keys
+      data: []
+      # - secretKey: API_KEY
+      #   remoteRef:
+      #     key: "openrag/secrets"
+      #     property: "api_key"
+
+    # Option B: Vault Secrets Operator
+    vaultStaticSecret:
+      vaultAuthRef: "openrag-vault-auth"
+      mount: "kv"
+      type: "kv-v2"
+      path: "openrag/secrets"
+      refreshAfter: "30s"
+      hmacSecretData: true
+
   config:
     # LLM
-    BASE_URL: "http://{{ .Release.Name }}-llm-engine-service/v1/"
-    MODEL: *llmModel
+    # NOTE: postgresql/milvus are sub-charts pinned via their own
+    # fullnameOverride (see values above) so they honor "fullname" like the
+    # rest of this chart. vllm-stack has no such override in its own templates
+    # — its *-engine-service Services are permanently named from the real
+    # Release.Name, so BASE_URL/VLM_BASE_URL/EMBEDDER_BASE_URL/
+    # TRANSCRIBER_BASE_URL below must stay on .Release.Name. Under ArgoCD, set
+    # spec.source.helm.releaseName to match fullnameOverride ("openrag") so
+    # these resolve too.
+    #
+    # Empty while the bundled llm engine is at replicaCount 0: a URL would
+    # point at a Service with no pods, and the first boot would seed it as the
+    # default LLM endpoint. Empty, nothing is seeded, and the LLM is set in the
+    # admin UI. When you scale llm up, set:
+    #   BASE_URL: 'http://{{ .Release.Name }}-llm-engine-service/v1/'
+    #   MODEL: '{{ .Values.vllm.llmModelName }}'
+    # Any engine scaled to 0 needs its *_BASE_URL emptied or pointed elsewhere.
+    BASE_URL: ""
+    MODEL: ""
     LLM_SEMAPHORE: "50"
 
     # VLM
-    VLM_BASE_URL: "http://{{ .Release.Name }}-vlm-engine-service/v1/"
-    VLM_MODEL: *vlmModel
+    VLM_BASE_URL: 'http://{{ .Release.Name }}-vlm-engine-service/v1/'
+    VLM_MODEL: '{{ .Values.vllm.vlmModelName }}'
     VLM_SEMAPHORE: "50"
 
     # App
     APP_PORT: "8080"
-    ENABLE_RAY_SERVE: "true"
+    # Optional white-label name for casual introductions; empty is neutral.
+    ASSISTANT_NAME: ""
+    # Requires ray.enabled=true (a separate RayCluster with its own "serve" port
+    # 80 exposed on {{ fullname }}-raycluster-head-svc — see templates/openrag.yaml
+    # Ingress). With the default ray.enabled=false, the app is expected to run
+    # plain uvicorn on APP_PORT instead, which is what container/service/probes
+    # in templates/openrag.yaml are wired for. Flip both together (see
+    # values-linagora.yaml for the ray.enabled=true pairing).
+    ENABLE_RAY_SERVE: "false"
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
+    GRAFANA_URL: ""
+    # GET /metrics fails closed. "true" serves it to anyone reaching port 8080
+    # (the Ingress port) without env.secrets.METRICS_TOKEN — only for clusters
+    # that block /metrics at the Ingress and scrape the Service in-cluster.
+    METRICS_ALLOW_UNAUTHENTICATED: "false"
+
+    # One flat JSON object per log line on stderr, for the platform's log
+    # collector. PREREQUISITE: this chart ships no collector and no longer
+    # mounts a logs volume — a DaemonSet (Alloy, Fluent Bit, …)
+    # must already ship pod stdout to Loki. Without one, logs exist only in
+    # the container runtime (`kubectl logs`) and are lost with the pod. See
+    # docs/documentation/loki_logs.md for the pipeline to add on the
+    # collector side. Set to "text" for the colorized human format.
+    LOG_FORMAT: "json"
+    # Ray relays worker output onto the API process. Its log deduplication
+    # merges same-shape lines from several workers and rewrites the survivor
+    # as "{...} [repeated 2x across cluster]" — no longer JSON — and the
+    # "(Actor pid=N)" relay prefix is ANSI-colorized even on a pipe. Both off.
+    RAY_DEDUP_LOGS: "0"
+    RAY_COLOR_PREFIX: "0"
+    # With ray.enabled=true the chart also sets RAY_LOG_TO_STDERR=1 (see
+    # configmap-env.yaml): worker lines are then written to the Ray pods' own
+    # stderr for the DaemonSet, instead of being relayed to the API driver —
+    # a relay that only carries lines from actors created by the *current*
+    # driver job and so goes silent for the detached workers after an API
+    # restart.
 
     WITH_CHAINLIT_UI: "false"
-    SAVE_UPLOADED_FILES: "false"
-    # HTTP scaling is handled by Ray Serve above (ENABLE_RAY_SERVE +
-    # RAY_SERVE_NUM_REPLICAS), not uvicorn workers — see entrypoint.sh.
+    SAVE_UPLOADED_FILES: "true"
 
     # Vector DB
-    VDB_HOST: "{{ .Release.Name }}-milvus"
+    # milvus.fullnameOverride above pins this sub-chart's proxy Service name to
+    # match "fullname" instead of the real Release.Name (see note near the top).
+    VDB_HOST: '{{ include "openrag-stack.fullname" . }}-milvus'
     VDB_PORT: "19530"
     VDB_CONNECTOR_NAME: "milvus"
 
     # PostgreSQL
-    POSTGRES_HOST: "{{ .Release.Name }}-postgresql"
+    # postgresql.fullnameOverride above pins this sub-chart's Service name to
+    # match "fullname" instead of the real Release.Name (see note near the top).
+    POSTGRES_HOST: '{{ include "openrag-stack.fullname" . }}-postgresql'
     POSTGRES_PORT: *pgPort
     POSTGRES_USER: *pgUser
     # POSTGRES_PASSWORD is a secret — defined under env.secrets, not here in the
@@ -355,44 +1220,103 @@ env:
     POSTGRES_RUN_MIGRATIONS: "{{ .Values.postgresProvisioning.runMigrationsInApp }}"
 
     # Embedder
-    EMBEDDER_MODEL_NAME: *embedderModel
-    EMBEDDER_BASE_URL: "http://{{ .Release.Name }}-embedder-engine-service/v1"
+    EMBEDDER_MODEL_NAME: '{{ .Values.vllm.embedderModelName }}'
+    EMBEDDER_BASE_URL: 'http://{{ .Release.Name }}-embedder-engine-service/v1'
+    # Client for an external embedder: vllm (default, needs GET /models), ollama,
+    # or tei (Hugging Face text-embeddings-inference, which has no /models).
+    # EMBEDDER_PROVIDER: "tei"
 
     # Reranker
-    RERANKER_MODEL: *rerankerModel
-    RERANKER_ENABLED: "true"
+    RERANKER_MODEL: '{{ .Values.reranker.model.id }}'
+    # True when either the local Infinity reranker is deployed or an external
+    # one is configured — false (and RERANKER_BASE_URL below moot) when
+    # neither applies, so this never points at a Service that doesn't exist.
+    RERANKER_ENABLED: '{{ or .Values.reranker.enabled (ne .Values.reranker.externalUrl "") }}'
     RERANKER_TOP_K: "4"
-    RERANKER_BASE_URL: "http://{{ .Release.Name }}-reranker:{{ .Values.reranker.servicePort }}"
-    RERANKER_MODEL_TYPE: "infinity"
+    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.service.port }}{{ end }}'
+    RERANKER_PROVIDER: "infinity"
+
+    # Model Endpoint Registry: when true, re-syncs each type's env-seeded
+    # endpoint (URL/model/api_key/...) from the vars above on every boot, so a
+    # Helm values change + rollout takes effect after the first deploy. Keep
+    # false to let endpoints edited from the admin UI stay as the source of
+    # truth. See docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
+    MODEL_ENDPOINT_SYNC_ON_BOOT: "false"
+
+    # Refresh only saved defaults that still match a previous bundled prompt.
+    # Disable during a staged rollout while older application pods run.
+    PROMPTS_REFRESH_DEFAULTS: "true"
+    # When true, /ready (the readiness probe) fails while the default embedder is
+    # unavailable. Every replica shares it, so its outage or restart then takes
+    # all of them out of the Service, admin API and UI included. Before enabling,
+    # check that /ready reports checks.embedder: ok (the probe looks the model
+    # name up in GET /models, or checks /health for EMBEDDER_PROVIDER=tei). See
+    # docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
+    READINESS_REQUIRE_EMBEDDER: "false"
 
     # Prompts: templates ship inside the package (openrag/prompts/templates);
     # set PROMPTS_DIR only to override with a custom template directory.
 
     # Loaders
     PDFLOADER: "PyMuPDFLoader"
+    # PyMuPDF parses one PDF at a time per indexer worker unless asked: each
+    # slot is then a child process (~80 MiB inside a Ray worker before parsing,
+    # up to what its largest parse needs while parsing; between parses its RSS
+    # drops back near that, its VmData not always).
+    # The ceiling (MiB) makes an oversized PDF fail on its own instead of
+    # OOM-killing the worker; each child logs its baseline when it starts. See
+    # env_vars.md.
+    # PYMUPDF_POOL_SIZE: "4"
+    # PYMUPDF_PARSE_MEMORY_LIMIT_MB: "1024"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
+    # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse
+    # raises MemoryError in that child instead of OOM-killing the pod. Left unset
+    # (off) on purpose: it bounds the child's whole memory, torch included, so a
+    # value below its baseline fails every parse. The worker logs the baseline at
+    # startup — measure there first, then set this well above it.
+    # MARKER_PARSE_MEMORY_LIMIT_MB: "6144"
     MARKER_MAX_PROCESSES: "15"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"
-    TRANSCRIBER_BASE_URL: "http://{{ .Release.Name }}-whisper-engine-service/v1"
+    TRANSCRIBER_BASE_URL: 'http://{{ .Release.Name }}-whisper-engine-service/v1'
 
     # Ray
+    # RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'
+    RAY_NUM_GPUS: "0.1"
     RAY_POOL_SIZE: "3"
     RAY_MAX_TASKS_PER_WORKER: "50"
     RAY_DASHBOARD_PORT: "8265"
-    RAY_ADDRESS: "ray://raycluster-head-svc:10001"
     RAY_task_retry_delay_ms: "3000"
     RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
 
     UV_LINK_MODE: "copy"
     UV_CACHE_DIR: "/tmp/uv-cache"
+    UV_PYTHON_PREFERENCE: "only-system"
+    UV_PYTHON: "python3"  # portable: finds python3 in PATH, bypasses .python-version patch-version mismatch
 
   secrets:
     API_KEY: "" # LLM API KEY
     VLM_API_KEY: "" # VLM API KEY
     EMBEDDER_API_KEY: ""
     TRANSCRIBER_API_KEY: ""
+    # Read live from postgresql.auth.password (not the *pgPass anchor, which
+    # only resolves within values.yaml and goes stale once overridden via
+    # --set/-f) so the secret always matches the actual DB credential.
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
     AUTH_TOKEN: "" # API KEY for OpenRAG
+    METRICS_TOKEN: "" # Bearer for Prometheus on GET /metrics; empty = 403 unless METRICS_ALLOW_UNAUTHENTICATED
     HF_TOKEN: "" # HuggingFace token
+    RERANKER_API_KEY: "EMPTY"  # Set when using an external reranker that requires authentication
+
+# Arbitrary additional Kubernetes objects rendered at install time.
+# Each entry is a full resource manifest; Go templates are supported.
+# Example:
+# extraObjects:
+#   - apiVersion: v1
+#     kind: ConfigMap
+#     metadata:
+#       name: "{{ include "openrag-stack.fullname" . }}-extra"
+#     data:
+#       key: value
+extraObjects: []

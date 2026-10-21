@@ -9,7 +9,7 @@ Workspaces let you organize files within a partition into named subsets. When se
 
 ## Concepts
 
-- A **workspace** belongs to exactly one partition
+- A **workspace** belongs to exactly one partition, and its `workspace_id` is unique **within that partition** only: two partitions may each have a workspace called `default`. A workspace is always addressed as `(partition, workspace_id)`.
 - A file can belong to **multiple workspaces** (or none)
 - Workspaces do not duplicate files — they reference existing partition files
 - Deleting a workspace deletes **orphaned files** (files not in any other workspace) from the partition automatically
@@ -27,7 +27,7 @@ erDiagram
 
     workspaces {
         int id PK
-        varchar workspace_id UK
+        varchar workspace_id
         varchar partition_name FK
         varchar display_name
         int created_by FK
@@ -36,13 +36,14 @@ erDiagram
 
     workspace_files {
         int id PK
-        varchar workspace_id FK
-        varchar file_id FK
+        int workspace_id FK
+        int file_id FK
     }
 ```
 
 **Constraints:**
-- `UniqueConstraint(workspace_id)` — workspace IDs are globally unique
+- `UniqueConstraint(partition_name, workspace_id)` — workspace IDs are unique per partition, not globally
+- `workspace_files.workspace_id` references the integer `workspaces.id`, not the client-facing string (which is not unique across partitions)
 - `UniqueConstraint(workspace_id, file_id)` on `workspace_files` — a file appears at most once per workspace
 - Cascade delete: dropping a workspace removes its `workspace_files` rows
 
@@ -59,7 +60,7 @@ All workspace endpoints live under `/partition/{partition}/workspaces`.
 | POST | `/partition/{partition}/workspaces` | Editor | Create a workspace |
 | GET | `/partition/{partition}/workspaces` | Viewer | List all workspaces in partition |
 | GET | `/partition/{partition}/workspaces/{workspace_id}` | Viewer | Get workspace details |
-| DELETE | `/partition/{partition}/workspaces/{workspace_id}` | Owner | Delete workspace and orphaned files |
+| DELETE | `/partition/{partition}/workspaces/{workspace_id}` | Owner | Delete workspace (and orphaned files, unless `keep_files=true`) |
 
 ### Workspace File Management
 
@@ -126,10 +127,29 @@ curl -X DELETE "$BASE_URL/partition/my-partition/workspaces/project-alpha" \
 ```
 
 ```json
-{"status": "deleted", "orphaned_files_deleted": 1}
+{"status": "deleted", "orphaned_files_deleted": 1, "orphaned_files_failed": [], "kept_files": 0}
 ```
 
-Files that belonged **only** to the deleted workspace are automatically removed from the partition. Files shared with other workspaces are preserved.
+Only files uploaded with workspace assignment are automatically removed, and only after their last workspace is deleted. Independently indexed files remain in the partition even when attached to the deleted workspace. Files indexed before ownership tracking was introduced are also preserved because their origin is unknown.
+
+#### Keeping Orphaned Files (`keep_files=true`)
+
+Pass `?keep_files=true` to delete the workspace and its membership rows **without** touching any files, even ones that would otherwise be orphaned:
+
+```bash
+curl -X DELETE "$BASE_URL/partition/my-partition/workspaces/project-alpha?keep_files=true" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"status": "deleted", "orphaned_files_deleted": 0, "orphaned_files_failed": [], "kept_files": 1}
+```
+
+- `kept_files` reports how many files would have been orphaned and were left indexed in the partition instead of being deleted.
+- The workspace and its `workspace_files` rows are still removed as usual — only the file-deletion step is skipped.
+- With `keep_files=false` (the default), only exclusively workspace-owned orphans are deleted.
+- Retained files become independent partition files, so attaching them to another workspace does not make them eligible for automatic deletion again.
+- Useful when files may be shared outside of the workspace model (e.g. referenced by an external system) and must never be deleted as a side effect of removing a workspace.
 
 ---
 
@@ -145,7 +165,9 @@ curl -X POST "$BASE_URL/indexer/partition/my-partition/file/my-file-id" \
   -F 'workspace_ids=["project-alpha", "project-beta"]'
 ```
 
-The `workspace_ids` field accepts a JSON array of workspace IDs. Each workspace must exist in the target partition, otherwise the request is rejected with a 404.
+The `workspace_ids` field accepts a JSON array of workspace IDs. Each workspace must exist in the target partition, otherwise the request is rejected with a 404. A file uploaded without `workspace_ids` and attached later through the workspace-files endpoint remains an independently indexed partition file; deleting that workspace does not remove it. Use upload-time assignment when the file should be owned and purged with its last workspace.
+
+Uploads remain protected while their workspace attachments are being completed. If attachment fails, indexing is interrupted before ownership transfer, or a requested workspace is deleted during attachment, the file remains independently indexed to avoid losing uploaded content.
 
 ---
 
@@ -162,7 +184,7 @@ Only chunks from files belonging to the `project-alpha` workspace are returned.
 
 ### Multi-Partition Search
 
-The `workspace` parameter also works with multi-partition search:
+The `workspace` parameter also works with multi-partition search. The workspace is looked up among the partitions being searched only; if more than one of them owns a workspace with that id, the request is rejected with `422 [WORKSPACE_AMBIGUOUS]` and must target a single partition (`partitions=<one>` or `/search/partition/{partition}`).
 
 ```bash
 curl "$BASE_URL/search?partitions=my-partition&text=quarterly+results&workspace=project-alpha" \
@@ -199,7 +221,11 @@ flowchart LR
     A[Delete workspace] --> B[Find workspace files]
     B --> C{File in other workspaces?}
     C -->|Yes| D[Keep file]
-    C -->|No| E[Delete orphaned file from partition]
+    C -->|No| H{Independently indexed?}
+    H -->|Yes| D
+    H -->|No| G{keep_files=true?}
+    G -->|Yes| D
+    G -->|No| E[Delete orphaned file from partition]
     D --> F[Done]
     E --> F
 ```

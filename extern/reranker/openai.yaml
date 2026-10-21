@@ -1,6 +1,5 @@
 x-vllm-env: &vllm_env
   HUGGING_FACE_HUB_TOKEN:
-  VLLM_SLEEP_WHEN_IDLE: 1  # Avoid 100% CPU usage when idle
 
 x-reranker: &reranker_template
   networks:
@@ -10,15 +9,17 @@ x-reranker: &reranker_template
   # restart: on-failure
   environment:
     - HUGGING_FACE_HUB_TOKEN
-    - VLLM_SLEEP_WHEN_IDLE=1  # Avoid 100% CPU usage when idle
   ipc: "host"
   volumes:
     - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface
+  # The image's entrypoint is `vllm serve`, which takes the model positionally
+  # (`--model` is deprecated).
   command: >
-    --model ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+    ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
     --trust-remote-code
     --api-key ${RERANKER_API_KEY:-"EMPTY"}
     --gpu_memory_utilization 0.3
+    ${RERANKER_EXTRA_ARGS:-}
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
     interval: 20s
@@ -31,7 +32,7 @@ x-reranker: &reranker_template
 services:
   reranker-gpu:
     <<: *reranker_template
-    image: vllm/vllm-openai:v0.17.1
+    image: vllm/vllm-openai:v0.30.0
     environment:
       <<: *vllm_env
       NVIDIA_VISIBLE_DEVICES: all
@@ -49,15 +50,16 @@ services:
 
   reranker-cpu:
     <<: *reranker_template
-    image: vllm/vllm-openai-cpu:v0.17.1
+    image: vllm/vllm-openai-cpu:v0.30.0
     deploy: {}
     environment:
       <<: *vllm_env
       VLLM_CPU_KVCACHE_SPACE: 8
     command: >
-      --model ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
       --trust-remote-code
       --api-key ${RERANKER_API_KEY:-"EMPTY"}
       --dtype float32
+      ${RERANKER_EXTRA_ARGS:-}
     profiles:
       - "cpu"

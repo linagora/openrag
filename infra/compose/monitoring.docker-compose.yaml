@@ -7,8 +7,20 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/openrag_token:/etc/prometheus/openrag_token:ro
+      # Generated from the chart's rule template with default values by
+      # scripts/gen_alert_rules.py, so Compose and Kubernetes alert on one
+      # definition. Regenerate rather than editing; CI checks for drift.
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      # The token is no longer bind-mounted here: develop supplies it through
+      # the ``configs:`` entry below, written straight from METRICS_TOKEN. Two
+      # sources for one target would collide, and the config is the one that
+      # fails closed when the variable is unset.
       - prometheus_data:/prometheus
+    configs:
+      # The scrape bearer, read by prometheus.yml (credentials_file). Written
+      # straight from METRICS_TOKEN so the API and its scraper can't disagree.
+      - source: openrag_metrics_token
+        target: /etc/prometheus/openrag_token
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
@@ -22,14 +34,18 @@ services:
     image: grafana/grafana:11.2.2
     container_name: openrag-grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GF_SERVER_ROOT_URL:-http://localhost:3000}
+      - GF_SERVER_SERVE_FROM_SUB_PATH=${GF_SERVER_SERVE_FROM_SUB_PATH:-false}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # The chart's copy is the only one: Helm's .Files.Glob reads only inside
+      # the chart directory, and the Kubernetes ConfigMaps are rendered from it.
+      - ../charts/openrag-stack/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
@@ -55,15 +71,13 @@ services:
     restart: unless-stopped
 
   nvidia-gpu-exporter:
-    image: utkuozdemir/nvidia_gpu_exporter:1.2.0
+    image: utkuozdemir/nvidia_gpu_exporter:1.13.1
     container_name: openrag-nvidia-gpu-exporter
     ports:
       # Localhost only: scraped over the compose network by name.
       - "127.0.0.1:9835:9835"
-    volumes:
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=utility
     deploy:
       resources:
         reservations:
@@ -72,6 +86,28 @@ services:
               count: all
               capabilities: [gpu]
     restart: unless-stopped
+
+  # The API runs Ray embedded, and Ray picks a random port for its metrics
+  # agent unless told otherwise. Pin it so the "openrag-ray" scrape job can
+  # name it: indexing, and the inference calls the indexing workers make, are
+  # recorded in Ray actors and only ever reach Prometheus through that agent.
+  # Unauthenticated, so it is reachable on the compose network only and
+  # deliberately absent from `ports:`. Both API variants share the `openrag`
+  # alias the job targets.
+  openrag:
+    environment:
+      RAY_METRICS_EXPORT_PORT: "8091"
+
+  openrag-cpu:
+    environment:
+      RAY_METRICS_EXPORT_PORT: "8091"
+
+configs:
+  # Inline `content` needs Docker Compose >= 2.23.1. GET /metrics fails closed
+  # without METRICS_TOKEN, so the overlay refuses to start rather than scrape
+  # a 403 forever. Generate one with `openssl rand -hex 16`.
+  openrag_metrics_token:
+    content: "${METRICS_TOKEN:?Set METRICS_TOKEN in .env — the monitoring overlay sends it as the bearer on GET /metrics}"
 
 volumes:
   prometheus_data:

@@ -15,8 +15,9 @@ class _AsyncContext:
 
 
 class _FakeConn:
-    def __init__(self, partition_exists: bool):
+    def __init__(self, partition_exists: bool, membership_created: bool = True):
         self.partition_exists = partition_exists
+        self.membership_created = membership_created
         self.executed: list[tuple[str, tuple]] = []
 
     def transaction(self):
@@ -25,6 +26,9 @@ class _FakeConn:
     async def fetchval(self, query: str, *params):
         if "SELECT 1 FROM partitions" in query:
             return 1 if self.partition_exists else None
+        if "INSERT INTO partition_memberships" in query:
+            self.executed.append((query, params))
+            return 1 if self.membership_created else None
         return None
 
     async def execute(self, query: str, *params):
@@ -33,8 +37,8 @@ class _FakeConn:
 
 
 class _FakePool:
-    def __init__(self, partition_exists: bool):
-        self.conn = _FakeConn(partition_exists)
+    def __init__(self, partition_exists: bool, membership_created: bool = True):
+        self.conn = _FakeConn(partition_exists, membership_created)
 
     def acquire(self):
         return _AsyncContext(self.conn)
@@ -74,3 +78,17 @@ async def test_add_member_to_existing_partition_allows_any_role():
 
     assert await repo.add_partition_member("existing", 6, "editor") is True
     assert any("INSERT INTO partition_memberships" in query for query, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_add_member_conflict_does_not_overwrite_existing_role():
+    from services.persistence.partition_membership_repo import PgPartitionMembershipRepository
+
+    pool = _FakePool(partition_exists=True, membership_created=False)
+    repo = PgPartitionMembershipRepository(pool_getter=lambda: pool)
+
+    assert await repo.add_partition_member("existing", 6, "editor") is False
+    membership_query = next(query for query, _ in pool.conn.executed if "INSERT INTO partition_memberships" in query)
+    assert "DO NOTHING" in membership_query
+    assert "DO UPDATE" not in membership_query
+    assert "RETURNING 1" in membership_query

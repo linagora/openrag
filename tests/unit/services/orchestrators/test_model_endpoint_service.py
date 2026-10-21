@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -40,13 +42,32 @@ def _make_unvalidated_row(**kwargs):
 
 
 class _FakeEndpointRepo:
-    def __init__(self, rows: list | None = None):
+    def __init__(self, rows: list | None = None, usage: dict | None = None, indexed_usage: list | None = None):
         from core.config.model_endpoints import ModelEndpointRow
 
         self._store: dict[tuple[str, str], ModelEndpointRow] = {}
         self.calls: list[tuple[str, tuple]] = []
+        self._usage = usage or {}
+        # Per-partition indexed-file counts `indexed_file_usage` reports, the
+        # same for every endpoint. Empty is "nothing indexed", which is what
+        # every test written before the edit guard assumes.
+        self._indexed_usage = indexed_usage or []
+        # Set to a message to make the delete refuse, the way the real repo
+        # does when a partition still resolves to the embedder.
+        self.conflict_on_delete: str | None = None
+        # Embedders a running swap re-embeds partitions into: the real repo
+        # refuses any edit changing their vectors.
+        self.swap_targets: set[str] = set()
         for r in rows or []:
             self._store[(r.name, r.model_type)] = r
+
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        self.calls.append(("usage_counts", ()))
+        return dict(self._usage)
+
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict]:
+        self.calls.append(("indexed_file_usage", (name, model_type)))
+        return list(self._indexed_usage)
 
     async def create(self, row):
         self._store[(row.name, row.model_type)] = row
@@ -64,10 +85,25 @@ class _FakeEndpointRepo:
             rows = [r for r in rows if r.model_type == model_type]
         return rows
 
-    async def update(self, name: str, model_type: str, **fields):
+    async def update(self, name: str, model_type: str, *, guard=None, **fields):
         row = self._store.get((name, model_type))
         if row is None:
             return None
+        # The real repo checks for a running swap, then runs the guard, on the
+        # row it just locked, before writing.
+        if model_type == "embedder" and name in self.swap_targets:
+            from core.config.model_endpoints import material_embedder_changes
+            from core.utils.exceptions import ConflictError
+
+            if changed := material_embedder_changes(row, fields):
+                raise ConflictError(
+                    f"Embedder '{name}' is the target of 1 running embedder swap(s), and changing "
+                    f"{', '.join(changed)} would change the vectors they write.",
+                    code="EMBEDDER_SWAP_IN_PROGRESS",
+                )
+        if guard is not None:
+            await guard(row, lambda: self.indexed_file_usage(name, model_type))
+        self.calls.append(("update", (name, model_type)))
         updated = row.model_copy(update=fields)
         self._store[(name, model_type)] = updated
         return updated
@@ -84,31 +120,47 @@ class _FakeEndpointRepo:
         for key, row in list(self._store.items()):
             self._store[key] = row.model_copy(update={"is_default": key[0] == name and key[1] == model_type})
 
-    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None, str | None]:
         names = sorted(k[0] for k in self._store if k[1] == model_type)
         self.calls.append(("delete_and_promote_default", (name, model_type)))
+        if self.conflict_on_delete is not None:
+            from core.utils.exceptions import ConflictError
+
+            raise ConflictError(self.conflict_on_delete)
         if name not in names:
-            return ("not_found", None)
+            return ("not_found", None, None)
         if len(names) <= 1:
-            return ("last", None)
+            return ("last", None, None)
         was_default = self._store[(name, model_type)].is_default
-        self._store.pop((name, model_type), None)
+        deleted = self._store.pop((name, model_type))
         promoted = None
         if was_default:
             promoted = next(n for n in names if n != name)
             for key, row in list(self._store.items()):
                 if key[1] == model_type:
                     self._store[key] = row.model_copy(update={"is_default": key[0] == promoted})
-        return ("ok", promoted)
+        return ("ok", promoted, deleted.vector_field)
 
 
-def _make_service(repo=None, rows=None, settings=None):
+def _make_service(
+    repo=None,
+    rows=None,
+    settings=None,
+    partition_service=None,
+    preset_service=None,
+    prompt_service=None,
+    vector_store=None,
+):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
 
     return ModelEndpointService(
         model_endpoint_repo=repo or _FakeEndpointRepo(rows),
         config=settings or Settings(),
+        partition_service=partition_service,
+        preset_service=preset_service,
+        prompt_service=prompt_service,
+        vector_store=vector_store,
     )
 
 
@@ -128,6 +180,18 @@ async def test_seed_defaults_inserts_embedder_when_empty():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("embedder", "implementation"), [({}, "vllm"), ({"provider": "tei"}, "tei")])
+async def test_seed_defaults_seeds_the_embedder_with_its_provider(embedder, implementation):
+    from core.config.root import Settings
+
+    repo = _FakeEndpointRepo()
+    await _make_service(repo, settings=Settings(embedder=embedder)).seed_defaults()
+
+    [row] = [row for (_, model_type), row in repo._store.items() if model_type == "embedder"]
+    assert row.extra["implementation"] == implementation
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_skips_type_when_rows_exist():
     existing = _make_row(name="custom", model_type="embedder", is_default=True)
     repo = _FakeEndpointRepo(rows=[existing])
@@ -136,6 +200,30 @@ async def test_seed_defaults_skips_type_when_rows_exist():
 
     creates = [c for c in repo.calls if c[0] == "create"]
     assert not any(name_type[1] == "embedder" for _, name_type in creates)
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_ignores_concurrent_create_conflict():
+    """A replica that loses the initial seed race must still finish booting."""
+    from core.utils.exceptions import ValidationError
+
+    attempted: list[str] = []
+
+    class RacingRepo(_FakeEndpointRepo):
+        async def create(self, row):
+            attempted.append(row.model_type)
+            if row.model_type == "stt":
+                raise ValidationError(
+                    "already exists",
+                    status_code=409,
+                    code="ENDPOINT_EXISTS",
+                )
+            return await super().create(row)
+
+    repo = RacingRepo()
+    await _make_service(repo).seed_defaults()
+
+    assert "stt" in attempted
 
 
 @pytest.mark.asyncio
@@ -182,6 +270,13 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
         llm={"base_url": "http://llm:8000/v1", "model": "mistral", "api_key": "llm-key"},
         vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "api_key": "vlm-key"},
         reranker={"provider": "infinity", "api_key": "rerank-key"},
+        loader={
+            "transcriber": {
+                "base_url": "http://stt:8000/v1",
+                "model_name": "moss-transcribe-diarize",
+                "api_key": "stt-key",
+            }
+        },
     )
     repo = _FakeEndpointRepo()
     svc = _make_service(repo, settings=settings)
@@ -194,7 +289,54 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
         "llm": "llm-key",
         "vlm": "vlm-key",
         "reranker": "rerank-key",
+        "stt": "stt-key",
     }
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_keeps_the_empty_api_key_except_for_stt(monkeypatch):
+    """#1113: the bundled reranker runs with ``--api-key EMPTY`` and answers 401
+    without ``Bearer EMPTY``, so ``EMPTY`` is seeded as a key. STT alone drops
+    it: some transcription endpoints reject any Authorization header."""
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = Settings(
+        embedder={"api_key": "EMPTY"},
+        llm={"base_url": "http://llm:8000/v1", "model": "mistral", "api_key": "EMPTY"},
+        vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "api_key": "EMPTY"},
+        reranker={"provider": "infinity", "api_key": "EMPTY"},
+        loader={"transcriber": {"base_url": "http://stt:8000/v1", "model_name": "whisper", "api_key": "EMPTY"}},
+    )
+    repo = _FakeEndpointRepo()
+    await _make_service(repo, settings=settings).seed_defaults()
+
+    assert {row.model_type: row.extra.get("api_key") for row in repo._store.values()} == {
+        "embedder": "EMPTY",
+        "llm": "EMPTY",
+        "vlm": "EMPTY",
+        "reranker": "EMPTY",
+        "stt": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_key", ["", "   "])
+async def test_seed_defaults_omits_blank_api_keys(monkeypatch, api_key):
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = Settings(embedder={"api_key": api_key}, reranker={"provider": "infinity", "api_key": api_key})
+    repo = _FakeEndpointRepo()
+    await _make_service(repo, settings=settings).seed_defaults()
+
+    rows = {row.model_type: row for row in repo._store.values()}
+    assert "api_key" not in rows["embedder"].extra
+    assert "api_key" not in rows["reranker"].extra
 
 
 @pytest.mark.asyncio
@@ -214,6 +356,14 @@ async def test_seed_defaults_preserves_endpoint_timeouts_and_batch_size(monkeypa
         llm={"base_url": "http://llm:8000/v1", "model": "mistral", "timeout": 45},
         vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "timeout": 75},
         reranker={"provider": "infinity", "timeout": 25},
+        loader={
+            "transcriber": {
+                "base_url": "http://stt:8000/v1",
+                "model_name": "moss-transcribe-diarize",
+                "timeout": 900,
+                "max_concurrent_chunks": 3,
+            }
+        },
     )
     repo = _FakeEndpointRepo()
     svc = _make_service(repo, settings=settings)
@@ -226,6 +376,8 @@ async def test_seed_defaults_preserves_endpoint_timeouts_and_batch_size(monkeypa
     assert rows["llm"].timeout == 45
     assert rows["vlm"].timeout == 75
     assert rows["reranker"].timeout == 25
+    assert rows["stt"].timeout == 900
+    assert rows["stt"].batch_size == 3
 
 
 @pytest.mark.asyncio
@@ -421,6 +573,541 @@ async def test_seed_defaults_skips_reranker_when_unconfigured(monkeypatch):
     assert not any(name_type[1] == "reranker" for _, name_type in creates)
 
 
+@pytest.mark.asyncio
+async def test_seed_defaults_leaves_existing_env_named_row_untouched_by_default(monkeypatch):
+    """sync_on_boot defaults to False: an already-seeded row (name matches the
+    env-derived slug) must survive an env-var change across restarts — the DB
+    stays the source of truth until an admin (or an opt-in sync) changes it.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="embed-model", model_type="embedder", model_name="embed-model", batch_size=512, is_default=True
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model", "batch_size": 64})
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    assert not any(c[0] == "update" for c in repo.calls)
+    assert repo._store[("embed-model", "embedder")].batch_size == 512
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_syncs_env_named_row_when_sync_on_boot_enabled(monkeypatch):
+    """sync_on_boot=True: the endpoint whose name matches the current
+    env-derived slug is refreshed from Settings/env on every boot, so a Helm
+    values change + pod rollout is enough — no admin API call needed.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    # _sync_env_managed reads these directly, so an inherited value from the dev
+    # or CI environment would make the "batch_size is preserved" assertion below
+    # pass or fail for reasons that have nothing to do with the code under test.
+    monkeypatch.delenv("EMBEDDER_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("EMBEDDER_TIMEOUT", raising=False)
+
+    existing = _make_row(
+        name="embed-model",
+        model_type="embedder",
+        model_name="embed-model",
+        endpoint="http://old-embedder:8000/v1",
+        batch_size=512,
+        # Marked env-managed: a row whose endpoint has drifted from env is only
+        # synced when it carries the marker — adoption by slug alone would not
+        # touch it (see test_..._does_not_adopt_a_modified_row).
+        extra={"api_key": "hand-set-secret", "managed_by": "env"},
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model", "batch_size": 64},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    updated = repo._store[("embed-model", "embedder")]
+    # EMBEDDER_BATCH_SIZE is not set, so env does not own batch_size here and the
+    # admin's 512 stands; endpoint/model_name are always env-owned and do sync.
+    assert updated.batch_size == 512
+    assert updated.endpoint == "http://embedder:8000/v1"
+    # Sync now writes `extra` (it must, to rotate a key), but a hand-set key still
+    # survives: env has no real key here, only the `EMPTY` placeholder, which is
+    # never treated as a credential. The row is stamped as env-managed so a later
+    # model change can find it by marker instead of by slug.
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+
+    assert updated.extra == {"api_key": "hand-set-secret", ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_never_touches_differently_named_endpoints(monkeypatch):
+    """sync_on_boot=True must not clobber a hand-created endpoint that doesn't
+    share the env-derived name, and must not create a competing default either.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(name="custom", model_type="embedder", batch_size=999, is_default=True)
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model", "batch_size": 64},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    embedder_calls = [c for c in repo.calls if c[0] in ("update", "create") and c[1][1] == "embedder"]
+    assert not embedder_calls
+    assert repo._store[("custom", "embedder")].batch_size == 999
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_follows_a_changed_model_slug(monkeypatch):
+    """Changing the model must actually take effect under sync_on_boot.
+
+    The row is found by its env-managed marker, not by the slug it was named
+    after, so a new model is written onto the same row and the row is renamed
+    to match. Before the marker this silently did nothing: the new slug matched
+    no row, the seed declined to create a competing default, and the old model
+    stayed live.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="old-model",
+        model_type="embedder",
+        model_name="old-model",
+        batch_size=512,
+        extra={"implementation": "vllm", ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "new-model", "batch_size": 64},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    # The row keeps its name — partitions and presets store endpoint names by
+    # value and nothing cascades a rename, so renaming would strand them.
+    assert ("new-model", "embedder") not in repo._store
+    synced = repo._store[("old-model", "embedder")]
+    assert synced.model_name == "new-model"
+    assert synced.endpoint == "http://embedder:8000/v1"
+
+
+def _indexed_env_managed_embedder(**overrides):
+    """The env-seeded default embedder of an install that has indexed files."""
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+
+    fields = {
+        "name": "indexed-model",
+        "model_type": "embedder",
+        "model_name": "indexed-model",
+        "endpoint": "http://embedder:8000/v1",
+        "batch_size": 512,
+        "extra": {"implementation": "vllm", "api_key": "old-key", ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        "is_default": True,
+    }
+    fields.update(overrides)
+    row = _make_row(**fields)
+    return row, _FakeEndpointRepo(rows=[row], indexed_usage=[{"partition": "docs", "file_count": 3}])
+
+
+async def _seed_capturing_warnings(svc) -> list[tuple[str, str]]:
+    """Run the seed; return the (level, message) of every warning or worse."""
+    from loguru import logger
+
+    records: list[tuple[str, str]] = []
+    sink = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])), level="WARNING"
+    )
+    try:
+        await svc.seed_defaults()
+    finally:
+        logger.remove(sink)
+    return records
+
+
+def _sync_settings(**embedder):
+    from core.config.root import Settings
+
+    return Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "indexed-model", **embedder},
+        models={"sync_on_boot": True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_indexed_files(monkeypatch):
+    """#1099: after an upgrade that moved the default embedder, an .env without
+    EMBEDDER_MODEL_NAME made the boot sync rewrite the indexed embedder's model,
+    so new uploads wrote another model's vectors into the field search compares.
+    The model now changes only through the admin API's guard. The rest of the
+    row still follows env: a refused model must not also block a rotated key or
+    a tunable the operator set in the same rollout."""
+
+    monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    _, repo = _indexed_env_managed_embedder()
+    settings = _sync_settings(
+        base_url="http://new-embedder:8000/v1", model_name="new-model", api_key="rotated-key", batch_size=64
+    )
+    svc = _make_service(repo, settings=settings)
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.model_name == "indexed-model"
+    assert synced.extra["api_key"] == "rotated-key"
+    assert synced.batch_size == 64
+    assert synced.endpoint == "http://new-embedder:8000/v1"
+    # The boot log is read by an operator, not an admin-API client: it names
+    # the variable to set, not the API's "Resend ..." instruction. A warning,
+    # worded as a disagreement: the database's model may be an admin's
+    # deliberate change that env was never updated for.
+    [(level, warning)] = warnings
+    assert level == "WARNING"
+    assert "env asks for 'new-model', the database keeps 'indexed-model'" in warning
+    assert "EMBEDDER_MODEL_NAME" in warning
+    assert "vllm.embedderModelName" in warning
+    assert "acknowledge_indexed_data=true" in warning
+    assert "Resend" not in warning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "env_provider", "configured", "expected"),
+    [
+        # Named by env, the vendor syncs, indexed files or not: like the URL, it
+        # is how the operator describes the server, not a change of model.
+        ("vllm", "tei", "tei", "tei"),
+        # Not named by env, the config default must not undo an admin's choice.
+        ("tei", None, "vllm", "tei"),
+        ("tei", "", "vllm", "tei"),
+    ],
+)
+async def test_seed_defaults_sync_on_boot_sets_the_embedder_vendor_only_when_env_names_it(
+    monkeypatch, stored, env_provider, configured, expected
+):
+    if env_provider is None:
+        monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("EMBEDDER_PROVIDER", env_provider)
+    _, repo = _indexed_env_managed_embedder(extra={"implementation": stored, "api_key": "old-key", "managed_by": "env"})
+    svc = _make_service(repo, settings=_sync_settings(provider=configured))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["implementation"] == expected
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_key_of_an_embedder_with_indexed_files(monkeypatch):
+    """An API key cannot change a vector, so indexed files do not hold it back."""
+    _, repo = _indexed_env_managed_embedder()
+    svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
+    # Not refused and then applied by the fallback: nothing is reported.
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_moves_an_embedder_with_indexed_files_to_a_new_url(monkeypatch):
+    """A new URL is how an operator moves the same model to another server. If
+    that server serves another model, readiness reports the embedder unavailable;
+    the sync does not refuse the move."""
+    _, repo = _indexed_env_managed_embedder()
+    svc = _make_service(repo, settings=_sync_settings(base_url="http://embedder.gpu-pool:8000/v1"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.endpoint == "http://embedder.gpu-pool:8000/v1"
+    assert synced.model_name == "indexed-model"
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_holds_the_url_and_model_of_a_running_swaps_target(monkeypatch):
+    """A running swap refuses any change to its target's vectors, the URL
+    included, so the fallback that holds back only the model was refused too and
+    failed boot — before the step that resumes the swap, so every boot failed
+    the same way. The row keeps its URL and model until the swap ends, and takes
+    the rest."""
+    monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    settings = _sync_settings(
+        base_url="http://embedder.gpu-pool:8000/v1", model_name="new-model", api_key="rotated-key", batch_size=64
+    )
+    svc = _make_service(repo, settings=settings)
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.endpoint == "http://embedder:8000/v1"
+    assert synced.model_name == "indexed-model"
+    assert synced.extra["api_key"] == "rotated-key"
+    assert synced.batch_size == 64
+    [(level, warning)] = warnings
+    assert level == "WARNING"
+    assert "running embedder swap" in warning
+    assert "http://embedder.gpu-pool:8000/v1" in warning
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_key_of_a_running_swaps_target(monkeypatch):
+    """A swap holds back only what changes its vectors."""
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_api_key(monkeypatch):
+    """A rotated *_API_KEY must reach the row it owns.
+
+    ``extra`` was previously never written by sync, so rotating the key left the
+    old one in the DB and requests failed as soon as the provider revoked it.
+    Only the key is taken from env — an admin's other ``extra`` keys survive.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="embed-model",
+        model_type="embedder",
+        model_name="embed-model",
+        extra={
+            "implementation": "vllm",
+            "api_key": "old-revoked-key",
+            "custom_kwarg": "set-by-admin",
+            ENV_MANAGED_KEY: ENV_MANAGED_VALUE,
+        },
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={
+            "base_url": "http://embedder:8000/v1",
+            "model_name": "embed-model",
+            "api_key": "new-rotated-key",
+        },
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    extra = repo._store[("embed-model", "embedder")].extra
+    assert extra["api_key"] == "new-rotated-key"
+    assert extra["custom_kwarg"] == "set-by-admin"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_adopts_a_row_seeded_before_the_marker(monkeypatch):
+    """Deployments upgraded from a build without the marker must not be stranded.
+
+    The row has no marker, so it is matched by slug once and stamped — from then
+    on it is found by marker and a model change can follow it.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="embed-model",
+        model_type="embedder",
+        model_name="embed-model",
+        endpoint="http://embedder:8000/v1",  # still exactly what the seeder wrote
+        extra={"implementation": "vllm"},
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model"},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    assert repo._store[("embed-model", "embedder")].extra[ENV_MANAGED_KEY] == ENV_MANAGED_VALUE
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_does_not_adopt_a_modified_row(monkeypatch):
+    """A hand-created row that merely shares the slug must not be taken over.
+
+    Before the marker existed the slug was the only handle on a seeded row, but a
+    slug match alone cannot distinguish an old seed from an endpoint an admin
+    named after the model. Adoption therefore requires the row to still match env
+    exactly; this one has been re-pointed by hand, so sync leaves it alone.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="embed-model",
+        model_type="embedder",
+        model_name="embed-model",
+        endpoint="http://admin-chosen-host:9000/v1",  # deliberately not the env value
+        batch_size=512,
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model"},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    untouched = repo._store[("embed-model", "embedder")]
+    assert untouched.endpoint == "http://admin-chosen-host:9000/v1"
+    assert untouched.batch_size == 512
+    assert ENV_MANAGED_KEY not in untouched.extra
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_keeps_admin_timeout_when_no_env_var_set(monkeypatch):
+    """`llm` has no timeout env var at all, so sync must never write timeout.
+
+    The seed always carries `s.llm.timeout`, so trusting the seed's presence
+    overwrote an admin's 99 with the config default.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="chat-model",
+        model_type="llm",
+        model_name="chat-model",
+        endpoint="http://llm:8000/v1",
+        timeout=99.0,
+        extra={ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        llm={"base_url": "http://llm:8000/v1", "model": "chat-model"},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    assert repo._store[("chat-model", "llm")].timeout == 99.0
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_keeps_admin_batch_size_for_non_embedder_types(monkeypatch):
+    """Sync must not invent values the environment never supplied.
+
+    `_build_default_seeds` only carries a `batch_size` for `embedder`; the
+    llm/vlm/reranker seeds have none. Defaulting to a literal therefore reset an
+    admin-tuned row to 32 on every boot, even though nothing in env asked for a
+    batch_size at all. The fallback is the row's own value.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="chat-model",
+        model_type="llm",
+        model_name="chat-model",
+        batch_size=256,
+        timeout=99.0,
+        extra={ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        llm={"base_url": "http://llm:8000/v1", "model": "chat-model"},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    synced = repo._store[("chat-model", "llm")]
+    assert synced.batch_size == 256, "env supplied no batch_size for llm — the admin value must stand"
+    assert synced.endpoint == "http://llm:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_will_not_rename_over_a_hand_created_name(monkeypatch):
+    """The rename must never collide with an endpoint an admin created."""
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    managed = _make_row(
+        name="old-model",
+        model_type="embedder",
+        model_name="old-model",
+        extra={ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        is_default=True,
+    )
+    hand_made = _make_row(name="new-model", model_type="embedder", model_name="something-else", batch_size=999)
+    repo = _FakeEndpointRepo(rows=[managed, hand_made])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "new-model"},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    # The hand-created row is intact and the managed row kept its old name.
+    assert repo._store[("new-model", "embedder")].batch_size == 999
+    assert repo._store[("new-model", "embedder")].model_name == "something-else"
+    assert repo._store[("old-model", "embedder")].model_name == "new-model"
+
+
 # ------------------------------------------------------------------
 # load_all
 # ------------------------------------------------------------------
@@ -433,6 +1120,7 @@ async def test_load_all_populates_config_models():
     rows = [
         _make_row(name="jina", model_type="embedder", is_default=True),
         _make_row(name="mistral", model_type="llm", is_default=True),
+        _make_row(name="moss", model_type="stt", model_name="moss-transcribe-diarize", is_default=True),
     ]
     repo = _FakeEndpointRepo(rows=rows)
     settings = Settings()
@@ -444,6 +1132,10 @@ async def test_load_all_populates_config_models():
     assert "default" in settings.models.embedder
     assert "mistral" in settings.models.llm
     assert "default" in settings.models.llm
+    assert "moss" in settings.models.stt
+    assert "default" in settings.models.stt
+    assert settings.models.stt["moss"].name == "moss"
+    assert settings.models.stt["default"].name == "moss"
 
 
 @pytest.mark.asyncio
@@ -459,6 +1151,37 @@ async def test_load_all_no_default_alias_without_is_default():
 
     assert "jina" in settings.models.embedder
     assert "default" not in settings.models.embedder
+
+
+@pytest.mark.asyncio
+async def test_load_new_registers_endpoints_created_elsewhere_and_keeps_the_loaded_ones():
+    """A partition a swap switched on another process names an endpoint created
+    there; ``load_new`` makes it resolvable here. Loaded entries stay as they are:
+    their clients are cached by name, and a rename here keeps its old-name alias."""
+    from core.config.root import Settings
+
+    repo = _FakeEndpointRepo(rows=[_make_row(name="embed-a", is_default=True)])
+    settings = Settings()
+    svc = _make_service(repo, settings=settings)
+    await svc.load_all()
+    loaded = settings.models.embedder["embed-a"]
+    settings.models.embedder["renamed-from"] = loaded
+
+    # Another process creates embed-b and a reranker, and edits embed-a.
+    repo._store[("embed-b", "embedder")] = _make_row(
+        name="embed-b", model_name="embed-model-b", is_default=False, vector_field="vector_embed_b"
+    )
+    repo._store[("rank-b", "reranker")] = _make_row(name="rank-b", model_type="reranker", is_default=False)
+    repo._store[("embed-a", "embedder")] = _make_row(name="embed-a", endpoint="http://edited:8000/v1")
+
+    await svc.load_new()
+
+    assert settings.models.embedder["embed-b"].model_name == "embed-model-b"
+    assert settings.models.embedder["embed-b"].vector_field == "vector_embed_b"
+    assert "rank-b" in settings.models.reranker
+    assert settings.models.embedder["embed-a"] is loaded
+    assert settings.models.embedder["default"] is loaded
+    assert settings.models.embedder["renamed-from"] is loaded
 
 
 # ------------------------------------------------------------------
@@ -553,6 +1276,221 @@ async def test_update_model_endpoint_renames_and_evicts_cache():
     assert ("new-name", "embedder") in repo._store
 
 
+class _FakePresetServiceForReload:
+    def __init__(self):
+        self.refresh_calls = 0
+
+    async def refresh_if_stale(self):
+        self.refresh_calls += 1
+        return True
+
+
+class _FakePartitionServiceForReload:
+    def __init__(self):
+        self.load_partitions_calls = 0
+
+    async def load_partitions(self):
+        self.load_partitions_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_reloads_presets_then_partitions():
+    """A rename cascades DB-side references (#770) inside the repo's own rename
+    transaction (see PgModelEndpointRepository.rename), but those writes are
+    invisible until PresetService / PartitionService reload their in-memory
+    caches — pin that both get refreshed on a rename."""
+    existing = _make_row(name="old-name", model_type="llm")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 0
+
+
+class _FakeUnchangedRevisionPresetService:
+    """A preset service whose revision did not move — `refresh_if_stale` reloads
+    nothing and reports so."""
+
+    def __init__(self):
+        self.refresh_calls = 0
+
+    async def refresh_if_stale(self):
+        self.refresh_calls += 1
+        return False
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_reloads_partitions_when_revision_unchanged():
+    """An `embedder` rename cascades into `partitions` but into no preset row, so
+    the preset revision never moves and `refresh_if_stale` reloads nothing. The
+    partition reload must still run, or `partitions.embedder` keeps the old name
+    and every index/search on that partition fails until a process restart."""
+    existing = _make_row(name="jina", model_type="embedder")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakeUnchangedRevisionPresetService()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("jina", "embedder", new_name="jina-v3")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_without_rename_skips_preset_and_partition_reload():
+    """A plain field update (no rename) touches no cross-referenced name, so
+    it must not pay for a presets/partitions reload it doesn't need."""
+    existing = _make_row(name="jina")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("jina", "embedder", endpoint="http://new:8000/v1")
+
+    assert preset_service.refresh_calls == 0
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_aliases_new_name_before_reload_awaits():
+    """A request racing the rename must resolve `new_name` even before the
+    presets/partitions reload below completes — the DB cascade (#770) has
+    already repointed partitions/presets at it by the time the rename
+    `await` returns, so the registry can't lag behind until `load_all()`."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    seen_during_reload = {}
+
+    class _SnoopingPresetService:
+        async def refresh_if_stale(self):
+            seen_during_reload["new-name"] = svc._config.models.llm.get("new-name")
+            seen_during_reload["old-name"] = svc._config.models.llm.get("old-name")
+            return True
+
+    svc._preset_service = _SnoopingPresetService()
+
+    await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert seen_during_reload["new-name"].endpoint == "http://old:8000/v1"
+    assert seen_during_reload["old-name"].endpoint == "http://old:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_keeps_both_names_resolvable_after_failed_reload():
+    """If PresetService.load_all() (or PartitionService.load_partitions())
+    raises mid-rename, the DB rename has already committed — the registry
+    must still resolve both the old and the new name afterward, instead of
+    being stuck answering only to the pre-rename one until process restart."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert svc._config.models.llm.get("old-name").endpoint == "http://old:8000/v1"
+    assert svc._config.models.llm.get("new-name").endpoint == "http://old:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_with_field_change_aliases_the_new_values():
+    """A rename combined with a field change (e.g. a new endpoint URL) must
+    alias `new_name`/`old_name` to the row this call just wrote, not to
+    whatever the in-memory bucket held before the update ran — otherwise a
+    reload failure right after would leave the registry silently serving the
+    stale pre-update config under the DB-authoritative new name forever."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name", endpoint="http://new:8000/v1")
+
+    assert svc._config.models.llm.get("new-name").endpoint == "http://new:8000/v1"
+    assert svc._config.models.llm.get("old-name").endpoint == "http://new:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_aliases_carry_the_new_registry_name():
+    """The aliased config must be named for what the DB now calls the row.
+
+    ``_alias_renamed_name`` is handed the pre-rename row, so naming the config
+    from it left ``name`` at ``old_name`` under both aliases until the final
+    ``load_all()``. ``ModelEndpointConfig.name`` is the stable registry identity
+    — and for STT it keys OpenAIAudioClient's limiter/client caches — so a
+    request landing in that window would key its caches under the retired name.
+    """
+    existing = _make_row(name="old-name", model_type="stt", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "stt", new_name="new-name")
+
+    assert svc._config.models.stt.get("new-name").name == "new-name"
+    # The old name stays resolvable for in-flight references, but it is an alias
+    # to the renamed row — not a claim that the row is still called that.
+    assert svc._config.models.stt.get("old-name").name == "new-name"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_evicts_stale_client_cache_before_failed_reload():
+    """A cached *client instance* under old_name predates this call and can't
+    know about a field change baked into the same rename — the factory checks
+    its cache before the config registry, so it must be evicted eagerly (not
+    only in the post-reload cleanup a failing reload would skip), or a
+    request through old_name keeps getting the stale pre-update client."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+    stale_client = object()
+    cache: dict = {"old-name": stale_client}
+    svc._client_caches["llm"] = cache
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name", endpoint="http://new:8000/v1")
+
+    assert "old-name" not in cache
+    assert "new-name" not in cache
+
+
 @pytest.mark.asyncio
 async def test_update_default_endpoint_evicts_default_alias_cache():
     # Updating the current default must evict the 'default' cache key too, not just
@@ -583,6 +1521,99 @@ async def test_update_non_default_endpoint_keeps_default_alias_cache():
 
     assert "e5" not in cache
     assert cache.get("default") is sentinel
+
+
+# ── edit guard: an embedder edit that strands indexed vectors (#762) ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"endpoint": "http://other:8000/v1"},
+        {"model_name": "bge-m3"},
+        {"extra": {"implementation": "ollama"}},
+        {"extra": {"max_model_len": 512}},
+    ],
+)
+async def test_update_refuses_a_material_embedder_edit_over_indexed_files(fields):
+    """The browser confirmation is not the guard: a direct API call changing
+    what the embedder produces must be refused while files depend on it."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakeEndpointRepo(
+        rows=[_make_row(name="jina")],
+        indexed_usage=[{"partition": "docs", "file_count": 31}, {"partition": "hr", "file_count": 4}],
+    )
+    svc = _make_service(repo)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_model_endpoint("jina", "embedder", **fields)
+
+    assert exc.value.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA"
+    assert "35 indexed file(s) in 2 partition(s) (docs, hr)" in exc.value.message
+    # An API client's way out, not the boot sync's (which names env vars).
+    assert "Resend with acknowledge_indexed_data=true" in exc.value.message
+    assert not any(c[0] == "update" for c in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_update_applies_a_material_embedder_edit_once_acknowledged():
+    repo = _FakeEndpointRepo(rows=[_make_row(name="jina")], indexed_usage=[{"partition": "docs", "file_count": 31}])
+    svc = _make_service(repo)
+
+    result = await svc.update_model_endpoint("jina", "embedder", acknowledge_indexed_data=True, model_name="bge-m3")
+
+    assert result.model_name == "bge-m3"
+
+
+@pytest.mark.asyncio
+async def test_update_applies_a_material_embedder_edit_when_nothing_is_indexed():
+    repo = _FakeEndpointRepo(rows=[_make_row(name="jina")], indexed_usage=[])
+    svc = _make_service(repo)
+
+    result = await svc.update_model_endpoint("jina", "embedder", model_name="bge-m3")
+
+    assert result.model_name == "bge-m3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"timeout": 90.0},
+        {"batch_size": 8},
+        {"new_name": "jina-v3"},
+        # A trailing slash is the same URL once normalized.
+        {"endpoint": "http://vllm:8000/v1/"},
+        # An endpoint saved without `implementation` already runs the default
+        # client; the form stamping that default on save changes nothing.
+        {"extra": {"implementation": "vllm"}},
+        {"extra": {"embed_concurrency": 4}},
+    ],
+)
+async def test_update_does_not_ask_for_acknowledgement_on_a_harmless_edit(fields):
+    repo = _FakeEndpointRepo(rows=[_make_row(name="jina")], indexed_usage=[{"partition": "docs", "file_count": 31}])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("jina", "embedder", **fields)
+
+    assert not any(c[0] == "indexed_file_usage" for c in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_update_never_guards_a_non_embedder():
+    """Repointing an LLM changes future answers, never a stored vector."""
+    repo = _FakeEndpointRepo(
+        rows=[_make_row(name="mistral", model_type="llm")],
+        indexed_usage=[{"partition": "docs", "file_count": 31}],
+    )
+    svc = _make_service(repo)
+
+    result = await svc.update_model_endpoint("mistral", "llm", model_name="mistral-large")
+
+    assert result.model_name == "mistral-large"
+    assert not any(c[0] == "indexed_file_usage" for c in repo.calls)
 
 
 @pytest.mark.asyncio
@@ -812,6 +1843,92 @@ async def test_set_default_calls_repo_and_reloads():
     assert any(c[0] == "list_all" for c in repo.calls)
 
 
+# ── a new default embedder keeps indexed partitions where they are (#762) ──
+
+
+@pytest.mark.asyncio
+async def test_set_default_embedder_reloads_partitions():
+    """The repo pins indexed partitions riding the alias to the outgoing default
+    by name; this replica's partition configs must see that before the alias
+    resolves to the new one."""
+    rows = [_make_row(name="jina", is_default=True), _make_row(name="e5", is_default=False)]
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(_FakeEndpointRepo(rows=rows), partition_service=partition_service)
+
+    await svc.set_default("embedder", "e5")
+
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_set_default_llm_does_not_reload_partitions():
+    rows = [
+        _make_row(name="mistral", model_type="llm", is_default=True),
+        _make_row(name="qwen", model_type="llm", is_default=False),
+    ]
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(_FakeEndpointRepo(rows=rows), partition_service=partition_service)
+
+    await svc.set_default("llm", "qwen")
+
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_update_is_default_embedder_reloads_partitions():
+    rows = [_make_row(name="jina", is_default=True), _make_row(name="e5", is_default=False)]
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(_FakeEndpointRepo(rows=rows), partition_service=partition_service)
+
+    await svc.update_model_endpoint("e5", "embedder", is_default=True)
+
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_create_default_embedder_reloads_partitions():
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(_FakeEndpointRepo(rows=[_make_row(name="jina")]), partition_service=partition_service)
+
+    await svc.create_model_endpoint(_make_row(name="e5", is_default=True))
+
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("promote", "creates"),
+    [
+        pytest.param(lambda svc: svc.set_default("embedder", "e5"), False, id="set_default"),
+        pytest.param(lambda svc: svc.update_model_endpoint("e5", "embedder", is_default=True), False, id="update"),
+        pytest.param(lambda svc: svc.create_model_endpoint(_make_row(name="e5", is_default=True)), True, id="create"),
+    ],
+)
+async def test_default_embedder_change_reloads_partitions_before_moving_the_alias(promote, creates):
+    """An indexed partition the repo just pinned still reads `default` in memory
+    until the partition reload lands. If the alias has already moved by then, a
+    query in between embeds with a model its vectors were not built with."""
+    from core.config.root import Settings
+
+    settings = Settings()
+    alias_during_reload: list[str] = []
+
+    class _RecordingPartitionService:
+        async def load_partitions(self):
+            alias_during_reload.append(settings.models.embedder["default"].name)
+
+    rows = [_make_row(name="jina", is_default=True)]
+    if not creates:
+        rows.append(_make_row(name="e5", is_default=False))
+    svc = _make_service(_FakeEndpointRepo(rows=rows), settings=settings, partition_service=_RecordingPartitionService())
+    await svc.load_all()
+
+    await promote(svc)
+
+    assert alias_during_reload == ["jina"]
+    assert settings.models.embedder["default"].name == "e5"
+
+
 # ------------------------------------------------------------------
 # validate_endpoint
 # ------------------------------------------------------------------
@@ -855,12 +1972,876 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
         "reachable": True,
         "model_found": True,
         "models_served": ["mistral-small"],
+        "transcription_supported": None,
         "detail": None,
     }
 
 
 @pytest.mark.asyncio
-async def test_validate_endpoint_sends_api_key(monkeypatch):
+async def test_validate_endpoint_reports_missing_model_on_reachable_endpoint(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "other-model"}]}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", "missing-model")
+
+    assert result == {
+        "reachable": True,
+        "model_found": False,
+        "models_served": ["other-model"],
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("served", "version_status", "model_found", "detail"),
+    [
+        # Ollama lists the tag and serves an untagged name as :latest, and only as that.
+        (["nomic-embed-text:latest"], 200, True, None),
+        (["nomic-embed-text:v1.5"], 200, False, None),
+        # vLLM accepts only the names it lists, and has no /api/version.
+        (["nomic-embed-text:latest"], 404, False, None),
+        # A failed answer is not an Ollama answer.
+        (["nomic-embed-text:latest"], "refused", False, None),
+        # No answer in time: neither served nor refused.
+        (
+            ["nomic-embed-text:latest"],
+            "timeout",
+            None,
+            'Reachable, but the endpoint did not say in time whether it serves "nomic-embed-text" '
+            'as "nomic-embed-text:latest".',
+        ),
+    ],
+)
+async def test_validate_endpoint_matches_an_untagged_model_name_to_its_latest_tag_on_ollama(
+    monkeypatch, served, version_status, model_found, detail
+):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            if url == "http://models.test:11434/api/version":
+                if version_status == "refused":
+                    raise httpx.ConnectError("connection refused")
+                if version_status == "timeout":
+                    raise httpx.ReadTimeout("timed out")
+                return FakeResponse(version_status, {"version": "0.40.1"})
+            assert url == "http://models.test:11434/v1/models"
+            return FakeResponse(200, {"data": [{"id": model_id} for model_id in served]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://models.test:11434/v1", "nomic-embed-text", model_type="embedder")
+
+    assert result == {
+        "reachable": True,
+        "model_found": model_found,
+        "models_served": served,
+        "transcription_supported": None,
+        "detail": detail,
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_checks_a_tei_embedder_on_its_health_route(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://tei.test/v1", "BAAI/bge-m3", model_type="embedder", extra={"implementation": "tei"}
+    )
+
+    # TEI has no model list: reachable, the model left unconfirmed rather than refused.
+    assert calls == ["http://tei.test/health"]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [None, "", "   "])
+async def test_validate_endpoint_leaves_model_found_unset_without_a_model_name(monkeypatch, model_name):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": []}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            assert url == "http://llm:8000/v1/models"
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", model_name)
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": [],
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{"models": [{"id": "other-model"}]}, None])
+async def test_validate_endpoint_keeps_reachable_when_model_list_is_invalid(monkeypatch, payload):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            if payload is None:
+                raise ValueError("not JSON")
+            return payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", "mistral-small")
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": "Endpoint returned an invalid model list.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_health_only_endpoint_keeps_model_presence_unknown(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://reranker:8000",
+        "reranker-model",
+        model_type="reranker",
+        extra={"implementation": "infinity"},
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_probes_transcription_capability_with_redirects_enabled(monkeypatch):
+    import httpx
+
+    prompt_service = SimpleNamespace(resolve_prompt=AsyncMock(return_value="  Prefer OpenRAG terms.  "))
+    svc = _make_service(prompt_service=prompt_service)
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, data=None):
+            self.status_code = status_code
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *, timeout, headers, follow_redirects):
+            assert timeout == 5.0
+            assert headers == {}
+            assert follow_redirects is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url, *, data, files, follow_redirects, timeout):
+            calls.append(("post", url))
+            assert data == {
+                "model": "moss-transcribe-diarize",
+                "prompt": "Prefer OpenRAG terms.",
+                "language": "fr",
+                "response_format": "json",
+                "temperature": "0",
+                "timestamp_granularities[]": ["segment", "word"],
+                "provider[diarize]": "true",
+            }
+            assert files["file"][0] == "openrag-stt-validation.wav"
+            assert files["file"][2] == "audio/wav"
+            assert files["file"][1][:4] == b"RIFF"
+            assert len(files["file"][1]) == 32_044
+            assert follow_redirects is True
+            assert timeout.connect == 5.0
+            assert timeout.write == 5.0
+            assert timeout.pool == 5.0
+            assert timeout.read == 180.0
+            return FakeResponse(200, {"text": ""})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        timeout=180,
+        extra={
+            "language": "fr",
+            "response_format": "json",
+            "temperature": 0,
+            "timestamp_granularities": ["segment", "word"],
+            "provider": {"diarize": True},
+            "api_key": "must-not-be-forwarded",
+            "implementation": "must-not-be-forwarded",
+            "prompt": "must-not-be-forwarded",
+        },
+    )
+
+    assert calls == [
+        ("get", "http://moss:8000/v1/models"),
+        ("post", "http://moss:8000/v1/audio/transcriptions"),
+    ]
+    prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription")
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["moss-transcribe-diarize"],
+        "transcription_supported": True,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra", "audio_payload", "expected_supported"),
+    [
+        ({}, {}, False),
+        ({"response_format": "text"}, None, True),
+    ],
+)
+async def test_validate_stt_endpoint_checks_success_response_shape(
+    monkeypatch,
+    extra,
+    audio_payload,
+    expected_supported,
+):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            if self._payload is None:
+                raise ValueError("not JSON")
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse({"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, _url, **_kwargs):
+            return FakeResponse(audio_payload)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        extra=extra,
+    )
+
+    assert result["transcription_supported"] is expected_supported
+    assert result["detail"] == (
+        None if expected_supported else "Transcription endpoint returned an incompatible response."
+    )
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_uses_one_normalized_model_name(monkeypatch):
+    """Model discovery and the authenticated probe must agree on the model."""
+    import httpx
+
+    svc = _make_service()
+    probed_models: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload=None):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse({"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, _url, *, data, **_kwargs):
+            probed_models.append(data["model"])
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "  moss-transcribe-diarize  ",
+        model_type="stt",
+    )
+
+    assert result["model_found"] is True
+    assert probed_models == ["moss-transcribe-diarize"]
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_rejects_missing_transcription_route(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, data=None):
+            self.status_code = status_code
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *, timeout, headers, follow_redirects):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url, **_kwargs):
+            return FakeResponse(404)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["moss-transcribe-diarize"],
+        "transcription_supported": False,
+        "detail": "Endpoint does not support OpenAI-compatible audio transcriptions.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 422])
+async def test_validate_stt_endpoint_rejects_unsuccessful_audio_probe(monkeypatch, status_code):
+    """A malformed or rejected real probe must not validate STT credentials."""
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, response_status, data=None):
+            self.status_code = response_status
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url, **kwargs):
+            assert kwargs["data"] == {"model": "moss-transcribe-diarize"}
+            assert kwargs["files"]["file"][1][:4] == b"RIFF"
+            return FakeResponse(status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "https://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["moss-transcribe-diarize"],
+        "transcription_supported": False,
+        "detail": f"Transcription validation request returned HTTP {status_code}.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_skips_audio_probe_when_model_is_not_served(monkeypatch):
+    """Do not spend STT capacity once the public model list rejects the model."""
+    import httpx
+
+    svc = _make_service()
+    calls: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, response_status, data=None):
+            self.status_code = response_status
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append("get")
+            return FakeResponse(200, {"data": [{"id": "another-model"}]})
+
+        async def post(self, url, **_kwargs):
+            calls.append("post")
+            return FakeResponse(200)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert calls == ["get"]
+    assert result == {
+        "reachable": True,
+        "model_found": False,
+        "models_served": ["another-model"],
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_payload", [ValueError("invalid JSON"), {"data": "not-a-list"}])
+async def test_validate_stt_endpoint_probes_audio_when_model_list_is_invalid(monkeypatch, model_payload):
+    import httpx
+
+    svc = _make_service()
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            if isinstance(self._payload, Exception):
+                raise self._payload
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(200, model_payload)
+
+        async def post(self, url, **_kwargs):
+            calls.append(("post", url))
+            return FakeResponse(200, {"text": ""})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert calls == [
+        ("get", "http://moss:8000/v1/models"),
+        ("post", "http://moss:8000/v1/audio/transcriptions"),
+    ]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": True,
+        "detail": "Endpoint returned an invalid model list.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_probes_audio_when_model_list_times_out(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"text": ""}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, request_url):
+            calls.append("get")
+            raise httpx.ReadTimeout("model list cold start")
+
+        async def post(self, request_url, **kwargs):
+            calls.append("post")
+            assert kwargs["timeout"].read == 900
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        timeout=900,
+    )
+
+    assert calls == ["get", "post"]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": True,
+        "detail": "Model list request timed out.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeypatch, status_code):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url, **_kwargs):
+            return FakeResponse(status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "https://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert result["reachable"] is True
+    assert result["model_found"] is True
+    assert result["transcription_supported"] is False
+    assert (
+        result["detail"] == f"Transcription capability check was rejected with HTTP {status_code}. Check the API key."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_stt_endpoint_stops_after_model_list_auth_failure(monkeypatch, status_code):
+    import httpx
+
+    svc = _make_service()
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, response_status):
+            self.status_code = response_status
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(status_code)
+
+        async def post(self, url, **_kwargs):
+            calls.append(("post", url))
+            return FakeResponse(422)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "https://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert calls == [("get", "https://moss:8000/v1/models")]
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": False,
+        "detail": f"Model list request was rejected with HTTP {status_code}. Check the API key.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_non_stt_endpoint_keeps_auth_gated_model_list_reachable(monkeypatch, status_code):
+    """An HTTP response proves reachability even when a non-STT model list is scoped."""
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, response_status):
+            self.status_code = response_status
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "https://llm:8000/v1",
+        "mistral-small",
+        api_key="scoped-key",
+        model_type="llm",
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": f"Model list returned HTTP {status_code}.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["http", "https"])
+async def test_validate_endpoint_sends_api_key(monkeypatch, scheme):
     import httpx
 
     svc = _make_service()
@@ -888,9 +2869,11 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
-    await svc.validate_endpoint("http://llm:8000/v1", "mistral-small", api_key="secret-token")
+    result = await svc.validate_endpoint(f"{scheme}://llm:8000/v1", "mistral-small", api_key="secret-token")
 
     assert captured_headers == [{"Authorization": "Bearer secret-token"}]
+    assert result["reachable"] is True
+    assert result["model_found"] is True
 
 
 @pytest.mark.asyncio
@@ -910,6 +2893,7 @@ async def test_validate_endpoint_rejects_non_http_urls_without_request(monkeypat
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
     }
 
@@ -931,6 +2915,7 @@ async def test_validate_endpoint_rejects_malformed_urls_without_request(monkeypa
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
     }
 
@@ -952,5 +2937,194 @@ async def test_validate_endpoint_rejects_url_credentials_without_request(monkeyp
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must not include credentials.",
     }
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_reloads_presets_when_the_cascade_moved_them():
+    """The repo clears preset selections naming the deleted endpoint; this
+    replica must re-read them.
+
+    Regression: without the reload, indexation kept resolving the deleted name
+    out of the in-memory preset config and failed strictly — audio uploads on
+    that preset broke — even though the DB had already restored the default
+    fallback in the delete's own transaction. Clearing a selection writes to
+    ``pipeline_presets``, so the revision moves and ``refresh_if_stale`` reloads
+    presets and partitions together.
+    """
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="whisper", model_type="stt", is_default=True),
+            _make_row(name="doomed", model_type="stt", is_default=False),
+        ]
+    )
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.delete_model_endpoint("doomed", "stt")
+
+    assert preset_service.refresh_calls == 1
+    # refresh_if_stale reloaded partitions itself; no second reload here.
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_reloads_partitions_when_no_preset_moved():
+    """No preset named the endpoint, so the revision never moves — the partition
+    reload must still run, mirroring the rename path's fallback."""
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="whisper", model_type="stt", is_default=True),
+            _make_row(name="doomed", model_type="stt", is_default=False),
+        ]
+    )
+    preset_service = _FakeUnchangedRevisionPresetService()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.delete_model_endpoint("doomed", "stt")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 1
+
+
+# ── used_by_partitions / delete conflict (#762 B) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_model_endpoints_annotates_used_by_partitions():
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", model_type="embedder", is_default=True),
+            _make_row(name="e5", model_type="embedder", is_default=False),
+        ],
+        usage={("jina", "embedder"): 4},
+    )
+    svc = _make_service(repo)
+
+    rows = await svc.list_model_endpoints(model_type="embedder")
+
+    by_name = {r["name"]: r["used_by_partitions"] for r in rows}
+    assert by_name == {"jina": 4, "e5": 0}
+    # One aggregate lookup for the whole list, not one per endpoint.
+    assert sum(1 for c, _ in repo.calls if c == "usage_counts") == 1
+
+
+@pytest.mark.asyncio
+async def test_one_endpoint_carries_the_same_usage_count_as_the_list():
+    """The single-endpoint routes used to keep the schema's 0 while the list
+    reported the real count, so an embedder in use read as unused there."""
+    rows = [
+        _make_row(name="jina", model_type="embedder", is_default=True),
+        _make_row(name="bge", model_type="reranker", is_default=True),
+    ]
+    repo = _FakeEndpointRepo(rows=rows, usage={("jina", "embedder"): 4, ("bge", "reranker"): 0})
+    svc = _make_service(repo)
+
+    listed = {r["name"]: r["used_by_partitions"] for r in await svc.list_model_endpoints()}
+    single = {row.name: (await svc.with_partition_usage(row))["used_by_partitions"] for row in rows}
+
+    # A reranker is referenced through presets, never by a partition: still 0.
+    assert single == listed == {"jina": 4, "bge": 0}
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_propagates_conflict_without_touching_caches():
+    """A refused delete changed nothing in the DB, so reloading the registry or
+    evicting clients here would be churn — and would briefly advertise a state
+    that never happened."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", model_type="embedder", is_default=True),
+            _make_row(name="e5", model_type="embedder", is_default=False),
+        ]
+    )
+    repo.conflict_on_delete = "Embedder 'e5' is still in use: 3 partition(s) name it."
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.delete_model_endpoint("e5", "embedder")
+
+    assert exc.value.status_code == 409
+    assert partition_service.load_partitions_calls == 0
+
+
+# ── dropping a deleted embedder's vector field ──────────────
+
+
+def _embedders_with_fields():
+    return [
+        _make_row(name="jina", is_default=True, vector_field="vector_jina"),
+        _make_row(name="e5", is_default=False, vector_field="vector_e5"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_embedder_drops_its_vector_field(mock_vector_store):
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    svc = _make_service(_FakeEndpointRepo(rows=_embedders_with_fields()), vector_store=mock_vector_store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_embedder_delete_keeps_its_vector_field(mock_vector_store):
+    from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    svc = _make_service(repo, vector_store=mock_vector_store)
+
+    with pytest.raises(NotFoundError):
+        await svc.delete_model_endpoint("ghost", "embedder")
+    repo.conflict_on_delete = "Embedder 'e5' is still in use: 3 partition(s) name it."
+    with pytest.raises(ConflictError):
+        await svc.delete_model_endpoint("e5", "embedder")
+    repo.conflict_on_delete = None
+    await svc.delete_model_endpoint("e5", "embedder")
+    with pytest.raises(ValidationError, match="last"):
+        await svc.delete_model_endpoint("jina", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_the_dropped_field_is_the_one_the_locked_delete_removed(mock_vector_store):
+    # 'e5' was renamed and a new 'e5' created after a read done before the
+    # delete's lock: dropping what that read saw would drop a live field.
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768, "vector_e5_2": 768}
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", is_default=True, vector_field="vector_jina"),
+            _make_row(name="e5-renamed", is_default=False, vector_field="vector_e5"),
+            _make_row(name="e5", is_default=False, vector_field="vector_e5_2"),
+        ]
+    )
+    repo.get = AsyncMock(return_value=_make_row(name="e5", is_default=False, vector_field="vector_e5"))
+    svc = _make_service(repo, vector_store=mock_vector_store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024, "vector_e5": 768}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_field_drop_does_not_fail_the_committed_delete():
+    store = SimpleNamespace(drop_vector_field=AsyncMock(side_effect=RuntimeError("milvus down")))
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, vector_store=store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    store.drop_vector_field.assert_awaited_once_with("vector_e5")
+    assert ("e5", "embedder") not in repo._store
+    assert partition_service.load_partitions_calls == 1

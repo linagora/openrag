@@ -8,9 +8,11 @@ from api.dependencies.auth import (
     require_partition_owner,
     require_partition_viewer,
 )
+from api.error_handlers import register_error_handlers
 from api.routers.admin import partitions
 from di.providers import get_partition_service
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
+from services.orchestrators.partition_service import PartitionService
 
 
 def _partition_detail(**overrides: Any) -> dict[str, Any]:
@@ -91,6 +93,39 @@ class FakeCreatePartitionService:
         self.created.append(kwargs)
 
 
+class FakeMemberCandidateService:
+    """Service double for the partition member candidate route."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def list_member_candidates(
+        self,
+        partition: str,
+        *,
+        search: str,
+        cursor: int | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "partition": partition,
+                "search": search,
+                "cursor": cursor,
+                "limit": limit,
+            }
+        )
+        return {
+            "candidates": [
+                {"user_id": 2, "display_name": "Sam", "email": "sam.2@example.com"},
+                {"user_id": 3, "display_name": "Sam", "email": "sam.3@example.com"},
+            ],
+            "limit": limit,
+            "has_more": True,
+            "next_cursor": 30,
+        }
+
+
 def _build_list_app(*, is_admin: bool) -> FastAPI:
     """App for the list route, with a regular user whose sole membership is ``all``."""
     app = FastAPI()
@@ -139,6 +174,72 @@ async def test_list_partitions_does_not_expand_all_for_non_admin(async_client_fa
         response = await client.get("/partition/")
     assert response.status_code == 200
     assert [p["partition"] for p in response.json()["partitions"]] == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_list_partition_member_candidates_returns_stable_identities(async_client_factory):
+    service = FakeMemberCandidateService()
+    app = _build_app(service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get(
+            "/partition/legal/users/candidates",
+            params={"search": "sam", "cursor": 20, "limit": 10},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "candidates": [
+            {"user_id": 2, "display_name": "Sam", "email": "sam.2@example.com"},
+            {"user_id": 3, "display_name": "Sam", "email": "sam.3@example.com"},
+        ],
+        "limit": 10,
+        "has_more": True,
+        "next_cursor": 30,
+    }
+    assert service.calls == [
+        {
+            "partition": "legal",
+            "search": "sam",
+            "cursor": 20,
+            "limit": 10,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_partition_member_candidates_rejects_non_owner(async_client_factory):
+    service = FakeMemberCandidateService()
+    app = _build_app(service)
+
+    async def reject_non_owner():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Partition owner role required",
+        )
+
+    app.dependency_overrides[require_partition_owner] = reject_non_owner
+
+    async with async_client_factory(app) as client:
+        response = await client.get(
+            "/partition/legal/users/candidates",
+            params={"search": "sam"},
+        )
+
+    assert response.status_code == 403
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_list_partition_member_candidates_requires_search(async_client_factory):
+    service = FakeMemberCandidateService()
+    app = _build_app(service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/users/candidates")
+
+    assert response.status_code == 422
+    assert service.calls == []
 
 
 @pytest.mark.asyncio
@@ -216,3 +317,64 @@ async def test_create_partition_rejects_malformed_limit_before_writing(async_cli
     assert response.status_code == 500
     assert "MAX_PARTITIONS_PER_USER" in response.json()["detail"]
     assert service.created == []
+
+
+class _DeleteRouteRepo:
+    """Partition repo double for the delete route, backing a real PartitionService."""
+
+    def __init__(self, existing: set[str]) -> None:
+        self.existing = set(existing)
+        self.deleted: list[str] = []
+
+    async def partition_exists(self, name: str) -> bool:
+        return name in self.existing
+
+    async def delete_partition(self, name: str) -> bool:
+        self.deleted.append(name)
+        self.existing.discard(name)
+        return True
+
+
+class _NoCollectionVectorStore:
+    """Vector store double for a stack that has never indexed anything."""
+
+    async def collection_exists(self, name: str) -> bool:
+        return False
+
+
+def _build_delete_app(repo: _DeleteRouteRepo) -> FastAPI:
+    """App for the delete route, backed by a real PartitionService and the global error handlers."""
+    service = PartitionService(
+        partition_repo=repo,
+        membership_repo=None,
+        document_repo=None,
+        vector_store=_NoCollectionVectorStore(),
+        user_repo=None,
+        collection="vdb",
+    )
+    app = _build_app(service)
+    register_error_handlers(app)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_delete_default_partition_returns_409(async_client_factory):
+    """The default partition cannot be deleted."""
+    repo = _DeleteRouteRepo({"default", "legal"})
+    async with async_client_factory(_build_delete_app(repo)) as client:
+        response = await client.delete("/partition/default")
+
+    assert response.status_code == 409
+    assert "DEFAULT_PARTITION_PROTECTED" in response.json()["detail"]
+    assert repo.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_delete_other_partition_returns_204(async_client_factory):
+    """Any other partition is still deleted."""
+    repo = _DeleteRouteRepo({"default", "legal"})
+    async with async_client_factory(_build_delete_app(repo)) as client:
+        response = await client.delete("/partition/legal")
+
+    assert response.status_code == 204
+    assert repo.deleted == ["legal"]

@@ -19,11 +19,16 @@ from api.dependencies.auth import (
     require_partition_viewer,
 )
 from api.dependencies.files import validate_file_id
-from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
+from api.schemas.admin.partition_schemas import (
+    EmbedderSwapResponse,
+    PartitionDetailResponse,
+    StartEmbedderSwapRequest,
+    UpdatePartitionRequest,
+)
 from core.utils.exceptions import ConfigError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
-from di.providers import get_partition_service
+from di.providers import get_embedder_swap_service, get_partition_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
@@ -103,7 +108,8 @@ async def list_existant_partitions(
 This permanently deletes the partition and all its documents. This action cannot be undone.
 
 **Response:**
-Returns 204 No Content on successful deletion.
+Returns 204 No Content on successful deletion, or 409 Conflict (`DEFAULT_PARTITION_PROTECTED`)
+for the `default` partition, which cannot be deleted.
 """,
 )
 async def delete_partition(
@@ -123,6 +129,7 @@ async def delete_partition(
 **Parameters:**
 - `partition`: The partition name
 - `limit`: Optional maximum number of files to return
+- `degraded_stage`: Optional enrichment stage requiring re-indexing
 
 **Response:**
 Returns a list of files with:
@@ -139,11 +146,12 @@ async def list_files(
     request: Request,
     partition: str,
     limit: int | None = None,
+    degraded_stage: Literal["caption", "contextualize", "topic_tag"] | None = Query(default=None),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
     """List files stored in a partition."""
-    file_dicts = await service.list_files(partition, limit)
+    file_dicts = await service.list_files(partition, limit, degraded_stage)
 
     def process_file(file_dict):
         """Add a canonical file-detail link to one file row."""
@@ -191,14 +199,13 @@ async def get_file(
     service=Depends(get_partition_service),
 ):
     """Return metadata and chunk links for one file in a partition."""
-    if not await service.file_exists(file_id, partition):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"'{file_id}' not found in partition '{partition}'",
-        )
-    rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit)
+    catalog_metadata = await service.get_file_metadata(partition=partition, file_id=file_id)
+    rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit) if limit else []
     documents = [{"link": str(request.url_for("get_extract", extract_id=row["_id"]))} for row in rows]
-    metadata = {k: v for k, v in rows[0].items() if k != "_id"} if rows else {}
+    # Preserve the legacy first-page hint, but do not merge an entire chunk
+    # into file metadata: chunks also carry vectors, text and internal fields.
+    first_page = {"page": rows[0]["page"]} if rows and "page" in rows[0] else {}
+    metadata = {**first_page, **catalog_metadata}
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -321,7 +328,7 @@ async def create_partition(
 **Body:**
 Accepts partition config fields such as:
 - `description`
-- `embedder`
+- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default). Each embedder stores its vectors in its own field, so a partition that holds indexed files cannot change embedder: 409 `PARTITION_HAS_INDEXED_FILES`, or 409 `INDEXING_IN_PROGRESS` while its first files are still being indexed or copied in. To move a partition with files, use `POST /partition/{partition}/embedder-swap`, which re-embeds them first
 - `indexation_preset`
 - `retrieval_preset`
 - `chat_history_depth`
@@ -346,6 +353,109 @@ async def update_partition_config(
         partition=partition,
         **body.model_dump(exclude_unset=True),
     )
+
+
+@router.post(
+    "/{partition}/embedder-swap",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=EmbedderSwapResponse,
+    description="""Re-embed a partition's files with an embedder, then point the partition at it.
+
+One endpoint for two jobs, told apart only by `embedder` in the body:
+
+- **Move to another embedder**: name a different endpoint. Nearly every file is re-embedded, since none has
+  vectors in that embedder's field yet, and the partition switches to it when the swap completes.
+- **Repair drift**: name the embedder the partition already uses. Only the drifted files are re-embedded, and the
+  partition keeps its embedder.
+
+A file is skipped when the model and vector field it was indexed with both match the target endpoint as it is now.
+Every other file is re-embedded, including files indexed before the vector field was recorded. Drift shows in
+`GET /partition/{partition}/config`, as an `indexed_embedders` entry whose `model_name` or `vector_field` differs
+from the partition's embedder.
+
+Each chunk's stored text is embedded again: nothing is re-parsed or re-chunked. Searches keep using the current
+embedder until every file is done. A chunk longer than the target's context window is cut before it is embedded, as
+at indexing; `chunks_over_window` counts them. Writing the new vectors makes Milvus rewrite the numbers in each
+chunk's metadata as 64-bit floats, so an integer beyond ±2^53 there comes back rounded; the file's metadata in
+Postgres keeps the exact value.
+
+While the swap runs, uploads, file replacements, metadata updates, copies into the partition and changes to its
+`embedder` return 409 `EMBEDDER_SWAP_IN_PROGRESS`. So do deleting the target embedder and edits to it that change
+its vectors. Deleting files stays allowed.
+
+**Body:**
+- `embedder`: name of a registered embedder endpoint (not the `default` alias)
+
+**Errors:**
+- 409 `EMBEDDER_SWAP_IN_PROGRESS`: a swap is already running on this partition
+- 409 `INDEXING_IN_PROGRESS`: files are still being indexed or copied into this partition
+- 422 `MODEL_ENDPOINT_NOT_FOUND` / `EMBEDDER_ALIAS_NOT_ALLOWED`
+
+**Permissions:**
+- Requires partition owner role
+
+**Response:**
+The swap. `files_total` counts the files to re-embed, not the ones skipped. Poll
+`GET /partition/{partition}/embedder-swap` for progress.
+""",
+)
+async def start_embedder_swap(
+    partition: str,
+    body: StartEmbedderSwapRequest,
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_embedder_swap_service),
+):
+    """Start re-embedding a partition with an embedder: another one, or its own to repair drift."""
+    return await service.start(partition, body.embedder)
+
+
+@router.get(
+    "/{partition}/embedder-swap",
+    response_model=EmbedderSwapResponse | None,
+    description="""Progress of a partition's embedder swap, or how its last one ended.
+
+`status` is `running`, `completed`, `failed` (see `error`) or `cancelled`; `files_done` of the `files_total` files
+to re-embed are done. `chunks_over_window` of their chunks were longer than the target's context window and cut
+before embedding. `source_embedder` equals `target_embedder` on a drift repair. `null` when the
+partition never had one.
+
+**Permissions:**
+- Requires partition viewer role
+""",
+)
+async def get_embedder_swap(
+    partition: str,
+    partition_viewer=Depends(require_partition_viewer),
+    service=Depends(get_embedder_swap_service),
+):
+    """Return the partition's embedder swap, or ``None`` if it never had one."""
+    return await service.get(partition)
+
+
+@router.delete(
+    "/{partition}/embedder-swap",
+    response_model=EmbedderSwapResponse,
+    description="""Cancel a running embedder swap.
+
+The partition stays on its current embedder, and files can be written to it again. On a drift repair, the files
+already re-embedded are in the field the partition searches: they are repaired, and a later repair skips them. On a
+move to another embedder, they keep vectors nothing searches until a later swap to that embedder, which skips them
+— or until that embedder is deleted, which drops those vectors and has a later swap re-embed the files.
+
+**Permissions:**
+- Requires partition owner role
+
+**Errors:**
+- 409 `EMBEDDER_SWAP_NOT_RUNNING`
+""",
+)
+async def cancel_embedder_swap(
+    partition: str,
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_embedder_swap_service),
+):
+    """Cancel the partition's running embedder swap."""
+    return await service.cancel(partition)
 
 
 @router.get(
@@ -383,8 +493,10 @@ async def get_partition_config(
 **Response:**
 Returns list of partition members with:
 - `user_id`: User identifier
+- `display_name`: Human-readable name, when available
+- `email`: Account email, when available
 - `role`: User's role (owner, editor, or viewer)
-- Additional user details
+- `added_at`: Membership creation time
 
 **Permissions:**
 - Requires partition owner role
@@ -401,8 +513,44 @@ async def list_partition_users(
     service=Depends(get_partition_service),
 ):
     """List all users who are members of the given partition."""
-    members = await service.list_members(partition=partition)
+    members = await service.list_members_with_identities(partition=partition)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"members": members})
+
+
+@router.get(
+    "/{partition}/users/candidates",
+    description="""List users who can be added to a partition.
+
+**Parameters:**
+- `partition`: The partition name
+- `search`: Display-name prefix (at least 3 characters) or exact user ID
+- `cursor`: Last user ID from the previous page
+- `limit`: Page size (maximum 100)
+
+**Response:**
+Returns a bounded page of non-member users with their display name and email,
+plus continuation metadata.
+
+**Permissions:**
+- Requires partition owner role
+""",
+)
+async def list_partition_user_candidates(
+    partition: str,
+    search: str = Query(..., max_length=200),
+    cursor: int | None = Query(default=None, ge=0, le=2_147_483_647),
+    limit: int = Query(default=25, ge=1, le=100),
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_partition_service),
+):
+    """List a searchable page of users who are not partition members."""
+    page = await service.list_member_candidates(
+        partition=partition,
+        search=search,
+        cursor=cursor,
+        limit=limit,
+    )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=page)
 
 
 @router.post(
@@ -424,6 +572,7 @@ async def list_partition_users(
 
 **Response:**
 Returns 201 Created on successful addition.
+Returns 409 Conflict if the user is already a member; use the role endpoint to change an existing member.
 """,
 )
 async def add_partition_user(

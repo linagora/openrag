@@ -42,7 +42,7 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
@@ -54,12 +54,13 @@ services:
       retries: 5
 
   milvus:
-    image: milvusdb/milvus:v2.6.11
+    image: milvusdb/milvus:v3.0.2
     command: ["milvus", "run", "standalone"]
     security_opt:
     - seccomp:unconfined
     environment:
       ETCD_ENDPOINTS: etcd:2379
+      ETCD_AUTH_ENABLED: "false"
       MINIO_ADDRESS: minio:9000
     depends_on:
       etcd:
@@ -105,6 +106,11 @@ services:
       - DEFAULT_FILE_QUOTA=10
       - AUTH_TOKEN=${AUTH_TOKEN:-test-admin-token}
       - SUPER_ADMIN_MODE=${SUPER_ADMIN_MODE:-true}
+      # This stack is disposable and its credentials are published in this file,
+      # so the boot-time secret policy would (correctly) refuse to start it. The
+      # policy itself is covered by tests/unit/core/config/test_secrets_guard.py,
+      # including a case asserting it still trips.
+      - ALLOW_INSECURE_SECRETS=true
     ports:
       - "8080:8080"
     volumes:

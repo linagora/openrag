@@ -6,17 +6,66 @@ import asyncio
 import copy
 import json
 import re
+from collections.abc import Callable
 
 from core.utils.logging import get_logger
 
 logger = get_logger()
 
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+# Models copy the prompt's markdown literally (`[Sources: none]` in backticks,
+# **Sources:** in bold) and move the emphasis around freely: outside the
+# brackets, inside them around the label ([**Sources:** none],
+# [**Sources**]: 1, 3), or around the value ([Sources: **1, 3**],
+# [Sources: **1**, **3**]). So emphasis/code marks are accepted at every
+# boundary of the tag, and are part of it when it is stripped.
+#
+# Every run of marks or whitespace below is possessive, so a failed search never
+# retries the ways of splitting a run between neighbours (a long run of marks or
+# spaces after the value made it quadratic). That loses no match: what follows a
+# run either cannot start with one of its characters or is another run that
+# would take the same ones, so giving any back could not help. The lookbehinds
+# enter the leading whitespace and mark runs only at their first character, for
+# the same reason: a match starting mid-run is never needed, starting at the run
+# covers it. After the value, whitespace stays on the tag's line unless a
+# closing bracket follows, which is what the end-of-line lookahead needs anyway.
+#
+# The label up to its colon, with marks allowed before and after each bracket
+# and around "Sources".
+_SOURCES_LABEL = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+:\s*+[*_`]*+\[?[ \t]*+"
+_SOURCES_TAG_TAIL = r"[.*_` \t\r]*+(?=\n|$)"
+# The closing bracket may sit on the next line ([Sources: 1, 3,\n]); without
+# one, the tag ends on its own line.
+_SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
+_SOURCES_TAG_END = r"(?:" + _SOURCES_TAG_CLOSE + r"|[,*_` \t]*+)" + _SOURCES_TAG_TAIL
 _SOURCES_NONE_RE = re.compile(
-    r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?[.\s]*?(?=\n|$)",
+    _SOURCES_LABEL + r"[*_`]*+none" + _SOURCES_TAG_END,
     re.IGNORECASE,
 )
-_SOURCES_NUMS_RE = re.compile(r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*?(?=\n|$)", re.IGNORECASE)
+# Each number may carry its own marks and separators ([Sources: **1**, **3**]),
+# and a long list may wrap onto the next line. The repetition itself is not
+# possessive: when what follows the last number is not the end of the tag
+# ("Sources: 1\n2. Next item"), it gives numbers back one at a time, which
+# costs one short scan each since every separator run stops at the next digit.
+_SOURCES_NUMS_RE = re.compile(
+    _SOURCES_LABEL + r"((?:[,\s*_`]*+\d++)+)" + _SOURCES_TAG_END,
+    re.IGNORECASE,
+)
+# An empty tag ([Sources: ]) cites nothing but is still stripped. It needs its
+# closing bracket: a bare "Sources:" at the end of a line may just be prose.
+_SOURCES_EMPTY_RE = re.compile(
+    _SOURCES_LABEL + _SOURCES_TAG_CLOSE + _SOURCES_TAG_TAIL,
+    re.IGNORECASE,
+)
+_INLINE_SOURCE_NUMS_RE = re.compile(
+    r"[ \t]*\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*\]",
+    re.IGNORECASE,
+)
+_UNCLOSED_SOURCE_NUMS_RE = re.compile(
+    r"[ \t]*\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*(?=\n|$)",
+    re.IGNORECASE,
+)
+_DANGLING_SOURCE_RE = re.compile(r"[ \t]*\[\s*Sources?\s*(?=\n|$)", re.IGNORECASE)
 
 
 def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
@@ -26,22 +75,42 @@ def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
     return preview
 
 
-def _strip_sources_tags(text: str) -> tuple[str, set[int], bool]:
-    """Strip line-terminal source tags and return citations found."""
+def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tuple[str, set[int], bool]:
+    """Strip source tags and return citations found."""
     cited: set[int] = set()
-    for match in _SOURCES_NUMS_RE.finditer(text):
-        cited.update(int(n.strip()) for n in match.group(1).split(",") if n.strip().isdigit())
+    patterns = [_SOURCES_NUMS_RE]
+    if include_inline_markers:
+        patterns.extend((_INLINE_SOURCE_NUMS_RE, _UNCLOSED_SOURCE_NUMS_RE))
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            # Every number the tag holds is a citation, whatever separates them:
+            # the regexes accept spaces, newlines and marks as well as commas
+            # ([Sources: **1** **3**]), and a tag stripped with its numbers
+            # unread would fall back to citing every source.
+            cited.update(int(n) for n in re.findall(r"\d+", match.group(1)))
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)
+    cleaned = _SOURCES_EMPTY_RE.sub("", cleaned)
+    if include_inline_markers:
+        cleaned = _INLINE_SOURCE_NUMS_RE.sub("", cleaned)
+        cleaned = _UNCLOSED_SOURCE_NUMS_RE.sub("", cleaned)
+        cleaned = _DANGLING_SOURCE_RE.sub("", cleaned)
     return cleaned, cited, saw_none
 
 
-def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
-    """Strip line-terminal source tags and return merged citations."""
-    cleaned, citations, saw_none = _strip_sources_tags(text)
+def extract_and_strip_sources_block(
+    text: str,
+    *,
+    include_inline_markers: bool = True,
+) -> tuple[str, set[int] | None]:
+    """Strip source tags and return merged citations."""
+    cleaned, citations, saw_none = _strip_sources_tags(text, include_inline_markers=include_inline_markers)
 
     if not citations and not saw_none:
+        if cleaned != text:
+            logger.debug("Removed incomplete source marker from LLM response")
+            return cleaned.rstrip(), None
         tail = text[-150:] if len(text) > 150 else text
         logger.debug("No [Sources: ...] tag found in LLM response", tail=repr(_sanitize_log_preview(tail)))
         return text, None
@@ -56,13 +125,17 @@ def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
 
 
 def filter_sources_by_citations(sources: list, citations: set[int] | None) -> list:
-    """Keep only sources whose 1-based index was cited."""
+    """Keep only sources whose 1-based index was cited.
+
+    No tag at all (``citations is None``) means the model didn't report which
+    sources it used, not that it used none — the answer may still be grounded
+    in them, so keep everything rather than silently dropping real sources.
+    """
     if citations is None:
         return sources
     if not citations:
         return []
-    filtered = [source for i, source in enumerate(sources, start=1) if i in citations]
-    return filtered if filtered else sources
+    return [source for i, source in enumerate(sources, start=1) if i in citations]
 
 
 def _min_sources_tag_buffer_size(n_sources: int) -> int:
@@ -83,8 +156,33 @@ async def stream_with_source_filtering(
     sources: list,
     model_name: str,
     buffer_size: int | None = None,
+    *,
+    citation_protocol_active: bool = True,
+    all_sources: list | None = None,
+    include_all_retrieved: bool = False,
+    extra_fields: dict | None = None,
+    terminal_extra_fields: dict | Callable[[], dict] | None = None,
 ):
-    """Process an LLM SSE stream, stripping line-terminal source tags.
+    """Process an LLM SSE stream and, when active, strip source tags.
+
+    ``sources`` is the prompt-visible (context-budget-truncated) list used to
+    resolve citation indices — reported as-is via ``extra.sources`` (legacy,
+    kept for existing clients: cited sources, or every presented source as a
+    fallback when no tag was found) and ``extra.presented_sources`` (always
+    the raw pre-filter list, so a client can render "sources consulted" when
+    nothing was cited). ``extra.cited_sources`` is the strict version: only
+    what the model actually cited, empty whenever no tag was found — never
+    falling back to "everything" the way ``sources`` does.
+    ``extra.citations_reported`` disambiguates those two empty/full states
+    on the wire: ``true`` only when a ``[Sources: ...]`` tag (even an empty
+    one) was actually found.
+
+    ``all_sources`` — the complete pre-truncation retrieval set — is reported
+    as ``extra.all_retrieved_sources`` only when ``include_all_retrieved`` is
+    true (it defaults to ``sources`` when the caller has nothing more
+    complete to offer). It's gated because a full retrieval dump on every
+    response is debug/eval telemetry, not something most callers need on the
+    hot path.
 
     The terminal flush (tail content + ``extra.sources``) runs exactly once
     after the loop on *every* termination path — a clean ``data: [DONE]``, the
@@ -99,6 +197,7 @@ async def stream_with_source_filtering(
     """
     if buffer_size is None:
         buffer_size = max(_MIN_STREAM_LOOKAHEAD, _min_sources_tag_buffer_size(len(sources)))
+    include_inline_markers = citation_protocol_active and bool(sources)
     pending = ""
     emitted_len = 0
     chunk_template = None
@@ -155,7 +254,13 @@ async def stream_with_source_filtering(
                 if len(pending) <= buffer_size:
                     continue
 
-                cleaned, _, _ = _strip_sources_tags(pending)
+                if citation_protocol_active:
+                    cleaned, _, _ = _strip_sources_tags(
+                        pending,
+                        include_inline_markers=include_inline_markers,
+                    )
+                else:
+                    cleaned = pending
                 safe_end = max(0, len(cleaned) - buffer_size)
                 if safe_end > emitted_len:
                     out = {
@@ -175,7 +280,7 @@ async def stream_with_source_filtering(
                                 "finish_reason": None,
                             }
                         ],
-                        "extra": "{}",
+                        "extra": {},
                     }
                     yield f"data: {json.dumps(out)}\n\n"
                     emitted_len = safe_end
@@ -184,7 +289,7 @@ async def stream_with_source_filtering(
                 # keep-alive chunk): pass it through untouched. A finish-only chunk
                 # is intentionally *not* re-emitted here — the terminal flush emits
                 # the finish chunk so it can carry `extra.sources`.
-                data["extra"] = "{}"
+                data["extra"] = {}
                 yield f"data: {json.dumps(data)}\n\n"
     except Exception as exc:
         # Upstream raised mid-stream (timeout, connection drop, worker restart):
@@ -216,11 +321,26 @@ async def stream_with_source_filtering(
         logger.warning("Upstream stream raised before any content; surfacing error", error=str(stream_error))
         raise stream_error
 
-    final_clean, citations = extract_and_strip_sources_block(pending)
-    final_clean = final_clean.rstrip()
+    if citation_protocol_active:
+        final_clean, citations = extract_and_strip_sources_block(
+            pending,
+            include_inline_markers=include_inline_markers,
+        )
+        final_clean = final_clean.rstrip()
+    else:
+        final_clean, citations = pending, None
 
     filtered = filter_sources_by_citations(sources, citations)
-    extra_payload = {"sources": filtered}
+    extra_payload = {
+        "sources": filtered,
+        "presented_sources": sources,
+        "cited_sources": filtered if citations is not None else [],
+        "citations_reported": citations is not None,
+    }
+    if include_all_retrieved:
+        extra_payload["all_retrieved_sources"] = all_sources if all_sources is not None else sources
+    if extra_fields:
+        extra_payload.update(extra_fields)
     if not saw_done:
         extra_payload["truncated"] = True
         logger.warning(
@@ -231,7 +351,6 @@ async def stream_with_source_filtering(
             chars=len(final_clean),
             sources=len(filtered),
         )
-    filtered_json = json.dumps(extra_payload)
 
     if template and len(final_clean) > emitted_len:
         tail_chunk = copy.deepcopy(template)
@@ -240,15 +359,34 @@ async def stream_with_source_filtering(
         # finish chunk); clients treat such a chunk as terminal and drop its
         # delta. The separate finish chunk below emits it with an empty delta.
         tail_chunk["choices"][0]["finish_reason"] = None
-        tail_chunk["extra"] = filtered_json
+        tail_chunk["extra"] = extra_payload
         yield f"data: {json.dumps(tail_chunk)}\n\n"
+
+    finish_extra = None
+    if template or terminal_extra_fields:
+        finish_extra = dict(extra_payload)
+        if terminal_extra_fields:
+            try:
+                finalized_fields = terminal_extra_fields() if callable(terminal_extra_fields) else terminal_extra_fields
+                finish_extra.update(finalized_fields)
+            except Exception as error:  # noqa: BLE001 - optional telemetry must not break the answer stream
+                logger.bind(error_type=type(error).__name__).warning(
+                    "Terminal telemetry could not be finalized and was omitted."
+                )
 
     if template:
         await asyncio.sleep(0.05)
         finish_chunk = copy.deepcopy(template)
         finish_chunk["choices"][0]["delta"] = {}
         finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-        finish_chunk["extra"] = filtered_json
+        finish_chunk["extra"] = finish_extra
+        yield f"data: {json.dumps(finish_chunk)}\n\n"
+    elif finish_extra is not None:
+        finish_chunk = {
+            "model": model_name,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "extra": finish_extra,
+        }
         yield f"data: {json.dumps(finish_chunk)}\n\n"
 
     yield "data: [DONE]\n\n"

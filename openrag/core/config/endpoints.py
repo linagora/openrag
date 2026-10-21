@@ -2,9 +2,42 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+import os
+from collections.abc import Mapping
+from typing import Literal
+
+from pydantic import Field, field_validator
 
 from .base import ConfigMixin
+
+LLM_OVERRIDE_ENDPOINT_ENV = "LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT"
+
+
+def custom_endpoint_override_enabled() -> bool:
+    """Is a client-supplied ``llm_override.base_url`` honored at all?
+
+    Off by default: enabling it lets any authenticated caller make the server POST
+    to an arbitrary host (SSRF). Only the request *shape* is constrained — see
+    ``VLLMClient._resolve_endpoint_override``.
+
+    Lives here rather than in ``services.inference`` because the API layer reads it
+    too and ``api -> services`` is a forbidden import direction. Read on demand so
+    a test or a reloaded worker sees the current environment.
+    """
+    return os.getenv(LLM_OVERRIDE_ENDPOINT_ENV, "false").strip().lower() == "true"
+
+
+def client_llm_override(metadata: object) -> Mapping[str, object]:
+    """Read ``metadata.llm_override`` as a mapping, or ``{}``.
+
+    Only the *outer* ``metadata`` is schema-validated, so ``{"llm_override":
+    "gpt-4o"}`` is a valid request whose ``.get(...)`` would raise
+    ``AttributeError`` — a 500. A non-mapping override counts as absent.
+    """
+    if not isinstance(metadata, Mapping):
+        return {}
+    override = metadata.get("llm_override")
+    return override if isinstance(override, Mapping) else {}
 
 
 class LLMParamsConfig(ConfigMixin):
@@ -44,8 +77,10 @@ class VLMConfig(LLMParamsConfig):
 class EmbedderConfig(ConfigMixin):
     """Embedding model endpoint configuration."""
 
-    provider: str = "openai"
-    model_name: str = "jinaai/jina-embeddings-v3"
+    # The client the env-seeded embedder endpoint runs, its ``implementation``.
+    # Env: EMBEDDER_PROVIDER.
+    provider: Literal["vllm", "ollama", "tei"] = "vllm"
+    model_name: str = "Qwen/Qwen3-Embedding-0.6B"
     base_url: str = "http://vllm:8000/v1"
     api_key: str = Field(default="EMPTY", repr=False)
     # 2047 (just below the 2048 boundary): the embedder sends
@@ -61,6 +96,13 @@ class EmbedderConfig(ConfigMixin):
     # `embed_concurrency` requests in flight, to stay within the timeout above.
     batch_size: int = Field(default=32, gt=0)
     embed_concurrency: int = Field(default=4, gt=0)
+
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _openai_is_vllm(cls, value: object) -> object:
+        # ``openai`` was this field's default while nothing read it; a config
+        # that still says so means the OpenAI-compatible client, ``vllm``.
+        return "vllm" if value == "openai" else value
 
 
 class SemaphoreConfig(ConfigMixin):

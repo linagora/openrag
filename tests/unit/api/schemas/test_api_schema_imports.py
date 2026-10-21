@@ -6,6 +6,7 @@ from api.schemas.admin.workspaces import AddFilesRequest, CreateWorkspaceRequest
 from api.schemas.auth.login import CurrentUserResponse, LoginResponse
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest, OpenAIMessage
 from api.schemas.user.search import SearchRequest
+from core.utils import consts
 from pydantic import ValidationError
 
 
@@ -85,16 +86,170 @@ def test_chat_request_drops_top_logprobs_when_logprobs_not_enabled():
         assert "top_logprobs" not in dump
 
 
-def test_chat_request_omits_logprobs_when_unset():
-    """An unset logprobs must not be emitted — the server never requests it on the
-    client's behalf (sending it unsolicited can break streaming on some backends).
+def test_chat_request_defaults_logprobs_off():
+    """logprobs is off by default, and the "off" state is an explicit ``False`` so
+    it is visible in the OpenAPI schema rather than merely absent.
+
+    That explicit ``False`` survives ``model_dump(exclude_none=True)``, so it is
+    the *client* layer that has to keep it off the wire — see
+    ``_strip_falsy_logprobs`` and its tests in
+    tests/unit/services/inference/{test_vllm_client,test_ollama_client}.py, which
+    assert the payload actually sent. This test owns only the schema contract.
     """
     request = OpenAIChatCompletionRequest(messages=[OpenAIMessage(role="user", content="hi")])
     dump = request.model_dump(exclude_none=True)
 
-    assert request.logprobs is None
-    assert "logprobs" not in dump
+    assert request.logprobs is False
+    assert request.top_logprobs is None
     assert "top_logprobs" not in dump
+    assert OpenAIChatCompletionRequest.model_json_schema()["properties"]["logprobs"]["default"] is False
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"bypass_query_contextualization": True},
+        {
+            "bypass_query_contextualization": True,
+            "include_retrieval_trace": True,
+        },
+        {
+            "bypass_query_contextualization": True,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+            "compare_original_query": True,
+        },
+    ],
+)
+def test_contextualization_bypass_rejects_unsafe_or_ambiguous_combinations(metadata):
+    with pytest.raises(ValidationError):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": metadata,
+            }
+        )
+
+
+def test_contextualization_bypass_accepts_traced_required_retrieval():
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {
+                "bypass_query_contextualization": True,
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+            },
+        }
+    )
+
+    assert request.metadata["bypass_query_contextualization"] is True
+
+
+def test_original_query_comparison_requires_trace_even_without_bypass():
+    with pytest.raises(ValidationError, match="compare_original_query requires include_retrieval_trace"):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": {"compare_original_query": True},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"retrieval_similarity_threshold": 0.35},
+        {
+            "retrieval_similarity_threshold": 0.35,
+            "include_retrieval_trace": True,
+        },
+        {
+            "retrieval_similarity_threshold": -0.01,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+        },
+        {
+            "retrieval_similarity_threshold": 1.01,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+        },
+        {
+            "retrieval_top_k": 1001,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+        },
+    ],
+)
+def test_retrieval_diagnostic_overrides_reject_unsafe_values_or_untraced_requests(metadata):
+    with pytest.raises(ValidationError):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": metadata,
+            }
+        )
+
+
+def test_retrieval_diagnostic_overrides_accept_bounded_traced_required_retrieval():
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+                "retrieval_similarity_threshold": 0.35,
+                "retrieval_top_k": 1000,
+                "retrieval_disable_reranker": True,
+                "retrieval_disable_expansion": True,
+            },
+        }
+    )
+
+    assert request.metadata["retrieval_similarity_threshold"] == 0.35
+    assert request.metadata["retrieval_top_k"] == 1000
+
+
+def test_inactive_retrieval_diagnostic_defaults_do_not_require_trace_or_force_retrieval():
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {
+                "retrieval_similarity_threshold": None,
+                "retrieval_top_k": None,
+                "retrieval_disable_reranker": False,
+                "retrieval_disable_expansion": None,
+            },
+        }
+    )
+
+    assert request.metadata["retrieval_disable_reranker"] is False
+
+
+def test_retrieval_diagnostic_values_are_validated_before_trace_requirements():
+    with pytest.raises(ValidationError, match="retrieval_top_k must be an integer"):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": {"retrieval_top_k": "many"},
+            }
+        )
+
+
+@pytest.mark.parametrize("model", [OpenAIChatCompletionRequest, OpenAICompletionRequest])
+def test_openapi_example_is_a_valid_request(model):
+    """The Swagger "Try it out" bodies are hand-written dicts in ``json_schema_extra``
+    — nothing type-checks them, so a field rename silently leaves the docs handing
+    out a body the API rejects. Parse each pinned example back through its own model.
+
+    ``extra="allow"`` means a *misspelled* key still validates, so the model name is
+    asserted separately: it is the one part of the example the router will reject
+    outright (404) if the partition prefix ever moves again.
+    """
+    example = model.model_json_schema()["examples"][0]
+
+    model.model_validate(example)
+    assert example["model"].startswith(consts.PARTITION_PREFIX)
 
 
 def test_chat_request_passes_through_extra_openai_params():
@@ -112,6 +267,64 @@ def test_chat_request_passes_through_extra_openai_params():
 
     assert dump["tools"] == [{"type": "function", "function": {"name": "f"}}]
     assert dump["seed"] == 42
+
+
+def test_chat_message_passes_through_extra_openai_fields():
+    """An OpenAI message is more than role/content: `name` disambiguates speakers
+    and `tool_calls`/`tool_call_id` carry function calling. Dropping them here
+    silently truncated the history sent to the LLM
+    """
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "hi", "name": "alice"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+                },
+            ]
+        }
+    )
+    messages = request.model_dump(exclude_none=True)["messages"]
+
+    assert messages[0]["name"] == "alice"
+    assert messages[1]["tool_calls"][0]["id"] == "c1"
+
+
+def test_sanitize_messages_keeps_tool_calls_reaching_it():
+    """_sanitize_messages leaves a content-free assistant turn alone when it
+    carries tool_calls — reachable only now that the schema forwards the field
+    """
+    from services.orchestrators.query_service import QueryService
+
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+                }
+            ]
+        }
+    )
+    sanitized = QueryService._sanitize_messages(request.model_dump(exclude_none=True)["messages"])
+
+    assert sanitized[0]["content"] == ""
+
+
+def test_completion_request_passes_through_extra_openai_params():
+    """Legacy /completions mirrors the chat request: undeclared vendor params are
+    forwarded, while the declared bounds on n/best_of still apply
+    """
+    request = OpenAICompletionRequest.model_validate({"prompt": "hi", "suffix": "!", "user": "alice"})
+    dump = request.model_dump(exclude_none=True)
+
+    assert dump["suffix"] == "!"
+    assert dump["user"] == "alice"
+    with pytest.raises(ValidationError):
+        OpenAICompletionRequest.model_validate({"prompt": "hi", "n": 9, "user": "alice"})
 
 
 def test_completion_request_omits_unset_nulls():
@@ -167,3 +380,74 @@ def test_completion_request_bounds_n_and_best_of():
     for bad in ({"n": 0}, {"n": 9}, {"best_of": 0}, {"best_of": 9}):
         with pytest.raises(ValidationError):
             OpenAICompletionRequest(prompt="x", **bad)
+
+
+def test_chat_message_accepts_tool_role_with_tool_call_id():
+    """A tool-result turn is `role="tool"` + `tool_call_id`. `extra="allow"` only
+    preserves undeclared fields *after* the declared ones validate, so an
+    unlisted role rejected the whole message before its extras mattered
+    """
+    message = OpenAIMessage.model_validate({"role": "tool", "content": "42", "tool_call_id": "c1"})
+    dump = message.model_dump()
+
+    assert dump["role"] == "tool"
+    assert dump["tool_call_id"] == "c1"
+
+
+def test_chat_message_accepts_null_content_with_tool_calls():
+    """The assistant turn that *carries* tool_calls has `content: null` in the
+    OpenAI API — the exact shape `_sanitize_messages` documents as legitimately
+    content-free. A required `content: str` rejected it before it got there
+    """
+    message = OpenAIMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+        }
+    )
+
+    assert message.content is None
+    assert message.model_dump()["tool_calls"][0]["id"] == "c1"
+
+
+def test_chat_message_accepts_developer_role():
+    """`developer` is OpenAI's replacement for `system` on newer models; rejecting
+    it 422s a request the downstream LLM would have accepted
+    """
+    assert OpenAIMessage.model_validate({"role": "developer", "content": "be terse"}).role == "developer"
+
+
+def test_chat_request_accepts_replayed_tool_call_history():
+    """The realistic end-to-end shape: a client replaying a conversation that
+    already used tools, then asking a new question. Every intermediate turn must
+    survive parsing for the history reaching the LLM to stay faithful
+    """
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"c":"Paris"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "content": "18C", "tool_call_id": "c1"},
+                {"role": "assistant", "content": "It's 18C in Paris."},
+                {"role": "user", "content": "and tomorrow?"},
+            ]
+        }
+    )
+    messages = request.model_dump(exclude_none=True)["messages"]
+
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant", "user"]
+    assert messages[1]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert messages[2]["tool_call_id"] == "c1"
+    # exclude_none drops the null content rather than forwarding `content: null`
+    assert "content" not in messages[1]

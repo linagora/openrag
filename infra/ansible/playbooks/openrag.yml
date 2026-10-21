@@ -31,7 +31,6 @@
     project_directories:
       - data
       - db
-      - logs
       - .hydra_config
       - model_weights
       - vdb/volumes

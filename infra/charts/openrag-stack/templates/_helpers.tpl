@@ -47,16 +47,267 @@ Selector labels
 */}}
 {{- define "openrag-stack.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "openrag-stack.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
 {{- end }}
 
 {{/*
-Create the name of the service account to use
+Component-scoped selector labels. app.kubernetes.io/name identifies the
+specific workload ("openrag", "admin-ui", "reranker", ...) instead of the
+umbrella chart name, so e.g. `kubectl get pods -l app.kubernetes.io/name=admin-ui`
+targets one component — every workload template should use this (and
+"componentLabels" below) instead of hand-rolling its own label block.
+Usage: {{ include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) }}
 */}}
-{{- define "openrag-stack.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create }}
-{{- default (include "openrag-stack.fullname" .) .Values.serviceAccount.name }}
-{{- else }}
-{{- default "default" .Values.serviceAccount.name }}
+{{- define "openrag-stack.componentSelectorLabels" -}}
+app.kubernetes.io/name: {{ .component }}
+app.kubernetes.io/instance: {{ include "openrag-stack.fullname" .context }}
 {{- end }}
+
+{{/*
+Component-scoped common labels (componentSelectorLabels plus chart/version/managed-by).
+Usage: {{ include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) }}
+*/}}
+{{- define "openrag-stack.componentLabels" -}}
+helm.sh/chart: {{ include "openrag-stack.chart" .context }}
+{{ include "openrag-stack.componentSelectorLabels" . }}
+{{- if .context.Chart.AppVersion }}
+app.kubernetes.io/version: {{ .context.Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .context.Release.Service }}
+{{- end }}
+
+{{/*
+Environment secret name used by all consumers.
+When env.existingSecret is set, that name is returned directly.
+*/}}
+{{- define "openrag-stack.secretName" -}}
+{{- if .Values.env.existingSecret }}
+{{- .Values.env.existingSecret }}
+{{- else }}
+{{- printf "%s-env-secrets" (include "openrag-stack.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Names of the env ConfigMap and Secret the migration hook reads: copies created
+as hooks themselves, since a pre-install hook runs before the release's own
+resources exist. An env.existingSecret is created before the install, so the
+hook reads it directly.
+
+The fullname is cut before the suffix, not after: cut after, a 62-character
+fullname would give the copy the same name as the app's Secret, and the copy's
+hook-delete-policy would then delete the app's Secret. Cutting before still
+collides for a fullname ending in "-migration" whose cut lands on or just after
+its "-" (58 or 59 characters for the ConfigMap, 50 or 51 for the Secret), so
+the helpers refuse that case.
+*/}}
+{{- define "openrag-stack.migrationConfigMapName" -}}
+{{- $name := printf "%s-migration-env" (include "openrag-stack.fullname" . | trunc 49 | trimSuffix "-") }}
+{{- if eq $name (printf "%s-env" (include "openrag-stack.fullname" .)) }}
+{{- fail (printf "the migration Job's ConfigMap copy would be named %q, like the app's ConfigMap, and deleting the copy would delete it; change the release name or fullnameOverride" $name) }}
+{{- end }}
+{{- $name }}
+{{- end }}
+
+{{- define "openrag-stack.migrationSecretName" -}}
+{{- if .Values.env.existingSecret }}
+{{- .Values.env.existingSecret }}
+{{- else }}
+{{- $name := printf "%s-migration-env-secrets" (include "openrag-stack.fullname" . | trunc 41 | trimSuffix "-") }}
+{{- if eq $name (include "openrag-stack.secretName" .) }}
+{{- fail (printf "the migration Job's Secret copy would be named %q, like the app's Secret, and deleting the copy would delete it; change the release name or fullnameOverride" $name) }}
+{{- end }}
+{{- $name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Refuse migration settings that leave the schema to chance. Alembic is the only
+thing that creates the schema, either in the app at startup
+(POSTGRES_RUN_MIGRATIONS, from postgresProvisioning.runMigrationsInApp) or in
+the migration Job.
+
+- POSTGRES_RUN_MIGRATIONS is read as the app reads it (_coerce in
+  core/config/loader.py): blank means unset, which the app reads as true;
+  true/1/yes and false/0/no in any case, with no trimming; anything else stops
+  the app at startup, so the chart refuses it.
+- env.config.POSTGRES_RUN_MIGRATIONS replaces the value derived from
+  runMigrationsInApp, so the two can disagree without a word. So does
+  env.secrets.POSTGRES_RUN_MIGRATIONS: the pods read the env Secret after the
+  ConfigMap, so its value wins. The chart can read it only when it renders the
+  Secret itself, not from env.existingSecret or a secrets operator.
+- With migrations off in the app and no Job, nothing applies them: the app
+  starts without its services and answers 503 until someone does. That is a
+  supported setup only when the operator says so with
+  postgresProvisioning.externalMigrations.
+- The Job is for an external PostgreSQL: it runs before Helm creates the
+  bundled one, so on a first install it cannot reach it.
+*/}}
+{{- define "openrag-stack.validateMigrationSettings" -}}
+{{- $truthy := list "true" "1" "yes" }}
+{{- $falsy := list "false" "0" "no" }}
+{{- $inAppValue := printf "%v" .Values.postgresProvisioning.runMigrationsInApp | lower }}
+{{- if not (has $inAppValue (concat $truthy $falsy)) }}
+{{- fail (printf "postgresProvisioning.runMigrationsInApp is %q; set it to true or false." (printf "%v" .Values.postgresProvisioning.runMigrationsInApp)) }}
+{{- end }}
+{{- $inApp := has $inAppValue $truthy }}
+{{- /* hasKey, not `default`: to `default`, a boolean false is empty. A key
+   removed from env.config is unset in the ConfigMap, which the app reads as
+   true, as it reads a blank. */}}
+{{- $configValue := "" }}
+{{- if hasKey .Values.env.config "POSTGRES_RUN_MIGRATIONS" }}
+{{- $configValue = index .Values.env.config "POSTGRES_RUN_MIGRATIONS" }}
+{{- end }}
+{{- $sources := list (list "env.config" $configValue) }}
+{{- $secrets := .Values.env.secrets | default dict }}
+{{- if and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") (hasKey $secrets "POSTGRES_RUN_MIGRATIONS") }}
+{{- $sources = append $sources (list "env.secrets" (index $secrets "POSTGRES_RUN_MIGRATIONS")) }}
+{{- end }}
+{{- range $sources }}
+{{- $source := index . 0 }}
+{{- $value := tpl (printf "%v" (index . 1)) $ }}
+{{- $appMigrates := true }}
+{{- if $value }}
+{{- if not (has (lower $value) (concat $truthy $falsy)) }}
+{{- fail (printf "%s.POSTGRES_RUN_MIGRATIONS is %q, which the app rejects at startup. Remove it from %s and set postgresProvisioning.runMigrationsInApp instead." $source $value $source) }}
+{{- end }}
+{{- $appMigrates = has (lower $value) $truthy }}
+{{- end }}
+{{- if ne $appMigrates $inApp }}
+{{- fail (printf "%s.POSTGRES_RUN_MIGRATIONS is %q, which the app reads as %v (blank or unset reads as true), but postgresProvisioning.runMigrationsInApp is %v, and this value replaces it. Set postgresProvisioning.runMigrationsInApp and remove POSTGRES_RUN_MIGRATIONS from %s." $source $value $appMigrates $.Values.postgresProvisioning.runMigrationsInApp $source) }}
+{{- end }}
+{{- end }}
+{{- /* Compared as a string: under --set-string, "false" is a non-empty string, which a template reads as true. Same spellings as runMigrationsInApp. */}}
+{{- $external := has (toString .Values.postgresProvisioning.externalMigrations | lower) $truthy }}
+{{- if not (or $inApp .Values.postgresProvisioning.migrationJob.enabled $external) }}
+{{- fail "postgresProvisioning.runMigrationsInApp and postgresProvisioning.migrationJob.enabled are both false, so nothing applies the PostgreSQL migrations: the app would start without its services and answer 503. Enable one of them, or set postgresProvisioning.externalMigrations: true if you apply them yourself." }}
+{{- end }}
+{{- if and .Values.postgresProvisioning.migrationJob.enabled .Values.postgresql.enabled }}
+{{- fail "postgresProvisioning.migrationJob is for an external PostgreSQL: it runs before Helm creates the bundled one (postgresql.enabled), so it cannot reach it on a first install. With the bundled PostgreSQL, turn the Job off and let the app apply the migrations (postgresProvisioning.runMigrationsInApp: true)." }}
+{{- end }}
+{{- end }}
+
+{{/*
+Merge a component's security context override (e.g. just runAsUser/runAsGroup/
+fsGroup, tuned to that component's own Dockerfile) on top of a shared default
+from values.yaml's top-level `security` block — component keys win on
+conflicts, everything else is inherited from the default.
+Deliberately NOT Sprig's `merge` (mergo): mergo treats a zero value (false, 0,
+"") as "unset" and overwrites it with the default, so an explicit
+`allowPrivilegeEscalation: false` override would be silently discarded the
+day the shared default becomes `true`. This does a presence-based (hasKey)
+shallow merge instead, so an explicitly-set false/0/"" always wins.
+Usage: {{ include "openrag-stack.mergeSecurityContext" (dict "component" .Values.ray.podSecurityContext "default" .Values.security.podSecurityContext) }}
+*/}}
+{{- define "openrag-stack.mergeSecurityContext" -}}
+{{- $result := deepCopy .component -}}
+{{- range $key, $value := .default -}}
+{{- if not (hasKey $result $key) -}}
+{{- $_ := set $result $key $value -}}
+{{- end -}}
+{{- end -}}
+{{- $result | toYaml -}}
+{{- end }}
+
+{{/*
+Component override for a single boolean/scalar security field (e.g.
+automountServiceAccountToken): uses the component's own value only if the key
+is explicitly present, otherwise falls back to the shared default. A plain
+`| default` would treat an explicit `false` override as empty and silently
+fall back anyway — this checks presence (hasKey) instead of truthiness.
+Usage: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.ray "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
+*/}}
+{{- define "openrag-stack.securityFieldOverride" -}}
+{{- if hasKey .component .key -}}
+{{- get .component .key -}}
+{{- else -}}
+{{- .default -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Render an OpenRAG container probe. Ray Serve exposes the HTTP application from
+the Ray head rather than from the OpenRAG driver pod, so Kubernetes must run
+the request inside the container where cluster DNS can resolve the head
+Service. Timing and threshold settings continue to come from openrag.probes.
+*/}}
+{{- define "openrag-stack.openragProbe" -}}
+{{- $probe := deepCopy .probe -}}
+{{- if .rayServe -}}
+{{- $_ := unset $probe "httpGet" -}}
+{{- $_ := unset $probe "tcpSocket" -}}
+{{- $_ := unset $probe "grpc" -}}
+{{- $host := printf "%s-raycluster-head-svc" (include "openrag-stack.fullname" .context) -}}
+{{- $url := printf "http://%s:80%s" $host .path -}}
+{{- $_ := set $probe "exec" (dict "command" (list "curl" "--fail" "--silent" "--show-error" $url)) -}}
+{{- end -}}
+{{- $probe | toYaml -}}
+{{- end }}
+
+{{/*
+"true" when the API is served by Ray Serve replicas behind the RayCluster head
+Service (port ray-serve) rather than by uvicorn on the openrag Deployment's
+port 8080. Both switches are required: ray.enabled renders the RayCluster,
+ENABLE_RAY_SERVE makes the app hand itself to serve.run. Anything that must
+target "where the API actually listens" (Ingress backend, metrics discovery)
+branches on this.
+Usage: {{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
+*/}}
+{{- define "openrag-stack.rayServeApi" -}}
+{{- if and .Values.ray.enabled (eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true") -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/*
+Port every Ray node exports its metrics on, head and workers alike, and the
+embedded Ray inside the openrag pod when ray.enabled=false. Kept off
+networkPolicy.externalPorts' 8080 on purpose: that rule matches by port number
+across every pod in the namespace, and these metrics are unauthenticated.
+KubeRay's own default is exactly 8080, so both halves of raycluster.yaml must
+override it — see the comments there.
+*/}}
+{{- define "openrag-stack.rayMetricsPort" -}}
+8090
+{{- end }}
+
+{{/*
+Whether Ray's metrics get a PodMonitor. monitoring.bundled turns it on like the
+API's ServiceMonitor: the ingestion and worker-side inference series exist on
+Ray's endpoint only, so a stack that scrapes the API alone leaves the alerts
+built on them unable to fire.
+*/}}
+{{- define "openrag-stack.rayPodMonitor" -}}
+{{- if or .Values.ray.metrics.podMonitor.enabled .Values.monitoring.bundled -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/*
+Whether the openrag pod starts Ray itself. With ray.enabled=false and
+RAY_ADDRESS set, the API attaches to an external cluster (ray.init(address=...))
+and starts no metrics agent, so nothing would listen on the embedded Ray's
+port: a monitor on it is a target that is always down. Only env.config and
+env.secrets are visible here; a RAY_ADDRESS supplied through env.existingSecret
+or an external secrets provider is not, which is what ray.externalCluster says.
+*/}}
+{{- define "openrag-stack.embeddedRay" -}}
+{{- $address := include "openrag-stack.rayAddress" . -}}
+{{- if and (not .Values.ray.enabled) (not $address) (not .Values.ray.externalCluster) -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/*
+The RAY_ADDRESS the API will see, as configmap-env.yaml and secrets-env.yaml
+render it: both pass values through tpl, so a raw value can be an expression
+that renders empty. Empty when the chart sees none.
+
+The pod reads the ConfigMap, then the Secret (envFrom), so a key in both takes
+the Secret's value, even an empty one. env.secrets only reaches that Secret
+when the chart renders it: no env.existingSecret and the "values" provider.
+Otherwise the Secret is opaque here and env.config is all the chart can read.
+*/}}
+{{- define "openrag-stack.rayAddress" -}}
+{{- $secrets := .Values.env.secrets | default dict -}}
+{{- $chartSecret := and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") -}}
+{{- $raw := dig "RAY_ADDRESS" "" (.Values.env.config | default dict) -}}
+{{- if and $chartSecret (hasKey $secrets "RAY_ADDRESS") -}}
+{{- $raw = get $secrets "RAY_ADDRESS" -}}
+{{- end -}}
+{{- tpl (printf "%v" $raw) . | trim -}}
 {{- end }}

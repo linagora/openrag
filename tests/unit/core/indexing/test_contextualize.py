@@ -55,3 +55,42 @@ async def test_contextualizer_holds_llm_semaphore_around_chat():
     # The injected gate was entered for the chat call and released afterwards.
     assert gate_held == [True]
     assert _TrackingGate.depth == 0
+
+
+@pytest.mark.asyncio
+async def test_contextualizer_reports_provider_failure_while_returning_base_chunks():
+    class FailingLLM:
+        async def chat(self, messages, **kwargs):
+            raise RuntimeError("context provider unavailable")
+
+    failures: list[Exception] = []
+    contextualizer = ChunkContextualizer(FailingLLM(), "System prompt")
+
+    result = await contextualizer.contextualize(
+        [Chunk(id="c1", text="chunk body", partition="p")],
+        on_failure=failures.append,
+    )
+
+    assert result[0].context == ""
+    assert result[0].content == "chunk body"
+    assert len(failures) == 1
+    assert str(failures[0]) == "context provider unavailable"
+
+
+@pytest.mark.asyncio
+async def test_contextualizer_reports_empty_provider_response_as_degraded():
+    class EmptyLLM:
+        async def chat(self, messages, **kwargs):
+            return {"choices": [{"message": {"content": ""}}]}
+
+    failures: list[Exception] = []
+    contextualizer = ChunkContextualizer(EmptyLLM(), "System prompt")
+
+    result = await contextualizer.contextualize(
+        [Chunk(id="c1", text="chunk body", partition="p")],
+        on_failure=failures.append,
+    )
+
+    assert result[0].content == "chunk body"
+    assert len(failures) == 1
+    assert isinstance(failures[0], ValueError)

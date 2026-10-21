@@ -14,6 +14,7 @@ endpoints returned via ``HTTPException``.
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from api.dependencies.auth import (
     check_user_file_quota,
@@ -30,13 +31,13 @@ from api.dependencies.files import (
     validate_file_id,
     validate_metadata,
 )
-from api.routers.admin.task_logs import collect_task_logs
 from core.models.catalog import TERMINAL_TASK_STATES
-from core.utils.exceptions import OpenRAGError
+from core.utils.error_summary import summarize_task_error
+from core.utils.exceptions import ConflictError, OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
-from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
-from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
+from core.utils.url_safety import is_safe_url
+from di.providers import get_auth_service, get_config, get_indexing_service, get_job_service, get_partition_service
 from fastapi import (
     APIRouter,
     Depends,
@@ -52,12 +53,80 @@ from fastapi.responses import JSONResponse
 logger = get_logger()
 
 
+def _validate_callback_url(callback_url: str | None, config) -> None:
+    """Reject a callback_url the server must not POST to.
+
+    The sender re-checks; this is only so the caller hears about it now rather
+    than losing the callback silently.
+    """
+    if not callback_url:
+        return
+    allow_private = bool(getattr(getattr(config, "indexing_callback", None), "allow_private_urls", False))
+    try:
+        # is_safe_url never touches the port; a non-numeric one raises here.
+        urlparse(callback_url).port
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="callback_url is not a valid URL",
+        ) from exc
+    if not is_safe_url(callback_url, allow_private_hosts=allow_private):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="callback_url must be a public http(s) URL",
+        )
+
+
 def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | None = None, **path_params) -> str:
     """Build a URL using the preferred scheme if configured."""
     url = request.url_for(route_name, **path_params)
     if preferred_url_scheme:
         url = url.replace(scheme=preferred_url_scheme)
     return str(url)
+
+
+async def _point_conflict_at_running_task(
+    exc: BaseException,
+    request: Request,
+    config,
+    *,
+    user: dict[str, Any],
+    job_service,
+    auth_service,
+) -> None:
+    """Tell a caller turned away by the admission fence where to look.
+
+    The fence lives in the dispatcher, which has no ``Request`` and so cannot
+    build the link itself. Left as an extra field on the 409 body: a client that
+    retried after a timeout can poll the task it already started instead of
+    treating the refusal as a lost upload.
+
+    The link is only given to someone the task-status route would serve (the
+    task's owner or an admin). Another editor of the partition still gets
+    ``existing_task_id``, but a URL that answers them 403 would only mislead.
+    """
+    if not isinstance(exc, ConflictError) or exc.code != "DOCUMENT_INDEXING_IN_PROGRESS":
+        return
+    existing_task_id = exc.extra.get("existing_task_id")
+    if not existing_task_id:
+        return
+    try:
+        task_details = await job_service.get_task_details(existing_task_id)
+    except Exception as lookup_error:  # noqa: BLE001 - the 409 stands without the link
+        logger.warning(
+            "Could not read the running task's owner for a 409 link.",
+            task_id=existing_task_id,
+            error=str(lookup_error),
+        )
+        return
+    if not task_details or not auth_service.authorize(user=user, action="task:access", resource=task_details):
+        return
+    exc.extra["task_status_url"] = build_url(
+        request,
+        "get_task_status",
+        preferred_url_scheme=config.server.preferred_url_scheme,
+        task_id=existing_task_id,
+    )
 
 
 router = APIRouter()
@@ -70,6 +139,9 @@ router = APIRouter()
 **Response:**
 Returns a list of supported file extensions and MIME types that can be indexed by the system.
 """,
+    # The handler doesn't read the user, so the dependency is declared here
+    # rather than left to AuthMiddleware alone.
+    dependencies=[Depends(current_user)],
 )
 async def get_supported_types(config=Depends(get_config)):
     """
@@ -92,7 +164,10 @@ async def get_supported_types(config=Depends(get_config)):
 
 **File Type Support:**
 - Supports standard file extensions listed in `/supported/types`
-- For unsupported extensions, specify `mimetype` in metadata
+- For unsupported or missing extensions, specify `mimetype` in metadata: a
+  supported mimetype then decides how the file is parsed (`minutes.cozy-note`
+  sent as `text/markdown` is parsed as Markdown). A supported extension is
+  never overridden by the mimetype.
 
 **Metadata Format:**
 JSON string containing file metadata. Example:
@@ -117,6 +192,16 @@ JSON string containing file metadata. Example:
 
 **Response:**
 Returns 201 Created with a task status URL for tracking indexing progress.
+
+**Conflicts (409):**
+- The file is already in the partition's catalog.
+- `DOCUMENT_INDEXING_IN_PROGRESS` — another task is still indexing this
+  `file_id`. `extra.existing_task_id` / `extra.task_status_url` point at it, so
+  a client that re-sent after a timeout can poll the first task instead of
+  re-uploading. `task_status_url` is only included for the task's owner or an
+  admin, the callers the task-status route serves.
+- `DOCUMENT_CONTENT_EXISTS` — content deduplication matched an existing file
+  (`extra.existing_file_id`).
 """,
 )
 async def add_file(
@@ -126,11 +211,20 @@ async def add_file(
     file: UploadFile = Depends(validate_file_format),
     metadata: dict = Depends(validate_metadata),
     workspace_ids: str | None = Form(None, description="JSON array of workspace IDs to add the file to"),
+    callback_url: str | None = Form(None, description="Optional URL notified when async indexing finishes"),
+    callback_token: str | None = Form(
+        None,
+        description="Optional bearer token sent as `Authorization` on the callback_url request",
+    ),
     user=Depends(require_partition_editor),
     _quota_check=Depends(check_user_file_quota),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
+    job_service=Depends(get_job_service),
+    auth_service=Depends(get_auth_service),
 ):
+    _validate_callback_url(callback_url, config)
+
     if await service.file_exists(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -143,14 +237,15 @@ async def add_file(
             parsed_workspace_ids = json.loads(workspace_ids)
             if not isinstance(parsed_workspace_ids, list):
                 raise ValueError
+            if not all(isinstance(workspace_id, str) for workspace_id in parsed_workspace_ids):
+                raise ValueError
         except (json.JSONDecodeError, ValueError):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="workspace_ids must be a JSON array of strings",
             )
         for ws_id in parsed_workspace_ids:
-            ws = await service.get_workspace(ws_id)
-            if not ws or ws["partition_name"] != partition:
+            if not await service.get_workspace(partition, ws_id):
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Workspace '{ws_id}' not found in partition '{partition}'",
@@ -164,11 +259,17 @@ async def add_file(
                 file,
                 Path(config.paths.data_dir),
                 with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
             )
             file_path = saved_upload.path
             content_sha256 = saved_upload.sha256
         else:
-            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
+            )
             content_sha256 = None
     except OpenRAGError:
         # Domain errors (e.g. 413 too-large, 400 bad filename) carry their own
@@ -195,9 +296,23 @@ async def add_file(
             user=user,
             workspace_ids=parsed_workspace_ids,
             content_sha256=content_sha256,
+            callback_url=callback_url,
+            callback_token=callback_token,
         )
-    except BaseException:
-        file_path.unlink(missing_ok=True)
+    except BaseException as exc:
+        # A submission whose outcome is unknown may have left a worker running
+        # that has not read the file yet; deleting it would fail an indexing
+        # run that could still succeed. The worker cleans up its own input.
+        if not indexing_worker_may_be_running(exc):
+            file_path.unlink(missing_ok=True)
+        await _point_conflict_at_running_task(
+            exc,
+            request,
+            config,
+            user=user,
+            job_service=job_service,
+            auth_service=auth_service,
+        )
         raise
 
     return JSONResponse(
@@ -280,10 +395,17 @@ async def put_file(
     file_id: str = Depends(validate_file_id),
     file: UploadFile = Depends(validate_file_format),
     metadata: dict = Depends(validate_metadata),
+    callback_url: str | None = Form(None, description="Optional URL notified when async indexing finishes"),
+    callback_token: str | None = Form(
+        None,
+        description="Optional bearer token sent as `Authorization` on the callback_url request",
+    ),
     user=Depends(require_partition_editor),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
 ):
+    _validate_callback_url(callback_url, config)
+
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -304,11 +426,17 @@ async def put_file(
                 file,
                 Path(config.paths.data_dir),
                 with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
             )
             file_path = saved_upload.path
             content_sha256 = saved_upload.sha256
         else:
-            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
+            )
             content_sha256 = None
     except OpenRAGError:
         raise
@@ -330,9 +458,15 @@ async def put_file(
             user=user,
             replace=True,
             content_sha256=content_sha256,
+            callback_url=callback_url,
+            callback_token=callback_token,
         )
-    except BaseException:
-        file_path.unlink(missing_ok=True)
+    except BaseException as exc:
+        # A submission whose outcome is unknown may have left a worker running
+        # that has not read the file yet; deleting it would fail an indexing
+        # run that could still succeed. The worker cleans up its own input.
+        if not indexing_worker_may_be_running(exc):
+            file_path.unlink(missing_ok=True)
         raise
 
     return JSONResponse(
@@ -510,6 +644,8 @@ async def get_task_status(
 **Response:**
 Returns error information including:
 - `task_id`: The task identifier
+- `reason`: Complete failure reason for administrators
+- `summary`: Concise failure reason for backward-compatible clients
 - `traceback`: Error traceback as an array of lines
 
 **Note:** Only available if task state is FAILED.
@@ -530,48 +666,15 @@ async def get_task_error(
     # The raw traceback exposes filesystem paths and internals; only return it
     # to admins. Task owners get a generic failure indicator.
     if user and user.get("is_admin", False):
-        return {"task_id": task_id, "traceback": error.splitlines()}
-    return {"task_id": task_id, "traceback": ["Task failed. Contact an administrator for details."]}
-
-
-@router.get(
-    "/task/{task_id}/logs",
-    description="""Get logs for a specific task.
-
-**Parameters:**
-- `task_id`: The unique task identifier
-- `max_lines`: Maximum number of log lines to return (default: 100)
-
-**Response:**
-Returns task logs including:
-- `task_id`: The task identifier
-- `logs`: Array of log entries with timestamps and messages
-
-**Note:** Logs are returned in chronological order (oldest first).
-""",
-)
-async def get_task_logs(
-    task_id: str,
-    max_lines: int = 100,
-    task_details=Depends(require_task_owner),
-    config=Depends(get_config),
-):
-    log_file = app_log_file(config.paths.log_dir)
-    if not log_file.exists():
-        raise HTTPException(status_code=500, detail="Log file not found.")
-
-    try:
-        logs = collect_task_logs(log_file, task_id, max_lines)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-
-    if not logs:
-        raise HTTPException(status_code=404, detail=f"No logs found for task '{task_id}'")
-
-    return JSONResponse(content={"task_id": task_id, "logs": logs})
+        reason = await service.get_task_error_reason(task_id)
+        return {
+            "task_id": task_id,
+            "reason": reason,
+            "summary": summarize_task_error(error, reason=reason) or "Task failed.",
+            "traceback": error.splitlines(),
+        }
+    message = "Task failed. Contact an administrator for details."
+    return {"task_id": task_id, "summary": message, "traceback": [message]}
 
 
 @router.delete(

@@ -1,37 +1,86 @@
+import math
 from typing import Any, Literal
 
+from core.utils import consts
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
-def default_max_tokens():
-    from core.config import load_config
-
-    return load_config().llm_context.max_output_tokens
+# Built from the constant rather than spelled out, so renaming the prefix (as
+# ``ragondin-`` -> ``openrag-`` already once did) cannot leave the docs pointing
+# at a model name the router no longer resolves.
+_EXAMPLE_MODEL = f"{consts.PARTITION_PREFIX}<partition>"
 
 
 class OpenAIMessage(BaseModel):
-    role: Literal["user", "assistant", "system"]
-    content: str
+    # Allow to have extra openAI attributes, like  `tool_calls`,
+    # `function_call`, etc. Pydantic's default `extra="ignore"`
+    # drops them.
+    #
+    # `extra="allow"` renders as `additionalProperties: true`, which makes
+    # Swagger UI invent an `"additionalProp1": {}` key in the body it generates
+    # for "Try it out". Extra keys are forwarded verbatim to the downstream
+    # OpenAI-compatible provider, so that generated body 400s as soon as it is
+    # copied into curl. Every model here therefore pins an explicit `examples`
+    # entry, which Swagger UI renders in place of its own guess.
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={"examples": [{"role": "user", "content": "What is OpenRag?"}]},
+    )
+
+    role: Literal["user", "assistant", "system", "tool", "developer"]
+
+    # content can be None when using `tool_calls`
+    content: str | None = None
 
 
 class OpenAIChatCompletionRequest(BaseModel):
-    # Accept and forward vendor-specific OpenAI params
-    model_config = ConfigDict(extra="allow")
+    # Accept and forward vendor-specific OpenAI params. See `OpenAIMessage` for
+    # why an example is pinned; here it also keeps Swagger UI from filling the
+    # unset optionals with placeholders that are *valid* JSON but invalid
+    # requests -- `max_tokens: 0` (rejected downstream, minimum is 1) and
+    # `logprobs: true` / `top_logprobs: 0` (opt-in only). The example
+    # omits every field that should stay omitted, so it is copy-pasteable.
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={
+            "examples": [
+                {
+                    "model": _EXAMPLE_MODEL,
+                    "messages": [{"role": "user", "content": "What is OpenRag?"}],
+                    "temperature": 0.3,
+                    "top_p": 1.0,
+                    "stream": False,
+                    "metadata": {
+                        "use_map_reduce": False,
+                        "spoken_style_answer": False,
+                        "websearch": False,
+                        "include_all_retrieved_sources": False,
+                        "include_retrieval_trace": False,
+                        "compare_original_query": False,
+                        "bypass_query_contextualization": False,
+                        "require_retrieval": False,
+                    },
+                }
+            ]
+        },
+    )
 
     model: str | None = Field(None, description="model name")
     messages: list[OpenAIMessage]
     temperature: float | None = Field(0.3)
     top_p: float | None = Field(1.0)
     stream: bool | None = Field(False)
-    max_tokens: int | None = Field(default_factory=default_max_tokens)
-    # Client-controlled and forwarded as-is to the downstream model; the server
-    # default is off (see LLMParamsConfig.logprobs). For chat completions
-    # `logprobs` is a boolean — `top_logprobs` carries the count — unlike the
-    # legacy /completions endpoint where `logprobs` is an integer.
-    logprobs: bool | None = Field(None)
+    # Deliberately left unset rather than defaulted here: this schema is parsed
+    # before the request's partition (and therefore the answering LLM endpoint)
+    # is known, so a default_factory could only ever read the *default*
+    # endpoint's budget — capping a partition whose own chat_llm endpoint allows
+    # more. The router fills it from the resolved endpoint via
+    # ``_apply_default_max_tokens`` once the partition is known.
+    max_tokens: int | None = Field(None)
+    logprobs: bool | None = Field(False)
     top_logprobs: int | None = Field(None)
     response_format: dict[str, Any] | None = Field(
         None,
+        examples=[{"type": "json_object"}],
         description="OpenAI response_format, e.g. {'type': 'json_object'} or "
         "{'type': 'json_schema', 'json_schema': {...}}. Forwarded to the LLM. "
         "Note: forcing JSON output on a partition (RAG) query suppresses the "
@@ -43,8 +92,33 @@ class OpenAIChatCompletionRequest(BaseModel):
             "spoken_style_answer": False,
             "websearch": False,
             "llm_override": None,
+            "include_all_retrieved_sources": False,
+            "include_retrieval_trace": False,
+            "compare_original_query": False,
+            "bypass_query_contextualization": False,
+            "require_retrieval": False,
         },
-        description="Extra custom parameters. Supports 'llm_override' object with an optional 'model' to override the downstream model name. The LLM endpoint and credentials are fixed by server configuration and cannot be overridden by the client.",
+        description=(
+            "Extra custom parameters. 'require_retrieval' (default false; enabled only by JSON true) "
+            "forces retrieval even for a casual or normalized-empty partition-backed chat message. "
+            "Other partition-backed chat messages retrieve by default. Only allowlisted casual messages skip "
+            "retrieval. Ambiguous, mixed, and factual "
+            "messages retrieve, and an empty generated query falls back to the latest user message. Casual messages "
+            "that are not forced use a direct response. Search scope and "
+            "filters remain in effect; matching sources are not guaranteed. Has no effect in direct LLM mode. "
+            "Supports an 'llm_override' object with an optional 'model' "
+            "to override the downstream model name; its 'base_url' and 'api_key' are honored only "
+            "when the deployment sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT, and ignored otherwise. "
+            "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
+            "set to the response's extra.all_retrieved_sources — off by default since it can be "
+            "large; opt in only for debugging/evaluation."
+            " 'include_retrieval_trace' (default false) adds bounded retrieval telemetry, including the original and "
+            "rewritten query text but excluding document content, to extra. "
+            "'compare_original_query' runs an isolated original-query retrieval only when tracing is enabled; "
+            "it never changes the documents used for the answer. "
+            "'bypass_query_contextualization' skips query rewriting for a traced, explicitly required retrieval; "
+            "it cannot be combined with 'compare_original_query'."
+        ),
     )
 
     @model_validator(mode="after")
@@ -59,8 +133,85 @@ class OpenAIChatCompletionRequest(BaseModel):
             self.top_logprobs = None
         return self
 
+    @model_validator(mode="after")
+    def _validate_contextualization_bypass(self) -> "OpenAIChatCompletionRequest":
+        metadata = self.metadata or {}
+        if metadata.get("compare_original_query") is True and metadata.get("include_retrieval_trace") is not True:
+            raise ValueError("compare_original_query requires include_retrieval_trace")
+        if metadata.get("bypass_query_contextualization") is not True:
+            return self
+        if metadata.get("include_retrieval_trace") is not True:
+            raise ValueError("bypass_query_contextualization requires include_retrieval_trace")
+        if metadata.get("require_retrieval") is not True:
+            raise ValueError("bypass_query_contextualization requires require_retrieval")
+        if metadata.get("compare_original_query") is True:
+            raise ValueError("bypass_query_contextualization cannot be combined with compare_original_query")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_retrieval_diagnostic_overrides(self) -> "OpenAIChatCompletionRequest":
+        metadata = self.metadata or {}
+        keys = {
+            "retrieval_similarity_threshold",
+            "retrieval_top_k",
+            "retrieval_disable_reranker",
+            "retrieval_disable_expansion",
+        }
+        supplied = keys.intersection(metadata)
+        if not supplied:
+            return self
+
+        threshold = metadata.get("retrieval_similarity_threshold")
+        if threshold is not None:
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                raise ValueError("retrieval_similarity_threshold must be a number")
+            if not math.isfinite(float(threshold)) or not 0 <= float(threshold) <= 1:
+                raise ValueError("retrieval_similarity_threshold must be between 0 and 1")
+
+        top_k = metadata.get("retrieval_top_k")
+        if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 1000):
+            raise ValueError("retrieval_top_k must be an integer between 1 and 1000")
+
+        disable_keys = ("retrieval_disable_reranker", "retrieval_disable_expansion")
+        for key in disable_keys:
+            if metadata.get(key) is not None and not isinstance(metadata[key], bool):
+                raise ValueError(f"{key} must be a boolean")
+
+        active = threshold is not None or top_k is not None or any(metadata.get(key) is True for key in disable_keys)
+        if not active:
+            return self
+        if metadata.get("include_retrieval_trace") is not True:
+            raise ValueError("retrieval diagnostic overrides require include_retrieval_trace")
+        if metadata.get("require_retrieval") is not True:
+            raise ValueError("retrieval diagnostic overrides require require_retrieval")
+        if metadata.get("websearch") is True:
+            raise ValueError("retrieval diagnostic overrides cannot be combined with websearch")
+        return self
+
 
 class OpenAICompletionRequest(BaseModel):
+    # Mirrors OpenAIChatCompletionRequest, including the pinned example that
+    # keeps Swagger UI from generating an unusable body.
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={
+            "examples": [
+                {
+                    "model": _EXAMPLE_MODEL,
+                    "prompt": "What is OpenRag?",
+                    "temperature": 0.3,
+                    "top_p": 1.0,
+                    "stream": False,
+                    "metadata": {
+                        "spoken_style_answer": False,
+                        "include_all_retrieved_sources": False,
+                        "require_retrieval": False,
+                    },
+                }
+            ]
+        },
+    )
+
     model: str | None = Field(None, description="model name")
     prompt: str
     # Bound n/best_of: each multiplies generation cost, so leaving them unbounded
@@ -70,7 +221,13 @@ class OpenAICompletionRequest(BaseModel):
     frequency_penalty: float | None = Field(0.0)
     logit_bias: dict | None = Field(None)
     logprobs: int | None = Field(None)
-    max_tokens: int | None = Field(default_factory=default_max_tokens)
+    # Deliberately left unset rather than defaulted here: this schema is parsed
+    # before the request's partition (and therefore the answering LLM endpoint)
+    # is known, so a default_factory could only ever read the *default*
+    # endpoint's budget — capping a partition whose own chat_llm endpoint allows
+    # more. The router fills it from the resolved endpoint via
+    # ``_apply_default_max_tokens`` once the partition is known.
+    max_tokens: int | None = Field(None)
     n: int | None = Field(1, ge=1, le=8)
     presence_penalty: float | None = Field(0.0)
     seed: int | None = Field(None)
@@ -78,3 +235,24 @@ class OpenAICompletionRequest(BaseModel):
     stream: bool | None = Field(False)
     temperature: float | None = Field(0.3)
     top_p: float | None = Field(1.0)
+    metadata: dict[str, Any] | None = Field(
+        {
+            "spoken_style_answer": False,
+            "llm_override": None,
+            "include_all_retrieved_sources": False,
+            "require_retrieval": False,
+        },
+        description=(
+            "Extra custom parameters. 'require_retrieval' (default false; enabled only by JSON true) "
+            "makes partition-backed text completions retrieve when the contextualizer would otherwise skip, "
+            "using the original prompt as the fallback query. Unlike chat, text completions remain opt-in when "
+            "the contextualizer skips retrieval. Search scope and filters remain in effect; matching sources "
+            "are not guaranteed. Has no effect in direct LLM mode. "
+            "Supports an 'llm_override' object with an optional 'model' "
+            "to override the downstream model name; its 'base_url' and 'api_key' are honored only "
+            "when the deployment sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT, and ignored otherwise. "
+            "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
+            "set to the response's extra.all_retrieved_sources — off by default since it can be "
+            "large; opt in only for debugging/evaluation."
+        ),
+    )

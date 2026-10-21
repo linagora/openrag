@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from openrag.core.models.user import ApiKey, User
+from core.models.user import ApiKey, User
 
 
 class UserRepository(ABC):
@@ -29,6 +29,9 @@ class UserRepository(ABC):
 
     @abstractmethod
     async def get_user(self, user_id: int) -> User | None: ...
+
+    @abstractmethod
+    async def get_users_by_ids(self, user_ids: list[int]) -> list[User]: ...
 
     @abstractmethod
     async def get_user_by_email(self, email: str) -> User | None: ...

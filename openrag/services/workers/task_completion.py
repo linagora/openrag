@@ -1,14 +1,37 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any
 
 import ray
-from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY, TERMINAL_TASK_STATES
+from core.models.catalog import (
+    TASK_FINISHED_AT_METADATA_KEY,
+    TERMINAL_TASK_STATES,
+    DocumentStatus,
+    IndexationJob,
+    normalize_degraded_stages,
+)
+from core.utils.error_summary import extract_task_error_reason
+from services.workers.ray_utils import call_ray_actor_method_with_timeout
+from services.workers.task_state import STALE_TASK_STATE_MANAGER_HINT
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _REFLESS_RECOVERY_POLL_SECONDS = 5.0
+_TASK_STATE_CALL_TIMEOUT_SECONDS = 30.0
+_JOB_RETENTION_DAYS = 30
+_ORPHAN_GRACE_SECONDS = 300
+_RECONCILE_INTERVAL_SECONDS = 120.0
+_SETTLEMENT_RETRY_SECONDS = 30.0
+_MAX_PENDING_SETTLEMENTS = 1_000
+_ORPHANED_JOB_ERROR = "Indexing task was interrupted by a restart and no longer has a live worker."
+_SETTLED_STATE_POLL_ATTEMPTS = 5
+_SETTLED_STATE_POLL_INTERVAL_SECONDS = 0.05
+_ORPHANED_WORKER_POLL_SECONDS = 5.0
+_ORPHANED_WORKER_WARN_AFTER_SECONDS = 300.0
+_ORPHANED_WORKER_WARN_EVERY_SECONDS = 1800.0
 
 
 class TaskCompletionTracker:
@@ -21,6 +44,24 @@ class TaskCompletionTracker:
         self._logger = get_logger()
         self._tracked_task_ids: set[str] = set()
         self._recovery_lock = asyncio.Lock()
+        self._catalog_store: Any = None
+        self._catalog_lock = asyncio.Lock()
+        # Outcomes Postgres has not taken yet, oldest first.
+        self._pending_settlements: OrderedDict[str, IndexationJob] = OrderedDict()
+        self._settlement_retry: asyncio.Future | None = None
+        self._reconcile_loop: asyncio.Future | None = None
+
+    def supports_cancellation_recovery(self) -> bool:
+        """Identify trackers that preserve unsettled cancellation fences."""
+        return True
+
+    def supports_degraded_stage_history(self) -> bool:
+        """Identify trackers that persist bounded degradation with settled jobs."""
+        return True
+
+    def supports_error_reason_history(self) -> bool:
+        """Identify trackers that persist canonical failure reasons."""
+        return True
 
     async def track(self, task_id: str, object_ref: dict[str, Any]) -> None:
         ref = object_ref.get("ref")
@@ -30,7 +71,8 @@ class TaskCompletionTracker:
             return
         self._tracked_task_ids.add(task_id)
         try:
-            await asyncio.gather(ref, return_exceptions=True)
+            (outcome,) = await asyncio.gather(ref, return_exceptions=True)
+            await self._await_orphaned_worker(task_id, outcome)
             await self._record_finished_at(task_id)
         except Exception as exc:
             self._logger.warning(
@@ -39,6 +81,7 @@ class TaskCompletionTracker:
                 error=str(exc),
             )
         finally:
+            await self._finish_cancellation(task_id)
             self._tracked_task_ids.discard(task_id)
 
     async def recover(self) -> None:
@@ -47,22 +90,53 @@ class TaskCompletionTracker:
             try:
                 task_state_manager = self._task_state_manager()
                 tracker = ray.get_actor("TaskCompletionTracker", namespace=self._namespace)
-                all_info = await task_state_manager.get_all_info.remote()
+                all_info = await self._call_task_state(
+                    task_state_manager.get_all_info.remote,
+                    "get_all_info_for_completion_recovery",
+                )
+                await self.reconcile_jobs(list(all_info))
+                if self._reconcile_loop is None or self._reconcile_loop.done():
+                    self._reconcile_loop = asyncio.ensure_future(self._periodic_reconcile())
                 for task_id, info in all_info.items():
+                    state = info.get("state")
+                    if state == "CANCELLED":
+                        object_ref = await self._call_task_state(
+                            lambda task_id=task_id: task_state_manager.get_object_ref.remote(task_id),
+                            f"get_object_ref({task_id}) for cancellation recovery",
+                        )
+                        normalized_ref = _normalize_object_ref(object_ref)
+                        if normalized_ref is not None:
+                            tracker.track.remote(task_id, normalized_ref)
+                        elif info.get("worker_submitted") is True:
+                            tracker.recover_refless.remote(task_id, preserve_cancelled_submission=True)
+                        elif not _has_finished_at(info.get("details")):
+                            await self._record_finished_at(task_id)
+                            await self._finish_cancellation(task_id)
+                        continue
                     if _has_finished_at(info.get("details")):
                         continue
-                    if info.get("state") in _TERMINAL_STATES:
+                    if state in _TERMINAL_STATES:
                         await self._record_finished_at(task_id)
                         continue
-                    object_ref = await task_state_manager.get_object_ref.remote(task_id)
-                    if isinstance(object_ref, dict) and object_ref.get("ref") is not None:
-                        tracker.track.remote(task_id, object_ref)
+                    object_ref = await self._call_task_state(
+                        lambda task_id=task_id: task_state_manager.get_object_ref.remote(task_id),
+                        f"get_object_ref({task_id}) for completion recovery",
+                    )
+                    normalized_ref = _normalize_object_ref(object_ref)
+                    if normalized_ref is not None:
+                        tracker.track.remote(task_id, normalized_ref)
                     else:
                         tracker.recover_refless.remote(task_id)
             except Exception as exc:
                 self._logger.warning("Failed to recover indexing completion tracking", error=str(exc))
 
-    async def recover_refless(self, task_id: str, poll_interval: float = _REFLESS_RECOVERY_POLL_SECONDS) -> None:
+    async def recover_refless(
+        self,
+        task_id: str,
+        poll_interval: float = _REFLESS_RECOVERY_POLL_SECONDS,
+        *,
+        preserve_cancelled_submission: bool = False,
+    ) -> None:
         """Watch a recovered active task whose ObjectRef has not been stored yet."""
         if task_id in self._tracked_task_ids:
             return
@@ -70,19 +144,54 @@ class TaskCompletionTracker:
         try:
             while True:
                 task_state_manager = self._task_state_manager()
-                details = await task_state_manager.get_details.remote(task_id)
+                details = await self._call_task_state(
+                    lambda: task_state_manager.get_details.remote(task_id),
+                    f"get_details({task_id}) for ref-less recovery",
+                )
+                if details is None:
+                    # The actor no longer knows this task: evicted, or never
+                    # admitted on this generation. None of the exit conditions
+                    # below can fire on a None read, so without this the loop
+                    # would poll forever. There is nothing left to watch.
+                    return
                 if _has_finished_at(details):
                     return
 
-                state = await task_state_manager.get_state.remote(task_id)
-                if state in _TERMINAL_STATES:
+                expire_refless = getattr(task_state_manager, "expire_refless_task_if_stale", None)
+                expire_remote = getattr(expire_refless, "remote", None)
+                if expire_remote is not None and await self._call_task_state(
+                    lambda: expire_remote(task_id),
+                    f"expire_refless_task_if_stale({task_id})",
+                ):
                     await self._record_finished_at(task_id)
                     return
 
-                object_ref = await task_state_manager.get_object_ref.remote(task_id)
-                ref = object_ref.get("ref") if isinstance(object_ref, dict) else None
-                if ref is not None:
-                    await asyncio.gather(ref, return_exceptions=True)
+                state = await self._call_task_state(
+                    lambda: task_state_manager.get_state.remote(task_id),
+                    f"get_state({task_id}) for ref-less recovery",
+                )
+                object_ref = await self._call_task_state(
+                    lambda: task_state_manager.get_object_ref.remote(task_id),
+                    f"get_object_ref({task_id}) for ref-less recovery",
+                )
+                normalized_ref = _normalize_object_ref(object_ref)
+                if normalized_ref is not None:
+                    ref = normalized_ref["ref"]
+                    (outcome,) = await asyncio.gather(ref, return_exceptions=True)
+                    await self._await_orphaned_worker(task_id, outcome)
+                    await self._record_finished_at(task_id)
+                    await self._finish_cancellation(task_id)
+                    return
+
+                if state == "CANCELLED" and preserve_cancelled_submission:
+                    if await self._has_unsettled_cancelled_worker(task_state_manager, task_id):
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    await self._record_finished_at(task_id)
+                    await self._finish_cancellation(task_id)
+                    return
+
+                if state in _TERMINAL_STATES:
                     await self._record_finished_at(task_id)
                     return
 
@@ -96,25 +205,304 @@ class TaskCompletionTracker:
         finally:
             self._tracked_task_ids.discard(task_id)
 
-    async def _record_finished_at(self, task_id: str) -> None:
+    async def _await_orphaned_worker(self, task_id: str, outcome: Any) -> None:
+        """Hold the finished stamp while a worker whose ref lost its owner may still run.
+
+        ``OwnerDiedError`` means the pool actor that submitted the task died,
+        not that the worker stopped. The stamp releases the file fence and the
+        content claim, so it waits until the TaskStateManager's worker lease
+        says the worker settled; that lease lapses on its own if the worker
+        died too. An actor without that check keeps the previous behaviour.
+        """
+        if not isinstance(outcome, ray.exceptions.OwnerDiedError):
+            return
         task_state_manager = self._task_state_manager()
-        details = await task_state_manager.get_details.remote(task_id)
+        method = getattr(task_state_manager, "has_worker_settled", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            self._logger.warning(
+                "TaskStateManager cannot tell whether an orphaned worker settled; stamping its task now. "
+                + STALE_TASK_STATE_MANAGER_HINT,
+                task_id=task_id,
+            )
+            return
+        started = monotonic()
+        warn_at = started + _ORPHANED_WORKER_WARN_AFTER_SECONDS
+        while not await self._worker_settled_or_unknown(task_id, remote):
+            now = monotonic()
+            if now >= warn_at:
+                self._logger.warning(
+                    "Still waiting for an orphaned indexing worker to settle; its file stays held until then",
+                    task_id=task_id,
+                    waited_seconds=round(now - started),
+                )
+                warn_at = now + _ORPHANED_WORKER_WARN_EVERY_SECONDS
+            await asyncio.sleep(_ORPHANED_WORKER_POLL_SECONDS)
+
+    async def _worker_settled_or_unknown(self, task_id: str, remote: Any) -> bool:
+        # This poll can run for as long as the orphaned worker does. One failed
+        # read must not end it: that would drop the finished stamp until the
+        # next tracker restart. A failed read counts as not settled yet.
+        try:
+            return bool(await self._call_task_state(lambda: remote(task_id), f"has_worker_settled({task_id})"))
+        except Exception as exc:  # noqa: BLE001 - retried on the next poll
+            self._logger.warning(
+                "Failed to ask whether an orphaned indexing worker settled; asking again",
+                task_id=task_id,
+                error=str(exc),
+            )
+            return False
+
+    async def _record_finished_at(self, task_id: str) -> None:
+        # Keep the handle in a variable: Ray's ActorMethod holds it weakly, so a
+        # method called off an unstored handle raises "Lost reference to actor".
+        task_state_manager = self._task_state_manager()
+        details = await self._call_task_state(
+            lambda: task_state_manager.get_details.remote(task_id),
+            f"get_details({task_id}) for completion timestamp",
+        )
         if not isinstance(details, dict) or _has_finished_at(details):
             return
 
+        # Persist before stamping the actor: the stamp is what stops this method
+        # running again, so a failed write must leave the task unstamped for
+        # ``recover`` to pick up. Stamping regardless would strand the row at
+        # whatever non-terminal status it last held, until orphan reconciliation
+        # marked a completed job FAILED after a restart.
+        if not await self._record_settled_job(task_id, details):
+            return
+        await self._stamp_finished_at(task_id, details)
+
+    async def _stamp_finished_at(self, task_id: str, details: dict[str, Any] | None = None) -> None:
+        """Mark the task settled in the actor, if it still knows the task.
+
+        The retry path arrives here long after the fact, so it re-reads rather
+        than replaying stale details: ``set_details`` on a task the actor has
+        already evicted would put the record back.
+        """
+        task_state_manager = self._task_state_manager()
+        if details is None:
+            details = await self._call_task_state(
+                lambda: task_state_manager.get_details.remote(task_id),
+                f"get_details({task_id}) for completion timestamp",
+            )
+            if not isinstance(details, dict) or _has_finished_at(details):
+                return
         metadata = details.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
-        await task_state_manager.set_details.remote(
-            task_id,
-            file_id=details.get("file_id"),
-            partition=details.get("partition"),
-            metadata=metadata,
-            user_id=details.get("user_id"),
+        await self._call_task_state(
+            lambda: task_state_manager.set_details.remote(
+                task_id,
+                file_id=details.get("file_id"),
+                partition=details.get("partition"),
+                metadata=metadata,
+                user_id=details.get("user_id"),
+            ),
+            f"set_finished_at({task_id})",
         )
+
+    async def _finish_cancellation(self, task_id: str) -> None:
+        try:
+            task_state_manager = self._task_state_manager()
+            finish_cancellation = getattr(task_state_manager, "finish_cancellation", None)
+            remote = getattr(finish_cancellation, "remote", None)
+            if remote is not None:
+                await self._call_task_state(lambda: remote(task_id), f"finish_cancellation({task_id})")
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to finalize indexing task cancellation",
+                task_id=task_id,
+                error=str(exc),
+            )
+
+    async def _has_unsettled_cancelled_worker(self, task_state_manager: Any, task_id: str) -> bool:
+        method = getattr(task_state_manager, "has_unsettled_cancelled_worker", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            # A mixed-version actor cannot prove settlement. Keep the claim
+            # fenced until a compatible TaskStateManager is available.
+            return True
+        return bool(
+            await self._call_task_state(
+                lambda: remote(task_id),
+                f"has_unsettled_cancelled_worker({task_id})",
+            )
+        )
+
+    async def _poll_for_terminal_state(self, task_state_manager: Any, task_id: str) -> str | None:
+        """Ride out the race between a cancel's state write and this read.
+
+        ``cancel_active_indexing_tasks`` awaits the same worker ref as
+        ``track()``, then writes ``CANCELLED`` in a second remote call. A read
+        here can land in that gap and see the task's last non-terminal state,
+        wrongly concluding there is nothing to persist yet. A short poll
+        closes the window instead of trusting the first read.
+        """
+        for attempt in range(_SETTLED_STATE_POLL_ATTEMPTS):
+            state = await self._call_task_state(
+                lambda: task_state_manager.get_state.remote(task_id),
+                f"get_state({task_id}) for job history",
+            )
+            if state in _TERMINAL_STATES:
+                return state
+            if attempt < _SETTLED_STATE_POLL_ATTEMPTS - 1:
+                await asyncio.sleep(_SETTLED_STATE_POLL_INTERVAL_SECONDS)
+        return None
+
+    async def _job_repo(self) -> Any:
+        """Build the catalog store lazily: this actor outlives any API process."""
+        if self._catalog_store is None:
+            async with self._catalog_lock:
+                if self._catalog_store is None:
+                    from core.config import load_config
+                    from services.storage.postgres_store import PostgresStore, catalog_rdb_config
+
+                    store = PostgresStore(catalog_rdb_config(load_config()), run_migrations=False)
+                    await store.initialize()
+                    self._catalog_store = store
+        return self._catalog_store.job_repo
+
+    async def _record_settled_job(self, task_id: str, details: dict[str, Any]) -> bool:
+        """Persist the final state of a settled task. History must never fail indexing.
+
+        Returns whether the caller may stamp the actor. ``True`` covers both a
+        successful write and a task with nothing to persist yet; only a genuine
+        failure returns ``False``, because the stamp is what stops recovery
+        retrying this task.
+        """
+        try:
+            task_state_manager = self._task_state_manager()
+            state = await self._poll_for_terminal_state(task_state_manager, task_id)
+            if state is None:
+                return True
+            error = await self._call_task_state(
+                lambda: task_state_manager.get_error.remote(task_id),
+                f"get_error({task_id}) for job history",
+            )
+            method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
+            supports_reason = isinstance(method_names, (frozenset, list, set, tuple)) and (
+                "get_error_reason" in method_names
+            )
+            error_reason = None
+            if supports_reason:
+                error_reason = await self._call_task_state(
+                    lambda: task_state_manager.get_error_reason.remote(task_id),
+                    f"get_error_reason({task_id}) for job history",
+                )
+            if error_reason is None:
+                error_reason = extract_task_error_reason(error)
+            metadata = details.get("metadata")
+            filename = metadata.get("filename") if isinstance(metadata, dict) else None
+            job = IndexationJob(
+                id=task_id,
+                status=DocumentStatus(state),
+                partition=details.get("partition") or "default",
+                file_id=details.get("file_id"),
+                filename=filename,
+                user_id=details.get("user_id"),
+                error=error,
+                error_reason=error_reason,
+                degraded_stages=normalize_degraded_stages(details.get("degraded_stages")),
+                completed_at=datetime.now(UTC),
+            )
+        except Exception as exc:
+            self._logger.warning("Failed to read settled indexing job", task_id=task_id, error=str(exc))
+            return False
+        if await self._write_job(job):
+            return True
+        self._queue_settlement_retry(job)
+        return False
+
+    async def _write_job(self, job: IndexationJob) -> bool:
+        try:
+            repo = await self._job_repo()
+            await repo.upsert_job(job)
+        except Exception as exc:
+            self._logger.warning("Failed to record settled indexing job", task_id=job.id, error=str(exc))
+            return False
+        return True
+
+    def _queue_settlement_retry(self, job: IndexationJob) -> None:
+        """Hold a decided outcome until Postgres takes it.
+
+        Nothing re-reads it later: ``track`` is about to forget the task and the
+        actor evicts its record soon after, so a dropped outcome leaves the row
+        non-terminal for orphan reconciliation to report as a failed job.
+        """
+        if job.id not in self._pending_settlements and len(self._pending_settlements) >= _MAX_PENDING_SETTLEMENTS:
+            dropped, _ = self._pending_settlements.popitem(last=False)
+            self._logger.warning("Dropped a pending indexing job settlement", task_id=dropped)
+        self._pending_settlements[job.id] = job
+        if self._settlement_retry is None or self._settlement_retry.done():
+            self._settlement_retry = asyncio.ensure_future(self._retry_pending_settlements())
+
+    async def _retry_pending_settlements(self, delay: float = _SETTLEMENT_RETRY_SECONDS) -> None:
+        """Re-offer held outcomes until Postgres accepts them."""
+        while self._pending_settlements:
+            await asyncio.sleep(delay)
+            for task_id, job in list(self._pending_settlements.items()):
+                if not await self._write_job(job):
+                    continue
+                self._pending_settlements.pop(task_id, None)
+                try:
+                    await self._stamp_finished_at(task_id)
+                except Exception as exc:
+                    self._logger.warning(
+                        "Failed to record indexing task completion time",
+                        task_id=task_id,
+                        error=str(exc),
+                    )
+
+    async def _periodic_reconcile(self, interval: float = _RECONCILE_INTERVAL_SECONDS) -> None:
+        """Keep sweeping orphaned/expired job rows between restarts.
+
+        ``recover()`` only runs once per process start, so without this a task
+        interrupted inside the grace window it skips (the most recent
+        ``_ORPHAN_GRACE_SECONDS``) would never be revisited until the next
+        restart.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                task_state_manager = self._task_state_manager()
+                all_info = await self._call_task_state(
+                    task_state_manager.get_all_info.remote,
+                    "get_all_info_for_periodic_reconcile",
+                )
+                await self.reconcile_jobs(list(all_info))
+            except Exception as exc:
+                self._logger.warning("Periodic indexing job reconciliation failed", error=str(exc))
+
+    async def reconcile_jobs(self, active_ids: list[str]) -> None:
+        """Settle records a restart orphaned and drop history past retention."""
+        try:
+            repo = await self._job_repo()
+            now = datetime.now(UTC)
+            orphaned = await repo.fail_orphaned_jobs(
+                # A settlement waiting on Postgres has an outcome already; it is
+                # not an orphan, and failing it here would freeze the wrong one.
+                active_ids=[*active_ids, *self._pending_settlements],
+                error=_ORPHANED_JOB_ERROR,
+                # A row written moments ago may belong to a dispatch that has
+                # not reached the actor yet, so leave the recent ones alone.
+                before=now - timedelta(seconds=_ORPHAN_GRACE_SECONDS),
+            )
+            purged = await repo.purge_terminal_jobs(older_than=now - timedelta(days=_JOB_RETENTION_DAYS))
+            if orphaned or purged:
+                self._logger.info("Reconciled indexing job history", orphaned=orphaned, purged=purged)
+        except Exception as exc:
+            self._logger.warning("Failed to reconcile indexing job history", error=str(exc))
 
     def _task_state_manager(self) -> Any:
         return ray.get_actor("TaskStateManager", namespace=self._namespace)
+
+    async def _call_task_state(self, submit: Any, task_description: str) -> Any:
+        return await call_ray_actor_method_with_timeout(
+            submit,
+            timeout=_TASK_STATE_CALL_TIMEOUT_SECONDS,
+            task_description=task_description,
+        )
 
 
 TaskCompletionTrackerActor = ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)(
@@ -127,6 +515,11 @@ def _has_finished_at(details: Any) -> bool:
         return False
     metadata = details.get("metadata")
     return isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata
+
+
+def _normalize_object_ref(object_ref: Any) -> dict[str, Any] | None:
+    ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+    return {"ref": ref} if ref is not None else None
 
 
 def _utc_now_iso() -> str:

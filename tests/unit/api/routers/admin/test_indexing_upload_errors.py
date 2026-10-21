@@ -15,9 +15,10 @@ from api.dependencies.auth import check_user_file_quota, require_partition_edito
 from api.dependencies.files import validate_file_format, validate_file_id, validate_metadata
 from api.error_handlers import register_error_handlers
 from api.routers.admin.indexing import router as indexer_router
-from core.utils.exceptions import ConflictError
-from di.providers import get_config, get_indexing_service
+from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
+from di.providers import get_auth_service, get_config, get_indexing_service, get_job_service
 from fastapi import FastAPI, UploadFile
+from services.orchestrators.auth_service import AuthService
 
 
 class _FakeIndexingService:
@@ -31,8 +32,17 @@ class _FakeIndexingService:
             existing_file_id="existing-file",
         )
 
-    async def get_workspace(self, _workspace_id: str):
+    async def get_workspace(self, _partition: str, _workspace_id: str):
         return None
+
+
+class _FileIndexingService(_FakeIndexingService):
+    async def add_file(self, **_kwargs):
+        raise ConflictError(
+            "File 'f1' is already being indexed in partition 'p1'.",
+            code="DOCUMENT_INDEXING_IN_PROGRESS",
+            existing_task_id="task-running",
+        )
 
 
 class _DispatchFailureService(_FakeIndexingService):
@@ -53,11 +63,33 @@ class _ExistingFileService(_FakeIndexingService):
         return "unexpected-task"
 
 
+class _FakeJobService:
+    """Owns the running task the fence names, unless told the lookup fails."""
+
+    def __init__(self, *, owner_id: int | None = 1, error: Exception | None = None) -> None:
+        self._owner_id = owner_id
+        self._error = error
+
+    async def get_task_details(self, task_id: str) -> dict | None:
+        if self._error is not None:
+            raise self._error
+        return {"task_id": task_id, "user_id": self._owner_id}
+
+
 def _empty_metadata() -> dict:
     return {}
 
 
-def _build_app(tmp_path, monkeypatch, content: bytes, *, service=None, deduplication_enabled=True) -> FastAPI:
+def _build_app(
+    tmp_path,
+    monkeypatch,
+    content: bytes,
+    *,
+    service=None,
+    deduplication_enabled=True,
+    user=None,
+    job_service=None,
+) -> FastAPI:
     # Cap at ~8 bytes so a small upload trips the limit.
     monkeypatch.setattr("api.dependencies.files._max_upload_size_bytes", lambda: 8)
 
@@ -74,7 +106,9 @@ def _build_app(tmp_path, monkeypatch, content: bytes, *, service=None, deduplica
     app.dependency_overrides[validate_file_id] = lambda: "f1"
     app.dependency_overrides[validate_file_format] = lambda: UploadFile(file=io.BytesIO(content), filename="big.bin")
     app.dependency_overrides[validate_metadata] = _empty_metadata
-    app.dependency_overrides[require_partition_editor] = lambda: {"id": 1, "is_admin": True}
+    app.dependency_overrides[require_partition_editor] = lambda: user or {"id": 1, "is_admin": True}
+    app.dependency_overrides[get_job_service] = lambda: job_service or _FakeJobService()
+    app.dependency_overrides[get_auth_service] = lambda: AuthService
     app.dependency_overrides[check_user_file_quota] = lambda: None
     app.dependency_overrides[get_config] = lambda: cfg
     app.dependency_overrides[get_indexing_service] = lambda: service or _FakeIndexingService()
@@ -121,6 +155,75 @@ async def test_add_file_duplicate_content_returns_409_and_removes_upload(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_add_file_already_indexing_returns_409_pointing_at_the_running_task(tmp_path, monkeypatch):
+    """A client that retried after a timeout gets told where its first task is."""
+    app = _build_app(tmp_path, monkeypatch, content=b"same", service=_FileIndexingService())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 409
+    extra = resp.json()["extra"]
+    assert extra["existing_task_id"] == "task-running"
+    assert extra["task_status_url"].endswith("/task/task-running")
+    assert list((tmp_path / "data").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("user", "owner_id", "linked"),
+    [
+        ({"id": 7, "is_admin": False}, 7, True),
+        ({"id": 1, "is_admin": True}, 7, True),
+        ({"id": 8, "is_admin": False}, 7, False),
+    ],
+    ids=["task-owner", "admin", "another-editor"],
+)
+@pytest.mark.asyncio
+async def test_add_file_already_indexing_links_the_task_only_for_whoever_may_read_it(
+    tmp_path, monkeypatch, user, owner_id, linked
+):
+    """The task-status route serves only the owner or an admin; anyone else would follow a link into a 403."""
+    app = _build_app(
+        tmp_path,
+        monkeypatch,
+        content=b"same",
+        service=_FileIndexingService(),
+        user=user,
+        job_service=_FakeJobService(owner_id=owner_id),
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 409
+    extra = resp.json()["extra"]
+    assert extra["existing_task_id"] == "task-running"
+    assert ("task_status_url" in extra) is linked
+
+
+@pytest.mark.asyncio
+async def test_add_file_already_indexing_keeps_the_409_when_the_owner_lookup_fails(tmp_path, monkeypatch):
+    app = _build_app(
+        tmp_path,
+        monkeypatch,
+        content=b"same",
+        service=_FileIndexingService(),
+        job_service=_FakeJobService(error=RuntimeError("task state unavailable")),
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 409
+    extra = resp.json()["extra"]
+    assert extra["existing_task_id"] == "task-running"
+    assert "task_status_url" not in extra
+
+
+@pytest.mark.asyncio
 async def test_add_file_invalid_workspace_is_rejected_before_upload_is_saved(tmp_path, monkeypatch):
     app = _build_app(tmp_path, monkeypatch, content=b"same")
     transport = httpx.ASGITransport(app=app)
@@ -133,6 +236,35 @@ async def test_add_file_invalid_workspace_is_rejected_before_upload_is_saved(tmp
 
     assert resp.status_code == 404
     assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize("workspace_ids", ["null", "123", "[123]", "[null]", '["ok", 123]'])
+@pytest.mark.asyncio
+async def test_add_file_rejects_invalid_workspace_id_form_values(tmp_path, monkeypatch, workspace_ids):
+    app = _build_app(tmp_path, monkeypatch, content=b"same")
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/indexer/partition/p1/file/f1",
+            data={"workspace_ids": workspace_ids},
+        )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_add_file_accepts_empty_workspace_id_array(tmp_path, monkeypatch):
+    app = _build_app(tmp_path, monkeypatch, content=b"same")
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/indexer/partition/p1/file/f1",
+            data={"workspace_ids": "[]"},
+        )
+
+    assert resp.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -187,3 +319,49 @@ async def test_put_file_save_failure_returns_safe_error(
     assert resp.json() == {"detail": "Failed to save uploaded file."}
     assert "private path" not in resp.text
     assert service.dispatched is False
+
+
+class _UnknownOutcomeService(_FakeIndexingService):
+    """Dispatcher gave up on the submit RPC but a worker may already be live."""
+
+    async def add_file(self, **_kwargs):
+        exc = TimeoutError("submit timed out")
+        mark_indexing_worker_may_be_running(exc)
+        raise exc
+
+
+class _UnknownOutcomePutService(_ExistingFileService):
+    async def add_file(self, **_kwargs):
+        exc = TimeoutError("submit timed out")
+        mark_indexing_worker_may_be_running(exc)
+        raise exc
+
+
+@pytest.mark.asyncio
+async def test_add_file_keeps_upload_when_worker_may_still_be_running(tmp_path, monkeypatch):
+    """A worker launched before the submit response was lost still needs the file.
+
+    ``IndexerPool.submit`` starts ``process_file`` before it returns, and the
+    worker does not read the path until after its ref registration, so deleting
+    the upload here would fail an indexing run that could still succeed.
+    """
+    app = _build_app(tmp_path, monkeypatch, content=b"same", service=_UnknownOutcomeService())
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 500
+    assert len(list((tmp_path / "data").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_put_file_keeps_upload_when_worker_may_still_be_running(tmp_path, monkeypatch):
+    app = _build_app(tmp_path, monkeypatch, content=b"same", service=_UnknownOutcomePutService())
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.put("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 500
+    assert len(list((tmp_path / "data").iterdir())) == 1

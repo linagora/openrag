@@ -1,7 +1,7 @@
 """Integration proof for #657 — re-indexing must not duplicate Milvus chunks.
 
 Drives the real :class:`IndexingPipeline` (with trivial parser/chunker/embedder
-fakes) against a live Milvus 2.6, indexing a file and then re-indexing it with
+fakes) against a live Milvus 3.0, indexing a file and then re-indexing it with
 ``replace=True``. Asserts the file's chunk count stays stable (insert-before-
 delete) instead of doubling on every re-index.
 

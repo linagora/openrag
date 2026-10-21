@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
+from core.utils.exceptions import ConfigError, NotFoundError
 
 
 class _NativeChunker:
@@ -20,6 +25,13 @@ class _BrokenChunker:
 
 class _NonCallableChunker:
     chunk = None
+
+
+def test_indexer_worker_actor_is_ray_serializable() -> None:
+    import ray.cloudpickle as cloudpickle
+    from services.workers.indexer_pool import IndexerWorkerActor
+
+    cloudpickle.dumps(IndexerWorkerActor.__ray_metadata__.modified_class)
 
 
 def test_build_pipeline_timeouts_bounds_parse_from_config() -> None:
@@ -39,16 +51,40 @@ def test_build_chunker_returns_native_chunker(monkeypatch: pytest.MonkeyPatch) -
     from services.workers.indexer_pool import _build_chunker
 
     native = _NativeChunker()
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: native)
+    seen_windows: list[int | None] = []
 
-    assert _build_chunker(object()) is native
+    def create_chunker(_cfg, window: int | None = None):
+        seen_windows.append(window)
+        return native
+
+    monkeypatch.setattr(factory, "create_chunker", create_chunker)
+
+    assert _build_chunker(object(), 4096) is native
+    assert seen_windows == [4096]
+
+
+def test_build_chunker_from_config_forwards_embedder_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.chunking.factory as factory
+    from services.workers.indexer_pool import _build_chunker_from_config
+
+    native = _NativeChunker()
+    seen_windows: list[int | None] = []
+
+    def create_chunker(_cfg, window: int | None = None):
+        seen_windows.append(window)
+        return native
+
+    monkeypatch.setattr(factory, "create_chunker", create_chunker)
+
+    assert _build_chunker_from_config(object(), 2048) is native
+    assert seen_windows == [2048]
 
 
 def test_build_chunker_rejects_invalid_chunker(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.chunking.factory as factory
     from services.workers.indexer_pool import _build_chunker
 
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: _BrokenChunker())
+    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: _BrokenChunker())
 
     with pytest.raises(TypeError, match="chunk"):
         _build_chunker(object())
@@ -58,7 +94,7 @@ def test_build_chunker_rejects_non_callable_chunk_attr(monkeypatch: pytest.Monke
     import core.chunking.factory as factory
     from services.workers.indexer_pool import _build_chunker
 
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: _NonCallableChunker())
+    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: _NonCallableChunker())
 
     with pytest.raises(TypeError, match="chunk"):
         _build_chunker(object())
@@ -123,12 +159,15 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v2"
+    assert opts["name"] == "IndexerPoolDispatcher-v13"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
     # max_concurrency bounds concurrent submit() calls → whole-fleet capacity.
     assert opts["max_concurrency"] == 12
+    # Detached actors default to max_restarts=0: without this the dispatcher
+    # stays dead after a crash until the next deploy (#846).
+    assert opts["max_restarts"] == 5
     # pool_size / max_tasks_per_worker are passed to the actor constructor.
     assert remote_calls == [{"pool_size": 3, "max_tasks_per_worker": 4, "namespace": "openrag"}]
 
@@ -139,12 +178,14 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     import services.workers.indexer_pool as module
 
     calls = []
+    remote_calls = []
 
     class Options:
         def __init__(self, kwargs):
             self._kwargs = kwargs
 
-        def remote(self):
+        def remote(self, namespace):
+            remote_calls.append(namespace)
             return f"actor-{self._kwargs['name']}"
 
     def fake_options(**kwargs):
@@ -154,20 +195,22 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     monkeypatch.setattr(module.IndexerWorkerActor, "options", fake_options)
 
     actor_class = module.IndexerPool.__ray_metadata__.modified_class
-    pool = actor_class(pool_size=3, max_tasks_per_worker=4)
+    pool = actor_class(pool_size=3, max_tasks_per_worker=4, namespace="tenant-ray")
 
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v2-0",
-        "IndexerWorker-v2-1",
-        "IndexerWorker-v2-2",
+        "IndexerWorker-v13-0",
+        "IndexerWorker-v13-1",
+        "IndexerWorker-v13-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
+        assert c["max_restarts"] == 5  # a worker that OOMs must come back (#846)
         assert c["get_if_exists"] is True
-        assert c["namespace"] == "openrag"
+        assert c["namespace"] == "tenant-ray"
+    assert remote_calls == ["tenant-ray", "tenant-ray", "tenant-ray"]
 
 
 def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,6 +245,64 @@ def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.Monke
     assert tagger._llm.kwargs["endpoint"] == "http://llm:8000/v1"
     assert tagger._llm.kwargs["model_name"] == "topic-model"
     assert tagger._llm.kwargs["temperature"] == 0.1
+
+
+def test_worker_factories_do_not_forward_the_env_managed_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`managed_by` is bookkeeping, not a constructor kwarg — and never a request field.
+
+    Every seeded endpoint now carries the marker in `extra`, and the worker
+    factories splat `extra` straight into the client. Forwarding it would push
+    `managed_by: "env"` into the provider payload, which a strict
+    OpenAI-compatible service rejects with a 400 — failing indexing rather than
+    anything visibly related to the marker.
+    """
+    from core.config.model_endpoints import (
+        ENV_MANAGED_KEY,
+        ENV_MANAGED_VALUE,
+        LLM_CONTEXT_SIZE_KEY,
+        LLM_OUTPUT_TOKENS_KEY,
+    )
+    from core.llm import llm_registry
+    from services.workers.indexer_pool import _build_topic_tagger_factory
+
+    class ProbeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    llm_registry.register("marker-probe")(ProbeLLM)
+    cfg = SimpleNamespace(
+        models=SimpleNamespace(
+            llm={
+                "topic-a": ModelEndpointConfig(
+                    endpoint="http://llm:8000/v1",
+                    model_name="topic-model",
+                    timeout=9.0,
+                    extra={
+                        "implementation": "marker-probe",
+                        "temperature": 0.1,
+                        ENV_MANAGED_KEY: ENV_MANAGED_VALUE,
+                        LLM_CONTEXT_SIZE_KEY: 8192,
+                        LLM_OUTPUT_TOKENS_KEY: 1024,
+                    },
+                )
+            }
+        ),
+        llm=SimpleNamespace(base_url="", model=""),
+        paths=SimpleNamespace(prompts_dir="/tmp/prompts"),
+        prompts=SimpleNamespace(topic_tagger="topic.txt"),
+    )
+    monkeypatch.setattr("core.prompts.load_template_by_key", lambda *_args: "extract topics")
+
+    tagger = _build_topic_tagger_factory(cfg)("topic-a")
+
+    assert ENV_MANAGED_KEY not in tagger._llm.kwargs
+    assert "implementation" not in tagger._llm.kwargs
+    # The LLM token budgets are the same class of control key. di/factories.py
+    # already stripped them, but these worker factories did not — so they leaked
+    # into every worker-issued request until both sides shared one set.
+    assert LLM_CONTEXT_SIZE_KEY not in tagger._llm.kwargs
+    assert LLM_OUTPUT_TOKENS_KEY not in tagger._llm.kwargs
+    assert tagger._llm.kwargs["temperature"] == 0.1  # real kwargs still forwarded
 
 
 def test_build_contextualizer_factory_returns_factory_for_later_hydration(tmp_path) -> None:
@@ -406,6 +507,126 @@ def test_embedder_factory_rebuilds_on_api_key_rotation() -> None:
         embedder_registry._registry.pop("key-probe-embedder", None)
 
 
+def test_embedder_factory_stamps_each_client_with_the_config_it_was_built_from() -> None:
+    """What the catalog write compares the partition's embedder with (#958). It
+    rides on the client, so a registry reload mid-file cannot change it."""
+    from core.config.model_endpoints import embedder_fingerprint
+    from core.embeddings import embedder_registry
+    from services.workers.indexer_pool import _build_embedder_factory
+
+    class ProbeEmbedder:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    embedder_registry.register("stamp-probe-embedder")(ProbeEmbedder)
+    try:
+        extra = {"implementation": "stamp-probe-embedder", "max_model_len": 512}
+        registry = {"ep": ModelEndpointConfig(endpoint="http://embed.example/v1", model_name="m1", extra=extra)}
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(embedder=registry),
+            embedder=SimpleNamespace(base_url="", model_name="", api_key=""),
+        )
+        factory = _build_embedder_factory(cfg)
+        first = factory("ep")
+
+        registry["ep"] = ModelEndpointConfig(endpoint="http://embed.example/v1", model_name="m2", extra=extra)
+        second = factory("ep")
+
+        assert first.vector_fingerprint == embedder_fingerprint("http://embed.example/v1", "m1", extra)
+        assert second.vector_fingerprint == embedder_fingerprint("http://embed.example/v1", "m2", extra)
+    finally:
+        embedder_registry._registry.pop("stamp-probe-embedder", None)
+
+
+def _edit_aware_pool(*, loaded: str, stored: str | None, default: bool = False):
+    """A bare actor whose registry loaded model *loaded* while the DB now says *stored*."""
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.workers.indexer_pool import IndexerWorkerActor
+
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
+    pool = actor_class.__new__(actor_class)
+    name = "default" if default else "jina"
+
+    def _config(model: str) -> ModelEndpointConfig:
+        return ModelEndpointConfig(name="jina", endpoint="http://jina:8000/v1", model_name=model)
+
+    registry = {name: _config(loaded)}
+    row = (
+        None
+        if stored is None
+        else ModelEndpointRow(
+            name="jina",
+            model_type="embedder",
+            endpoint="http://jina:8000/v1",
+            model_name=stored,
+            is_default=True,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    class Repo:
+        async def get(self, name, model_type):
+            return row
+
+        async def list_all(self, model_type=None):
+            return [row] if row is not None else []
+
+    class Service:
+        calls = 0
+
+        async def load_all(self) -> None:
+            Service.calls += 1
+            await asyncio.sleep(0)
+            if row is not None:
+                registry[name] = _config(row.model_name)
+
+    pool._cfg = SimpleNamespace(models=SimpleNamespace(embedder=registry), embedder=None)
+    pool._catalog_store = SimpleNamespace(model_endpoint_repo=Repo())
+    pool._model_endpoint_service = Service()
+    pool._registry_lock = asyncio.Lock()
+    pool._registry_loaded_at = 0.0
+    pool._logger = SimpleNamespace(warning=lambda *a, **k: None)
+    return pool, Service
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("default", [False, True], ids=["named", "alias"])
+async def test_a_file_reloads_the_registry_when_its_embedder_was_edited(default: bool) -> None:
+    """Without this, files started in the TTL window after an edit would embed
+    with the old config and all be refused when they are recorded."""
+    pool, service = _edit_aware_pool(loaded="jina-v3", stored="jina-v4", default=default)
+
+    await asyncio.gather(*(pool._reload_if_embedder_edited(None if default else "jina") for _ in range(5)))
+
+    assert service.calls == 1
+    assert pool._cfg.models.embedder["default" if default else "jina"].model_name == "jina-v4"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("loaded", "stored"), [("jina-v3", "jina-v3"), ("jina-v3", None)], ids=["same", "unknown"])
+async def test_a_file_keeps_the_registry_when_its_embedder_is_unchanged(loaded: str, stored: str | None) -> None:
+    pool, service = _edit_aware_pool(loaded=loaded, stored=stored)
+
+    await pool._reload_if_embedder_edited("jina")
+
+    assert service.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_edit_check_never_fails_the_file() -> None:
+    pool, service = _edit_aware_pool(loaded="jina-v3", stored="jina-v4")
+
+    async def broken(*_a, **_k):
+        raise OSError("db down")
+
+    pool._catalog_store.model_endpoint_repo.get = broken
+
+    await pool._reload_if_embedder_edited("jina")
+
+    assert service.calls == 0
+
+
 def test_vlm_factory_reads_live_registry() -> None:
     from core.vlm import vlm_registry
     from services.workers.indexer_pool import _build_vlm_factory
@@ -500,13 +721,14 @@ def test_required_llm_names_mirrors_pipeline_selection() -> None:
     ) == ["ctx", "tags"]
 
 
-def test_required_model_endpoint_names_include_embedder_and_vlm() -> None:
+def test_required_model_endpoint_names_include_embedder_vlm_and_stt() -> None:
     from services.workers.indexer_pool import _required_model_endpoint_names
 
     required = _required_model_endpoint_names(
         {
             "enable_image_captioning": True,
             "vlm": "vlm-fast",
+            "stt": "moss-transcribe-diarize",
             "enable_contextualization": True,
             "contextualization_llm": "ctx",
             "enable_topic_tagging": True,
@@ -519,7 +741,58 @@ def test_required_model_endpoint_names_include_embedder_and_vlm() -> None:
         "embedder": ["embed-fast"],
         "llm": ["ctx", "tags"],
         "vlm": ["vlm-fast"],
+        "stt": ["default", "moss-transcribe-diarize"],
     }
+
+
+def test_required_model_endpoint_names_treat_blank_stt_selection_as_default() -> None:
+    from services.workers.indexer_pool import _required_model_endpoint_names
+
+    required = _required_model_endpoint_names({"stt": "   "}, embedder_name=None)
+
+    # A blank selection already resolves through the global endpoint. It must
+    # not masquerade as a named resource and trigger a registry miss reload.
+    assert required["stt"] == ["default"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "original_filename", "audio_loader", "expected_stt_names"),
+    [
+        ("document.pdf", None, "OpenAIAudioLoader", ["default"]),
+        ("recording.wav", None, "LocalWhisperLoader", ["default"]),
+        ("opaque-upload", "recording.wav", "OpenAIAudioLoader", ["default", "retired-moss"]),
+    ],
+)
+async def test_actor_hydrates_selected_stt_only_for_external_audio(
+    path: str,
+    original_filename: str | None,
+    audio_loader: str,
+    expected_stt_names: list[str],
+) -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._cfg = SimpleNamespace(
+        loader=SimpleNamespace(
+            file_loaders=SimpleNamespace(wav=audio_loader, mp3=audio_loader),
+        ),
+    )
+    required_registry_names = None
+
+    async def record_registry_names(required):
+        nonlocal required_registry_names
+        required_registry_names = required
+
+    actor._ensure_registry_fresh = record_registry_names
+
+    await actor.process_file(
+        task_id="t",
+        path=path,
+        metadata={"file_id": "f", "original_filename": original_filename},
+        partition="p",
+        indexation_config={"stt": "retired-moss"},
+    )
+
+    assert required_registry_names["stt"] == expected_stt_names
 
 
 def test_registry_reload_decision_guards() -> None:
@@ -959,6 +1232,11 @@ def _bare_pool(workers: list) -> object:
     pool._release_tasks = set()
     pool._claim_store = None
     pool._claim_store_lock = asyncio.Lock()
+    pool._namespace = "openrag"
+    pool._task_state_manager = SimpleNamespace(
+        set_object_ref=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        finish_rejected_submission=SimpleNamespace(remote=AsyncMock(return_value=True)),
+    )
     return pool
 
 
@@ -1019,6 +1297,7 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
     # The ObjectRef is passed through wrapped in a one-element list (the
     # dispatcher unwraps it; the wrapper stops Ray auto-dereferencing the ref).
     assert ref0 == [workers[0].futures[0]]
+    assert pool._task_state_manager.set_object_ref.remote.await_count == 3
     await _settle_pool_release_tasks(
         pool,
         workers[0].futures[0],
@@ -1028,29 +1307,73 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
+async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.indexer_pool as module
+
     worker = _FakeWorker()
     pool = _bare_pool([worker])
+    repo = SimpleNamespace(release_content_sha256_claim=AsyncMock())
+    pool._claim_store = SimpleNamespace(document_repo=repo)
 
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v2",
+        "protocol_version": "v13",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
     }
+    recovered_task_state_manager = SimpleNamespace(
+        finish_rejected_submission=SimpleNamespace(remote=AsyncMock(return_value=True))
+    )
+    pool._task_state_manager = None
+    get_actor = MagicMock(return_value=recovered_task_state_manager)
+    monkeypatch.setattr(module.ray, "get_actor", get_actor)
     with pytest.raises(RuntimeError, match="draining"):
-        await pool.submit(task_id="rejected-after-drain")
+        await pool.submit(
+            task_id="rejected-after-drain",
+            partition="tenant-a",
+            metadata={
+                "file_id": "file-1",
+                "content_sha256": "abc123",
+                CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1",
+            },
+        )
     assert len(worker.calls) == 1
+    get_actor.assert_called_once_with("TaskStateManager", namespace="openrag")
+    recovered_task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("rejected-after-drain")
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="attempt-1",
+    )
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v2",
+        "protocol_version": "v13",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
     }
+
+
+@pytest.mark.asyncio
+async def test_pool_finalizes_prelaunch_rejection_with_legacy_task_state_actor() -> None:
+    from services.workers.indexer_pool import _REJECTED_SUBMISSION_ERROR
+
+    pool = _bare_pool([_FakeWorker()])
+    set_failed = AsyncMock(return_value=True)
+    pool._task_state_manager = SimpleNamespace(
+        _ray_actor_method_names={"set_failed_if_not_cancelled"},
+        set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed),
+    )
+
+    await pool.begin_drain()
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(task_id="legacy-rejected-task")
+
+    set_failed.assert_awaited_once_with("legacy-rejected-task", _REJECTED_SUBMISSION_ERROR)
 
 
 @pytest.mark.asyncio
@@ -1063,7 +1386,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v2",
+        "protocol_version": "v13",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1078,7 +1401,88 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v2"
+    assert await pool.protocol_version() == "v13"
+
+
+@pytest.mark.asyncio
+async def test_pool_cancels_worker_when_ref_registration_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.return_value = False
+    cancellation_requested = asyncio.Event()
+    cancel = MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set())
+    monkeypatch.setattr(module.ray, "cancel", cancel)
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+
+    cancel.assert_called_once_with(worker.futures[0], recursive=True)
+    assert submission.done() is False
+
+    worker.futures[0].set_result(None)
+    with pytest.raises(RuntimeError, match="cancelled before worker ref registration"):
+        await submission
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
+    await _settle_pool_release_tasks(pool)
+
+
+@pytest.mark.asyncio
+async def test_pool_waits_for_worker_when_ref_registration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.side_effect = RuntimeError("task state unavailable")
+    cancellation_requested = asyncio.Event()
+    monkeypatch.setattr(
+        module.ray,
+        "cancel",
+        MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set()),
+    )
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+    assert submission.done() is False
+
+    worker.futures[0].set_result(None)
+    with pytest.raises(RuntimeError, match="task state unavailable"):
+        await submission
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
+    await _settle_pool_release_tasks(pool)
+
+
+@pytest.mark.asyncio
+async def test_rejected_worker_settlement_survives_submit_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.return_value = False
+    cancellation_requested = asyncio.Event()
+    monkeypatch.setattr(
+        module.ray,
+        "cancel",
+        MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set()),
+    )
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+    submission.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submission
+
+    assert worker.futures[0].done() is False
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
+    assert pool._inflight == [0]
 
 
 @pytest.mark.asyncio
@@ -1123,8 +1527,7 @@ async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
         await pool.submit(task_id="a")
 
     assert pool._inflight == [0]
-
-    assert pool._inflight == [0]
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("a")
 
 
 @pytest.mark.asyncio
@@ -1206,7 +1609,7 @@ async def test_pool_keeps_content_claim_until_cancelled_task_settles() -> None:
     )
 
 
-def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.config
     import core.embeddings
     import services.storage.milvus_store as milvus_store
@@ -1236,7 +1639,9 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        paths=SimpleNamespace(data_dir="/tmp/data"),
+        semaphore=SimpleNamespace(vlm_semaphore=7),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -1244,6 +1649,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     class Store:
         document_repo = object()
         topic_tag_repo = object()
+        job_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):
@@ -1259,7 +1665,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
         return Store()
 
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
-    monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_chunker", lambda _cfg, _window=None: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_vlm_factory", lambda _cfg: vlm_factory)
     monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: contextualizer_factory)
@@ -1267,7 +1673,9 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", fake_postgres_store)
-    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg: object())
+    pymupdf_pool_configs = []
+    monkeypatch.setattr(parser_dispatcher, "configure_pymupdf_pool", pymupdf_pool_configs.append)
+    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg, **_kwargs: object())
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: object())
     monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
     actor_calls = []
@@ -1280,17 +1688,25 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(module, "IndexerWorker", Worker)
 
     actor_class = module.IndexerWorkerActor.__ray_metadata__.modified_class
-    actor_class()
+    actor_class(namespace="tenant-ray")
 
     assert actor_calls
     assert actor_calls[0][0][0] == "TaskStateManager"
-    assert actor_calls[0][1].get("namespace") == "openrag"
+    assert actor_calls[0][1].get("namespace") == "tenant-ray"
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
     assert captured["vlm_factory"] is vlm_factory
     assert captured["catalog_config"] is cfg.rdb
     assert captured["catalog_config"].database == "custom_catalog"
     assert captured["catalog_run_migrations"] is False
+    # The per-document caption cap is the VLM gate's own budget: no point letting
+    # one document queue more of its images on that gate than it will ever admit.
+    # Without this the actor could stop forwarding it and every test still passed.
+    assert captured["caption_concurrency"] == 7
+    assert captured["caption_concurrency"] == cfg.semaphore.vlm_semaphore
+    # The PyMuPDF process pool belongs to the indexer: the API replicas build the
+    # same dispatcher and must keep the single thread (#997).
+    assert pymupdf_pool_configs == [cfg]
 
 
 def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1324,7 +1740,9 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        paths=SimpleNamespace(data_dir="/tmp/data"),
+        semaphore=SimpleNamespace(vlm_semaphore=10),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -1332,6 +1750,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
     class Store:
         document_repo = object()
         topic_tag_repo = object()
+        job_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):
@@ -1342,7 +1761,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
         return object()
 
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
-    monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_chunker", lambda _cfg, _window=None: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_vlm_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: object())
@@ -1350,7 +1769,8 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
-    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg: object())
+    monkeypatch.setattr(parser_dispatcher, "configure_pymupdf_pool", lambda _cfg: None)
+    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg, **_kwargs: object())
     # No global default VLM endpoint configured.
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: None)
     monkeypatch.setattr(parser_dispatcher, "load_caption_prompt", lambda _cfg: "TEMPLATE TEXT")
@@ -1390,6 +1810,15 @@ class _RecordingWorker:
         return {"stored_count": 1, "stage": "stored"}
 
 
+def _AsyncReturn(value):
+    """A stub coroutine function returning *value* for any arguments."""
+
+    async def _call(*_a, **_k):
+        return value
+
+    return _call
+
+
 def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     """Bare IndexerWorkerActor with only the attributes process_file touches."""
     from services.workers.indexer_pool import IndexerWorkerActor
@@ -1403,13 +1832,408 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_catalog = _noop
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
+    actor._cfg = SimpleNamespace(
+        loader=SimpleNamespace(
+            file_loaders=SimpleNamespace(wav="LocalWhisperLoader", mp3="LocalWhisperLoader"),
+        ),
+    )
+    actor._task_state_manager = SimpleNamespace(
+        get_object_ref=SimpleNamespace(remote=AsyncMock(return_value={"ref": object()})),
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+    )
     actor._catalog_store = SimpleNamespace(
-        workspace_repo=SimpleNamespace(),
-        document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
+        workspace_repo=SimpleNamespace(add_files_to_workspace=AsyncMock(return_value=[])),
+        document_repo=SimpleNamespace(
+            release_content_sha256_claim=AsyncMock(),
+            mark_file_independently_indexed=AsyncMock(return_value=True),
+            finalize_file_workspace_ownership=AsyncMock(return_value=True),
+        ),
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=lambda *a: "ref"))
+    actor._active_indexation_config = ContextVar("test_active_indexation_config", default=None)
+    # These build the actor with __new__, so __init__ never runs. Captioning is
+    # enabled by default, so ingest now resolves its prompt even for a config
+    # that omits the flag — stub the service these tests don't exercise.
+    actor._prompt_service = SimpleNamespace(
+        resolve_prompt=_AsyncReturn("prompt"),
+    )
     return actor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("ws1 unavailable"), ["f"]])
+async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path, failure) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=[failure, []])
+
+    result = await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=["ws1", "ws2"],
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_awaited_once_with("f", "p")
+    actor._catalog_store.document_repo.finalize_file_workspace_ownership.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actor_transfers_ownership_only_after_all_attachments_succeed(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    attach = actor._catalog_store.workspace_repo.add_files_to_workspace
+
+    async def transfer(*args):
+        assert attach.await_count == 2
+        return True
+
+    finalize = actor._catalog_store.document_repo.finalize_file_workspace_ownership
+    finalize.side_effect = transfer
+    await actor.process_file(
+        task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", workspace_ids=["ws1", "ws2"]
+    )
+    finalize.assert_awaited_once_with("f", "p", ["ws1", "ws2"])
+    # Attachment is keyed on the file's partition: workspace ids are only unique there.
+    attach.assert_any_await("p", "ws1", ["f"])
+    attach.assert_any_await("p", "ws2", ["f"])
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actor_propagates_workspace_attachment_cancellation(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f"},
+            partition="p",
+            workspace_ids=["ws1"],
+        )
+
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_not_awaited()
+
+
+@contextmanager
+def _active_indexation_config(actor, config):
+    """Run the block as if a file carrying *config* were dispatched to the actor."""
+    token = actor._active_indexation_config.set(config)
+    try:
+        yield
+    finally:
+        actor._active_indexation_config.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_actor_resolves_the_default_asr_prompt_without_a_preset_selection() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    resolve_prompt = AsyncMock(return_value="prompt")
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
+
+    assert await actor._resolve_transcription_prompt() == "prompt"
+    resolve_prompt.assert_awaited_once_with("asr_transcription")
+
+
+@pytest.mark.asyncio
+async def test_actor_uses_native_asr_prompt_when_resolution_fails() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    resolve_prompt = AsyncMock(side_effect=RuntimeError("database unavailable"))
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
+
+    assert await actor._resolve_transcription_prompt() is None
+    resolve_prompt.assert_awaited_once_with("asr_transcription")
+
+
+@pytest.mark.asyncio
+async def test_actor_resolves_the_preset_asr_prompt_before_the_default() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._prompt_service.resolve_prompt = AsyncMock(return_value="preset prompt")
+
+    with _active_indexation_config(actor, {"asr_transcription_prompt_name": "meeting-diarization"}):
+        assert await actor._resolve_transcription_prompt() == "preset prompt"
+
+    actor._prompt_service.resolve_prompt.assert_awaited_once_with(
+        "asr_transcription",
+        names=["meeting-diarization"],
+        strict_names=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_actor_rejects_an_unavailable_selected_asr_prompt() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    class PromptService:
+        async def resolve_prompt(
+            self,
+            _prompt_type: str,
+            names: list[str] | None = None,
+            *,
+            strict_names: bool = False,
+        ) -> str:
+            if names == ["retired-asr"] and strict_names:
+                raise NotFoundError("Selected ASR prompt 'retired-asr' no longer exists")
+            return "default prompt"
+
+    actor._prompt_service = PromptService()
+
+    with _active_indexation_config(actor, {"asr_transcription_prompt_name": "retired-asr"}):
+        with pytest.raises(NotFoundError, match="retired-asr"):
+            await actor._resolve_transcription_prompt()
+
+
+@pytest.mark.asyncio
+async def test_actor_uses_the_global_asr_prompt_when_an_active_preset_has_no_selection() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._prompt_service.resolve_prompt = AsyncMock(return_value="global prompt")
+
+    with _active_indexation_config(actor, {}):
+        assert await actor._resolve_transcription_prompt() == "global prompt"
+
+    # An absent preset selection takes the prompt service's global-default path.
+    actor._prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription")
+
+
+def test_actor_resolves_the_preset_stt_endpoint_before_the_default() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    default = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name="whisper")
+    moss = ModelEndpointConfig(endpoint="http://moss:8000/v1", model_name="moss-transcribe-diarize")
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": default, "moss": moss}))
+
+    assert actor._resolve_transcription_endpoint() is default
+
+    with _active_indexation_config(actor, {"stt": "moss"}):
+        assert actor._resolve_transcription_endpoint() is moss
+
+
+def test_actor_rejects_an_unavailable_selected_stt_endpoint() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    default = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name="whisper")
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": default}))
+
+    with _active_indexation_config(actor, {"stt": "retired-moss"}):
+        with pytest.raises(KeyError, match="retired-moss"):
+            actor._resolve_transcription_endpoint()
+
+
+@pytest.mark.parametrize(
+    ("model_name", "endpoint_url"),
+    [(None, "http://moss:8000/v1"), ("", "http://moss:8000/v1"), ("   ", "http://moss:8000/v1"), ("moss", "   ")],
+)
+def test_actor_rejects_an_incomplete_selected_stt_endpoint(model_name: str | None, endpoint_url: str) -> None:
+    """An incomplete selection must fail the file, not degrade to TRANSCRIBER_*.
+
+    OpenAIAudioClient reads a missing endpoint/model as "no endpoint configured"
+    and transcribes with the env fallback, dropping the selection's ``extra``
+    request options too — so the file would *succeed* while a different provider
+    produced the transcript. seed_defaults writes STT rows straight from
+    TRANSCRIBER_MODEL, bypassing the API's validate_stt_fields guard, so a blank
+    model name can reach the registry.
+    """
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    default = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name="whisper")
+    incomplete = ModelEndpointConfig(endpoint=endpoint_url, model_name=model_name)
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": default, "moss": incomplete}))
+
+    with _active_indexation_config(actor, {"stt": "moss"}):
+        with pytest.raises(KeyError, match="incomplete"):
+            actor._resolve_transcription_endpoint()
+
+
+def test_actor_keeps_an_incomplete_global_default_stt_endpoint() -> None:
+    """Without an explicit selection the parser's TRANSCRIBER_* fallback stands.
+
+    Only a *named* selection carries the promise that this exact provider runs;
+    the unset path must keep degrading rather than failing files on deployments
+    that never registered a complete STT endpoint.
+    """
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    incomplete = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name=None)
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": incomplete}))
+
+    with _active_indexation_config(actor, {}):
+        assert actor._resolve_transcription_endpoint() is incomplete
+
+
+def test_actor_rejects_a_selected_stt_endpoint_when_the_registry_is_unavailable() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt=None))
+
+    with _active_indexation_config(actor, {"stt": "moss"}):
+        with pytest.raises(KeyError, match="moss"):
+            actor._resolve_transcription_endpoint()
+
+
+def test_actor_trims_a_preset_stt_selection_before_resolving_it() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    default = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name="whisper")
+    moss = ModelEndpointConfig(endpoint="http://moss:8000/v1", model_name="moss-transcribe-diarize")
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": default, "moss": moss}))
+
+    with _active_indexation_config(actor, {"stt": " moss "}):
+        assert actor._resolve_transcription_endpoint() is moss
+
+
+@pytest.mark.asyncio
+async def test_actor_trims_a_preset_asr_prompt_selection_before_resolving_it() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def resolve_prompt(
+        _prompt_type: str,
+        names: list[str] | None = None,
+        *,
+        strict_names: bool = False,
+    ) -> str:
+        return "meeting prompt" if names == ["meeting"] else "default prompt"
+
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
+
+    with _active_indexation_config(actor, {"asr_transcription_prompt_name": " meeting "}):
+        assert await actor._resolve_transcription_prompt() == "meeting prompt"
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_concurrent_preset_transcription_settings_task_local(tmp_path) -> None:
+    """A parse timeout must not lose or cross-contaminate task-local preset settings."""
+    from core.models.document import Document, ProcessedDocument
+    from services.workers.indexer_actor import IndexerWorker
+    from services.workers.stages.parse import parse_stage
+
+    seen: dict[str, tuple[str, str]] = {}
+    barrier = asyncio.Barrier(2)
+
+    class ResolverParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            await barrier.wait()
+            endpoint = actor._resolve_transcription_endpoint()
+            prompt = await actor._resolve_transcription_prompt()
+            assert endpoint is not None
+            assert prompt is not None
+            seen[document.id] = (endpoint.model_name or "", prompt)
+            return ProcessedDocument(document_id=document.id)
+
+    class ParsingPipeline:
+        async def run(self, row: dict[str, object]) -> dict[str, object]:
+            await parse_stage(row, ResolverParser(), timeout=0.5)
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    worker_task_state = SimpleNamespace(
+        set_state=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        complete_with_degraded_stages=SimpleNamespace(remote=AsyncMock(return_value="completed")),
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+    )
+    worker = IndexerWorker(pipeline=ParsingPipeline(), task_state_manager=worker_task_state)
+
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._cfg = SimpleNamespace(
+        loader=SimpleNamespace(file_loaders=SimpleNamespace(wav="LocalWhisperLoader", mp3="LocalWhisperLoader")),
+        models=SimpleNamespace(
+            stt={
+                "default": ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="default"),
+                "moss-a": ModelEndpointConfig(endpoint="http://moss-a:8000/v1", model_name="moss-a"),
+                "moss-b": ModelEndpointConfig(endpoint="http://moss-b:8000/v1", model_name="moss-b"),
+            }
+        ),
+    )
+
+    async def resolve_prompt(
+        _prompt_type: str,
+        names: list[str] | None = None,
+        *,
+        strict_names: bool = False,
+    ) -> str:
+        return f"prompt:{names[0]}" if names else "prompt:default"
+
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
+    actor._resolve_ingest_prompts = _AsyncReturn({})
+    first_path = tmp_path / "a.mp3"
+    second_path = tmp_path / "b.mp3"
+    first_path.write_bytes(b"audio")
+    second_path.write_bytes(b"audio")
+
+    await asyncio.gather(
+        actor.process_file(
+            task_id="a",
+            path=str(first_path),
+            metadata={"file_id": "a"},
+            partition="a",
+            indexation_config={"stt": "moss-a", "asr_transcription_prompt_name": "prompt-a"},
+        ),
+        actor.process_file(
+            task_id="b",
+            path=str(second_path),
+            metadata={"file_id": "b"},
+            partition="b",
+            indexation_config={"stt": "moss-b", "asr_transcription_prompt_name": "prompt-b"},
+        ),
+    )
+
+    assert seen == {
+        "a": ("moss-a", "prompt:prompt-a"),
+        "b": ("moss-b", "prompt:prompt-b"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_actor_does_not_start_without_registered_worker_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._task_state_manager.get_object_ref.remote.return_value = None
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="registered task reference"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    worker_ref_error = module._MISSING_WORKER_REF_ERROR
+    actor._task_state_manager.set_failed_if_not_cancelled.remote.assert_awaited_once_with("t", worker_ref_error)
+    assert worker.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_worker_reference_records_a_canonical_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._task_state_manager.get_object_ref.remote.return_value = None
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    actor._task_state_manager.set_failed_with_reason_if_not_cancelled = SimpleNamespace(remote=set_failed)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="registered task reference"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert set_failed.await_args.args == ("t", module._MISSING_WORKER_REF_ERROR, module._MISSING_WORKER_REF_ERROR)
 
 
 @pytest.mark.asyncio
@@ -1478,6 +2302,41 @@ async def test_actor_purges_upload_on_worker_failure(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, RuntimeError("boom")])
+async def test_actor_keeps_markdown_copy_when_purging_upload(tmp_path, error) -> None:
+    # SAVE_MARKDOWN is independent of save_uploaded_files: inspecting parser
+    # output must not require keeping every raw upload.
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=_RecordingWorker(error=error))
+
+    if error is None:
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+    else:
+        with pytest.raises(RuntimeError, match="boom"):
+            await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert not path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_markdown_copy_when_saving(tmp_path) -> None:
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
+
+
+@pytest.mark.asyncio
 async def test_actor_purges_upload_on_pre_worker_failure(tmp_path) -> None:
     # The gap the old worker-level finally missed: catalog/registry init (or the
     # SERIALIZING state update) fails *before* the worker runs. The upload must
@@ -1515,3 +2374,666 @@ async def test_actor_keeps_upload_on_pre_worker_failure_when_saving(tmp_path) ->
         await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
 
     assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_sends_the_error_callback_and_sets_failed(tmp_path, monkeypatch) -> None:
+    """IndexerWorker.process_file owns the success-path callback and is never
+    reached here, but the pre-flight path must still report a terminal state —
+    otherwise the callback says "error" while GET task-status shows QUEUED
+    forever, and a client trusting either source disagrees with the other."""
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("postgres down")
+
+    actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+    mark_failed = AsyncMock(return_value=True)
+    monkeypatch.setattr(module, "retry_idempotent_ray_actor_method", mark_failed)
+
+    metadata = {"file_id": "f", "doc_rev": "3-abc"}
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+            callback_token="jwt",
+        )
+
+    assert worker.calls == 0
+    mark_failed.assert_awaited_once()
+    assert mark_failed.await_args.kwargs["task_description"] == "set_failed_if_not_cancelled(t)"
+    callback.assert_awaited_once_with(
+        "https://cozy.example.com/ai/index/status", "p", "f", "error", metadata, callback_token="jwt"
+    )
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_captures_reason_with_new_task_state_actor(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("postgres down\n<html>\n</html>")
+
+    actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
+    set_failed = AsyncMock(return_value=True)
+    actor._tsm = SimpleNamespace(
+        _ray_actor_method_names={
+            "set_failed_if_not_cancelled",
+            "set_failed_with_reason_if_not_cancelled",
+        },
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        set_failed_with_reason_if_not_cancelled=SimpleNamespace(remote=set_failed),
+    )
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    failure = set_failed.await_args.args
+    assert failure[0] == "t"
+    assert "postgres down" in failure[1]
+    assert failure[2] == "RuntimeError: postgres down"
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_without_callback_url_still_sets_failed(tmp_path, monkeypatch) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("postgres down")
+
+    actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+    mark_failed = AsyncMock(return_value=True)
+    monkeypatch.setattr(module, "retry_idempotent_ray_actor_method", mark_failed)
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    mark_failed.assert_awaited_once()
+    callback.assert_awaited_once()
+    assert callback.await_args[0][0] is None
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_still_notifies_when_the_tsm_is_unreachable(tmp_path, monkeypatch) -> None:
+    """If the TSM is down, set_failed_if_not_cancelled can't run either, but a
+    client waiting on the callback must not be left with neither signal."""
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("postgres down")
+
+    actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+    monkeypatch.setattr(
+        module, "retry_idempotent_ray_actor_method", AsyncMock(side_effect=RuntimeError("tsm unreachable"))
+    )
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f"},
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+        )
+
+    callback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_preflight_sends_no_callback(tmp_path, monkeypatch) -> None:
+    """A cancelled task notifies nothing — the worker's gate says the same."""
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _cancelled(*_a, **_k):
+        raise asyncio.CancelledError()
+
+    actor._ensure_catalog = _cancelled
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+
+    with pytest.raises(asyncio.CancelledError):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f"},
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+        )
+
+    callback.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _build_vector_field_resolver
+# ---------------------------------------------------------------------------
+
+
+def _vector_field_resolver():
+    from services.workers.indexer_pool import _build_vector_field_resolver
+
+    embedders = {
+        # Renamed since creation: the field is read from the registry, not derived from the name.
+        "renamed": ModelEndpointConfig(name="renamed", endpoint="http://x/v1", vector_field="vector_original"),
+        "unmigrated": ModelEndpointConfig(name="unmigrated", endpoint="http://x/v1"),
+    }
+    # No endpoint is the default, but the global config names an embedder.
+    global_embedder = SimpleNamespace(base_url="http://embedder/v1", model_name="embed-model")
+    return _build_vector_field_resolver(
+        SimpleNamespace(models=SimpleNamespace(embedder=embedders), embedder=global_embedder)
+    )
+
+
+@pytest.mark.parametrize(("embedder", "field"), [("renamed", "vector_original"), ("unmigrated", None)])
+def test_a_registered_embedder_resolves_to_its_own_field_or_to_nothing(embedder, field) -> None:
+    assert _vector_field_resolver()(embedder) == field
+
+
+@pytest.mark.parametrize(
+    ("embedder", "error"),
+    [("default", "Mark one embedder endpoint as the default"), ("never-registered", "'never-registered' is not")],
+)
+def test_an_unregistered_embedder_has_no_field_to_index_into(embedder, error) -> None:
+    # The global config was never given a field: any field its vectors went to would hide them from search.
+    with pytest.raises(ConfigError, match=error):
+        _vector_field_resolver()(embedder)
+
+
+def test_a_missing_default_embedder_reloads_the_registry_despite_a_global_embedder_config() -> None:
+    import time as _time
+
+    from services.workers.indexer_pool import IndexerWorkerActor, _default_fallbacks
+
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
+    pool = actor_class.__new__(actor_class)
+    pool._cfg = SimpleNamespace(
+        models=SimpleNamespace(embedder={}),  # the registry lacks "default"
+        embedder=SimpleNamespace(base_url="http://embedder/v1", model_name="embed-model"),
+    )
+    pool._has_default_fallbacks = _default_fallbacks(pool._cfg)
+    pool._registry_loaded_at = _time.monotonic()  # fresh, not stale
+    pool._last_miss_reload_at = None
+
+    assert pool._reload_decision({"embedder": ["default"]}) == "miss"
+
+
+class _BlockingWorker(_RecordingWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def process_file(self, **kwargs) -> dict:
+        await self.release.wait()
+        return await super().process_file(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_actor_renews_the_worker_lease_only_while_the_file_is_processing(monkeypatch, tmp_path) -> None:
+    """The lease is how the task state tells a live worker from a dead one once the pool actor died."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+    while renew.await_count < 3:
+        await asyncio.sleep(0.01)
+    worker.release.set()
+    assert await processing == {"stored_count": 1, "stage": "stored"}
+    renewals = renew.await_count
+    await asyncio.sleep(0.05)
+
+    assert renew.await_count == renewals
+    renew.assert_awaited_with("t")
+
+
+def _renewals(outcomes: list[Any], then: Any) -> Callable[[str], Awaitable[Any]]:
+    """A renew_worker_lease answering ``outcomes`` in turn, then ``then`` for good; exceptions are raised."""
+    answers = iter(outcomes)
+
+    async def renew(_task_id: str) -> Any:
+        answer = next(answers, then)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return renew
+
+
+class _StartRecordingWorker(_BlockingWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started_at: float | None = None
+        self.cancelled_at: float | None = None
+
+    async def process_file(self, **kwargs) -> dict:
+        self.started_at = asyncio.get_running_loop().time()
+        try:
+            return await super().process_file(**kwargs)
+        except asyncio.CancelledError:
+            self.cancelled_at = asyncio.get_running_loop().time()
+            raise
+
+
+def _lease_timing(monkeypatch, *, interval: float, ttl: float) -> None:
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", interval)
+    monkeypatch.setattr(worker_lease, "_WORKER_LEASE_TTL_SECONDS", ttl)
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_processing_when_a_lease_renewal_fails(monkeypatch, tmp_path) -> None:
+    _lease_timing(monkeypatch, interval=0.01, ttl=5.0)
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(side_effect=_renewals([True, RuntimeError("task state unavailable")], then=True))
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+    while renew.await_count < 4:
+        await asyncio.sleep(0.01)
+    worker.release.set()
+
+    assert await processing == {"stored_count": 1, "stage": "stored"}
+
+
+@pytest.mark.asyncio
+async def test_actor_starts_only_once_a_failed_first_renewal_is_answered(monkeypatch, tmp_path) -> None:
+    """Until the task state recorded the pickup, it may settle the task as abandoned and release its file."""
+    _lease_timing(monkeypatch, interval=0.01, ttl=5.0)
+    worker = _StartRecordingWorker()
+    worker.release.set()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    attempts: list[float] = []
+
+    async def renew(_task_id: str) -> bool:
+        attempts.append(asyncio.get_running_loop().time())
+        if len(attempts) <= 2:
+            raise RuntimeError("task state unavailable")
+        return True
+
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    result = await actor.process_file(
+        task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    assert worker.started_at is not None
+    assert worker.started_at >= attempts[2]
+
+
+@pytest.mark.asyncio
+async def test_actor_fails_a_task_whose_first_renewal_is_never_answered(monkeypatch, tmp_path) -> None:
+    from services.workers.worker_lease import WorkerLeaseLostError
+
+    _lease_timing(monkeypatch, interval=0.01, ttl=0.1)
+    worker = _StartRecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(side_effect=RuntimeError("task state unavailable"))
+    end = AsyncMock()
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed))
+
+    with pytest.raises(WorkerLeaseLostError):
+        await asyncio.wait_for(
+            actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"),
+            timeout=5,
+        )
+
+    assert worker.started_at is None
+    assert renew.await_count >= 2
+    actor._task_state_manager.get_object_ref.remote.assert_not_awaited()
+    set_failed.assert_awaited_once()
+    assert set_failed.await_args.args[0] == "t"
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_actor_stops_before_its_lease_lapses_when_renewals_keep_failing(monkeypatch, tmp_path) -> None:
+    """The task state releases the file once the lease lapses; a worker still writing then could undo a delete."""
+    from services.workers.worker_lease import WorkerLeaseLostError
+
+    ttl = 0.3
+    _lease_timing(monkeypatch, interval=0.05, ttl=ttl)
+    worker = _StartRecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    sent_at: list[float] = []
+
+    async def renew(_task_id: str) -> bool:
+        sent_at.append(asyncio.get_running_loop().time())
+        if len(sent_at) > 2:
+            raise RuntimeError("task state unavailable")
+        return True
+
+    end = AsyncMock()
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed))
+
+    with pytest.raises(WorkerLeaseLostError):
+        await asyncio.wait_for(
+            actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"),
+            timeout=5,
+        )
+
+    last_answered = sent_at[1]
+    assert worker.cancelled_at is not None
+    assert worker.cancelled_at < last_answered + ttl
+    assert worker.calls == 0
+    set_failed.assert_awaited_once()
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_actor_reports_the_worker_returned_once_the_file_settles(monkeypatch, tmp_path) -> None:
+    """Ending the lease settles an orphaned ref at once instead of after the TTL."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    events: list[str] = []
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    async def renew(_task_id: str) -> bool:
+        events.append("renew")
+        return True
+
+    async def end(_task_id: str) -> None:
+        events.append("end")
+
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+    while "renew" not in events:
+        await asyncio.sleep(0.01)
+    worker.release.set()
+    await processing
+
+    assert events[0] == "renew"
+    assert events[-1] == "end"
+    assert events.count("end") == 1
+
+
+@pytest.mark.asyncio
+async def test_actor_stops_its_own_file_once_the_task_is_cancelled(monkeypatch, tmp_path) -> None:
+    """ray.cancel cannot reach a worker whose ref lost its owner; the lease renewal is how it learns."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(side_effect=[True, True, False])
+    end = AsyncMock()
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(processing, timeout=5)
+    assert renew.await_count == 3
+    assert worker.calls == 0
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_pool_registers_the_worker_actor_with_the_ref(monkeypatch) -> None:
+    """The task state needs the worker actor to settle a task that is still queued when the pool dies."""
+    import services.workers.worker_lease as worker_lease
+    from services.workers.task_state import WORKER_ACTOR_ID_KEY, WORKER_RESTARTS_KEY
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", lambda actor_id: (True, 3))
+    loop = asyncio.get_running_loop()
+    ref = loop.create_future()
+    worker = SimpleNamespace(
+        process_file=SimpleNamespace(remote=lambda **_kwargs: ref),
+        _actor_id=SimpleNamespace(hex=lambda: "ab" * 16),
+    )
+    pool = _bare_pool([worker])
+
+    assert await pool.submit(task_id="task-1", path="/tmp/doc.txt", metadata={}, partition="p") == [ref]
+
+    pool._task_state_manager.set_object_ref.remote.assert_awaited_once_with(
+        "task-1", {"ref": ref, WORKER_ACTOR_ID_KEY: "ab" * 16, WORKER_RESTARTS_KEY: 3}
+    )
+    await _settle_pool_release_tasks(pool, ref)
+
+
+@pytest.mark.asyncio
+async def test_pool_reads_the_worker_registration_off_the_event_loop(monkeypatch) -> None:
+    """A slow GCS read must not stall other submissions; their slots are reserved meanwhile."""
+    import threading
+
+    import services.workers.worker_lease as worker_lease
+
+    loop_thread = threading.get_ident()
+    read_threads: list[int] = []
+    first_read_started = threading.Event()
+    release_first_read = threading.Event()
+
+    def slow_read(actor_id: str) -> tuple[bool, int]:
+        read_threads.append(threading.get_ident())
+        if actor_id == "ab" * 16:
+            first_read_started.set()
+            release_first_read.wait(timeout=5)
+        return True, 0
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", slow_read)
+    loop = asyncio.get_running_loop()
+    refs = [loop.create_future(), loop.create_future()]
+    workers = [
+        SimpleNamespace(
+            process_file=SimpleNamespace(remote=lambda _ref=ref, **_kwargs: _ref),
+            _actor_id=SimpleNamespace(hex=lambda _hex=hex_id: _hex),
+        )
+        for ref, hex_id in zip(refs, ("ab" * 16, "cd" * 16))
+    ]
+    pool = _bare_pool(workers)
+
+    first = asyncio.create_task(pool.submit(task_id="task-1", metadata={}, partition="p"))
+    assert await asyncio.to_thread(first_read_started.wait, 5)
+    # The loop is free while the first read blocks, and the first slot is taken.
+    assert (await pool.status())["inflight_jobs"] == 1
+    assert await pool.submit(task_id="task-2", metadata={}, partition="p") == [refs[1]]
+    release_first_read.set()
+    assert await first == [refs[0]]
+
+    assert pool._inflight == [1, 1]
+    assert loop_thread not in read_threads
+    await _settle_pool_release_tasks(pool, *refs)
+
+
+@pytest.mark.asyncio
+async def test_pool_rolls_back_inflight_when_the_registration_read_raises(monkeypatch) -> None:
+    import services.workers.worker_lease as worker_lease
+
+    def failing_read(_actor_id: str) -> tuple[bool, int]:
+        raise RuntimeError("gcs unavailable")
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", failing_read)
+    submitted = []
+    worker = SimpleNamespace(
+        process_file=SimpleNamespace(remote=lambda **kwargs: submitted.append(kwargs)),
+        _actor_id=SimpleNamespace(hex=lambda: "ab" * 16),
+    )
+    pool = _bare_pool([worker])
+
+    with pytest.raises(RuntimeError, match="gcs unavailable"):
+        await pool.submit(task_id="a", metadata={}, partition="p")
+
+    assert submitted == []
+    assert pool._inflight == [0]
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("a")
+
+
+@pytest.mark.asyncio
+async def test_pool_reads_the_worker_restart_count_before_it_submits(monkeypatch) -> None:
+    """Read after, a restart that drops the task would count as its incarnation and hold its file for good."""
+    import services.workers.worker_lease as worker_lease
+    from services.workers.task_state import WORKER_RESTARTS_KEY
+
+    restarts = [3]
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", lambda actor_id: (True, restarts[0]))
+    ref = asyncio.get_running_loop().create_future()
+
+    def submit_then_restart(**_kwargs: Any) -> asyncio.Future[Any]:
+        # The worker actor restarts right after the task is sent, dropping it.
+        restarts[0] += 1
+        return ref
+
+    worker = SimpleNamespace(
+        process_file=SimpleNamespace(remote=submit_then_restart),
+        _actor_id=SimpleNamespace(hex=lambda: "ab" * 16),
+    )
+    pool = _bare_pool([worker])
+
+    await pool.submit(task_id="task-1", path="/tmp/doc.txt", metadata={}, partition="p")
+
+    (_task_id, registration), _ = pool._task_state_manager.set_object_ref.remote.await_args
+    assert registration[WORKER_RESTARTS_KEY] == 3
+    await _settle_pool_release_tasks(pool, ref)
+
+
+def test_worker_registration_omits_the_restart_count_when_the_gcs_cannot_be_read(monkeypatch) -> None:
+    import services.workers.worker_lease as worker_lease
+    from services.workers.task_state import WORKER_ACTOR_ID_KEY
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", lambda actor_id: None)
+    worker = SimpleNamespace(_actor_id=SimpleNamespace(hex=lambda: "cd" * 16))
+
+    assert worker_lease.worker_registration(worker) == {WORKER_ACTOR_ID_KEY: "cd" * 16}
+    assert worker_lease.worker_registration(SimpleNamespace()) == {}
+
+
+@pytest.mark.asyncio
+async def test_worker_lease_warns_that_an_older_task_state_manager_needs_a_ray_restart() -> None:
+    from services.workers.worker_lease import keep_worker_lease
+
+    logger = MagicMock()
+    started = asyncio.Event()
+
+    await keep_worker_lease(SimpleNamespace(), "t", worker_task=MagicMock(), logger=logger, started=started)
+
+    assert started.is_set()
+    logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in logger.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_actor_drops_a_task_whose_pickup_the_task_state_refuses(monkeypatch, tmp_path) -> None:
+    """A queued orphan already settled by its worker actor's restart count must not index late."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(return_value=False)
+    end = AsyncMock()
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(
+            actor.process_file(
+                task_id="t",
+                path=str(tmp_path / "doc.txt"),
+                metadata={"file_id": "f", "content_sha256": "abc123", CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1"},
+                partition="p",
+            ),
+            timeout=5,
+        )
+
+    assert worker.calls == 0
+    renew.assert_awaited_once_with("t")
+    actor._task_state_manager.get_object_ref.remote.assert_not_awaited()
+    actor._catalog_store.document_repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="f", partition="p", content_sha256="abc123", claim_token="attempt-1"
+    )
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelling_renewal_during_cleanup_does_not_cut_it_short(monkeypatch, tmp_path) -> None:
+    """Once the file settled, a late False must not cancel the claim release or skip ending the lease."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    cleaning_up = asyncio.Event()
+    released: list[str] = []
+
+    async def renew(_task_id: str) -> bool:
+        return not cleaning_up.is_set()
+
+    async def release(**_kwargs) -> None:
+        cleaning_up.set()
+        await asyncio.sleep(0.1)
+        released.append("claim")
+
+    end = AsyncMock()
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._catalog_store.document_repo.release_content_sha256_claim = release
+
+    result = await asyncio.wait_for(
+        actor.process_file(
+            task_id="t",
+            path=str(tmp_path / "doc.txt"),
+            metadata={"file_id": "f", "content_sha256": "abc123", CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1"},
+            partition="p",
+        ),
+        timeout=5,
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    assert released == ["claim"]
+    end.assert_awaited_once_with("t")

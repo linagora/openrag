@@ -16,6 +16,31 @@ from tqdm.asyncio import tqdm
 load_dotenv()
 
 
+def _source_chunk_ids(sources) -> list:
+    """Collect the chunk id of every document source, new entry shape or old.
+
+    The chunk's metadata is nested under ``chunk``; a server from before that
+    change spreads it across the entry instead. Accept both, as the Chainlit UI
+    does, so a benchmark run survives either side of a rolling deploy.
+
+    Entries with no chunk id -- web results, which are flat and carry a ``url``
+    instead -- are skipped rather than left to raise. A ``KeyError`` here would
+    be swallowed by the caller's broad ``except`` and turn a perfectly good
+    answer into an empty id list, scoring the question 0 on every retrieval
+    metric instead of measuring it.
+    """
+    chunk_ids = []
+    for entry in sources or []:
+        if not isinstance(entry, dict):
+            continue
+        chunk = entry.get("chunk")
+        if isinstance(chunk, dict) and "_id" in chunk:
+            chunk_ids.append(chunk["_id"])
+        elif "_id" in entry:
+            chunk_ids.append(entry["_id"])
+    return chunk_ids
+
+
 # Retrieving responses and document sources fom OpenRAG
 async def retrieve_response_and_docs_openrag(query: str, partition: str, _base_url: str, semaphore: asyncio.Semaphore):
     async with semaphore:
@@ -39,7 +64,12 @@ async def retrieve_response_and_docs_openrag(query: str, partition: str, _base_u
         try:
             res = await client.chat.completions.create(**settings)
             response_llm = res.choices[0].message.content
-            list_source_chunk_ids = [item["_id"] for item in json.loads(res.extra)["sources"]]
+            extra = getattr(res, "extra", None)
+            # `extra` is a JSON object, but a server from before that change sends
+            # the same payload as a JSON *string*. Normalise both to a dict.
+            if isinstance(extra, str):
+                extra = json.loads(extra)
+            list_source_chunk_ids = _source_chunk_ids((extra or {}).get("sources"))
 
             return response_llm, list_source_chunk_ids
         except Exception as e:

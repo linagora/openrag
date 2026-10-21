@@ -1,0 +1,134 @@
+import pytest
+from core.utils.error_summary import (
+    elide_middle,
+    extract_task_error_reason,
+    failure_reason_from_exception,
+    summarize_task_error,
+)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            'Traceback (most recent call last):\n  File "worker.py", line 1\n'
+            "RuntimeError: upstream returned HTML\n<html>\n</html>",
+            "RuntimeError: upstream returned HTML",
+        ),
+        (
+            "Traceback (most recent call last):\nValueError: invalid document\n"
+            "The parser rejected the document after validation.",
+            "ValueError: invalid document",
+        ),
+        (
+            "  + Exception Group Traceback (most recent call last):\n"
+            "  | ExceptionGroup: batch failed (2 sub-exceptions)\n"
+            "  +------------------------------------",
+            "ExceptionGroup: batch failed (2 sub-exceptions)",
+        ),
+        (
+            "pydantic_core._pydantic_core.ValidationError: 1 validation error for Document\n"
+            "title\n  Field required [type=missing]",
+            "ValidationError: 1 validation error for Document",
+        ),
+        (
+            "Indexer worker submission was rejected after the worker settled.",
+            "Indexer worker submission was rejected after the worker settled.",
+        ),
+        (
+            "Traceback (most recent call last):\nDocumentRejected: unsupported content\n"
+            "The document cannot be retried.",
+            "DocumentRejected: unsupported content",
+        ),
+        (
+            "Traceback (most recent call last):\nRuntimeError: upstream failed\nServer: nginx",
+            "RuntimeError: upstream failed",
+        ),
+        (
+            'Traceback (most recent call last):\n  File "worker.py", line 1, in run\nRuntimeError',
+            "RuntimeError",
+        ),
+        (
+            "Traceback (most recent call last):\nValueError: inner failure\n\n"
+            "The above exception was the direct cause of the following exception:\n\n"
+            "Traceback (most recent call last):\nRuntimeError: outer failure",
+            "RuntimeError: outer failure",
+        ),
+    ],
+)
+def test_extract_task_error_reason_uses_exception_header(error: str, expected: str) -> None:
+    assert extract_task_error_reason(error) == expected
+
+
+def test_failure_reason_from_exception_uses_first_meaningful_line() -> None:
+    exc = RuntimeError("\nupstream returned HTML\n<html>\n</html>")
+
+    assert failure_reason_from_exception(exc) == "RuntimeError: upstream returned HTML"
+
+
+def test_failure_reason_from_exception_handles_empty_messages() -> None:
+    assert failure_reason_from_exception(RuntimeError()) == "RuntimeError"
+
+
+def test_summary_prefers_stored_reason_and_caps_only_the_list_value() -> None:
+    reason = "RuntimeError: " + "x" * 600
+
+    summary = summarize_task_error("ValueError: legacy", reason=reason)
+
+    assert summary is not None
+    assert len(summary) == 500
+    assert " ... " in summary
+
+
+@pytest.mark.parametrize("error", [None, "", "Traceback (most recent call last):\n"])
+def test_extract_task_error_reason_returns_none_without_an_exception_header(error: str | None) -> None:
+    assert extract_task_error_reason(error) is None
+
+
+def test_summary_keeps_the_root_cause_of_a_long_wrapped_failure() -> None:
+    reason = (
+        "RuntimeError: MarkerLoader PDF loading (/app/data/" + "d" * 400 + ".pdf) failed: "
+        "RuntimeError: MarkerPool PDF [p10-14] (/app/data/" + "d" * 400 + ".pdf) failed: "
+        "ValueError: bad xref table"
+    )
+
+    summary = summarize_task_error(None, reason=reason)
+
+    assert summary is not None
+    assert len(summary) <= 500
+    assert summary.startswith("RuntimeError: MarkerLoader PDF loading")
+    assert summary.endswith("failed: ValueError: bad xref table")
+
+
+def test_failure_reason_from_exception_keeps_the_end_of_a_long_message() -> None:
+    reason = failure_reason_from_exception(RuntimeError("x" * 9_000 + " failed: ValueError: root"))
+
+    assert len(reason) <= 8_000
+    assert reason.startswith("RuntimeError: xxx")
+    assert reason.endswith("failed: ValueError: root")
+
+
+@pytest.mark.parametrize("max_length", [0, 3, 5])
+def test_elide_middle_respects_limits_too_small_for_the_marker(max_length: int) -> None:
+    assert len(elide_middle("abcdefghij", max_length)) <= max_length
+
+
+@pytest.mark.parametrize("max_length", range(1, 12))
+def test_elide_middle_keeps_both_ends_or_slices_at_small_limits(max_length: int) -> None:
+    elided = elide_middle("abcdefghijklmnop", max_length)
+
+    assert len(elided) <= max_length
+    if " ... " in elided:
+        assert elided.startswith("a")
+        assert elided.endswith("p")
+    else:
+        assert elided == "abcdefghijklmnop"[:max_length]
+
+
+def test_elide_middle_slices_when_the_marker_leaves_no_room_for_a_head() -> None:
+    assert elide_middle("abcdefghijklmnop", 6) == "abcdef"
+    assert elide_middle("abcdefghijklmnop", 7) == "a ... p"
+
+
+def test_elide_middle_leaves_short_text_alone() -> None:
+    assert elide_middle("short", 5) == "short"

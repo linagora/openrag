@@ -37,8 +37,11 @@ async def test_topic_tagger_extracts_normalized_unique_tags():
 async def test_topic_tagger_falls_back_to_empty_list_on_bad_response():
     llm = FakeLLM("this is not structured")
     tagger = TopicTagger(llm, "extract topics")
+    failures: list[Exception] = []
 
-    assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5) == []
+    assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5, on_failure=failures.append) == []
+    assert len(failures) == 1
+    assert isinstance(failures[0], ValueError)
 
 
 @pytest.mark.asyncio
@@ -69,8 +72,11 @@ async def test_topic_tagger_returns_empty_on_inference_error():
             raise InferenceError("LLM rejected topic tagging request")
 
     tagger = TopicTagger(FailingLLM(), "extract topics")
+    failures: list[Exception] = []
 
-    assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5) == []
+    assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5, on_failure=failures.append) == []
+    assert len(failures) == 1
+    assert isinstance(failures[0], InferenceError)
 
 
 @pytest.mark.asyncio

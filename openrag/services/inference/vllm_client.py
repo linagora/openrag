@@ -14,11 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import AsyncIterator
+import json
+import re
+import time
+from collections.abc import AsyncIterator, Mapping
+from urllib.parse import unquote, urlsplit
 
 import httpx
+from core.config.endpoints import (
+    LLM_OVERRIDE_ENDPOINT_ENV,
+    client_llm_override,
+    custom_endpoint_override_enabled,
+)
 from core.embeddings import Embedder, embedder_registry
 from core.llm import LLM, llm_registry
+from core.observability.inference_metrics import record_inference, record_usage_from_response
 from core.utils.exceptions import (
     EmbeddingAPIError,
     EmbeddingConnectionError,
@@ -32,10 +42,72 @@ from core.utils.logging import get_logger
 from core.vlm import VLM, vlm_registry
 from tqdm.asyncio import tqdm
 
+from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
+from ._metrics import outcome_for, resolve_provider, with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
+
+
+#: Sentinel line terminating an SSE completion. A stream that ends without it
+#: is a truncated answer, not a finished one — ``core/utils/source_filtering``
+#: reports exactly that to the caller.
+_STREAM_DONE = "data: [DONE]"
+
+#: ``/models`` answers from memory. The embed timeout (120 s by default) would
+#: let a blackholed embedder stall a file before it is even chunked.
+_SERVED_WINDOW_TIMEOUT_SECONDS = 10.0
+#: The server answered, but not with a readable ``max_model_len``.
+_SERVED_WINDOW_ERRORS = (httpx.HTTPStatusError, ValueError, TypeError, AttributeError)
+
+
+def _request_stream_usage(payload: dict, *, add_for_metrics: bool) -> bool:
+    """Ask the provider for a usage block; return whether the caller asked too.
+
+    Without ``include_usage`` a streamed response carries no usage at all, so
+    every chat answer would contribute nothing to the token metric. The caller's
+    own ``stream_options`` are kept, not replaced. A client-supplied endpoint
+    gets nothing added: another provider may reject the unknown field, and its
+    traffic is labelled ``client_override`` anyway.
+
+    The return value decides whether the usage-only chunk is forwarded: a
+    client that did not ask for one must not receive a ``"choices": []`` chunk
+    it may index into, nor the prompt size it reveals.
+    """
+    caller_options = payload.get("stream_options")
+    caller_options = caller_options if isinstance(caller_options, dict) else {}
+    caller_wants_usage = bool(caller_options.get("include_usage"))
+    if add_for_metrics:
+        payload["stream_options"] = {**caller_options, "include_usage": True}
+    return caller_wants_usage or not add_for_metrics
+
+
+def _record_stream_usage(line: str) -> bool:
+    """Count tokens from the usage-only chunk of a streamed completion.
+
+    Returns whether ``line`` *is* that chunk (``"choices": []``), so the caller
+    can withhold it from a client that never asked for usage.
+
+    Called for every SSE line — hundreds per answer — so the substring test
+    comes first. Content deltas also begin with ``data: ``, and parsing each of
+    them would duplicate, on the primary user-facing path, work that
+    ``stream_with_source_filtering`` already does downstream.
+
+    A delta whose *content* happens to contain the word "usage" is parsed and
+    then discarded by ``record_usage_from_response``, which requires ``usage``
+    to be a top-level object.
+    """
+    if '"usage"' not in line or not line.startswith("data:"):
+        return False
+    # SSE allows `data:` with or without one space after the colon.
+    body = line[len("data:") :]
+    try:
+        payload = json.loads(body[1:] if body.startswith(" ") else body)
+    except ValueError:
+        return False
+    record_usage_from_response(payload, operation="chat")
+    return isinstance(payload, dict) and payload.get("choices") == [] and isinstance(payload.get("usage"), dict)
 
 
 def _parse_response(resp: httpx.Response) -> dict:
@@ -45,9 +117,136 @@ def _parse_response(resp: httpx.Response) -> dict:
         raise InferenceError(f"Invalid JSON from inference server ({resp.url}): {e}", status_code=502) from e
 
 
+# A literal backslash followed by "u" and anything other than 4 hex digits.
+# json.dumps always escapes a literal backslash to `\\`, so this pattern can
+# only appear in a text's *decoded* content, never in a properly-serialized
+# JSON body — but some downstream JSON parsers (observed: a Go-based embedder
+# gateway) still choke on it with "invalid character ... in \u hexadecimal
+# character escape". Flagging it here pinpoints which input text to inspect.
+_SUSPECT_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
+
+
+def _find_suspect_escapes(texts: list[str], *, limit: int = 5, offset: int = 0) -> list[dict]:
+    r"""Locate inputs carrying a suspect ``\u`` escape — at most *limit* of them.
+
+    Findings land in ``EmbeddingAPIError.extra``, which is not log-only:
+    error_handlers.py serializes it into the HTTP error body, so these snippets
+    are client-visible. Stopping at *limit* keeps that payload bounded — naming
+    a few offending chunks is the point, not mirroring every bad input of a
+    512-chunk batch.
+
+    *offset* is the position of this batch within the caller's full input, so
+    ``index`` identifies the chunk in the document rather than in the batch.
+    Without it a bad chunk at position 97 reports as 1 under ``batch_size=32``,
+    pointing whoever reads the log at an innocent chunk — and since the log
+    carries only these positions (see ``_log_safe_error_detail``), a wrong one
+    is the whole diagnostic being wrong.
+    """
+    findings = []
+    for i, text in enumerate(texts):
+        match = _SUSPECT_UNICODE_ESCAPE.search(text)
+        if match:
+            start = max(0, match.start() - 15)
+            end = min(len(text), match.end() + 15)
+            findings.append({"index": offset + i, "snippet": text[start:end]})
+            if len(findings) >= limit:
+                break
+    return findings
+
+
+def _log_safe_error_detail(exc: BaseException) -> dict:
+    """Summarize a failed embedding call without copying document text to logs.
+
+    ``EmbeddingAPIError.extra`` carries the provider's raw response and, for a
+    400, snippets of the indexed document. That detail belongs in the API error,
+    whose audience is the uploader who already owns the document — but not in
+    container / centralized logs, which operators read across tenants. Keep only
+    what makes the failure diagnosable there: the model, the status, and which
+    chunk indices look malformed.
+    """
+    extra = getattr(exc, "extra", None)
+    if not isinstance(extra, Mapping):
+        return {}
+    detail: dict = {
+        "model_name": extra.get("model_name"),
+        "base_url": extra.get("base_url"),
+        "status_code": getattr(exc, "status_code", None),
+    }
+    suspects = extra.get("suspect_texts") or []
+    if suspects:
+        # Positions, not snippets — enough to go and inspect the offending
+        # chunks without mirroring their text into the log pipeline.
+        detail["suspect_count"] = len(suspects)
+        detail["suspect_indices"] = [s.get("index") for s in suspects]
+    return detail
+
+
 # ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------
+
+
+def _strip_falsy_logprobs(payload: dict) -> dict:
+    """Drop an unset/off ``logprobs`` (and its dependent ``top_logprobs``) from *payload*.
+
+    ``logprobs: false`` is already the OpenAI default, so sending it adds
+    nothing — but strict providers whose schema lacks the field reject it by
+    name whatever the value, e.g. Gemini. Without
+    this, the config default (``LLMParamsConfig.logprobs = False``) lands in
+    ``self._defaults`` and is sent on every request. A truthy value is a
+    deliberate opt-in and is forwarded as-is.
+
+    Checked with ``is`` against ``None``/``False`` rather than plain
+    truthiness (or ``in (None, False)``, which suffers the same problem since
+    ``0 == False``): the legacy ``/completions`` endpoint's ``logprobs`` is an
+    *integer* (how many alternates to return), where ``0`` is a deliberate,
+    meaningful request — "give me the sampled token's own logprob, no
+    alternates" — not an off state, and must not be conflated with it.
+    """
+    logprobs = payload.get("logprobs")
+    if logprobs is None or logprobs is False:
+        payload.pop("logprobs", None)
+        payload.pop("top_logprobs", None)
+    return payload
+
+
+#: Body fields that pick the credential or the endpoint rather than sampling.
+#: The chat request schema forwards unknown fields, and a LiteLLM proxy takes
+#: an ``api_key`` from the body over the deployment's key (its own blocklist
+#: bans ``api_base``/``base_url`` but not ``api_key``), so a caller could swap
+#: the key the server calls with. Credentials and endpoints come from
+#: configuration, or from an honoured ``llm_override``, never from the body.
+_CREDENTIAL_BODY_FIELDS = frozenset({"api_key", "api_base", "base_url"})
+
+
+def _strip_credential_fields(payload: dict) -> dict:
+    """Drop ``_CREDENTIAL_BODY_FIELDS`` from *payload*, and from its ``extra_body``.
+
+    ``extra_body`` too: LiteLLM spreads it into the outbound call's arguments,
+    so a field nested there reaches the provider like a top-level one.
+    """
+    dropped = sorted(_CREDENTIAL_BODY_FIELDS & payload.keys())
+    for field in dropped:
+        del payload[field]
+    extra_body = payload.get("extra_body")
+    if isinstance(extra_body, dict) and _CREDENTIAL_BODY_FIELDS & extra_body.keys():
+        nested = sorted(_CREDENTIAL_BODY_FIELDS & extra_body.keys())
+        payload["extra_body"] = {k: v for k, v in extra_body.items() if k not in _CREDENTIAL_BODY_FIELDS}
+        dropped += [f"extra_body.{field}" for field in nested]
+    if dropped:
+        logger.bind(fields=dropped).warning("Dropped credential fields from an LLM request body")
+    return payload
+
+
+def _targets_client_endpoint(client: VLLMClient, *_args, **kwargs) -> bool:
+    """Breaker predicate: is this call routed to a client-supplied endpoint?
+
+    The ``"llm"`` breaker is one process-wide instance describing the *configured*
+    endpoint, and it counts connection errors and timeouts. Without this any
+    caller could aim the override at an unresolvable host, repeat until
+    ``fail_max``, and open the breaker for every tenant.
+    """
+    return client._has_endpoint_override(kwargs)
 
 
 @llm_registry.register("vllm")
@@ -83,10 +282,12 @@ class VLLMClient(LLM):
         self._api_key = api_key
         self._enable_thinking = enable_thinking
         self._defaults: dict = kwargs
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
+        self._allow_custom_endpoint = custom_endpoint_override_enabled()
+        # Authorization per request, not on the client: httpx merges client-level
+        # headers into every request with no way to drop one, so the server's key
+        # would ride along to an overridden endpoint.
+        self._auth_headers: dict[str, str] = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._client = httpx.AsyncClient(timeout=timeout, headers={"Content-Type": "application/json"})
         # Same construction breadcrumb as VLLMEmbedder: the component factories
         # cache instances per endpoint name, so this fires once per configured
         # endpoint and shows which base URL/model a preset name resolved to.
@@ -97,44 +298,155 @@ class VLLMClient(LLM):
             enable_thinking=self._enable_thinking,
         ).debug(f"{type(self).__name__} ready")
 
-    def _resolve_overrides(self, kwargs: dict) -> tuple[str, str, dict[str, str] | None]:
+    def _resolve_overrides(self, kwargs: dict) -> tuple[str, str, dict[str, str], bool]:
         """Read ``metadata.llm_override`` from *kwargs* without mutating caller data.
 
         Pure read: ``kwargs`` is untouched so retries see the original override on
         every attempt. The caller strips ``metadata`` from the outbound payload via
         ``_payload_kwargs`` — every ``metadata`` key is OpenRAG-internal and never
         belongs on the wire.
+
+        Returns ``(base_url, model, headers, overridden)``. ``overridden`` says the
+        endpoint is the client's; callers need it to suppress the server's sampling
+        defaults, and reporting it here keeps the override parsed once.
         """
         base_url = self._endpoint
         model = self._model
-        override_headers: dict[str, str] | None = None
+        headers = self._auth_headers
+        overridden = False
 
-        # Only `model` may be overridden by the client. `base_url` / `api_key`
-        # are deliberately NOT read from the request: honoring a client-supplied
-        # endpoint enables SSRF (the server would issue requests to an arbitrary
-        # host, e.g. cloud metadata) and would leak the server's API key to that
-        # host. The endpoint and credentials always come from server config.
-        llm_override = (kwargs.get("metadata") or {}).get("llm_override") or {}
+        # `model` is always client-overridable; `base_url` / `api_key` only when
+        # the operator sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT.
+        llm_override = client_llm_override(kwargs.get("metadata"))
         if llm_override.get("model"):
             model = llm_override["model"]
 
-        return base_url, model, override_headers
+        if llm_override.get("base_url"):
+            if self._allow_custom_endpoint:
+                base_url, headers = self._resolve_endpoint_override(llm_override)
+                overridden = True
+            else:
+                # Otherwise the failure is opaque: `model` applies while
+                # `base_url` is dropped, so the request hits the *server's*
+                # endpoint with a third party's model name and comes back as
+                # "invalid model name".
+                logger.bind(
+                    requested_endpoint=llm_override.get("base_url"),
+                    used_endpoint=base_url,
+                    model=model,
+                ).warning(
+                    f"Ignoring llm_override.base_url — {LLM_OVERRIDE_ENDPOINT_ENV} is not enabled. "
+                    f"The request goes to the configured endpoint with model={model!r}."
+                )
+        elif llm_override:
+            logger.bind(keys=sorted(llm_override), model=model).warning(
+                "llm_override carries no base_url; only the model name is overridden"
+            )
 
-    def _chat_payload_kwargs(self, kwargs: dict) -> dict:
-        payload_kwargs = {**self._defaults, **kwargs}
-        enable_thinking = payload_kwargs.pop("enable_thinking", self._enable_thinking)
-        if enable_thinking is not None and enable_thinking is True:
+        return base_url, model, headers, overridden
+
+    def _resolve_endpoint_override(self, llm_override: Mapping) -> tuple[str, dict[str, str]]:
+        """Honor a client-supplied ``llm_override`` endpoint (opt-in, host-unrestricted).
+
+        Restores the pre-refactor contract (``base_url`` + ``api_key`` + ``model``)
+        for deployments whose clients rely on it. The *host* is deliberately
+        unconstrained; the request *shape* is what keeps this from being a read
+        primitive against internal HTTP APIs:
+
+        * **https only** — the plaintext internal services worth reaching (Milvus,
+          admin panels) stay unreachable.
+        * **No client-controlled path** — always ``{base_url}/chat/completions``,
+          or ``{base_url}/completions`` from ``generate``. A ``#`` or ``?`` would
+          truncate that suffix once concatenated and a ``..`` would traverse out of
+          it, making the override a path-picker. Tested on the raw string, not
+          ``urlsplit`` parts: a trailing ``#`` parses as an empty fragment and only
+          bites after concatenation.
+        * The server's own API key is never forwarded — the override's key, or no
+          ``Authorization`` at all.
+
+        Rejections are 4xx so ``with_retry`` (429/502/503/504) does not re-attempt.
+        """
+        candidate = str(llm_override["base_url"]).strip()
+
+        if "#" in candidate or "?" in candidate:
+            raise InferenceError(
+                "llm_override.base_url must not carry a query string or fragment",
+                code="LLM_OVERRIDE_REJECTED",
+                status_code=400,
+            )
+        try:
+            parts = urlsplit(candidate)
+        except ValueError as exc:
+            # Malformed input, e.g. the unclosed IPv6 literal `https://[::1/v1`.
+            # Uncaught it escapes the httpx handlers and error_handlers.py's
+            # OpenRAGError mapping, surfacing as an unstructured 500.
+            raise InferenceError(
+                "llm_override.base_url is not a valid URL",
+                code="LLM_OVERRIDE_REJECTED",
+                status_code=400,
+            ) from exc
+        scheme = parts.scheme.lower()
+        if scheme != "https":
+            raise InferenceError(
+                f"llm_override.base_url scheme {scheme!r} is not allowed (https only)",
+                code="LLM_OVERRIDE_REJECTED",
+                status_code=400,
+            )
+        # Decoded too: `urlsplit` leaves `%XX` alone and httpx forwards it, so
+        # `%2e%2e` arrives as `..` at a target that decodes before routing.
+        if ".." in parts.path.split("/") or ".." in unquote(parts.path).split("/"):
+            raise InferenceError(
+                "llm_override.base_url must not contain a '..' path segment",
+                code="LLM_OVERRIDE_REJECTED",
+                status_code=400,
+            )
+
+        candidate = candidate.rstrip("/")
+        api_key = llm_override.get("api_key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        logger.bind(endpoint=candidate, configured=self._endpoint).debug(
+            "Honoring client-supplied llm_override endpoint"
+        )
+        return candidate, headers
+
+    def _has_endpoint_override(self, kwargs: dict) -> bool:
+        """Is this request routed to a client-supplied endpoint?
+
+        Reads raw ``kwargs`` because the breaker predicate runs before the method
+        body. Inside the body, use the flag from ``_resolve_overrides``.
+        """
+        if not self._allow_custom_endpoint:
+            return False
+        return bool(client_llm_override(kwargs.get("metadata")).get("base_url"))
+
+    def _chat_payload_kwargs(self, kwargs: dict, *, use_defaults: bool = True) -> dict:
+        """Merge server sampling defaults under the request's own params.
+
+        ``use_defaults=False`` for a client-supplied endpoint: the defaults describe
+        the *server's* model and another provider may reject them outright (Gemini
+        400s on an unsolicited ``logprobs``). Dropping them is what made the restored
+        override actually work.
+        """
+        payload_kwargs = {**self._defaults, **kwargs} if use_defaults else dict(kwargs)
+        fallback_thinking = self._enable_thinking if use_defaults else None
+        enable_thinking = payload_kwargs.pop("enable_thinking", fallback_thinking)
+        # False must be sent too: Qwen3 templates think unless told not to.
+        if enable_thinking is not None:
             chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
             chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
             payload_kwargs["chat_template_kwargs"] = chat_template_kwargs
+        payload_kwargs = _strip_credential_fields(_strip_falsy_logprobs(payload_kwargs))
         return payload_kwargs
 
-    @with_circuit_breaker("llm")
+    @with_inference_metrics("completion", capture_usage=True)
+    @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:
-        base_url, model, headers = self._resolve_overrides(kwargs)
+        base_url, model, headers, overridden = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
-        payload = {**self._defaults, **kwargs, "model": model, "prompt": prompt}
+        payload = {**({} if overridden else self._defaults), **kwargs, "model": model, "prompt": prompt}
+        payload = _strip_credential_fields(_strip_falsy_logprobs(payload))
+        log_llm_call(caller="VLLMClient.generate", model=model, endpoint=base_url, prompt=prompt)
         try:
             resp = await self._client.post(f"{base_url}/completions", json=payload, headers=headers)
             resp.raise_for_status()
@@ -146,15 +458,23 @@ class VLLMClient(LLM):
             raise InferenceError(
                 f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
+                caller_shaped=overridden,
             ) from exc
         return _parse_response(resp)
 
-    @with_circuit_breaker("llm")
+    @with_inference_metrics("chat", capture_usage=True)
+    @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
-        base_url, model, headers = self._resolve_overrides(kwargs)
+        base_url, model, headers, overridden = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
-        payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": False}
+        payload = {
+            **self._chat_payload_kwargs(kwargs, use_defaults=not overridden),
+            "model": model,
+            "messages": messages,
+            "stream": False,
+        }
+        log_llm_call(caller="VLLMClient.chat", model=model, endpoint=base_url, messages=messages)
         try:
             resp = await self._client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
             resp.raise_for_status()
@@ -166,29 +486,70 @@ class VLLMClient(LLM):
             raise InferenceError(
                 f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
+                caller_shaped=overridden,
             ) from exc
         return _parse_response(resp)
 
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
-        base_url, model, headers = self._resolve_overrides(kwargs)
-        kwargs.pop("metadata", None)
-        payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": True}
+        base_url, model, headers, overridden = self._resolve_overrides(kwargs)
+        # Read before it is stripped: the outbound body must never carry
+        # OpenRAG-internal metadata, but the provider label is derived from it.
+        metadata = kwargs.pop("metadata", None)
+        payload = {
+            **self._chat_payload_kwargs(kwargs, use_defaults=not overridden),
+            "model": model,
+            "messages": messages,
+            "stream": True,
+        }
+        forward_usage = _request_stream_usage(payload, add_for_metrics=not overridden)
+        log_llm_call(caller="VLLMClient.stream_chat", model=model, endpoint=base_url, messages=messages, stream=True)
+        provider = resolve_provider(self, {"metadata": metadata})
+        started = time.perf_counter()
+        # Pessimistic until `[DONE]` proves the answer complete. The consumer
+        # breaks on `[DONE]` and closes this generator, which raises
+        # GeneratorExit at the yield below — indistinguishable from a client
+        # that gave up mid-answer unless completion is recorded explicitly.
+        # Assuming success instead would report every finished chat as an error.
+        outcome = "error"
         try:
             async with self._client.stream(
                 "POST", f"{base_url}/chat/completions", json=payload, headers=headers
             ) as resp:
                 if resp.status_code >= 400:
                     await resp.aread()
-                    raise InferenceError(
+                    error = InferenceError(
                         f"LLM streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
+                        caller_shaped=overridden,
                     )
+                    outcome = outcome_for(error, operation="chat")
+                    raise error
                 async for line in resp.aiter_lines():
+                    if _record_stream_usage(line) and not forward_usage:
+                        continue
+                    if line.strip() == _STREAM_DONE:
+                        outcome = "success"
                     yield line
         except httpx.ConnectError as exc:
             raise InferenceConnectionError(f"Cannot reach LLM at {base_url}") from exc
         except httpx.TimeoutException as exc:
+            outcome = "timeout"
             raise InferenceTimeoutError(f"LLM streaming request timed out at {base_url}") from exc
+        except (GeneratorExit, asyncio.CancelledError):
+            # Closed or cancelled by the consumer. After `[DONE]` that is the
+            # normal end; before it, the client gave up — not a provider error.
+            if outcome != "success":
+                outcome = "cancelled"
+            raise
+        finally:
+            # Hand-instrumented: @with_inference_metrics would time only the
+            # creation of this async generator, not the transfer.
+            record_inference(
+                provider=provider,
+                operation="chat",
+                outcome=outcome,
+                duration_seconds=time.perf_counter() - started,
+            )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -222,6 +583,12 @@ class VLLMEmbedder(Embedder):
         self._endpoint = endpoint.rstrip("/")
         self._model = model_name
         self._max_model_len = max_model_len
+        # The server's own max_model_len, read from /models by served_window()
+        # or once the server refuses our truncation (see
+        # _lower_truncation_to_served). None while unknown.
+        self._served_max_model_len: int | None = None
+        self._served_probed = False
+        self._served_probe_lock = asyncio.Lock()
         self._dimension: int | None = dimension
         # Big documents produce thousands of chunks; sending them in one request
         # overruns the endpoint's time budget. Split into `batch_size` slices and
@@ -257,18 +624,21 @@ class VLLMEmbedder(Embedder):
         if len(texts) <= self._batch_size:
             return await self._embed_batch(texts)
 
-        batches = [texts[i : i + self._batch_size] for i in range(0, len(texts), self._batch_size)]
+        # Keep each batch's start index: it is what turns a batch-local suspect
+        # position back into a position in `texts`.
+        offsets = list(range(0, len(texts), self._batch_size))
+        batches = [texts[i : i + self._batch_size] for i in offsets]
         semaphore = asyncio.Semaphore(self._embed_concurrency)
 
-        async def _run(batch: list[str]) -> list[list[float]]:
+        async def _run(batch: list[str], offset: int) -> list[list[float]]:
             async with semaphore:
-                return await self._embed_batch(batch)
+                return await self._embed_batch(batch, offset=offset)
 
         # Explicit tasks so that when one batch fails we can cancel the rest.
         # tqdm.gather (like asyncio.gather) propagates the first exception but
         # leaves the other in-flight batches running, where they would keep
         # consuming embedder capacity after embed() has already failed.
-        tasks = [asyncio.ensure_future(_run(batch)) for batch in batches]
+        tasks = [asyncio.ensure_future(_run(batch, offset)) for batch, offset in zip(batches, offsets, strict=True)]
         try:
             results = await tqdm.gather(
                 *tasks,
@@ -276,9 +646,17 @@ class VLLMEmbedder(Embedder):
             )
         except BaseException as exc:
             done = sum(1 for task in tasks if task.done() and not task.cancelled() and task.exception() is None)
-            logger.bind(batches_done=done, n_batches=len(batches), error=repr(exc)).warning(
-                "Embedding failed after {d}/{b} batches", d=done, b=len(batches)
-            )
+            # `.extra` carries the provider's raw response and, on a 400, snippets
+            # of the indexed document. Summarize instead of binding it wholesale:
+            # a failed upload of sensitive text must not copy that content into
+            # container / centralized logs. The full detail still reaches the
+            # uploader on the API error.
+            logger.bind(
+                batches_done=done,
+                n_batches=len(batches),
+                error=repr(exc),
+                error_detail=_log_safe_error_detail(exc),
+            ).warning("Embedding failed after {d}/{b} batches", d=done, b=len(batches))
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -289,20 +667,125 @@ class VLLMEmbedder(Embedder):
             vectors.extend(batch_vectors)
         return vectors
 
-    @with_circuit_breaker("embedder")
-    @with_retry(max_attempts=3)
-    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+    def _request_body(self, texts: list[str]) -> dict:
         body: dict = {"model": self._model, "input": texts}
-        if self._max_model_len is not None:
+        window = self._max_model_len
+        if window is not None and self._served_max_model_len is not None:
+            window = min(window, self._served_max_model_len)
+        if window is not None:
             # Truncate one token *below* max_model_len. vLLM pooling models
             # (e.g. Qwen3-Embedding) hang indefinitely on a request whose input
             # is exactly max_model_len tokens long (vllm-project/vllm#29496).
             # Any chunk >= max_model_len would otherwise be truncated straight
             # onto that boundary, wedging the batch forever while other batches
             # and files keep embedding.
-            body["truncate_prompt_tokens"] = max(1, self._max_model_len - 1)
+            body["truncate_prompt_tokens"] = max(1, window - 1)
+        return body
+
+    async def served_window(self) -> int | None:
+        """The ``max_model_len`` the server serves, read from ``/models`` once.
+
+        Indexing sizes chunks for the smaller of this and the configured
+        window, so a server started with a lower ``--max-model-len`` than an
+        endpoint's ``extra.max_model_len`` gets chunks it embeds whole instead
+        of truncating their tail. An unreachable server is asked again on the
+        next call; one that doesn't report the value is not.
+        """
+        if self._served_probed:
+            return self._served_max_model_len
+        async with self._served_probe_lock:
+            if self._served_probed:
+                return self._served_max_model_len
+            try:
+                served = await self._fetch_served_max_model_len()
+            except httpx.TransportError as exc:
+                logger.bind(model=self._model, base_url=self._endpoint, error=repr(exc)).warning(
+                    "Could not reach /models for the served max_model_len; asking again on the next file"
+                )
+                return self._served_max_model_len
+            except _SERVED_WINDOW_ERRORS as exc:
+                logger.bind(model=self._model, base_url=self._endpoint, error=repr(exc)).warning(
+                    "Could not read the served max_model_len from /models"
+                )
+                served = None
+            self._served_probed = True
+            if served is not None:
+                self._adopt_served_max_model_len(served)
+            return self._served_max_model_len
+
+    async def _lower_truncation_to_served(self, rejection: httpx.Response, sent: int | None) -> bool:
+        """After a 400, adopt the server's max_model_len if ours was too high.
+
+        vLLM rejects every request whose ``truncate_prompt_tokens`` exceeds the
+        served ``max_model_len``, whatever the input's length. The configured
+        value can outgrow it: an endpoint's ``extra.max_model_len`` set for a
+        bigger server, or a server redeployed with a lower ``--max-model-len``.
+        Every embedding call would then fail, indexing and search alike, so read
+        the served value from ``/models`` and truncate below it instead.
+
+        True when the request is worth resending: the rejection was about
+        truncation and the served value lowers what *sent* asked for. Batches
+        rejected concurrently each get True, the warning is logged once.
+        """
+        if sent is None or "truncate_prompt_tokens" not in rejection.text:
+            return False
         try:
-            resp = await self._client.post(f"{self._endpoint}/embeddings", json=body)
+            served = await self._fetch_served_max_model_len()
+        except (httpx.TransportError, *_SERVED_WINDOW_ERRORS) as exc:
+            logger.bind(model=self._model, base_url=self._endpoint, error=repr(exc)).warning(
+                "Could not read the served max_model_len from /models"
+            )
+            return False
+        if served is None or max(1, served - 1) >= sent:
+            return False
+        self._adopt_served_max_model_len(served)
+        return True
+
+    def _adopt_served_max_model_len(self, served: int) -> None:
+        lowered = self._served_max_model_len is None or served < self._served_max_model_len
+        self._served_max_model_len = served if lowered else self._served_max_model_len
+        if lowered and self._max_model_len is not None and served < self._max_model_len:
+            logger.bind(
+                model=self._model,
+                base_url=self._endpoint,
+                configured_max_model_len=self._max_model_len,
+                served_max_model_len=served,
+            ).warning(
+                "Embedder serves max_model_len={served}, below the configured {configured}: "
+                "embedding at {truncate} tokens and sizing new chunks for it. Set MAX_MODEL_LEN "
+                "or the endpoint's extra.max_model_len to at most {served}.",
+                served=served,
+                configured=self._max_model_len,
+                truncate=max(1, served - 1),
+            )
+
+    async def _fetch_served_max_model_len(self) -> int | None:
+        """The served model's ``max_model_len`` from ``/models``, or None.
+
+        ``max_model_len`` is a vendor extension vLLM adds to each model entry,
+        so None also covers a server that doesn't report it. Raises the
+        transport, status and parsing errors; each caller decides what an
+        unreadable answer means.
+        """
+        resp = await self._client.get(f"{self._endpoint}/models", timeout=_SERVED_WINDOW_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        for entry in resp.json().get("data") or []:
+            if entry.get("id") == self._model and entry.get("max_model_len"):
+                return int(entry["max_model_len"])
+        return None
+
+    @with_inference_metrics("embed")
+    @with_circuit_breaker("embedder")
+    @with_retry(max_attempts=3)
+    async def _embed_batch(self, texts: list[str], *, offset: int = 0) -> list[list[float]]:
+        url = f"{self._endpoint}/embeddings"
+        try:
+            body = self._request_body(texts)
+            resp = await self._client.post(url, json=body)
+            if resp.status_code == 400 and await self._lower_truncation_to_served(
+                resp, body.get("truncate_prompt_tokens")
+            ):
+                resp = await self._client.post(url, json=self._request_body(texts))
             resp.raise_for_status()
         # Transport failures must carry a retryable status so @with_retry above
         # actually fires (#704) — the translation happens inside the retried
@@ -332,12 +815,22 @@ class VLLMEmbedder(Embedder):
         except httpx.HTTPStatusError as exc:
             # Preserve the upstream status, as the LLM path already does, so 429
             # and 5xx are retried while 4xx (bad request, auth) fail fast.
+            extra: dict = {
+                "model_name": self._model,
+                "base_url": self._endpoint,
+                "error": exc.response.text[:500],
+            }
+            # A 400 usually means the embedder rejected the payload itself;
+            # pinpoint the offending chunk(s) so operators know which input to
+            # inspect (observed: literal `\u…` escapes choking a Go gateway).
+            if exc.response.status_code == 400:
+                suspect_texts = _find_suspect_escapes(texts, offset=offset)
+                if suspect_texts:
+                    extra["suspect_texts"] = suspect_texts
             raise EmbeddingAPIError(
                 f"Embedder API error ({exc.response.status_code})",
                 status_code=exc.response.status_code,
-                model_name=self._model,
-                base_url=self._endpoint,
-                error=exc.response.text,
+                **extra,
             ) from exc
 
         try:
@@ -369,6 +862,20 @@ class VLLMEmbedder(Embedder):
         await self._client.aclose()
 
 
+@embedder_registry.register("tei")
+class TEIEmbedder(VLLMEmbedder):
+    """Embedding client for Hugging Face text-embeddings-inference.
+
+    TEI serves the OpenAI-compatible ``/embeddings`` route (with or without
+    ``/v1``) but no ``/models``: the model is the one the server was started
+    with, and its input limit comes from that model, with ``--auto-truncate``
+    deciding whether a longer input is cut or refused.
+    """
+
+    async def _fetch_served_max_model_len(self) -> int | None:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # VLM (Vision-Language Model)
 # ---------------------------------------------------------------------------
@@ -395,6 +902,7 @@ class VLLMVision(VLLMClient, VLM):
         super().__init__(endpoint=endpoint, model_name=model_name, api_key=api_key, timeout=timeout, **kwargs)
         self._max_tokens = max_tokens
 
+    @with_inference_metrics("vlm")
     @with_circuit_breaker("vlm")
     @with_retry(max_attempts=2)
     async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
@@ -420,10 +928,14 @@ class VLLMVision(VLLMClient, VLM):
             "messages": messages,
             "max_tokens": self._max_tokens,
         }
+        log_llm_call(caller="VLLMVision.caption_image", model=self._model, endpoint=self._endpoint, messages=messages)
         try:
             resp = await self._client.post(
                 f"{self._endpoint}/chat/completions",
                 json=payload,
+                # Explicit since Authorization moved off the shared httpx client;
+                # captioning always uses the configured endpoint.
+                headers=self._auth_headers,
             )
             resp.raise_for_status()
         except httpx.ConnectError as exc:

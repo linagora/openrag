@@ -12,8 +12,15 @@ SUPER_ADMIN_MODE = os.getenv("SUPER_ADMIN_MODE", "false").lower() == "true"
 
 
 def current_user(request: Request):
-    """Return the authenticated user from request.state."""
-    return request.state.user
+    """Return the authenticated user from request.state.
+
+    AuthMiddleware sets it on every request it lets through to a protected
+    route; answer 401 if it is missing rather than fail on the attribute.
+    """
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthenticated")
+    return user
 
 
 def current_user_partitions(request: Request):

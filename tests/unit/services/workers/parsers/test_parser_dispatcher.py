@@ -36,7 +36,21 @@ def _config(
         concurrency_limit=20,
         enable_thinking=openai_loader_enable_thinking,
     )
-    loader = SimpleNamespace(file_loaders=file_loaders, image_captioning=image_captioning, openai=openai)
+    transcriber = SimpleNamespace(
+        base_url="http://transcriber:8000/v1",
+        api_key="k",
+        model_name="asr-model",
+        timeout=60,
+        direct_upload_suffixes={".mp3", ".wav"},
+        use_whisper_lang_detector=False,
+        max_concurrent_chunks=1,
+    )
+    loader = SimpleNamespace(
+        file_loaders=file_loaders,
+        image_captioning=image_captioning,
+        openai=openai,
+        transcriber=transcriber,
+    )
     vlm = SimpleNamespace(
         base_url=vlm_base_url,
         model="m",
@@ -81,9 +95,7 @@ class _FakeParser:
 )
 def test_resolve_backend(filename: str, content_type: DocumentType, expected_backend: str) -> None:
     disp = ParserDispatcher(_config())
-    from services.workers.parsers.parser_dispatcher import _suffix
-
-    assert disp._resolve_backend(content_type, _suffix(filename)) == expected_backend
+    assert disp._resolve_backend(content_type, Document.type_extension(filename)) == expected_backend
 
 
 def test_resolve_pdf_backend_variants() -> None:
@@ -95,6 +107,41 @@ def test_resolve_pdf_backend_variants() -> None:
 def test_resolve_audio_backend_openai() -> None:
     disp = ParserDispatcher(_config(audio="OpenAIAudioLoader"))
     assert disp._resolve_audio_backend("mp3") == "audio_client"
+
+
+def test_audio_client_receives_live_transcription_prompt_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.parsers.parser_dispatcher as dispatcher
+
+    async def resolver() -> str | None:
+        return "Keep speaker labels."
+
+    monkeypatch.setattr(dispatcher, "_create", lambda _module, _name, **kwargs: kwargs["client"])
+
+    client = ParserDispatcher(
+        _config(audio="OpenAIAudioLoader"),
+        transcription_prompt_resolver=resolver,
+    )._build_audio_client()
+
+    assert client._transcription_prompt_resolver is resolver
+
+
+def test_audio_client_receives_live_stt_endpoint_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.parsers.parser_dispatcher as dispatcher
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    endpoint = ModelEndpointConfig(endpoint="http://moss:8000/v1", model_name="moss-transcribe-diarize")
+
+    def resolver() -> ModelEndpointConfig:
+        return endpoint
+
+    monkeypatch.setattr(dispatcher, "_create", lambda _module, _name, **kwargs: kwargs["client"])
+
+    client = ParserDispatcher(
+        _config(audio="OpenAIAudioLoader"),
+        transcription_endpoint_resolver=resolver,
+    )._build_audio_client()
+
+    assert client._transcription_endpoint_resolver is resolver
 
 
 def test_unsupported_pdf_config_raises() -> None:
@@ -227,3 +274,152 @@ def test_build_eml_wires_nested_email_parser_with_depth_limit(monkeypatch: pytes
     nested_2 = nested_1._attachment_parsers["eml"]
     nested_3 = nested_2._attachment_parsers["eml"]
     assert "eml" not in nested_3._attachment_parsers
+
+
+# ---------------------------------------------------------------------------
+# The progress watchdog stamp (openrag_ingest_last_parse_completion_timestamp_seconds)
+# ---------------------------------------------------------------------------
+
+
+class _StubParser:
+    """Minimal backend: returns a document, or raises."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+
+    async def parse(self, document: Document) -> ProcessedDocument:
+        if self.error is not None:
+            raise self.error
+        return ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="x")])
+
+    def supported_types(self) -> list[str]:
+        return [doc_type.value for doc_type in DocumentType]
+
+
+def _text_document() -> Document:
+    return Document(filename="note.txt", raw_bytes=b"x", content_type=DocumentType.TEXT)
+
+
+@pytest.mark.asyncio
+async def test_successful_parse_stamps_the_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_parse_with`` is the single point where a parse has both a backend and a
+    completion. Drop the stamp and ``openrag_ingest_last_parse_completion_timestamp_seconds``
+    is never written; the gauge is then absent, and ``OpenRagIngestStalled`` — which
+    reads ``time() - max(<gauge>)`` — silently cannot fire. An alert that cannot fire
+    is indistinguishable from a healthy system, so the call site is pinned here and
+    not only the recorder it calls.
+    """
+    import services.workers.parsers.parser_dispatcher as module
+
+    stamped: list[str] = []
+    monkeypatch.setattr(module, "record_parse_completion", lambda pool: stamped.append(pool))
+
+    disp = ParserDispatcher(_config())
+    monkeypatch.setattr(disp, "_get", lambda _name: _StubParser())
+
+    await disp.parse(_text_document())
+
+    assert stamped == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_failed_parse_stamps_only_the_first_use_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed parse must not stamp a completion — a pool whose workers are
+    wedged must stop updating it, which is what lets the watchdog's
+    ``time() - <stamp>`` climb. The one stamp it leaves is the first-use seed.
+    Also guards the success test above against passing for the wrong reason: a
+    completion stamp placed before the parse would satisfy it too.
+    """
+    import core.observability.ray_metrics as rm
+    import services.workers.parsers.parser_dispatcher as module
+
+    stamped: list[str] = []
+    seeded: list[str] = []
+    monkeypatch.setattr(module, "record_parse_completion", lambda pool: stamped.append(pool))
+    monkeypatch.setattr(rm, "_WATCHDOG_SEEDED", set())
+    monkeypatch.setattr(rm, "record_parse_completion", lambda pool, **_: seeded.append(pool) or True)
+
+    disp = ParserDispatcher(_config())
+    monkeypatch.setattr(disp, "_get", lambda _name: _StubParser(error=RuntimeError("backend wedged")))
+
+    with pytest.raises(RuntimeError, match="backend wedged"):
+        await disp.parse(_text_document())
+
+    assert stamped == []
+    assert seeded == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_preset_pdf_strategy_stamps_the_pool_that_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_PdfStrategyParser`` picks the backend itself, bypassing ``parse``. A
+    PDF indexed under a preset's ``parsing_strategy`` must still stamp its
+    pool, or the watchdog goes blind for the GPU parsers it exists for."""
+    import services.workers.parsers.parser_dispatcher as module
+
+    stamped: list[str] = []
+    monkeypatch.setattr(module, "record_parse_completion", lambda pool: stamped.append(pool))
+
+    disp = ParserDispatcher(_config(pdf="MarkerLoader"))
+    disp._by_name.update({"marker": _FakeParser(), "pymupdf": _FakeParser()})
+    pdf = Document(filename="a.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF-1.4")
+
+    await disp.for_pdf_strategy("pymupdf").parse(pdf)
+    await disp.parse(pdf)
+
+    assert stamped == ["pymupdf", "marker"]
+
+
+@pytest.mark.asyncio
+async def test_a_pool_that_never_completes_still_seeds_the_watchdog_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stamped on success only, a pool that fails from its first parse never
+    produced the series, and ``time() - max(<stamp>)`` had nothing to age: the
+    stall that starts at boot was invisible. Its first use is seeded, once per
+    backend per process."""
+    import core.observability.ray_metrics as rm
+
+    stamped: list[str] = []
+    monkeypatch.setattr(rm, "_WATCHDOG_SEEDED", set())
+    monkeypatch.setattr(rm, "record_parse_completion", lambda pool, **_: stamped.append(pool) or True)
+
+    disp = ParserDispatcher(_config())
+    monkeypatch.setattr(disp, "_get", lambda _name: _StubParser(error=RuntimeError("backend wedged")))
+
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="backend wedged"):
+            await disp.parse(_text_document())
+
+    assert stamped == ["text"]
+
+
+def test_building_the_dispatcher_leaves_pymupdf_on_its_thread():
+    """The API replicas build this dispatcher for the direct-extract path. Only
+    the indexer worker gives PyMuPDF its process pool (``configure_pymupdf_pool``),
+    so building a dispatcher — and the PyMuPDF parser in it — must not."""
+    from core.indexing.parsers.pdf import pymupdf as pymupdf_mod
+    from services.workers.parsers.parser_dispatcher import build_parser_dispatcher
+
+    # A config that asks for a pool, so pushing it from here would show.
+    config = _config()
+    config.loader.pymupdf_pool_size = 2
+    config.loader.pymupdf_parse_memory_limit_mb = 512
+    config.loader.pymupdf_max_tasks_per_child = 7
+    pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())
+    disp = build_parser_dispatcher(config)
+    disp._get("pymupdf")
+
+    assert pymupdf_mod._POOL_SETTINGS == pymupdf_mod.PyMuPDFPoolSettings()
+    assert pymupdf_mod._get_pool().uses_processes is False
+
+
+def test_configure_pymupdf_pool_pushes_the_loader_settings():
+    from core.indexing.parsers.pdf import pymupdf as pymupdf_mod
+    from services.workers.parsers.parser_dispatcher import configure_pymupdf_pool
+
+    loader = SimpleNamespace(pymupdf_pool_size=3, pymupdf_parse_memory_limit_mb=512, pymupdf_max_tasks_per_child=7)
+    try:
+        configure_pymupdf_pool(SimpleNamespace(loader=loader))
+        assert pymupdf_mod._POOL_SETTINGS == pymupdf_mod.PyMuPDFPoolSettings(
+            max_workers=3, memory_limit_mb=512, max_tasks_per_child=7
+        )
+    finally:
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())

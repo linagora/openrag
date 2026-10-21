@@ -3,8 +3,16 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { toast } from "sonner";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cancelTask, getQueueInfo, listTasks, type TaskState } from "@/lib/api/jobs";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cancelTask,
+  getQueueInfo,
+  listTasks,
+  type TaskListItem,
+  type TaskOutcome,
+  type TaskState,
+} from "@/lib/api/jobs";
+import { downloadCsv } from "@/lib/csv";
 import JobListPage from "./list";
 
 vi.mock("sonner", () => ({
@@ -15,11 +23,18 @@ vi.mock("sonner", () => ({
 }));
 
 const permissions = vi.hoisted(() => ({ isAdmin: true }));
+const auth = vi.hoisted(() => ({
+  user: { id: 7, is_admin: true },
+}));
 
 vi.mock("@/lib/permissions", () => ({
   usePermissions: () => ({
     isAdmin: permissions.isAdmin,
   }),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => auth,
 }));
 
 vi.mock("@/lib/api/jobs", async () => {
@@ -32,18 +47,44 @@ vi.mock("@/lib/api/jobs", async () => {
   };
 });
 
+vi.mock("@/lib/csv", () => ({
+  downloadCsv: vi.fn(),
+}));
+
 const cancelTaskMock = vi.mocked(cancelTask);
 const getQueueInfoMock = vi.mocked(getQueueInfo);
 const listTasksMock = vi.mocked(listTasks);
 const toastErrorMock = vi.mocked(toast.error);
+const downloadCsvMock = vi.mocked(downloadCsv);
+
+beforeAll(() => {
+  if (!Element.prototype.hasPointerCapture) {
+    Element.prototype.hasPointerCapture = () => false;
+  }
+  if (!Element.prototype.setPointerCapture) {
+    Element.prototype.setPointerCapture = () => {};
+  }
+  if (!Element.prototype.releasePointerCapture) {
+    Element.prototype.releasePointerCapture = () => {};
+  }
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = () => {};
+  }
+});
 
 const task = (
   task_id: string,
   state: TaskState,
   filename: string,
   partition = "docs",
-  timing: { created_at?: string; duration_ms?: number } = {},
-) => ({
+  timing: {
+    created_at?: string;
+    duration_ms?: number;
+    outcome?: "completed" | "completed_degraded" | "failed" | "cancelled" | "active";
+    degraded_stages?: string[];
+    error_summary?: string;
+  } = {},
+): TaskListItem => ({
   task_id,
   state,
   details: {
@@ -51,8 +92,20 @@ const task = (
     partition,
     metadata: { filename },
     user_id: 1,
+    ...(timing.degraded_stages ? { degraded_stages: timing.degraded_stages } : {}),
   },
-  ...timing,
+  created_at: timing.created_at,
+  duration_ms: timing.duration_ms,
+  error_summary: timing.error_summary,
+  outcome:
+    timing.outcome ??
+    ({
+      QUEUED: "active",
+      SERIALIZING: "active",
+      COMPLETED: "completed",
+      FAILED: "failed",
+      CANCELLED: "cancelled",
+    } satisfies Record<TaskState, TaskOutcome>)[state],
   url: `/indexer/task/${task_id}`,
 });
 
@@ -63,18 +116,26 @@ function renderJobs() {
     },
   });
 
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
         <JobListPage />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+
+  return { ...rendered, queryClient };
+}
+
+function queryRefetchInterval(queryClient: QueryClient, queryKey: readonly unknown[]) {
+  const query = queryClient.getQueryCache().find({ queryKey, exact: true });
+  return (query?.options as { refetchInterval?: number | false } | undefined)?.refetchInterval;
 }
 
 describe("JobListPage filters", () => {
   beforeEach(() => {
     permissions.isAdmin = true;
+    auth.user = { id: 7, is_admin: true };
     vi.clearAllMocks();
     cancelTaskMock.mockResolvedValue({ message: "Cancellation signal sent" });
     getQueueInfoMock.mockResolvedValue({
@@ -107,10 +168,92 @@ describe("JobListPage filters", () => {
     await userEvent.type(search, "completed");
     expect(search.value).toBe("completed");
 
-    await userEvent.click(screen.getByRole("tab", { name: "FAILED" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Failed" }));
 
     await waitFor(() => expect(search.value).toBe(""));
     expect(await screen.findByText("failed.pdf")).not.toBeNull();
+  });
+
+  it("distinguishes completed jobs with degraded enrichment", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("degraded-task", "COMPLETED", "degraded.pdf", "docs", {
+          outcome: "completed_degraded",
+          degraded_stages: ["caption", "topic_tag"],
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("Completed with degradation")).not.toBeNull();
+    expect(screen.getByText("Caption, Topic tagging")).not.toBeNull();
+  });
+
+  it("shows, searches, and exports failure reasons for admins", async () => {
+    const failedTask = task("failed-task", "FAILED", "failed.pdf", "docs", {
+      error_summary: "ValueError: parser failed",
+    });
+    listTasksMock.mockResolvedValue({
+      tasks: [failedTask, task("other-task", "COMPLETED", "other.pdf")],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByRole("columnheader", { name: "Failure reason" })).not.toBeNull();
+    expect(screen.getByTitle("ValueError: parser failed")).not.toBeNull();
+
+    await userEvent.type(screen.getByPlaceholderText("Search jobs..."), "parser failed");
+    await waitFor(() => expect(screen.queryByText("other.pdf")).toBeNull());
+    expect(screen.getByText("failed.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    const csvColumns = downloadCsvMock.mock.calls[0][1] as Array<{
+      header: string;
+      value: (row: TaskListItem) => unknown;
+    }>;
+    const reasonColumn = csvColumns.find((column) => column.header === "failure_reason");
+    expect(reasonColumn?.value(failedTask)).toBe("ValueError: parser failed");
+  });
+
+  it("does not show or export failure reasons for regular users", async () => {
+    permissions.isAdmin = false;
+    auth.user = { id: 7, is_admin: false };
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("failed-task", "FAILED", "failed.pdf", "docs", {
+          error_summary: "ValueError: parser failed",
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("failed.pdf")).not.toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "Failure reason" })).toBeNull();
+    expect(screen.queryByTitle("ValueError: parser failed")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+    expect(downloadCsvMock.mock.calls[0][1]).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ header: "failure_reason" })]),
+    );
+  });
+
+  it("scopes its queries by account and authorization role and polls them itself", async () => {
+    const { queryClient } = renderJobs();
+
+    await screen.findByText("completed.pdf");
+
+    const queryKeys = queryClient
+      .getQueryCache()
+      .findAll()
+      .map((query) => query.queryKey);
+
+    expect(queryKeys).toContainEqual(["tasks", 7, "admin", "all"]);
+    expect(queryKeys).toContainEqual(["queue-info", 7, "admin"]);
+    expect(queryRefetchInterval(queryClient, ["tasks", 7, "admin", "all"])).toBe(5_000);
+    expect(queryRefetchInterval(queryClient, ["queue-info", 7, "admin"])).toBe(5_000);
   });
 
   it("bulk-cancels only selected active jobs", async () => {
@@ -175,6 +318,92 @@ describe("JobListPage filters", () => {
     await userEvent.type(screen.getByPlaceholderText("Search jobs..."), "other");
 
     await waitFor(() => expect(screen.queryByText("1 selected")).toBeNull());
+  });
+
+  it("filters jobs by partition and exports the filtered rows", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("docs-task", "COMPLETED", "docs.pdf", "docs"),
+        task("archive-task", "FAILED", "archive.pdf", "archive", {
+          created_at: "2026-07-20T08:00:00Z",
+          duration_ms: 65_000,
+        }),
+        task("all-named-task", "COMPLETED", "all-named.pdf", "__all__"),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("docs.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("combobox", { name: /filter jobs by partition/i }));
+    await userEvent.click(await screen.findByRole("option", { name: "archive" }));
+
+    expect(screen.queryByText("docs.pdf")).toBeNull();
+    expect(screen.getByText("archive.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(downloadCsvMock).toHaveBeenCalledWith(
+      "openrag-jobs.csv",
+      expect.arrayContaining([
+        expect.objectContaining({ header: "created_at" }),
+        expect.objectContaining({ header: "duration_ms" }),
+      ]),
+      [expect.objectContaining({ task_id: "archive-task" })],
+    );
+
+    await userEvent.click(screen.getByRole("combobox", { name: /filter jobs by partition/i }));
+    await userEvent.click(await screen.findByRole("option", { name: "__all__" }));
+
+    expect(screen.queryByText("docs.pdf")).toBeNull();
+    expect(screen.queryByText("archive.pdf")).toBeNull();
+    expect(screen.getByText("all-named.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(downloadCsvMock).toHaveBeenLastCalledWith(
+      "openrag-jobs.csv",
+      expect.any(Array),
+      [expect.objectContaining({ task_id: "all-named-task" })],
+    );
+
+    await userEvent.click(screen.getByRole("tab", { name: "Failed" }));
+    await waitFor(() => expect(screen.getByText("docs.pdf")).not.toBeNull());
+  });
+
+  it("exports degraded outcomes and stages", async () => {
+    const degradedTask = task("degraded-task", "COMPLETED", "degraded.pdf", "docs", {
+      outcome: "completed_degraded",
+      degraded_stages: ["caption", "topic_tag"],
+    });
+    listTasksMock.mockResolvedValue({ tasks: [degradedTask] });
+
+    renderJobs();
+
+    expect(await screen.findByText("degraded.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    const columns = downloadCsvMock.mock.calls[0][1] as Array<{
+      header: string;
+      value: (row: TaskListItem) => unknown;
+    }>;
+    const exported = Object.fromEntries(columns.map((column) => [column.header, column.value(degradedTask)]));
+    expect(exported).toMatchObject({
+      outcome: "completed_degraded",
+      degraded_stages: "caption,topic_tag",
+    });
+  });
+
+  it("reports CSV download failures", async () => {
+    downloadCsvMock.mockImplementationOnce(() => {
+      throw new Error("downloads unavailable");
+    });
+    renderJobs();
+
+    expect(await screen.findByText("completed.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(toastErrorMock).toHaveBeenCalledWith("CSV export failed: downloads unavailable");
   });
 
   it("keeps long job values constrained while exposing full names", async () => {
@@ -261,6 +490,7 @@ describe("JobListPage filters", () => {
 
   it("does not fetch admin-only queue information for non-admin users", async () => {
     permissions.isAdmin = false;
+    auth.user = { id: 7, is_admin: false };
 
     renderJobs();
 

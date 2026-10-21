@@ -5,6 +5,7 @@ from __future__ import annotations
 from core.models.preset import PartitionConfig
 from pydantic import Field
 
+from .auth import AuthConfig
 from .base import ConfigMixin
 from .chunking import ChunkerConfig
 from .endpoints import (
@@ -14,7 +15,7 @@ from .endpoints import (
     SemaphoreConfig,
     VLMConfig,
 )
-from .indexation import LoaderConfig
+from .indexation import IndexingCallbackConfig, LoaderConfig
 from .infrastructure import (
     PathsConfig,
     PromptsConfig,
@@ -60,6 +61,7 @@ class Settings(ConfigMixin):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
     loader: LoaderConfig = Field(default_factory=LoaderConfig)
+    indexing_callback: IndexingCallbackConfig = Field(default_factory=IndexingCallbackConfig)
     ray: RayConfig = Field(default_factory=RayConfig)
     chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)
     retriever: RetrieverConfig = Field(default_factory=SingleRetrieverConfig)
@@ -69,3 +71,4 @@ class Settings(ConfigMixin):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     presets: PresetsConfig = Field(default_factory=PresetsConfig)
     partitions: dict[str, PartitionConfig] = Field(default_factory=dict)
+    auth: AuthConfig = Field(default_factory=AuthConfig)

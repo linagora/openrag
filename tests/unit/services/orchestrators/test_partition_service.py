@@ -7,19 +7,37 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from core.utils.exceptions import NotFoundError, PartitionNotFoundError, UserNotFoundError, ValidationError
+from core.utils.exceptions import (
+    ConflictError,
+    NotFoundError,
+    PartitionNotFoundError,
+    UserNotFoundError,
+    ValidationError,
+)
 from services.orchestrators.partition_service import PartitionService
 
 
 class FakePartitionRepo:
-    def __init__(self, existing: set[str] | None = None, *, owned_count: int = 0):
+    def __init__(
+        self,
+        existing: set[str] | None = None,
+        *,
+        owned_count: int = 0,
+        embedders: dict[str, str] | None = None,
+    ):
         self._existing = existing if existing is not None else set()
         self._owned_count = owned_count
+        self._embedders = embedders or {}
         self.created: list[tuple[str, int]] = []
         self.deleted: list[str] = []
 
     async def partition_exists(self, name: str) -> bool:
         return name in self._existing
+
+    async def get_partition_row(self, name: str) -> dict | None:
+        if name not in self._existing:
+            return None
+        return {"partition": name, "embedder": self._embedders.get(name, "default")}
 
     async def list_partitions(self) -> list[dict]:
         return [{"partition": p} for p in sorted(self._existing)]
@@ -129,12 +147,17 @@ class FakeMembershipRepo:
         self,
         members: set[tuple[int, str]] | None = None,
         owned: dict[int, int] | None = None,
+        candidate_rows: list[dict] | None = None,
+        add_result: bool = True,
     ):
         self._members = members or set()
         self._owned = owned or {}  # user_id -> number of partitions owned
+        self._candidate_rows = candidate_rows or []
+        self._add_result = add_result
         self.added: list[tuple[str, int, str]] = []
         self.removed: list[tuple[str, int]] = []
         self.role_updates: list[tuple[str, int, str]] = []
+        self.candidate_calls: list[dict] = []
 
     async def list_user_partitions(self, user_id: int):
         from core.models.user import PartitionRole, UserPartition
@@ -150,9 +173,39 @@ class FakeMembershipRepo:
     async def list_partition_members(self, partition: str) -> list[dict]:
         return [{"user_id": u, "role": "viewer"} for (u, p) in self._members if p == partition]
 
+    async def list_partition_member_candidates(
+        self,
+        partition: str,
+        *,
+        search_prefix: str | None,
+        search_user_id: int | None,
+        after_id: int | None,
+        limit: int,
+    ) -> list[dict]:
+        self.candidate_calls.append(
+            {
+                "partition": partition,
+                "search_prefix": search_prefix,
+                "search_user_id": search_user_id,
+                "after_id": after_id,
+                "limit": limit,
+            }
+        )
+        rows = [
+            row
+            for row in self._candidate_rows
+            if (row["user_id"], partition) not in self._members
+            and (
+                row["user_id"] == search_user_id
+                or (search_prefix is not None and (row["display_name"] or "").lower().startswith(search_prefix.lower()))
+            )
+            and (after_id is None or row["user_id"] > after_id)
+        ]
+        return rows[:limit]
+
     async def add_partition_member(self, partition: str, user_id: int, role: str) -> bool:
         self.added.append((partition, user_id, role))
-        return True
+        return self._add_result
 
     async def remove_partition_member(self, partition: str, user_id: int) -> bool:
         self.removed.append((partition, user_id))
@@ -164,15 +217,26 @@ class FakeMembershipRepo:
 
 
 class FakeDocumentRepo:
-    def __init__(self, files: set[tuple[str, str]] | None = None, listing: dict | None = None):
+    def __init__(
+        self,
+        files: set[tuple[str, str]] | None = None,
+        listing: dict | None = None,
+        metadata: dict | None = None,
+    ):
         self._files = files or set()
         self._listing = listing if listing is not None else {}
+        self._metadata = metadata
+        self.list_calls: list[dict] = []
 
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool:
         return (file_id, partition) in self._files
 
-    async def list_partition_files(self, partition: str, limit=None) -> dict:
+    async def list_partition_files(self, partition: str, limit=None, degraded_stage=None) -> dict:
+        self.list_calls.append({"partition": partition, "limit": limit, "degraded_stage": degraded_stage})
         return self._listing
+
+    async def get_file_metadata(self, file_id: str, partition: str) -> dict | None:
+        return self._metadata
 
     async def get_files_by_relationship(self, partition: str, relationship_id: str) -> list[dict]:
         return [{"file_id": "a", "relationship_id": relationship_id}]
@@ -189,6 +253,7 @@ class FakeVectorStore:
         self.deleted_ids: list[str] = []
         self.deleted_filters: list[dict] = []
         self.last_chunk_filters: dict | None = None
+        self.last_output_fields: list[str] | None = None
 
     async def collection_exists(self, name) -> bool:
         return self._exists
@@ -208,15 +273,45 @@ class FakeVectorStore:
 
     async def query_chunks_by_filter(self, collection, filters, output_fields=None):
         self.last_chunk_filters = dict(filters)
+        self.last_output_fields = output_fields
         return [row for row in self._rows if all(row.get(key) == value for key, value in filters.items())]
 
 
 class FakeUserRepo:
-    def __init__(self, existing: set[int] | None = None):
+    def __init__(
+        self,
+        existing: set[int] | None = None,
+        display_names: dict[int, str] | None = None,
+        emails: dict[int, str] | None = None,
+    ):
         self._existing = existing if existing is not None else set()
+        self._display_names = display_names or {}
+        self._emails = emails or {}
+        self.requested_user_id_batches: list[list[int]] = []
 
     async def user_exists(self, user_id: int) -> bool:
         return user_id in self._existing
+
+    async def get_user(self, user_id: int):
+        if user_id not in self._existing:
+            return None
+        return SimpleNamespace(
+            id=user_id,
+            display_name=self._display_names.get(user_id),
+            email=self._emails.get(user_id),
+        )
+
+    async def get_users_by_ids(self, user_ids: list[int]):
+        self.requested_user_id_batches.append(list(user_ids))
+        return [
+            SimpleNamespace(
+                id=user_id,
+                display_name=self._display_names.get(user_id),
+                email=self._emails.get(user_id),
+            )
+            for user_id in user_ids
+            if user_id in self._existing
+        ]
 
 
 def _svc(
@@ -330,6 +425,36 @@ async def test_delete_partition_missing_raises_404():
 
 
 @pytest.mark.asyncio
+async def test_delete_default_partition_is_refused_before_any_cleanup():
+    # Deleting the seeded "default" partition could leave a deployment with no
+    # partition at all, an empty partition cache startup never produces.
+    # Refused before any vector or row is touched.
+    prepo = FakePartitionRepo(existing={"default", "p1"})
+    vstore = FakeVectorStore(ids=["c1"])
+    config = SimpleNamespace(partitions={"default": "cfg-default", "p1": "cfg-p1"})
+
+    with pytest.raises(ConflictError) as ei:
+        await _svc(prepo=prepo, vstore=vstore, config=config).delete_partition("default")
+
+    assert ei.value.status_code == 409
+    assert ei.value.code == "DEFAULT_PARTITION_PROTECTED"
+    assert prepo.deleted == []
+    assert vstore.deleted_filters == []
+    assert config.partitions == {"default": "cfg-default", "p1": "cfg-p1"}
+
+
+@pytest.mark.asyncio
+async def test_delete_other_partition_still_works_and_keeps_default_cached():
+    prepo = FakePartitionRepo(existing={"default", "p1"})
+    config = SimpleNamespace(partitions={"default": "cfg-default", "p1": "cfg-p1"})
+
+    await _svc(prepo=prepo, config=config).delete_partition("p1")
+
+    assert prepo.deleted == ["p1"]
+    assert config.partitions == {"default": "cfg-default"}
+
+
+@pytest.mark.asyncio
 async def test_delete_partition_deletes_vectors_before_rows():
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore(ids=["c1", "c2"])
@@ -428,6 +553,7 @@ async def test_create_partition_with_config_inside_indexing_admission_keeps_db_w
     config = SimpleNamespace(partitions={})
     svc = _svc(prepo=prepo, config=config)
     svc._validate_preset_refs = lambda row: None
+    svc._validate_embedder_ref = lambda name: None
     svc.resolve_partition_row = lambda row: f"resolved-{row['partition']}"
 
     async with svc.indexing_admission("p1") as existed:
@@ -570,6 +696,8 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
     tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
+    tsm.finish_cancellation = MagicMock()
+    tsm.finish_cancellation.remote = AsyncMock(return_value=True)
 
     with patch("ray.cancel") as cancel:
         await _svc(prepo=prepo, tsm=tsm).delete_partition("p1")
@@ -577,6 +705,7 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
     tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="p1", file_id=None)
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
 
 @pytest.mark.asyncio
@@ -606,6 +735,8 @@ async def test_delete_partition_uses_legacy_task_state_lookup_when_matching_api_
     tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
+    tsm.finish_cancellation = MagicMock()
+    tsm.finish_cancellation.remote = AsyncMock(return_value=True)
 
     with patch("ray.cancel") as cancel:
         await _svc(prepo=prepo, vstore=vstore, tsm=tsm).delete_partition("p1")
@@ -614,6 +745,7 @@ async def test_delete_partition_uses_legacy_task_state_lookup_when_matching_api_
     tsm.get_object_ref.remote.assert_called_once_with("task-1")
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
     assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
     assert prepo.deleted == ["p1"]
 
@@ -718,6 +850,35 @@ async def test_list_files_empty_listing_returns_empty_list():
 
 
 @pytest.mark.asyncio
+async def test_list_files_pushes_degraded_stage_filter_to_catalog() -> None:
+    repo = FakeDocumentRepo(listing={"files": [{"file_id": "f1", "degraded_stages": ["caption"]}]})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), drepo=repo)
+
+    files = await svc.list_files("p", limit=20, degraded_stage="caption")
+
+    assert files == [{"file_id": "f1", "degraded_stages": ["caption"]}]
+    assert repo.list_calls == [{"partition": "p", "limit": 20, "degraded_stage": "caption"}]
+
+
+@pytest.mark.asyncio
+async def test_get_file_metadata_reads_the_authoritative_catalog_row() -> None:
+    metadata = {"filename": "catalog.pdf", "degraded_stages": ["caption"]}
+    svc = _svc(drepo=FakeDocumentRepo(files={("f", "p")}, metadata=metadata))
+
+    assert await svc.get_file_metadata("p", "f") == metadata
+
+
+@pytest.mark.asyncio
+async def test_get_file_metadata_rejects_a_missing_catalog_row() -> None:
+    svc = _svc(drepo=FakeDocumentRepo(metadata=None))
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.get_file_metadata("p", "missing")
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_get_file_chunks_missing_file_404():
     svc = _svc(drepo=FakeDocumentRepo(files=set()))
     with pytest.raises(NotFoundError) as ei:
@@ -734,19 +895,23 @@ async def test_get_file_chunks_strips_text_keeps_id_and_caps_limit():
             "page": i,
             "partition": "p",
             "file_id": "f",
+            "vector": [0.1, 0.2],
             "_openrag_indexing_task_id": "task-1",
         }
         for i in range(5)
     ]
+    vstore = FakeVectorStore(rows=rows)
     svc = _svc(
         drepo=FakeDocumentRepo(files={("f", "p")}),
-        vstore=FakeVectorStore(rows=rows),
+        vstore=vstore,
     )
     out = await svc.get_file_chunks("p", "f", limit=3)
     assert len(out) == 3
     assert all("text" not in r for r in out)
+    assert all("vector" not in r for r in out)
     assert all("_id" in r for r in out)
     assert all("_openrag_indexing_task_id" not in r for r in out)
+    assert vstore.last_output_fields == ["_id", "page"]
 
 
 @pytest.mark.asyncio
@@ -768,12 +933,53 @@ async def test_list_all_chunks_excludes_vector_when_no_embedding():
     assert "_openrag_indexing_task_id" not in out[0]["metadata"]
 
 
+def _embedder_config(**fields: str | None):
+    """A config whose embedder endpoints own the given dense fields."""
+    return SimpleNamespace(
+        models=SimpleNamespace(embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()})
+    )
+
+
 @pytest.mark.asyncio
 async def test_list_all_chunks_stringifies_vector_when_included():
-    rows = [{"text": "t", "_id": "1", "partition": "p", "vector": [0.1, 0.2]}]
-    svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "e5"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5"),
+    )
     out = await svc.list_all_chunks("p", include_embedding=True)
     assert isinstance(out[0]["metadata"]["vector"], str)
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_exports_the_partitions_own_vector_not_a_leftover():
+    """A swap leaves the old embedder's vector in place, so rows carry two."""
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_old": [9.0], "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "e5"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5", old="vector_old"),
+    )
+
+    out = await svc.list_all_chunks("p", include_embedding=True)
+
+    assert out[0]["metadata"]["vector"] == str([0.1, 0.2])
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_omits_the_vector_when_the_field_is_unresolvable():
+    """Better no embedding than one from a field nothing searches."""
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "gone"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5"),
+    )
+
+    out = await svc.list_all_chunks("p", include_embedding=True)
+
+    assert "vector" not in out[0]["metadata"]
 
 
 async def test_list_all_chunks_without_file_id_filters_partition_only():
@@ -831,6 +1037,191 @@ async def test_list_members_missing_partition_404():
 
 
 @pytest.mark.asyncio
+async def test_list_member_candidates_excludes_existing_members():
+    candidate_rows = [
+        {"user_id": 1, "display_name": "Partition owner"},
+        {"user_id": 2, "display_name": "Sam"},
+        {"user_id": 3, "display_name": "Sam"},
+    ]
+    mrepo = FakeMembershipRepo(
+        {(1, "p"), (3, "p")},
+        candidate_rows=candidate_rows,
+    )
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}),
+        mrepo=mrepo,
+    )
+
+    assert await svc.list_member_candidates("p", search="  sam  ") == {
+        "candidates": [{"user_id": 2, "display_name": "Sam"}],
+        "limit": 25,
+        "has_more": False,
+        "next_cursor": None,
+    }
+    assert mrepo.candidate_calls == [
+        {
+            "partition": "p",
+            "search_prefix": "sam",
+            "search_user_id": None,
+            "after_id": None,
+            "limit": 26,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_returns_bounded_page_with_continuation():
+    candidate_rows = [{"user_id": user_id, "display_name": f"User {user_id}"} for user_id in range(1, 102)]
+    mrepo = FakeMembershipRepo(candidate_rows=candidate_rows)
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}),
+        mrepo=mrepo,
+    )
+
+    page = await svc.list_member_candidates("p", search="User", cursor=10, limit=20)
+
+    assert [candidate["user_id"] for candidate in page["candidates"]] == list(range(11, 31))
+    assert page == {
+        "candidates": candidate_rows[10:30],
+        "limit": 20,
+        "has_more": True,
+        "next_cursor": 30,
+    }
+    assert mrepo.candidate_calls == [
+        {
+            "partition": "p",
+            "search_prefix": "User",
+            "search_user_id": None,
+            "after_id": 10,
+            "limit": 21,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("search", [None, "", "  ", "sa"])
+async def test_list_member_candidates_requires_a_targeted_search(search):
+    svc = _svc(prepo=FakePartitionRepo({"p"}))
+
+    with pytest.raises(ValidationError):
+        await svc.list_member_candidates("p", search=search)
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_searches_numeric_id_and_name_prefix():
+    candidate = {"user_id": 42, "display_name": "Unrelated name"}
+    mrepo = FakeMembershipRepo(candidate_rows=[candidate])
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    assert await svc.list_member_candidates("p", search="0042") == {
+        "candidates": [candidate],
+        "limit": 25,
+        "has_more": False,
+        "next_cursor": None,
+    }
+    assert mrepo.candidate_calls[0]["search_user_id"] == 42
+    assert mrepo.candidate_calls[0]["search_prefix"] == "0042"
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_keeps_short_numeric_search_id_only():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="42")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] == 42
+    assert mrepo.candidate_calls[0]["search_prefix"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_uses_name_prefix_for_numeric_values_outside_id_range():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="2147483648")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] is None
+    assert mrepo.candidate_calls[0]["search_prefix"] == "2147483648"
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_treats_non_ascii_digits_as_a_name_prefix():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="١٢٣")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] is None
+    assert mrepo.candidate_calls[0]["search_prefix"] == "١٢٣"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("search", "cursor"),
+    [
+        ("User", 2_147_483_648),
+        ("User", -1),
+    ],
+)
+async def test_list_member_candidates_rejects_ids_outside_postgres_range(search, cursor):
+    svc = _svc(prepo=FakePartitionRepo({"p"}))
+
+    with pytest.raises(ValidationError):
+        await svc.list_member_candidates("p", search=search, cursor=cursor)
+
+
+@pytest.mark.asyncio
+async def test_list_members_does_not_lookup_user_identities():
+    mrepo = FakeMembershipRepo(members={(9, "p")})
+    urepo = FakeUserRepo({9})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
+
+    members = await svc.list_members("p")
+
+    assert members == [{"user_id": 9, "role": "viewer"}]
+    assert urepo.requested_user_id_batches == []
+
+
+@pytest.mark.asyncio
+async def test_list_members_with_identities_uses_one_lookup():
+    mrepo = FakeMembershipRepo(members={(9, "p"), (10, "p")})
+    urepo = FakeUserRepo(
+        {9, 10},
+        display_names={9: "Alice", 10: "Bob"},
+        emails={9: "alice@example.com", 10: "bob@example.com"},
+    )
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
+    members = await svc.list_members_with_identities("p")
+    assert {member["user_id"]: member for member in members} == {
+        9: {
+            "user_id": 9,
+            "role": "viewer",
+            "display_name": "Alice",
+            "email": "alice@example.com",
+        },
+        10: {
+            "user_id": 10,
+            "role": "viewer",
+            "display_name": "Bob",
+            "email": "bob@example.com",
+        },
+    }
+    assert len(urepo.requested_user_id_batches) == 1
+    assert set(urepo.requested_user_id_batches[0]) == {9, 10}
+
+
+@pytest.mark.asyncio
+async def test_list_members_missing_user_display_name_is_none():
+    mrepo = FakeMembershipRepo(members={(9, "p")})
+    urepo = FakeUserRepo(set())  # user_id 9 no longer exists
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
+    members = await svc.list_members_with_identities("p")
+    assert members[0]["display_name"] is None
+    assert members[0]["email"] is None
+
+
+@pytest.mark.asyncio
 async def test_add_member_checks_partition_and_user():
     mrepo = FakeMembershipRepo()
     svc = _svc(
@@ -840,6 +1231,22 @@ async def test_add_member_checks_partition_and_user():
     )
     await svc.add_member("p", 9, "editor")
     assert mrepo.added == [("p", 9, "editor")]
+
+
+@pytest.mark.asyncio
+async def test_add_member_rejects_existing_membership_without_changing_role():
+    mrepo = FakeMembershipRepo(add_result=False)
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}),
+        mrepo=mrepo,
+        urepo=FakeUserRepo({9}),
+    )
+
+    with pytest.raises(ConflictError) as error:
+        await svc.add_member("p", 9, "editor")
+
+    assert error.value.code == "PARTITION_MEMBER_EXISTS"
+    assert "PATCH /partition/p/users/9" in error.value.message
 
 
 @pytest.mark.asyncio

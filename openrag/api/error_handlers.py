@@ -30,6 +30,7 @@ from core.utils.exceptions import (
     AuthenticationError,
     AuthError,
     ConflictError,
+    EmbeddingError,
     InferenceError,
     InferenceTimeoutError,
     LLMParsingError,
@@ -68,6 +69,17 @@ _STATUS_MAP: dict[type[BaseException], int] = {
 }
 
 
+#: A provider's 401 or 403 is a key the provider refused, never the caller's
+#: OpenRag token. The inference clients keep it on the exception (the breaker,
+#: the retry and the metrics read it), but passed through it told a caller
+#: whose token is valid that it was not, and the admin UI drops its stored
+#: token on any 401. The caller gets a 502: an upstream failed. Unless the
+#: key was the caller's own (``InferenceError.caller_shaped``, an honoured
+#: ``llm_override`` endpoint): then it is their request, a 400.
+_PROVIDER_CREDENTIAL_STATUSES = frozenset({401, 403})
+_PROVIDER_ERRORS = (InferenceError, EmbeddingError)
+
+
 def _status_for(exc: BaseException) -> int:
     """Return the HTTP status code for ``exc``.
 
@@ -78,6 +90,8 @@ def _status_for(exc: BaseException) -> int:
     """
     explicit = getattr(exc, "status_code", None)
     if isinstance(explicit, int):
+        if explicit in _PROVIDER_CREDENTIAL_STATUSES and isinstance(exc, _PROVIDER_ERRORS):
+            return 400 if getattr(exc, "caller_shaped", False) else 502
         return explicit
     for cls in type(exc).__mro__:
         if cls in _STATUS_MAP:
@@ -110,7 +124,7 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError) -> JSON
         status_code=status_code,
         message=str(exc),
         method=request.method,
-        path=request.url.path,
+        path=request.scope["path"],
     )
     body = exc.to_dict()
     request_id = _get_request_id(request)
@@ -128,15 +142,20 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     Robot Framework suite and the existing unit assertions still match
     after the move.
     """
-    logger.exception(
+    # This handler runs in Starlette's outermost layer, after the
+    # ``RequestIdMiddleware`` ``contextualize`` scope has unwound with the
+    # exception, so the id is bound explicitly here — the one line an operator
+    # will search for by request_id must not be the one missing it.
+    request_id = _get_request_id(request)
+    log = logger.bind(request_id=request_id) if request_id is not None else logger
+    log.exception(
         "Unhandled exception",
         error_type=type(exc).__name__,
         message=str(exc),
         method=request.method,
-        path=request.url.path,
+        path=request.scope["path"],
     )
     extra: dict[str, object] = {}
-    request_id = _get_request_id(request)
     if request_id is not None:
         extra["request_id"] = request_id
     response = JSONResponse(

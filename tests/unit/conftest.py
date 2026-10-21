@@ -47,11 +47,21 @@ class MockEmbedder(Embedder):
 class MockVectorStore(VectorStore):
     """In-memory vector store keyed by collection name."""
 
+    def iter_chunk_metadata(self, collection, *, partition, file_ids=None, batch_size=500):
+        raise NotImplementedError("This test double does not model reconciliation metadata")
+
     def __init__(self) -> None:
         self.collections: dict[str, dict[str, Any]] = {}
         self.search_results: list[dict[str, Any]] = []
+        # Dense fields ensured on this store, with their dimension. A field
+        # absent here models "nothing indexed with that embedder yet".
+        self.vector_fields: dict[str, int] = {}
+        # Partial writes per field: {field: {chunk_id: vector or None}}.
+        self.written_vectors: dict[str, dict[str, list[float] | None]] = {}
 
-    async def upsert(self, chunks: list[Any], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Any], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         store = self.collections.setdefault(collection, {})
         for chunk in chunks:
             store[getattr(chunk, "id", id(chunk))] = chunk
@@ -65,6 +75,7 @@ class MockVectorStore(VectorStore):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
         return self.search_results[:top_k]
 
@@ -88,11 +99,28 @@ class MockVectorStore(VectorStore):
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         self.collections.setdefault(name, {})
 
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        created = field not in self.vector_fields
+        self.vector_fields[field] = dimension
+        return created
+
+    async def drop_vector_field(self, field: str) -> bool:
+        return self.vector_fields.pop(field, None) is not None
+
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        self.written_vectors.setdefault(field, {}).update(vectors)
+        return len(vectors)
+
     async def drop_collection(self, name: str) -> None:
         self.collections.pop(name, None)
 
     async def collection_exists(self, name: str) -> bool:
         return name in self.collections
+
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        if not vector_field:
+            return None
+        return self.vector_fields.get(vector_field)
 
     async def query_ids_by_filter(self, collection: str, filters: dict[str, Any]) -> list[str]:
         return list(self.collections.get(collection, {}).keys())
@@ -102,6 +130,7 @@ class MockVectorStore(VectorStore):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         return []
 

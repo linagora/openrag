@@ -8,9 +8,11 @@ violate the dependency rule:
     services -> core                        (NOT api, NOT di)
     core     -> (nothing in openrag)        (pure domain)
 
-Only files inside openrag/{core,services,api,di}/ are checked. Legacy
-paths (openrag/components/, openrag/routers/, openrag/models/, ...) are
-ignored until they are migrated.
+Layer boundaries are checked only inside openrag/{core,services,api,di}/.
+
+Absolute application imports must use the bare layer root, not ``openrag.``:
+mixing the two loads distinct copies of classes such as exception types.
+This import-root rule covers all Python files in openrag/, tests/, and scripts/.
 
 Usage:
     python scripts/check_layer_imports.py
@@ -88,21 +90,25 @@ def resolve_relative(file_path: Path, level: int, module: str) -> str:
 
 def check_file(path: Path) -> list[str]:
     src_layer = file_layer(path)
-    if src_layer is None:
-        return []
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except SyntaxError as exc:
         return [f"{path}:{exc.lineno}  syntax error in file: {exc.msg}"]
 
     violations: list[str] = []
-    forbidden = FORBIDDEN[src_layer]
+    forbidden = FORBIDDEN.get(src_layer, set())
     for lineno, entry in iter_imports(tree):
         if isinstance(entry, tuple) and entry and entry[0] == "__relative__":
+            if src_layer is None:
+                continue
             _, level, module = entry
             dotted = resolve_relative(path, level, module)
         else:
             dotted = entry
+            if dotted == "openrag" or dotted.startswith("openrag."):
+                rel = path.relative_to(REPO_ROOT)
+                violations.append(f"{rel}:{lineno}  use the bare import root, not {dotted} (#885)")
+                continue
         tgt_layer = layer_of(dotted)
         if tgt_layer is None or tgt_layer == src_layer:
             continue
@@ -118,8 +124,9 @@ def main() -> int:
         return 2
 
     all_violations: list[str] = []
-    for path in sorted(OPENRAG.rglob("*.py")):
-        all_violations.extend(check_file(path))
+    for root in (OPENRAG, REPO_ROOT / "tests", REPO_ROOT / "scripts"):
+        for path in sorted(root.rglob("*.py")):
+            all_violations.extend(check_file(path))
 
     if all_violations:
         print("layer import violations:")

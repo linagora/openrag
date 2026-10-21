@@ -141,12 +141,23 @@ class DoclingLoader(BasePooledParser):
 
     def __init__(self) -> None:
         self.config = load_config()
+
+    def _pool(self) -> DoclingPool:
+        """Look up the named ``DoclingPool`` actor; call once per dispatch.
+
+        Never cached: this loader lives as long as its indexer worker, and
+        ``POST /actors/DoclingPool/restart`` replaces the pool with a new actor,
+        so a cached handle would keep dispatching to the killed one. Store the
+        result before calling a method on it: Ray's ``ActorMethod`` holds its
+        handle weakly, so ``self._pool().process_pdf.remote()`` raises
+        "Lost reference to actor".
+        """
         # Create the pool lazily if bootstrap didn't: bootstrap only pre-warms the
         # globally-configured PDF backend, but a per-preset parsing_strategy can
         # select docling even when the global default is marker (see #569/#575).
         from services.workers.bootstrap import get_or_create_actor
 
-        self.worker: DoclingPool = get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")
+        return get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")
 
     def supported_types(self) -> list[str]:
         return [DocumentType.PDF.value]
@@ -173,8 +184,9 @@ class DoclingLoader(BasePooledParser):
         )
 
     async def _dispatch(self, file_path: str) -> ConversionResult:
+        pool = self._pool()
         return await call_ray_actor_with_timeout(
-            self.worker.process_pdf.remote(file_path),
+            pool.process_pdf.remote(file_path),
             timeout=self.config.loader.docling_timeout,
             task_description=f"DoclingLoader PDF loading ({file_path})",
         )

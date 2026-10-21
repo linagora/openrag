@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
+_REVISION = 7
 
 
 def _make_row(**kwargs):
@@ -130,6 +131,41 @@ async def test_list_all_with_type_filter():
     query, params = pool.executed[0]
     assert "WHERE preset_type" in query
     assert params == ("retrieval",)
+
+
+@pytest.mark.asyncio
+async def test_latest_revision_reads_the_singleton_counter():
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    pool._fetchval_result = _REVISION
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    assert await repo.latest_revision() == _REVISION
+
+    query, params = pool.executed[-1]
+    assert "SELECT revision" in query
+    assert "FROM preset_configuration_revision" in query
+    assert "WHERE singleton" in query
+    assert params == ()
+
+
+@pytest.mark.asyncio
+async def test_load_all_with_revision_reads_presets_and_revision_from_one_snapshot():
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    pool._fetch_result = [{**_make_row(name="audio"), "revision": _REVISION}]
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    rows, revision = await repo.load_all_with_revision()
+
+    assert revision == _REVISION
+    assert [row["name"] for row in rows] == ["audio"]
+    query, params = pool.executed[-1]
+    assert "FROM preset_configuration_revision AS r" in query
+    assert "LEFT JOIN pipeline_presets AS p ON true" in query
+    assert params == ()
 
 
 @pytest.mark.asyncio

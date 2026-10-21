@@ -1,6 +1,6 @@
 """VLM registry."""
 
-from openrag.core.utils.registry import Registry
+from core.utils.registry import Registry
 
 from .vlm import VLM
 

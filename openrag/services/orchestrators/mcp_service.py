@@ -32,12 +32,18 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from core.utils.conts import is_internal_metadata_key, strip_protected_metadata
-from core.utils.exceptions import ValidationError
-from core.utils.log_tail import collect_task_logs
+from core.indexing.validators import (
+    CONTENT_SNIFF_BYTES,
+    validate_content_matches_extension,
+    validate_ooxml_package,
+)
+from core.models.document import Document
+from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
+from core.utils.exceptions import ConflictError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
 from core.utils.url_safety import is_blocked_address, is_safe_url
+from core.vector_stores.vector_field import is_vector_field_key
 
 if TYPE_CHECKING:
     from core.vector_stores import VectorStore
@@ -60,7 +66,7 @@ _MAX_FUZZY_CANDIDATES = 5000
 def _strip_protected_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Drop server-managed keys from caller-supplied metadata (defense in depth).
 
-    Thin wrapper over the shared guard in ``core.utils.conts`` — the key set now
+    Thin wrapper over the shared guard in ``core.utils.consts`` — the key set now
     lives there so the REST and upload paths enforce the same one (#713).
     """
     md, removed = strip_protected_metadata(metadata)
@@ -284,7 +290,7 @@ class MCPService:
             {"partition": partition, "file_id": file_id},
             output_fields=["*"],
         )
-        metadata = _public_chunk_metadata(rows[0], exclude=("_id", "text", "vector")) if rows else {}
+        metadata = _public_chunk_metadata(rows[0], exclude=("_id", "text")) if rows else {}
         return {
             "partition": partition,
             "file_id": file_id,
@@ -332,7 +338,7 @@ class MCPService:
                 {
                     "chunk_id": row.get("_id"),
                     "content": row.get("text"),
-                    "metadata": _public_chunk_metadata(row, exclude=("text", "_id", "vector")),
+                    "metadata": _public_chunk_metadata(row, exclude=("text", "_id")),
                 }
                 for row in page
             ],
@@ -425,27 +431,6 @@ class MCPService:
                 else:
                     task["error"] = "Task failed. Contact an administrator for details."
         return {"count": len(tasks), "tasks": tasks}
-
-    async def get_task_logs(
-        self,
-        *,
-        task_id: str,
-        user_id: int | None,
-        is_admin: bool,
-        log_file: str | Path,
-        max_lines: int = 100,
-    ) -> dict[str, Any]:
-        details = await self._jobs.get_task_details(task_id)
-        if details is None:
-            raise KeyError(f"Task '{task_id}' not found")
-        if not is_admin and user_id is not None and details.get("user_id") != user_id:
-            raise PermissionError("You do not have permission to access this task")
-
-        log_path = Path(log_file)
-        if not log_path.exists():
-            raise FileNotFoundError(f"Log file not found: {log_path}")
-        logs = collect_task_logs(log_path, task_id, max_lines)
-        return {"task_id": task_id, "count": len(logs), "logs": logs}
 
     # ------------------------------------------------------------------
     # Chunk lookup
@@ -593,7 +578,15 @@ class MCPService:
             raise FileExistsError(f"File '{file_id}' already exists in partition '{partition}'")
 
         filename = Path(urlparse(url).path.rstrip("/")).name or file_id
-        suffix = Path(filename).suffix or ""
+        metadata = _strip_protected_metadata(extra_metadata)
+        metadata["source_url"] = url
+        guessed_mime, _ = mimetypes.guess_type(filename)
+        if guessed_mime and "mimetype" not in metadata:
+            metadata["mimetype"] = guessed_mime
+
+        # Downloaded under the suffix it is parsed as, like an upload, so the
+        # path-based parsers read this file rather than a second copy.
+        suffix = Document.type_suffix(filename, metadata.get("mimetype"))
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = Path(tmp.name)
         download_complete = False
@@ -606,11 +599,24 @@ class MCPService:
             if not download_complete:
                 tmp_path.unlink(missing_ok=True)
 
-        metadata = _strip_protected_metadata(extra_metadata)
-        metadata["source_url"] = url
-        guessed_mime, _ = mimetypes.guess_type(filename)
-        if guessed_mime and "mimetype" not in metadata:
-            metadata["mimetype"] = guessed_mime
+        # The extension from the URL path, or the mimetype standing in for an
+        # unknown one, selects the parser — the same trust the upload routes
+        # refuse to extend to a caller-supplied filename. Check the downloaded
+        # bytes agree with it.
+        content_verified = False
+        try:
+            extension = Document.type_extension(filename, metadata.get("mimetype"))
+            with tmp_path.open("rb") as downloaded:
+                validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
+                await asyncio.to_thread(validate_ooxml_package, extension, downloaded)
+            content_verified = True
+        finally:
+            # `finally`, not `except Exception`, and for the same reason as the
+            # download above: the package check awaits, so a cancelled request
+            # raises CancelledError here — a BaseException — and the download
+            # would otherwise be left on disk.
+            if not content_verified:
+                tmp_path.unlink(missing_ok=True)
 
         try:
             task_id = await self._indexing.add_file(
@@ -622,6 +628,19 @@ class MCPService:
                 original_filename=filename,
                 user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
             )
+        except ConflictError as exc:
+            tmp_path.unlink(missing_ok=True)
+            busy_task_id = exc.extra.get("existing_task_id") if exc.code == "DOCUMENT_INDEXING_IN_PROGRESS" else None
+            if not busy_task_id:
+                raise
+            # An MCP client only sees the error message, not ``extra``, and it
+            # polls by task id rather than by the REST status URL: name the
+            # task in the message, the way a successful call does.
+            raise ConflictError(
+                f"{exc.message} Poll get_indexation_task_status with task_id='{busy_task_id}'.",
+                code=exc.code,
+                **exc.extra,
+            ) from exc
         except BaseException:
             tmp_path.unlink(missing_ok=True)
             raise
@@ -693,4 +712,8 @@ __all__ = ["MCPService"]
 
 
 def _public_chunk_metadata(row: dict[str, Any], *, exclude: tuple[str, ...]) -> dict[str, Any]:
-    return {key: value for key, value in row.items() if key not in exclude and not is_internal_metadata_key(key)}
+    return {
+        key: value
+        for key, value in row.items()
+        if key not in exclude and not is_vector_field_key(key) and not is_internal_metadata_key(key)
+    }

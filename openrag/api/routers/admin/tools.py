@@ -12,6 +12,7 @@ tool validation/dispatch, and the 4xx/5xx error mapping whose exact
 import json
 from pathlib import Path
 
+from api.dependencies.auth import current_user
 from api.dependencies.files import (
     save_file_to_disk,
     validate_file_format,
@@ -26,7 +27,9 @@ from fastapi.responses import JSONResponse
 
 logger = get_logger()
 
-router = APIRouter()
+# No handler here reads the user, so declare the dependency on the router
+# rather than leaving it to AuthMiddleware alone.
+router = APIRouter(dependencies=[Depends(current_user)])
 
 
 AVAILABLE_TOOLS: list[ToolInfo] = [
@@ -100,7 +103,12 @@ async def execute_tool(
     file_path = None
     try:
         if tool["name"] == "extractText":
-            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
+            )
 
             logger.debug(f"Execute tool extractText with file {file.filename}")
             sanitized_content = await service.serialize_file(

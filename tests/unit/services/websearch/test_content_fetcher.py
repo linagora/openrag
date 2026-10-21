@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 from services.websearch.base import WebResult
-from services.websearch.content_fetcher import ContentFetcher, _is_safe_url
+from services.websearch.content_fetcher import ContentFetcher
 
 
 @pytest.fixture
@@ -18,60 +18,10 @@ def _make_result(url="https://example.com", snippet="short snippet"):
 
 
 # ---------------------------------------------------------------------------
-# _is_safe_url — unit tests (no network, no client)
-# ---------------------------------------------------------------------------
-
-
-class TestIsSafeUrl:
-    @pytest.mark.parametrize(
-        "url",
-        [
-            "http://localhost/secret",
-            "http://127.0.0.1/admin",
-            "http://127.0.0.42/x",
-            "http://[::1]/admin",
-            "http://10.0.0.1/internal",
-            "http://192.168.1.1/router",
-            "http://169.254.169.254/metadata",  # AWS/cloud metadata service
-            "http://0.0.0.0/x",
-            "http://100.64.0.1/cgnat",  # RFC 6598 shared address space
-            "http://198.18.0.1/bench",  # Benchmarking range
-        ],
-    )
-    def test_blocks_private_and_reserved_addresses(self, url):
-        assert _is_safe_url(url) is False
-
-    def test_blocks_decimal_encoded_loopback(self):
-        """2130706433 is 127.0.0.1 in decimal integer form."""
-        assert _is_safe_url("http://2130706433/secret") is False
-
-    def test_blocks_decimal_encoded_private(self):
-        """167772161 is 10.0.0.1 in decimal integer form."""
-        assert _is_safe_url("http://167772161/secret") is False
-
-    @pytest.mark.parametrize(
-        "url",
-        [
-            "file:///etc/passwd",
-            "ftp://example.com/x",
-            "data:text/html,<h1>hi</h1>",
-            "javascript:alert(1)",
-        ],
-    )
-    def test_blocks_non_http_schemes(self, url):
-        assert _is_safe_url(url) is False
-
-    def test_allows_public_ip(self):
-        # 93.184.216.34 is example.com — globally routable
-        assert _is_safe_url("http://93.184.216.34/page") is True
-
-    def test_allows_regular_hostname(self):
-        assert _is_safe_url("https://example.com/page") is True
-
-
-# ---------------------------------------------------------------------------
 # _fetch_single — integration tests with mock transport
 # ---------------------------------------------------------------------------
+# SSRF literal-host checks (_is_safe_url) now delegate to
+# core.utils.url_safety.is_safe_url; see tests/unit/core/utils/test_url_safety.py.
 
 
 class TestFetchSingleURL:

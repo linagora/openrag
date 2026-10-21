@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
+import os
+import pathlib
 import sys
-from unittest.mock import AsyncMock, MagicMock
+import threading
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from core.indexing.parsers.doc_parser import DocParser
+from core.indexing.parsers import doc_parser as doc_parser_module
+from core.indexing.parsers.doc_parser import _SPIRE_WATERMARK, DocParser, _strip_watermark
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 
 
@@ -64,18 +70,67 @@ class TestParse:
             text_blocks=[TextBlock(text="from-docx", page_number=1)],
             page_count=1,
         )
-        docx_parser.parse = AsyncMock(return_value=expected)
+        seen_content = None
+
+        async def capture(doc):
+            nonlocal seen_content
+            seen_content = pathlib.Path(doc.source_path).read_bytes()
+            return expected
+
+        docx_parser.parse = AsyncMock(side_effect=capture)
 
         parser = DocParser(docx_parser=docx_parser)
         result = await parser.parse(_doc_document())
 
-        assert result is expected
+        assert result == expected
         docx_parser.parse.assert_awaited_once()
         forwarded = docx_parser.parse.await_args.args[0]
-        assert forwarded.raw_bytes == dummy_docx
+        assert forwarded.raw_bytes is None, "the converted .docx was read into memory"
+        # Read while the call was live: the file is removed once parse returns.
+        assert seen_content == dummy_docx
         assert forwarded.content_type is DocumentType.DOCX
         instance.LoadFromFile.assert_called_once()
         instance.Close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_the_forwarded_document_points_at_the_converted_file_not_the_original(self, fake_spire, tmp_path):
+        """#911 trap. ``model_copy`` propagates every field, so the derived
+        ``.docx`` would carry the original ``.doc``'s ``source_path``. Since
+        ``as_temporary_file`` prefers ``source_path`` over ``raw_bytes``,
+        ``DocxParser`` would then reopen the *unconverted* ``.doc`` — parsing
+        the wrong file, with the conversion silently discarded."""
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake-doc")
+
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(b"DOCX-CONTENT")
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        seen_content = None
+
+        async def capture(doc):
+            nonlocal seen_content
+            seen_content = pathlib.Path(doc.source_path).read_bytes()
+            return ProcessedDocument(document_id="test", text_blocks=[], page_count=0)
+
+        docx_parser.parse = AsyncMock(side_effect=capture)
+
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=b"\xd0\xcf\x11\xe0fake-doc",
+            source_path=str(src),
+        )
+        await DocParser(docx_parser=docx_parser).parse(document)
+
+        forwarded = docx_parser.parse.await_args.args[0]
+        assert forwarded.source_path != str(src), "the converted .docx still points at the original .doc"
+        assert forwarded.source_path.endswith(".docx")
+        assert forwarded.raw_bytes is None, "the converted .docx was read into memory anyway"
+        assert seen_content == b"DOCX-CONTENT", "guard: the conversion must have produced the .docx"
+        # The path the derived document would have to resolve through.
+        assert document.source_path == str(src), "guard: the original must keep its own path"
 
     @pytest.mark.asyncio
     async def test_save_failure_falls_back_to_get_text(self, fake_spire):
@@ -115,3 +170,321 @@ class TestParse:
         monkeypatch.setitem(sys.modules, "spire.doc", None)
         result = await DocParser().parse(_doc_document())
         assert result.text_blocks == [] and result.page_count == 0
+
+
+class TestConvertedFileIsAPathNotBytes:
+    """#846 §3. The converted .docx used to be read whole into memory on top of
+    the .doc already there. It is handed over as a path instead."""
+
+    @pytest.mark.asyncio
+    async def test_the_converted_file_is_removed_after_the_docx_parser_returns(self, fake_spire, tmp_path):
+        """Ownership moved out of ``_convert``: nothing else will clean it up."""
+        seen: dict[str, str] = {}
+        instance = MagicMock()
+
+        def save_to_file(path: str, _fmt) -> None:
+            with open(path, "wb") as fh:
+                fh.write(b"DOCX")
+
+        instance.SaveToFile.side_effect = save_to_file
+        fake_spire.return_value = instance
+
+        async def capture(doc):
+            seen["path"] = doc.source_path
+            seen["existed"] = os.path.exists(doc.source_path)
+            return ProcessedDocument(document_id="test", text_blocks=[], page_count=0)
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(side_effect=capture)
+
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake")
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=src.read_bytes(),
+            source_path=str(src),
+        )
+
+        await DocParser(docx_parser=docx_parser).parse(document)
+
+        assert seen["existed"] is True, "the DOCX parser was handed a path that did not exist"
+        assert not os.path.exists(seen["path"]), "the converted .docx leaked"
+
+    @pytest.mark.asyncio
+    async def test_the_converted_file_is_removed_even_when_the_docx_parser_raises(self, fake_spire, tmp_path):
+        instance = MagicMock()
+        captured: dict[str, str] = {}
+
+        def save_to_file(path: str, _fmt) -> None:
+            captured["path"] = path
+            with open(path, "wb") as fh:
+                fh.write(b"DOCX")
+
+        instance.SaveToFile.side_effect = save_to_file
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(side_effect=RuntimeError("boom"))
+
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake")
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=src.read_bytes(),
+            source_path=str(src),
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await DocParser(docx_parser=docx_parser).parse(document)
+
+        assert not os.path.exists(captured["path"]), "the converted .docx leaked on the failure path"
+
+    @pytest.mark.asyncio
+    async def test_the_converted_file_is_removed_when_the_task_is_cancelled(self, fake_spire):
+        """``asyncio.to_thread`` cannot be interrupted, so a cancelled ``parse``
+        unwinds while Spire is still converting and its own cleanup runs before the
+        file exists. ``_convert`` re-checks after the write and removes it instead.
+        """
+        converting = threading.Event()
+        proceed = threading.Event()
+        captured: dict[str, str] = {}
+
+        def save_to_file(path: str, _fmt) -> None:
+            captured["path"] = path
+            converting.set()
+            proceed.wait(5)  # hold the worker until ``parse`` has unwound
+            with open(path, "wb") as fh:
+                fh.write(b"DOCX")
+
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = save_to_file
+        fake_spire.return_value = instance
+
+        task = asyncio.create_task(DocParser(docx_parser=MagicMock()).parse(_doc_document()))
+        await asyncio.to_thread(converting.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        proceed.set()
+
+        for _ in range(500):  # the uninterruptible worker outlives the cancelled task
+            if not os.path.exists(captured["path"]):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("the converted .docx leaked on cancellation")
+
+    @pytest.mark.asyncio
+    async def test_the_converted_file_is_removed_when_the_result_never_arrives(self, fake_spire, tmp_path):
+        """The window the ``abandoned`` flag alone cannot close.
+
+        ``asyncio.to_thread`` does not deliver the worker's result atomically:
+        ``_convert`` can find the flag clear, hand the path over and return, and
+        cancellation can still reach the awaiting task before the assignment
+        lands. The flag is set too late to help — the worker has already checked
+        it — and ``docx_path`` is still None, so a ``finally`` keyed on it frees
+        nothing. Reproduced by letting the conversion finish and then raising at
+        the await, exactly as a cancelled task would.
+
+        Found by CodeRabbit in review on #1000.
+        """
+        captured: dict[str, str] = {}
+
+        def save_to_file(path: str, _fmt) -> None:
+            captured["path"] = path
+            with open(path, "wb") as fh:
+                fh.write(b"DOCX")
+
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = save_to_file
+        fake_spire.return_value = instance
+
+        # A source_path on disk, as the upload routes build: ``as_temporary_file``
+        # then yields it directly, leaving ``_convert`` the only threaded call to
+        # intercept.
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake")
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=src.read_bytes(),
+            source_path=str(src),
+        )
+
+        real_to_thread = asyncio.to_thread
+
+        async def hand_off_then_lose_it(func, *args, **kwargs):
+            await real_to_thread(func, *args, **kwargs)  # the worker completes...
+            raise asyncio.CancelledError  # ...and the caller never sees the result
+
+        with patch.object(doc_parser_module.asyncio, "to_thread", hand_off_then_lose_it):
+            with pytest.raises(asyncio.CancelledError):
+                await DocParser(docx_parser=MagicMock()).parse(document)
+
+        assert captured, "guard: the conversion must have produced a file"
+        assert not os.path.exists(captured["path"]), "the converted .docx leaked at the hand-off"
+
+
+class TestAgainstTheRealDocxParser:
+    """Every other test here mocks ``DocxParser``, which hid a real break: the
+    derived document kept ``filename="legacy.doc"`` while its ``source_path``
+    was a ``.docx``, and ``as_temporary_file`` only yields a path whose suffix
+    matches the filename's. It rejected the converted file, fell through to
+    ``raw_bytes`` (None) and raised — every legacy .doc upload would have
+    failed. A mocked collaborator cannot catch a contract between two real ones.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_real_docx_parser_can_open_the_handed_over_file(self, fake_spire, tmp_path):
+        docx = pytest.importorskip("docx", reason="python-docx is only available transitively")
+        from core.indexing.parsers.docx_parser import DocxParser
+
+        built = io.BytesIO()
+        d = docx.Document()
+        d.add_paragraph("converted content")
+        d.save(built)
+        payload = built.getvalue()
+
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(payload)
+        fake_spire.return_value = instance
+
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake")
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=src.read_bytes(),
+            source_path=str(src),
+        )
+
+        result = await DocParser(docx_parser=DocxParser()).parse(document)
+
+        assert any("converted content" in b.text for b in result.text_blocks), (
+            "the real DocxParser produced nothing from the handed-over path"
+        )
+
+
+class TestStripWatermark:
+    """#1080: Spire.Doc free edition prepends an evaluation warning to every
+    converted document. Verify the helper and both conversion paths strip it."""
+
+    def test_strip_watermark_removes_standalone_line(self):
+        text = f"{_SPIRE_WATERMARK}\n\nActual content here."
+        assert _SPIRE_WATERMARK not in _strip_watermark(text)
+        assert "Actual content here." in _strip_watermark(text)
+
+    def test_strip_watermark_leaves_unrelated_text_intact(self):
+        text = "Normal paragraph.\n\nAnother paragraph."
+        assert _strip_watermark(text) == text
+
+    def test_strip_watermark_empty_string(self):
+        assert _strip_watermark("") == ""
+
+    def test_strip_watermark_only_watermark(self):
+        assert _strip_watermark(_SPIRE_WATERMARK).strip() == ""
+
+    def test_strip_watermark_does_not_match_partial_line(self):
+        partial = f"prefix {_SPIRE_WATERMARK} suffix"
+        assert _strip_watermark(partial) == partial
+
+    @pytest.mark.asyncio
+    async def test_watermark_stripped_from_docx_text_blocks(self, fake_spire):
+        """Watermark in a text block returned by DocxParser is removed (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(b"DOCX")
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(
+            return_value=ProcessedDocument(
+                document_id="test",
+                text_blocks=[
+                    TextBlock(text=_SPIRE_WATERMARK, page_number=1),
+                    TextBlock(text=f"{_SPIRE_WATERMARK}\nReal content.", page_number=1),
+                    TextBlock(text="Clean block.", page_number=2),
+                ],
+                page_count=2,
+            )
+        )
+
+        result = await DocParser(docx_parser=docx_parser).parse(_doc_document())
+
+        texts = [b.text for b in result.text_blocks]
+        assert not any(_SPIRE_WATERMARK in t for t in texts), "watermark survived into text blocks"
+        assert any("Real content." in t for t in texts), "real content was wrongly discarded"
+        assert any("Clean block." in t for t in texts), "unrelated block was wrongly discarded"
+
+    @pytest.mark.asyncio
+    async def test_watermark_only_block_is_dropped(self, fake_spire):
+        """A text block that is nothing but the watermark is dropped entirely (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(b"DOCX")
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(
+            return_value=ProcessedDocument(
+                document_id="test",
+                text_blocks=[
+                    TextBlock(text=_SPIRE_WATERMARK, page_number=1),
+                    TextBlock(text="Actual content.", page_number=1),
+                ],
+                page_count=1,
+            )
+        )
+
+        result = await DocParser(docx_parser=docx_parser).parse(_doc_document())
+
+        assert len(result.text_blocks) == 1
+        assert result.text_blocks[0].text == "Actual content."
+
+    @pytest.mark.asyncio
+    async def test_watermark_only_docx_block_zeroes_page_count(self, fake_spire):
+        """A DOCX whose only block is the watermark should produce page_count=0 (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(b"DOCX")
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(
+            return_value=ProcessedDocument(
+                document_id="test",
+                text_blocks=[TextBlock(text=_SPIRE_WATERMARK, page_number=1)],
+                page_count=1,
+            )
+        )
+
+        result = await DocParser(docx_parser=docx_parser).parse(_doc_document())
+
+        assert result.text_blocks == []
+        assert result.page_count == 0
+
+    @pytest.mark.asyncio
+    async def test_watermark_stripped_from_fallback_text(self, fake_spire):
+        """Watermark in the GetText() fallback path is stripped (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = RuntimeError("conversion failed")
+        instance.GetText.return_value = f"{_SPIRE_WATERMARK}\n\nFallback content."
+        fake_spire.return_value = instance
+
+        result = await DocParser().parse(_doc_document())
+
+        assert len(result.text_blocks) == 1
+        assert _SPIRE_WATERMARK not in result.text_blocks[0].text
+        assert "Fallback content." in result.text_blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_fallback_only_watermark_returns_empty(self, fake_spire):
+        """If GetText() returns only the watermark, the result has no text blocks (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = RuntimeError("conversion failed")
+        instance.GetText.return_value = _SPIRE_WATERMARK
+        fake_spire.return_value = instance
+
+        result = await DocParser().parse(_doc_document())
+
+        assert result.text_blocks == []
+        assert result.page_count == 0

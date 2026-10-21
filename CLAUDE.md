@@ -133,10 +133,81 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 1. `format_context()` (`openrag/core/prompts/chat_prompt_builder.py`) numbers each source (`[Source 1]`, `[Source 2]`, ...) in the context and returns `(formatted_text, included_indices)` — the indices track which docs fit within the token budget
 2. Prompt templates (`openrag/prompts/templates/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
 3. `extract_and_strip_sources_block()` (`openrag/core/utils/source_filtering.py`) strips this tag from the response before sending to the client
-4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources (falls back to all sources if none match)
+4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every presented source is kept instead (a missing tag means the model didn't report citations, not that it used none)
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
-The `extra` field in API responses is a JSON string: `{"sources": [filtered_source_list]}`.
+The `extra` field in API responses is a JSON object with these keys. It was a
+JSON-encoded *string* up to and including v2.2.2 — a breaking change for readers
+written against the old shape, which must stop calling `json.loads` on it:
+
+- `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when the model reported no citations — neither a `[Sources: ...]` tag nor an inline `[Source N]` marker — or the request skips citation reporting (structured output, direct LLM, web search with no results).
+- `presented_sources` — every source actually shown to the LLM (after `format_context()`/`format_web_context()` truncation), regardless of citation. Always present; a client can fall back to this ("sources consulted") when nothing was cited.
+- `cited_sources` — strictly what the model cited, in the tag or inline `[Source N]` markers; unlike `sources`, this never falls back to "everything" — it's `[]` whenever nothing was cited or citations weren't reported. Chainlit uses this field directly so its source panel never presents uncited retrieval candidates.
+- `citations_reported` (bool) — `true` when the model reported citations: a `[Sources: ...]` tag with sources or `none`, or inline `[Source N]` markers (an empty `[Sources: ]` counts as no tag); `false` otherwise, which is exactly when `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
+- `all_retrieved_sources` — the complete retrieval set, captured before the context-token-budget truncation, so it also includes documents/web results that didn't fit in the prompt (and, on the map-reduce path, the original retrieved docs rather than the LLM-generated summaries). Only included when the request sets `metadata.include_all_retrieved_sources: true` — it's debug/eval telemetry, gated off by default since retrieval is uncapped up to `retriever.top_k` while the context budget only fits a handful of documents.
+
+Each document source entry (`build_document_source_link`) is shaped:
+
+```json
+{
+  "source_type": "document",
+  "chunk": { "...the chunk's metadata, copied verbatim..." },
+  "rerank_score": 0.646,
+  "chunk_url": "https://host/extract/<chunk id>",
+  "file_url":  "https://host/static/<chunk id>"
+}
+```
+
+`chunk` holds what the chunk carries; the siblings are what the server computed about
+it. Two consequences worth knowing: `source_type`, `chunk_url` and `file_url` are
+authoritative and are scrubbed from `chunk` as well as overridden at the top level, so
+metadata can't spoof them in either place (the guard is structural now, not a manual
+overwrite); and `file_url` is still omitted entirely when the chunk has no `source`.
+
+Web entries (`source_type: "web"`) are unchanged and flat — `url`, `title`, `snippet`,
+no `chunk`. Clients switch on `source_type`, as before.
+
+**`rerank_score`** — the raw score the reranker gave that chunk — sits beside `chunk`,
+not inside it: it describes how *this* query ranked the chunk, and the same chunk
+retrieved by a different query scores differently.
+
+It gets there via `ScoredChunk` (`openrag/core/models/retrieval_result.py`), a `Chunk`
+subclass holding `vector_score` / `rerank_score` / `combined_score` as typed fields.
+`_rerank_chunks` (`openrag/core/retrieval/pipeline.py`) returns `ScoredChunk.from_chunk(...)`
+instead of the bare chunk, and `ScoredChunk.to_langchain()` folds the non-null scores into
+metadata at the boundary the API response is built from, and `build_document_source_link`
+lifts them back out to sit beside `chunk`. Because it subclasses `Chunk`, every
+`list[Chunk]` signature through retrieval, expansion and RRF stays valid. Only
+`rerank_score` is populated today — the vector score is still dropped in
+`vector_store_searcher._dict_to_chunk` (`score` is in its `skip` set), and nothing computes
+a combined score.
+
+The three key names are shared as `RETRIEVAL_SCORE_KEYS` (`core/utils/consts.py`) because
+promoting a metadata key to an authoritative sibling is only safe if nothing else can put it
+there. Milvus collections have a dynamic field, so upload metadata is persisted verbatim —
+`{"rerank_score": 0.99}` would come back on every read. `_dict_to_chunk` therefore drops
+those keys along with `score`, and `ScoredChunk.to_langchain()` clears them from inherited
+metadata before stamping its typed fields. A score in an API response was set by *that*
+retrieval, never by whoever uploaded the file.
+
+Three caveats:
+
+- The key is **absent**, not null, when no reranker ran (reranker disabled, or a web
+  source — web results are built separately and never reranked). Such chunks stay plain
+  `Chunk`s and carry no score field at all.
+- Its scale is provider-dependent: Infinity/vLLM return a `relevance_score`, TEI a
+  `score` with `raw_scores: false` (0–1). Compare within one response, never across
+  deployments, and don't threshold on an absolute value.
+- On the multi-query path it does **not** explain the ordering. `get_relevant_docs`
+  reranks each sub-query's list separately and then fuses them with RRF, so the final
+  order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
+  whichever list RRF saw first.
+
+### Prometheus Metrics
+
+`GET /metrics` (`openrag/api/routers/admin/monitoring.py`) serves the default `prometheus_client` registry: HTTP counters/histogram recorded by `api/middleware/instrumentation.py`, plus the API-process side of the Tier-1 metrics (`openrag_ingest_tasks`, inference, tokens, circuit breakers). Anything recorded inside a Ray actor goes through `ray.util.metrics` instead and is exported by Ray's metrics agent, not `/metrics`; specs live in `core/observability/metric_specs.py`, and `tests/unit/core/observability/test_metric_emission.py` fails the build on a spec nothing writes. Full list and query rules: `docs/content/docs/documentation/metrics_reference.md`. The path is in `DEFAULT_BYPASS_PATHS` (no user token needed) and the route enforces its own `METRICS_TOKEN` (`server.metrics_token`, blank = unset) via `require_metrics_token`; admin tokens are deliberately not accepted there — one mechanism, no fallback. It **fails closed**: token unset and `METRICS_ALLOW_UNAUTHENTICATED` (`server.metrics_allow_unauthenticated`) false → 403 on every scrape, with a startup warning from `describe_metrics_access`. The opt-in exists because the API port is exactly what the Ingress / admin-ui proxy forwards (review on PR #914), so "no token" must never silently mean "open"; a configured token always wins over the opt-in. The admin UI's System > Metrics tab reads `GET /monitoring/metrics` (`admin_router`, `require_admin`, an API prefix) instead — same exposition, separate audience, so the scrape path never touches the Postgres token lookup and an admin never holds the scrape secret. The config is read through `load_config()` rather than the request container so a scrape keeps working while the container is degraded. Compose: the monitoring overlay writes `METRICS_TOKEN` into the Prometheus container via a `configs.content` entry (Compose ≥ 2.23.1) and fails fast without it; the admin-ui nginx returns 404 on `/metrics`. Helm: `openrag.metrics.*` (pod annotations + optional ServiceMonitor with `bearerTokenFromSecret`), `env.secrets.METRICS_TOKEN`, `env.config.METRICS_ALLOW_UNAUTHENTICATED`. Docs: `docs/content/docs/documentation/prometheus_metrics.md`.
+
+Grafana dashboards live once, in `infra/charts/openrag-stack/dashboards/` (Helm's `.Files.Glob` reads only inside the chart): the Compose overlay mounts that directory, and the chart renders one sidecar ConfigMap per file (`monitoring.dashboards.*`, `templates/grafana-dashboards.yaml`). `monitoring.bundled` (default off) installs kube-prometheus-stack as a sub-chart aliased `kubePrometheusStack` — vllm-stack carries its own, and two same-named sub-charts make Helm coalesce one's defaults into the other — and implies the dashboards, the alert rules (`OpenRagTargetDown` then leaves the stack's own `openrag-monitoring-*`/`openrag-grafana` jobs out) plus the API ServiceMonitor with the bearer, so it refuses to render without `METRICS_TOKEN`. It also opens the admission-webhook port in the default-deny NetworkPolicy (`networkPolicy.webhookFrom`, empty = any source): the caller is the API server, which no selector can name. That port is on the webhook's own pod (`kubePrometheusStack.prometheusOperator.admissionWebhooks.deployment.enabled: true`), not the operator's, whose listener also serves `/debug/pprof/`. The bundled Grafana's sidecar label/labelValue/folderAnnotation can't be derived from `monitoring.dashboards.*`, so `grafana-dashboards.yaml` fails the render when they differ, and when `monitoring.dashboards.labels` restates the watched label (it would render the key twice, last value wins). Every bundled workload, the certificate hook Jobs included, has requests and a memory limit, no CPU limit (upstream sets none: BestEffort, and a ResourceQuota requiring requests refuses the hook Jobs, failing the install); the numbers come from a kind run, and the Prometheus comment in `values.yaml` carries the series-count model behind its 1Gi/3Gi. The control-plane targets (`kubeControllerManager`, `kubeScheduler`, `kubeEtcd`, `kubeProxy`) are off: on a managed control plane their absent(up) alerts fire forever. Its cluster-scoped objects have fixed names, so it is one `bundled` release per cluster. Two tests render the pinned kube-prometheus-stack archive itself (skipped where it isn't fetched, as in unit CI), so an upstream key renamed by a version bump fails them instead of silently dropping a setting. Under Argo CD the webhook's CA is written by a PostSync hook, which waits for the whole Application to be Healthy, so validation is skipped (`failurePolicy: Ignore`) until then; `admissionWebhooks.certManager.enabled` avoids the hooks. Tests: `tests/unit/infra/test_monitoring_delivery.py`; docs: `kubernetes.md`, Monitoring.
 
 ### API Routers (`openrag/api/routers/`)
 
@@ -154,12 +225,12 @@ The `extra` field in API responses is a JSON string: `{"sources": [filtered_sour
 The system uses token-based authentication with role-based access control (RBAC) for multi-tenant partition access.
 
 **Database Schema** (PostgreSQL with SQLAlchemy, in `openrag/services/persistence/schema.py`):
-- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`
+- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`, `managed_by_config` (provisioned from `auth.seed_users`)
 - `files` - File records with `file_id`, `partition_name`, `file_metadata`, `created_by` (FK to users), `relationship_id`, `parent_id`
 - `partition_memberships` - Join table linking users to partitions with roles (`owner`, `editor`, `viewer`)
 - `partitions` - Document collections with cascade delete to files and memberships
-- `workspaces` - Named file subsets within a partition for scoped search/chat
-- `workspace_files` - Join table linking workspaces to files
+- `workspaces` - Named file subsets within a partition for scoped search/chat. `workspace_id` is unique per partition only (`(partition_name, workspace_id)`), so every lookup is keyed on both; a workspace-scoped multi-partition search whose id matches several searchable partitions fails with `AmbiguousWorkspaceError` (422) instead of picking one
+- `workspace_files` - Join table linking workspaces to files by their integer PKs (`workspaces.id`, `files.id`), never by the per-partition string ids
 
 **Authentication Flow** (`AuthMiddleware` from `openrag/api/middleware/auth.py`, registered in `openrag/api/main.py`):
 1. Token extracted from `Authorization: Bearer <token>` header (or `?token=` query param for `/static` routes)
@@ -213,6 +284,8 @@ await vectordb.list_partition_members.remote(partition)
 
 **Bootstrap**: On startup, ensures admin user (id=1) exists using `AUTH_TOKEN` env var or generates a random token.
 
+**Seed users** (#1153): `auth.seed_users` (or the `SEED_USERS` env var, rendered by the chart from `openrag.seedUsers`) declares operator-managed accounts, provisioned by `PgUserRepository.ensure_seed_users` at API startup only, with each token read from the env var the entry names. Seeding only upserts rows it created (`users.managed_by_config`) and listed memberships; it never deletes, and a removed entry just has its token revoked. Full semantics: `docs/content/docs/documentation/user_auth.md`.
+
 **Multi-Partition Search**: Users can search across all their accessible partitions:
 - Search endpoint: `GET /search?partitions=all&text=query`
 - Chat completions: `POST /v1/chat/completions` with `"model": "openrag-all"`
@@ -241,6 +314,76 @@ Optional web search augmentation via the Staan API, allowing the LLM to combine 
 - `openrag/core/prompts/chat_prompt_builder.py` — `format_web_context()` formats web results as numbered source blocks
 - `openrag/services/orchestrators/query_service.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
 - `openrag/api/routers/user/chat.py` — `__prepare_sources()` merges document and web sources
+
+### Indexing Status Callbacks
+
+Indexing is asynchronous, so a client can either poll the task-status URL or
+hand OpenRag a URL to notify once the task settles.
+
+**Request fields** (multipart form, on `POST` and `PUT /indexer/partition/{partition}/file/{file_id}`):
+- `callback_url` — POSTed once the task reaches a terminal state
+- `callback_token` — sent as `Authorization: Bearer <token>` on that POST
+
+**Body:** `{"partition", "file_id", "status": "success"|"error", "metadata"}`. `metadata` is
+the upload metadata echoed back **minus** `UPLOAD_METADATA_SERVER_KEYS` (`core/utils/consts.py`:
+`source`, `filename`, `original_filename`, `file_size`, `file_id`, `content_sha256`) — an exclusion,
+not a fixed field list, so any caller-supplied field (cozy-stack's revision marker is `doc_rev`)
+travels through unrecomputed and under whatever name the caller gave it; a key the caller never sent
+is simply absent, not echoed back as `null`. The exclusion exists because the target is a
+caller-supplied URL and `_build_metadata` merges those server-computed keys into the same dict —
+`source` (the server's on-disk path) is the load-bearing one. `test_build_metadata_only_adds_keys_in_upload_metadata_server_keys`
+(`tests/unit/services/orchestrators/test_indexing_service.py`) fails the build if `_build_metadata`
+ever injects a key the constant doesn't cover.
+
+**Guarantees:** one attempt, no retries, a 5 s deadline on the request, never raises — a failed
+callback is logged and cannot change the indexing outcome. No `callback_url` → strict no-op. A
+user-cancelled task sends nothing (only a real failure notifies `"error"`), which is why the sender
+keys off the return value of `set_failed_if_not_cancelled` and the pool's pre-flight handler catches
+`Exception`, not `BaseException`.
+
+**Not guaranteed:** delivery. The send is awaited on the worker's slot, so a blackholing target costs
+up to 5 s of indexing throughput per file, and an actor lost before the task settles notifies
+nothing at all. Clients keep a timeout and fall back to polling the task-status URL.
+
+`callback_url` is checked against the SSRF guard (`is_safe_url` — scheme, loopback/private/link-local,
+decimal/hex/octal/short-form IPv4 literals, all normalized through `socket.inet_aton` so a legacy
+numeric spelling can't overflow `ipaddress.ip_address(int(...))` into a false-negative IPv6 address)
+but not resolved: neither a DNS lookup nor an https requirement is enforced beyond that literal
+check, deliberately — the URL is caller-supplied, so picking a safe target is the caller's call, not
+OpenRag's to police. Checked twice — in the router (immediate `400`) and again in the sender (a
+direct caller bypasses the router) — so accepting a hostname the sender would refuse never happens.
+`INDEXING_CALLBACK_ALLOW_PRIVATE_URLS=true` / `indexing_callback.allow_private_urls` lifts the
+*address* half of the guard for dev stacks whose target is a local instance; the scheme check always
+applies. Keep it off in production: with it on, any user allowed to upload can make the server POST
+to an internal address.
+
+**Rolling deploys:** the worker actors are named, detached and `get_if_exists`, so changing
+`process_file`'s remote contract requires bumping `_INDEXER_ACTOR_PROTOCOL_VERSION` in
+`indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`; v5 added worker-ref-registration wait
+and TSM `set_state` fencing; v7 folds in a second, independent v6 lineage — STT-preset-aware registry
+hydration plus the `_active_indexation_config` contextvar — that landed on `develop` under the same
+version string while this branch's own v6 was in flight; v8 (develop) added `max_restarts` on the
+dispatcher and workers, since Ray only applies actor options when it creates the actor and
+`get_if_exists=True` would otherwise silently keep the previous release's restart policy (#846); v8
+(this branch, independently) covers `TaskStateManager` bounding its in-memory retention and being
+replaced during bootstrap when an older actor lacks that support — that replacement changes the
+`TaskStateManager` actor id, which strands the dispatcher's and workers' cached handles to it unless
+the whole generation rolls together; v9 folds in both independent v8 lineages). Without the bump, new
+replicas attach to the previous release's actors and every submit raises `TypeError`. Old generations
+are retired with `services/workers/retire_indexer_generation.py`.
+
+**Key files:**
+- `openrag/services/workers/indexing_callback.py` — `send_indexing_callback()` (was `webhook.py`; the
+  target is a normal authenticated route now, not an unauthenticated webhook trigger)
+- `openrag/core/utils/url_safety.py` — `is_safe_url(url, *, allow_private_hosts=False)`, shared with
+  the MCP `index_url` tool (which keeps the strict default). The web-search content fetcher
+  (`services/websearch/content_fetcher.py`) does **not** import this — it has its own older,
+  un-synced `_is_safe_url`, so hardening this module does not automatically harden that one.
+- `openrag/core/config/indexation.py` — `IndexingCallbackConfig`
+
+Both fields travel the same chain as the rest of an indexing job: `api/routers/admin/indexing.py` →
+`services/orchestrators/indexing_service.py` → `core/indexing/dispatcher.py` (port) →
+`services/workers/dispatcher.py` → `indexer_pool.py` → `indexer_actor.py` → `indexing_callback.py`.
 
 ### File Quota System
 
@@ -289,7 +432,7 @@ All tests live in a separate `tests/` tree (zero test files inside the `openrag/
 - Robot Framework tests: `tests/integration/robot/api/*.robot`
 - Load/benchmark tests: `tests/load/`
 - Shared fixtures: `tests/unit/conftest.py` (mock ports), `tests/unit/api/conftest.py` (ASGI client), plus per-suite conftests
-- Test config lives in `pyproject.toml` (`[tool.pytest.ini_options]`): `testpaths = ["tests"]`, `pythonpath = ["./openrag"]`, and the `env` block sets `PROMPTS_DIR=./openrag/prompts/templates` and `LOG_DIR`
+- Test config lives in `pyproject.toml` (`[tool.pytest.ini_options]`): `testpaths = ["tests"]`, `pythonpath = ["./openrag"]`, and the `env` block sets `PROMPTS_DIR=./openrag/prompts/templates`
 
 **Running integration tests locally with act:**
 ```bash
@@ -346,6 +489,8 @@ from core.utils.logging import get_logger
 logger = get_logger()
 logger.bind(file_id=file_id, partition=partition).info("Message")
 ```
+
+stderr is the **only** sink (`core/utils/logging.py`); there is no log file. `LOG_FORMAT=text` (default) is the colorized terminal format, `LOG_FORMAT=json` writes one flat JSON object per line (`json_record`/`json_sink`: `ts`, `level`, `logger`, `function`, `line`, `msg`, `exception`, then every bound `extra` at the top level, collisions prefixed `extra_`) and routes stdlib logging (uvicorn, Ray) through loguru via `InterceptHandler` (idempotent `intercept_stdlib_logging(level)`: one interceptor on the root, foreign handlers detached not closed, root at loguru's numeric level so libraries' `isEnabledFor(DEBUG)` guards hold, chatty loggers capped at WARNING only while still at NOTSET). `RequestIdMiddleware` binds `request_id` into the loguru context for the whole request; the unhandled-500 handler binds it explicitly because it runs after that scope unwinds. Ray relays worker output onto the API stream with a `(Actor pid=N) ` prefix that the collector strips; `RAY_DEDUP_LOGS=0` and `RAY_COLOR_PREFIX=0` are required for that relay to carry valid JSON (overlay and chart set them), and with `ray.enabled=true` the chart sets `RAY_LOG_TO_STDERR=1` so workers write to their own pod's stderr (the relay only carries the current driver job's actors). Shipping: compose `infra/compose/logging.docker-compose.yaml` (Alloy, `infra/compose/alloy/config.alloy`), Helm sets `LOG_FORMAT=json` and relies on the platform DaemonSet. Docs: `docs/content/docs/documentation/loki_logs.md`.
 
 ### Import Conventions
 

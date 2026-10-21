@@ -26,25 +26,30 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.preset import PartitionConfig
-from core.utils.conts import is_internal_metadata_key
+from core.utils.consts import DEFAULT_ADMIN_USER_ID, DEFAULT_PARTITION_NAME, is_internal_metadata_key
 from core.utils.exceptions import (
     ConfigError,
+    ConflictError,
     NotFoundError,
     PartitionNotFoundError,
+    ServiceUnavailableError,
     UserNotFoundError,
     ValidationError,
 )
 from core.utils.logging import get_logger
-from services.workers.task_cancellation import cancel_active_indexing_tasks
+from core.vector_stores.vector_field import is_vector_field_key
+from services.workers.task_cancellation import cancel_active_indexing_tasks, count_active_indexing_tasks
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -61,6 +66,9 @@ logger = get_logger()
 # and the admin partition-list route would expand it to *every* partition — see
 # ``list_existant_partitions``. Matched case-insensitively.
 _RESERVED_PARTITION_NAMES = frozenset({"all"})
+_MAX_MEMBER_CANDIDATE_PAGE_SIZE = 100
+_MAX_POSTGRES_INTEGER = 2_147_483_647
+_MIN_MEMBER_CANDIDATE_SEARCH_LENGTH = 3
 
 # Columns where an explicit ``None`` in a PATCH is a real value (SQL NULL =
 # "reset to default"), not the omitted-field sentinel that the None-filter
@@ -98,8 +106,10 @@ class PartitionService:
         task_state_manager: Any = None,
         task_state_manager_factory: Callable[[], Any] | None = None,
         task_cancel_timeout: float = 60.0,
+        prompt_repo: Any = None,
     ) -> None:
         self._partition_repo = partition_repo
+        self._prompt_repo = prompt_repo
         self._membership_repo = membership_repo
         self._document_repo = document_repo
         self._vector_store = vector_store
@@ -175,6 +185,85 @@ class PartitionService:
             finally:
                 _ACTIVE_PARTITION_OPERATIONS.reset(token)
 
+    async def pin_embedder_for_write(self, partition: str) -> None:
+        """Take *partition* off the ``default`` embedder alias before it gets data (#762).
+
+        A partition on the alias follows every change of default embedder. That
+        is only harmless while it holds nothing: once it has vectors, following
+        the alias sends its queries to a model its files were never embedded
+        with. So the first upload or copy replaces the alias with the endpoint
+        it resolves to, and a later default change passes the partition by —
+        empty partitions keep following the default, indexed ones keep their
+        embedder.
+
+        Runs at admission, before the job captures the partition's embedder, so
+        the worker is handed that concrete name. Handed ``default``, it would
+        resolve the alias itself, later, against its own copy of the catalog —
+        possibly after the default moved, writing the file into another
+        embedder than the one the partition was just pinned to.
+
+        A partition emptied afterwards stays pinned: a concrete name cannot be
+        told apart from one an admin chose, and PATCHing ``embedder`` back to
+        ``default`` is how an admin opts back in.
+        """
+        if self._config is None:
+            return
+        cached = self._config.partitions.get(partition)
+        if cached is not None and cached.embedder != DEFAULT_ENDPOINT_ALIAS:
+            return
+        operation = self._active_partition_operation(partition)
+        embedder = await self._pin_default_embedder_for_operation(partition, operation=operation)
+        if embedder is None or embedder == DEFAULT_ENDPOINT_ALIAS:
+            # No such partition, or no default embedder to resolve to: nothing
+            # to pin, and the upload fails on its own further down.
+            return
+        logger.bind(partition=partition, embedder=embedder).info("Pinned partition to its embedder on first write.")
+        await self.load_partitions()
+
+    @asynccontextmanager
+    async def copy_in_flight(self, partition: str) -> AsyncIterator[None]:
+        """Held by a copy into *partition* until its file row exists.
+
+        Take it under :meth:`indexing_admission`, the fence an embedder change
+        checks it under.
+        """
+        copy_lock = getattr(self._partition_repo, "copy_lock", None)
+        if copy_lock is None:
+            yield
+            return
+        async with copy_lock(partition):
+            yield
+
+    @asynccontextmanager
+    async def operation_lock(self, partition: str) -> AsyncIterator[None]:
+        """Hold the cross-process partition fence uploads and deletes serialize on.
+
+        For operations that must not interleave with an upload admission or a
+        partition delete — an embedder swap starting or completing.
+        """
+        async with self._partition_operation_lock(partition):
+            yield
+
+    async def ensure_no_embedder_swap(self, partition: str) -> None:
+        """Refuse a write to *partition* while an embedder swap is re-embedding it.
+
+        The swap re-embeds the chunks the partition has when it starts, and
+        completes by pointing the partition at the new embedder. A file written
+        meanwhile would land in the old embedder's field and be left behind; a
+        metadata update would rewrite chunks under the swap. Repositories
+        without swap support never report one.
+        """
+        getter = getattr(self._partition_repo, "get_embedder_swap", None)
+        if getter is None:
+            return
+        swap = await getter(partition)
+        if swap is not None and swap.get("status") == EmbedderSwapStatus.RUNNING:
+            raise ConflictError(
+                f"Partition '{partition}' is being re-embedded with '{swap.get('target_embedder')}'. "
+                "Files can be added or changed once the embedder swap completes.",
+                code="EMBEDDER_SWAP_IN_PROGRESS",
+            )
+
     @asynccontextmanager
     async def _partition_operation_lock(self, partition: str) -> AsyncIterator[Any]:
         lock_factory = getattr(self._partition_repo, "partition_operation_lock", None)
@@ -230,6 +319,12 @@ class PartitionService:
             return await list_partition_rows()
         return await self._partition_repo.list_partition_rows()
 
+    async def _pin_default_embedder_for_operation(self, partition: str, *, operation: Any = None) -> str | None:
+        pin = getattr(operation, "pin_default_embedder", None)
+        if pin is not None:
+            return await pin(partition)
+        return await self._partition_repo.pin_default_embedder(partition)
+
     def _active_partition_operation(self, partition: str | None = None) -> Any:
         active_operations = _ACTIVE_PARTITION_OPERATIONS.get() or {}
         if partition is not None:
@@ -252,13 +347,17 @@ class PartitionService:
         """Per-partition stored config columns + ``document_count``, keyed by name.
 
         Lightweight list view: returns the stored columns (description, embedder,
-        preset references, dimension, chat config) WITHOUT resolving the
-        indexation/retrieval pipelines — so this stays two queries regardless of
+        preset references, chat config) plus the live vector dimension, WITHOUT
+        resolving the indexation/retrieval pipelines — so this stays two queries regardless of
         partition count. Pipeline resolution is reserved for the single-partition
         detail (``get_partition_config``). Values are JSON-ready.
         """
         rows = await self._partition_repo.list_partition_rows()
         counts = await self.file_counts_by_partition()
+        dimensions = {
+            embedder: await self._live_vector_dimension(embedder)
+            for embedder in {r.get("embedder") or "default" for r in rows}
+        }
         summaries: dict[str, dict] = {}
         for r in rows:
             name = r["partition"]
@@ -269,7 +368,7 @@ class PartitionService:
                 "embedder": r.get("embedder") or "default",
                 "indexation_preset": r.get("indexation_preset") or "default",
                 "retrieval_preset": r.get("retrieval_preset") or "default",
-                "dimension": r.get("dimension"),
+                "dimension": dimensions[r.get("embedder") or "default"],
                 "chat_history_depth": r.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
                 "chat_llm": r.get("chat_llm"),
                 "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
@@ -297,9 +396,10 @@ class PartitionService:
         this raises only if the race is lost between that check and here.
 
         When ``config`` was supplied to the service, the referenced presets
-        are validated *before* the row is written (so a bad preset name fails
-        fast and atomically), the non-default config columns are persisted,
-        and the in-memory partition cache is re-resolved.
+        and model endpoints are validated *before* the row is written (so a bad
+        preset or embedder name fails fast and atomically), the non-default
+        config columns are persisted, and the in-memory partition cache is
+        re-resolved.
         """
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
@@ -333,6 +433,7 @@ class PartitionService:
             self._validate_preset_refs({"partition": partition, **config_fields})
             if chat_llm:
                 self._validate_chat_llm_ref(chat_llm)
+            self._validate_embedder_ref(embedder)
 
         await self._create_partition_for_operation(
             partition,
@@ -345,18 +446,56 @@ class PartitionService:
         # and re-resolve the in-memory cache. Only done in the Phase 14 flow
         # where a config was supplied.
         if self._config is not None:
-            await self._update_partition_for_operation(partition, operation=operation, **config_fields)
+            try:
+                await self._update_partition_for_operation(partition, operation=operation, **config_fields)
+            except Exception:
+                # The update re-checks preset and endpoint references under its
+                # own transaction, so a concurrent delete of one lands here
+                # after the row exists. Leaving it would answer the caller with
+                # an error and their retry with "already exists" — against a
+                # partition holding none of what they asked for.
+                await self._discard_half_created_partition(partition, operation=operation)
+                raise
             await self.load_partitions()
 
         logger.info(f"Partition '{partition}' created by user_id {user_id}.")
 
+    async def _discard_half_created_partition(self, partition: str, *, operation: Any = None) -> None:
+        """Undo the row this call created when its config could not be written.
+
+        Best-effort: whatever made the update fail may well fail this too, and
+        the original error is the one worth reporting. The partition holds no
+        files — nothing has been able to write to it yet — so this only ever
+        drops an empty row.
+        """
+        try:
+            await self._delete_partition_for_operation(partition, operation=operation)
+        except Exception as exc:
+            logger.warning(
+                "Could not remove a partition whose configuration failed to persist",
+                partition=partition,
+                error=str(exc),
+            )
+
     async def delete_partition(self, partition: str) -> None:
-        """Drop a partition's vectors *and* relational rows (cross-cutting)."""
+        """Drop a partition's vectors *and* relational rows (cross-cutting).
+
+        The ``default`` partition is refused with a 409: it is seeded at
+        startup and keeps the partition catalog from ever being empty. Without
+        this guard, deleting the last partition would empty the partition
+        cache, and indexing, search and chat would fall back to the static
+        startup configuration instead of the partition presets.
+        """
         async with self._partition_operation_lock(partition) as operation:
             await self._delete_partition_locked(partition, operation=operation)
 
     async def _delete_partition_locked(self, partition: str, *, operation: Any = None) -> None:
         await self._ensure_partition_for_operation(partition, operation=operation)
+        if partition == DEFAULT_PARTITION_NAME:
+            raise ConflictError(
+                f"The '{DEFAULT_PARTITION_NAME}' partition cannot be deleted. Delete its files instead.",
+                code="DEFAULT_PARTITION_PROTECTED",
+            )
         task_state_manager = self._task_state_manager
         if task_state_manager is None and self._task_state_manager_factory is not None:
             task_state_manager = self._task_state_manager_factory()
@@ -416,27 +555,37 @@ class PartitionService:
         explicit ``None`` clears the column back to its default. When a
         preset reference changes, the merged row is validated against the
         in-memory cache *before* the write so an unknown preset name fails
-        fast, and an assigned ``chat_llm`` must name a catalogued LLM
-        endpoint; the repository additionally re-checks preset existence
-        atomically under the write's transaction, closing the race with a
-        concurrent preset delete (see
+        fast, and an assigned ``chat_llm`` / ``embedder`` must name a
+        catalogued endpoint of the matching type; the repository additionally
+        re-checks preset and endpoint existence atomically under the write's
+        transaction, closing the race with a concurrent preset delete or
+        endpoint rename (see
         :meth:`PgPartitionRepository.update_partition`).
         """
         await self._ensure_partition(partition)
         updates = {k: v for k, v in fields.items() if v is not None or k in _NULLABLE_COLUMNS}
 
-        if self._config is not None and updates:
-            current = await self._partition_repo.get_partition_row(partition)
-            if current is None:
-                raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-            self._validate_preset_refs({**current, **updates})
-            # Only the incoming value is checked — a *stored* name that went
-            # stale (endpoint deleted later) must not block unrelated PATCHes;
-            # QueryService falls back to the default LLM for those at runtime.
-            if updates.get("chat_llm"):
-                self._validate_chat_llm_ref(updates["chat_llm"])
+        # An embedder change is checked and written under the fence upload
+        # admission takes, so no upload can resolve the old embedder in between.
+        changes_embedder = self._config is not None and bool(updates.get("embedder"))
+        async with self._partition_operation_lock(partition) if changes_embedder else nullcontext():
+            if self._config is not None and updates:
+                current = await self._partition_repo.get_partition_row(partition)
+                if current is None:
+                    raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+                self._validate_preset_refs({**current, **updates})
+                # Only the incoming value is checked — a *stored* name that went
+                # stale (endpoint deleted later) must not block unrelated PATCHes;
+                # QueryService falls back to the default LLM for those at runtime.
+                if updates.get("chat_llm"):
+                    self._validate_chat_llm_ref(updates["chat_llm"])
+                if updates.get("embedder"):
+                    self._validate_embedder_ref(updates["embedder"])
+                    await self._refuse_embedder_change_with_data(partition, current, updates["embedder"])
+                if updates.get("generation_prompt_names"):
+                    await self._validate_generation_prompt_names(updates["generation_prompt_names"])
 
-        result = await self._partition_repo.update_partition(partition, **updates)
+            result = await self._partition_repo.update_partition(partition, **updates)
 
         if self._config is not None:
             await self.load_partitions()
@@ -444,7 +593,7 @@ class PartitionService:
         logger.info("Partition updated.", partition=partition, fields=sorted(updates))
         return result
 
-    async def get_partition_config(self, partition: str) -> dict:
+    async def get_partition_config(self, partition: str, *, strict_vector_dimension: bool = False) -> dict:
         """Return the resolved Phase 14 detail for a partition.
 
         Shapes a ``PartitionDetailResponse``: the stored preset references plus
@@ -456,13 +605,142 @@ class PartitionService:
         if row is None:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
         detail = self._partition_detail(row, self.resolve_partition_row(row))
+        detail["dimension"] = await self._live_vector_dimension(row.get("embedder"), strict=strict_vector_dimension)
         detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
+        detail["indexed_embedders"] = await self._indexed_embedders(partition)
         return detail
+
+    async def _refuse_embedder_change_with_data(self, partition: str, current: dict, embedder: str) -> None:
+        """Refuse moving a partition that holds data to another embedder's vector field.
+
+        Its vectors would stay in the old field, which its searches stop reading.
+        """
+        if embedder == current.get("embedder"):
+            return  # the value it already holds: nothing to refuse
+        # Ahead of the same-field shortcut below: a swap ends by pointing the
+        # partition at its target, so no other write may move the reference
+        # meanwhile — not even one the fields agree on, like the `default` alias
+        # for the endpoint it resolves to today, which a later set-default
+        # would then carry to another field under the partition's files.
+        await self.ensure_no_embedder_swap(partition)
+        embedders = self._require_config().models.embedder
+        old_field = getattr(embedders.get(current.get("embedder") or DEFAULT_ENDPOINT_ALIAS), "vector_field", None)
+        new_field = getattr(embedders.get(embedder), "vector_field", None)
+        if old_field is not None and old_field == new_field:
+            return
+        if await self._partition_repo.get_partition_file_count(partition) > 0:
+            raise ConflictError(
+                f"Partition '{partition}' has indexed files, which would disappear from search "
+                f"if its embedder changed. Use POST /partition/{partition}/embedder-swap to re-embed them.",
+                code="PARTITION_HAS_INDEXED_FILES",
+            )
+        # An upload in flight has no file row yet, but already writes with the old embedder.
+        active = await self._count_active_indexing_tasks(partition)
+        if active:
+            raise ConflictError(
+                f"Partition '{partition}' has {active} indexing task(s) in progress. "
+                "Change its embedder once they finish.",
+                code="INDEXING_IN_PROGRESS",
+            )
+        copy_in_progress = getattr(self._partition_repo, "copy_in_progress", None)
+        if copy_in_progress is not None and await copy_in_progress(partition):
+            raise ConflictError(
+                f"A file is being copied into partition '{partition}'. Change its embedder once the copy finishes.",
+                code="INDEXING_IN_PROGRESS",
+            )
+
+    async def _count_active_indexing_tasks(self, partition: str) -> int:
+        task_state_manager = self._task_state_manager
+        if task_state_manager is None and self._task_state_manager_factory is not None:
+            task_state_manager = self._task_state_manager_factory()
+        if task_state_manager is None:
+            return 0
+        return await count_active_indexing_tasks(
+            task_state_manager, partition=partition, timeout=self._task_cancel_timeout
+        )
 
     async def update_partition_config(self, partition: str, **fields: object) -> dict:
         """Update a partition's preset references and return the resolved detail."""
         await self.update_partition(partition, **fields)
         return await self.get_partition_config(partition)
+
+    async def _indexed_embedders(self, partition: str) -> list[dict]:
+        """Which embedders actually produced this partition's files.
+
+        The partition row says what is configured *now*; this says what the
+        files were built with, so the difference is the set a swap left behind.
+
+        Empty when the catalog cannot answer. Files indexed before provenance
+        existed report ``embedder: null`` rather than being backfilled with the
+        current setting — a guess dressed as a record, and wrong for exactly
+        the files worth finding.
+        """
+        counter = getattr(self._document_repo, "count_files_by_embedder", None)
+        if counter is None:
+            return []
+        try:
+            return await counter(partition)
+        except Exception as exc:
+            logger.debug("Could not read per-file embedder provenance", partition=partition, error=str(exc))
+            return []
+
+    async def _live_vector_dimension(self, embedder: str | None, *, strict: bool = False) -> int | None:
+        """Dimension of the vectors ``embedder`` actually stored, or ``None``.
+
+        Replaces ``partitions.dimension``, which no code path has ever written:
+        it sits at its ``server_default`` of 1024 forever, so a client reading
+        it got a *wrong* number rather than a missing one whenever the embedder
+        was anything but 1024-d (#762 G). The column stays — it is the hook a
+        per-partition-collection topology would need — but it is no longer
+        reported as fact.
+
+        Read from the dense field of ``embedder``: ``None`` before anything was
+        indexed with it.
+
+        Ordinary partition-config reads are best effort because the dimension
+        is informational. Snapshot callers pass ``strict=True`` so an outage
+        cannot be mistaken for a real ``None`` dimension and alter its hash.
+        """
+        getter = getattr(self._vector_store, "vector_dimension", None)
+        if getter is None or self._config is None:
+            if strict:
+                raise ServiceUnavailableError(
+                    "The live vector dimension cannot be read for this partition.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                )
+            return None
+        endpoint = self._config.models.embedder.get(embedder or "default")
+        field = getattr(endpoint, "vector_field", None)
+        if field is None:
+            if strict:
+                raise ServiceUnavailableError(
+                    "The configured embedder has no vector field for this partition.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                )
+            return None
+        try:
+            return await getter(field)
+        except Exception as exc:
+            logger.debug("Could not read the live vector dimension", error=str(exc))
+            if strict:
+                raise ServiceUnavailableError(
+                    "The live vector dimension is temporarily unavailable.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                ) from exc
+            return None
+
+    async def _active_vector_field(self, partition: str) -> str | None:
+        """The dense field *partition*'s current embedder reads and writes.
+
+        ``None`` when it cannot be resolved, which callers read as "do not
+        surface an embedding" rather than as "any field will do".
+        """
+        if self._config is None:
+            return None
+        row = await self._partition_repo.get_partition_row(partition)
+        embedder = (row or {}).get("embedder") or DEFAULT_ENDPOINT_ALIAS
+        endpoint = self._config.models.embedder.get(embedder)
+        return getattr(endpoint, "vector_field", None)
 
     def _validate_preset_refs(self, row: dict) -> None:
         """Validate a row's preset references for create/update.
@@ -489,6 +767,45 @@ class PartitionService:
                 code="MODEL_ENDPOINT_NOT_FOUND",
             )
 
+    def _validate_embedder_ref(self, embedder: str) -> None:
+        """Assignment-time check: ``embedder`` must name a catalogued embedder endpoint.
+
+        Unlike :meth:`_validate_chat_llm_ref`, this is not merely a nicety.
+        ``chat_llm`` has a runtime fallback — an unknown name resolves to the
+        default LLM — so it can only be validated at assignment. The embedder
+        has no fallback: ``_build_embedder_factory`` raises a bare ``KeyError``
+        for an unknown name, taking down every upload *and* every query on the
+        partition. That is why the write is additionally re-checked against the
+        DB inside its own transaction (see
+        :meth:`PgPartitionRepository.update_partition`) rather than trusting
+        this in-memory catalog alone.
+
+        ``"default"`` is checked like any other name: it is the alias
+        ``ModelEndpointService.load_all`` files the default endpoint under, so
+        its absence means there is no embedder to index with at all.
+        """
+        if embedder not in self._require_config().models.embedder:
+            raise ValidationError(
+                f"Embedder endpoint '{embedder}' not found.",
+                code="MODEL_ENDPOINT_NOT_FOUND",
+            )
+
+    async def _validate_generation_prompt_names(self, mapping: dict[str, str]) -> None:
+        """Assignment-time check: each named generation prompt must exist.
+
+        Mirrors ``_validate_chat_llm_ref`` — guards assignment only; a stored
+        name can go stale later (the prompt may be deleted), which the resolver
+        tolerates by falling back to the global default at request time.
+        """
+        if self._prompt_repo is None:
+            return
+        for prompt_type, name in mapping.items():
+            if await self._prompt_repo.get_by_name(prompt_type, name) is None:
+                raise ValidationError(
+                    f"No '{prompt_type}' prompt named '{name}' exists.",
+                    code="PROMPT_NOT_FOUND",
+                )
+
     def _partition_detail(self, row: dict, cfg: PartitionConfig) -> dict:
         """Shape a resolved row into the ``PartitionDetailResponse`` payload."""
         return {
@@ -498,11 +815,19 @@ class PartitionService:
             "indexation_preset": row.get("indexation_preset") or "default",
             "retrieval_preset": row.get("retrieval_preset") or "default",
             "indexation_pipeline": cfg.indexation.model_dump(mode="json"),
-            "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
-            "dimension": row.get("dimension"),
+            # top_n as it applies: a preset that leaves it unset follows RERANKER_TOP_K.
+            "retrieval_pipeline": {
+                **cfg.retrieval.model_dump(mode="json"),
+                "top_n": cfg.retrieval.effective_top_n(self._config.reranker.top_k),
+            },
+            # Placeholder: the column is not the dimension of anything (see
+            # _live_vector_dimension). get_partition_config overwrites it with
+            # the live value; nothing else should read it.
+            "dimension": None,
             "created_at": row.get("created_at"),
             "chat_history_depth": row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             "chat_llm": row.get("chat_llm"),
+            "generation_prompt_names": row.get("generation_prompt_names") or {},
         }
 
     # ------------------------------------------------------------------
@@ -540,6 +865,7 @@ class PartitionService:
             # QueryService._resolve_chat_history_depth actually reads at chat time.
             chat_history_depth=row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             chat_llm=row.get("chat_llm"),
+            generation_prompt_names=row.get("generation_prompt_names") or {},
         )
 
     async def load_partitions(self) -> None:
@@ -557,12 +883,12 @@ class PartitionService:
         cache.update(resolved)
         logger.info("Loaded partition configs.", n_partitions=len(resolved))
 
-    async def seed_default_partition(self, user_id: int = 1) -> None:
+    async def seed_default_partition(self, user_id: int = DEFAULT_ADMIN_USER_ID) -> None:
         """Ensure the 'default' partition exists with default presets."""
-        if await self._partition_repo.partition_exists(name="default"):
+        if await self._partition_repo.partition_exists(name=DEFAULT_PARTITION_NAME):
             return
-        await self._partition_repo.create_partition(name="default", user_id=user_id)
-        logger.info("Seeded 'default' partition.")
+        await self._partition_repo.create_partition(name=DEFAULT_PARTITION_NAME, user_id=user_id)
+        logger.info(f"Seeded '{DEFAULT_PARTITION_NAME}' partition.")
 
     def _require_config(self) -> Settings:
         if self._config is None:
@@ -598,16 +924,36 @@ class PartitionService:
     # File / chunk reads
     # ------------------------------------------------------------------
 
-    async def list_files(self, partition: str, limit: int | None = None) -> list[dict]:
+    async def list_files(
+        self,
+        partition: str,
+        limit: int | None = None,
+        degraded_stage: str | None = None,
+    ) -> list[dict]:
         await self._ensure_partition(partition)
-        result = await self._document_repo.list_partition_files(partition=partition, limit=limit)
+        result = await self._document_repo.list_partition_files(
+            partition=partition,
+            limit=limit,
+            degraded_stage=degraded_stage,
+        )
         return result.get("files", [])
 
-    async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list[dict]:
-        """Return chunk rows (``_id`` kept, ``text`` dropped) for one file.
+    async def get_file_metadata(self, partition: str, file_id: str) -> dict:
+        """Return authoritative metadata from the partition-scoped catalog row."""
+        metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        if metadata is None:
+            raise NotFoundError(
+                f"'{file_id}' not found in partition '{partition}'",
+                code="FILE_NOT_FOUND",
+            )
+        return metadata
 
-        The router builds the extract links and strips ``_id`` from the
-        surfaced metadata, exactly as before.
+    async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list[dict]:
+        """Return chunk IDs and page numbers for one file.
+
+        The file-detail route needs only extract links and the first page
+        number. Chunk text, vectors and other per-chunk fields do not belong
+        in the file's metadata response.
         """
         _validate_limit(limit)
         if not await self.file_exists(file_id, partition):
@@ -618,11 +964,11 @@ class PartitionService:
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
-            output_fields=["*"],
+            output_fields=["_id", "page"],
         )
         if len(rows) > limit:
             rows = rows[:limit]
-        return [{k: v for k, v in row.items() if k != "text" and not is_internal_metadata_key(k)} for row in rows]
+        return [{k: row[k] for k in ("_id", "page") if k in row} for row in rows]
 
     async def list_all_chunks(
         self,
@@ -640,15 +986,19 @@ class PartitionService:
         """
         _validate_limit(limit)
         await self._ensure_partition(partition)
-        excluded = {"text"} if include_embedding else {"text", "vector"}
-        output_fields = ["*", "vector"] if include_embedding else ["*"]
+        # Which field to export: a chunk keeps the old embedder's vector after a
+        # swap (nothing clears it), so "the non-null one" is ambiguous and can
+        # return the stale space. None leaves the embedding out rather than
+        # guessing — the same stance resolve_vector_field takes.
+        active_field = await self._active_vector_field(partition) if include_embedding else None
+        excluded = {"text"}
         filters: dict[str, Any] = {"partition": partition}
         if file_id is not None:
             filters["file_id"] = file_id
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             filters,
-            output_fields=output_fields,
+            output_fields=["*"],
         )
         if limit is not None and len(rows) > limit:
             rows = rows[:limit]
@@ -660,9 +1010,12 @@ class PartitionService:
                     continue
                 if is_internal_metadata_key(k):
                     continue
-                if k == "vector":
-                    # Legacy surfaced the embedding as a flat string.
-                    v = str(np.array(v).flatten().tolist())
+                if is_vector_field_key(k):
+                    # "*" returns one dense field per embedder. Legacy
+                    # surfaced the embedding as a flat string under "vector".
+                    if k == active_field and v is not None:
+                        meta["vector"] = str(np.array(v).flatten().tolist())
+                    continue
                 meta[k] = v
             return meta
 
@@ -673,13 +1026,86 @@ class PartitionService:
     # ------------------------------------------------------------------
 
     async def list_members(self, partition: str) -> list[dict]:
+        """Return role data without identity lookups for authorization callers."""
         await self._ensure_partition(partition)
         return await self._membership_repo.list_partition_members(partition)
+
+    async def list_member_candidates(
+        self,
+        partition: str,
+        *,
+        search: str | None,
+        cursor: int | None = None,
+        limit: int = 25,
+    ) -> dict:
+        """Return matching non-members without exposing the full user directory."""
+        if cursor is not None and (cursor < 0 or cursor > _MAX_POSTGRES_INTEGER):
+            raise ValidationError("Cursor is outside the supported user ID range.")
+        if limit < 1 or limit > _MAX_MEMBER_CANDIDATE_PAGE_SIZE:
+            raise ValidationError(
+                f"Limit must be between 1 and {_MAX_MEMBER_CANDIDATE_PAGE_SIZE}.",
+            )
+
+        await self._ensure_partition(partition)
+        normalized_search = search.strip() if search else ""
+        if not normalized_search:
+            raise ValidationError("Search is required to find users.")
+
+        search_user_id: int | None = None
+        search_prefix: str | None = None
+        if normalized_search.isascii() and normalized_search.isdecimal():
+            numeric_search = int(normalized_search)
+            if numeric_search <= _MAX_POSTGRES_INTEGER:
+                search_user_id = numeric_search
+            if len(normalized_search) >= _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH:
+                search_prefix = normalized_search
+        elif len(normalized_search) < _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH:
+            raise ValidationError(
+                f"Enter at least {_MIN_MEMBER_CANDIDATE_SEARCH_LENGTH} characters or an exact user ID.",
+            )
+        else:
+            search_prefix = normalized_search
+
+        rows = await self._membership_repo.list_partition_member_candidates(
+            partition,
+            search_prefix=search_prefix,
+            search_user_id=search_user_id,
+            after_id=cursor,
+            limit=limit + 1,
+        )
+        has_more = len(rows) > limit
+        candidates = rows[:limit]
+        return {
+            "candidates": candidates,
+            "limit": limit,
+            "has_more": has_more,
+            "next_cursor": candidates[-1]["user_id"] if has_more and candidates else None,
+        }
+
+    async def list_members_with_identities(self, partition: str) -> list[dict]:
+        """Enrich the admin-facing member list with one bulk user lookup."""
+        members = await self.list_members(partition)
+        users = {
+            user.id: user for user in await self._user_repo.get_users_by_ids([member["user_id"] for member in members])
+        }
+        for member in members:
+            user = users.get(member["user_id"])
+            member["display_name"] = user.display_name if user else None
+            member["email"] = user.email if user else None
+        return members
 
     async def add_member(self, partition: str, user_id: int, role: str) -> None:
         await self._ensure_partition(partition)
         await self._ensure_user_exists(user_id)
-        await self._membership_repo.add_partition_member(partition, user_id, role)
+        created = await self._membership_repo.add_partition_member(partition, user_id, role)
+        if not created:
+            raise ConflictError(
+                (
+                    f"User {user_id} is already a member of partition '{partition}'. "
+                    f"Use PATCH /partition/{partition}/users/{user_id} to change their role."
+                ),
+                code="PARTITION_MEMBER_EXISTS",
+            )
         logger.info(f"User_id {user_id} added to partition '{partition}'.")
 
     async def remove_member(self, partition: str, user_id: int) -> None:

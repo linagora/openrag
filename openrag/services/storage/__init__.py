@@ -7,7 +7,7 @@ adapters that orchestrators consume through the core port ABCs:
   :class:`ConnectionManager` with every repository implementation under
   :mod:`services.persistence`, satisfying
   :class:`core.ports.catalog_store.CatalogStore`.
-* :class:`milvus_store.MilvusVectorStore` — Milvus 2.6 backed vector ops
+* :class:`milvus_store.MilvusVectorStore` — Milvus 3.0 backed vector ops
   satisfying :class:`core.vector_stores.VectorStore`.
 
 The Ray actor that callers know today lives at

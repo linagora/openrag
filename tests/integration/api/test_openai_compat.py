@@ -145,7 +145,7 @@ class TestSourceFiltering:
         data = response.json()
 
         assert "extra" in data
-        extra = json.loads(data["extra"])
+        extra = data["extra"]
         assert "sources" in extra
         assert isinstance(extra["sources"], list)
         assert len(extra["sources"]) > 0, "Should have at least one filtered source"
@@ -228,7 +228,7 @@ class TestSourceFiltering:
         assert finish_reason == "stop", f"Expected finish_reason='stop', got {finish_reason!r}"
         # Finish chunk should carry filtered sources in extra
         assert finish_extra is not None, "Finish chunk should have extra field"
-        extra = json.loads(finish_extra)
+        extra = finish_extra
         assert "sources" in extra
         assert isinstance(extra["sources"], list)
 
@@ -254,7 +254,7 @@ class TestWebOnlyMode:
         assert data["choices"][0]["message"]["content"]  # non-empty string
 
         # If sources present, all must be web type (no document sources in web-only mode)
-        extra = json.loads(data["extra"]) if data.get("extra") else {}
+        extra = data.get("extra") or {}
         sources = extra.get("sources", [])
         for source in sources:
             assert source.get("source_type") == "web"

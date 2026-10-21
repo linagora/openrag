@@ -1,0 +1,920 @@
+"""Unit tests for PromptService.
+
+Uses an in-memory fake repository so the resolution precedence, seeding, and
+validation logic are tested without a database. Seeding runs against the *real*
+bundled templates, which also verifies the prompt_type → config-key map lines
+up with the on-disk filenames for all managed types.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import shutil
+from hashlib import sha256
+from pathlib import Path
+from types import SimpleNamespace
+from typing import get_args
+
+import pytest
+from api.schemas.admin.prompt_schemas import PromptTypeName
+from core.config.infrastructure import PathsConfig, PromptsConfig
+from core.models.prompt import Prompt, PromptType
+from core.utils.exceptions import ConfigError, NotFoundError, ServiceUnavailableError, ValidationError
+from loguru import logger
+from services.orchestrators import prompt_seed_hashes as seed_hash_module
+from services.orchestrators import prompt_service as prompt_module
+from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
+
+
+class FakePromptRepo:
+    """Minimal in-memory PromptRepository honouring the same invariants."""
+
+    def __init__(self) -> None:
+        self.prompts: dict[str, Prompt] = {}
+
+    async def create(self, prompt: Prompt) -> Prompt:
+        if prompt.is_default:
+            for p in self.prompts.values():
+                if p.prompt_type == prompt.prompt_type:
+                    p.is_default = False
+        self.prompts[prompt.id] = prompt
+        return prompt
+
+    async def get(self, prompt_id: str) -> Prompt | None:
+        return self.prompts.get(prompt_id)
+
+    async def list(self, *, prompt_type=None, offset=0, limit=100) -> list[Prompt]:
+        rows = [p for p in self.prompts.values() if prompt_type is None or p.prompt_type == prompt_type]
+        rows.sort(key=lambda p: (p.prompt_type, p.name, p.created_at))
+        return rows[offset : offset + limit]
+
+    async def count(self, *, prompt_type=None) -> int:
+        return len([p for p in self.prompts.values() if prompt_type is None or p.prompt_type == prompt_type])
+
+    async def update(self, prompt_id: str, **fields) -> Prompt | None:
+        p = self.prompts.get(prompt_id)
+        if p is None:
+            return None
+        for k in ("name", "content"):
+            if k in fields:
+                setattr(p, k, fields[k])
+        return p
+
+    async def update_default_content_if_unchanged(
+        self, prompt_id: str, expected_name: str, old_content: str, new_content: str
+    ) -> bool:
+        p = self.prompts.get(prompt_id)
+        if p is None or not p.is_default or p.name != expected_name or p.content != old_content:
+            return False
+        p.content = new_content
+        return True
+
+    async def delete(self, prompt_id: str) -> bool:
+        return self.prompts.pop(prompt_id, None) is not None
+
+    async def get_by_name(self, prompt_type: str, name: str) -> Prompt | None:
+        return next(
+            (p for p in self.prompts.values() if p.prompt_type == prompt_type and p.name == name),
+            None,
+        )
+
+    async def reference_counts(self) -> dict[tuple[str, str], int]:
+        return getattr(self, "_ref_counts", {})
+
+    async def get_default(self, prompt_type: str) -> Prompt | None:
+        return next((p for p in self.prompts.values() if p.prompt_type == prompt_type and p.is_default), None)
+
+    async def set_default(self, prompt_id: str) -> Prompt | None:
+        target = self.prompts.get(prompt_id)
+        if target is None:
+            return None
+        for p in self.prompts.values():
+            if p.prompt_type == target.prompt_type:
+                p.is_default = False
+        target.is_default = True
+        return target
+
+
+def _service(repo: FakePromptRepo | None = None) -> PromptService:
+    config = SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig())
+    return PromptService(prompt_repo=repo or FakePromptRepo(), config=config)
+
+
+def _service_with_bundled_templates(repo: FakePromptRepo, tmp_path: Path, monkeypatch):
+    bundled_dir = tmp_path / "templates"
+    shutil.copytree(prompt_module._DEFAULT_PROMPTS_DIR, bundled_dir)
+    monkeypatch.setattr(prompt_module, "_DEFAULT_PROMPTS_DIR", bundled_dir)
+    config = SimpleNamespace(paths=PathsConfig(prompts_dir=bundled_dir), prompts=PromptsConfig())
+    return PromptService(prompt_repo=repo, config=config), bundled_dir
+
+
+def _set_seed_history(monkeypatch, prompt_type: str, *hashes: str) -> None:
+    history = dict(seed_hash_module._PROMPT_SEED_HASH_HISTORY)
+    history[prompt_type] = tuple(hashes)
+    monkeypatch.setattr(prompt_module, "_PROMPT_SEED_HASH_HISTORY", history)
+
+
+class _ReloadRecorder:
+    def __init__(self, calls: list[str], name: str) -> None:
+        self._calls = calls
+        self._name = name
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append(self._name)
+        return True
+
+
+class _FailOncePresetReload:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+        self._failed = False
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append("presets")
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("temporary preset reload failure")
+        return True
+
+
+class _RefreshRecorder:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append("presets")
+        return True
+
+
+class TestSeeding:
+    async def test_shared_template_metadata_covers_every_prompt_type(self):
+        metadata = seed_hash_module._PROMPT_TEMPLATE_METADATA
+        assert set(metadata) == {prompt_type.value for prompt_type in PromptType}
+        assert set(seed_hash_module._PROMPT_SEED_HASH_HISTORY) == set(metadata)
+        assert {prompt_type: config_key for prompt_type, (config_key, _) in metadata.items()} == (
+            prompt_module._TYPE_TO_CONFIG_KEY
+        )
+
+    async def test_final_seed_history_hashes_match_the_bundled_templates(self):
+        svc = _service()
+        for prompt_type, history in seed_hash_module._PROMPT_SEED_HASH_HISTORY.items():
+            actual = sha256(svc._disk_seed(prompt_type).encode("utf-8")).hexdigest()
+            assert history[-1] == actual
+
+    async def test_known_pre_calendar_template_is_refreshed(self):
+        old_text = (Path(__file__).parent / "fixtures/query_contextualizer_before_calendar_anchors.txt").read_text()
+        old_hash = sha256(old_text.encode("utf-8")).hexdigest()
+        assert old_hash in prompt_module._PROMPT_SEED_HASH_HISTORY["query_contextualizer"][:-1]
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content=old_text,
+                is_default=True,
+            )
+        )
+
+        await _service(repo).seed_defaults()
+
+        assert old.content == _service(repo)._disk_seed("query_contextualizer")
+        assert "{calendar_anchors}" in old.content
+
+    async def test_refresh_can_be_disabled_without_hiding_stale_defaults(self, monkeypatch):
+        old_text = (Path(__file__).parent / "fixtures/query_contextualizer_before_calendar_anchors.txt").read_text()
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content=old_text,
+                is_default=True,
+            )
+        )
+        warnings = []
+        monkeypatch.setattr(prompt_module.logger, "warning", warnings.append)
+        svc = _service(repo)
+        svc._config.prompts = PromptsConfig(refresh_defaults=False)
+
+        await svc.seed_defaults()
+
+        assert old.content == old_text
+        assert any("query_contextualizer" in warning and "outdated" in warning for warning in warnings)
+
+    async def test_seeds_all_prompt_types_from_disk(self):
+        repo = FakePromptRepo()
+        await _service(repo).seed_defaults()
+        seeded_types = {p.prompt_type for p in repo.prompts.values()}
+        assert seeded_types == set(PROMPT_TYPE_KEYS)
+        assert len(PROMPT_TYPE_KEYS) == 9
+        for p in repo.prompts.values():
+            assert p.is_default is True
+            if p.prompt_type != PromptType.ASR_TRANSCRIPTION.value:
+                assert p.content.strip()
+
+        asr_prompt = await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)
+        assert asr_prompt is not None
+        assert asr_prompt.content == ""
+
+    async def test_seeding_is_idempotent(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await svc.seed_defaults()
+        sysp = await repo.get_default("sys_prompt")
+        sysp.content = "OPERATOR EDIT"
+        await svc.seed_defaults()
+        assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
+        assert len(repo.prompts) == 9
+
+    async def test_seed_defaults_propagates_repository_read_failure(self):
+        class FailingRepo(FakePromptRepo):
+            async def get_default(self, prompt_type: str) -> Prompt | None:
+                raise RuntimeError("database unavailable")
+
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await _service(FailingRepo()).seed_defaults()
+
+    async def test_upgrades_untouched_older_default_in_place(self, monkeypatch, tmp_path):
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer", name="default_query_contextualizer", content="old", is_default=True
+            )
+        )
+        svc, bundled_dir = _service_with_bundled_templates(repo, tmp_path, monkeypatch)
+        (bundled_dir / "query_contextualizer_tmpl.txt").write_text("new")
+        _set_seed_history(monkeypatch, "query_contextualizer", sha256(b"old").hexdigest(), sha256(b"new").hexdigest())
+
+        await svc.seed_defaults()
+
+        refreshed = await repo.get_default("query_contextualizer")
+        assert refreshed.id == old.id
+        assert refreshed.name == old.name
+        assert refreshed.content == "new"
+        await svc.seed_defaults()
+        assert refreshed.content == "new"
+
+    async def test_preserves_edited_default_even_when_an_old_seed_exists(self, monkeypatch):
+        repo = FakePromptRepo()
+        edited = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content="admin edit",
+                is_default=True,
+            )
+        )
+        svc = _service(repo)
+        await svc.seed_defaults()
+        assert edited.content == "admin edit"
+
+    async def test_preserves_renamed_default_even_if_its_content_is_old(self, monkeypatch):
+        repo = FakePromptRepo()
+        renamed = await repo.create(
+            Prompt(prompt_type="query_contextualizer", name="my_contextualizer", content="old", is_default=True)
+        )
+        await _service(repo).seed_defaults()
+        assert renamed.content == "old"
+
+    async def test_admin_edit_during_refresh_wins(self, monkeypatch, tmp_path):
+        class EditingRepo(FakePromptRepo):
+            async def update_default_content_if_unchanged(self, prompt_id, expected_name, old_content, new_content):
+                self.prompts[prompt_id].content = "admin edit"
+                return await super().update_default_content_if_unchanged(
+                    prompt_id, expected_name, old_content, new_content
+                )
+
+        repo = EditingRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer", name="default_query_contextualizer", content="old", is_default=True
+            )
+        )
+        svc, bundled_dir = _service_with_bundled_templates(repo, tmp_path, monkeypatch)
+        (bundled_dir / "query_contextualizer_tmpl.txt").write_text("new")
+        _set_seed_history(monkeypatch, "query_contextualizer", sha256(b"old").hexdigest(), sha256(b"new").hexdigest())
+        await svc.seed_defaults()
+        assert old.content == "admin edit"
+
+    async def test_refresh_write_failure_propagates_and_preserves_old_default(self, monkeypatch, tmp_path):
+        class FailingRepo(FakePromptRepo):
+            async def update_default_content_if_unchanged(self, prompt_id, expected_name, old_content, new_content):
+                raise RuntimeError("database write failed")
+
+        repo = FailingRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer", name="default_query_contextualizer", content="old", is_default=True
+            )
+        )
+        svc, bundled_dir = _service_with_bundled_templates(repo, tmp_path, monkeypatch)
+        (bundled_dir / "query_contextualizer_tmpl.txt").write_text("new")
+        _set_seed_history(monkeypatch, "query_contextualizer", sha256(b"old").hexdigest(), sha256(b"new").hexdigest())
+
+        with pytest.raises(RuntimeError, match="database write failed"):
+            await svc.seed_defaults()
+
+        assert old.content == "old"
+
+    async def test_refresh_read_failure_keeps_old_default_and_other_types_seed(self, monkeypatch):
+        old_text = (Path(__file__).parent / "fixtures/query_contextualizer_before_calendar_anchors.txt").read_text()
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content=old_text,
+                is_default=True,
+            )
+        )
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        def unreadable_seed(prompt_type):
+            if prompt_type == "query_contextualizer":
+                raise PermissionError("permission denied")
+            return disk_seed(prompt_type)
+
+        monkeypatch.setattr(svc, "_disk_seed", unreadable_seed)
+        await svc.seed_defaults()
+
+        assert old.content == old_text
+        assert len(repo.prompts) == len(PROMPT_TYPE_KEYS)
+
+    async def test_custom_prompt_directory_disables_automatic_refresh(self, monkeypatch, tmp_path):
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer", name="default_query_contextualizer", content="old", is_default=True
+            )
+        )
+        config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
+        svc = PromptService(prompt_repo=repo, config=config)
+        await svc.seed_defaults()
+        assert old.content == "old"
+
+    async def test_custom_filename_in_bundled_directory_disables_automatic_refresh(self, monkeypatch, tmp_path):
+        (tmp_path / "query_contextualizer_tmpl.txt").write_text("canonical template")
+        (tmp_path / "operator_custom.txt").write_text("operator template")
+        monkeypatch.setattr(prompt_module, "_DEFAULT_PROMPTS_DIR", tmp_path)
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content="old",
+                is_default=True,
+            )
+        )
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(
+                paths=PathsConfig(prompts_dir=tmp_path),
+                prompts=PromptsConfig(query_contextualizer="operator_custom.txt"),
+            ),
+        )
+        _set_seed_history(
+            monkeypatch,
+            "query_contextualizer",
+            sha256(b"old").hexdigest(),
+            sha256(b"canonical template").hexdigest(),
+        )
+
+        await svc._refresh_default_if_pristine("query_contextualizer", old)
+
+        assert old.content == "old"
+
+    async def test_in_place_edit_of_bundled_template_does_not_refresh_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(prompt_module, "_DEFAULT_PROMPTS_DIR", tmp_path)
+        (tmp_path / "query_contextualizer_tmpl.txt").write_text("operator-modified template")
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content="old",
+                is_default=True,
+            )
+        )
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig()),
+        )
+        _set_seed_history(
+            monkeypatch,
+            "query_contextualizer",
+            sha256(b"old").hexdigest(),
+            sha256(b"trusted bundled template").hexdigest(),
+        )
+
+        await svc._refresh_default_if_pristine("query_contextualizer", old)
+
+        assert old.content == "old"
+
+    async def test_seeding_skips_blank_non_asr_template(self, monkeypatch):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        monkeypatch.setattr(
+            svc,
+            "_disk_seed",
+            lambda prompt_type: "" if prompt_type == PromptType.SYS_PROMPT.value else disk_seed(prompt_type),
+        )
+
+        await svc.seed_defaults()
+
+        assert await repo.get_default(PromptType.SYS_PROMPT.value) is None
+        assert await repo.get_default(PromptType.ASR_TRANSCRIPTION.value) is not None
+        with pytest.raises(ConfigError) as exc:
+            await svc.resolve_prompt(PromptType.SYS_PROMPT.value)
+        assert exc.value.code == "PROMPT_UNAVAILABLE"
+
+    async def test_seeding_normalizes_whitespace_only_asr_template(self, monkeypatch):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        monkeypatch.setattr(
+            svc,
+            "_disk_seed",
+            lambda prompt_type: " \n\t "
+            if prompt_type == PromptType.ASR_TRANSCRIPTION.value
+            else disk_seed(prompt_type),
+        )
+
+        await svc.seed_defaults()
+
+        assert (await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)).content == ""
+
+    async def test_type_set_matches_enum(self):
+        assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType}
+
+    async def test_api_prompt_type_names_match_enum(self):
+        assert set(get_args(PromptTypeName)) == {t.value for t in PromptType}
+
+
+class TestResolution:
+    async def test_resolution_with_identity_preserves_prompt_provenance(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(Prompt(prompt_type="query_contextualizer", name="legal", content="LEGAL"))
+
+        resolved = await svc.resolve_prompt_with_identity("query_contextualizer", names=["legal"])
+
+        assert resolved.content == "LEGAL"
+        assert resolved.name == "legal"
+        assert resolved.source == "named"
+        assert resolved.content_hash == hashlib.sha256(b"LEGAL").hexdigest()
+
+    async def test_strict_identity_resolution_propagates_database_outage_as_503(self):
+        class BrokenRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type: str, name: str) -> Prompt | None:
+                raise RuntimeError("postgres unreachable")
+
+        svc = _service(BrokenRepo())
+
+        with pytest.raises(ServiceUnavailableError) as exc:
+            await svc.resolve_prompt_with_identity("query_contextualizer", names=["legal"], strict_errors=True)
+
+        assert exc.value.code == "PROMPT_LOOKUP_UNAVAILABLE"
+
+    async def test_precedence_named_then_default_then_disk(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+
+        # Nothing in DB → disk seed fallback (never empty).
+        disk = await svc.resolve_prompt("sys_prompt")
+        assert disk.strip()
+
+        # Global default → wins over disk.
+        await repo.create(Prompt(prompt_type="sys_prompt", name="default_sys", content="DEFAULT", is_default=True))
+        assert await svc.resolve_prompt("sys_prompt") == "DEFAULT"
+
+        # A named prompt → wins over default when named.
+        await repo.create(Prompt(prompt_type="sys_prompt", name="legal", content="LEGAL"))
+        assert await svc.resolve_prompt("sys_prompt", names=["legal"]) == "LEGAL"
+        # Unknown / None names are skipped, falling through to the default.
+        assert await svc.resolve_prompt("sys_prompt", names=["missing"]) == "DEFAULT"
+        assert await svc.resolve_prompt("sys_prompt", names=[None]) == "DEFAULT"
+
+    async def test_strict_named_resolution_rejects_a_missing_selection(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(
+            Prompt(
+                prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+                name="default-asr",
+                content="DEFAULT",
+                is_default=True,
+            )
+        )
+
+        with pytest.raises(NotFoundError, match="retired-asr"):
+            await svc.resolve_prompt(
+                PromptType.ASR_TRANSCRIPTION.value,
+                names=["retired-asr"],
+                strict_names=True,
+            )
+
+    async def test_first_resolvable_name_wins(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(Prompt(prompt_type="hyde", name="b", content="B"))
+        # Ordered candidates: first that resolves wins (extension point for a
+        # future per-user tier prepended ahead of the partition/preset name).
+        assert await svc.resolve_prompt("hyde", names=["a", "b"]) == "B"
+
+    async def test_asr_falls_back_to_native_prompt_when_custom_dir_has_no_template(self, tmp_path):
+        config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
+        svc = PromptService(prompt_repo=FakePromptRepo(), config=config)
+
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
+
+
+class TestCrud:
+    async def test_create_validates_type(self):
+        with pytest.raises(ValidationError):
+            await _service().create_prompt(prompt_type="not_a_type", name="x", content="y")
+
+    async def test_asr_allows_blank_content_to_select_the_model_prompt(self):
+        svc = _service()
+
+        created = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="native-model-prompt",
+            content="",
+            is_default=True,
+        )
+
+        assert created.content == ""
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
+
+    async def test_asr_whitespace_content_is_stored_as_the_native_prompt_choice(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+
+        created = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="native-model-prompt",
+            content=" \n\t ",
+            is_default=True,
+        )
+
+        assert created.content == ""
+        assert (await repo.get(created.id)).content == ""
+
+    async def test_updating_asr_to_whitespace_selects_the_native_prompt(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="custom-instruction",
+            content="Keep speaker labels.",
+        )
+
+        updated = await svc.update_prompt(prompt.id, content=" \n\t ")
+
+        assert updated.content == ""
+        assert (await repo.get(prompt.id)).content == ""
+
+    async def test_updating_non_asr_to_blank_content_is_rejected(self):
+        svc = _service()
+        prompt = await svc.create_prompt(prompt_type="sys_prompt", name="answer", content="Answer clearly.")
+
+        with pytest.raises(ValidationError) as exc:
+            await svc.update_prompt(prompt.id, content="   ")
+
+        assert exc.value.status_code == 422
+        assert exc.value.code == "PROMPT_CONTENT_EMPTY"
+
+    async def test_non_asr_rejects_blank_content(self):
+        with pytest.raises(ValidationError) as exc:
+            await _service().create_prompt(prompt_type="sys_prompt", name="blank", content="   ")
+        assert exc.value.status_code == 422
+
+    async def test_get_missing_raises(self):
+        with pytest.raises(NotFoundError):
+            await _service().get_prompt("nope")
+
+    async def test_create_duplicate_name_per_type_is_rejected(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await svc.create_prompt(prompt_type="sys_prompt", name="formal", content="a")
+        with pytest.raises(ValidationError):
+            await svc.create_prompt(prompt_type="sys_prompt", name="formal", content="b")
+        # Same name under a different type is fine.
+        await svc.create_prompt(prompt_type="hyde", name="formal", content="c")
+
+    async def test_rename_collision_is_rejected(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await svc.create_prompt(prompt_type="sys_prompt", name="a", content="a")
+        b = await svc.create_prompt(prompt_type="sys_prompt", name="b", content="b")
+        with pytest.raises(ValidationError):
+            await svc.update_prompt(b.id, name="a")
+
+    async def test_renaming_asr_prompt_refreshes_presets_and_partitions(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_ReloadRecorder(calls, "presets"),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        assert calls == ["presets"]
+
+    async def test_retrying_an_asr_rename_refreshes_caches_after_a_reload_failure(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_FailOncePresetReload(calls),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        with pytest.raises(RuntimeError, match="temporary preset reload failure"):
+            await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        assert calls == ["presets", "presets"]
+
+    async def test_create_accepts_valid_template_placeholders(self):
+        svc = _service()
+        # sys_prompt allows {context} and {current_date}; escaped braces are literal.
+        p = await svc.create_prompt(
+            prompt_type="sys_prompt", name="ok", content="Use {context} on {current_date}. Literal {{brace}}."
+        )
+        assert p.id
+
+    async def test_query_contextualizer_accepts_calendar_anchors_placeholder(self):
+        """``{calendar_anchors}`` is rendered by QueryService.generate_query; a
+        contextualizer prompt using it must pass write-time validation, and the
+        bundled template does."""
+        svc = _service()
+        p = await svc.create_prompt(
+            prompt_type="query_contextualizer",
+            name="anchored",
+            content="Date: {current_date}\n{calendar_anchors}\nLang: {query_language}",
+        )
+        assert p.id
+
+    async def test_create_rejects_unknown_placeholder(self):
+        svc = _service()
+        with pytest.raises(ValidationError) as exc:
+            await svc.create_prompt(prompt_type="sys_prompt", name="bad", content="Answer about {topic}")
+        assert exc.value.status_code == 422
+
+    async def test_create_rejects_malformed_braces(self):
+        svc = _service()
+        # A stray single brace (e.g. a JSON/code example) would crash str.format at runtime.
+        with pytest.raises(ValidationError):
+            await svc.create_prompt(prompt_type="sys_prompt", name="bad", content='return {"a": 1}')
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "{context!x} on {current_date}",  # ValueError: unknown conversion
+            "{context.missing} on {current_date}",  # AttributeError at render time
+            "{context[0]} on {current_date}",  # renders, but not a supported form
+            "{context:>10} on {current_date}",  # format spec
+        ],
+    )
+    async def test_create_rejects_placeholders_str_format_cannot_render(self, content):
+        """A field reduced to its root name looked valid while `.format()` still
+        raised — and as a type's global default that fails every request that
+        falls back to it. Only plain placeholders are accepted.
+        """
+        svc = _service()
+        with pytest.raises(ValidationError) as exc:
+            await svc.create_prompt(prompt_type="sys_prompt", name="bad", content=content)
+        assert exc.value.status_code == 422
+
+    async def test_bundled_templates_all_pass_validation(self):
+        """Guards the stricter rule against the seed path: a bundled template that
+        failed validation would be skipped at boot, leaving the type with no
+        default at all.
+        """
+        from core.prompts.template_loader import load_template_by_key
+        from services.orchestrators.prompt_service import _TYPE_TO_CONFIG_KEY, _validate_template
+
+        svc = _service()
+        for prompt_type, config_key in _TYPE_TO_CONFIG_KEY.items():
+            content = load_template_by_key(svc._config.paths.prompts_dir, svc._config.prompts, config_key)
+            _validate_template(prompt_type, content)
+
+    async def test_verbatim_type_allows_any_braces(self):
+        svc = _service()
+        # chunk_contextualizer is sent as-is (never str.format-ed), so literal braces are fine.
+        p = await svc.create_prompt(
+            prompt_type="chunk_contextualizer", name="ok", content='Emit JSON like {"topic": "x"} with {anything}'
+        )
+        assert p.id
+
+    async def test_update_rejects_bad_template(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        p = await svc.create_prompt(prompt_type="hyde", name="h", content="Hypothetical doc for {question}")
+        with pytest.raises(ValidationError):
+            await svc.update_prompt(p.id, content="now with {unknown_var}")
+
+    async def test_update_promotes_default_via_set_default(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        a = await repo.create(Prompt(prompt_type="sys_prompt", name="a", content="a", is_default=True))
+        b = await repo.create(Prompt(prompt_type="sys_prompt", name="b", content="b"))
+        updated = await svc.update_prompt(b.id, content="b2", is_default=True)
+        assert updated.is_default is True and updated.content == "b2"
+        assert (await repo.get(a.id)).is_default is False  # single-default invariant
+
+    async def test_delete_default_is_rejected(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        d = await repo.create(Prompt(prompt_type="sys_prompt", content="c", is_default=True))
+        with pytest.raises(ValidationError):
+            await svc.delete_prompt(d.id)
+
+    async def test_delete_non_default_ok(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        p = await repo.create(Prompt(prompt_type="sys_prompt", content="c"))
+        await svc.delete_prompt(p.id)
+        assert await repo.get(p.id) is None
+
+    async def test_deleting_asr_prompt_refreshes_preset_configuration(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_RefreshRecorder(calls),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        await svc.delete_prompt(prompt.id)
+
+        assert calls == ["presets"]
+
+    async def test_set_default_missing_raises(self):
+        with pytest.raises(NotFoundError):
+            await _service().set_default("nope")
+
+    async def test_list_filters_and_annotates_used_by(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        p = await repo.create(Prompt(prompt_type="hyde", name="b", content="c"))
+        repo._ref_counts = {("hyde", "b"): 3}
+        listed = await svc.list_prompts(prompt_type="hyde")
+        assert [row["prompt_type"] for row in listed] == ["hyde"]
+        assert listed[0]["used_by"] == 3
+        assert p.id == listed[0]["id"]
+
+
+class TestLoggingIsBraceSafe:
+    def test_a_brace_in_a_prompt_name_does_not_raise(self):
+        """Prompt names are free text. Interpolating one into the log format
+        string made a brace a format field, so a partition pointed at a prompt
+        named `my{tmpl}` raised KeyError on *every* request that resolved it.
+        """
+        from services.orchestrators.prompt_service import PromptService
+
+        records: list[str] = []
+        sink_id = logger.add(records.append, level="DEBUG", format="{message}")
+        try:
+            PromptService._log_resolution("sys_prompt", ["my{tmpl}"], "named", "my{tmpl}", "body {with} braces")
+        finally:
+            logger.remove(sink_id)
+        assert "my{tmpl}" in "".join(records)
+
+
+class TestResolveSurvivesRepositoryFailure:
+    async def test_a_repo_error_degrades_to_the_disk_seed(self):
+        """Resolution moved onto the request path, so chat and search now depend
+        on Postgres per request where they used to read prompts once at boot. A
+        transient pool error must degrade to the bundled template, not 500.
+        """
+
+        class ExplodingRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type, name):
+                raise RuntimeError("connection pool exhausted")
+
+            async def get_default(self, prompt_type):
+                raise RuntimeError("connection pool exhausted")
+
+        svc = _service(ExplodingRepo())
+        content = await svc.resolve_prompt("sys_prompt", names=["whatever"])
+        assert "{context}" in content  # the bundled sys_prompt template
+
+    async def test_an_asr_repo_error_uses_the_provider_native_prompt(self):
+        class ExplodingRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type, name):
+                raise RuntimeError("connection pool exhausted")
+
+            async def get_default(self, prompt_type):
+                raise RuntimeError("connection pool exhausted")
+
+        svc = _service(ExplodingRepo())
+
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
+
+
+class TestSeedingSurvivesAConcurrentReplica:
+    async def test_a_lost_seed_race_does_not_fail_boot(self):
+        """Losing the race is a no-op, but the unique violation maps to a
+        ValidationError that _initialize_step re-raises — so an unhandled one
+        turns a concurrent boot into a crash-loop instead of a skipped insert.
+        """
+
+        class RacingRepo(FakePromptRepo):
+            async def create(self, prompt):
+                raise ValidationError("already exists", status_code=409, code="PROMPT_EXISTS")
+
+        await _service(RacingRepo()).seed_defaults()  # must not raise
+
+
+class TestUnavailablePromptRaisesTheTypedError:
+    async def test_missing_default_and_missing_template_raises_configerror(self, tmp_path):
+        """Exercises the raise itself. ConfigError hard-coded its own code, so
+        passing code= collided with the forwarded kwargs and the statement threw
+        TypeError instead — the typed error could never be constructed.
+        """
+        # Point the loader at an empty directory — no bundled template, and the
+        # fake repo has no default, which is the only path reaching the raise.
+        svc = _service()
+        svc._config = SimpleNamespace(
+            paths=PathsConfig(prompts_dir=tmp_path),
+            prompts=PromptsConfig(),
+        )
+
+        with pytest.raises(ConfigError) as exc:
+            await svc.resolve_prompt("hyde")
+
+        assert exc.value.code == "PROMPT_UNAVAILABLE"
+        assert exc.value.status_code == 500
+        assert "hyde" in str(exc.value)
+
+
+class TestErrorPathsAreExercised:
+    """Every raise in the service reached at least once.
+
+    These paths were reasoned about rather than run, which is how a raise that
+    itself threw TypeError survived review — coverage over the error branches is
+    the check that catches that class of defect.
+    """
+
+    async def test_malformed_braces_raise_at_write_time(self):
+        svc = _service()
+        with pytest.raises(ValidationError) as exc:
+            await svc.create_prompt(prompt_type="hyde", name="bad", content="unbalanced {question")
+        assert exc.value.status_code == 422
+        assert "brace" in str(exc.value).lower()
+
+    @pytest.mark.parametrize("op", ["get", "update", "set_default", "delete"])
+    async def test_unknown_id_raises_not_found(self, op):
+        svc = _service()
+        with pytest.raises(NotFoundError):
+            if op == "get":
+                await svc.get_prompt("nope")
+            elif op == "update":
+                await svc.update_prompt("nope", name="x")
+            elif op == "set_default":
+                await svc.set_default("nope")
+            else:
+                await svc.delete_prompt("nope")
+
+    async def test_deleting_a_types_default_is_refused(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        p = await svc.create_prompt(prompt_type="hyde", name="d", content="{question}", is_default=True)
+        with pytest.raises(ValidationError):
+            await svc.delete_prompt(p.id)
+
+    async def test_seeding_keeps_the_native_asr_default_when_custom_templates_are_missing(self, tmp_path):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        svc._config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
+        await svc.seed_defaults()  # warns per type, never raises
+        assert [(p.prompt_type, p.content, p.is_default) for p in repo.prompts.values()] == [
+            (PromptType.ASR_TRANSCRIPTION.value, "", True)
+        ]

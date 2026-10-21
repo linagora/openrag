@@ -19,12 +19,14 @@ if TYPE_CHECKING:
     from di.container import ServiceContainer
     from services.orchestrators.auth_service import AuthService
     from services.orchestrators.conversion_service import ConversionService
+    from services.orchestrators.embedder_swap_service import EmbedderSwapService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.mcp_service import MCPService
     from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
+    from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
     from services.orchestrators.user_service import UserService
     from services.orchestrators.workspace_service import WorkspaceService
 
@@ -93,6 +95,11 @@ def get_partition_service(request: Request = None) -> PartitionService:
     return _require_initialized(request).partition_service
 
 
+def get_embedder_swap_service(request: Request = None) -> EmbedderSwapService:
+    """Resolve the embedder swap orchestrator from the active container."""
+    return _require_initialized(request).embedder_swap_service
+
+
 def get_workspace_service(request: Request = None) -> WorkspaceService:
     """Resolve the workspace orchestrator from the active container."""
     return _require_initialized(request).workspace_service
@@ -101,6 +108,11 @@ def get_workspace_service(request: Request = None) -> WorkspaceService:
 def get_retrieval_service(request: Request = None) -> RetrievalService:
     """Resolve the retrieval orchestrator from the active container."""
     return _require_initialized(request).retrieval_service
+
+
+def get_retrieval_snapshot_service(request: Request = None) -> RetrievalSnapshotService:
+    """Resolve the public retrieval-snapshot orchestrator."""
+    return _require_initialized(request).retrieval_snapshot_service
 
 
 def get_query_service(request: Request = None) -> QueryService:
@@ -149,6 +161,11 @@ def get_preset_service(request: Request = None) -> Any:
     return _get_optional_service(_require_initialized(request), "preset_service")
 
 
+def get_prompt_service(request: Request = None) -> Any:
+    """Resolve the prompt-management orchestrator from the active container."""
+    return _get_optional_service(_require_initialized(request), "prompt_service")
+
+
 def get_config(request: Request = None):
     """Resolve application configuration from the active container."""
     return _require_initialized(request).config
@@ -165,8 +182,10 @@ __all__ = [
     "get_model_endpoint_service",
     "get_partition_service",
     "get_preset_service",
+    "get_prompt_service",
     "get_query_service",
     "get_retrieval_service",
+    "get_retrieval_snapshot_service",
     "get_user_service",
     "get_workspace_service",
     "set_container",

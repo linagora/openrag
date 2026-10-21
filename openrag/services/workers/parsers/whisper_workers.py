@@ -200,11 +200,22 @@ class LocalWhisperLoader(BasePooledParser):
 
     def __init__(self):
         self.config = load_config()
+
+    def _pool(self) -> WhisperPool:
+        """Look up the named ``WhisperPool`` actor; call once per dispatch.
+
+        Never cached: this loader lives as long as its indexer worker, and
+        ``POST /actors/WhisperPool/restart`` replaces the pool with a new actor,
+        so a cached handle would keep dispatching to the killed one. Store the
+        result before calling a method on it: Ray's ``ActorMethod`` holds its
+        handle weakly, so ``self._pool().transcribe.remote()`` raises
+        "Lost reference to actor".
+        """
         # Self-provision the pool on first use — mirrors MarkerLoader; bootstrap
         # no longer pre-warms parser pools at startup.
         from services.workers.bootstrap import get_or_create_actor
 
-        self.worker: WhisperPool = get_or_create_actor("WhisperPool", WhisperPool, lifetime="detached")
+        return get_or_create_actor("WhisperPool", WhisperPool, lifetime="detached")
 
     def supported_types(self) -> list[str]:
         return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]
@@ -216,9 +227,10 @@ class LocalWhisperLoader(BasePooledParser):
                 metadata=dict(document.metadata),
             )
 
+        pool = self._pool()
         async with document.as_temporary_file() as path:
             try:
-                text = await self.worker.transcribe.remote(str(path))
+                text = await pool.transcribe.remote(str(path))
             except Exception as e:
                 logger.error("Error transcribing audio", error=str(e))
                 raise

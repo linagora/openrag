@@ -2,7 +2,7 @@
 
 # --- Writable-dir permission fix + privilege drop --------------------------
 # The app runs as a non-root user whose primary group is GID 0. Its writable
-# dirs (/app/data, /app/logs, /app/model_weights) are bind-mounted from the
+# dirs (/app/data, /app/model_weights) are bind-mounted from the
 # host, so the image's group-0-writable perms (Dockerfile `chmod g=u`) don't
 # apply to them — the host directory's ownership does, and Docker creates a
 # missing bind source as root:root with no group-write. That makes the
@@ -21,7 +21,7 @@ if [ "$(id -u)" = "0" ]; then
   # host-owned mount keeps its host ownership, so Chainlit — which writes any
   # bundled language file missing from the mount on startup — hits
   # PermissionError as the non-root app user. Grant GID-0 write here too.
-  for d in /app/data /app/logs /app/model_weights /app/openrag/.chainlit/translations; do
+  for d in /app/data /app/model_weights /app/openrag/.chainlit/translations; do
     mkdir -p "$d" 2>/dev/null || true
     chgrp -R 0 "$d" 2>/dev/null || true
     chmod -R g+rwX "$d" 2>/dev/null || true
@@ -29,6 +29,18 @@ if [ "$(id -u)" = "0" ]; then
   # Re-exec this script as the non-root app user (UID in GID 0) to run the app.
   exec setpriv --reuid "$APP_UID" --regid 0 --clear-groups /app/entrypoint.sh "$@"
 fi
+
+# The persisted openrag_venv volume can be re-synced by different APP_UIDs
+# across the container's lifetime (e.g. a locally-built image bakes in the
+# host UID while a pulled/CI-built image bakes in the Dockerfile default) —
+# both share GID 0. Default umask (022) makes `uv sync` create new venv
+# entries owner-writable only, so a later sync under a different UID can't
+# remove/replace them ("Permission denied" on __editable__*.pth). Force
+# group-writable new files/dirs so any GID-0 UID can always resync.
+# NOTE: this only fixes files written from here on — an openrag_venv volume
+# that already existed before this fix still has owner-only entries and needs
+# to be recreated once after upgrading (delete the volume / let it resync).
+umask 002
 
 ENV_ARGS=()
 if [[ -n "${SHARED_ENV}" ]]; then

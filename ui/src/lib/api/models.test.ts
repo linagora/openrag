@@ -1,12 +1,19 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   displayModelEndpointExtra,
+  isSecretField,
   mergeModelEndpointApiKeyExtra,
+  mergeModelEndpointLlmContext,
+  mergeModelEndpointMossSpeakerAware,
+  mergeModelEndpointSttLanguage,
   pickDefaultEndpoint,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   resolveEmbedderName,
   splitModelEndpointApiKeyExtra,
+  splitModelEndpointLlmContext,
+  splitModelEndpointMossSpeakerAware,
+  splitModelEndpointSttLanguage,
   validateModelEndpoint,
 } from "./models";
 import type { ModelEndpointResponse } from "./models";
@@ -104,7 +111,9 @@ describe("validateModelEndpoint", () => {
 
     await validateModelEndpoint({
       endpoint: "http://candidate:8000/v1",
+      model_type: "stt",
       model_name: "mistral-small",
+      timeout: 900,
       stored_api_key_model_type: "llm",
       stored_api_key_name: "private-llm",
     });
@@ -112,7 +121,9 @@ describe("validateModelEndpoint", () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       endpoint: "http://candidate:8000/v1",
+      model_type: "stt",
       model_name: "mistral-small",
+      timeout: 900,
       stored_api_key_model_type: "llm",
       stored_api_key_name: "private-llm",
     });
@@ -134,6 +145,12 @@ describe("revealModelEndpointApiKey", () => {
 });
 
 describe("model endpoint secret placeholders", () => {
+  it("counts hyphenated header names as secrets, like the backend", () => {
+    expect(isSecretField("X-API-Key")).toBe(true);
+    expect(isSecretField("X-Auth-Token")).toBe(true);
+    expect(isSecretField("X-Request-Id")).toBe(false);
+  });
+
   it("shows backend redacted secret sentinels as password-style bullets", () => {
     expect(
       displayModelEndpointExtra({
@@ -168,12 +185,12 @@ describe("model endpoint secret placeholders", () => {
     expect(
       prepareModelEndpointExtraForSubmit({
         auth: { token: "••••••••" },
-        headers: [{ api_key: "hf-********" }],
+        headers: [{ api_key: "hf-********", Authorization: "Bea********" }],
         note: "••••••••",
       }),
     ).toEqual({
       auth: { token: "<redacted>" },
-      headers: [{ api_key: "<redacted>" }],
+      headers: [{ api_key: "<redacted>", Authorization: "<redacted>" }],
       note: "••••••••",
     });
   });
@@ -254,5 +271,110 @@ describe("model endpoint secret placeholders", () => {
     ).toEqual({
       implementation: "vllm",
     });
+  });
+});
+
+describe("LLM context token-budget extra fields", () => {
+  it("splits the two budgets out of extra into form-field strings", () => {
+    expect(
+      splitModelEndpointLlmContext({
+        implementation: "vllm",
+        max_llm_context_size: 32768,
+        max_output_tokens: 2048,
+      }),
+    ).toEqual({
+      llmContext: { maxContextSize: "32768", maxOutputTokens: "2048" },
+      extra: { implementation: "vllm" },
+    });
+  });
+
+  it("yields blank fields when the budgets are absent", () => {
+    expect(splitModelEndpointLlmContext({ implementation: "vllm" })).toEqual({
+      llmContext: { maxContextSize: "", maxOutputTokens: "" },
+      extra: { implementation: "vllm" },
+    });
+  });
+
+  it("merges non-blank budget fields back into extra as numbers", () => {
+    expect(
+      mergeModelEndpointLlmContext(
+        { implementation: "vllm" },
+        { maxContextSize: "32768", maxOutputTokens: "2048" },
+      ),
+    ).toEqual({
+      implementation: "vllm",
+      max_llm_context_size: 32768,
+      max_output_tokens: 2048,
+    });
+  });
+
+  it("clears a budget key when its field is left blank", () => {
+    expect(
+      mergeModelEndpointLlmContext(
+        { implementation: "vllm", max_llm_context_size: 8192, max_output_tokens: 1024 },
+        { maxContextSize: "16384", maxOutputTokens: "" },
+      ),
+    ).toEqual({
+      implementation: "vllm",
+      max_llm_context_size: 16384,
+    });
+  });
+
+  it("round-trips split → merge without touching unrelated extra keys", () => {
+    const stored = { implementation: "vllm", api_key: "sk-x", max_output_tokens: 512 };
+    const { llmContext, extra } = splitModelEndpointLlmContext(stored);
+    expect(mergeModelEndpointLlmContext(extra, llmContext)).toEqual({
+      implementation: "vllm",
+      api_key: "sk-x",
+      max_output_tokens: 512,
+    });
+  });
+});
+
+describe("STT language-hint extra field", () => {
+  it("splits and merges a language hint without touching provider options", () => {
+    const { languageHint, extra } = splitModelEndpointSttLanguage({
+      language: "fr",
+      diarization: true,
+    });
+
+    expect(languageHint).toBe("fr");
+    expect(extra).toEqual({ diarization: true });
+    expect(mergeModelEndpointSttLanguage(extra, "en")).toEqual({
+      diarization: true,
+      language: "en",
+    });
+  });
+
+  it("removes the language key when the dedicated field is blank", () => {
+    expect(mergeModelEndpointSttLanguage({ language: "fr", diarization: true }, "  ")).toEqual({
+      diarization: true,
+    });
+  });
+});
+
+describe("MOSS speaker-aware extra field", () => {
+  it("splits and merges the MOSS-only normalization control", () => {
+    const { mossSpeakerAware, extra } = splitModelEndpointMossSpeakerAware({
+      moss_speaker_aware: true,
+      temperature: 0,
+    });
+
+    expect(mossSpeakerAware).toBe(true);
+    expect(extra).toEqual({ temperature: 0 });
+    expect(mergeModelEndpointMossSpeakerAware(extra, true)).toEqual({
+      temperature: 0,
+      moss_speaker_aware: true,
+    });
+  });
+
+  it("treats malformed values as disabled and removes the dedicated key", () => {
+    const { mossSpeakerAware, extra } = splitModelEndpointMossSpeakerAware({
+      moss_speaker_aware: "true",
+      temperature: 0,
+    });
+
+    expect(mossSpeakerAware).toBe(false);
+    expect(mergeModelEndpointMossSpeakerAware(extra, false)).toEqual({ temperature: 0 });
   });
 });

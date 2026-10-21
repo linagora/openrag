@@ -12,7 +12,7 @@ import { request } from "./client";
 //   POST   /model-endpoints/{type}/{name}/reveal-api-key
 //   POST   /model-endpoints/{type}/{name}/validate → ValidateEndpointResponse (no body)
 
-export type ModelType = "embedder" | "reranker" | "llm" | "vlm";
+export type ModelType = "embedder" | "reranker" | "llm" | "vlm" | "stt";
 
 export interface ModelEndpointResponse {
   name: string;
@@ -24,6 +24,22 @@ export interface ModelEndpointResponse {
   extra: Record<string, unknown>;
   has_api_key?: boolean;
   is_default: boolean;
+  /** Partitions whose resolved reference is this endpoint — those naming it,
+   *  plus (for the default endpoint) those riding the `default` alias. 0 for
+   *  types referenced through presets. */
+  used_by_partitions?: number;
+  /** LLM endpoints only (null otherwise; absent on older backends): what a blank
+   *  max context size / max output tokens resolves to. `detected_*` is the
+   *  `max_model_len` the endpoint reported on /v1/models (vLLM does, most
+   *  gateways don't); `context_size_detection_pending` means an endpoint write
+   *  cleared it and the re-probe hasn't landed yet. */
+  detected_max_llm_context_size?: number | null;
+  context_size_detection_pending?: boolean;
+  default_max_llm_context_size?: number | null;
+  default_max_output_tokens?: number | null;
+  /** Dense vector field this embedder owns; null for other model types. Set
+   *  when the endpoint is created and kept through renames. */
+  vector_field?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -48,12 +64,17 @@ export interface UpdateModelEndpointRequest {
   timeout?: number;
   extra?: Record<string, unknown>;
   is_default?: boolean;
+  /** Required by the server for an embedder edit that changes what its vectors
+   *  are while partitions hold files indexed with it (409 otherwise). Set only
+   *  after the user has seen and acknowledged what is indexed. */
+  acknowledge_indexed_data?: boolean;
 }
 
 export interface ValidateModelEndpointResponse {
   reachable: boolean;
   model_found?: boolean | null;
   models_served?: string[] | null;
+  transcription_supported?: boolean | null;
   detail?: string | null;
 }
 
@@ -75,6 +96,7 @@ const SECRET_FIELD_NAMES = new Set([
   "api_token",
   "access_key",
   "auth_token",
+  "authorization",
   "chainlit_auth_secret",
   "client_secret",
   "hf_token",
@@ -106,9 +128,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isSecretField(key: string | undefined): boolean {
+/** Whether a key holds a secret, and so comes back redacted rather than as its
+ *  stored value — which is why a diff has to leave it alone. Hyphens count as
+ *  underscores, as on the backend, so a header such as `X-API-Key` matches too. */
+export function isSecretField(key: string | undefined): boolean {
   if (!key) return false;
-  const normalized = key.toLowerCase();
+  const normalized = key.toLowerCase().replaceAll("-", "_");
   return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
 }
 
@@ -175,6 +200,13 @@ export function mergeModelEndpointApiKeyExtra(
 ): Record<string, unknown> {
   const prepared = prepareModelEndpointExtraForSubmit(extra);
   const normalizedApiKey = prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
+  if (
+    normalizedApiKey === REDACTED_SECRET &&
+    typeof prepared.api_key === "string" &&
+    prepared.api_key !== REDACTED_SECRET
+  ) {
+    return prepared;
+  }
   if (typeof normalizedApiKey === "string" && normalizedApiKey) {
     return { ...prepared, api_key: normalizedApiKey };
   }
@@ -182,6 +214,209 @@ export function mergeModelEndpointApiKeyExtra(
     return { ...prepared, api_key: "" };
   }
   return prepared;
+}
+
+// LLM token budgets stored in `extra` but surfaced as first-class number fields
+// in the endpoint modal (LLM endpoints only). Kept out of the raw "Extra (JSON)"
+// box, same as the API key. Backend: core/config/model_endpoints.py.
+export const LLM_CONTEXT_SIZE_KEY = "max_llm_context_size";
+export const LLM_OUTPUT_TOKENS_KEY = "max_output_tokens";
+export const STT_LANGUAGE_KEY = "language";
+export const MOSS_SPEAKER_AWARE_KEY = "moss_speaker_aware";
+
+export interface LlmContextFields {
+  maxContextSize: string;
+  maxOutputTokens: string;
+}
+
+/** Where an LLM endpoint's token budget comes from. */
+export type LlmBudgetSource = "set" | "detected" | "default" | "detecting";
+
+export interface LlmBudget {
+  /** null while detecting, or when an older backend doesn't report the default. */
+  value: number | null;
+  source: LlmBudgetSource;
+}
+
+function positiveInt(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null;
+}
+
+/** The context window an LLM endpoint answers with, in the order the backend
+ *  resolves it: the admin-set value, else the `max_model_len` the endpoint
+ *  reports, else the deployment default (MAX_LLM_CONTEXT_SIZE). Pass
+ *  `ignoreSet` for what a blank field would fall back to. */
+export function llmContextSize(ep: ModelEndpointResponse, { ignoreSet = false } = {}): LlmBudget {
+  const set = ignoreSet ? null : positiveInt(ep.extra?.[LLM_CONTEXT_SIZE_KEY]);
+  if (set !== null) return { value: set, source: "set" };
+  if (ep.context_size_detection_pending) return { value: null, source: "detecting" };
+  const detected = positiveInt(ep.detected_max_llm_context_size);
+  if (detected !== null) return { value: detected, source: "detected" };
+  return { value: positiveInt(ep.default_max_llm_context_size), source: "default" };
+}
+
+/** The default output budget of an LLM endpoint: admin-set, else MAX_OUTPUT_TOKENS. */
+export function llmOutputTokens(ep: ModelEndpointResponse, { ignoreSet = false } = {}): LlmBudget {
+  const set = ignoreSet ? null : positiveInt(ep.extra?.[LLM_OUTPUT_TOKENS_KEY]);
+  if (set !== null) return { value: set, source: "set" };
+  return { value: positiveInt(ep.default_max_output_tokens), source: "default" };
+}
+
+const BUDGET_SOURCE_LABEL: Record<LlmBudgetSource, string> = {
+  set: "set",
+  detected: "detected",
+  default: "system default",
+  detecting: "detecting…",
+};
+
+/** `refetchInterval` for an endpoint list: an LLM endpoint write re-probes
+ *  /v1/models after responding, so poll until the detected windows are back
+ *  rather than leave "Detecting…" on screen. */
+export function refetchWhileDetecting(query: {
+  state: { data?: ModelEndpointResponse[] };
+}): number | false {
+  return query.state.data?.some((ep) => ep.context_size_detection_pending) ? 2000 : false;
+}
+
+/** "131,072 (detected)", "8,192 (system default)", "Detecting…" — for display. */
+export function formatLlmBudget(budget: LlmBudget): string {
+  if (budget.source === "detecting") return "Detecting…";
+  if (budget.value === null) return "System default";
+  return `${budget.value.toLocaleString("en-US")} (${BUDGET_SOURCE_LABEL[budget.source]})`;
+}
+
+/** Pull the two LLM budget keys out of `extra` into form-field strings. */
+export function splitModelEndpointLlmContext(extra: Record<string, unknown>): {
+  llmContext: LlmContextFields;
+  extra: Record<string, unknown>;
+} {
+  const { [LLM_CONTEXT_SIZE_KEY]: ctx, [LLM_OUTPUT_TOKENS_KEY]: out, ...rest } = extra;
+  const asField = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "");
+  return {
+    llmContext: { maxContextSize: asField(ctx), maxOutputTokens: asField(out) },
+    extra: rest,
+  };
+}
+
+/** Merge the two LLM budget fields back into `extra`. Blank clears the override
+ *  (deletes the key → server falls back to the global default); a non-blank
+ *  value is sent as a number for the server to validate as a positive int. */
+export function mergeModelEndpointLlmContext(
+  extra: Record<string, unknown>,
+  fields: LlmContextFields,
+): Record<string, unknown> {
+  const result = { ...extra };
+  const apply = (key: string, raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === "") {
+      delete result[key];
+      return;
+    }
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) result[key] = n;
+    else delete result[key];
+  };
+  apply(LLM_CONTEXT_SIZE_KEY, fields.maxContextSize);
+  apply(LLM_OUTPUT_TOKENS_KEY, fields.maxOutputTokens);
+  return result;
+}
+
+/** Pull the optional STT language hint out of `extra` into its own form field. */
+export function splitModelEndpointSttLanguage(extra: Record<string, unknown>): {
+  languageHint: string;
+  extra: Record<string, unknown>;
+} {
+  const { [STT_LANGUAGE_KEY]: language, ...rest } = extra;
+  return {
+    languageHint: typeof language === "string" ? language : "",
+    extra: rest,
+  };
+}
+
+/** Merge a blank-or-string STT language hint back into the endpoint's `extra`. */
+export function mergeModelEndpointSttLanguage(
+  extra: Record<string, unknown>,
+  languageHint: string,
+): Record<string, unknown> {
+  const result = { ...extra };
+  const normalized = languageHint.trim();
+  if (normalized) result[STT_LANGUAGE_KEY] = normalized;
+  else delete result[STT_LANGUAGE_KEY];
+  return result;
+}
+
+/** Pull MOSS speaker normalization out of raw endpoint extra for its dedicated control. */
+export function splitModelEndpointMossSpeakerAware(extra: Record<string, unknown>): {
+  mossSpeakerAware: boolean;
+  extra: Record<string, unknown>;
+} {
+  const { [MOSS_SPEAKER_AWARE_KEY]: speakerAware, ...rest } = extra;
+  return {
+    mossSpeakerAware: speakerAware === true,
+    extra: rest,
+  };
+}
+
+/** Enable MOSS speaker normalization; absence preserves the raw provider response. */
+export function mergeModelEndpointMossSpeakerAware(
+  extra: Record<string, unknown>,
+  enabled: boolean,
+): Record<string, unknown> {
+  const result = { ...extra };
+  if (enabled) result[MOSS_SPEAKER_AWARE_KEY] = true;
+  else delete result[MOSS_SPEAKER_AWARE_KEY];
+  return result;
+}
+
+// Which client class an endpoint is built with — a control key inside `extra`
+// (see di/factories.py:make_component_factory), surfaced here as a per-type
+// "Vendor" dropdown instead of free-text JSON. Options mirror the registries
+// in openrag/services/inference/*.py; defaults mirror openrag/di/container.py.
+export const IMPLEMENTATION_KEY = "implementation";
+
+export const VENDOR_OPTIONS_BY_TYPE: Record<ModelType, string[]> = {
+  embedder: ["vllm", "ollama", "tei"],
+  reranker: ["infinity", "openai", "tei"],
+  llm: ["vllm", "ollama"],
+  vlm: ["vllm"],
+  // STT uses the OpenAI-compatible audio-transcription API directly; there
+  // is no model-client implementation to select.
+  stt: [],
+};
+
+export const DEFAULT_VENDOR_BY_TYPE: Record<ModelType, string> = {
+  embedder: "vllm",
+  reranker: "infinity",
+  llm: "vllm",
+  vlm: "vllm",
+  stt: "",
+};
+
+/** Pull the vendor/`implementation` control key out of `extra` into a form field. */
+export function splitModelEndpointImplementation(extra: Record<string, unknown>): {
+  implementation: string;
+  extra: Record<string, unknown>;
+} {
+  const { [IMPLEMENTATION_KEY]: implementation, ...rest } = extra;
+  return {
+    implementation: typeof implementation === "string" ? implementation : "",
+    extra: rest,
+  };
+}
+
+/** Merge the vendor field back into `extra`. Blank omits the key entirely
+ *  (server falls back to its own `default_impl` per model type). */
+export function mergeModelEndpointImplementation(
+  extra: Record<string, unknown>,
+  implementation: string,
+): Record<string, unknown> {
+  const result = { ...extra };
+  if (implementation.trim()) {
+    result[IMPLEMENTATION_KEY] = implementation.trim();
+  } else {
+    delete result[IMPLEMENTATION_KEY];
+  }
+  return result;
 }
 
 /** List endpoints (bare array). Optionally filter by model type. */
@@ -212,6 +447,26 @@ export function updateModelEndpoint(
   });
 }
 
+/** One partition's already-indexed file count for an endpoint. */
+export interface IndexedPartitionUsage {
+  partition: string;
+  file_count: number;
+}
+
+/** What an in-place edit of an embedder endpoint would strand (#762 C).
+ *
+ *  Empty means nothing is indexed against it yet, so the edit carries no
+ *  retrieval risk and the confirmation can say so instead of warning anyway.
+ */
+export interface IndexedFileUsage {
+  partitions: IndexedPartitionUsage[];
+  total_files: number;
+}
+
+export function getModelEndpointIndexedUsage(modelType: ModelType, name: string) {
+  return request<IndexedFileUsage>(`${BASE}/${enc(modelType)}/${enc(name)}/indexed-usage`);
+}
+
 export function setDefaultModelEndpoint(modelType: ModelType, name: string) {
   return request<ModelEndpointResponse>(
     `${BASE}/${enc(modelType)}/${enc(name)}/set-default`,
@@ -234,7 +489,10 @@ export function deleteModelEndpoint(modelType: ModelType, name: string) {
 
 export interface ValidateModelEndpointRequest {
   endpoint: string;
+  model_type?: ModelType;
   model_name?: string;
+  timeout?: number;
+  extra?: Record<string, unknown>;
   api_key?: string;
   stored_api_key_model_type?: ModelType;
   stored_api_key_name?: string;
@@ -286,4 +544,23 @@ export function resolveEmbedderName(
 ): string {
   if (value !== "default") return value || "—";
   return pickDefaultEndpoint(embedderEndpoints)?.name ?? "default";
+}
+
+/** The model an embedder reference currently runs, or null if unknown.
+ *
+ *  Endpoint names are labels and can be renamed (#770 cascades the rename to
+ *  `partitions.embedder`, but a file's recorded provenance is a historical
+ *  fact and is never rewritten). The model is what actually determines the
+ *  vector space, so it — not the label — is what drift must be judged on.
+ */
+export function resolveEmbedderModel(
+  value: string | null | undefined,
+  embedderEndpoints: ModelEndpointResponse[] | undefined | null,
+): string | null {
+  if (!value) return null;
+  const endpoint =
+    value === "default"
+      ? pickDefaultEndpoint(embedderEndpoints)
+      : embedderEndpoints?.find((e) => e.name === value);
+  return endpoint?.model_name ?? null;
 }

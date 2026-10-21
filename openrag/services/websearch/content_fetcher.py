@@ -1,11 +1,12 @@
 import asyncio
 import ipaddress
 import socket
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import httpx
 import lxml.html
 from core.utils.logging import get_logger
+from core.utils.url_safety import is_blocked_address, is_safe_url
 from html_to_markdown import convert
 from services.websearch.base import WebResult
 
@@ -20,70 +21,6 @@ _BOILERPLATE_TAGS = {"nav", "footer", "header", "aside", "script", "style", "nos
 _USER_AGENT = "Mozilla/5.0 (compatible; OpenRAG/1.0; +https://github.com/linagora/openrag)"
 
 _MAX_REDIRECTS = 10
-
-
-def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """True for any IP that a server-side fetcher must not contact.
-
-    Checks all private/reserved/non-global flags explicitly so the guard is
-    correct across Python minor releases (``is_global`` semantics changed
-    between 3.10 and 3.11 for CGNAT and some multicast ranges).
-    """
-    return (
-        addr.is_loopback
-        or addr.is_private
-        or addr.is_link_local
-        or addr.is_reserved
-        or addr.is_unspecified
-        or addr.is_multicast
-        or not addr.is_global
-    )
-
-
-def _is_safe_url(url: str) -> bool:
-    """Return True only if *url* is safe for a server-side fetch.
-
-    Blocks:
-    - Non-HTTP(S) schemes
-    - ``localhost`` hostname
-    - IPv4/IPv6 literals in private, loopback, link-local, or reserved ranges
-    - Decimal-integer-encoded IPv4 addresses (e.g. ``2130706433`` == ``127.0.0.1``)
-
-    Regular hostnames pass through; per-hop redirect validation (in
-    :meth:`ContentFetcher._fetch_single`) re-checks every redirect target,
-    covering the case where a public hostname redirects to a private address.
-    """
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return False
-
-    if parsed.scheme not in ("http", "https"):
-        return False
-
-    host = parsed.hostname
-    if not host:
-        return False
-
-    if host.lower() == "localhost":
-        return False
-
-    # Dotted-decimal or IPv6 literal (e.g. "127.0.0.1", "::1", "10.0.0.1")
-    try:
-        return not _is_blocked_address(ipaddress.ip_address(host))
-    except ValueError:
-        pass
-
-    # Decimal-integer form (e.g. 2130706433 → 127.0.0.1).
-    # ipaddress.ip_address(int) interprets the value as a packed IPv4 address,
-    # matching how glibc's resolver (and therefore httpx) handles such hostnames.
-    try:
-        return not _is_blocked_address(ipaddress.ip_address(int(host)))
-    except (ValueError, TypeError):
-        pass
-
-    # Regular hostname — passes initial check; every redirect hop is re-validated.
-    return True
 
 
 class ContentFetcher:
@@ -118,7 +55,7 @@ class ContentFetcher:
         """httpx request hook: block requests whose host *resolves* to a
         non-global IP.
 
-        ``_is_safe_url`` only inspects the literal host, so a public-looking
+        ``is_safe_url`` only inspects the literal host, so a public-looking
         hostname that resolves to an internal address (DNS-rebinding-style
         SSRF) would otherwise slip through. This hook resolves the host and
         rejects any non-global resolved IP. It runs for the initial request
@@ -137,7 +74,7 @@ class ContentFetcher:
                 addr = ipaddress.ip_address(ip)
             except ValueError as e:
                 raise httpx.RequestError(f"Unparseable address for {host}", request=request) from e
-            if _is_blocked_address(addr):
+            if is_blocked_address(addr):
                 logger.warning("Blocked SSRF attempt to non-global address", host=host, ip=ip)
                 raise httpx.RequestError(f"Blocked non-global address {ip} for {host}", request=request)
 
@@ -145,13 +82,13 @@ class ContentFetcher:
         """Fetch a single URL and extract text. Returns None on any failure.
 
         Redirects are followed manually (``follow_redirects=False``) so every
-        hop is validated by :func:`_is_safe_url` before the request is sent.
+        hop is validated by :func:`is_safe_url` before the request is sent.
         This prevents a legitimate initial URL from redirecting to a private
         address after the initial check passes.
         """
         current_url = url
         for _ in range(_MAX_REDIRECTS + 1):
-            if not _is_safe_url(current_url):
+            if not is_safe_url(current_url):
                 logger.warning("Blocked unsafe URL in web search results", url=current_url)
                 return None
 

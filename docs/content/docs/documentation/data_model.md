@@ -4,7 +4,7 @@ description: Database schema for PostgreSQL metadata and Milvus vector storage
 ---
 
 OpenRAG uses a dual-database architecture:
-- **PostgreSQL** for metadata (users, partitions, files, access control)
+- **PostgreSQL** for metadata (users, partitions, files, access control, indexing job history)
 - **Milvus** for content (document chunks, embeddings, vector search)
 
 ---
@@ -21,6 +21,7 @@ erDiagram
     users ||--o{ partition_memberships : belongs_to
     workspaces ||--o{ workspace_files : has
     files ||--o{ workspace_files : referenced_by
+    users |o--o{ jobs : submitted
 
     partitions {
         int id PK
@@ -56,7 +57,7 @@ erDiagram
 
     workspaces {
         int id PK
-        varchar workspace_id UK
+        varchar workspace_id
         varchar partition_name FK
         varchar display_name
         int created_by FK
@@ -65,8 +66,21 @@ erDiagram
 
     workspace_files {
         int id PK
-        varchar workspace_id FK
-        varchar file_id FK
+        int workspace_id FK
+        int file_id FK
+    }
+
+    jobs {
+        varchar id PK
+        varchar partition
+        varchar file_id
+        int user_id FK
+        varchar status
+        varchar error
+        datetime created_at
+        datetime updated_at
+        datetime started_at
+        datetime completed_at
     }
 ```
 
@@ -158,7 +172,7 @@ Groups files within a partition into named subsets for scoped search and chat. S
 | Column          | Type | Description |
 |------------------|------|-------------|
 | `id`             | Integer (PK) | Internal identifier |
-| `workspace_id`   | String (unique) | Client-facing workspace identifier |
+| `workspace_id`   | String | Client-facing workspace identifier, unique per partition (`uix_workspace_partition_id` on `(partition_name, workspace_id)`), not globally |
 | `partition_name` | String (FK → `partitions.partition`, CASCADE) | Owning partition |
 | `display_name`   | String (nullable) | Human-readable name |
 | `created_by`     | Integer (FK → `users.id`, SET NULL) | User who created the workspace |
@@ -175,11 +189,49 @@ Join table linking workspaces to files.
 | Column          | Type | Description |
 |------------------|------|-------------|
 | `id`             | Integer (PK) | Internal identifier |
-| `workspace_id`   | String (FK → `workspaces.workspace_id`, CASCADE) | Workspace reference |
-| `file_id`        | String | File reference (no FK constraint — referential integrity enforced at application level) |
+| `workspace_id`   | Integer (FK → `workspaces.id`, CASCADE) | Workspace reference (the integer PK, since the string `workspace_id` is only unique per partition) |
+| `file_id`        | Integer (FK → `files.id`, CASCADE) | File reference (the integer PK, since the string `file_id` is only unique per partition) |
 
 **Constraints:**
 - `UniqueConstraint(workspace_id, file_id)` → a file appears at most once per workspace
+
+---
+
+### `jobs`
+
+Durable history of indexing tasks, one row per task. The in-memory Ray `TaskStateManager` is lost when Ray restarts; this table is what keeps a task's outcome visible afterwards.
+
+| Column          | Type | Description |
+|------------------|------|-------------|
+| `id`             | String (PK) | Task id, the same one used by `/indexer/task/{task_id}` |
+| `partition`      | String | Target partition (no FK constraint, so the history outlives a deleted partition) |
+| `file_id`        | String (nullable) | Target file |
+| `user_id`        | Integer (FK → `users.id`, SET NULL, nullable) | User who submitted the task |
+| `status`         | String | `QUEUED`, `SERIALIZING`, `COMPLETED`, `FAILED` or `CANCELLED` |
+| `error`          | String (nullable) | Failure message or traceback, truncated to 8,000 characters |
+| `created_at`     | DateTime (tz) | When the task was queued |
+| `updated_at`     | DateTime (tz) | Last write to the row |
+| `started_at`     | DateTime (tz, nullable) | When a worker picked the task up (queue wait is `started_at - created_at`) |
+| `completed_at`   | DateTime (tz, nullable) | When the task settled |
+
+**Constraints:**
+- `CheckConstraint ck_jobs_status` → `status` must be a `DocumentStatus` value
+
+**Indexes:**
+- `ix_jobs_status_created_at (status, created_at)` — queue views filtered by status, newest first
+- `ix_jobs_user_status (user_id, status)` — per-user task listing
+- `ix_jobs_settled_at (COALESCE(completed_at, created_at))` — retention sweep
+- `ix_jobs_partition_file_id (partition, file_id)` — lookups by file
+
+**Lifecycle:**
+- The dispatcher inserts the row as `QUEUED`, or writes `FAILED` if the task could not be submitted
+- The indexer worker sets `SERIALIZING` and `started_at` when it starts the task
+- The `TaskCompletionTracker` actor writes the final status, `error` and `completed_at` once the task settles
+- A terminal row never reopens: once `COMPLETED`, `FAILED` or `CANCELLED`, later writes cannot change its `status`, `error` or `completed_at`
+- At startup and every 2 minutes, a non-terminal row whose task the `TaskStateManager` no longer knows, and that has not been updated for 5 minutes, is marked `FAILED` as interrupted by a restart
+- Terminal rows are deleted 30 days after they settle
+
+Queue endpoints merge these rows with the live `TaskStateManager` state; while a task is still in memory, the live state wins.
 
 ---
 
@@ -245,6 +297,7 @@ flowchart LR
 | File inventory | ✓ | - | Single source of truth for uploaded files |
 | Workspace membership | ✓ | - | File grouping resolved at query time |
 | User accounts & roles | ✓ | - | Authentication, ACID compliance |
+| Indexing job history | ✓ | - | Task outcomes survive Ray restarts |
 | Document chunks | - | ✓ | Optimized for vector operations |
 | Dense embeddings | - | ✓ | HNSW similarity search |
 | Sparse embeddings | - | ✓ | BM25 keyword matching |

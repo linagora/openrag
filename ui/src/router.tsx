@@ -15,6 +15,7 @@ import { ProtectedRoute } from "@/components/layout/protected-route";
 // Admin-only pages — lazy loaded so they are never downloaded by regular users
 const ModelsPage = lazy(() => import("@/pages/admin/models"));
 const PresetsPage = lazy(() => import("@/pages/admin/presets"));
+const PromptsPage = lazy(() => import("@/pages/admin/prompts"));
 const UserListPage = lazy(() => import("@/pages/admin/users/list"));
 const UserDetailPage = lazy(() => import("@/pages/admin/users/detail"));
 const SystemPage = lazy(() => import("@/pages/admin/system"));
@@ -69,6 +70,16 @@ export const router = createBrowserRouter(
             <AdminRoute>
               <Suspense fallback={<div className="p-6">Loading...</div>}>
                 <PresetsPage />
+              </Suspense>
+            </AdminRoute>
+          ),
+        },
+        {
+          path: "prompts",
+          element: (
+            <AdminRoute>
+              <Suspense fallback={<div className="p-6">Loading...</div>}>
+                <PromptsPage />
               </Suspense>
             </AdminRoute>
           ),

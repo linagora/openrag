@@ -9,9 +9,11 @@ The hierarchy is organised by concern:
     +-- ConfigError
     +-- RegistryError
     +-- PipelineError
+    |   +-- NoIndexableContentError     (422)
     +-- AuthError
     |   +-- AuthenticationError          (401)
     +-- ValidationError                  (422)
+    |   +-- AmbiguousWorkspaceError
     +-- NotFoundError                    (404)
     |   +-- DocumentNotFoundError
     |   +-- PartitionNotFoundError
@@ -86,10 +88,16 @@ class OpenRAGError(Exception):
 
 
 class ConfigError(OpenRAGError):
-    """Configuration-related errors."""
+    """Configuration-related errors.
 
-    def __init__(self, message: str, **kwargs):
-        super().__init__(message, code="CONFIG_ERROR", status_code=500, **kwargs)
+    Accepts a custom ``code`` (same shape as :class:`ValidationError`) so a
+    caller can name a specific failure. Hard-coding it made ``code=`` collide
+    with the forwarded ``**kwargs`` and raise ``TypeError`` from the ``raise``
+    statement itself, replacing the intended error with an unrelated one.
+    """
+
+    def __init__(self, message: str, *, code: str = "CONFIG_ERROR", **kwargs):
+        super().__init__(message, code=code, status_code=500, **kwargs)
 
 
 class RegistryError(OpenRAGError):
@@ -102,8 +110,15 @@ class RegistryError(OpenRAGError):
 class PipelineError(OpenRAGError):
     """Pipeline execution errors."""
 
+    def __init__(self, message: str, *, code: str = "PIPELINE_ERROR", status_code: int = 500, **kwargs):
+        super().__init__(message, code=code, status_code=status_code, **kwargs)
+
+
+class NoIndexableContentError(PipelineError):
+    """The pipeline produced no content that retrieval could return."""
+
     def __init__(self, message: str, **kwargs):
-        super().__init__(message, code="PIPELINE_ERROR", status_code=500, **kwargs)
+        super().__init__(message, code="NO_INDEXABLE_CONTENT", status_code=422, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +155,44 @@ class ValidationError(OpenRAGError):
 
     def __init__(self, message: str, *, status_code: int = 422, code: str = "VALIDATION_ERROR", **kwargs):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
+
+
+class AmbiguousWorkspaceError(ValidationError):
+    """A workspace id matched several partitions the caller may search.
+
+    ``workspace_id`` is only unique per partition, so a multi-partition
+    request must be narrowed to one partition before it can be scoped.
+    """
+
+    def __init__(self, workspace_id: str, partitions: list[str], **kwargs):
+        super().__init__(
+            f"Workspace '{workspace_id}' exists in several partitions ({', '.join(partitions)}); "
+            "target a single partition.",
+            code="WORKSPACE_AMBIGUOUS",
+            workspace_id=workspace_id,
+            partitions=list(partitions),
+            **kwargs,
+        )
+
+
+class ContextWindowExceededError(ValidationError):
+    """The answer instructions and the request alone don't fit in the answering model's context window.
+
+    The router's preflight counts the caller's messages and the output budget,
+    not the instructions the answer prompt adds; this catches what that leaves,
+    instead of sending the provider a request it would reject.
+    """
+
+    def __init__(self, prompt_tokens: int, max_prompt_tokens: int, **kwargs):
+        super().__init__(
+            f"Request exceeds the answering model's context window: the instructions and the request take "
+            f"{prompt_tokens} tokens, and {max_prompt_tokens} are left once the requested output is reserved.",
+            status_code=413,
+            code="CONTEXT_WINDOW_EXCEEDED",
+            prompt_tokens=prompt_tokens,
+            max_prompt_tokens=max_prompt_tokens,
+            **kwargs,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +288,27 @@ class CircuitBreakerOpenError(ServiceUnavailableError):
 
 
 class InferenceError(OpenRAGError):
-    """Base for all inference service failures. Maps to HTTP 503."""
+    """Base for all inference service failures. Maps to HTTP 503.
 
-    def __init__(self, message: str, *, code: str = "INFERENCE_ERROR", status_code: int = 503, **kwargs):
+    ``caller_shaped`` marks a call sent with the caller's own endpoint and key
+    (an honoured ``llm_override.base_url``): the API answers its 401 or 403 as
+    the caller's error rather than an upstream failure. A model-only override
+    still sends OpenRag's key, and a 401 there cannot be told from that key
+    being revoked, so it is not caller-shaped. Kept off ``extra``, which is
+    serialised into the response body.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "INFERENCE_ERROR",
+        status_code: int = 503,
+        caller_shaped: bool = False,
+        **kwargs,
+    ):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
+        self.caller_shaped = caller_shaped
 
 
 class LLMParsingError(InferenceError):
@@ -426,3 +496,28 @@ class VDBSchemaMigrationRequiredError(VDBError):
 class UnexpectedVDBError(VDBError):
     def __init__(self, message: str, **kwargs):
         super().__init__(message, code="VDB_UNEXPECTED_ERROR", status_code=500, **kwargs)
+
+
+# ``IndexerPool.submit`` launches the worker task before it returns, so a lost
+# or timed-out submit response can leave a worker running against the uploaded
+# file. The dispatcher preserves the task and its content claim in that case
+# (``submission_outcome_unknown``) and marks the propagating exception, so
+# upload handlers keep the file instead of unlinking input the live worker has
+# not read yet. The worker deletes its own input once it settles — see
+# ``services.workers.indexer_actor.delete_uploaded_file``.
+_INDEXING_WORKER_MAY_BE_RUNNING_ATTR = "_openrag_indexing_worker_may_be_running"
+
+
+def mark_indexing_worker_may_be_running(exc: BaseException) -> None:
+    """Flag ``exc`` as propagating while an indexing worker may still be live."""
+    try:
+        setattr(exc, _INDEXING_WORKER_MAY_BE_RUNNING_ATTR, True)
+    except AttributeError:
+        # A few built-in exceptions forbid attribute assignment; losing the
+        # marker only restores the previous (delete-the-upload) behaviour.
+        pass
+
+
+def indexing_worker_may_be_running(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised while an indexing worker may still be live."""
+    return getattr(exc, _INDEXING_WORKER_MAY_BE_RUNNING_ATTR, False) is True

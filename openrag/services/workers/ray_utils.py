@@ -11,10 +11,15 @@ Use the decorator form when params are static (or pulled from a
 module-level config); use the function form when params are dynamic per
 call. Cancellation paths are translated into a predictable shape:
 
-- caller-side timeout → ``ray.cancel(future)`` then re-raise ``TimeoutError``
+- caller-side timeout → ``ray.cancel(future)`` then raise ``TimeoutError``
+  naming the task and its bound
+- worker-side ``TimeoutError`` → ``RemoteTimeoutError`` (a ``TimeoutError``)
+  whose message ends with the remote cause (no cancel: the task has settled)
 - caller-side ``asyncio.CancelledError`` → ``ray.cancel(future)`` then re-raise
 - worker-side ``TaskCancelledError`` → re-raise as-is
-- worker-side ``RayTaskError`` → re-raise as ``RuntimeError`` (cause preserved)
+- actor restart/unavailability → ``ServiceUnavailableError`` (503)
+- worker-side ``RayTaskError`` → re-raise as ``RuntimeError`` whose message
+  ends with the remote cause (cause also chained)
 """
 
 from __future__ import annotations
@@ -27,17 +32,71 @@ from collections.abc import Callable
 from typing import Any
 
 import ray
+from core.utils.error_summary import elide_middle, failure_reason_from_exception
+from core.utils.exceptions import ServiceUnavailableError
 from core.utils.logging import get_logger
-from ray.exceptions import RayTaskError, TaskCancelledError
+from ray.exceptions import ActorUnavailableError, RayActorError, RayTaskError, TaskCancelledError
 
 logger = get_logger()
 
+# Each actor hop appends its cause to the message, so the cap applies per hop.
+_REMOTE_CAUSE_MAX_LENGTH = 300
+
 __all__ = [
+    "RemoteTimeoutError",
+    "call_ray_actor_method_with_timeout",
+    "caused_by",
     "call_ray_actor_with_timeout",
+    "retry_idempotent_ray_actor_method",
     "retry_with_backoff",
     "with_retry",
     "with_timeout",
 ]
+
+
+class RemoteTimeoutError(TimeoutError):
+    """A ``TimeoutError`` the Ray task raised itself, not the caller's deadline.
+
+    Still a ``TimeoutError``, so callers that map a timeout (the extractText
+    504, Marker's slot recycle) keep working. The task has already settled,
+    though, so a caller waiting for it to finish can tell this apart from its
+    own wait running out.
+    """
+
+
+def _actor_unavailable(task_description: str, exc: BaseException) -> ServiceUnavailableError:
+    logger.bind(
+        task_description=task_description,
+        ray_error=type(exc).__name__,
+    ).warning("Ray actor is temporarily unavailable")
+    return ServiceUnavailableError(
+        "Worker service is temporarily unavailable",
+        code="RAY_ACTOR_UNAVAILABLE",
+    )
+
+
+def _remote_cause(error: RayTaskError) -> str:
+    """``"<Type>: <first line>"`` of the exception the actor raised.
+
+    Not ``str(error)``: that is Ray's formatted remote traceback, headed by a
+    ``ray::Actor.method() (pid=...)`` line. ``error.cause`` is the actor's own
+    exception, and Ray does not nest one ``RayTaskError`` inside another, so a
+    failure that crossed several actors arrives as the innermost wrapper's
+    ``RuntimeError``, whose message already carries the deeper causes.
+    """
+    cause = getattr(error, "cause", None)
+    if cause is None:
+        return "RayTaskError"
+    try:
+        reason = failure_reason_from_exception(cause)
+    except Exception:
+        reason = type(cause).__name__
+    return elide_middle(reason, _REMOTE_CAUSE_MAX_LENGTH)
+
+
+def _task_failed(task_description: str, error: RayTaskError) -> RuntimeError:
+    """The ``RuntimeError`` :func:`call_ray_actor_with_timeout` raises for *error*."""
+    return RuntimeError(f"{task_description} failed: {_remote_cause(error)}")
 
 
 def _resolve_description(template: str, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
@@ -76,18 +135,26 @@ async def call_ray_actor_with_timeout(
 
     Raises:
         TimeoutError: If the task exceeds ``timeout``.
+        RemoteTimeoutError: If the task raised a ``TimeoutError`` itself.
         asyncio.CancelledError: If the calling coroutine is cancelled.
         TaskCancelledError: If the Ray task was cancelled by the worker.
-        RuntimeError: If the Ray task failed (original exception chained).
+        RuntimeError: If the Ray task failed. The message ends with the remote
+            cause, so it survives being pickled across further actor hops; the
+            Ray error is also chained as ``__cause__``.
     """
     try:
         result = await asyncio.wait_for(asyncio.gather(future), timeout=timeout)
         return result[0]
 
-    except TimeoutError:
+    except TimeoutError as exc:
+        if isinstance(exc, RayTaskError):
+            # The actor raised its own TimeoutError (e.g. a Marker child's
+            # bound), so the task has already settled: nothing to cancel. Keep
+            # the type, which callers branch on, and name the remote cause.
+            raise RemoteTimeoutError(f"{task_description} failed: {_remote_cause(exc)}") from exc
         logger.warning(f"{task_description} timed out, cancelling Ray task")
         ray.cancel(future, recursive=True)
-        raise
+        raise TimeoutError(f"{task_description} timed out after {timeout:g}s") from exc
 
     except asyncio.CancelledError:
         logger.warning(f"{task_description} cancelled, cancelling Ray task")
@@ -98,8 +165,59 @@ async def call_ray_actor_with_timeout(
         logger.warning(f"{task_description} Ray task was cancelled")
         raise
 
+    except (RayActorError, ActorUnavailableError) as exc:
+        raise _actor_unavailable(task_description, exc) from exc
+
     except RayTaskError as e:
-        raise RuntimeError(f"{task_description} failed") from e
+        raise _task_failed(task_description, e) from e
+
+
+async def call_ray_actor_method_with_timeout(
+    submit: Callable[[], ray.ObjectRef],
+    timeout: float,
+    task_description: str = "Ray task",
+) -> Any:
+    """Submit and await an actor method while covering both failure windows.
+
+    A dead or restarting actor can reject ``method.remote()`` synchronously,
+    before an ``ObjectRef`` exists. Keeping submission inside this helper
+    ensures that failure receives the same controlled 503 mapping as a failure
+    raised while awaiting the returned reference.
+    """
+    try:
+        future = submit()
+    except (RayActorError, ActorUnavailableError) as exc:
+        raise _actor_unavailable(task_description, exc) from exc
+    return await call_ray_actor_with_timeout(
+        future=future,
+        timeout=timeout,
+        task_description=task_description,
+    )
+
+
+async def retry_idempotent_ray_actor_method(
+    submit: Callable[[], ray.ObjectRef],
+    recovery_timeout: float = 30.0,
+    task_description: str = "Ray task",
+    retry_delay: float = 0.1,
+) -> Any:
+    """Retry an idempotent actor write while its process is reconstructing."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + recovery_timeout
+    while loop.time() < deadline:
+        try:
+            remaining = max(0.01, deadline - loop.time())
+            return await call_ray_actor_method_with_timeout(
+                submit=submit,
+                timeout=remaining,
+                task_description=task_description,
+            )
+        except ServiceUnavailableError:
+            await asyncio.sleep(retry_delay)
+    raise ServiceUnavailableError(
+        "Worker service did not recover in time",
+        code="RAY_ACTOR_UNAVAILABLE",
+    )
 
 
 def with_timeout(
@@ -145,12 +263,35 @@ def with_timeout(
 # ---------------------------------------------------------------------------
 
 
+def caused_by(exc: BaseException | None, types: type[BaseException] | tuple[type[BaseException], ...]) -> bool:
+    """True when *exc*, or anything it was raised from, is one of *types*.
+
+    Ray does not hand a worker's exception back unchanged: a child failure
+    arrives as ``RayTaskError(Original)``, and :func:`call_ray_actor_with_timeout`
+    then re-raises that as ``RuntimeError`` with the Ray error as ``__cause__``.
+    A plain ``isinstance`` therefore misses the original type across an actor
+    boundary — which is exactly where a caller needs to recognise it.
+
+    Walks ``__cause__`` with a seen-set, because an explicitly chained cycle
+    would otherwise spin forever.
+    """
+    seen: set[int] = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, types):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
+
+
 async def retry_with_backoff(
     attempt_fn: Callable[[int], Any],
     max_retries: int,
     base_delay: float,
     task_description: str = "task",
     jitter: bool = True,
+    no_retry: tuple[type[BaseException], ...] = (),
 ) -> Any:
     """Run ``attempt_fn(attempt_index)`` with exponential backoff.
 
@@ -158,6 +299,13 @@ async def retry_with_backoff(
     in ``[0, base_delay)`` when ``jitter=True``. ``attempt_fn`` is an
     async callable; it owns acquire/release of any per-attempt resources
     so a flaky resource can be sidestepped on retry.
+
+    ``no_retry`` names failures a second attempt cannot change — a deterministic
+    ceiling, say — so they are raised immediately instead of costing
+    ``max_retries`` more runs and the backoff between them. Matched with
+    :func:`caused_by`, not ``isinstance``: across an actor boundary the original
+    type survives only on ``__cause__``. Empty by default, so every existing
+    caller keeps retrying everything.
     """
     last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
@@ -167,6 +315,9 @@ async def retry_with_backoff(
             raise
         except Exception as e:
             last_exc = e
+            if no_retry and caused_by(e, no_retry):
+                logger.error(f"{task_description} failed with a non-retryable error: {e}")
+                raise
             if attempt >= max_retries:
                 logger.error(f"{task_description} failed after {attempt + 1} attempts: {e}")
                 raise

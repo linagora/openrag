@@ -28,7 +28,10 @@ interface BaseDataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
   data: TData[];
   pageSize?: number;
+  emptyMessage?: string;
   initialSorting?: SortingState;
+  /** Reset pagination to the first page whenever this value changes. */
+  pageResetKey?: unknown;
   /** Render a leading checkbox column. */
   enableSelection?: boolean;
   /** Optional row-level selection guard for pages with state-dependent bulk actions. */
@@ -54,7 +57,9 @@ export function DataTable<TData, TValue>({
   columns,
   data,
   pageSize = 10,
+  emptyMessage = "No results.",
   initialSorting = [],
+  pageResetKey,
   enableSelection = false,
   canSelectRow,
   getRowId,
@@ -67,6 +72,12 @@ export function DataTable<TData, TValue>({
   const [internalRowSelection, setInternalRowSelection] = useState<RowSelectionState>({});
   const rowSelection = controlledRowSelection ?? internalRowSelection;
   const setRowSelection = onRowSelectionChange ?? setInternalRowSelection;
+
+  useEffect(() => {
+    setPagination((previous) =>
+      previous.pageIndex === 0 ? previous : { ...previous, pageIndex: 0 },
+    );
+  }, [pageResetKey]);
 
   // Prepend a checkbox column when selection is enabled.
   const tableColumns = useMemo<ColumnDef<TData, TValue>[]>(() => {
@@ -177,7 +188,7 @@ export function DataTable<TData, TValue>({
                   colSpan={columnCount}
                   className="h-24 text-center text-muted-foreground"
                 >
-                  No results.
+                  {emptyMessage}
                 </TableCell>
               </TableRow>
             )}

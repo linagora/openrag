@@ -5,7 +5,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow, ModelsConfig
+from core.config.model_endpoints import (
+    LLM_CONTEXT_SIZE_KEY,
+    LLM_OUTPUT_TOKENS_KEY,
+    ModelEndpointConfig,
+    ModelEndpointRow,
+    ModelsConfig,
+)
 from pydantic import ValidationError
 
 
@@ -29,7 +35,9 @@ def test_models_config_dicts_are_mutable_in_place():
     ep = ModelEndpointConfig(endpoint="http://vllm:8000/v1")
 
     cfg.embedder["default"] = ep
+    cfg.stt["default"] = ep
     assert "default" in cfg.embedder
+    assert "default" in cfg.stt
 
     new_ep = ModelEndpointConfig(endpoint="http://new:8000/v1")
     cfg.embedder.clear()
@@ -50,6 +58,12 @@ def test_model_endpoint_row_invalid_model_type():
         ModelEndpointRow(**_row_payload(model_type="not-a-model"))
 
 
+def test_model_endpoint_row_accepts_stt_type():
+    """STT endpoints share the persisted registry with inference endpoints."""
+    row = ModelEndpointRow(**_row_payload(model_type="stt", model_name="moss-transcribe-diarize"))
+    assert row.model_type == "stt"
+
+
 @pytest.mark.parametrize("batch_size", [0, -1])
 def test_model_endpoint_row_non_positive_batch_size(batch_size: int):
     """Persisted endpoint rows reject non-positive batch sizes."""
@@ -62,3 +76,101 @@ def test_model_endpoint_row_non_positive_timeout(timeout: float):
     """Persisted endpoint rows reject non-positive timeouts."""
     with pytest.raises(ValidationError):
         ModelEndpointRow(**_row_payload(timeout=timeout))
+
+
+# --------------------------------------------------------------------------- #
+# Named-LLM-endpoint token budget accessors
+# --------------------------------------------------------------------------- #
+
+
+def _with_default_llm(**extra) -> ModelsConfig:
+    cfg = ModelsConfig()
+    cfg.llm["default"] = ModelEndpointConfig(endpoint="http://vllm:8000/v1", extra=dict(extra))
+    return cfg
+
+
+def test_llm_token_budgets_none_when_unregistered():
+    cfg = ModelsConfig()
+    assert cfg.llm_extra() == {}
+    assert cfg.llm_context_size() is None
+    assert cfg.llm_output_tokens() is None
+
+
+def test_llm_token_budgets_read_from_extra():
+    cfg = _with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 32768, LLM_OUTPUT_TOKENS_KEY: 2048})
+    assert cfg.llm_context_size() == 32768
+    assert cfg.llm_output_tokens() == 2048
+
+
+def test_llm_token_budgets_none_when_key_absent():
+    cfg = _with_default_llm(implementation="vllm")  # unrelated extra key
+    assert cfg.llm_context_size() is None
+    assert cfg.llm_output_tokens() is None
+
+
+@pytest.mark.parametrize("bad", [0, -1, "not-a-number", None, 12.5])
+def test_llm_token_budgets_coerce_invalid_to_none(bad):
+    # A non-positive / non-int stored value means "no override" — the preflight
+    # falls back to the global default rather than trusting garbage.
+    cfg = _with_default_llm(**{LLM_CONTEXT_SIZE_KEY: bad, LLM_OUTPUT_TOKENS_KEY: bad})
+    assert cfg.llm_context_size() is None
+    assert cfg.llm_output_tokens() is None
+
+
+def test_llm_token_budgets_resolved_by_name():
+    # A partition's chat_llm preset names a catalogued endpoint other than
+    # "default" — the accessor must read that endpoint's extra, not the
+    # default alias's.
+    cfg = ModelsConfig()
+    cfg.llm["default"] = ModelEndpointConfig(endpoint="http://vllm:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: 8192})
+    cfg.llm["mistral"] = ModelEndpointConfig(
+        endpoint="http://mistral:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: 32768, LLM_OUTPUT_TOKENS_KEY: 4096}
+    )
+    assert cfg.llm_context_size("mistral") == 32768
+    assert cfg.llm_output_tokens("mistral") == 4096
+    assert cfg.llm_context_size("default") == 8192
+    assert cfg.llm_context_size("unregistered") is None
+
+
+# ── embedder_fingerprint: what decides an embedder's vectors (#958) ──
+
+
+def test_embedder_fingerprint_ignores_what_cannot_change_a_vector():
+    """Timeout, batch size and the API key change how vectors are fetched, not
+    what they are; the indexer must not refuse a file over them."""
+    from core.config.model_endpoints import embedder_fingerprint
+
+    base = embedder_fingerprint("http://vllm:8000/v1", "bge-m3", {"api_key": "k1", "embed_concurrency": 4})
+    rotated = embedder_fingerprint("http://vllm:8000/v1/ ", "bge-m3", {"api_key": "k2", "implementation": "vllm"})
+
+    assert rotated == base
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "model_name", "extra"),
+    [
+        ("http://other:8000/v1", "bge-m3", {}),
+        ("http://vllm:8000/v1", "e5-large", {}),
+        ("http://vllm:8000/v1", "bge-m3", {"implementation": "ollama"}),
+        ("http://vllm:8000/v1", "bge-m3", {"max_model_len": 512}),
+    ],
+)
+def test_embedder_fingerprint_changes_with_what_decides_the_vectors(endpoint, model_name, extra):
+    from core.config.model_endpoints import embedder_fingerprint
+
+    assert embedder_fingerprint(endpoint, model_name, extra) != embedder_fingerprint(
+        "http://vllm:8000/v1", "bge-m3", {}
+    )
+
+
+def test_material_embedder_changes_names_what_moved_against_the_fingerprint():
+    """The edit guard and the indexer judge a change by the same fingerprint."""
+    from core.config.model_endpoints import material_embedder_changes
+
+    row = ModelEndpointRow(**_row_payload(model_type="embedder", model_name="bge-m3"))
+
+    assert material_embedder_changes(row, {"model_name": "e5-large", "extra": {"max_model_len": 512}}) == [
+        "model_name",
+        "extra.max_model_len",
+    ]
+    assert material_embedder_changes(row, {"timeout": 90.0, "extra": {"implementation": "vllm"}}) == []

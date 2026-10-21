@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 
 import pytest
 from core.utils.source_filtering import (
@@ -103,6 +104,148 @@ class TestExtractAndStripSourcesBlock:
         assert clean == "Answer text"
         assert citations == set()
 
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "`[Sources: none]`",
+            "**[Sources: none]**",
+            "*[Sources: none]*.",
+            "_[Sources: none]_",
+            "**Sources:** none",
+            "[Sources: **none**]",
+            "[Sources: _none_]",
+            "[Sources: `none`]",
+            "**[Sources: **none**]**",
+            "[**Sources:** none]",
+            "[**Sources**: none]",
+            "[**Sources: none**]",
+            "**[**Sources:** none]**",
+            "[**Sources**]: none",
+            "[`Sources`: none]",
+            "[_Sources:_ none]",
+        ],
+    )
+    @pytest.mark.parametrize("separator", [" ", "\n", "\n\n"])
+    def test_sources_none_wrapped_in_markdown(self, tag, separator):
+        clean, citations = extract_and_strip_sources_block(f"Test test.{separator}{tag}")
+        assert clean == "Test test."
+        assert citations == set()
+
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "`[Sources: 1, 3]`",
+            "**[Sources: 1, 3]**",
+            "*[Sources: 1, 3]*",
+            "**Sources:** 1, 3",
+            "[Sources: **1, 3**]",
+            "[Sources: `1, 3`]",
+            "[Sources: **1**, **3**]",
+            "**Sources:** **1**, _3_",
+            "[**Sources:** 1, 3]",
+            "[**Sources**: 1, 3]",
+            "[**Sources: 1, 3**]",
+            "**[**Sources:** 1, 3]**",
+            "[**Sources**]: 1, 3",
+            "[`Sources`: 1, 3]",
+            "[**Sources:** **1**, **3**]",
+        ],
+    )
+    def test_sources_numbers_wrapped_in_markdown(self, tag):
+        clean, citations = extract_and_strip_sources_block(f"Answer text\n{tag}")
+        assert clean == "Answer text"
+        assert citations == {1, 3}
+
+    @pytest.mark.parametrize("mark", ["**", "*", "_", "__", "`"])
+    @pytest.mark.parametrize(("value", "expected"), [("none", set()), ("1, 3", {1, 3})])
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "{m}[Sources: {v}]{m}",
+            "[{m}Sources:{m} {v}]",
+            "[{m}Sources{m}: {v}]",
+            "[{m}Sources: {v}{m}]",
+            "[Sources:{m} {v}{m}]",
+            "[Sources: {m}{v}{m}]",
+            "{m}[{m}Sources:{m} {v}]{m}",
+            "{m}Sources:{m} {v}",
+            "{m}Sources{m}: {v}",
+            "{m}Sources: {v}{m}",
+            "Sources: {m}{v}{m}",
+            "{m}[Sources]:{m} {v}",
+            "[{m}Sources{m}]: {v}",
+        ],
+    )
+    def test_marks_at_every_boundary_of_the_tag(self, template, mark, value, expected):
+        """Wherever the model puts the emphasis, the whole tag goes and the citation is read."""
+        tag = template.format(m=mark, v=value)
+        clean, citations = extract_and_strip_sources_block(f"Answer text.\n{tag}")
+        assert clean == "Answer text."
+        assert citations == expected
+
+    def test_markdown_in_answer_body_untouched_by_tag_stripping(self):
+        text = "**Important**: run `make`\n[Sources: 2]"
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "**Important**: run `make`"
+        assert citations == {2}
+
+    @pytest.mark.parametrize("tag", ["`[Sources: 1, 3]`", "`[**Sources:** 1, 3]`"])
+    def test_code_span_tag_inline_in_prose_preserved(self, tag):
+        text = f"Use the format {tag} at the very end of your response."
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == text
+        assert citations is None
+
+    def test_sources_list_wrapped_onto_the_next_line(self):
+        clean, citations = extract_and_strip_sources_block("Answer text\n[Sources: 1,\n3]")
+        assert clean == "Answer text"
+        assert citations == {1, 3}
+
+    @pytest.mark.parametrize(
+        "tag",
+        ["[Sources: 1 3]", "[Sources: **1** **3**]", "[Sources: 1\n3]", "**Sources:** `1` `3`"],
+    )
+    def test_numbers_not_separated_by_commas_are_all_cited(self, tag):
+        """A tag that is stripped must have its numbers read, or it would fall back to every source."""
+        clean, citations = extract_and_strip_sources_block(f"Answer text\n{tag}")
+        assert clean == "Answer text"
+        assert citations == {1, 3}
+
+    def test_line_after_the_tag_is_kept(self):
+        clean, citations = extract_and_strip_sources_block("Answer text\nSources: 1\n2. Next item")
+        assert clean == "Answer text\n2. Next item"
+        assert citations == {1}
+
+    @pytest.mark.parametrize("tag", ["[Sources: ]", "[Sources:]", "[**Sources:** ]"])
+    def test_empty_tag_is_stripped_without_reporting_citations(self, tag):
+        clean, citations = extract_and_strip_sources_block(f"Answer text\n{tag}")
+        assert clean == "Answer text"
+        assert citations is None
+
+    @pytest.mark.parametrize("text", ["The two main Sources:\n1. Doc A\n2. Doc B", "Here are the Sources:\n\n- doc a"])
+    def test_sources_label_in_prose_is_not_a_tag(self, text):
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == text
+        assert citations is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("*" * 20_000, id="marks"),
+            pytest.param("*_`" * 7_000 + "x", id="mixed-marks"),
+            pytest.param("[" + "*" * 20_000 + "x", id="bracket-marks"),
+            pytest.param("Sources: none" + "*" * 20_000 + "x", id="none-marks"),
+            pytest.param("Sources: 1" + "*" * 20_000 + "x", id="number-marks"),
+            pytest.param("Sources:" + "\n" * 20_000 + "x", id="label-newlines"),
+            pytest.param("[Sources: " + "**1**, " * 4_000 + "x", id="emphasized-numbers"),
+        ],
+    )
+    def test_long_runs_of_marks_are_linear(self, text):
+        """Neighbouring runs that share characters made a failed search quadratic (seconds at this size)."""
+        start = time.perf_counter()
+        extract_and_strip_sources_block(text)
+        assert time.perf_counter() - start < 1.0
+
     def test_sources_numbers_case_insensitive(self):
         text = "Answer text\n[sources: 1, 3]"
         clean, citations = extract_and_strip_sources_block(text)
@@ -135,6 +278,24 @@ class TestExtractAndStripSourcesBlock:
         assert clean == text
         assert citations is None
 
+    def test_context_source_markers_are_recovered_and_stripped(self):
+        text = "The footprint fell by 28% [Source 7].\nThe partners include Flexis [Source 8][Source 9]."
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "The footprint fell by 28%.\nThe partners include Flexis."
+        assert citations == {7, 8, 9}
+
+    def test_unclosed_numbered_source_marker_is_recovered(self):
+        text = "The target is 2040 [Source 2"
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "The target is 2040"
+        assert citations == {2}
+
+    def test_dangling_source_marker_is_removed_without_a_citation(self):
+        text = "Logistics emissions fell by 30% [Source"
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "Logistics emissions fell by 30%"
+        assert citations is None
+
 
 class TestFilterSourcesByCitations:
     def test_basic_filtering(self):
@@ -142,7 +303,8 @@ class TestFilterSourcesByCitations:
         result = filter_sources_by_citations(sources, {1, 3, 5})
         assert result == ["a", "c", "e"]
 
-    def test_none_citations_returns_all(self):
+    def test_none_citations_returns_all_sources(self):
+        """No tag at all means the model didn't report citations, not that it used none."""
         sources = ["a", "b", "c"]
         result = filter_sources_by_citations(sources, None)
         assert result == ["a", "b", "c"]
@@ -152,10 +314,10 @@ class TestFilterSourcesByCitations:
         result = filter_sources_by_citations(sources, set())
         assert result == []
 
-    def test_out_of_range_citations_fallback(self):
+    def test_out_of_range_citations_returns_empty(self):
         sources = ["a", "b", "c"]
         result = filter_sources_by_citations(sources, {99})
-        assert result == ["a", "b", "c"]
+        assert result == []
 
     def test_partial_out_of_range(self):
         sources = ["a", "b", "c"]
@@ -241,8 +403,8 @@ def _parse_finish_sources(sse_lines: list[str]) -> list:
         if line.startswith("data: ") and line.strip() != "data: [DONE]":
             data = json.loads(line[len("data: ") :])
             extra = data.get("extra")
-            if extra and extra != "{}":
-                return json.loads(extra).get("sources", [])
+            if extra:
+                return extra.get("sources", [])
     return []
 
 
@@ -274,6 +436,49 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Here is the answer."
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_all_retrieved_sources_omitted_unless_opted_in(self):
+        """all_retrieved_sources is debug/eval telemetry — absent by default,
+        only included when the caller passes include_all_retrieved=True."""
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert "all_retrieved_sources" not in _parse_finish_extra(result)
+
+    @pytest.mark.asyncio
+    async def test_all_retrieved_sources_includes_uncited_ones_when_opted_in(self):
+        """`all_retrieved_sources` always carries every candidate, unfiltered by citation."""
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(
+            stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model", include_all_retrieved=True)
+        )
+        assert _parse_finish_extra(result)["all_retrieved_sources"] == self.SOURCES
+
+    @pytest.mark.asyncio
+    async def test_citations_reported_true_when_model_cites_every_source(self):
+        """Citing every source and reporting no tag both leave `sources` equal
+        to the full list — `citations_reported` is the only way to tell them
+        apart (#847 review)."""
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 2, 3]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        extra = _parse_finish_extra(result)
+        assert extra["sources"] == self.SOURCES
+        assert extra["citations_reported"] is True
 
     @pytest.mark.asyncio
     async def test_content_and_finish_reason_in_same_chunk_keeps_last_token(self):
@@ -368,10 +573,86 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "I cannot find this in the documents."
         assert _parse_finish_sources(result) == []
+        # Explicit "[Sources: none]" is a reported (empty) citation set, not a
+        # missing tag — distinguishable from case 3 below via citations_reported.
+        assert _parse_finish_extra(result)["citations_reported"] is True
 
     @pytest.mark.asyncio
-    async def test_case3_llm_no_tag_fallback_all(self):
-        """Case 3: LLM omits tag entirely → fallback to all sources."""
+    async def test_backticked_sources_none_split_across_chunks_is_stripped(self):
+        lines = [
+            _make_chunk("Test test. `"),
+            _make_chunk("[Sources"),
+            _make_chunk(": none]"),
+            _make_chunk("`"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Test test."
+        assert _parse_finish_sources(result) == []
+        assert _parse_finish_extra(result)["citations_reported"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tag_chunks", "expected_sources"),
+        [
+            (["\n[Sources: **", "none**]"], []),
+            (["\n[Sources: **1", ", 3**]"], [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+            (["\n[Sources: **1**", ", **3**]"], [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+            (["\n[*", "*Sources:*", "* none]"], []),
+            (["\n[**Sou", "rces:** 1", ", 3]"], [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+        ],
+    )
+    async def test_emphasized_value_inside_tag_split_across_chunks_is_stripped(self, tag_chunks, expected_sources):
+        lines = [
+            _make_chunk("Here is the answer."),
+            *(_make_chunk(part) for part in tag_chunks),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Here is the answer."
+        extra = _parse_finish_extra(result)
+        assert extra["sources"] == expected_sources
+        assert extra["cited_sources"] == expected_sources
+        assert extra["citations_reported"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tag", "expected_sources"),
+        [
+            ("[**Sources:** none]", []),
+            ("[**Sources:** 1, 3]", [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+            ("**[**Sources:** **1**, **3**]**", [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+            ("[`Sources`: none]", []),
+            ("[_Sources_]: 1, 3", [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+            ("[Sources: **1** **3**]", [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+        ],
+    )
+    async def test_emphasized_tag_streamed_one_character_per_chunk_is_stripped(self, tag, expected_sources):
+        """The worst split: no prefix of the tag may reach the client."""
+        answer = "Here is the answer, with **bold** and `code`."
+        lines = [*(_make_chunk(char) for char in f"{answer}\n{tag}"), _make_finish(), DONE_LINE]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == answer
+        extra = _parse_finish_extra(result)
+        assert extra["sources"] == expected_sources
+        assert extra["cited_sources"] == expected_sources
+        assert extra["citations_reported"] is True
+
+    @pytest.mark.asyncio
+    async def test_fully_emphasized_tag_citing_many_sources_does_not_leak(self):
+        """A tag longer than the lookahead buffer is still held back while it streams."""
+        sources = [{"file": f"{i}.pdf"} for i in range(1, 61)]
+        tag = "**[**Sources:** " + ", ".join(f"**{i}**" for i in range(1, 61)) + "]**"
+        lines = [_make_chunk("Answer."), *(_make_chunk(char) for char in f"\n{tag}"), _make_finish(), DONE_LINE]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), sources, "test-model"))
+        assert _collect_content(result) == "Answer."
+        assert _parse_finish_extra(result)["cited_sources"] == sources
+
+    @pytest.mark.asyncio
+    async def test_case3_llm_no_tag_returns_all_sources(self):
+        """Case 3: LLM omits tag entirely → treated as unreported, not uncited; all sources kept."""
         lines = [
             _make_chunk("Answer without any sources tag."),
             _make_finish(),
@@ -380,6 +661,49 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Answer without any sources tag."
         assert _parse_finish_sources(result) == self.SOURCES
+        # No tag at all → citations_reported is False even though `sources`
+        # ends up covering everything, same as an explicit "cite all" case.
+        assert _parse_finish_extra(result)["citations_reported"] is False
+
+    @pytest.mark.asyncio
+    async def test_structured_output_preserves_source_like_json_values(self):
+        structured = '{"answer":"Use [Source 1]","literal_format":"[Sources: 1]"}'
+        lines = [
+            _make_chunk(structured),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream(lines),
+                self.SOURCES,
+                "test-model",
+                citation_protocol_active=False,
+            )
+        )
+        assert _collect_content(result) == structured
+        assert _parse_finish_sources(result) == self.SOURCES
+        # citation_protocol_active=False → citations always None → not reported.
+        assert _parse_finish_extra(result)["citations_reported"] is False
+
+    @pytest.mark.asyncio
+    async def test_direct_output_preserves_terminal_source_marker(self):
+        answer = "The requested literal notation is:\n[Sources: 1]"
+        lines = [
+            _make_chunk(answer),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream(lines),
+                [],
+                "test-model",
+                citation_protocol_active=False,
+            )
+        )
+        assert _collect_content(result) == answer
+        assert _parse_finish_sources(result) == []
 
     @pytest.mark.asyncio
     async def test_multiple_inline_tags_stripped_from_stream(self):
@@ -400,6 +724,30 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
 
     @pytest.mark.asyncio
+    async def test_context_source_markers_are_stripped_and_rendered_as_sources(self):
+        lines = [
+            _make_chunk("First claim [Sour"),
+            _make_chunk("ce 1]. Second claim [Source 2][Source 3]."),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "First claim. Second claim."
+        assert _parse_finish_sources(result) == self.SOURCES
+
+    @pytest.mark.asyncio
+    async def test_literal_source_marker_is_preserved_without_sources(self):
+        lines = [
+            _make_chunk("The literal notation [Sour"),
+            _make_chunk("ce 1] identifies the first source."),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), [], "test-model"))
+        assert _collect_content(result) == "The literal notation [Source 1] identifies the first source."
+        assert _parse_finish_sources(result) == []
+
+    @pytest.mark.asyncio
     async def test_inline_prose_tag_preserved_in_stream(self):
         """Meta-discussion: a [Sources: 1, 3] inside a sentence must NOT be stripped."""
         lines = [
@@ -411,7 +759,7 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         content = _collect_content(result)
         assert content == "Use the format [Sources: 1, 3] at the very end of your response."
-        # No line-terminal tag → fallback to all sources
+        # No line-terminal tag means the model didn't report citations — kept, not dropped.
         assert _parse_finish_sources(result) == self.SOURCES
 
     @pytest.mark.asyncio
@@ -477,8 +825,8 @@ class TestStreamClosedWithoutDone:
             if line.startswith("data: ") and line.strip() != "data: [DONE]":
                 data = json.loads(line[len("data: ") :])
                 extra = data.get("extra")
-                if extra and extra != "{}":
-                    finish_extra = json.loads(extra)
+                if extra:
+                    finish_extra = extra
                     break
         assert finish_extra is not None
         assert finish_extra.get("truncated") is True
@@ -577,9 +925,81 @@ def _parse_finish_extra(sse_lines: list[str]) -> dict:
         if line.startswith("data: ") and line.strip() != "data: [DONE]":
             data = json.loads(line[len("data: ") :])
             extra = data.get("extra")
-            if extra and extra != "{}":
-                return json.loads(extra)
+            if extra:
+                return extra
     return {}
+
+
+class TestStreamExtraShape:
+    """`extra` is a nested JSON object on every streamed chunk, never a string.
+
+    Worth pinning separately from the source-content tests: the empty sentinel a
+    mid-stream chunk carries changed from `"{}"` (a truthy string) to `{}` (a
+    falsy object), so any client guarding on `if chunk.extra:` now takes the
+    other branch. That flip is invisible to a test that only reads sources.
+    """
+
+    SOURCES = [{"source_type": "document", "n": 1}]
+
+    @pytest.mark.asyncio
+    async def test_every_chunk_carries_extra_as_an_object(self):
+        # Long enough to push past the 100-char citation-tag buffer, so at least
+        # one mid-stream content chunk is actually emitted to the client.
+        lines = [
+            _make_chunk("Answer body. " * 40),
+            _make_chunk("\n[Sources: 1]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+
+        payloads = [
+            json.loads(line[len("data: ") :])
+            for line in result
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        assert payloads, "stream produced no data frames"
+        assert all(isinstance(p["extra"], dict) for p in payloads), [type(p["extra"]) for p in payloads]
+
+        # Mid-stream chunks carry the empty sentinel; only the tail/finish chunks
+        # carry sources. `{}` is falsy, so `if chunk.extra:` now skips the former.
+        assert [p for p in payloads if not p["extra"]], "no mid-stream chunk carried the empty sentinel"
+        assert payloads[-1]["extra"]["sources"] == self.SOURCES
+
+    @pytest.mark.asyncio
+    async def test_terminal_telemetry_failure_does_not_break_the_stream(self):
+        def broken_telemetry():
+            raise RuntimeError("internal telemetry failure")
+
+        lines = [_make_chunk("Complete answer."), _make_finish(), DONE_LINE]
+
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream(lines),
+                self.SOURCES,
+                "test-model",
+                terminal_extra_fields=broken_telemetry,
+            )
+        )
+
+        assert result[-1].strip() == DONE_LINE
+        finish = json.loads(result[-2][len("data: ") :])
+        assert finish["choices"][0]["finish_reason"] == "stop"
+        assert "retrieval_trace" not in finish["extra"]
+
+    @pytest.mark.asyncio
+    async def test_terminal_telemetry_is_emitted_when_upstream_only_sends_done(self):
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream([DONE_LINE]),
+                self.SOURCES,
+                "test-model",
+                terminal_extra_fields={"retrieval_trace": {"request_id": "req-1"}},
+            )
+        )
+
+        assert result[-1].strip() == DONE_LINE
+        assert _parse_finish_extra(result)["retrieval_trace"] == {"request_id": "req-1"}
 
 
 class TestStreamWithManySources:

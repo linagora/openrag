@@ -15,6 +15,16 @@ class PresetRepository(ABC):
     async def list_all(self, preset_type: str | None = None) -> list[dict]: ...
 
     @abstractmethod
+    async def latest_revision(self) -> int:
+        """Return the transaction-ordered preset configuration revision."""
+        ...
+
+    @abstractmethod
+    async def load_all_with_revision(self) -> tuple[list[dict], int]:
+        """Return all presets and their revision from one database snapshot."""
+        ...
+
+    @abstractmethod
     async def upsert(self, name: str, preset_type: str, config: dict) -> dict: ...
 
     @abstractmethod

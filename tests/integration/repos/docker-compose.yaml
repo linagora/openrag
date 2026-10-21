@@ -14,7 +14,7 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
@@ -26,12 +26,13 @@ services:
       retries: 5
 
   milvus:
-    image: milvusdb/milvus:v2.6.11
+    image: milvusdb/milvus:v3.0.2
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
     environment:
       ETCD_ENDPOINTS: etcd:2379
+      ETCD_AUTH_ENABLED: "false"
       MINIO_ADDRESS: minio:9000
     ports:
       - "19530:19530"

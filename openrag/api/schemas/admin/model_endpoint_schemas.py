@@ -2,20 +2,62 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
-from core.utils.redaction import redact_secret_mapping
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from core.config.model_endpoints import (
+    LLM_CONTEXT_SIZE_KEY,
+    LLM_OUTPUT_TOKENS_KEY,
+    MOSS_SPEAKER_AWARE_KEY,
+    STT_LANGUAGE_KEY,
+)
+from core.utils.redaction import RedactedExtraRepr, redact_secret_mapping
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
+ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
+
+# LLM token budgets that the admin UI edits as first-class fields but stores in
+# ``extra`` — validated here so a typo can't persist a nonsensical value.
+_LLM_TOKEN_EXTRA_KEYS = (LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY)
+
+# Allowlist, not a denylist: `name` is a single path segment in every
+# single-endpoint route (see `_normalize_name`), and enumerating unsafe values
+# one at a time as they're discovered — first `/` (#768), then the RFC 3986
+# dot-segments `.`/`..` — never closes the class. Anchoring both ends on
+# alphanumeric rules out `/`, `.`, `..`, and any leading/trailing separator by
+# construction, while `.`/`_`/`-` stay available in the middle for realistic
+# names like `gpt-4.1` or `jina_v3`.
+_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+_NAME_MAX_LENGTH = 128
 
 
 def _normalize_name(value: str) -> str:
-    """Trim a user-facing registry name and reject blank values."""
+    """Trim a user-facing registry name and reject any value unsafe as a URL path segment.
+
+    ``name`` is embedded as a single path segment in every single-endpoint route
+    (``GET/PUT/DELETE /model-endpoints/{model_type}/{name}``, ``.../set-default``,
+    ``.../reveal-api-key``, ``.../validate``). A value outside ``_NAME_PATTERN``
+    — a ``/`` (splits across path segments), the exact values ``.``/``..``
+    (RFC 3986 dot-segments: browsers and HTTP clients normalize these out of
+    the URL before the request is even sent, resolving to the collection route
+    or dropping the ``model_type`` segment entirely), or anything else that
+    doesn't start/end alphanumeric — would leave the row visible in the list
+    endpoint but permanently unreachable by get/update/delete/set-default,
+    surfacing as a spurious "not found". Percent-encoding never helps: ASGI
+    servers decode ``%2F``/dot-segment escapes before Starlette's router sees
+    the path.
+    """
     value = value.strip()
     if not value:
         raise ValueError("name must be non-empty")
+    if len(value) > _NAME_MAX_LENGTH:
+        raise ValueError(f"name must be at most {_NAME_MAX_LENGTH} characters")
+    if not _NAME_PATTERN.fullmatch(value):
+        raise ValueError(
+            "name must start and end with a letter or digit, and contain only "
+            "letters, digits, '.', '_', or '-' (it is used as a URL path segment)"
+        )
     return value
 
 
@@ -27,7 +69,61 @@ def _normalize_endpoint(value: str) -> str:
     return normalized
 
 
-class CreateModelEndpointRequest(BaseModel):
+def _normalize_model_name(value: str | None) -> str | None:
+    """Trim an optional provider model name without inventing a value."""
+    return value.strip() if value is not None else None
+
+
+def validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reject non-positive-int LLM token budgets carried in ``extra``.
+
+    ``bool`` is an ``int`` subclass in Python, so it is excluded explicitly —
+    ``true`` must not slip through as ``1``.
+
+    Only ever applied to **LLM** endpoints. These two keys are meaningful only
+    there, so enforcing them globally would reserve the names across every
+    endpoint type and reject an embedder / reranker / VLM carrying same-named
+    provider metadata of a different shape. The create schema scopes the call
+    by reading its own ``model_type``; the update route scopes it from the path
+    parameter (``UpdateModelEndpointRequest`` has no ``model_type`` field).
+
+    Raises ``ValueError`` so a pydantic ``field_validator`` can surface it as a
+    normal 422; callers outside pydantic translate it themselves.
+    """
+    if not extra:
+        return extra
+    for key in _LLM_TOKEN_EXTRA_KEYS:
+        if key not in extra:
+            continue
+        value = extra[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"extra.{key} must be a positive integer")
+    return extra
+
+
+def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) -> None:
+    """Validate fields that are meaningful for an OpenAI-compatible STT endpoint.
+
+    ``model`` is required by ``/audio/transcriptions``. A language hint is
+    intentionally permissive: providers accept either ISO 639-1 values such as
+    ``fr`` or broader BCP-47 tags, so the API only requires a non-empty string.
+    Speaker-aware MOSS normalization is an explicit boolean so it cannot be
+    confused with a provider request option.
+    """
+    if not model_name or not model_name.strip():
+        raise ValueError("model_name is required for an STT endpoint")
+    if extra is not None and STT_LANGUAGE_KEY in extra:
+        language = extra[STT_LANGUAGE_KEY]
+        if not isinstance(language, str) or not language.strip():
+            raise ValueError(f"extra.{STT_LANGUAGE_KEY} must be a non-empty language code")
+
+    if extra is None or MOSS_SPEAKER_AWARE_KEY not in extra:
+        return
+    if not isinstance(extra[MOSS_SPEAKER_AWARE_KEY], bool):
+        raise ValueError(f"extra.{MOSS_SPEAKER_AWARE_KEY} must be a boolean")
+
+
+class CreateModelEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body for registering a model endpoint."""
 
     model_config = ConfigDict(extra="forbid")
@@ -53,8 +149,33 @@ class CreateModelEndpointRequest(BaseModel):
         """Normalize the endpoint URL."""
         return _normalize_endpoint(value)
 
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Persist the same model name used by validation and inference."""
+        return _normalize_model_name(value)
 
-class UpdateModelEndpointRequest(BaseModel):
+    @field_validator("extra")
+    @classmethod
+    def validate_extra_token_budgets(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+        """Reject non-positive-int LLM token budgets in ``extra`` — LLMs only.
+
+        ``model_type`` is declared before ``extra``, so it is already validated
+        and present in ``info.data`` here (absent only when it failed its own
+        validation, in which case the request is rejected regardless).
+        """
+        if info.data.get("model_type") != "llm":
+            return value
+        return validate_llm_token_extra(value)
+
+    @model_validator(mode="after")
+    def validate_stt_endpoint(self) -> CreateModelEndpointRequest:
+        if self.model_type == "stt":
+            validate_stt_fields(self.model_name, self.extra)
+        return self
+
+
+class UpdateModelEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body for updating a registered model endpoint."""
 
     model_config = ConfigDict(extra="forbid")
@@ -66,6 +187,17 @@ class UpdateModelEndpointRequest(BaseModel):
     timeout: float | None = Field(default=None, gt=0)
     extra: dict[str, Any] | None = None
     is_default: bool | None = None
+    # Not stored. An embedder edit that changes its URL, model, `implementation`
+    # or `max_model_len` while partitions hold files built with it is refused
+    # (409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA) unless this says the caller knows.
+    acknowledge_indexed_data: bool = Field(
+        default=False,
+        description=(
+            "Apply an embedder change that would leave already-indexed files with vectors from the "
+            "previous model or configuration. Without it such an edit returns 409 "
+            "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA."
+        ),
+    )
 
     @field_validator("name")
     @classmethod
@@ -81,12 +213,44 @@ class UpdateModelEndpointRequest(BaseModel):
             return None
         return _normalize_endpoint(value)
 
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Normalize an optional replacement model name."""
+        return _normalize_model_name(value)
+
+    # NOTE: no ``extra`` token-budget validator here on purpose. This schema
+    # carries no ``model_type`` (it is a path parameter), so it cannot tell an
+    # LLM update from an embedder/reranker/VLM one, and validating
+    # unconditionally would reserve the budget key names across every endpoint
+    # type. The update route applies the check once it has the path's
+    # ``model_type`` — see ``_reject_non_llm_token_budgets``.
+
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdateModelEndpointRequest:
         """Reject empty update payloads."""
-        if not self.model_fields_set:
+        if not self.model_fields_set - {"acknowledge_indexed_data"}:
             raise ValueError("at least one field must be provided")
         return self
+
+
+class IndexedPartitionUsage(BaseModel):
+    """One partition's already-indexed file count for an endpoint."""
+
+    partition: str
+    file_count: int
+
+
+class IndexedFileUsageResponse(BaseModel):
+    """What an in-place edit of an embedder endpoint would strand (#762 C).
+
+    Sized per partition so a confirmation can name real numbers. An empty
+    ``partitions`` means nothing is indexed against this endpoint yet, and the
+    edit carries no retrieval risk at all.
+    """
+
+    partitions: list[IndexedPartitionUsage] = []
+    total_files: int = 0
 
 
 class ModelEndpointResponse(BaseModel):
@@ -101,6 +265,27 @@ class ModelEndpointResponse(BaseModel):
     extra: dict[str, Any]
     has_api_key: bool = False
     is_default: bool
+    # Dense vector field this embedder owns; null for other model types. Set
+    # when the endpoint is created and kept through renames. The admin UI
+    # compares it with the field each file was indexed into.
+    vector_field: str | None = None
+    # Partitions whose resolved reference is this endpoint — those naming it
+    # plus, for the default endpoint, those riding the `default` alias. Zero
+    # for types with no partition column (reranker/vlm/stt), which are
+    # referenced through presets instead. Every route returning this model
+    # fills it, through ModelEndpointService.with_partition_usage.
+    used_by_partitions: int = 0
+    # LLM endpoints only (None otherwise): what a blank max context size /
+    # max output tokens resolves to, so the admin UI can show the value in
+    # effect instead of a generic "System default". The window is the
+    # ``max_model_len`` the endpoint reported on ``/v1/models`` (vLLM does,
+    # most gateways don't), else ``default_max_llm_context_size``.
+    detected_max_llm_context_size: int | None = None
+    # An endpoint write cleared the detected values and the re-probe hasn't
+    # landed yet: ``detected_max_llm_context_size`` is unknown, not absent.
+    context_size_detection_pending: bool = False
+    default_max_llm_context_size: int | None = None
+    default_max_output_tokens: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -119,12 +304,15 @@ class ModelEndpointResponse(BaseModel):
         return data
 
 
-class ValidateEndpointRequest(BaseModel):
+class ValidateEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body to validate endpoint values before they are saved (draft)."""
 
     endpoint: str
+    model_type: ModelEndpointType | None = None
     model_name: str | None = None
-    api_key: str | None = None
+    timeout: float | None = Field(default=None, gt=0)
+    extra: dict[str, Any] = Field(default_factory=dict)
+    api_key: str | None = Field(default=None, repr=False)
     stored_api_key_model_type: ModelEndpointType | None = None
     stored_api_key_name: str | None = None
 
@@ -133,6 +321,12 @@ class ValidateEndpointRequest(BaseModel):
     def validate_endpoint(cls, value: str) -> str:
         """Normalize the draft endpoint URL before probing it."""
         return _normalize_endpoint(value)
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Probe the normalized model name that would be persisted."""
+        return _normalize_model_name(value)
 
     @field_validator("stored_api_key_name")
     @classmethod
@@ -156,13 +350,14 @@ class ValidateEndpointResponse(BaseModel):
     reachable: bool
     model_found: bool | None = None
     models_served: list[str] | None = None
+    transcription_supported: bool | None = None
     detail: str | None = None
 
 
 class RevealApiKeyResponse(BaseModel):
     """Response body for explicitly revealing a stored endpoint API key."""
 
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
 
 
 __all__ = [
@@ -173,4 +368,5 @@ __all__ = [
     "UpdateModelEndpointRequest",
     "ValidateEndpointRequest",
     "ValidateEndpointResponse",
+    "validate_stt_fields",
 ]
