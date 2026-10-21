@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from core.models.user import User, UserCreate, UserUpdate
-from core.utils.exceptions import UserNotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, UserNotFoundError, ValidationError
 from services.orchestrators.user_service import UserService
 
 
@@ -91,9 +91,14 @@ class FakePartitionService:
 class FakeMembershipRepo:
     def __init__(self, owned: dict[int, list[dict]] | None = None):
         self._owned = owned or {}
+        self.assigned: list[tuple[int, str, str]] = []
 
     async def list_user_partitions_dict(self, user_id: int) -> list[dict]:
         return self._owned.get(user_id, [])
+
+    async def assign_partition(self, assignment):
+        self.assigned.append((assignment.user_id, assignment.partition, assignment.role.value))
+        return assignment
 
 
 class FakeJobService:
@@ -114,6 +119,7 @@ def _svc(
     partition_service: FakePartitionService | None = None,
     membership_repo: FakeMembershipRepo | None = None,
     job_service: FakeJobService | None = None,
+    seed_user_ids: frozenset[str] = frozenset(),
 ) -> UserService:
     return UserService(
         user_repo=repo,
@@ -122,6 +128,7 @@ def _svc(
         partition_service=partition_service or FakePartitionService(),
         membership_repo=membership_repo or FakeMembershipRepo(),
         job_service=job_service or FakeJobService(),
+        seed_user_ids=seed_user_ids,
     )
 
 
@@ -205,6 +212,7 @@ async def test_delete_user_missing_raises_and_no_repo_call():
 @pytest.mark.asyncio
 async def test_delete_user_existing_no_owned_partitions():
     repo = FakeUserRepo(existing={5})
+    repo._users[5] = User(id=5, display_name="u")
     ps = FakePartitionService()
     await _svc(repo, partition_service=ps).delete_user(5)
     assert repo.deleted == [5]
@@ -214,6 +222,7 @@ async def test_delete_user_existing_no_owned_partitions():
 @pytest.mark.asyncio
 async def test_delete_user_cascades_owned_partitions_first():
     repo = FakeUserRepo(existing={5})
+    repo._users[5] = User(id=5, display_name="u")
     ps = FakePartitionService()
     mem = FakeMembershipRepo(
         {
@@ -226,6 +235,96 @@ async def test_delete_user_cascades_owned_partitions_first():
     await _svc(repo, partition_service=ps, membership_repo=mem).delete_user(5)
     assert ps.deleted == ["p_owned"]  # only owner-role partitions
     assert repo.deleted == [5]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_refuses_a_managed_account_still_listed_in_seed_users():
+    """Deleting it would cascade its partitions, then the next startup would
+    recreate the entry under a new id (#1153)."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+    ps = FakePartitionService()
+    mem = FakeMembershipRepo({2: [{"partition": "p_owned", "role": "owner"}]})
+    svc = _svc(repo, partition_service=ps, membership_repo=mem, seed_user_ids=frozenset({"svc-a"}))
+
+    with pytest.raises(ConflictError, match="remove its entry there"):
+        await svc.delete_user(2)
+
+    assert ps.deleted == []
+    assert repo.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_delete_user_accepts_a_managed_account_removed_from_seed_users():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+    ps = FakePartitionService()
+    mem = FakeMembershipRepo({2: [{"partition": "p_owned", "role": "owner"}]})
+
+    await _svc(repo, partition_service=ps, membership_repo=mem, seed_user_ids=frozenset({"svc-b"})).delete_user(2)
+
+    assert ps.deleted == ["p_owned"]
+    assert repo.deleted == [2]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_accepts_an_unmanaged_account_matching_a_seed_entry():
+    """Seeding never takes over an unmanaged row, so its deletion is not undone."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a")
+
+    await _svc(repo, seed_user_ids=frozenset({"svc-a"})).delete_user(2)
+
+    assert repo.deleted == [2]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_keeps_the_default_partition_they_own():
+    # The default partition cannot be deleted; the user is still removed,
+    # their membership in it goes with them and the admin takes it over.
+    repo = FakeUserRepo(existing={5})
+    repo._users[5] = User(id=5, display_name="u")
+    ps = FakePartitionService()
+    mem = FakeMembershipRepo(
+        {
+            5: [
+                {"partition": "default", "role": "owner"},
+                {"partition": "p_owned", "role": "owner"},
+            ]
+        }
+    )
+    await _svc(repo, partition_service=ps, membership_repo=mem).delete_user(5)
+    assert ps.deleted == ["p_owned"]
+    assert mem.assigned == [(1, "default", "owner")]
+    assert repo.deleted == [5]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_owning_default_makes_the_admin_its_owner():
+    # Without an owner nobody could manage the default partition's members,
+    # so the seeded admin (id 1) takes over ownership.
+    repo = FakeUserRepo(existing={5})
+    repo._users[5] = User(id=5, display_name="u")
+    mem = FakeMembershipRepo({5: [{"partition": "default", "role": "owner"}]})
+    await _svc(repo, membership_repo=mem).delete_user(5)
+    assert mem.assigned == [(1, "default", "owner")]
+    assert repo.deleted == [5]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_not_owning_default_leaves_its_owners_alone():
+    repo = FakeUserRepo(existing={5})
+    repo._users[5] = User(id=5, display_name="u")
+    mem = FakeMembershipRepo(
+        {
+            5: [
+                {"partition": "default", "role": "editor"},
+                {"partition": "p_owned", "role": "owner"},
+            ]
+        }
+    )
+    await _svc(repo, membership_repo=mem).delete_user(5)
+    assert mem.assigned == []
 
 
 @pytest.mark.asyncio
@@ -369,6 +468,111 @@ async def test_update_user_does_not_revoke_oidc_sessions_for_regular_profile_upd
     await _svc(repo, auth_service=auth).update_user(2, UserUpdate(display_name="Renamed"))
 
     assert auth.revoked_users == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_external_id", ["svc-renamed", ""])
+@pytest.mark.parametrize(
+    ("seed_user_ids", "message"),
+    [
+        pytest.param(frozenset({"svc-a"}), "change its external_user_id there", id="listed"),
+        pytest.param(frozenset(), "removed from auth.seed_users", id="removed"),
+    ],
+)
+async def test_update_user_refuses_external_id_change_on_a_managed_account(new_external_id, seed_user_ids, message):
+    """auth.seed_users matches its rows on external_user_id: renaming or clearing
+    it would orphan the row from its config entry (#1153)."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+
+    with pytest.raises(ConflictError, match=message):
+        await _svc(repo, seed_user_ids=seed_user_ids).update_user(2, UserUpdate(external_user_id=new_external_id))
+
+    assert repo.updated == []
+    assert repo._users[2].external_user_id == "svc-a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("is_admin", "seed_user_ids", "message"),
+    [
+        pytest.param(False, frozenset({"svc-a"}), "change its is_admin there", id="listed-demote"),
+        pytest.param(True, frozenset(), "removed from auth.seed_users", id="removed-promote"),
+    ],
+)
+async def test_update_user_refuses_admin_change_on_a_managed_account(is_admin, seed_user_ids, message):
+    """Startup seeding sets the admin flag of a managed account on every boot
+    (and drops it for a removed entry), so an API change would not last."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(
+        id=2, display_name="svc", external_user_id="svc-a", is_admin=not is_admin, managed_by_config=True
+    )
+    auth = FakeAuthService()
+
+    with pytest.raises(ConflictError, match=message):
+        await _svc(repo, auth_service=auth, seed_user_ids=seed_user_ids).update_user(2, UserUpdate(is_admin=is_admin))
+
+    assert repo.updated == []
+    assert auth.revoked_users == []
+
+
+@pytest.mark.asyncio
+async def test_update_user_allows_restating_the_admin_flag_of_a_managed_account():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", is_admin=True, managed_by_config=True)
+
+    out = await _svc(repo).update_user(2, UserUpdate(display_name="Renamed", is_admin=True))
+
+    assert out["display_name"] == "Renamed"
+
+
+@pytest.mark.asyncio
+async def test_regenerate_token_refuses_a_removed_managed_account():
+    """Its token is revoked again at every startup: a new one would not last."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+    repo.regen_results[2] = {"id": 2, "token": "or-new"}
+    auth = FakeAuthService()
+
+    with pytest.raises(ConflictError, match="removed from auth.seed_users"):
+        await _svc(repo, auth_service=auth).regenerate_token(2)
+
+    assert repo.regenerated == []
+    assert auth.revoked_users == []
+
+
+@pytest.mark.asyncio
+async def test_regenerate_token_allows_a_listed_managed_account():
+    """The way to cut a leaked token at once (user_auth.md)."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+    repo.regen_results[2] = {"id": 2, "token": "or-new"}
+
+    out = await _svc(repo, seed_user_ids=frozenset({"svc-a"})).regenerate_token(2)
+
+    assert out == {"id": 2, "token": "or-new"}
+    assert repo.regenerated == [2]
+
+
+@pytest.mark.asyncio
+async def test_update_user_allows_other_fields_and_same_external_id_on_a_managed_account():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+
+    out = await _svc(repo).update_user(2, UserUpdate(display_name="Renamed", external_user_id="svc-a"))
+
+    assert out["display_name"] == "Renamed"
+    assert out["external_user_id"] == "svc-a"
+
+
+@pytest.mark.asyncio
+async def test_update_user_allows_external_id_change_on_an_unmanaged_account():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="u", external_user_id="old")
+
+    out = await _svc(repo).update_user(2, UserUpdate(external_user_id="new"))
+
+    assert out["external_user_id"] == "new"
 
 
 # --------------------------------------------------------------------------- #

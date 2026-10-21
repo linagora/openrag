@@ -8,9 +8,11 @@ from api.dependencies.auth import (
     require_partition_owner,
     require_partition_viewer,
 )
+from api.error_handlers import register_error_handlers
 from api.routers.admin import partitions
 from di.providers import get_partition_service
 from fastapi import FastAPI, HTTPException, status
+from services.orchestrators.partition_service import PartitionService
 
 
 def _partition_detail(**overrides: Any) -> dict[str, Any]:
@@ -315,3 +317,64 @@ async def test_create_partition_rejects_malformed_limit_before_writing(async_cli
     assert response.status_code == 500
     assert "MAX_PARTITIONS_PER_USER" in response.json()["detail"]
     assert service.created == []
+
+
+class _DeleteRouteRepo:
+    """Partition repo double for the delete route, backing a real PartitionService."""
+
+    def __init__(self, existing: set[str]) -> None:
+        self.existing = set(existing)
+        self.deleted: list[str] = []
+
+    async def partition_exists(self, name: str) -> bool:
+        return name in self.existing
+
+    async def delete_partition(self, name: str) -> bool:
+        self.deleted.append(name)
+        self.existing.discard(name)
+        return True
+
+
+class _NoCollectionVectorStore:
+    """Vector store double for a stack that has never indexed anything."""
+
+    async def collection_exists(self, name: str) -> bool:
+        return False
+
+
+def _build_delete_app(repo: _DeleteRouteRepo) -> FastAPI:
+    """App for the delete route, backed by a real PartitionService and the global error handlers."""
+    service = PartitionService(
+        partition_repo=repo,
+        membership_repo=None,
+        document_repo=None,
+        vector_store=_NoCollectionVectorStore(),
+        user_repo=None,
+        collection="vdb",
+    )
+    app = _build_app(service)
+    register_error_handlers(app)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_delete_default_partition_returns_409(async_client_factory):
+    """The default partition cannot be deleted."""
+    repo = _DeleteRouteRepo({"default", "legal"})
+    async with async_client_factory(_build_delete_app(repo)) as client:
+        response = await client.delete("/partition/default")
+
+    assert response.status_code == 409
+    assert "DEFAULT_PARTITION_PROTECTED" in response.json()["detail"]
+    assert repo.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_delete_other_partition_returns_204(async_client_factory):
+    """Any other partition is still deleted."""
+    repo = _DeleteRouteRepo({"default", "legal"})
+    async with async_client_factory(_build_delete_app(repo)) as client:
+        response = await client.delete("/partition/legal")
+
+    assert response.status_code == 204
+    assert repo.deleted == ["legal"]

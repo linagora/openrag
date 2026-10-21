@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
+from .auth import SEED_USERS_ENV_VAR
 from .root import Settings
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("EMBEDDER_CONCURRENCY", "embedder.embed_concurrency", int),
     # Model endpoint registry
     ("MODEL_ENDPOINT_SYNC_ON_BOOT", "models.sync_on_boot", bool),
+    ("PROMPTS_REFRESH_DEFAULTS", "prompts.refresh_defaults", bool),
     ("READINESS_REQUIRE_EMBEDDER", "models.readiness_requires_embedder", bool),
     # VectorDB
     ("VDB_HOST", "vectordb.host", str),
@@ -111,6 +114,9 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),
     ("MARKER_PARSE_MEMORY_LIMIT_MB", "loader.marker_parse_memory_limit_mb", int),
+    ("PYMUPDF_POOL_SIZE", "loader.pymupdf_pool_size", int),
+    ("PYMUPDF_PARSE_MEMORY_LIMIT_MB", "loader.pymupdf_parse_memory_limit_mb", int),
+    ("PYMUPDF_MAX_TASKS_PER_CHILD", "loader.pymupdf_max_tasks_per_child", int),
     ("MARKER_POOL_SIZE", "loader.marker_pool_size", int),
     ("MARKER_MAX_PROCESSES", "loader.marker_max_processes", int),
     ("MARKER_NUM_GPUS", "loader.marker_num_gpus", float),
@@ -246,6 +252,27 @@ def _coerce(value: str, target_type: type, env_var: str = "") -> Any:
     return value
 
 
+def _parse_seed_users(raw: str) -> list[Any]:
+    """Parse ``SEED_USERS``: a JSON or YAML list of ``auth.seed_users`` entries.
+
+    The value should carry env var *names* only, but a token pasted in by
+    mistake would be quoted back by PyYAML's error snippet, so the complaint
+    names the problem and its position, never the text. A value that is not a
+    list fails the boot: a silently dropped list would leave service accounts
+    unprovisioned.
+    """
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        problem = getattr(exc, "problem", None) or "parse error"
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: not valid JSON or YAML ({problem}{where})") from None
+    if not isinstance(parsed, list):
+        raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: expected a list, got {type(parsed).__name__}")
+    return parsed
+
+
 def _apply_env_overrides(data: dict) -> dict:
     """Apply environment variable overrides to the config dict."""
     for env_var, dotted_path, target_type in _ENV_OVERRIDES:
@@ -259,6 +286,10 @@ def _apply_env_overrides(data: dict) -> dict:
         sem = data.setdefault("semaphore", {})
         sem.setdefault("llm_semaphore", sem_value)
         sem.setdefault("vlm_semaphore", sem_value)
+
+    seed_users = os.environ.get(SEED_USERS_ENV_VAR, "")
+    if seed_users.strip():
+        data.setdefault("auth", {})["seed_users"] = _parse_seed_users(seed_users)
 
     audio_loader = os.environ.get("AUDIOLOADER")
     if audio_loader:
@@ -308,4 +339,23 @@ def load_config(
         if key in paths and paths[key]:
             paths[key] = str(Path(paths[key]).resolve())
 
-    return Settings(**data)
+    try:
+        return Settings(**data)
+    except ValidationError as exc:
+        error = _without_auth_inputs(exc)
+    # Raised outside the handler so the original, with its inputs, is not chained.
+    raise error
+
+
+def _without_auth_inputs(exc: ValidationError) -> ValidationError:
+    """Drop the offending values when an ``auth`` entry fails validation.
+
+    A token typed under ``token:`` or pasted where a ``token_env`` name belongs
+    would otherwise reach the boot log as ``input_value``, or the ``input`` of
+    :meth:`ValidationError.errors` for a caller that logs those.
+    """
+    errors = exc.errors(include_url=False)
+    if not any(error["loc"][:1] == ("auth",) for error in errors):
+        return exc
+    scrubbed = [{**error, "input": None} if error["loc"][:1] == ("auth",) else error for error in errors]
+    return ValidationError.from_exception_data(exc.title, scrubbed, hide_input=True)
