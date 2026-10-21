@@ -115,6 +115,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("CSV_BATCH_SIZE", "loader.csv_batch_size", int),
     ("CSV_DELIMITER", "loader.csv_delimiter", str),
     ("XLSX_BATCH_SIZE", "loader.xlsx_batch_size", int),
+    ("XLSX_HEADER_ROW", "loader.xlsx_header_row", int),
     ("XLSX_BACKEND", "loader.xlsx_backend", str),
     ("XLSX_FALLBACK_BACKEND", "loader.xlsx_fallback_backend", str),
     # Indexing callback

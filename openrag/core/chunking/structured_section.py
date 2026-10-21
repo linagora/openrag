@@ -288,6 +288,9 @@ class StructuredSectionChunker(BaseChunker):
     # ChunkingStrategy contract
     # ------------------------------------------------------------------
     def chunk(self, document: ProcessedDocument, partition: str = "default") -> list[Chunk]:
+        workbook_chunks = self._chunk_workbook_blocks(document, partition)
+        if workbook_chunks is not None:
+            return workbook_chunks
         content = self._content_from(document)
         if not content.strip():
             return []
@@ -296,7 +299,10 @@ class StructuredSectionChunker(BaseChunker):
         filename = str(metadata.get("filename") or metadata.get("source") or "")
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
-        units = self._page_units(content) if paginated else self._build_units(content)
+        if metadata.get("tabular_format") == "xlsx":
+            units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
+        else:
+            units = self._page_units(content) if paginated else self._build_units(content)
         csv_metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
         if csv_metadata:
             for unit in units:
