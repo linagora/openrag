@@ -34,6 +34,13 @@ def test_csv_loader_settings_can_be_overridden_by_env(monkeypatch, tmp_path):
     assert settings.loader.csv_delimiter == ";"
 
 
+def test_xlsx_loader_defaults_to_openpyxl_without_fallback():
+    cfg = LoaderConfig()
+
+    assert cfg.xlsx_backend == "openpyxl"
+    assert cfg.xlsx_fallback_backend is None
+
+
 def test_transcriber_config_default_direct_upload_suffixes():
     cfg = TranscriberConfig()
     assert cfg.direct_upload_suffixes == set(_DEFAULT_DIRECT_UPLOAD_SUFFIXES)
