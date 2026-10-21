@@ -34,7 +34,7 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
     A 64 KiB ASCII prefix is not evidence that the rest of a file is UTF-8.
     Validate UTF-8 incrementally first. Only if validation fails, run chardet
     on a small sample around non-ASCII bytes. Prefer tolerant UTF-8 only when
-    valid multibyte characters outnumber invalid bytes by at least four to one.
+    valid multibyte characters outnumber invalid bytes.
     """
     # ``surrogateescape`` lets validation continue after an invalid byte while
     # keeping invalid bytes distinguishable from valid Unicode characters.
@@ -71,9 +71,10 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
     if not invalid_bytes:
         return "utf-8-sig", "strict"
 
-    # A coincidental UTF-8 sequence in cp1252 must not outweigh thousands of
-    # invalid bytes. Count evidence across the whole file, in either order.
-    if multibyte_characters >= 4 * invalid_bytes:
+    # Require a strict majority: this keeps small UTF-8 files with one stray
+    # byte intact without letting tied or sparse coincidental UTF-8 sequences
+    # reinterpret a single-byte encoded file.
+    if multibyte_characters > invalid_bytes:
         logger.warning("CSV is predominantly UTF-8 with invalid bytes; replacing undecodable bytes")
         return "utf-8-sig", "replace"
 
