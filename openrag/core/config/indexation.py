@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
 from .base import ConfigMixin
+
+# Marker's conversion modes. ``fast_no_ocr`` is Marker's ``fast`` mode with OCR
+# off; balanced and fast call the OCR server (``SURYA_INFERENCE_URL``).
+MARKER_MODES: tuple[str, ...] = ("balanced", "fast", "fast_no_ocr")
+MarkerMode = Literal["balanced", "fast", "fast_no_ocr"]
 
 # ---------------------------------------------------------------------------
 # Transcriber (nested under loader)
@@ -173,6 +178,18 @@ class LoaderConfig(ConfigMixin):
     mimetypes: MimetypesConfig = Field(default_factory=MimetypesConfig)
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)
+    # Balanced OCRs every page with the VLM, fast only the pages and blocks
+    # whose text layer fails, fast_no_ocr never. Set explicitly: left to itself,
+    # Marker picks balanced when its process sees CUDA and fast otherwise.
+    # Fast by default: on the benchmark corpus it kept more text than
+    # balanced, which drops some lists and table-of-contents pages, and ran
+    # 1.65x faster on an L4.
+    marker_mode: MarkerMode = "fast"
+    # Requests the OCR server serves at once (vLLM ``--max-num-seqs``,
+    # llama-server ``--parallel``). MarkerWorker splits it across every slot of
+    # the pool, because each slot's client otherwise sends the server's whole
+    # capacity on its own, and past it throughput falls.
+    marker_ocr_concurrency: int = Field(default=32, ge=1)
     marker_max_tasks_per_child: int = 20
     # Hard ceiling on what one Marker parse may allocate, enforced as RLIMIT_DATA
     # in the slot's child process (#997). ``RLIMIT_DATA``, not ``RLIMIT_AS``:

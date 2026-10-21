@@ -16,6 +16,10 @@ x-openrag-env: &openrag_env
   # the font at a bind-mounted dir the app user owns, so the ~15MB download
   # happens once and persists across restarts.
   FONT_PATH: ${FONT_PATH:-/app/data/fonts/GoNotoCurrent-Regular.ttf}
+  # Marker's OCR server (x-surya-ocr below), for MARKER_MODE balanced and fast.
+  # Point it at your own, or set it empty to run Marker without OCR, in
+  # fast_no_ocr only.
+  SURYA_INFERENCE_URL: ${SURYA_INFERENCE_URL-http://surya-ocr:8000/v1}
 
 x-openrag: &openrag_template
   image: linagoraai/openrag:v2.3.1
@@ -117,6 +121,28 @@ x-vllm: &vllm_template
     start_period: 90s
   # ports:
   #   - ${VLLM_PORT:-8000}:8000
+
+# Marker's OCR model (datalab-to/surya-ocr-2), for MARKER_MODE balanced and
+# fast. Both variants answer as surya-ocr:8000 under the model name surya
+# checks, so SURYA_INFERENCE_URL is the same in both profiles. MARKER_OCR_CONCURRENCY
+# caps the requests the server takes at once, and the API splits it across its
+# Marker slots, so set it in .env rather than here. Like the embedder, not a
+# hard dependency of the API: without it, MARKER_MODE fast_no_ocr still runs.
+x-surya-ocr: &surya_ocr_template
+  networks:
+    default:
+      aliases:
+        - surya-ocr
+  restart: on-failure
+  volumes:
+    - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 20s
+    timeout: 5s
+    retries: 4
+    start_period: 120s
+
 services:
   # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
   admin-ui:
@@ -152,6 +178,8 @@ services:
       <<: *openrag_env
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      SURYA_INFERENCE_BACKEND: ${SURYA_INFERENCE_BACKEND:-vllm}
+      MARKER_OCR_CONCURRENCY: ${MARKER_OCR_CONCURRENCY:-32}
     deploy:
       resources:
         reservations:
@@ -174,6 +202,13 @@ services:
   openrag-cpu:
     <<: *openrag_template
     deploy: {}
+    environment:
+      <<: *openrag_env
+      SURYA_INFERENCE_BACKEND: ${SURYA_INFERENCE_BACKEND:-llamacpp}
+      MARKER_OCR_CONCURRENCY: ${MARKER_OCR_CONCURRENCY:-4}
+      # OCR on CPU is too slow to run on every page: a preset can still turn
+      # it on for a partition with Marker mode fast.
+      MARKER_MODE: ${MARKER_MODE:-fast_no_ocr}
     profiles:
       - "cpu"
     depends_on:
@@ -182,6 +217,63 @@ services:
       milvus:
         condition: service_healthy
     # No hard dependency on vllm-cpu (see the GPU service above).
+
+  # Marker's OCR server on the GPU (see x-surya-ocr). The flags follow the
+  # server surya would start itself (surya-ocr 0.22). 0.3 of an L4 leaves room
+  # for the embedder; at full load the KV cache stayed below half of 0.45.
+  surya-vllm:
+    <<: *surya_ocr_template
+    image: vllm/vllm-openai:v0.30.0
+    environment:
+      <<: *vllm_env
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    runtime: nvidia
+    ipc: "host"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      datalab-to/surya-ocr-2
+      --served-model-name datalab-to/surya-ocr-2
+      --dtype bfloat16
+      --max-model-len 18000
+      --max-num-seqs ${MARKER_OCR_CONCURRENCY:-32}
+      --max-num-batched-tokens 8192
+      --gpu-memory-utilization ${SURYA_GPU_MEMORY_UTILIZATION:-0.3}
+      --enable-prefix-caching
+      --mm-processor-kwargs '{"min_pixels": 3136, "max_pixels": 6291456}'
+      --speculative-config '{"method": "mtp", "num_speculative_tokens": 2}'
+      ${SURYA_VLLM_EXTRA_ARGS:-}
+    profiles:
+      - ""
+
+  # Marker's OCR server on CPU (see x-surya-ocr): the GGUF build, fetched into
+  # the Hugging Face cache on first start. About 10 tokens/s per slot on 8
+  # cores, and a dense scanned page needs 6-8k tokens. Each slot gets the 12k
+  # context one request may need; --threads -1 uses every core the host has.
+  surya-llamacpp:
+    <<: *surya_ocr_template
+    image: ghcr.io/ggml-org/llama.cpp:server-b11681
+    environment:
+      LLAMA_CACHE: /root/.cache/huggingface/hub
+    command: >
+      -hf datalab-to/surya-ocr-2-gguf
+      --hf-file surya-2.gguf
+      --alias datalab-to/surya-ocr-2
+      --jinja
+      --host 0.0.0.0
+      --port 8000
+      --parallel ${MARKER_OCR_CONCURRENCY:-4}
+      --kv-unified-per-slot 12288
+      --threads ${SURYA_LLAMACPP_THREADS:--1}
+      ${SURYA_LLAMACPP_EXTRA_ARGS:-}
+    profiles:
+      - "cpu"
 
   rdb:
     image: postgres:15

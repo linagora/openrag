@@ -311,3 +311,35 @@ Otherwise the Secret is opaque here and env.config is all the chart can read.
 {{- end -}}
 {{- tpl (printf "%v" $raw) . | trim -}}
 {{- end }}
+
+{{/*
+Marker's OCR server URL (SURYA_INFERENCE_URL), from markerOcr: externalUrl when
+set, else the bundled server markerOcr.backend names. Empty for backend none,
+which runs Marker without OCR.
+*/}}
+{{- define "openrag-stack.markerOcrUrl" -}}
+{{- $ocr := .Values.markerOcr -}}
+{{- if $ocr.externalUrl -}}
+{{- $ocr.externalUrl -}}
+{{- else if eq $ocr.backend "vllm" -}}
+http://{{ .Release.Name }}-surya-engine-service/v1
+{{- else if eq $ocr.backend "llamacpp" -}}
+http://{{ include "openrag-stack.fullname" . }}-surya-llamacpp:8000/v1
+{{- end -}}
+{{- end }}
+
+{{/*
+The "surya" engine of vllm.servingEngineSpec.modelSpec, as YAML; empty when
+vllm-stack is off or lists no such engine.
+*/}}
+{{- define "openrag-stack.markerOcrEngine" -}}
+{{- /* Round-tripped because `dig` takes a plain map, and Helm's values are not one. */ -}}
+{{- $vllm := .Values.vllm | default dict | toYaml | fromYaml -}}
+{{- if dig "enabled" true $vllm -}}
+{{- range (dig "servingEngineSpec" "modelSpec" list $vllm) -}}
+{{- if eq (toString .name) "surya" -}}
+{{- toYaml . -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

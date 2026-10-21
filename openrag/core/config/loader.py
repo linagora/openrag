@@ -112,6 +112,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("INDEXING_CALLBACK_ALLOW_PRIVATE_URLS", "indexing_callback.allow_private_urls", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
+    ("MARKER_MODE", "loader.marker_mode", str),
+    ("MARKER_OCR_CONCURRENCY", "loader.marker_ocr_concurrency", int),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),
     ("MARKER_PARSE_MEMORY_LIMIT_MB", "loader.marker_parse_memory_limit_mb", int),
     ("PYMUPDF_POOL_SIZE", "loader.pymupdf_pool_size", int),

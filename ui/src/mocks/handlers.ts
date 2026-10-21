@@ -629,7 +629,7 @@ export const handlers = [
         { actor_id: "a1", name: "Vectordb", class_name: "MilvusDB", state: "ALIVE", namespace: "openrag" },
         { actor_id: "a2", name: "Indexer", class_name: "Indexer", state: "ALIVE", namespace: "openrag" },
         { actor_id: "a3", name: "TaskStateManager", class_name: "TaskStateManager", state: "ALIVE", namespace: "openrag" },
-        { actor_id: "a4", name: "MarkerPool", class_name: "MarkerPool", state: "DEAD", namespace: "openrag" },
+        { actor_id: "a4", name: "MarkerPool-v2", class_name: "MarkerPool", state: "DEAD", namespace: "openrag" },
       ],
     }),
   ),

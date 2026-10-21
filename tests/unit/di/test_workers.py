@@ -84,8 +84,8 @@ def test_list_ray_actors_hides_the_dead_actor_a_restart_replaced(monkeypatch) ->
     name; Ray keeps the killed one's record as DEAD. Listing it showed every
     restarted actor twice (and counted it as not alive in the admin overview)."""
     actors = [
-        _fake_actor("MarkerPool", state="DEAD", actor_id="old-marker"),
-        _fake_actor("MarkerPool", actor_id="new-marker"),
+        _fake_actor("MarkerPool-v2", state="DEAD", actor_id="old-marker"),
+        _fake_actor("MarkerPool-v2", actor_id="new-marker"),
         _fake_actor("vlmSemaphore", state="DEAD", actor_id="old-vlm-1"),
         _fake_actor("vlmSemaphore", state="DEAD", actor_id="old-vlm-2"),
         _fake_actor("vlmSemaphore", actor_id="vlm"),
@@ -94,7 +94,7 @@ def test_list_ray_actors_hides_the_dead_actor_a_restart_replaced(monkeypatch) ->
     listing, _ = _list_ray_actors_over(monkeypatch, actors)
 
     assert sorted((a["name"], a["actor_id"]) for a in listing["actors"]) == [
-        ("MarkerPool", "new-marker"),
+        ("MarkerPool-v2", "new-marker"),
         ("vlmSemaphore", "vlm"),
     ]
 
@@ -105,8 +105,8 @@ def test_list_ray_actors_keeps_the_dead_record_until_the_replacement_is_alive(mo
     started successfully; a replacement still coming up (or stuck, e.g. waiting
     for a GPU) must not make the restart look done."""
     actors = [
-        _fake_actor("MarkerPool", state="DEAD", actor_id="old-marker"),
-        _fake_actor("MarkerPool", state=replacement_state, actor_id="new-marker"),
+        _fake_actor("MarkerPool-v2", state="DEAD", actor_id="old-marker"),
+        _fake_actor("MarkerPool-v2", state=replacement_state, actor_id="new-marker"),
     ]
 
     listing, _ = _list_ray_actors_over(monkeypatch, actors)
@@ -153,8 +153,8 @@ def test_list_ray_actors_still_shows_a_down_actor_past_rays_default_limit(monkey
     dead records, an actor that was down could fall outside that window and
     vanish from the list."""
     actors = [
-        *(_fake_actor("MarkerPool", state="DEAD", actor_id=f"old-marker-{i:03}") for i in range(150)),
-        _fake_actor("MarkerPool", actor_id="new-marker"),
+        *(_fake_actor("MarkerPool-v2", state="DEAD", actor_id=f"old-marker-{i:03}") for i in range(150)),
+        _fake_actor("MarkerPool-v2", actor_id="new-marker"),
         # Sorts after every old-marker-* record.
         _fake_actor("vlmSemaphore", state="DEAD", actor_id="old-vlm"),
     ]
@@ -162,7 +162,7 @@ def test_list_ray_actors_still_shows_a_down_actor_past_rays_default_limit(monkey
     listing, _ = _list_ray_actors_over(monkeypatch, actors)
 
     assert sorted((a["name"], a["state"]) for a in listing["actors"]) == [
-        ("MarkerPool", "ALIVE"),
+        ("MarkerPool-v2", "ALIVE"),
         ("vlmSemaphore", "DEAD"),
     ]
     assert listing["complete"] is True
@@ -183,7 +183,7 @@ def test_list_ray_actors_past_rays_data_source_cap(monkeypatch) -> None:
             for i in range(5)
         ),
         _fake_actor("TaskStateManager"),
-        _fake_actor("MarkerPool", actor_id="new-marker"),
+        _fake_actor("MarkerPool-v2", actor_id="new-marker"),
     ]
     logger = Mock()
     monkeypatch.setattr(di.workers, "logger", logger)
@@ -192,7 +192,7 @@ def test_list_ray_actors_past_rays_data_source_cap(monkeypatch) -> None:
 
     assert sorted((a["name"], a["state"]) for a in listing["actors"]) == [
         ("DoclingPool", "DEAD"),
-        ("MarkerPool", "ALIVE"),
+        ("MarkerPool-v2", "ALIVE"),
         ("TaskStateManager", "ALIVE"),
     ]
     assert listing["complete"] is False
@@ -204,7 +204,7 @@ def test_list_ray_actors_counts_a_full_page_as_incomplete(monkeypatch) -> None:
     the data source's cap is set above it, and then the listing can't tell a
     cut from an exact fit, so a full page is reported as incomplete."""
     monkeypatch.setattr(di.workers, "_ACTOR_LIST_LIMIT", 2)
-    actors = [_fake_actor(name) for name in ("Indexer", "MarkerPool", "TaskStateManager")]
+    actors = [_fake_actor(name) for name in ("Indexer", "MarkerPool-v2", "TaskStateManager")]
 
     listing, _ = _list_ray_actors_over(monkeypatch, actors)
 
@@ -270,12 +270,12 @@ async def test_other_actor_restart_still_recreates_the_actor(monkeypatch) -> Non
     old_actor = SimpleNamespace()
     new_actor = SimpleNamespace(_actor_id=SimpleNamespace(hex=Mock(return_value="new-actor-id")))
     factory = Mock(return_value=new_actor)
-    monkeypatch.setattr("di.workers.get_actor_creation_map", lambda: {"MarkerPool": factory})
+    monkeypatch.setattr("di.workers.get_actor_creation_map", lambda: {"MarkerPool-v2": factory})
     monkeypatch.setattr(ray, "get_actor", Mock(return_value=old_actor))
     kill = Mock()
     monkeypatch.setattr(ray, "kill", kill)
 
-    assert await restart_ray_actor("MarkerPool") == "new-actor-id"
+    assert await restart_ray_actor("MarkerPool-v2") == "new-actor-id"
 
     kill.assert_called_once_with(old_actor, no_restart=True)
     factory.assert_called_once_with()

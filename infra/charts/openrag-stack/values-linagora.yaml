@@ -188,3 +188,38 @@ vllm:
               - key: gpu-role
                 operator: In
                 values: ["vlm"]
+
+      # Marker's OCR model, off here: this cluster has no GPU set aside for it
+      # yet, so markerOcr.backend is none below. To turn it on, give it
+      # replicaCount 1 and a gpu-role, and set markerOcr.backend to vllm.
+      - name: "surya"
+        repository: "vllm/vllm-openai"
+        tag: "v0.30.0-cu129"
+        modelURL: "datalab-to/surya-ocr-2"
+        replicaCount: 0
+        requestCPU: 4
+        requestMemory: "16Gi"
+        requestGPU: 1
+        limitCPU: 4
+        limitMemory: "16Gi"
+        hf_token:
+          secretName: *hfTokenSecret
+          secretKey: HF_TOKEN
+        vllmConfig:
+          dtype: "bfloat16"
+          maxModelLen: 18000
+          maxNumSeqs: 32
+          gpuMemoryUtilization: 0.3
+          enablePrefixCaching: true
+          extraArgs:
+            - "--max-num-batched-tokens"
+            - "8192"
+            - "--mm-processor-kwargs"
+            - '{"min_pixels": 3136, "max_pixels": 6291456}'
+            - "--speculative-config"
+            - '{"method": "mtp", "num_speculative_tokens": 2}'
+        nodeSelectorTerms: []
+
+# Marker runs without OCR (fast_no_ocr) until the surya engine above runs.
+markerOcr:
+  backend: none

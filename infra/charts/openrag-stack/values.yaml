@@ -641,15 +641,15 @@ vllm:
   whisperModelName: &whisperModel "openai/whisper-large-v3-turbo"
   llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
 
-  # Single source for the HF_TOKEN secret name passed to all four model specs.
-  # YAML anchor: editing this value propagates to all four hf_token.secretName entries below.
+  # Single source for the HF_TOKEN secret name passed to every model spec.
+  # YAML anchor: editing this value propagates to every hf_token.secretName entry below.
   # Must match the chart env secret name ({{ include "openrag-stack.fullname" . }}-env-secrets by default).
   # values.yaml is not templated, so if you override fullnameOverride ("openrag")
   # this must be updated to match too — see templates/NOTES.txt for a warning if
   # they ever drift, and NEVER use "--set vllm.servingEngineSpec.modelSpec[N]...":
   # Helm replaces lists wholesale rather than merging them by index, so a
   # partial override there silently wipes repository/tag/modelURL/resources
-  # for all four models (see NOTES.txt for the safe way to override this).
+  # for every model (see NOTES.txt for the safe way to override this).
   hfTokenSecretName: &vllmHfTokenSecretName "openrag-env-secrets"
 
   servingEngineSpec:
@@ -797,6 +797,41 @@ vllm:
           extraArgs: ["--trust-remote-code"]
         shmSize: "20Gi"
         nodeSelectorTerms: []
+
+      # Marker's OCR model (markerOcr below). vllm-stack serves it under its
+      # modelURL, the name surya checks. The flags follow the server surya
+      # starts itself (surya-ocr 0.22). maxNumSeqs must equal
+      # markerOcr.concurrency: the chart refuses to render otherwise.
+      # Measured on an L4 (24 GB), v0.30.0: 0.3 reserves 6.5 GB, a 4.2 GiB KV
+      # cache (226k tokens); at full load (32 requests) the KV cache peaked
+      # near 3.4 GiB.
+      - name: "surya"
+        repository: "vllm/vllm-openai"
+        tag: *vllmTag
+        modelURL: "datalab-to/surya-ocr-2"
+        replicaCount: 1
+        requestCPU: 4
+        requestMemory: "16Gi"
+        requestGPU: 1
+        limitCPU: 4
+        limitMemory: "16Gi"
+        hf_token:
+          secretName: *vllmHfTokenSecretName
+          secretKey: HF_TOKEN
+        vllmConfig:
+          dtype: "bfloat16"
+          maxModelLen: 18000
+          maxNumSeqs: 32
+          gpuMemoryUtilization: 0.3
+          enablePrefixCaching: true
+          extraArgs:
+            - "--max-num-batched-tokens"
+            - "8192"
+            - "--mm-processor-kwargs"
+            - '{"min_pixels": 3136, "max_pixels": 6291456}'
+            - "--speculative-config"
+            - '{"method": "mtp", "num_speculative_tokens": 2}'
+        nodeSelectorTerms: []
   routerSpec:
     enableRouter: false
 
@@ -866,6 +901,49 @@ reranker:
   # to null to remove it, and another handler (tcpSocket, exec, grpc) to
   # replace httpGet.
   probes: {}
+
+# === Marker OCR server ===
+# Marker's balanced and fast modes (MARKER_MODE, or a preset's mode) send pages
+# to an OCR model, datalab-to/surya-ocr-2, over an OpenAI-compatible API. The
+# chart sets SURYA_INFERENCE_URL, SURYA_INFERENCE_BACKEND and
+# MARKER_OCR_CONCURRENCY in env.config from this block.
+markerOcr:
+  # vllm:     the "surya" engine in vllm.servingEngineSpec.modelSpec (GPU).
+  # llamacpp: the llama.cpp Deployment below (CPU). The surya engine is then
+  #           unused: set its replicaCount to 0, or vllm.enabled to false.
+  #           OCR on CPU is too slow for every page, so MARKER_MODE defaults
+  #           to fast_no_ocr, and a preset turns OCR on with Marker mode fast.
+  # none:     no OCR server. Marker runs in fast_no_ocr only, so scanned pages
+  #           come out empty; MARKER_MODE defaults to fast_no_ocr.
+  backend: vllm
+  # Your own OCR server instead of a bundled one: its OpenAI-compatible base
+  # URL, serving the model as datalab-to/surya-ocr-2. backend then names the
+  # client OpenRAG uses for it, vllm or llamacpp, and no bundled one is needed.
+  externalUrl: ""
+  # Requests the OCR server serves at once: the surya engine's maxNumSeqs, or
+  # llama.cpp's --parallel. Marker splits it across its slots
+  # (MARKER_POOL_SIZE x MARKER_MAX_PROCESSES). With llamacpp, 4 suits 8 CPUs.
+  concurrency: 32
+  llamacpp:
+    image:
+      registry: "ghcr.io"
+      repository: "ggml-org/llama.cpp"
+      tag: "server-b11681"
+    # llama-server threads. Keep it at the CPUs requested below: by default the
+    # server starts one per core of the node, whatever the pod may use.
+    threads: 8
+    # Flags appended to the chart's own (model, alias, port, slots, threads).
+    extraArgs: []
+    nodeSelector: {}
+    # The model (1.5 GB) is fetched into the model-weights volume on first
+    # start, so the startup probe allows 20 minutes. Memory is an estimate,
+    # not measured on a cluster: the model, plus a 12k-token KV cache per slot.
+    resources:
+      requests:
+        cpu: "8"
+        memory: "8Gi"
+      limits:
+        memory: "8Gi"
 
 # === Admin UI (replaces indexer-ui) ===
 # React SPA served by an nginx bundled inside the image. VITE_BASE_PATH=/app/
@@ -1279,6 +1357,13 @@ env:
     MARKER_MAX_PROCESSES: "15"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"
+    # Marker's OCR server, from markerOcr above. MARKER_POOL_SIZE x
+    # MARKER_MAX_PROCESSES slots above markerOcr.concurrency queue more
+    # requests than the server serves (the worker logs it).
+    SURYA_INFERENCE_URL: '{{ include "openrag-stack.markerOcrUrl" . }}'
+    SURYA_INFERENCE_BACKEND: '{{ ternary "llamacpp" "vllm" (eq .Values.markerOcr.backend "llamacpp") }}'
+    MARKER_OCR_CONCURRENCY: '{{ .Values.markerOcr.concurrency }}'
+    MARKER_MODE: '{{ ternary "fast" "fast_no_ocr" (eq .Values.markerOcr.backend "vllm") }}'
     TRANSCRIBER_BASE_URL: 'http://{{ .Release.Name }}-whisper-engine-service/v1'
 
     # Ray

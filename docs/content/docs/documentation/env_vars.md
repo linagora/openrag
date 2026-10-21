@@ -96,8 +96,10 @@ These settings apply when `MarkerLoader` is selected (`PDFLOADER=MarkerLoader`; 
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
+| `MARKER_MODE` | str | `fast` (`fast_no_ocr` in the Compose `cpu` profile) | How Marker converts: `balanced` OCRs every page with its VLM; `fast` reads the text layer and OCRs only the pages and blocks where it fails (scans, garbled text, equations); `fast_no_ocr` reads the text layer only, so scanned and image-only pages come out empty. `balanced` and `fast` need the OCR server (`SURYA_INFERENCE_URL`): without it, Marker refuses them at once. |
+| `MARKER_OCR_CONCURRENCY` | int | 32 (4 in the Compose `cpu` profile) | Requests the OCR server serves at once (`--max-num-seqs` for vLLM, `--parallel` for llama.cpp; the bundled servers take it from this variable). Marker splits it across all its slots (`MARKER_POOL_SIZE` × `MARKER_MAX_PROCESSES`, at least one request each), because past the server's capacity its throughput falls. |
 | `MARKER_POOL_SIZE` | int | 1 | Number of workers (typically 1 worker per cluster node) |
-| `MARKER_MAX_PROCESSES` | int | 2 | Number of subprocesses <-> Number of concurrent PDFs per worker (to increase depending on your available GPU resources)|
+| `MARKER_MAX_PROCESSES` | int | 2 | Concurrent PDF chunks per worker, each in its own child process. The children hold no model since Marker 2.0 (the OCR VLM runs in its own server), so this is bounded by CPU cores and memory rather than GPU memory. |
 | `MARKER_MAX_TASKS_PER_CHILD` | int | 20 | Number of tasks a child (PDF worker) has to process before it gets restarted to clean up memory leaks |
 | `MARKER_TIMEOUT` | int | 3600 | Timeout in seconds for marker processes |
 | `MARKER_PDFTEXT_WORKERS` | int | 1 | Deprecated and ignored since OpenRAG 2.3.2: Marker runs pdftext with one worker, inside the Marker child, and logs a warning when this is set above 1. Remove it. |
@@ -113,6 +115,18 @@ It also **reduces per-worker GPU memory spikes** on large files. With a reasonab
 :::
 
 
+
+##### Marker OCR Server
+Marker's `balanced` and `fast` modes send pages to an OCR model, `datalab-to/surya-ocr-2`, served over an OpenAI-compatible API. Compose bundles one: `surya-vllm` on the GPU, or `surya-llamacpp` with `--profile cpu`, both reachable as `surya-ocr:8000`. Marker also starts two small helper servers of its own inside the worker (layout detection and an OCR-error check); they need no setting.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SURYA_INFERENCE_URL` | str | `http://surya-ocr:8000/v1` (Compose) | OpenAI-compatible base URL of the OCR server. It must serve the model under the name `datalab-to/surya-ocr-2`. Empty: Marker runs without OCR, in `fast_no_ocr` only. |
+| `SURYA_INFERENCE_BACKEND` | str | `vllm` (`llamacpp` in the Compose `cpu` profile) | Which client Marker uses for that server: `vllm` or `llamacpp`. |
+| `SURYA_GPU_MEMORY_UTILIZATION` | float | 0.3 | Compose only: share of the GPU `surya-vllm` reserves. |
+| `SURYA_VLLM_EXTRA_ARGS` | str | — | Compose only: extra `vllm serve` flags for `surya-vllm`. |
+| `SURYA_LLAMACPP_THREADS` | int | -1 | Compose only: `llama-server` threads for `surya-llamacpp`; `-1` uses every core of the host, whatever the container is limited to. |
+| `SURYA_LLAMACPP_EXTRA_ARGS` | str | — | Compose only: extra `llama-server` flags for `surya-llamacpp`, e.g. `--offline` once the model is in the cache. |
 
 ##### Docling Loader Configuration
 These settings apply when `DoclingLoader` is selected (`PDFLOADER=DoclingLoader`):

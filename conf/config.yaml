@@ -231,6 +231,14 @@ loader:
   pymupdf_parse_memory_limit_mb: 0
   pymupdf_max_tasks_per_child: 20
 
+  # Env: MARKER_MODE. balanced | fast | fast_no_ocr. Balanced and fast call the
+  #      OCR server (SURYA_INFERENCE_URL); fast_no_ocr reads the text layer only,
+  #      so scanned pages come out empty.
+  marker_mode: fast
+  # Env: MARKER_OCR_CONCURRENCY. Requests the OCR server serves at once (vLLM
+  #      --max-num-seqs, llama-server --parallel), shared by every Marker slot.
+  marker_ocr_concurrency: 32
+
   # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_POOL_SIZE, MARKER_MAX_PROCESSES,
   #      MARKER_NUM_GPUS, MARKER_TIMEOUT, MARKER_CHILD_TIMEOUT_RATIO,
   #      MARKER_CHUNK_SIZE,

@@ -1,0 +1,130 @@
+{{- $ocr := .Values.markerOcr }}
+{{- /* Marker's OCR server (markerOcr in values.yaml). The checks run whichever
+   backend is picked, since SURYA_INFERENCE_URL is rendered from the same
+   values: a wrong one would only show when a PDF first needs OCR. */}}
+{{- if not (has (toString $ocr.backend) (list "vllm" "llamacpp" "none")) }}
+{{- fail (printf "markerOcr.backend is %q: set vllm, llamacpp or none." (toString $ocr.backend)) }}
+{{- end }}
+{{- if and $ocr.externalUrl (eq $ocr.backend "none") }}
+{{- fail "markerOcr.externalUrl names an OCR server but markerOcr.backend is none. Set backend to the kind of server it is, vllm or llamacpp, or clear externalUrl." }}
+{{- end }}
+{{- if and (eq $ocr.backend "vllm") (not $ocr.externalUrl) }}
+{{- $engine := include "openrag-stack.markerOcrEngine" . | fromYaml }}
+{{- if not $engine }}
+{{- fail "markerOcr.backend is vllm but no \"surya\" engine runs in vllm.servingEngineSpec.modelSpec (or vllm.enabled is false), so SURYA_INFERENCE_URL would name a Service that does not exist. Helm replaces that list wholesale: copy the surya engine from the chart's values.yaml into yours, or set markerOcr.backend to llamacpp or none." }}
+{{- end }}
+{{- if lt (int (dig "replicaCount" 1 $engine)) 1 }}
+{{- fail "markerOcr.backend is vllm but the surya engine has replicaCount 0: set it to 1, or set markerOcr.backend to llamacpp or none." }}
+{{- end }}
+{{- $seqs := toString (dig "vllmConfig" "maxNumSeqs" "unset" $engine) }}
+{{- if ne $seqs (toString $ocr.concurrency) }}
+{{- fail (printf "The surya engine serves %s requests at once (vllmConfig.maxNumSeqs) but markerOcr.concurrency is %v, the budget Marker splits across its slots. Set both to the same value." $seqs $ocr.concurrency) }}
+{{- end }}
+{{- end }}
+{{- if and (eq $ocr.backend "llamacpp") (not $ocr.externalUrl) }}
+{{- $llama := $ocr.llamacpp }}
+{{- $args := list "-hf" "datalab-to/surya-ocr-2-gguf" "--hf-file" "surya-2.gguf" "--alias" "datalab-to/surya-ocr-2" "--jinja" "--host" "0.0.0.0" "--port" "8000" "--parallel" (toString $ocr.concurrency) "--kv-unified-per-slot" "12288" "--threads" (toString $llama.threads) }}
+{{- /* The model, its name, the port, the slots and the threads come from the
+   chart: a second one would load another model, or answer where the probes,
+   the Service and SURYA_INFERENCE_URL do not look, or break the budget
+   Marker splits across its slots. */}}
+{{- range $llama.extraArgs | default list }}
+{{- $flag := toString . }}
+{{- range list "-hf" "-hfr" "--hf-repo" "-hff" "--hf-file" "-m" "--model" "-a" "--alias" "--host" "--port" "-np" "--parallel" "-t" "--threads" }}
+{{- if or (eq $flag .) (hasPrefix (printf "%s=" .) $flag) }}
+{{- fail (printf "markerOcr.llamacpp.extraArgs sets %s, which the chart already passes (the model and its name, the port, markerOcr.concurrency as --parallel, markerOcr.llamacpp.threads as --threads). Remove it from extraArgs." .) }}
+{{- end }}
+{{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-surya-llamacpp
+  labels:
+    {{- include "openrag-stack.componentLabels" (dict "component" "surya-llamacpp" "context" $) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openrag-stack.componentSelectorLabels" (dict "component" "surya-llamacpp" "context" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openrag-stack.componentSelectorLabels" (dict "component" "surya-llamacpp" "context" $) | nindent 8 }}
+    spec:
+      securityContext:
+        {{- include "openrag-stack.mergeSecurityContext" (dict "component" (dict "runAsUser" 10001 "runAsGroup" 10001 "fsGroup" 10001) "default" .Values.security.podSecurityContext) | nindent 8 }}
+      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      {{- with $llama.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: llama-server
+          image: "{{ $llama.image.registry | default .Values.global.image.registry }}/{{ $llama.image.repository }}:{{ $llama.image.tag }}"
+          securityContext:
+            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
+          args:
+            {{- range (concat $args ($llama.extraArgs | default list)) }}
+            - {{ toString . | quote }}
+            {{- end }}
+          env:
+            # The image's HOME (/root) is not writable as this user. The model is
+            # cached in Hugging Face's layout, in a directory of its own on the
+            # model-weights volume: an air-gapped install copies
+            # models--datalab-to--surya-ocr-2-gguf there, then adds --offline.
+            - name: HOME
+              value: /tmp
+            - name: LLAMA_CACHE
+              value: /models/llama.cpp
+          ports:
+            - containerPort: 8000
+              name: http
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml $llama.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-weights
+              mountPath: /models
+      volumes:
+        - name: model-weights
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "openrag-stack.fullname" . }}-model-weights
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-surya-llamacpp
+  labels:
+    {{- include "openrag-stack.componentLabels" (dict "component" "surya-llamacpp" "context" $) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "openrag-stack.componentSelectorLabels" (dict "component" "surya-llamacpp" "context" $) | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: http
+{{- end }}

@@ -17,7 +17,7 @@ import pytest
 import ray
 import services.workers.bootstrap as bootstrap
 
-PARSER_POOL_ACTORS = ("MarkerPool", "DoclingPool", "WhisperPool", "WhisperActor")
+PARSER_POOL_ACTORS = ("MarkerPool-v2", "DoclingPool", "WhisperPool", "WhisperActor")
 
 
 def _capture_actor_creations(monkeypatch) -> list[tuple]:
@@ -381,20 +381,20 @@ def test_task_completion_tracker_without_error_reason_history_is_replaced(monkey
 
 
 @pytest.mark.parametrize(
-    ("actor_name", "module_name"),
+    ("actor_name", "module_name", "class_name"),
     [
-        ("MarkerPool", "services.workers.parsers.marker_workers"),
-        ("DoclingPool", "services.workers.parsers.docling_workers"),
-        ("WhisperPool", "services.workers.parsers.whisper_workers"),
+        ("MarkerPool-v2", "services.workers.parsers.marker_workers", "MarkerPool"),
+        ("DoclingPool", "services.workers.parsers.docling_workers", "DoclingPool"),
+        ("WhisperPool", "services.workers.parsers.whisper_workers", "WhisperPool"),
     ],
 )
-def test_pool_factory_creates_the_named_pool(monkeypatch, actor_name, module_name):
+def test_pool_factory_creates_the_named_pool(monkeypatch, actor_name, module_name, class_name):
     calls = _capture_actor_creations(monkeypatch)
     bootstrap.register_parser_pool_restart_factories()
 
     assert bootstrap.actor_creation_map[actor_name]() == "actor-handle"
 
-    pool_cls = getattr(importlib.import_module(module_name), actor_name)
+    pool_cls = getattr(importlib.import_module(module_name), class_name)
     assert calls == [(actor_name, pool_cls, {"lifetime": "detached"})]
 
 
