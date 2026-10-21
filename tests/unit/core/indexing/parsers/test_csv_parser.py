@@ -416,6 +416,49 @@ async def test_utf8_french_text_with_a_stray_byte_keeps_utf8(tmp_path, monkeypat
     assert result.text_blocks[0].metadata["csv_decode_replacements"] == 1
 
 
+@pytest.mark.parametrize(
+    ("utf8_text", "stray_bytes"),
+    [
+        ("déjà vu", b"it\x92s"),
+        ("Hélène,Orléans", b"Ren\xe9"),
+    ],
+)
+@pytest.mark.parametrize("source_kind", ["path", "bytes"])
+async def test_small_utf8_file_with_one_stray_byte_keeps_utf8(
+    tmp_path, monkeypatch, utf8_text, stray_bytes, source_kind
+):
+    fake_chardet = ModuleType("chardet")
+
+    def fail_if_called(_raw):
+        raise AssertionError("valid UTF-8 evidence must outweigh one stray byte")
+
+    fake_chardet.detect = fail_if_called
+    monkeypatch.setitem(sys.modules, "chardet", fake_chardet)
+    raw = f'id,note\n1,"{utf8_text}"\n2,'.encode() + stray_bytes + b"\n"
+    path = tmp_path / "small-mixed.csv"
+    path.write_bytes(raw)
+    document = Document(source_path=str(path)) if source_kind == "path" else Document(raw_bytes=raw)
+
+    result = await CsvParser().parse(document)
+
+    text = result.text_blocks[0].text
+    assert utf8_text in text
+    assert "\ufffd" in text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 1
+
+
+async def test_tied_utf8_and_invalid_evidence_remains_single_byte_encoded(monkeypatch):
+    import chardet
+
+    monkeypatch.setattr(chardet, "detect", lambda _: {"encoding": "Windows-1252", "confidence": 0.99})
+    raw = "id,note\n1,Ã©é\n".encode("cp1252")
+
+    result = await CsvParser().parse(Document(raw_bytes=raw))
+
+    assert "Ã©é" in result.text_blocks[0].text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 0
+
+
 async def test_stray_byte_before_utf8_text_keeps_utf8(tmp_path, monkeypatch):
     fake_chardet = ModuleType("chardet")
 
