@@ -5,6 +5,7 @@ import codecs
 import csv
 import html
 import io
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -17,7 +18,11 @@ from core.utils.logging import get_logger
 logger = get_logger()
 
 _ENCODING_SAMPLE_SIZE = 64 * 1024
-_ENCODING_DETECTION_LIMIT = 2 * _ENCODING_SAMPLE_SIZE
+_ENCODING_DETECTION_LIMIT = 4096
+_INVALID_UTF8 = re.compile("[\udc80-\udcff]")
+_VALID_MULTIBYTE = re.compile("[\u0080-\ud7ff\ue000-\U0010ffff]")
+_NON_ASCII_BYTE = re.compile(b"[\x80-\xff]")
+_LONG_ASCII_RUN = re.compile(rb"[\x00-\x7f]{129,}")
 _DIALECT_SAMPLE_SIZE = 64 * 1024
 _CSV_FIELD_SIZE_LIMIT = 16 * 1024 * 1024
 csv.field_size_limit(max(csv.field_size_limit(), _CSV_FIELD_SIZE_LIMIT))
@@ -28,7 +33,8 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
 
     A 64 KiB ASCII prefix is not evidence that the rest of a file is UTF-8.
     Validate UTF-8 incrementally first. Only if validation fails, run chardet
-    on a bounded prefix plus the failing block.
+    on a small sample around non-ASCII bytes. Prefer tolerant UTF-8 only when
+    valid multibyte characters outnumber invalid bytes by at least four to one.
     """
     # ``surrogateescape`` lets validation continue after an invalid byte while
     # keeping invalid bytes distinguishable from valid Unicode characters.
@@ -36,60 +42,59 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
     # file and let chardet silently reinterpret that text as a single-byte
     # encoding.
     decoder = codecs.getincrementaldecoder("utf-8-sig")("surrogateescape")
-    utf8_valid = True
-    prefix = bytearray()
-    failing_block = b""
+    invalid_bytes = 0
+    multibyte_characters = 0
+    detection_sample = b""
     previous_tail = b""
-    saw_utf8_multibyte = False
 
     raw_stream.seek(0)
     while block := raw_stream.read(_ENCODING_SAMPLE_SIZE):
-        if len(prefix) < _ENCODING_SAMPLE_SIZE:
-            prefix.extend(block[: _ENCODING_SAMPLE_SIZE - len(prefix)])
         decoded = decoder.decode(block, final=False)
-        contains_invalid_bytes = any("\udc80" <= character <= "\udcff" for character in decoded)
-        if contains_invalid_bytes:
-            utf8_valid = False
-            if not failing_block:
-                # Include the possible beginning of a sequence buffered from
-                # the previous block. Four bytes cover the longest UTF-8 code
-                # point and keep the chardet sample bounded.
-                failing_block = previous_tail + block
-        saw_utf8_multibyte |= any(
-            ord(character) > 0x7F and not "\udc80" <= character <= "\udcff" for character in decoded
-        )
+        if not decoded.isascii():
+            invalid_bytes += len(_INVALID_UTF8.findall(decoded))
+            multibyte_characters += len(_VALID_MULTIBYTE.findall(decoded))
+            if not detection_sample and invalid_bytes:
+                candidate = previous_tail + block
+                first_non_ascii = _NON_ASCII_BYTE.search(candidate)
+                if first_non_ascii is not None:
+                    start = max(0, first_non_ascii.start() - 64)
+                    detection_sample = candidate[start : start + _ENCODING_DETECTION_LIMIT]
         previous_tail = block[-4:]
 
     decoded = decoder.decode(b"", final=True)
-    if any("\udc80" <= character <= "\udcff" for character in decoded):
-        utf8_valid = False
-        if not failing_block:
-            failing_block = previous_tail
-    saw_utf8_multibyte |= any(ord(character) > 0x7F and not "\udc80" <= character <= "\udcff" for character in decoded)
+    invalid_bytes += len(_INVALID_UTF8.findall(decoded))
+    multibyte_characters += len(_VALID_MULTIBYTE.findall(decoded))
+    if invalid_bytes and not detection_sample:
+        detection_sample = previous_tail
 
     raw_stream.seek(0)
-    if utf8_valid:
+    if not invalid_bytes:
         return "utf-8-sig", "strict"
 
-    # Valid multibyte text before the first bad byte is strong evidence that
-    # this is UTF-8 with a stray byte, not a single-byte encoded file. Asking
-    # chardet here can silently reinterpret every valid accent in the file.
-    if saw_utf8_multibyte:
-        logger.warning("CSV contains invalid bytes after valid UTF-8 text; replacing undecodable bytes")
+    # A coincidental UTF-8 sequence in cp1252 must not outweigh thousands of
+    # invalid bytes. Count evidence across the whole file, in either order.
+    if multibyte_characters >= 4 * invalid_bytes:
+        logger.warning("CSV is predominantly UTF-8 with invalid bytes; replacing undecodable bytes")
         return "utf-8-sig", "replace"
 
-    detection_sample = bytes(prefix)
-    remaining = _ENCODING_DETECTION_LIMIT - len(detection_sample)
-    if remaining > 0 and failing_block:
-        detection_sample += failing_block[:remaining]
+    # Long ASCII words provide no encoding evidence and can make chardet's
+    # language probers disproportionately expensive. Keep nearby context only.
+    detection_sample = _LONG_ASCII_RUN.sub(lambda match: match[0][:64] + b" " + match[0][-64:], detection_sample)
     try:
         import chardet
     except ImportError:
         encoding = "cp1252"
     else:
-        encoding = chardet.detect(detection_sample).get("encoding") or "cp1252"
+        detected = chardet.detect(detection_sample)
+        encoding = detected.get("encoding") or "cp1252"
+        if detected.get("confidence", 1.0) < 0.2:
+            # Tiny or repetitive samples cannot reliably identify a language.
+            # Use the same fallback as an unavailable detector.
+            encoding = "cp1252"
 
     normalized_encoding = encoding.lower().replace("_", "-")
+    if normalized_encoding in {"iso-8859-1", "latin-1", "latin1"}:
+        encoding = "cp1252"
     if normalized_encoding in {"ascii", "utf-8", "utf-8-sig"}:
         logger.bind(encoding=encoding).warning("CSV contains invalid UTF-8 bytes; replacing undecodable bytes")
         return "utf-8-sig", "replace"
