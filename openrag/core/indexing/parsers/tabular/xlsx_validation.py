@@ -168,15 +168,21 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                     if archive.getinfo(part.get("PartName", "").lstrip("/")).file_size > limits.max_metadata_bytes:
                         raise limit("XLSX styles exceed the memory limit")
             shared_sizes = _shared_string_sizes(archive, types, limits)
-            relationships = {r.get("Id"): r for r in xml("xl/_rels/workbook.xml.rels")}
+            relationship_nodes = list(xml("xl/_rels/workbook.xml.rels"))
+            relationship_ids = [relationship.get("Id") for relationship in relationship_nodes]
+            if any(not rel_id for rel_id in relationship_ids) or len(set(relationship_ids)) != len(relationship_ids):
+                raise invalid("XLSX workbook relationships have missing or duplicate identifiers")
+            relationships = dict(zip(relationship_ids, relationship_nodes, strict=True))
             sheets = xml("xl/workbook.xml").findall("{*}sheets/{*}sheet")
             if len(sheets) > limits.max_sheets:
                 raise limit("XLSX worksheet count exceeds the limit")
             infos = []
             sheet_names = [sheet.get("name", "") for sheet in sheets]
-            if any(not name for name in sheet_names) or len(set(sheet_names)) != len(sheet_names):
+            folded_sheet_names = [name.casefold() for name in sheet_names]
+            if any(not name for name in sheet_names) or len(set(folded_sheet_names)) != len(folded_sheet_names):
                 raise invalid("XLSX sheet names are missing or duplicated")
             cells_seen = 0
+            worksheet_paths = set()
             for index, sheet in enumerate(sheets):
                 rel_id = next((v for k, v in sheet.attrib.items() if k.endswith("}id")), None)
                 relationship = relationships[rel_id]
@@ -188,6 +194,9 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 path = posixpath.normpath(target.lstrip("/") if target.startswith("/") else "xl/" + target)
                 if not path.startswith("xl/") or path not in names:
                     raise invalid("XLSX worksheet relationship has an invalid target")
+                if path in worksheet_paths:
+                    raise invalid("XLSX worksheet relationships contain a duplicate target")
+                worksheet_paths.add(path)
                 max_row = max_col = missing = errors = text_bytes = 0
                 previous_row = current_row = previous_col = 0
                 # clear completed children so memory does not grow with row count.
