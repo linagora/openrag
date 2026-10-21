@@ -259,6 +259,75 @@ def test_header_names_are_unique_even_with_generated_name_collisions():
     assert block.metadata["table_columns"] == ["column_3", "name", "column_3_2", "name_3", "name_2"]
 
 
+@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
+def test_whitespace_only_cells_do_not_become_headers_or_data(backend):
+    doc = _document([["title"], ["name", "   "], ["Alice", "\t"], [" ", "\t"], ["Bob", "Lyon"]])
+
+    [block] = list(XlsxParser(backend=backend, header_row=2).iter_batches(doc))
+
+    assert block.metadata["table_columns"] == ["name", "column_2"]
+    assert block.metadata["table_row_numbers"] == [3, 5]
+    assert "Alice" in block.text and "Bob" in block.text
+
+
+@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
+def test_explicit_whitespace_only_header_is_rejected(backend):
+    with pytest.raises(PipelineError, match="selected header row 1 is empty"):
+        list(XlsxParser(backend=backend, header_row=1).iter_batches(_document([["   ", "\t"], [1, 2]])))
+
+
+def test_rejects_case_insensitive_duplicate_sheet_names_before_reader_opens(monkeypatch):
+    doc = _edit_xml(
+        Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes()),
+        lambda xml: xml.replace('name="Projects"', 'name="people"'),
+        target="xl/workbook.xml",
+    )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="sheet names are missing or duplicated"):
+        list(XlsxParser().iter_batches(doc))
+
+
+def test_rejects_duplicate_workbook_relationship_ids_before_reader_opens(monkeypatch):
+    from xml.etree import ElementTree as ET
+
+    def duplicate_identifier(xml):
+        root = ET.fromstring(xml)
+        relationship = next(iter(root))
+        ET.SubElement(root, relationship.tag, relationship.attrib)
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(
+        _document([["name"], ["Alice"]]),
+        duplicate_identifier,
+        target="xl/_rels/workbook.xml.rels",
+    )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="duplicate identifiers"):
+        list(XlsxParser().iter_batches(doc))
+
+
+def test_rejects_two_sheets_pointing_to_the_same_worksheet(monkeypatch):
+    from xml.etree import ElementTree as ET
+
+    def duplicate_target(xml):
+        root = ET.fromstring(xml)
+        worksheets = [node for node in root if node.get("Type", "").endswith("/worksheet")]
+        worksheets[1].set("Target", worksheets[0].get("Target"))
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(
+        Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes()),
+        duplicate_target,
+        target="xl/_rels/workbook.xml.rels",
+    )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="duplicate target"):
+        list(XlsxParser().iter_batches(doc))
+
+
 @pytest.mark.parametrize("failure", [TimeoutError("timeout"), MemoryError("memory"), RuntimeError("bug")])
 def test_fallback_does_not_swallow_resource_failures_or_programming_errors(monkeypatch, failure):
     def fail(*_):

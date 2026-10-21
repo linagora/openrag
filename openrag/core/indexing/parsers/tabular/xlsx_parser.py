@@ -89,6 +89,11 @@ def _cell_text(value: Any) -> str:
     return str(value)
 
 
+def _has_text(values: list[str]) -> bool:
+    """Treat cells containing only formatting whitespace as empty."""
+    return any(value.strip() for value in values)
+
+
 @contextmanager
 def _document_source(document: Document):
     if document.source_path is not None:
@@ -266,17 +271,17 @@ class XlsxParser(TabularBatchParser):
                             preamble_rows.append(physical_row)
                         continue
                     rendered = [_cell_text(value) for value in values]
-                    if selected_header_row is not None and not any(rendered):
+                    if selected_header_row is not None and not _has_text(rendered):
                         raise PipelineError(
                             f"XLSX sheet {sheet.name!r}: selected header row {selected_header_row} is empty",
                             code="INVALID_XLSX",
                             status_code=422,
                         )
-                    if any(rendered):
+                    if _has_text(rendered):
                         rendered.extend([""] * (sheet.columns - len(rendered)))
                         if any(len(value) > self.limits.max_cell_chars for value in rendered):
                             raise limit("XLSX header text exceeds the character limit")
-                        header_values = normalize_headers(rendered)
+                        header_values = normalize_headers([value if value.strip() else "" for value in rendered])
                         # Explicit duplicate headers also need unique column identities.
                         reserved, used = set(header_values), set()
                         for index, name in enumerate(header_values):
@@ -326,7 +331,7 @@ class XlsxParser(TabularBatchParser):
 
                 for physical_row, values in enumerate(row_iterator, start=header_row + 1):
                     rendered = [_cell_text(value) for value in values]
-                    if not any(rendered):
+                    if not _has_text(rendered):
                         continue
                     if any(len(value) > self.limits.max_cell_chars for value in rendered):
                         raise limit("XLSX cell text exceeds the character limit")
