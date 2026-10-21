@@ -200,8 +200,12 @@ def chunk_table(
     row of the previous chunk is replayed as overlap so context is preserved
     across the boundary.
     """
+    if table_element.metadata and table_element.metadata.get("tabular_format") == "xlsx":
+        return _chunk_xlsx_table(table_element.content, table_element, chunk_size, length_function)
     txt = clean_markdown_table_spacing(table_element.content)
     if table_element.metadata and table_element.metadata.get("csv_columns"):
+        if table_element.metadata.get("tabular_format") == "xlsx":
+            return _chunk_xlsx_table(txt, table_element, chunk_size, length_function)
         return _chunk_csv_table(
             txt,
             table_element=table_element,
@@ -240,6 +244,71 @@ def chunk_table(
         subtables.append("\n".join([header_text, *body_rows]))
 
     return [MDElement(type="table", content=subtable, page_number=table_element.page_number) for subtable in subtables]
+
+
+def _chunk_xlsx_table(table, element, chunk_size, length_function):
+    """Reuse row splitting with escaped headers and exact sheet/column metadata."""
+    context = element.metadata.get("sheet_context", "")
+    if context:
+        if not table.endswith(context):
+            raise PipelineError("XLSX sheet context does not match table content")
+        table = table[: -len(context)]
+    table = clean_markdown_table_spacing(table)
+    context_tokens = length_function(context) if context else 0
+    if context_tokens >= chunk_size:
+        raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
+    original_columns = list(element.metadata["table_columns"])
+    rendered_columns = _table_cells(table.split("\n", 1)[0])
+    if len(rendered_columns) != len(original_columns):
+        raise PipelineError("XLSX table header does not match its column metadata")
+    column_positions = {name: index for index, name in enumerate(rendered_columns)}
+    if len(column_positions) != len(rendered_columns):
+        raise PipelineError("XLSX rendered column names are ambiguous")
+    safe_element = MDElement(
+        type="table",
+        content=table,
+        page_number=element.page_number,
+        metadata={**element.metadata, "table_columns": rendered_columns, "csv_columns": rendered_columns},
+    )
+    # Reserve the separator between header and body (the shared CSV splitter
+    # counts those independently). Verify the complete rendered result below.
+    chunks = _chunk_csv_table(
+        table,
+        table_element=safe_element,
+        chunk_size=chunk_size - length_function("\n") - context_tokens,
+        length_function=length_function,
+    )
+    for chunk in chunks:
+        chunk.content += context
+        if length_function(chunk.content) > chunk_size:
+            raise PipelineError("XLSX chunk exceeds its token budget")
+        metadata = chunk.metadata
+        positions = [column_positions[name] for name in metadata["table_columns"]]
+        metadata["table_column_indices"] = [index + 1 for index in positions]
+        metadata["table_columns"] = [original_columns[index] for index in positions]
+        metadata["csv_columns"] = list(metadata["table_columns"])
+        for key in ("column_group", "column_groups_total", "part", "parts_total"):
+            if f"csv_{key}" in metadata:
+                metadata[f"table_{key}"] = metadata[f"csv_{key}"]
+        if "csv_column" in metadata:
+            name = original_columns[column_positions[metadata["csv_column"]]]
+            metadata.update(table_column=name, csv_column=name)
+
+        def column_name(index):
+            name = ""
+            while index:
+                index, remainder = divmod(index - 1, 26)
+                name = chr(65 + remainder) + name
+            return name
+
+        sheet = "'" + metadata["sheet_name"].replace("'", "''") + "'!"
+        start, end = metadata["table_row_start"], metadata["table_row_end"]
+        metadata["cell_range"] = (
+            f"{sheet}{column_name(min(positions) + 1)}{start}:{column_name(max(positions) + 1)}{end}"
+        )
+        # The bounding range can span blank rows/unselected columns. Exact
+        # membership is table_row_numbers plus table_column_indices.
+    return chunks
 
 
 def _table_cells(row: str) -> list[str]:
