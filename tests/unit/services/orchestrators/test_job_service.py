@@ -34,18 +34,41 @@ class _Remote:
 
 
 class FakeTSM:
-    def __init__(self, *, states=None, info=None, pool=None):
+    def __init__(self, *, states=None, info=None, pool=None, stage_snapshots=None):
         self._states = states or {}
         self._info = info or {}
+        self._stage_snapshots = stage_snapshots or {}
+        self.stage_snapshot_bulk_reads = 0
         self._pool = pool or {"total_capacity": 8, "pool_size": 2, "max_tasks_per_worker": 4}
         self.get_all_states = _Remote(lambda: dict(self._states))
         self.get_pool_info = _Remote(lambda: dict(self._pool))
-        self.get_all_info = _Remote(lambda: dict(self._info))
-        self.get_all_user_info = _Remote(lambda uid: {k: v for k, v in self._info.items() if v.get("user") == uid})
+        self.get_all_info = _Remote(self._list_info)
+        self.get_all_user_info = _Remote(lambda uid: self._list_info(uid))
         self.get_details = _Remote(lambda task_id: self._info.get(task_id, {}).get("details"))
         self.get_user_pending_task_count = _Remote(
             lambda user_id: sum(1 for info in self._info.values() if info.get("user_id") == user_id)
         )
+        self.get_stage_progress_snapshots = _Remote(self._bulk_stage_snapshots)
+        self.get_stage_progress_snapshot = _Remote(lambda task_id: self._stage_snapshots.get(task_id))
+
+    def _list_info(self, user_id=None):
+        rows = {
+            task_id: dict(info)
+            for task_id, info in self._info.items()
+            if user_id is None or info.get("user") == user_id
+        }
+        for task_id, snapshot in self._stage_snapshots.items():
+            if task_id in rows:
+                rows[task_id]["stage_progress"] = snapshot.model_copy(update={"event_tail": []})
+        return rows
+
+    def _bulk_stage_snapshots(self, task_ids):
+        self.stage_snapshot_bulk_reads += 1
+        return {
+            task_id: snapshot.model_copy(update={"event_tail": []})
+            for task_id, snapshot in self._stage_snapshots.items()
+            if task_id in task_ids
+        }
 
 
 @pytest.mark.asyncio
@@ -280,6 +303,214 @@ async def test_list_tasks_does_not_expose_failure_details_to_regular_users():
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_orders_live_progress_before_client_pagination() -> None:
+    from core.models.stage_progress import StageProgressSummary, StageProgressWorkerSnapshot, StageTaskPhase
+    from services.workers.stage_tracker import StageTracker
+
+    stages = {}
+    for task_id, stage, rank in (("parse", "parse", 0), ("embed", "embed", 5)):
+        tracker = StageTracker(task_id)
+        tracker.start_stage(stage, rank)
+        stages[task_id] = tracker.snapshot()
+    finalizing = StageProgressWorkerSnapshot(
+        summary=StageProgressSummary(
+            task_id="finalizing",
+            phase=StageTaskPhase.FINALIZING,
+            position_score=7000,
+        )
+    )
+    info = {
+        task_id: {"state": state, "details": {}, "user": 1}
+        for task_id, state in (
+            ("queued", "QUEUED"),
+            ("unknown", "SERIALIZING"),
+            ("parse", "SERIALIZING"),
+            ("embed", "SERIALIZING"),
+            ("finalizing", "SERIALIZING"),
+            ("terminal", "COMPLETED"),
+        )
+    }
+    info["unknown"]["stage_tracking_version"] = 1
+    stages["finalizing"] = finalizing
+
+    tsm = FakeTSM(info=info, stage_snapshots=stages)
+    rows = await JobService(tsm).list_tasks(is_admin=True, user_id=1)
+
+    assert [row["task_id"] for row in rows] == ["finalizing", "embed", "parse", "unknown", "queued", "terminal"]
+    assert tsm.stage_snapshot_bulk_reads == 0
+    assert rows[0]["stage_progress"]["freshness"] == "live"
+    assert rows[1]["stage_progress"]["stage_id"] == "embed"
+    assert rows[1]["stage_progress"]["elapsed_ms"] is not None
+    assert rows[2]["stage_progress"]["stage_id"] == "parse"
+    assert rows[3]["stage_progress"]["history_quality"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_sorts_complete_authorized_set_before_server_pagination() -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    info = {
+        "queued": {"state": "QUEUED", "details": {"partition": "p2"}, "user": 1},
+        "unknown": {"state": "SERIALIZING", "details": {"partition": "p1"}, "user": 1},
+        "parse": {"state": "SERIALIZING", "details": {"partition": "p1"}, "user": 1},
+        "embed": {"state": "SERIALIZING", "details": {"partition": "p2"}, "user": 1},
+    }
+    snapshots = {}
+    for task_id, stage, rank in (("parse", "parse", 0), ("embed", "embed", 5)):
+        tracker = StageTracker(task_id)
+        tracker.start_stage(stage, rank)
+        snapshots[task_id] = tracker.snapshot()
+    service = JobService(FakeTSM(info=info, stage_snapshots=snapshots))
+
+    first = await service.list_tasks(is_admin=True, user_id=1, task_status="active", limit=2, offset=0)
+    second = await service.list_tasks(is_admin=True, user_id=1, task_status="active", limit=2, offset=2)
+
+    assert [row["task_id"] for row in first["tasks"]] == ["embed", "parse"]
+    assert [row["task_id"] for row in second["tasks"]] == ["unknown", "queued"]
+    assert first["pagination"] == {
+        "offset": 0,
+        "limit": 2,
+        "total": 4,
+        "has_more": True,
+        "available_partitions": ["p1", "p2"],
+    }
+    assert second["pagination"]["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_pagination_defaults_limit_and_rejects_invalid_values() -> None:
+    from services.orchestrators.job_service import JobService
+
+    service = JobService(FakeTSM())
+    defaulted = await service.list_tasks(is_admin=True, user_id=1, offset=0)
+
+    assert defaulted["pagination"]["limit"] == 50
+    with pytest.raises(ValueError, match="pagination"):
+        await service.list_tasks(is_admin=True, user_id=1, limit=101)
+
+
+@pytest.mark.asyncio
+async def test_task_stage_history_merges_durable_and_live_tail_without_claiming_completion() -> None:
+    from core.models.stage_progress import DurableStageProgress, StageEventStatus
+    from services.workers.stage_tracker import StageTracker
+
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+    tracker.finish_stage()
+    tracker.finish_task()
+    live = tracker.snapshot()
+    durable = DurableStageProgress(
+        task_id="task-1",
+        latest_sequence=2,
+        snapshot_revision=3,
+        phase=live.summary.phase,
+        position_score=500,
+        expected_final_sequence=2,
+        persisted_through_sequence=1,
+        has_open_invocation=False,
+    )
+    repo = FakeJobRepo(
+        [_job(id="task-1", stage_tracking_version=1)],
+        stage_summaries={"task-1": durable},
+        stage_events={"task-1": [live.event_tail[0]]},
+    )
+    service = JobService(
+        FakeTSM(info={"task-1": {"state": "COMPLETED", "details": {}}}, stage_snapshots={"task-1": live}), job_repo=repo
+    )
+
+    result = await service.get_task_stage_progress("task-1", limit=10)
+
+    assert [event["status"] for event in result["events"]] == [
+        StageEventStatus.STARTED.value,
+        StageEventStatus.COMPLETED.value,
+    ]
+    assert result["history_quality"] == "pending_persistence"
+    assert result["last_known_stage_id"] == "parse"
+    assert result["is_currently_running"] is False
+    assert result["persisted_through_sequence"] == 1
+
+
+def test_confirmed_worker_loss_is_reported_as_an_interrupted_last_known_stage() -> None:
+    from services.orchestrators.job_service import _stage_progress_view
+    from services.workers.stage_tracker import StageTracker
+
+    tracker = StageTracker("task-1")
+    tracker.start_stage("embed", 5)
+    snapshot = tracker.snapshot().model_copy(
+        update={
+            "summary": tracker.summary().model_copy(
+                update={
+                    "interrupted_invocation_id": tracker.summary().current_invocation_id,
+                    "known_loss": True,
+                }
+            )
+        }
+    )
+
+    result = _stage_progress_view(snapshot, None, state="FAILED", tracking_version=1)
+
+    assert result["history_quality"] == "incomplete"
+    assert result["is_currently_running"] is False
+    assert result["interrupted_invocation_id"] == str(tracker.summary().current_invocation_id)
+    assert result["last_known_stage_id"] == "embed"
+
+
+def test_terminal_open_invocation_is_not_complete_without_worker_loss_evidence() -> None:
+    from uuid import uuid4
+
+    from core.models.stage_progress import DurableStageProgress, StageTaskPhase
+    from services.orchestrators.job_service import _stage_progress_view
+
+    invocation_id = uuid4()
+    durable = DurableStageProgress(
+        task_id="task-1",
+        attempt=1,
+        latest_sequence=1,
+        snapshot_revision=3,
+        phase=StageTaskPhase.STAGE,
+        current_stage_id="embed",
+        current_stage_rank=5,
+        position_score=5000,
+        current_invocation_id=invocation_id,
+        expected_final_sequence=1,
+        has_open_invocation=True,
+        persisted_through_sequence=1,
+    )
+
+    result = _stage_progress_view(None, durable, state="FAILED", tracking_version=1)
+
+    assert result["history_quality"] == "unknown"
+    assert result["is_currently_running"] is False
+    assert result["last_known_stage_id"] == "embed"
+
+
+def test_durable_open_invocation_is_not_called_currently_running() -> None:
+    from uuid import uuid4
+
+    from core.models.stage_progress import DurableStageProgress, StageTaskPhase
+    from services.orchestrators.job_service import _stage_progress_view
+
+    durable = DurableStageProgress(
+        task_id="task-1",
+        attempt=1,
+        latest_sequence=1,
+        snapshot_revision=1,
+        phase=StageTaskPhase.STAGE,
+        current_stage_id="embed",
+        current_stage_rank=5,
+        position_score=5000,
+        current_invocation_id=uuid4(),
+        has_open_invocation=True,
+        persisted_through_sequence=1,
+    )
+
+    result = _stage_progress_view(None, durable, state="SERIALIZING", tracking_version=1)
+
+    assert result["freshness"] == "durable"
+    assert result["is_currently_running"] is False
+
+
+@pytest.mark.asyncio
 async def test_get_task_details_uses_task_state_manager():
     info = {
         "t1": {
@@ -327,13 +558,24 @@ async def test_get_user_pending_task_count_uses_task_state_manager():
 class FakeJobRepo:
     """Durable job rows, as the actor would never return them."""
 
-    def __init__(self, jobs=None, *, counts=None, broken: bool = False, fail_get_jobs: bool = False):
+    def __init__(
+        self,
+        jobs=None,
+        *,
+        counts=None,
+        broken: bool = False,
+        fail_get_jobs: bool = False,
+        stage_summaries=None,
+        stage_events=None,
+    ):
         self._jobs = {job.id: job for job in (jobs or [])}
         self._counts = counts
         self._broken = broken
         self._fail_get_jobs = fail_get_jobs
         self.listed_statuses = []
         self.calls: list[str] = []
+        self._stage_summaries = stage_summaries or {}
+        self._stage_events = stage_events or {}
 
     async def list_jobs(self, *, statuses=None, user_id=None, offset=0, limit=50):
         if self._broken:
@@ -376,6 +618,26 @@ class FakeJobRepo:
         for job in self._jobs.values():
             counts[job.status.value] = counts.get(job.status.value, 0) + 1
         return counts
+
+    async def get_stage_progress_summaries(self, task_ids):
+        self.calls.append("get_stage_progress_summaries")
+        return {task_id: self._stage_summaries[task_id] for task_id in task_ids if task_id in self._stage_summaries}
+
+    async def get_stage_progress_events(self, task_id, *, before=None, limit=100):
+        from core.models.stage_progress import StageProgressEventPage
+
+        self.calls.append("get_stage_progress_events")
+        events = self._stage_events.get(task_id, [])
+        if before is not None:
+            events = [event for event in events if (event.attempt, event.sequence) < (before.attempt, before.sequence)]
+        has_more = len(events) > limit
+        page = events[-limit:]
+        cursor = None
+        if has_more and page:
+            from core.models.stage_progress import StageProgressEventCursor
+
+            cursor = StageProgressEventCursor(attempt=page[0].attempt, sequence=page[0].sequence)
+        return StageProgressEventPage(events=page, has_more=has_more, next_cursor=cursor)
 
 
 def _job(**kwargs):
