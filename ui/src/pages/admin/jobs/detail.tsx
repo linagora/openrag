@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { MouseEvent } from "react";
@@ -13,6 +14,7 @@ import {
 } from "@/components/shared/degraded-stages";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -23,12 +25,13 @@ import { Separator } from "@/components/ui/separator";
 import {
   getTaskStatus,
   getTaskError,
+  getTaskStageProgress,
   cancelTask,
   isActiveState,
   isTerminalState,
 } from "@/lib/api/jobs";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
-import { copyToClipboard } from "@/lib/utils";
+import { copyToClipboard, formatDate } from "@/lib/utils";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
 
@@ -42,6 +45,49 @@ function failedStage(details: unknown): string {
   return str(record.failed_stage);
 }
 
+function formatStageDuration(durationMs: number | null | undefined): string | null {
+  if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return null;
+  const seconds = Math.floor(durationMs / 1000);
+  if (seconds < 1) return "< 1s";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+function historyQualityLabel(quality: string | undefined): string {
+  switch (quality) {
+    case "complete": return "All observed stage events are saved.";
+    case "pending_persistence": return "Recent stage updates may still be saving.";
+    case "incomplete": return "Some stage history may be missing.";
+    case "truncated": return "Only the most recent stage history is available.";
+    case "legacy": return "Stage history was not recorded for this task.";
+    case "not_started": return "No pipeline stage has started yet.";
+    default: return "Stage history completeness is unknown.";
+  }
+}
+
+function stageEventText(
+  eventStatus: string,
+  failureEffect: string | null | undefined,
+  isOpenCurrentInvocation: boolean,
+  isInterruptedInvocation: boolean,
+  isCurrentlyRunning: boolean,
+  taskTerminal: boolean,
+): string {
+  if (eventStatus === "started") {
+    if (isInterruptedInvocation) return "Interrupted — worker stopped before a stage end was observed";
+    if (isOpenCurrentInvocation && taskTerminal) return "Last observed start — no stage end was recorded before the task ended";
+    if (isOpenCurrentInvocation && isCurrentlyRunning) return "Running";
+    if (isOpenCurrentInvocation) return "Last observed start — worker activity is not confirmed";
+    return "Started";
+  }
+  if (eventStatus === "completed") return "Completed";
+  if (eventStatus === "cancelled") return "Cancelled";
+  if (failureEffect === "continued_degraded") return "Failed; indexing continued without this enrichment";
+  return "Failed";
+}
+
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
@@ -49,6 +95,24 @@ export default function JobDetailPage() {
   const queryClient = useQueryClient();
   const userId = user?.id ?? 0;
   const authorizationScope = isAdmin ? "admin" : "user";
+  const historyIdentity = `${id ?? ""}:${userId}:${authorizationScope}`;
+  const [historyState, setHistoryState] = useState<{
+    identity: string;
+    cursors: Array<{ attempt: number; sequence: number } | null>;
+  }>(() => ({ identity: historyIdentity, cursors: [null] }));
+  const historyCursors = historyState.identity === historyIdentity ? historyState.cursors : [null];
+  const updateHistoryCursors = (
+    update: (current: Array<{ attempt: number; sequence: number } | null>) => Array<{
+      attempt: number;
+      sequence: number;
+    } | null>,
+  ) => {
+    setHistoryState((current) => ({
+      identity: historyIdentity,
+      cursors: update(current.identity === historyIdentity ? current.cursors : [null]),
+    }));
+  };
+  const historyCursor = historyCursors[historyCursors.length - 1] ?? null;
 
   // OpenRag has no task SSE — poll status until it reaches a terminal state.
   const taskQuery = useQuery({
@@ -59,6 +123,20 @@ export default function JobDetailPage() {
       const state = query.state.data?.task_state;
       return state && isTerminalState(state) ? false : 3000;
     },
+  });
+
+  const stageQuery = useQuery({
+    queryKey: [
+      "task-stage-progress",
+      id,
+      userId,
+      authorizationScope,
+      historyCursor?.attempt ?? null,
+      historyCursor?.sequence ?? null,
+    ],
+    queryFn: () => getTaskStageProgress(id!, historyCursor, 50),
+    enabled: !!id && !!user,
+    refetchInterval: historyCursors.length === 1 && isActiveState(taskQuery.data?.task_state ?? "") ? 3000 : false,
   });
 
   const state = taskQuery.data?.task_state;
@@ -110,6 +188,11 @@ export default function JobDetailPage() {
     errorQuery.data?.summary?.trim() ||
     tracebackSummary(traceback);
   const stage = failedStage(details);
+  const stageEvents = stageQuery.data?.events ?? [];
+  const taskTerminal = isTerminalState(task.task_state);
+  const currentInvocationId = stageQuery.data?.current_invocation_id;
+  const interruptedInvocationId = stageQuery.data?.interrupted_invocation_id;
+  const nextStageCursor = stageQuery.data?.next_cursor;
   const diagnostics = [
     `Task ID: ${task.task_id}`,
     `State: ${task.task_state}`,
@@ -226,6 +309,70 @@ export default function JobDetailPage() {
               <dd className="font-medium">{str(details?.user_id) || "—"}</dd>
             </div>
           </dl>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Indexing stages</CardTitle>
+          <p className="text-sm text-muted-foreground" aria-live="polite">
+            {stageQuery.data ? historyQualityLabel(stageQuery.data.history_quality) : "Loading stage history…"}
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {stageQuery.isError ? (
+            <p className="text-sm text-destructive">Stage history is currently unavailable.</p>
+          ) : stageEvents.length ? (
+            <ol className="space-y-3 border-l pl-4">
+              {stageEvents.map((event) => {
+                const isOpenCurrentInvocation =
+                  event.status === "started" && !!currentInvocationId && event.invocation_id === currentInvocationId;
+                  const isInterruptedInvocation =
+                    event.status === "started" &&
+                    !!interruptedInvocationId &&
+                    event.invocation_id === interruptedInvocationId;
+                const duration = formatStageDuration(event.duration_ms);
+                return (
+                  <li key={`${event.attempt}:${event.sequence}`} className="relative space-y-1">
+                    <span className="absolute -left-[1.34rem] top-1.5 h-2 w-2 rounded-full bg-primary" />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{event.stage_id.replace(/_/g, " ")}</span>
+                      <Badge variant={event.status === "failed" ? "destructive" : "outline"}>
+                        {stageEventText(
+                          event.status,
+                          event.failure_effect,
+                          isOpenCurrentInvocation,
+                          isInterruptedInvocation,
+                          !!stageQuery.data?.is_currently_running,
+                          taskTerminal,
+                        )}
+                      </Badge>
+                      {duration && <span className="text-sm text-muted-foreground">{duration}</span>}
+                    </div>
+                    <time className="block text-xs text-muted-foreground" dateTime={event.occurred_at}>
+                      {formatDate(event.occurred_at)}
+                    </time>
+                  </li>
+                );
+              })}
+            </ol>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {stageQuery.data?.history_quality === "not_started" ? "No pipeline stage has started yet." : "No stage events are available."}
+            </p>
+          )}
+          <div className="flex gap-2">
+            {historyCursors.length > 1 && (
+              <Button variant="outline" size="sm" onClick={() => updateHistoryCursors((current) => current.slice(0, -1))}>
+                Newer stages
+              </Button>
+            )}
+            {stageQuery.data?.has_more && nextStageCursor && (
+              <Button variant="outline" size="sm" onClick={() => updateHistoryCursors((current) => [...current, nextStageCursor])}>
+                Older stages
+              </Button>
+            )}
+          </div>
         </CardContent>
       </Card>
 
