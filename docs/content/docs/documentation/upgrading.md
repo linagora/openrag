@@ -32,6 +32,36 @@ worker. Remove the setting; the Marker worker logs a warning while it is above 1
 `MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
 `1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
 
+From OpenRAG 2.3.2, the bundled object store runs SILO, the maintained MinIO
+fork, instead of the unpatched MinIO build. The switch is one-way, so back up
+the MinIO, etcd and Milvus data first. On Kubernetes, stop every MinIO pod
+before `helm upgrade`, and set `minioCredentials.accessKey` and `secretKey`: the
+chart refuses to install without them. Deployments on an external S3 store are
+not affected. Follow
+[Object storage upgrade (MinIO to SILO)](/openrag/documentation/minio_silo_upgrade/)
+before upgrading.
+
+From OpenRAG 2.3.2, a default prompt that still holds the text an earlier release
+seeded is replaced with the bundled template at startup. Defaults you edited or
+renamed, and named prompts, are kept. In every deployment this replaces an
+untouched `query_contextualizer` default; in one first installed on 2.1.x, also
+the `sys_prompt` and `spoken_style_answer` defaults. To keep an earlier text, copy it
+into a named prompt before you upgrade: rolling the image back does not restore
+it. While 2.3.0 or 2.3.1 instances still run beside 2.3.2 ones, set
+`PROMPTS_REFRESH_DEFAULTS=false`, and remove it once they have stopped. See the
+[Prompt Library](/openrag/documentation/api/#-prompt-library).
+
+From OpenRAG 2.3.2, `enable_thinking: false` reaches the model's chat template;
+earlier releases dropped it. A model with a Mistral tokenizer rejects it with a
+400, so remove `enable_thinking` from the `extra` of that model's endpoint, on the
+Models page or with `PUT /model-endpoints/{model_type}/{name}`, which replaces
+`extra`: send the rest of it back. `LLM_ENABLE_THINKING` and `VLM_ENABLE_THINKING`
+are only copied into an endpoint when it is first created, so changing them does
+not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
+`"enable_thinking": false` in its `extra` the same way. `OPENAI_LOADER_ENABLE_THINKING`
+is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
+See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
+
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
 From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
