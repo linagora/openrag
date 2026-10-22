@@ -14,6 +14,8 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
+_IDNA_LABEL_SEPARATORS = str.maketrans({"。": ".", "．": ".", "｡": "."})
+
 
 def _bare_numeric_host_value(host: str) -> int | None:
     """Parse *host* as a single C-style integer literal (decimal, ``0x`` hex,
@@ -82,7 +84,8 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     # crafted very long internationalized hostname can consume
     # disproportionate CPU in vulnerable idna releases (GHSA-65pc-fj4g-8rjx)
     # while the fetch resolves it — stalling the shared event loop.
-    if len(host) > 253 or any(len(label) > 63 for label in host.rstrip(".").split(".")):
+    hostname_for_length_check = host.translate(_IDNA_LABEL_SEPARATORS).rstrip(".")
+    if len(hostname_for_length_check) > 253 or any(len(label) > 63 for label in hostname_for_length_check.split(".")):
         return False
 
     if allow_private_hosts:

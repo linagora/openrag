@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from core.utils.url_safety import is_safe_url
 
+_OVER_LIMIT_HOSTNAME = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 62])
+
 
 @pytest.mark.parametrize(
     "url",
@@ -24,7 +26,6 @@ from core.utils.url_safety import is_safe_url
         "file:///etc/passwd",
         "not a url",
         "http://" + "a" * 64 + ".com/x",  # label past the 63-character DNS limit
-        "http://" + "a" * 300 + ".com/x",  # hostname past the 253-character DNS limit
     ],
 )
 def test_blocks_unsafe(url):
@@ -36,14 +37,30 @@ def test_allows_hostnames_at_the_dns_length_limits():
     at_limit = ".".join(["a" * 62, "b" * 62, "c" * 63, "d" * 63])
     assert len(at_limit) == 253
     assert is_safe_url("http://" + at_limit + "/x") is True
-    assert is_safe_url("http://" + at_limit + "e/x") is False  # 254 total
+    assert is_safe_url("http://" + at_limit + "./x") is True  # valid root dot
     assert is_safe_url("http://example.com./x") is True  # trailing dot is fine
 
 
-def test_dns_length_limits_apply_in_private_host_mode():
-    # allow_private_hosts skips the address checks, not the length bounds:
-    # the fetch still resolves the hostname, so the idna CPU bound stays.
-    assert is_safe_url("http://" + "a" * 300 + ".com/x", allow_private_hosts=True) is False
+@pytest.mark.parametrize("allow_private_hosts", [False, True])
+def test_blocks_total_hostname_length_over_253_with_valid_labels(allow_private_hosts):
+    # 63 + 63 + 63 + 62 characters plus three dots = 254; no label is too long.
+    assert len(_OVER_LIMIT_HOSTNAME) == 254
+    assert (
+        is_safe_url(
+            "http://" + _OVER_LIMIT_HOSTNAME + "/x",
+            allow_private_hosts=allow_private_hosts,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("separator", ["。", "．", "｡"])
+def test_allows_idna_equivalent_label_separators(separator):
+    hostname = "a" * 32 + separator + "b" * 32
+    assert is_safe_url(f"http://{hostname}/x") is True
+
+
+def test_allow_private_hosts_permits_internal_hostname():
     assert is_safe_url("http://intranet.corp/x", allow_private_hosts=True) is True
 
 
