@@ -9,6 +9,8 @@ import pytest
 import ray.exceptions as ray_exceptions
 import services.workers.task_state as task_state_module
 from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY
+from core.models.stage_progress import StageTaskPhase
+from services.workers.stage_tracker import StageTracker
 from services.workers.task_state import (
     PENDING_TASK_DETAILS,
     SUBMITTED_TASK_WITHOUT_REF,
@@ -118,6 +120,13 @@ async def test_reports_support_for_explicit_completion_outcomes() -> None:
     manager = _task_state_manager()
 
     assert await manager.supports_explicit_completion_outcomes() is True
+
+
+@pytest.mark.asyncio
+async def test_reports_support_for_stage_progress_snapshots() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.supports_stage_progress_snapshots() is True
 
 
 @pytest.mark.asyncio
@@ -795,6 +804,134 @@ async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -
 
     await reconstructed.set_state("task-1", "COMPLETED")
     assert stored == {}
+
+
+@pytest.mark.asyncio
+async def test_stage_progress_snapshots_are_revision_fenced_and_preserve_the_event_tail(monkeypatch) -> None:
+    saved: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(
+        task_state_module, "_save_recoverable_task", lambda task_id, info: saved.update({task_id: deepcopy(info)})
+    )
+    manager = _task_state_manager()
+    manager.tasks["task-1"] = TaskInfo(state="SERIALIZING")
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+    first = tracker.snapshot()
+
+    assert await manager.update_stage_progress_snapshot("task-1", first) is True
+    sampled = tracker.sample_elapsed()
+    assert sampled is not None
+    assert await manager.update_stage_progress_snapshot("task-1", sampled) is True
+    assert await manager.update_stage_progress_snapshot("task-1", first) is True
+
+    tracker.finish_stage()
+    ended = tracker.snapshot()
+    assert await manager.update_stage_progress_snapshot("task-1", ended) is True
+    actual = await manager.get_stage_progress_snapshot("task-1")
+
+    assert actual is not None
+    assert actual.summary.latest_sequence == 2
+    assert actual.summary.phase is StageTaskPhase.BETWEEN_STAGES
+    assert [event.sequence for event in actual.event_tail] == [1, 2]
+    assert actual.summary.snapshot_revision == ended.summary.snapshot_revision
+    assert saved["task-1"].stage_progress == actual
+
+
+@pytest.mark.asyncio
+async def test_stage_snapshot_attempt_fencing_and_terminal_override(monkeypatch) -> None:
+    saved: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(
+        task_state_module, "_save_recoverable_task", lambda task_id, info: saved.update({task_id: deepcopy(info)})
+    )
+    manager = _task_state_manager()
+    manager.tasks["task-1"] = TaskInfo(state="SERIALIZING")
+    older_tracker = StageTracker("task-1", attempt=1)
+    older_tracker.start_stage("parse", 0)
+    older = older_tracker.snapshot()
+    assert await manager.update_stage_progress_snapshot("task-1", older) is True
+
+    newer_tracker = StageTracker("task-1", attempt=2)
+    newer_tracker.start_stage("embed", 5)
+    newer = newer_tracker.snapshot()
+    assert await manager.update_stage_progress_snapshot("task-1", newer) is True
+    assert await manager.update_stage_progress_snapshot("task-1", older) is True
+
+    assert await manager.set_state("task-1", "COMPLETED") is True
+    newer_tracker.finish_task()
+    terminal = newer_tracker.snapshot()
+    assert await manager.update_stage_progress_snapshot("task-1", terminal) is True
+    assert await manager.get_state("task-1") == "COMPLETED"
+    actual = await manager.get_stage_progress_snapshot("task-1")
+    assert actual is not None
+    assert actual.summary.attempt == 2
+    assert actual.summary.current_stage_id == "embed"
+    assert actual.summary.expected_final_sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_stage_summary_reads_omit_event_tails(monkeypatch) -> None:
+    manager = _task_state_manager()
+    manager.tasks["task-1"] = TaskInfo(state="SERIALIZING")
+    manager.user_index[42] = {"task-1"}
+    tracker = StageTracker("task-1")
+    tracker.start_stage("chunk", 2)
+    await manager.update_stage_progress_snapshot("task-1", tracker.snapshot())
+
+    summaries = await manager.get_stage_progress_snapshots(["task-1", "missing"])
+
+    assert set(summaries) == {"task-1"}
+    assert summaries["task-1"].summary.current_stage_id == "chunk"
+    assert summaries["task-1"].event_tail == []
+
+    for task_rows in (await manager.get_all_info(), await manager.get_all_user_info(42)):
+        listed = task_rows["task-1"]["stage_progress"]
+        assert listed.summary.latest_sequence == 1
+        assert listed.event_tail == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_stage_summary_hides_worker_state_after_lease_expiry_until_settled(clock) -> None:
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    tracker = StageTracker("task-1")
+    tracker.start_stage("embed", 5)
+    manager.tasks["task-1"] = TaskInfo(
+        state="SERIALIZING",
+        object_ref={"ref": worker_ref},
+        worker_started=True,
+        worker_lease_expires_at=clock.now - 1,
+        stage_progress=tracker.snapshot(),
+    )
+
+    snapshots = await manager.get_stage_progress_snapshots(["task-1"])
+
+    assert snapshots == {}
+    assert manager.tasks["task-1"].stage_progress.summary.interrupted_invocation_id is None
+
+
+@pytest.mark.asyncio
+async def test_stage_progress_snapshot_survives_task_state_manager_reconstruction(monkeypatch) -> None:
+    stored: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: (deepcopy(stored), {}))
+    monkeypatch.setattr(
+        task_state_module,
+        "_save_recoverable_task",
+        lambda task_id, info: stored.update({task_id: deepcopy(info)}),
+    )
+    manager = _task_state_manager()
+    manager.tasks["task-1"] = TaskInfo(state="SERIALIZING", details={"user_id": 4})
+    tracker = StageTracker("task-1")
+    tracker.start_stage("embed", 5)
+    await manager.update_stage_progress_snapshot("task-1", tracker.snapshot())
+
+    reconstructed = _task_state_manager()
+
+    recovered = await reconstructed.get_stage_progress_snapshot("task-1")
+    assert recovered is not None
+    assert recovered.summary.current_stage_id == "embed"
+    assert recovered.summary.current_invocation_id == tracker.summary().current_invocation_id
+    assert [event.sequence for event in recovered.event_tail] == [1]
+    assert await reconstructed.get_state("task-1") == "SERIALIZING"
 
 
 @pytest.mark.asyncio
@@ -2185,6 +2322,34 @@ async def test_a_started_orphan_settles_once_its_dead_worker_lets_the_lease_laps
     clock.now += task_state_module._WORKER_LEASE_TTL_SECONDS
 
     assert await manager.has_worker_settled("task-1") is True
+
+
+@pytest.mark.asyncio
+async def test_a_settled_worker_marks_an_open_stage_as_interrupted(clock, monkeypatch) -> None:
+    saved: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(
+        task_state_module, "_save_recoverable_task", lambda task_id, info: saved.update({task_id: deepcopy(info)})
+    )
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+    assert await manager.set_state("task-1", "SERIALIZING") is True
+    assert await manager.renew_worker_lease("task-1") is True
+
+    tracker = StageTracker("task-1")
+    tracker.start_stage("embed", 5)
+    await manager.update_stage_progress_snapshot("task-1", tracker.snapshot())
+
+    assert await manager.has_worker_settled("task-1") is False
+    assert (await manager.get_stage_progress_snapshot("task-1")).summary.interrupted_invocation_id is None
+
+    clock.now += task_state_module._WORKER_LEASE_TTL_SECONDS
+    assert await manager.has_worker_settled("task-1") is True
+
+    snapshot = await manager.get_stage_progress_snapshot("task-1")
+    assert snapshot is not None
+    assert snapshot.summary.interrupted_invocation_id == tracker.summary().current_invocation_id
+    assert snapshot.summary.known_loss is True
+    assert saved["task-1"].stage_progress == snapshot
 
 
 @pytest.mark.asyncio
