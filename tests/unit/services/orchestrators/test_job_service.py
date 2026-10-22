@@ -806,6 +806,42 @@ async def test_get_task_details_falls_back_to_the_durable_row():
 
 
 @pytest.mark.asyncio
+async def test_get_task_details_includes_durable_stage_timings():
+    timings = {"parse": 0.25, "chunk": 0.5, "embed": 1.0, "store": 0.75}
+    service = JobService(FakeTSM(info={}), job_repo=FakeJobRepo([_job(stage_timings=timings)]))
+
+    details = await service.get_task_details("t-old")
+
+    assert details is not None
+    assert details["stage_timings"] == timings
+
+
+@pytest.mark.asyncio
+async def test_get_task_details_preserves_actor_timings_when_durable_value_is_null():
+    from core.models.catalog import DocumentStatus
+
+    timings = {"parse": 0.25, "chunk": 0.5}
+    info = {
+        "t1": {
+            "state": "COMPLETED",
+            "details": {"stage_timings": timings, "metadata": {"filename": "report.pdf"}},
+            "user": 7,
+        }
+    }
+    tsm = FakeTSM(info=info)
+    tsm.get_state = _Remote(lambda _task_id: "COMPLETED")
+    service = JobService(
+        tsm,
+        job_repo=FakeJobRepo([_job(id="t1", status=DocumentStatus.COMPLETED, stage_timings=None)]),
+    )
+
+    details = await service.get_task_details("t1")
+
+    assert details is not None
+    assert details["stage_timings"] == timings
+
+
+@pytest.mark.asyncio
 async def test_get_task_details_preserves_live_terminal_degradation():
     from core.models.catalog import DocumentStatus
 
