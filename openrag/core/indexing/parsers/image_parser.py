@@ -1,8 +1,9 @@
 """Image ``DocumentParser`` implementation.
 
 Decodes an image into normalized PNG bytes and emits a single
-:class:`ImageBlock`. Supports raster formats (PNG/JPEG/etc. — anything
-PIL opens) and SVG (rasterized to PNG via cairosvg).
+:class:`ImageBlock`. Supports the raster formats in
+``UPLOADED_IMAGE_FORMATS`` (PNG, JPEG, GIF, WebP, BMP) and SVG (rasterized
+to PNG via cairosvg).
 
 Captioning is not done here — see :class:`ImageBlock` for the
 parser→caption contract.
@@ -22,7 +23,7 @@ import asyncio
 import logging
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument
-from ..image_preprocessor import MIN_IMAGE_PIXELS, ensure_png_compatible_mode
+from ..image_preprocessor import MIN_IMAGE_PIXELS, UPLOADED_IMAGE_FORMATS, ensure_png_compatible_mode
 from .document_parser import DocumentParser
 from .registry import parser_registry
 
@@ -120,7 +121,7 @@ class ImageParser(DocumentParser):
             logger.warning("PIL not available; cannot decode raster image")
             return None
         try:
-            with Image.open(BytesIO(raw)) as image:
+            with Image.open(BytesIO(raw), formats=UPLOADED_IMAGE_FORMATS) as image:
                 image = ensure_png_compatible_mode(image)
                 buf = BytesIO()
                 image.save(buf, format="PNG")

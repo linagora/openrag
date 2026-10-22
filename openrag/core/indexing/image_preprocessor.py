@@ -61,6 +61,12 @@ MAX_EMBEDDED_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_EMBEDDED_TOTAL_BYTES = 100 * 1024 * 1024
 _URI_DELIMITERS = frozenset("\"'<>()[]{}")
 
+#: Raster formats Pillow may decode from uploaded content: the image types an
+#: upload can be (``core.models.document``), which also cover what Office
+#: documents embed. Without ``formats``, ``Image.open`` picks a decoder from the
+#: bytes alone, whatever the file or zip entry is called.
+UPLOADED_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP", "BMP")
+
 
 # ---------------------------------------------------------------------------
 # PIL mode normalization & encoding
