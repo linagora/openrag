@@ -475,7 +475,7 @@ GET /partition/{partition}
 ```http
 GET /partition/{partition}/file/{file_id}
 ```
-**Viewer**+. **Query:** `limit` (max chunks, default `2000`). Returns `{ "metadata": {…}, "documents": [ { "link": "…/extract/{id}" } ] }`. Returns `404` if the file isn't in the partition.
+**Viewer**+. **Query:** `limit` (max chunks, default `2000`). Returns `{ "metadata": {…}, "documents": [ { "link": "…/extract/{id}" } ], "topic_tags": ["…"] }` (`topic_tags` is empty when the file has none). Returns `404` if the file isn't in the partition.
 
 #### List Chunks in a Partition
 ```http
