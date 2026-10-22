@@ -181,6 +181,8 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
             folded_sheet_names = [name.casefold() for name in sheet_names]
             if any(not name for name in sheet_names) or len(set(folded_sheet_names)) != len(folded_sheet_names):
                 raise invalid("XLSX sheet names are missing or duplicated")
+            if any(sheet.get("state", "visible") not in {"visible", "hidden", "veryHidden"} for sheet in sheets):
+                raise invalid("XLSX worksheet has an invalid visibility state")
             cells_seen = 0
             worksheet_paths = set()
             for index, sheet in enumerate(sheets):
