@@ -185,6 +185,7 @@ async def list_files(
 Returns file information including:
 - `metadata`: File metadata (filename, size, timestamps, etc.)
 - `documents`: Array of document chunks with links to detailed views
+- `topic_tags`: Document-level topic tags generated at indexing (empty when none)
 
 **Permissions:**
 - Requires partition viewer role or higher
@@ -200,6 +201,7 @@ async def get_file(
 ):
     """Return metadata and chunk links for one file in a partition."""
     catalog_metadata = await service.get_file_metadata(partition=partition, file_id=file_id)
+    topic_tags = await service.get_file_topic_tags(partition=partition, file_id=file_id)
     rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit) if limit else []
     documents = [{"link": str(request.url_for("get_extract", extract_id=row["_id"]))} for row in rows]
     # Preserve the legacy first-page hint, but do not merge an entire chunk
@@ -209,7 +211,7 @@ async def get_file(
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"metadata": metadata, "documents": documents},
+        content={"metadata": metadata, "documents": documents, "topic_tags": topic_tags},
     )
 
 
