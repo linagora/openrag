@@ -150,13 +150,77 @@ async def test_stage_event_delivery_is_idempotent_and_reports_conflicting_outcom
             "failure_effect": StageFailureEffect.TASK_FAILED,
         }
     )
-    conflict = await repo.write_stage_progress(events=[conflicting_terminal], summaries=[_summary(task_id)])
+    conflict = await repo.write_stage_progress(
+        events=[conflicting_terminal],
+        summaries=[_summary(task_id, final_sequence=3, revision=4)],
+    )
 
     assert conflict.conflicted_task_ids == [task_id]
     state = (await repo.get_stage_progress_summaries([task_id]))[task_id]
     assert state.persisted_through_sequence == 2
+    assert state.latest_sequence == 3
+    assert state.expected_final_sequence == 3
     assert state.known_conflict is True
     assert [event.sequence for event in (await repo.get_stage_progress_events(task_id, limit=100)).events] == [1, 2]
+
+    unknown_final = StageProgressSummary(
+        task_id=task_id,
+        latest_sequence=4,
+        snapshot_revision=5,
+        phase=StageTaskPhase.BETWEEN_STAGES,
+        current_stage_rank=0,
+        position_score=0,
+    )
+    await repo.write_stage_progress(events=[], summaries=[unknown_final])
+    state_with_unknown_final = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert state_with_unknown_final.latest_sequence == 4
+    assert state_with_unknown_final.expected_final_sequence is None
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
+async def test_stage_summary_persists_interrupted_invocation_and_resets_for_retry(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"stage-history-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="test"))
+
+    invocation_id = uuid4()
+    started_at = datetime.now(UTC)
+    started = StageProgressEvent(
+        task_id=task_id,
+        attempt=1,
+        sequence=1,
+        invocation_id=invocation_id,
+        stage_id="parse",
+        stage_rank=0,
+        status=StageEventStatus.STARTED,
+        occurred_at=started_at,
+    )
+    interrupted = StageProgressSummary(
+        task_id=task_id,
+        attempt=1,
+        latest_sequence=1,
+        snapshot_revision=1,
+        phase=StageTaskPhase.STAGE,
+        current_stage_id="parse",
+        current_stage_rank=0,
+        stage_started_at=started_at,
+        current_invocation_id=invocation_id,
+        interrupted_invocation_id=invocation_id,
+        has_open_invocation=True,
+    )
+    await repo.write_stage_progress(events=[started], summaries=[interrupted])
+
+    persisted = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert persisted.interrupted_invocation_id == invocation_id
+
+    await repo.write_stage_progress(
+        events=[],
+        summaries=[StageProgressSummary(task_id=task_id, attempt=2, phase=StageTaskPhase.PREPARING)],
+    )
+    retried = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert retried.attempt == 2
+    assert retried.interrupted_invocation_id is None
 
     await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
 

@@ -20,9 +20,13 @@ def test_stage_history_schema_has_bounded_task_scoped_storage() -> None:
     (task_foreign_key,) = events.c.task_id.foreign_keys
     assert task_foreign_key.ondelete == "CASCADE"
     assert {"event_id", "attempt", "sequence", "invocation_id", "status"} <= set(events.c.keys())
-    assert {"attempt", "snapshot_revision", "persisted_through_sequence", "expected_final_sequence"} <= set(
-        state.c.keys()
-    )
+    assert {
+        "attempt",
+        "snapshot_revision",
+        "interrupted_invocation_id",
+        "persisted_through_sequence",
+        "expected_final_sequence",
+    } <= set(state.c.keys())
     assert "stage_tracking_version" in metadata.tables["jobs"].c
 
 

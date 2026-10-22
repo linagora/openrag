@@ -85,6 +85,7 @@ def _create_stage_state_table() -> None:
         sa.Column("position_score", sa.Integer(), server_default="0", nullable=False),
         sa.Column("stage_started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("current_invocation_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("interrupted_invocation_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("persisted_through_sequence", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("expected_final_sequence", sa.BigInteger(), nullable=True),
         sa.Column("known_loss", sa.Boolean(), server_default=sa.false(), nullable=False),
