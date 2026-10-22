@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Any
 
 from core.embeddings import Embedder
+from core.embeddings.query_embeddings import embed_queries
 from core.models.chunk import Chunk, _coerce_chunk_type
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
@@ -88,6 +89,12 @@ class VectorStoreSearcher(RetrievalSearcher):
     def _field(self) -> str | None:
         return self._vector_field() if callable(self._vector_field) else self._vector_field
 
+    async def _embed_queries(self, texts: list[str], field: str | None) -> list[list[float]]:
+        # A dense field belongs to one embedder (the default alias shares its
+        # embedder's), so searchers on one field share embeddings; without a
+        # field, only searchers holding this same embedder can.
+        return await embed_queries(self._embedder, field if field is not None else self._embedder, texts)
+
     async def search(
         self,
         query: str,
@@ -99,8 +106,9 @@ class VectorStoreSearcher(RetrievalSearcher):
         with_surrounding_chunks: bool = True,
         trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        field = self._field()
         embedding_started = perf_counter() if trace is not None else None
-        (embedding,) = await self._embedder.embed_query([query])
+        (embedding,) = await self._embed_queries([query], field)
         if trace is not None and embedding_started is not None:
             trace.timings["embedding"] = perf_counter() - embedding_started
         filters: dict[str, Any] = {"partition": partition}
@@ -118,7 +126,7 @@ class VectorStoreSearcher(RetrievalSearcher):
             filters=filters,
             top_k=top_k,
             similarity_threshold=similarity_threshold or None,
-            vector_field=self._field(),
+            vector_field=field,
             **trace_kwargs,
         )
         chunks = [_dict_to_chunk(r) for r in results]
@@ -139,11 +147,11 @@ class VectorStoreSearcher(RetrievalSearcher):
         with_surrounding_chunks: bool = True,
         trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        field = self._field()
         embedding_started = perf_counter() if trace is not None else None
-        embeddings = await self._embedder.embed_query(queries)
+        embeddings = await self._embed_queries(queries, field)
         if trace is not None and embedding_started is not None:
             trace.timings["embedding"] = perf_counter() - embedding_started
-        field = self._field()
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter

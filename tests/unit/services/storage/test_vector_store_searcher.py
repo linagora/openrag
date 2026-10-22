@@ -9,6 +9,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from core.embeddings.query_embeddings import sharing_query_embeddings
 from core.models.retrieval_trace import TraceCandidate
 from core.retrieval.trace import RetrievalTraceBuilder
 from services.storage.vector_store_searcher import VectorStoreSearcher, _dict_to_chunk
@@ -679,3 +680,58 @@ async def test_the_searcher_reads_its_own_embedders_field():
     await searcher.search("q", partition=["p1"], top_k=5)
 
     assert store.search.await_args.kwargs["vector_field"] == "vector_bge_m3"
+
+
+# ---------------------------------------------------------------------------
+# Query embeddings shared within a retrieval
+# ---------------------------------------------------------------------------
+
+
+def _space_searcher(store, embedder, vector_field=None) -> VectorStoreSearcher:
+    return VectorStoreSearcher(
+        vector_store=store, embedder=embedder, document_repo=MagicMock(), collection="col", vector_field=vector_field
+    )
+
+
+def _query_embedder() -> MagicMock:
+    embedder = MagicMock()
+    embedder.embed_query = AsyncMock(side_effect=lambda texts: [_EMBED_VEC for _ in texts])
+    return embedder
+
+
+@pytest.mark.asyncio
+async def test_searchers_on_one_vector_field_share_the_query_embedding():
+    store = MagicMock()
+    store.search = AsyncMock(return_value=[])
+    first, second = _query_embedder(), _query_embedder()
+
+    @sharing_query_embeddings
+    async def retrieval():
+        await _space_searcher(store, first, "vector_a").search(query="q", partition=["p1"], top_k=5)
+        await _space_searcher(store, second, "vector_a").multi_query_search(
+            queries=["q", "other"], partition=["p2"], top_k_per_query=5
+        )
+
+    await retrieval()
+
+    first.embed_query.assert_awaited_once_with(["q"])
+    second.embed_query.assert_awaited_once_with(["other"])
+    assert [call.kwargs["vector_field"] for call in store.search.await_args_list] == ["vector_a"] * 3
+
+
+@pytest.mark.asyncio
+async def test_searchers_without_a_vector_field_share_only_their_own_embedder():
+    store = MagicMock()
+    store.search = AsyncMock(return_value=[])
+    first, second = _query_embedder(), _query_embedder()
+
+    @sharing_query_embeddings
+    async def retrieval():
+        await _space_searcher(store, first).search(query="q", partition=["p1"], top_k=5)
+        await _space_searcher(store, first).search(query="q", partition=["p2"], top_k=5)
+        await _space_searcher(store, second).search(query="q", partition=["p3"], top_k=5)
+
+    await retrieval()
+
+    first.embed_query.assert_awaited_once_with(["q"])
+    second.embed_query.assert_awaited_once_with(["q"])
