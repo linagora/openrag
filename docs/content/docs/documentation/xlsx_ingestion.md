@@ -114,8 +114,9 @@ This setting applies to every nonempty visible worksheet in uploads handled by
 this deployment. Use it only for workbooks with a consistent header position.
 Leave it unset for the existing first-nonempty-row behavior. Mixed sheet layouts can use the per-sheet overrides below.
 
-Rows above the selected header are intentionally excluded from indexed content.
-Merged titles above it are therefore supported without expanding merged cells.
+Nonempty rows above the selected header are retained as worksheet context,
+separate from table headers and data rows. Merged titles above it are supported
+without expanding merged cells.
 Data rows keep their original physical coordinates, even across blank rows and
 batch boundaries. The selection consumes the existing row iterator and does not
 materialize a worksheet or change the archive, cell, or batch limits. Merged
