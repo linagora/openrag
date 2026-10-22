@@ -35,7 +35,7 @@ RUN npm run build
 # image runs under a hardened container security context (runAsNonRoot,
 # drop ALL capabilities) — required by the Helm chart and good practice in
 # compose too. COPY runs as root, then we drop back to a fixed non-root UID.
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.30-alpine
 
 USER root
 

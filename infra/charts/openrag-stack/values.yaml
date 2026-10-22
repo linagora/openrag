@@ -904,7 +904,7 @@ adminUi:
   # security.containerSecurityContext defaults for this workload specifically.
   # automountServiceAccountToken: false
   # containerSecurityContext: {}
-  # Base image is nginxinc/nginx-unprivileged:1.27-alpine, listening on 8080 so
+  # Base image is nginxinc/nginx-unprivileged:1.30-alpine, listening on 8080 so
   # it never needs root/NET_BIND_SERVICE. infra/docker/ui.Dockerfile chowns
   # /var/cache/nginx, /etc/nginx/conf.d and /var/run to 10001:0 and makes them
   # group-writable, so runAsGroup must stay 0 (not 10001) — the same
