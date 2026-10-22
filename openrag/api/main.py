@@ -38,6 +38,7 @@ from api.middleware import (
     RequestIdMiddleware,
     RequestTimeoutMiddleware,
     SecurityHeadersMiddleware,
+    UrlencodedBodyLimitMiddleware,
 )
 from api.routers.admin.cluster import router as actors_router
 from api.routers.admin.indexing import router as indexer_router
@@ -300,7 +301,7 @@ app.openapi = custom_openapi
 # (last ``add_middleware`` call wraps the outermost layer). The
 # Phase 10C target order on a request is:
 #
-#     Instrumentation -> RequestTimeout -> RequestId -> Auth -> route
+#     Instrumentation -> RequestTimeout -> RequestId -> UrlencodedBodyLimit -> Auth -> route
 #
 # so Auth is the innermost guard (lifespan's request_id already on
 # request.state when an auth failure runs through the error handlers),
@@ -318,6 +319,9 @@ app.add_middleware(
     # on None raises AttributeError, which no guard below catches (#937).
     get_auth_service=lambda request: get_container(request).auth_service,
 )
+# Before Auth, because routes that need no credentials parse their form before
+# any check runs; see UrlencodedBodyLimitMiddleware.
+app.add_middleware(UrlencodedBodyLimitMiddleware)
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(RequestTimeoutMiddleware)
 app.add_middleware(InstrumentationMiddleware)
