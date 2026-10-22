@@ -23,9 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-import ipaddress
 import mimetypes
-import socket
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,7 +40,7 @@ from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ConflictError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
-from core.utils.url_safety import is_blocked_address, is_safe_url
+from core.utils.url_safety import assert_host_resolves_safely, is_safe_url
 from core.vector_stores.vector_field import is_vector_field_key
 
 if TYPE_CHECKING:
@@ -662,17 +660,7 @@ class MCPService:
         cannot fully close TOCTOU DNS rebinding — the literal check and the
         per-hop re-validation in ``_safe_download`` remain the other layers.
         """
-        if not host:
-            raise ValueError("URL has no host")
-        loop = asyncio.get_running_loop()
-        try:
-            infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        except socket.gaierror as exc:
-            raise ValueError(f"could not resolve host {host!r}: {exc}") from exc
-        for info in infos:
-            addr = ipaddress.ip_address(info[4][0])
-            if is_blocked_address(addr):
-                raise ValueError(f"host {host!r} resolves to a disallowed address: {addr}")
+        await assert_host_resolves_safely(host)
 
     async def _safe_download(self, url: str, dest: Path) -> None:
         """Stream *url* to *dest* with SSRF, redirect, size and time guards.

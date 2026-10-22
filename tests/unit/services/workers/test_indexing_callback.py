@@ -8,6 +8,14 @@ import pytest
 from services.workers.indexing_callback import send_indexing_callback
 
 
+@pytest.fixture(autouse=True)
+def mock_public_callback_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def resolve_public_host(host: str) -> None:
+        return None
+
+    monkeypatch.setattr("services.workers.indexing_callback.assert_host_resolves_safely", resolve_public_host)
+
+
 def _patch_async_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:
     real_async_client = httpx.AsyncClient
 
@@ -135,6 +143,63 @@ async def test_unsafe_callback_url_is_skipped_not_sent(monkeypatch: pytest.Monke
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
         await send_indexing_callback("http://127.0.0.1:9999/x", "p", "f1", "success", {"doc_rev": "abc"})
         mock_logger.warning.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_callback_hostname_resolving_to_private_address_is_not_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.workers import indexing_callback
+
+    sent_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent_requests
+        sent_requests += 1
+        return httpx.Response(200)
+
+    async def reject_private_resolution(host: str) -> None:
+        assert host == "metadata.evil.example"
+        raise ValueError("host resolves to a private address")
+
+    _patch_async_client(monkeypatch, handler)
+    monkeypatch.setattr(indexing_callback, "assert_host_resolves_safely", reject_private_resolution, raising=False)
+
+    await send_indexing_callback("https://metadata.evil.example/callback", "p", "f1", "success")
+
+    assert sent_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_dns_lookup_failure_is_not_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.workers import indexing_callback
+
+    sent_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent_requests
+        sent_requests += 1
+        return httpx.Response(200)
+
+    async def fail_resolution(host: str) -> None:
+        assert host == "missing.example"
+        raise ValueError("could not resolve callback host")
+
+    _patch_async_client(monkeypatch, handler)
+    monkeypatch.setattr(indexing_callback, "assert_host_resolves_safely", fail_resolution)
+
+    await send_indexing_callback("https://missing.example/callback", "p", "f1", "success")
+
+    assert sent_requests == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hostname", ["127。0。0。1", "127．0．0．1", "127｡0｡0｡1", "127。1", "localhost."])
+async def test_noncanonical_loopback_callback_is_not_sent(monkeypatch: pytest.MonkeyPatch, hostname: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must never be called
+        raise AssertionError("no HTTP call should be made to a noncanonical loopback address")
+
+    _patch_async_client(monkeypatch, handler)
+
+    await send_indexing_callback(f"http://{hostname}/callback", "p", "f1", "success")
 
 
 @pytest.mark.asyncio

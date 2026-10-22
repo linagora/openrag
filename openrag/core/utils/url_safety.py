@@ -10,6 +10,7 @@ hop, since a public hostname can redirect to a private target.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from urllib.parse import urlparse
@@ -55,6 +56,31 @@ def is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> b
     )
 
 
+async def assert_host_resolves_safely(host: str) -> None:
+    """Raise ``ValueError`` if DNS for *host* fails or includes a blocked IP.
+
+    Every returned address must be public. Rejecting mixed public/private
+    answers avoids allowing a client to select the private result. This check
+    narrows DNS-based SSRF risk; callers should still revalidate redirect
+    targets and use network-level egress controls where available.
+    """
+    if not host:
+        raise ValueError("URL has no host")
+
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"could not resolve host {host!r}: {exc}") from exc
+
+    if not infos:
+        raise ValueError(f"host {host!r} did not resolve to any addresses")
+
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if is_blocked_address(addr):
+            raise ValueError(f"host {host!r} resolves to a disallowed address: {addr}")
+
+
 def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     """Return True only if *url* is safe for a server-side fetch.
 
@@ -84,19 +110,25 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     # crafted very long internationalized hostname can consume
     # disproportionate CPU in vulnerable idna releases (GHSA-65pc-fj4g-8rjx)
     # while the fetch resolves it — stalling the shared event loop.
-    hostname_for_length_check = host.translate(_IDNA_LABEL_SEPARATORS).rstrip(".")
-    if len(hostname_for_length_check) > 253 or any(len(label) > 63 for label in hostname_for_length_check.split(".")):
+    normalized_host = host.translate(_IDNA_LABEL_SEPARATORS)
+    hostname_for_length_check = normalized_host[:-1] if normalized_host.endswith(".") else normalized_host
+    labels = hostname_for_length_check.split(".")
+    if len(hostname_for_length_check) > 253 or any(not label or len(label) > 63 for label in labels):
         return False
 
     if allow_private_hosts:
         return True
 
-    if host.lower() == "localhost":
+    # Strip root dots for address checks as resolvers may treat dotted IPs as
+    # the same address. Keep the original suffix count for the length guard.
+    host_for_address_checks = normalized_host.rstrip(".")
+
+    if host_for_address_checks.lower() == "localhost":
         return False
 
     # Dotted-decimal or IPv6 literal (e.g. "127.0.0.1", "::1", "10.0.0.1").
     try:
-        return not is_blocked_address(ipaddress.ip_address(host))
+        return not is_blocked_address(ipaddress.ip_address(host_for_address_checks))
     except ValueError:
         pass
 
@@ -108,14 +140,14 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     # instead of raising. Relying on ip_address(int(host)) here would have
     # the opposite problem: it never raises for a value this large, it just
     # silently builds an unrelated, often-public-looking IPv6 address.
-    numeric_value = _bare_numeric_host_value(host)
+    numeric_value = _bare_numeric_host_value(host_for_address_checks)
     if numeric_value is not None and numeric_value > 0xFFFFFFFF:
         return False
 
     # inet_aton covers decimal/hex/octal/short-form IPv4 the same way glibc's
     # resolver does, for every in-range value.
     try:
-        packed = socket.inet_aton(host)
+        packed = socket.inet_aton(host_for_address_checks)
     except OSError:
         pass
     else:
@@ -125,4 +157,4 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     return True
 
 
-__all__ = ["is_blocked_address", "is_safe_url"]
+__all__ = ["assert_host_resolves_safely", "is_blocked_address", "is_safe_url"]
