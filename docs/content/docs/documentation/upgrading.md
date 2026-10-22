@@ -62,6 +62,10 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+From OpenRAG 2.3.3, Docker Compose no longer publishes the Ray dashboard on
+`127.0.0.1:8265`. Add `-f ray-dashboard.docker-compose.yaml` to open it while you
+need it. See [Ray dashboard](/openrag/installation/docker/#ray-dashboard).
+
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
 From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to

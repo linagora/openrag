@@ -1,0 +1,18 @@
+# Opt-in: publish the Ray dashboard on the host's loopback. Layer it last, after
+# any other overlay (proxy.docker-compose.yaml replaces the port list):
+#
+#   docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml up -d
+#
+# then open http://127.0.0.1:${RAY_DASHBOARD_PORT:-8265}, or forward it over SSH
+# from a server. The dashboard has no authentication and its job-submission API
+# runs arbitrary code, so publish it only while you use it, and bring the stack
+# back up without this file afterwards.
+
+services:
+  openrag:
+    ports:
+      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
+
+  openrag-cpu:
+    ports:
+      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265

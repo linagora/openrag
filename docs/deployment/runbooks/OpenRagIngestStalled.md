@@ -42,7 +42,7 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$OPENRAG/queue/tasks?task_statu
 
 - `workers.total_slots` vs `tasks.active` — are all slots occupied by tasks that never finish?
 - Pick a stuck task and read `details.failed_stage`, then `GET /indexer/task/{id}/error`.
-- Ray dashboard (`:8265`, loopback-bound) → Actors: are the `Indexer` actors alive?
+- Ray dashboard (Compose: add `-f ray-dashboard.docker-compose.yaml`, then `127.0.0.1:8265`) → Actors: are the `Indexer` actors alive?
 
 ## Likely causes, most common first
 
