@@ -823,3 +823,51 @@ def test_sheet_context_larger_than_chunk_budget_fails():
     )
     with pytest.raises(PipelineError, match="context exceeds chunk token budget"):
         chunk_table(element, chunk_size=20, length_function=lambda text: len(text.split()))
+
+
+@pytest.mark.parametrize("state", ["", "Visible", "veryhidden", "invalid"])
+def test_invalid_sheet_visibility_is_rejected_before_reader_opens(state, monkeypatch):
+    document = _edit_xml(
+        _document([["id", "value"], [1, "kept"]]),
+        lambda xml: xml.replace('state="visible"', f'state="{state}"'),
+        "xl/workbook.xml",
+    )
+
+    def unexpected_reader(*args):
+        pytest.fail("Invalid workbook metadata must be rejected before opening the reader")
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", unexpected_reader)
+    with pytest.raises(PipelineError, match="invalid visibility state") as error:
+        list(XlsxParser().iter_batches(document))
+    assert error.value.code == "INVALID_XLSX"
+
+
+@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
+def test_very_hidden_sheet_is_excluded_and_false_zero_rows_keep_exact_citations(backend):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "O'Brien directory"
+    sheet.append(["count", "active"])
+    sheet.append([0, False])
+    sheet.append([])
+    sheet.append([1, True])
+    hidden = workbook.create_sheet("Private")
+    hidden.sheet_state = "veryHidden"
+    hidden.append(["secret"])
+    hidden.append(["must not be indexed"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser(backend=backend, batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert "| 0 | false |" in blocks[0].text
+    assert "| 1 | true |" in blocks[1].text
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[2], [4]]
+    assert [block.metadata["cell_range"] for block in blocks] == [
+        "'O''Brien directory'!A2:B2",
+        "'O''Brien directory'!A4:B4",
+    ]
+    assert all(block.metadata["hidden_sheets_skipped"] == 1 for block in blocks)
+    assert all("must not be indexed" not in block.text for block in blocks)
