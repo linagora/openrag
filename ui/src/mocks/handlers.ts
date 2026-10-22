@@ -301,6 +301,7 @@ export const handlers = [
   ),
 
   // OpenRag per-partition file reads (documents detail + chunk viewer)
+  /** Mirrors the real file-detail route: catalog metadata, link-only documents, empty tags. */
   http.get(`${API}/partition/:name/file/:fileId`, ({ params }) => {
     const fileId = params.fileId as string;
     const chunks = documentChunks[fileId] ?? [];
@@ -314,7 +315,7 @@ export const handlers = [
       indexed_at: doc?.indexed_at,
       page: chunks[0]?.page_number,
     };
-    return HttpResponse.json({ metadata, documents: chunks.map((c) => ({ link: `/extract/${c.id}` })) });
+    return HttpResponse.json({ metadata, documents: chunks.map((c) => ({ link: `/extract/${c.id}` })), topic_tags: [] });
   }),
 
   http.get(`${API}/partition/:name/chunks`, ({ params }) => {

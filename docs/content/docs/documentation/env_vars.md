@@ -331,7 +331,7 @@ The PostgreSQL database is configured using the following environment variables:
 
 * **`Object Storage (MinIO)`**
 
-Milvus stores its data in a MinIO object store, whose credentials are **required (no default)** — the compose stack refuses to start if they are unset. Generate strong random values (e.g. `openssl rand -hex 16`). The same values are shared between the `minio` service and Milvus, so both sides must match.
+Milvus stores its data in an S3-compatible object store, [SILO](/openrag/documentation/minio_silo_upgrade/) (the maintained MinIO fork; the service is still called `minio`), whose credentials are **required (no default)** — the compose stack refuses to start if they are unset. Generate strong random values (e.g. `openssl rand -hex 16`). The same values are shared between the `minio` service and Milvus, so both sides must match. On Helm, set them as `minioCredentials.accessKey` / `minioCredentials.secretKey` instead.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -693,6 +693,7 @@ The following environment variables configure the FastAPI server and control acc
 | `APP_PORT` | `number` | `8000` | Port number on which the FastAPI application listens for incoming requests. |
 | `AUTH_TOKEN` | `string` | `EMPTY` | Authentication token used to bootstrap the admin user and access protected API endpoints. If it is empty, the API fails closed unless `ALLOW_NO_AUTH=true` is explicitly set for local development. |
 | `ALLOW_NO_AUTH` | `boolean` | `false` | Enables the no-auth local development bypass when `AUTH_MODE=token` and `AUTH_TOKEN` is unset. Never enable this in production. |
+| `SEED_USERS` | `string` | _(unset)_ | JSON (or YAML) list of operator-managed accounts, replacing `auth.seed_users` from `conf/config.yaml`. Each entry names the env var holding its token (`token_env`), never the token itself, for example `[{"external_user_id": "svc-cozy-stack", "token_env": "COZY_STACK_TOKEN", "partitions": [{"name": "twake", "role": "editor"}]}]`. The env var each entry names (here `COZY_STACK_TOKEN`) carries the token and is rewritten into the account at every startup. See [Operator-managed accounts](/openrag/documentation/user_auth/#operator-managed-accounts-authseed_users). |
 | `SUPER_ADMIN_MODE` | `boolean` | `false` | Enables super admin privileges when set to `true`, [granting unrestricted access](/openrag/documentation/data_model/#access-control) to all operations and bypassing standard access controls. This is for debugging |
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |

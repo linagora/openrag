@@ -61,7 +61,7 @@ describe("ReleaseNotes", () => {
   });
 
   it("shows the new badge again after an older release was viewed", () => {
-    localStorage.setItem(LAST_VIEWED_RELEASE_NOTES_KEY, "2.2.1");
+    localStorage.setItem(LAST_VIEWED_RELEASE_NOTES_KEY, "2.3.0");
     render(<ReleaseNotes />);
 
     expect(screen.getByRole("button", { name: `${triggerLabel}, new` }).textContent).toContain("New");
