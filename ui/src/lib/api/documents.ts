@@ -17,10 +17,12 @@ const P = "/partition";
 const enc = encodeURIComponent;
 
 /** File detail uses authoritative catalog metadata. `documents` are link-only
- * stubs (one per chunk) pointing at /extract/{id}. */
+ * stubs (one per chunk) pointing at /extract/{id}. `topic_tags` are the
+ * document-level tags generated at indexing (absent on older backends). */
 export interface FileDetail {
   metadata: Record<string, unknown>;
   documents: { link: string }[];
+  topic_tags?: string[];
 }
 
 /** A chunk WITH its text, from the partition-wide chunk listing. */

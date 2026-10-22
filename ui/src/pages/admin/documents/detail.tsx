@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Trash2, Copy, RefreshCw, FileText, BookOpen, Hash, ChevronRight } from "lucide-react";
+import { ArrowLeft, Trash2, Copy, RefreshCw, FileText, BookOpen, Hash, ChevronRight, Tag } from "lucide-react";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -129,6 +129,7 @@ function DetailsCard({ metadata }: { metadata: Record<string, unknown> }) {
   );
 }
 
+/** Admin file-detail page: authoritative catalog metadata, chunk links and topic tags. */
 export default function DocumentDetailPage() {
   const { partition, fileId } = useParams<{ partition: string; fileId: string }>();
   const navigate = useNavigate();
@@ -210,6 +211,8 @@ export default function DocumentDetailPage() {
   }
 
   const chunks = chunksQuery.data ?? [];
+  // Older backends omit the field; default to [] so the view stays compatible.
+  const topicTags = detailQuery.data?.topic_tags ?? [];
   const metadata = {
     ...(chunks[0]?.metadata ?? {}),
     ...(detailQuery.data?.metadata ?? {}),
@@ -262,6 +265,23 @@ export default function DocumentDetailPage() {
               {deleteMutation.isPending ? "Deleting..." : "Delete File"}
             </Button>
           </ConfirmDialog>
+        )}
+      </div>
+
+      <div
+        className="flex flex-wrap items-center gap-2"
+        role="group"
+        aria-label="Topic tags"
+      >
+        <Tag className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        {topicTags.length > 0 ? (
+          topicTags.map((tag) => (
+            <Badge key={tag} variant="secondary">
+              {tag}
+            </Badge>
+          ))
+        ) : (
+          <span className="text-sm text-muted-foreground">No topic tags</span>
         )}
       </div>
 
