@@ -96,6 +96,12 @@ Supporting metrics:
 | `openrag_ingest_queue_wait_seconds` | histogram | — | Ray | Admission-to-processing latency |
 | `openrag_ingest_last_parse_completion_timestamp_seconds` | gauge | `pool` | Ray | Progress watchdog — is a parser pool wedged. Last completed parse, or the pool's first use in the process |
 | `openrag_ingest_clock_skew_events_total` | counter | — | Ray | Queue-wait measurements that came out negative |
+| `openrag_ingest_stage_event_queue_size` | gauge | — | Ray | Stage transitions waiting for durable write |
+| `openrag_ingest_stage_event_dropped_total` | counter | `reason` | Ray | Stage history events or live summaries lost to bounded limits |
+| `openrag_ingest_stage_event_write_total` | counter | `result` | Ray | Stage history write successes, retries, and failures |
+| `openrag_ingest_stage_event_write_seconds` | histogram | — | Ray | Latency of each bounded database write attempt |
+| `openrag_ingest_stage_history_pending` | gauge | — | Ray | Task histories waiting for a durable acknowledgement |
+| `openrag_ingest_stage_history_incomplete` | gauge | — | Ray | Surviving histories with known event loss |
 | `openrag_circuit_breaker_state` | gauge | `name` | both | 0 closed, 1 open, 2 half-open, -1 unknown |
 
 `both` means each process exports its own calls, under the same name once the
@@ -111,6 +117,8 @@ the Ray target.
 Label values:
 
 - `status` — `completed`, `failed`, `cancelled`
+- `reason` — `queue_full`, `summary_overflow`, `write_failed`, `missing_parent`, `shutdown`, `live_snapshot_overflow`
+- `result` — `success`, `retry`, `failure`
 - `stage` — `parse`, `caption`, `chunk`, `contextualize`, `topic_tag`, `embed`, `store`
 - `state` — `QUEUED`, `SERIALIZING`
 - `operation` — `embed`, `chat`, `completion` (text completions), `rerank`, `vlm`
