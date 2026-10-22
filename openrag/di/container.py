@@ -181,6 +181,8 @@ class ServiceContainer:
                 defaults["max_model_len"] = embed_defaults.max_model_len
             if "embed_concurrency" not in cfg.extra:
                 defaults["embed_concurrency"] = embed_defaults.embed_concurrency
+            if "query_timeout" not in cfg.extra:
+                defaults["query_timeout"] = embed_defaults.query_timeout
             return defaults
 
         self.embedder_factory, self._embedder_cache = make_component_factory(
@@ -587,6 +589,7 @@ class ServiceContainer:
                     api_key=embed_cfg.api_key,
                     max_model_len=embed_cfg.max_model_len,
                     timeout=embed_cfg.timeout,
+                    query_timeout=embed_cfg.query_timeout,
                     batch_size=embed_cfg.batch_size,
                     embed_concurrency=embed_cfg.embed_concurrency,
                 ),

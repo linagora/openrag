@@ -100,7 +100,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         embedding_started = perf_counter() if trace is not None else None
-        (embedding,) = await self._embedder.embed([query])
+        (embedding,) = await self._embedder.embed_query([query])
         if trace is not None and embedding_started is not None:
             trace.timings["embedding"] = perf_counter() - embedding_started
         filters: dict[str, Any] = {"partition": partition}
@@ -140,7 +140,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         embedding_started = perf_counter() if trace is not None else None
-        embeddings = await self._embedder.embed(queries)
+        embeddings = await self._embedder.embed_query(queries)
         if trace is not None and embedding_started is not None:
             trace.timings["embedding"] = perf_counter() - embedding_started
         field = self._field()

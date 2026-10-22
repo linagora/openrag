@@ -266,6 +266,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 | `EMBEDDER_EXTRA_ARGS` | `str` | (empty) | Extra `vllm serve` flags appended to the **bundled** vLLM embedder's command (`vllm-gpu` / `vllm-cpu` in `infra/compose/docker-compose.yaml`). They come after the built-in flags, so repeating one overrides it, e.g. `--gpu_memory_utilization 0.1`. |
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
 | `EMBEDDER_TIMEOUT` | `float` | 120.0 | Per-request HTTP timeout (in seconds) for embedding calls. Raise it for slow remote endpoints. |
+| `EMBEDDER_QUERY_TIMEOUT` | `float` | 10.0 | Per-request HTTP timeout (in seconds) for embedding a search query, retried once; indexing uses `EMBEDDER_TIMEOUT`, retried twice. It bounds how long a chat or search waits on an embedder that stops answering. Applies to every embedder endpoint unless its `extra` sets `query_timeout`. |
 | `EMBEDDER_BATCH_SIZE` | `int` | 32 | Number of chunks sent per embedding request; large documents are split into batches of this size. |
 | `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests in flight at once. |
 

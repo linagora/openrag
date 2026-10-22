@@ -19,6 +19,14 @@ class Embedder(ABC):
         """Embed a batch of texts, returning vectors."""
         ...
 
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Embed search queries, which a user is waiting on.
+
+        A client with a query budget of its own (a shorter timeout, fewer
+        retries) overrides this; the default is :meth:`embed`.
+        """
+        return await self.embed(texts)
+
     @abstractmethod
     async def embed_single(self, text: str) -> list[float]:
         """Embed a single text."""
