@@ -122,36 +122,6 @@ def split_md_elements(md_text: str) -> list[MDElement]:
     return parts
 
 
-def get_chunk_page_number(chunk_str: str, previous_chunk_ending_page: int = 1) -> dict[str, int]:
-    """Resolve start and end pages for a text chunk containing ``[PAGE_N]`` markers.
-
-    Returns ``{"start_page": int, "end_page": int}``.
-    """
-    matches = list(PAGE_RE.finditer(chunk_str))
-
-    if not matches:
-        return {
-            "start_page": previous_chunk_ending_page,
-            "end_page": previous_chunk_ending_page,
-        }
-
-    first_match = matches[0]
-    last_match = matches[-1]
-    last_char_idx = len(chunk_str) - 1
-
-    if first_match.start() == 0:
-        start_page = int(first_match.group(1)) + 1
-    else:
-        start_page = previous_chunk_ending_page
-
-    if last_match.end() - 1 == last_char_idx:
-        end_page = int(last_match.group(1))
-    else:
-        end_page = int(last_match.group(1)) + 1
-
-    return {"start_page": start_page, "end_page": max(start_page, end_page)}
-
-
 def parse_markdown_table(markdown_table: str) -> tuple[list[str], list[list[str]]]:
     """Parse a markdown table into header lines + groups of rows.
 
