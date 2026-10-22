@@ -10,9 +10,11 @@ This module has no IO and no config dependency.
 
 from __future__ import annotations
 
+import bisect
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from operator import itemgetter
 from typing import Literal
 
 from core.utils.text import clean_markdown_table_spacing
@@ -69,13 +71,8 @@ def get_page_number(position: int, page_markers: list[tuple[int, int]]) -> int:
     from ``[PAGE_N]`` matches. Content AFTER ``[PAGE_N]`` belongs to page
     ``N + 1``; content before any marker is page 1.
     """
-    current_page = 1
-    for marker_pos, page_num in page_markers:
-        if position >= marker_pos:
-            current_page = page_num + 1
-        else:
-            break
-    return current_page
+    i = bisect.bisect_right(page_markers, position, key=itemgetter(0))
+    return page_markers[i - 1][1] + 1 if i else 1
 
 
 def split_md_elements(md_text: str) -> list[MDElement]:
