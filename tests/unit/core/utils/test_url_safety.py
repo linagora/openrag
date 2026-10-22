@@ -23,10 +23,28 @@ from core.utils.url_safety import is_safe_url
         "ftp://example.com/x",  # non-http scheme
         "file:///etc/passwd",
         "not a url",
+        "http://" + "a" * 64 + ".com/x",  # label past the 63-character DNS limit
+        "http://" + "a" * 300 + ".com/x",  # hostname past the 253-character DNS limit
     ],
 )
 def test_blocks_unsafe(url):
     assert is_safe_url(url) is False
+
+
+def test_allows_hostnames_at_the_dns_length_limits():
+    # 62 + 62 + 63 + 63 characters plus three dots = 253, every label in bounds.
+    at_limit = ".".join(["a" * 62, "b" * 62, "c" * 63, "d" * 63])
+    assert len(at_limit) == 253
+    assert is_safe_url("http://" + at_limit + "/x") is True
+    assert is_safe_url("http://" + at_limit + "e/x") is False  # 254 total
+    assert is_safe_url("http://example.com./x") is True  # trailing dot is fine
+
+
+def test_dns_length_limits_apply_in_private_host_mode():
+    # allow_private_hosts skips the address checks, not the length bounds:
+    # the fetch still resolves the hostname, so the idna CPU bound stays.
+    assert is_safe_url("http://" + "a" * 300 + ".com/x", allow_private_hosts=True) is False
+    assert is_safe_url("http://intranet.corp/x", allow_private_hosts=True) is True
 
 
 @pytest.mark.parametrize(
