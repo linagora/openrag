@@ -301,7 +301,7 @@ app.openapi = custom_openapi
 # (last ``add_middleware`` call wraps the outermost layer). The
 # Phase 10C target order on a request is:
 #
-#     Instrumentation -> RequestTimeout -> RequestId -> UrlencodedBodyLimit -> Auth -> route
+#     Instrumentation -> RequestTimeout -> RequestId -> Auth -> RateLimit -> UrlencodedBodyLimit -> route
 #
 # so Auth is the innermost guard (lifespan's request_id already on
 # request.state when an auth failure runs through the error handlers),
@@ -311,6 +311,10 @@ app.openapi = custom_openapi
 # RateLimitMiddleware is registered BEFORE AuthMiddleware so it executes AFTER
 # it (registration is reverse of execution), letting it key limits on the
 # authenticated user id that AuthMiddleware just put on request.state.
+# UrlencodedBodyLimitMiddleware is registered first, so it runs innermost: Auth
+# and the rate limiter refuse a request before its body is read, and a route that
+# needs no credentials still has its form bounded before FastAPI parses it.
+app.add_middleware(UrlencodedBodyLimitMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     AuthMiddleware,
@@ -319,9 +323,6 @@ app.add_middleware(
     # on None raises AttributeError, which no guard below catches (#937).
     get_auth_service=lambda request: get_container(request).auth_service,
 )
-# Before Auth, because routes that need no credentials parse their form before
-# any check runs; see UrlencodedBodyLimitMiddleware.
-app.add_middleware(UrlencodedBodyLimitMiddleware)
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(RequestTimeoutMiddleware)
 app.add_middleware(InstrumentationMiddleware)
