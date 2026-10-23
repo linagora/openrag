@@ -231,6 +231,10 @@ class PgJobRepository(JobRepository):
                 for task_id in task_ids:
                     task_conflicted_attempts: set[int] = set()
                     try:
+                        # Serialize all writers for one task before reading its
+                        # event coverage. The version marker below only updates
+                        # once, so it cannot serve as a lock for later batches.
+                        await connection.fetchrow("SELECT id FROM jobs WHERE id = $1 FOR UPDATE", task_id)
                         await connection.execute(
                             "UPDATE jobs SET stage_tracking_version = 1 WHERE id = $1 AND stage_tracking_version IS DISTINCT FROM 1",
                             task_id,

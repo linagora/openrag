@@ -247,6 +247,103 @@ async def test_out_of_order_events_advance_only_contiguous_coverage(postgres_sto
     await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
 
 
+async def test_concurrent_writes_do_not_leave_persisted_coverage_behind(postgres_store) -> None:
+    """Writers for one task serialize coverage updates on the parent job row."""
+    repo = postgres_store.job_repo
+    task_id = f"stage-lock-{uuid4()}"
+    trigger_function = f"slow_stage_state_update_{uuid4().hex}"
+    trigger_name = f"slow_stage_state_update_{uuid4().hex}"
+    function_created = False
+    trigger_created = False
+    try:
+        await repo.upsert_job(
+            IndexationJob(
+                id=task_id,
+                status=DocumentStatus.SERIALIZING,
+                partition="test",
+                stage_tracking_version=1,
+            )
+        )
+        await repo.write_stage_progress(
+            events=[],
+            summaries=[
+                StageProgressSummary(
+                    task_id=task_id,
+                    attempt=1,
+                    latest_sequence=0,
+                    snapshot_revision=0,
+                    phase=StageTaskPhase.PREPARING,
+                )
+            ],
+        )
+        await postgres_store.pool.execute(
+            f"""
+            CREATE FUNCTION {trigger_function}() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF OLD.task_id = '{task_id}' AND NEW.persisted_through_sequence = 1 THEN
+                    PERFORM pg_sleep(0.35);
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+        function_created = True
+        await postgres_store.pool.execute(
+            f"""
+            CREATE TRIGGER {trigger_name}
+            BEFORE UPDATE ON job_stage_state
+            FOR EACH ROW EXECUTE FUNCTION {trigger_function}()
+            """
+        )
+        trigger_created = True
+
+        invocation_id = uuid4()
+        started = StageProgressEvent(
+            task_id=task_id,
+            attempt=1,
+            sequence=1,
+            invocation_id=invocation_id,
+            stage_id="parse",
+            stage_rank=0,
+            status=StageEventStatus.STARTED,
+            occurred_at=datetime.now(UTC),
+        )
+        completed = started.model_copy(
+            update={
+                "event_id": uuid4(),
+                "sequence": 2,
+                "status": StageEventStatus.COMPLETED,
+                "occurred_at": datetime.now(UTC),
+                "duration_ms": 350,
+            }
+        )
+        started_summary = StageProgressSummary(
+            task_id=task_id,
+            attempt=1,
+            latest_sequence=1,
+            snapshot_revision=1,
+            phase=StageTaskPhase.STAGE,
+            current_stage_id="parse",
+            current_stage_rank=0,
+            current_invocation_id=invocation_id,
+            has_open_invocation=True,
+        )
+        first_write = asyncio.create_task(repo.write_stage_progress(events=[started], summaries=[started_summary]))
+        await asyncio.sleep(0.05)
+        await repo.write_stage_progress(events=[completed], summaries=[])
+        await first_write
+
+        state = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+        assert state.persisted_through_sequence == 2
+    finally:
+        if trigger_created:
+            await postgres_store.pool.execute(f"DROP TRIGGER IF EXISTS {trigger_name} ON job_stage_state")
+        if function_created:
+            await postgres_store.pool.execute(f"DROP FUNCTION IF EXISTS {trigger_function}()")
+        await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
 async def test_late_previous_attempt_is_retained_without_changing_current_summary(postgres_store) -> None:
     repo = postgres_store.job_repo
     task_id = f"stage-history-{uuid4()}"

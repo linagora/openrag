@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from core.models.stage_progress import StageEventStatus, StageProgressEvent
+from core.models.stage_progress import StageEventStatus, StageProgressEvent, StageProgressSummary, StageTaskPhase
 from services.persistence.job_repo import PgJobRepository
 from services.persistence.schema import metadata
 
@@ -60,6 +60,71 @@ async def test_stage_writer_rejects_oversized_batches_before_acquiring_storage()
 
     with pytest.raises(ValueError, match="at most 32 stage events"):
         await repo.write_stage_progress(events=[event] * 33, summaries=[])
+
+
+@pytest.mark.asyncio
+async def test_stage_writer_locks_the_task_row_before_reading_event_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.persistence import job_repo as job_repo_module
+
+    calls: list[tuple[str, str, tuple[object, ...]]] = []
+
+    class _Context:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Connection:
+        def transaction(self):
+            return _Context()
+
+        async def fetchrow(self, query: str, *args: object):
+            calls.append(("fetchrow", query, args))
+            return {"id": args[0]}
+
+        async def execute(self, query: str, *args: object):
+            calls.append(("execute", query, args))
+            return "UPDATE 1"
+
+    class _Pool:
+        def acquire(self):
+            return _ContextWithValue(_Connection())
+
+    class _ContextWithValue(_Context):
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+    async def no_rows(*_args):
+        return 0
+
+    async def no_conflict(*_args):
+        return False
+
+    async def no_summary_write(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(job_repo_module, "_persisted_through_sequence", no_rows)
+    monkeypatch.setattr(job_repo_module, "_has_conflicting_invocation_pair", no_conflict)
+    monkeypatch.setattr(job_repo_module, "_upsert_stage_summary", no_summary_write)
+    repo = PgJobRepository(lambda: _Pool())
+    task_id = "task-locked"
+    summary = StageProgressSummary(
+        task_id=task_id,
+        attempt=1,
+        latest_sequence=0,
+        snapshot_revision=0,
+        phase=StageTaskPhase.PREPARING,
+    )
+
+    await repo.write_stage_progress(events=[], summaries=[summary])
+
+    assert calls[0][0] == "fetchrow"
+    assert "SELECT id FROM jobs WHERE id = $1 FOR UPDATE" in calls[0][1]
+    assert calls[0][2] == (task_id,)
 
 
 @pytest.mark.asyncio
