@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, Mock
 import asyncpg
 import pytest
 from services.persistence.connection import ConnectionManager
+from sqlalchemy.exc import OperationalError
 
 
 class RDBConfigStub:
@@ -86,6 +87,27 @@ async def test_ensure_database_exists_reraises_when_database_still_missing(monke
 
     with pytest.raises(RuntimeError, match="permission denied"):
         await manager._ensure_database_exists()
+
+
+@pytest.mark.asyncio
+async def test_initialize_retries_when_postgres_drops_during_database_creation(monkeypatch):
+    # The server is up for the check, drops during the create, and is back for
+    # the recheck, so the database is still missing.
+    manager = ConnectionManager(RDBConfigStub())
+    create_pool = AsyncMock(return_value=object())
+    create_database = Mock(
+        side_effect=[OperationalError("CREATE DATABASE", {}, Exception("server closed the connection")), None]
+    )
+
+    monkeypatch.setattr(manager, "_database_exists", AsyncMock(side_effect=[False, False, False]))
+    monkeypatch.setattr("services.persistence.connection.asyncpg.create_pool", create_pool)
+    monkeypatch.setattr("services.persistence.connection.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("sqlalchemy_utils.create_database", create_database)
+
+    await manager.initialize()
+
+    assert create_database.call_count == 2
+    create_pool.assert_awaited_once()
 
 
 @pytest.mark.asyncio

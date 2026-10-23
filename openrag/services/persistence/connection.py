@@ -164,6 +164,7 @@ class ConnectionManager:
     async def _ensure_database_exists(self) -> None:
         """Create the configured database before opening the asyncpg pool."""
         from sqlalchemy import URL
+        from sqlalchemy.exc import OperationalError
         from sqlalchemy_utils import create_database
 
         if await self._database_exists():
@@ -182,6 +183,10 @@ class ConnectionManager:
             # Another process starting against the same fresh Postgres can
             # create the database between our check and our create (#1045).
             if not await self._database_exists():
+                if isinstance(exc, OperationalError):
+                    # The server dropped the connection mid-create and is back
+                    # now: hand it to the retry loop like any connection error.
+                    raise ConnectionError(f"Postgres database creation failed: {exc}") from exc
                 raise
             logger.info(
                 f"Postgres database `{self._conn_kwargs['database']}` was created by another process: {exc}",
