@@ -15,6 +15,23 @@ from core.utils.exceptions import CircuitBreakerOpenError, InferenceError
 logger = logging.getLogger(__name__)
 
 _MAX_PROMPT_CHARS = 8000
+_MAX_SAMPLE_CHUNKS = 12
+
+
+class TopicTagSample:
+    """Retain only bounded text from the first chunks, without their vectors."""
+
+    def __init__(self) -> None:
+        self.chunks: list[Chunk] = []
+        self._remaining_chars = _MAX_PROMPT_CHARS
+
+    def add(self, chunks: Sequence[Chunk]) -> None:
+        for chunk in chunks:
+            if len(self.chunks) >= _MAX_SAMPLE_CHUNKS or self._remaining_chars <= 0:
+                break
+            text = chunk.text[: self._remaining_chars] if chunk.text.strip() else ""
+            self.chunks.append(Chunk(text=text))
+            self._remaining_chars -= len(text)
 
 
 class TopicTagger:
@@ -91,7 +108,9 @@ def _build_messages(
     lang: str,
 ) -> list[dict[str, str]]:
     chunk_text = "\n\n".join(
-        f"Chunk {index + 1}:\n{chunk.text}" for index, chunk in enumerate(chunks[:12]) if chunk.text.strip()
+        f"Chunk {index + 1}:\n{chunk.text}"
+        for index, chunk in enumerate(chunks[:_MAX_SAMPLE_CHUNKS])
+        if chunk.text.strip()
     )
     chunk_text = chunk_text[:_MAX_PROMPT_CHARS]
     user_prompt = (

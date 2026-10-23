@@ -19,6 +19,10 @@ from core.utils.url_safety import is_safe_url
         "http://0x7f000001/x",  # hex-encoded 127.0.0.1
         "http://0177.0.0.1/x",  # octal-encoded 127.0.0.1
         "http://127.1/x",  # short form of 127.0.0.1
+        "http://127。0。0。1/x",  # IDNA-equivalent separators around loopback
+        "http://127．0．0．1/x",
+        "http://127｡1/x",
+        "http://localhost./x",  # DNS root dot does not change localhost
         "http://0xa9fea9fe/x",  # hex-encoded 169.254.169.254
         "ftp://example.com/x",  # non-http scheme
         "file:///etc/passwd",
@@ -38,6 +42,17 @@ def test_allows_hostnames_at_the_dns_length_limits():
     assert is_safe_url("http://" + at_limit + "/x") is True
     assert is_safe_url("http://" + at_limit + "e/x") is False  # 254 total
     assert is_safe_url("http://example.com./x") is True  # trailing dot is fine
+
+
+def test_rejects_more_than_one_trailing_root_dot_at_the_length_limit():
+    at_limit = ".".join(["a" * 62, "b" * 62, "c" * 63, "d" * 63])
+    assert len(at_limit) == 253
+    assert is_safe_url("http://" + at_limit + "../x") is False
+
+
+@pytest.mark.parametrize("separator", ["。", "．", "｡"])
+def test_idna_equivalent_separators_are_normalized_for_hostname_checks(separator: str) -> None:
+    assert is_safe_url(f"https://one{separator}two.example/x") is True
 
 
 def test_dns_length_limits_apply_in_private_host_mode():
