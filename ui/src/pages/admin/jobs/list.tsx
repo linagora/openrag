@@ -129,6 +129,42 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
     },
   },
   {
+    id: "stage_progress",
+    header: "Indexing stage",
+    cell: ({ row }) => {
+      const progress = row.original.stage_progress;
+      if (row.original.state === "QUEUED") return <span className="text-muted-foreground">Queued</span>;
+      if (!progress) return <span className="text-muted-foreground">—</span>;
+      const label = progress.stage_label || progress.last_known_stage_label;
+      const live = progress.freshness === "live";
+      let stage = "Stage not known";
+      if (progress.is_currently_running && label) {
+        stage = `${label} · ${formatDuration(progress.elapsed_ms)}`;
+      } else if (progress.phase === "finalizing") {
+        stage = live ? "Finalizing" : "Last observed: Finalizing";
+      } else if (progress.phase === "between_stages") {
+        stage = live ? "Between stages" : "Last observed: Between stages";
+      } else if (progress.phase === "preparing") {
+        stage = live ? "Preparing" : "Last observed: Preparing";
+      } else if (label) {
+        stage = `Last observed: ${label}`;
+      }
+      const quality = progress.history_quality === "pending_persistence"
+        ? "Saving history"
+        : progress.history_quality === "incomplete"
+          ? "History incomplete"
+          : progress.history_quality === "truncated"
+            ? "Older history trimmed"
+            : null;
+      return (
+        <div className="min-w-32">
+          <span>{stage}</span>
+          {quality && <span className="block text-xs text-muted-foreground">{quality}</span>}
+        </div>
+      );
+    },
+  },
+  {
     id: "file",
     accessorFn: (task) =>
       (str(task.details?.metadata?.filename) || str(task.details?.file_id)).toLowerCase(),
@@ -181,9 +217,15 @@ export default function JobListPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [partitionFilter, setPartitionFilter] = useState(ALL_PARTITIONS_FILTER);
+  const [activePageIndex, setActivePageIndex] = useState(0);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const taskStatusFilter = statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab;
+  const requestServerPage =
+    statusTab === "ACTIVE" && !debouncedSearch.trim() && partitionFilter === ALL_PARTITIONS_FILTER;
+  const requestedPage = requestServerPage
+    ? { limit: 10, offset: activePageIndex * 10 }
+    : undefined;
   const userId = user?.id ?? 0;
   const queryScope = { userId, isAdmin };
 
@@ -193,7 +235,7 @@ export default function JobListPage() {
   }, [search]);
 
   const tasksQuery = useQuery({
-    ...jobsTaskListQueryOptions(queryScope, taskStatusFilter),
+    ...jobsTaskListQueryOptions(queryScope, taskStatusFilter, requestedPage),
     enabled: !!user,
   });
   const queueInfoQuery = useQuery({
@@ -202,11 +244,12 @@ export default function JobListPage() {
   });
 
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data?.tasks]);
-  const partitionOptions = useMemo(
-    () =>
-      Array.from(new Set(tasks.map((task) => str(task.details?.partition)).filter(Boolean))).sort(),
-    [tasks],
-  );
+  const serverPagination = tasksQuery.data?.pagination;
+  const isServerPaginated = requestServerPage && !!serverPagination;
+  const partitionOptions = useMemo(() => {
+    if (isServerPaginated && serverPagination) return serverPagination.available_partitions;
+    return Array.from(new Set(tasks.map((task) => str(task.details?.partition)).filter(Boolean))).sort();
+  }, [isServerPaginated, serverPagination, tasks]);
   const filteredTasks = useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
     return tasks.filter((task) => {
@@ -248,8 +291,11 @@ export default function JobListPage() {
     onError: (error: Error) => toast.error(`Bulk cancel failed: ${error.message}`),
   });
 
-  const exportJobs = () => {
+  const exportJobs = async () => {
     try {
+      const exportRows = isServerPaginated
+        ? (await listTasks(taskStatusFilter)).tasks
+        : filteredTasks;
       downloadCsv(
         "openrag-jobs.csv",
         [
@@ -266,7 +312,7 @@ export default function JobListPage() {
             ? [{ header: "failure_reason", value: (task: TaskListItem) => task.error_summary }]
             : []),
         ],
-        filteredTasks,
+        exportRows,
       );
     } catch (error) {
       toast.error(`CSV export failed: ${error instanceof Error ? error.message : "Unknown error"}`);
@@ -278,6 +324,7 @@ export default function JobListPage() {
     setSearch("");
     setDebouncedSearch("");
     setPartitionFilter(ALL_PARTITIONS_FILTER);
+    setActivePageIndex(0);
     setRowSelection({});
   };
 
@@ -294,6 +341,7 @@ export default function JobListPage() {
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value);
+                setActivePageIndex(0);
                 setRowSelection({});
               }}
               className="pl-9"
@@ -303,6 +351,7 @@ export default function JobListPage() {
             value={partitionFilter}
             onValueChange={(value) => {
               setPartitionFilter(value);
+              setActivePageIndex(0);
               setRowSelection({});
             }}
           >
@@ -320,7 +369,8 @@ export default function JobListPage() {
           </Select>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <p className="text-sm text-muted-foreground">
-              {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
+              {(isServerPaginated ? serverPagination.total : filteredTasks.length)} job
+              {(isServerPaginated ? serverPagination.total : filteredTasks.length) === 1 ? "" : "s"}
             </p>
             {selectedActiveTasks.length > 0 && (
               <>
@@ -349,7 +399,7 @@ export default function JobListPage() {
             <Button
               variant="outline"
               size="sm"
-              onClick={exportJobs}
+              onClick={() => void exportJobs()}
               disabled={!filteredTasks.length}
               title="Export filtered jobs"
             >
@@ -396,6 +446,16 @@ export default function JobListPage() {
                 key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
                 columns={isAdmin ? adminColumns : columns}
                 data={filteredTasks}
+                disableSorting={statusTab === "ACTIVE"}
+                manualPage={
+                  isServerPaginated && serverPagination
+                    ? {
+                        pageIndex: activePageIndex,
+                        pageCount: Math.max(1, Math.ceil(serverPagination.total / serverPagination.limit)),
+                        onPageIndexChange: setActivePageIndex,
+                      }
+                    : undefined
+                }
                 enableSelection
                 canSelectRow={(task) => isActiveState(task.state)}
                 getRowId={(task) => task.task_id}

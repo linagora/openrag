@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
-import { getTaskError, getTaskStatus, cancelTask } from "@/lib/api/jobs";
+import { getTaskError, getTaskStatus, getTaskStageProgress, cancelTask } from "@/lib/api/jobs";
 import { copyToClipboard } from "@/lib/utils";
 import JobDetailPage from "./detail";
 
@@ -32,6 +32,7 @@ vi.mock("@/lib/api/jobs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/jobs")>()),
   getTaskError: vi.fn(),
   getTaskStatus: vi.fn(),
+  getTaskStageProgress: vi.fn(),
   cancelTask: vi.fn(),
 }));
 
@@ -41,6 +42,7 @@ vi.mock("@/lib/utils", async (importOriginal) => ({
 }));
 
 const getTaskStatusMock = vi.mocked(getTaskStatus);
+const getTaskStageProgressMock = vi.mocked(getTaskStageProgress);
 const getTaskErrorMock = vi.mocked(getTaskError);
 const cancelTaskMock = vi.mocked(cancelTask);
 const copyToClipboardMock = vi.mocked(copyToClipboard);
@@ -89,6 +91,15 @@ describe("JobDetailPage", () => {
         metadata: { filename: "failed.pdf" },
         user_id: 1,
       },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "unknown",
+      history_quality: "legacy",
+      is_currently_running: false,
+      persisted_through_sequence: 0,
+      events: [],
+      has_more: false,
+      next_cursor: null,
     });
     getTaskErrorMock.mockResolvedValue({
       task_id: "task-1",
@@ -227,5 +238,282 @@ describe("JobDetailPage", () => {
 
     expect((await screen.findAllByText("Completed with degradation")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("Caption, Contextualization").length).toBeGreaterThan(0);
+  });
+
+  it("labels an open stage as last observed when a terminal task has no stage end", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "FAILED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "failed.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "unknown",
+      is_currently_running: false,
+      persisted_through_sequence: 1,
+      current_invocation_id: "invocation-1",
+      last_known_stage_id: "embed",
+      last_known_stage_label: "Embedding",
+      events: [
+        {
+          event_id: "event-1",
+          task_id: "task-1",
+          attempt: 1,
+          sequence: 1,
+          invocation_id: "invocation-1",
+          stage_id: "embed",
+          stage_rank: 5,
+          status: "started",
+          occurred_at: "2026-10-22T10:00:00Z",
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText("Last observed start — no stage end was recorded before the task ended")).not.toBeNull();
+    expect(screen.getByText("Stage history completeness is unknown.")).not.toBeNull();
+  });
+
+  it("labels an open stage interrupted only when worker loss was confirmed", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "FAILED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "interrupted.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "live",
+      history_quality: "incomplete",
+      is_currently_running: false,
+      interrupted_invocation_id: "invocation-1",
+      persisted_through_sequence: 1,
+      current_invocation_id: "invocation-1",
+      last_known_stage_id: "embed",
+      last_known_stage_label: "Embedding",
+      events: [
+        {
+          event_id: "event-1",
+          task_id: "task-1",
+          attempt: 1,
+          sequence: 1,
+          invocation_id: "invocation-1",
+          stage_id: "embed",
+          stage_rank: 5,
+          status: "started",
+          occurred_at: "2026-10-22T10:00:00Z",
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText("Interrupted — worker stopped before a stage end was observed")).not.toBeNull();
+    expect(screen.getByText("Some stage history may be missing.")).not.toBeNull();
+  });
+
+  it("does not call a durable stage snapshot running without live worker evidence", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "SERIALIZING",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "stale.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "unknown",
+      is_currently_running: false,
+      persisted_through_sequence: 1,
+      current_invocation_id: "invocation-1",
+      last_known_stage_id: "embed",
+      last_known_stage_label: "Embedding",
+      events: [
+        {
+          event_id: "event-1",
+          task_id: "task-1",
+          attempt: 1,
+          sequence: 1,
+          invocation_id: "invocation-1",
+          stage_id: "embed",
+          stage_rank: 5,
+          status: "started",
+          occurred_at: "2026-10-22T10:00:00Z",
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText("Last observed start — worker activity is not confirmed")).not.toBeNull();
+    expect(screen.queryByText("Running")).toBeNull();
+  });
+
+  it("shows a conditional enrichment failure without inventing a skipped stage", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "degraded.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "complete",
+      is_currently_running: false,
+      persisted_through_sequence: 2,
+      events: [
+        {
+          event_id: "event-start",
+          task_id: "task-1",
+          attempt: 1,
+          sequence: 1,
+          invocation_id: "invocation-caption",
+          stage_id: "caption",
+          stage_rank: 1,
+          status: "started",
+          occurred_at: "2026-10-22T10:00:00Z",
+        },
+        {
+          event_id: "event-failed",
+          task_id: "task-1",
+          attempt: 1,
+          sequence: 2,
+          invocation_id: "invocation-caption",
+          stage_id: "caption",
+          stage_rank: 1,
+          status: "failed",
+          occurred_at: "2026-10-22T10:00:02Z",
+          duration_ms: 2000,
+          failure_effect: "continued_degraded",
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText("Failed; indexing continued without this enrichment")).not.toBeNull();
+    expect(screen.getAllByText("caption").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/skipped/i)).toBeNull();
+  });
+
+  it("keeps polling terminal tasks while stage history is pending persistence", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "done.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "pending_persistence",
+      is_currently_running: false,
+      persisted_through_sequence: 1,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    const { queryClient } = renderJobDetail();
+
+    expect(await screen.findByText("Recent stage updates may still be saving.")).not.toBeNull();
+    const stageQuery = queryClient.getQueryCache().find({
+      queryKey: ["task-stage-progress", "task-1", 7, "admin", null, null],
+    });
+    if (!stageQuery) throw new Error("Stage history query was not created");
+    const interval = (stageQuery.options as unknown as { refetchInterval?: unknown }).refetchInterval;
+    expect(typeof interval).toBe("function");
+    const getInterval = interval as (query: unknown) => number | false;
+    expect(getInterval(stageQuery)).toBe(3000);
+    now.mockReturnValue(1_031_000);
+    expect(getInterval(stageQuery)).toBe(false);
+    now.mockRestore();
+  });
+
+  it("stops the terminal history poll when persistence completes", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "done.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "pending_persistence",
+      is_currently_running: false,
+      persisted_through_sequence: 1,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    const { queryClient } = renderJobDetail();
+    expect(await screen.findByText("Recent stage updates may still be saving.")).not.toBeNull();
+    const stageQuery = queryClient.getQueryCache().find({
+      queryKey: ["task-stage-progress", "task-1", 7, "admin", null, null],
+    });
+    if (!stageQuery) throw new Error("Stage history query was not created");
+    const interval = (stageQuery.options as unknown as { refetchInterval?: unknown }).refetchInterval;
+    if (typeof interval !== "function") throw new Error("Stage history polling interval was not configured");
+    expect((interval as (query: unknown) => number | false)(stageQuery)).toBe(3000);
+
+    queryClient.setQueryData(stageQuery.queryKey, {
+      freshness: "durable",
+      history_quality: "complete",
+      is_currently_running: false,
+      persisted_through_sequence: 2,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    expect((interval as (query: unknown) => number | false)(stageQuery)).toBe(false);
+    expect(await screen.findByText("All observed stage events are saved.")).not.toBeNull();
+  });
+
+  it("labels events from a retried attempt in the stage timeline", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "retried.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "complete",
+      is_currently_running: false,
+      persisted_through_sequence: 2,
+      events: [
+        {
+          event_id: "attempt-1",
+          task_id: "task-1",
+          attempt: 1,
+          sequence: 1,
+          invocation_id: "invocation-1",
+          stage_id: "parse",
+          stage_rank: 0,
+          status: "started",
+          occurred_at: "2026-10-22T10:00:00Z",
+        },
+        {
+          event_id: "attempt-2",
+          task_id: "task-1",
+          attempt: 2,
+          sequence: 1,
+          invocation_id: "invocation-2",
+          stage_id: "parse",
+          stage_rank: 0,
+          status: "started",
+          occurred_at: "2026-10-22T10:01:00Z",
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText("Attempt 2")).not.toBeNull();
   });
 });

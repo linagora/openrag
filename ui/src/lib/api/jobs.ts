@@ -7,6 +7,7 @@ import { request } from "./client";
 //   GET    /queue/info                          queue + worker pool summary
 //   GET    /queue/tasks[?task_status=]          list tasks → { tasks: [...] }
 //   GET    /indexer/task/{id}                   status → { task_id, task_state, details, error_url? }
+//   GET    /indexer/task/{id}/stages            bounded stage timeline and quality
 //   GET    /indexer/task/{id}/error             { task_id, reason?, summary?, traceback: string[] }
 //   DELETE /indexer/task/{id}                   cancel → { message }
 
@@ -38,6 +39,58 @@ export interface TaskDetails {
 
 export type TaskOutcome = "active" | "completed" | "completed_degraded" | "failed" | "cancelled";
 
+export type StageHistoryQuality =
+  | "complete"
+  | "pending_persistence"
+  | "incomplete"
+  | "unknown"
+  | "truncated"
+  | "legacy"
+  | "not_started";
+
+export interface StageProgressSummary {
+  attempt?: number;
+  phase?: string;
+  stage_id?: string | null;
+  stage_label?: string | null;
+  stage_rank?: number | null;
+  position_score?: number;
+  is_currently_running: boolean;
+  elapsed_ms?: number | null;
+  elapsed_sampled_at?: string | null;
+  freshness: "live" | "durable" | "unknown";
+  history_quality: StageHistoryQuality;
+  latest_sequence?: number;
+  persisted_through_sequence: number;
+  expected_final_sequence?: number | null;
+  current_invocation_id?: string | null;
+  interrupted_invocation_id?: string | null;
+  last_known_stage_id?: string | null;
+  last_known_stage_label?: string | null;
+  history_truncated?: boolean;
+  known_loss?: boolean;
+}
+
+export interface StageProgressEvent {
+  event_id: string;
+  task_id: string;
+  attempt: number;
+  sequence: number;
+  invocation_id: string;
+  stage_id: string;
+  stage_rank?: number | null;
+  status: "started" | "completed" | "failed" | "cancelled";
+  occurred_at: string;
+  duration_ms?: number | null;
+  failure_effect?: "continued_degraded" | "task_failed" | null;
+}
+
+export interface StageProgressPage extends StageProgressSummary {
+  events: StageProgressEvent[];
+  has_more: boolean;
+  next_cursor: { attempt: number; sequence: number } | null;
+}
+
 /** Row from GET /queue/tasks — note `state` (vs `task_state` in the detail). */
 export interface TaskListItem {
   task_id: string;
@@ -46,9 +99,23 @@ export interface TaskListItem {
   details: TaskDetails;
   created_at?: string | null;
   duration_ms?: number | null;
+  stage_progress?: StageProgressSummary;
   error_summary?: string;
   url: string;
   error_url?: string;
+}
+
+export interface TaskListPagination {
+  offset: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
+  available_partitions: string[];
+}
+
+export interface TaskListResponse {
+  tasks: TaskListItem[];
+  pagination?: TaskListPagination;
 }
 
 /** GET /indexer/task/{id} — note `task_state` (vs `state` in list rows). */
@@ -74,13 +141,36 @@ export function getQueueInfo(): Promise<QueueInfo> {
   return request<QueueInfo>(`${QUEUE}/info`);
 }
 
-export function listTasks(taskStatus?: string): Promise<{ tasks: TaskListItem[] }> {
-  const qs = taskStatus ? `?task_status=${encodeURIComponent(taskStatus)}` : "";
-  return request<{ tasks: TaskListItem[] }>(`${QUEUE}/tasks${qs}`);
+export function listTasks(
+  taskStatus?: string,
+  pagination?: { limit: number; offset: number },
+): Promise<TaskListResponse> {
+  const query = new URLSearchParams();
+  if (taskStatus) query.set("task_status", taskStatus);
+  if (pagination) {
+    query.set("limit", String(pagination.limit));
+    query.set("offset", String(pagination.offset));
+  }
+  const search = query.toString();
+  const qs = search ? `?${search}` : "";
+  return request<TaskListResponse>(`${QUEUE}/tasks${qs}`);
 }
 
 export function getTaskStatus(taskId: string): Promise<TaskStatus> {
   return request<TaskStatus>(`${TASK}/${encodeURIComponent(taskId)}`);
+}
+
+export function getTaskStageProgress(
+  taskId: string,
+  cursor?: { attempt: number; sequence: number } | null,
+  limit = 50,
+): Promise<StageProgressPage> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor) {
+    query.set("before_attempt", String(cursor.attempt));
+    query.set("before_sequence", String(cursor.sequence));
+  }
+  return request<StageProgressPage>(`${TASK}/${encodeURIComponent(taskId)}/stages?${query.toString()}`);
 }
 
 export function getTaskError(taskId: string): Promise<{
