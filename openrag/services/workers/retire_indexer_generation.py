@@ -27,6 +27,7 @@ _LEGACY_WORKER_PATTERN = re.compile(r"^IndexerWorker-\d+$")
 # Dedicated budget for the recovery call after a drain has already exhausted
 # its own deadline, so restoring acceptance never blocks indefinitely.
 _ABORT_DRAIN_TIMEOUT = 30.0
+_STAGE_WRITER_CLOSE_TIMEOUT = 5.0
 
 
 def _actor_name(actor: Any) -> str:
@@ -108,6 +109,41 @@ async def _abort_drain_best_effort(dispatcher: Any, generation: str) -> None:
         )
 
 
+async def _close_stage_writers(worker_names: list[str], namespace: str) -> None:
+    """Drain each idle worker's bounded history queue before killing its actor."""
+
+    async def close_one(worker_name: str) -> None:
+        actor = _get_actor(worker_name, namespace)
+        if actor is None:
+            return
+        method = getattr(actor, "close_stage_writer", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            # Older worker protocols predate stage-history persistence.
+            return
+        await call_ray_actor_with_timeout(
+            remote(),
+            _STAGE_WRITER_CLOSE_TIMEOUT,
+            f"Drain stage writer for {worker_name}",
+        )
+
+    results = await asyncio.gather(*(close_one(name) for name in worker_names), return_exceptions=True)
+    cancellation = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
+    if cancellation is not None:
+        raise cancellation
+    failures = [
+        worker_names[index]
+        for index, result in enumerate(results)
+        if isinstance(result, Exception)
+    ]
+    if failures:
+        raise RuntimeError(
+            "Could not drain stage-history writers for retiring workers: "
+            + ", ".join(failures)
+            + ". The generation remains drained and its actors are still alive; resolve the writer issue and retry retirement."
+        ) from next(result for result in results if isinstance(result, Exception))
+
+
 async def _drain_protocol_generation(
     dispatcher: Any,
     generation: str,
@@ -185,6 +221,7 @@ def retire_generation(
                 "The indexer dispatcher is unavailable, so active worker jobs cannot be checked. "
                 "Verify the workers are idle, then rerun with --confirm-workers-idle."
             )
+        asyncio.run(_close_stage_writers(worker_names, namespace))
         for worker_name in worker_names:
             if _kill_actor(worker_name, namespace):
                 removed.append(worker_name)
@@ -201,6 +238,7 @@ def retire_generation(
         )
         worker_names = list(status.get("worker_names") or worker_names)
 
+    asyncio.run(_close_stage_writers(worker_names, namespace))
     if _kill_actor(dispatcher_name, namespace):
         removed.append(dispatcher_name)
     for worker_name in worker_names:
