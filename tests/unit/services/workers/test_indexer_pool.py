@@ -34,6 +34,20 @@ def test_indexer_worker_actor_is_ray_serializable() -> None:
     cloudpickle.dumps(IndexerWorkerActor.__ray_metadata__.modified_class)
 
 
+@pytest.mark.asyncio
+async def test_indexer_worker_actor_exposes_stage_writer_drain() -> None:
+    from services.workers.indexer_pool import IndexerWorkerActor
+
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
+    actor = object.__new__(actor_class)
+    worker = SimpleNamespace(close_stage_writer=AsyncMock())
+    actor._worker = worker
+
+    await actor.close_stage_writer()
+
+    worker.close_stage_writer.assert_awaited_once_with()
+
+
 def test_build_pipeline_timeouts_bounds_parse_from_config() -> None:
     """The pipeline must bound the parse stage at loader.parse_timeout so a wedged
     parse fails that file instead of stalling indexing (#571)."""

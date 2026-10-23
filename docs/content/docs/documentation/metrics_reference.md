@@ -117,7 +117,7 @@ the Ray target.
 Label values:
 
 - `status` — `completed`, `failed`, `cancelled`
-- `reason` — `queue_full`, `summary_overflow`, `write_failed`, `missing_parent`, `shutdown`, `live_snapshot_overflow`
+- `reason` — `queue_full`, `summary_overflow`, `write_failed`, `missing_parent`, `shutdown`, `live_snapshot_overflow`, `live_snapshot_failed`
 - `result` — `success`, `retry`, `failure`
 - `stage` — `parse`, `caption`, `chunk`, `contextualize`, `topic_tag`, `embed`, `store`
 - `state` — `QUEUED`, `SERIALIZING`

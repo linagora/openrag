@@ -164,7 +164,7 @@ def set_stage_history_counts(*, pending: int, incomplete: int) -> None:
 
 def record_stage_live_snapshot_failure() -> None:
     try:
-        _STAGE_EVENT_DROPPED_TOTAL.inc(1, tags={"reason": "live_snapshot_overflow"})
+        _STAGE_EVENT_DROPPED_TOTAL.inc(1, tags={"reason": "live_snapshot_failed"})
     except Exception as exc:  # noqa: BLE001 - metrics must never fail indexing
         report_once(INGEST_STAGE_EVENT_DROPPED_TOTAL.name, exc)
 

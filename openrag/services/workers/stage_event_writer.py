@@ -283,7 +283,7 @@ class StageEventWriter:
             if previous is None and len(self._live_pending) >= self._queue_capacity:
                 evicted_task_id, _ = self._live_pending.popitem(last=False)
                 self._dropped_live_snapshots += 1
-                record_stage_live_snapshot_failure()
+                record_stage_event_drop("live_snapshot_overflow")
                 self._mark_snapshot_loss(evicted_task_id)
                 self._remember_incomplete(evicted_task_id)
             self._live_pending[task_id] = snapshot
