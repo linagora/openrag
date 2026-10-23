@@ -162,7 +162,10 @@ prompts:
 # --- Document loader ---
 loader:
   # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
-  #      CONTENT_DEDUPLICATION_ENABLED
+  #      CONTENT_DEDUPLICATION_ENABLED, CSV_BATCH_SIZE, CSV_DELIMITER
+  csv_batch_size: 10000
+  # Null enables delimiter sniffing. Set one character to force a delimiter.
+  csv_delimiter: null
   image_captioning: true
   image_captioning_url: true
   save_markdown: false
