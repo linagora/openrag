@@ -62,3 +62,21 @@ def test_a_nested_svg_does_not_decode_an_embedded_tiff(encoded_image):
     png = ImageParser._svg_to_png(_svg_with_image(inner, "image/svg+xml"))
     assert png is not None
     assert _centre_pixel(png) != (255, 0, 0)
+
+
+def test_an_svg_applies_the_exif_orientation_of_an_embedded_jpeg():
+    # Red on the left, blue on the right, tagged to be shown turned 90° clockwise:
+    # upright, red is on top and blue at the bottom.
+    image = Image.new("RGB", (40, 20), (255, 0, 0))
+    image.paste((0, 0, 255), (20, 0, 40, 20))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    buf = BytesIO()
+    image.save(buf, format="JPEG", exif=exif.tobytes(), quality=95)
+
+    png = ImageParser._svg_to_png(_svg_with_image(buf.getvalue(), "image/jpeg"))
+
+    with Image.open(BytesIO(png)) as rendered:
+        top, bottom = rendered.convert("RGB").getpixel((20, 5)), rendered.convert("RGB").getpixel((20, 35))
+    assert top[0] > 200 and top[2] < 60
+    assert bottom[2] > 200 and bottom[0] < 60

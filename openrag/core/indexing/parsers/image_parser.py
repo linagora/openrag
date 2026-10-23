@@ -48,17 +48,18 @@ def _fetch_svg_resource(url: str, resource_type: str) -> bytes:
     ``safe_fetch`` still serves ``data:`` URLs, and cairosvg would open an
     ``<image>`` payload in any format Pillow knows. Such payloads are re-encoded
     as PNG here, or replaced by an empty SVG when their format is not allowed.
+    The EXIF orientation is applied first, as cairosvg does before its own save.
     Nested SVGs inherit this fetcher.
     """
     from cairosvg.url import safe_fetch
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     data = safe_fetch(url, resource_type)
     if resource_type != "image/*" or data.startswith(_CAIROSVG_NATIVE_PREFIXES) or b"<svg" in data:
         return data
     try:
         with Image.open(BytesIO(data), formats=UPLOADED_IMAGE_FORMATS) as image:
-            return pil_to_png_bytes(image)
+            return pil_to_png_bytes(ImageOps.exif_transpose(image))
     except Exception as exc:
         logger.warning("Skipping image embedded in SVG: %s", exc)
         return _EMPTY_SVG
