@@ -8,6 +8,7 @@ import types
 import pytest
 from api.middleware.auth import AuthMiddleware
 from api.middleware.urlencoded_body_limit import (
+    MAX_ANONYMOUS_URLENCODED_BODY_BYTES,
     MAX_URLENCODED_BODY_BYTES,
     MAX_URLENCODED_FIELDS,
     UrlencodedBodyLimitMiddleware,
@@ -22,8 +23,17 @@ from starlette.testclient import TestClient
 
 URLENCODED = "application/x-www-form-urlencoded"
 
+#: A user as Auth leaves it in the request state; only its presence matters here.
+USER = {"id": 2}
 
-def _client() -> tuple[TestClient, list[str]]:
+#: Each byte cap with the request it applies to.
+LIMITS = [
+    pytest.param(None, MAX_ANONYMOUS_URLENCODED_BODY_BYTES, id="anonymous"),
+    pytest.param(USER, MAX_URLENCODED_BODY_BYTES, id="authenticated"),
+]
+
+
+def _client(user: dict | None = None) -> tuple[TestClient, list[str]]:
     calls: list[str] = []
 
     async def form(request: Request):
@@ -37,7 +47,14 @@ def _client() -> tuple[TestClient, list[str]]:
 
     app = Starlette(routes=[Route("/form", form, methods=["POST"]), Route("/body", body, methods=["POST"])])
     app.add_middleware(UrlencodedBodyLimitMiddleware)
-    return TestClient(app), calls
+    if user is None:
+        return TestClient(app), calls
+
+    async def as_user(scope, receive, send):
+        scope.setdefault("state", {})["user"] = user
+        await app(scope, receive, send)
+
+    return TestClient(as_user), calls
 
 
 def _fields(count: int) -> bytes:
@@ -53,7 +70,7 @@ def test_a_small_form_reaches_the_route_unchanged():
 
 
 async def _drive(
-    chunks: list[bytes], headers: list[tuple[bytes, bytes]], *, complete: bool = True
+    chunks: list[bytes], headers: list[tuple[bytes, bytes]], *, complete: bool = True, user: dict | None = None
 ) -> tuple[int, list[dict]]:
     """Run the middleware over a body sent as one ASGI message per chunk, without
     a content-length, the way a chunked upload arrives. TestClient would send it
@@ -83,6 +100,8 @@ async def _drive(
         sent.append(message)
 
     scope = {"type": "http", "method": "POST", "path": "/form", "headers": headers, "query_string": b""}
+    if user is not None:
+        scope["state"] = {"user": user}
     await UrlencodedBodyLimitMiddleware(inner)(scope, receive, send)
     return sent[0]["status"], seen
 
@@ -101,20 +120,31 @@ async def test_a_disconnect_before_the_last_chunk_is_not_replayed_as_a_form():
     assert seen == [{"disconnected": "yes"}]
 
 
-def test_a_declared_length_over_the_limit_is_refused_before_the_route():
-    client, calls = _client()
-    body = b"a=" + b"x" * MAX_URLENCODED_BODY_BYTES
+@pytest.mark.parametrize(("user", "limit"), LIMITS)
+def test_the_byte_limit_is_inclusive(user, limit):
+    client, calls = _client(user)
+    body = b"a=" + b"x" * (limit - 2)
+    response = client.post("/form", content=body, headers={"content-type": URLENCODED})
+    assert response.status_code == 200
+    assert calls == ["form"]
+
+
+@pytest.mark.parametrize(("user", "limit"), LIMITS)
+def test_a_declared_length_over_the_limit_is_refused_before_the_route(user, limit):
+    client, calls = _client(user)
+    body = b"a=" + b"x" * (limit - 1)
     response = client.post("/form", content=body, headers={"content-type": URLENCODED})
     assert response.status_code == 413
     assert response.json()["detail"] == "Form body too large."
     assert calls == []
 
 
+@pytest.mark.parametrize(("user", "limit"), LIMITS)
 @pytest.mark.asyncio
-async def test_a_chunked_body_over_the_limit_is_refused_before_the_route():
+async def test_a_chunked_body_over_the_limit_is_refused_before_the_route(user, limit):
     chunk = b"x" * 8192
-    chunks = [b"a="] + [chunk] * (MAX_URLENCODED_BODY_BYTES // len(chunk) + 1)
-    status, seen = await _drive(chunks, [(b"content-type", URLENCODED.encode())])
+    chunks = [b"a="] + [chunk] * (limit // len(chunk))
+    status, seen = await _drive(chunks, [(b"content-type", URLENCODED.encode())], user=user)
     assert status == 413
     assert seen == []
 
@@ -166,9 +196,9 @@ async def test_header_bytes_the_parser_trims_do_not_skip_the_limit(content_type)
     assert seen == []
 
 
-def test_a_large_form_with_few_fields_reaches_the_route():
+def test_a_large_form_with_few_fields_reaches_the_route_for_a_user():
     # A metadata update sent as a form: percent-encoding inflates its JSON.
-    client, calls = _client()
+    client, calls = _client(USER)
     metadata = '{"title": "' + "é" * 40_000 + '"}'
     response = client.post("/form", data={"metadata": metadata})
     assert response.status_code == 200
@@ -241,6 +271,44 @@ def test_a_route_auth_lets_through_still_has_its_form_bounded(monkeypatch):
         "/auth/backchannel-logout", content=_fields(MAX_URLENCODED_FIELDS + 1), headers={"content-type": URLENCODED}
     )
     assert response.status_code == 413
+
+
+class _DevAuthService:
+    """What Auth asks for when ALLOW_NO_AUTH lets every request in as the admin."""
+
+    async def get_user_for_request(self, user_id):
+        return {"id": user_id, "is_admin": True}
+
+    async def list_user_partitions_for_request(self, user_id):
+        return []
+
+
+def test_the_user_auth_found_decides_the_byte_cap(monkeypatch):
+    """Auth keeps its user in the request state, which the limit reads from the scope."""
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_NO_AUTH", "true")
+
+    async def form(request: Request):
+        return JSONResponse({"fields": len(await request.form())})
+
+    app = Starlette(routes=[Route("/v1/form", form, methods=["POST"])])
+    app.add_middleware(UrlencodedBodyLimitMiddleware)
+    app.add_middleware(AuthMiddleware, get_auth_service=lambda request: _DevAuthService())
+    body = b"a=" + b"x" * MAX_ANONYMOUS_URLENCODED_BODY_BYTES
+
+    response = TestClient(app).post("/v1/form", content=body, headers={"content-type": URLENCODED})
+
+    assert response.status_code == 200
+
+
+def test_a_route_auth_lets_through_gets_the_anonymous_byte_cap(monkeypatch):
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+    body = b"logout_token=" + b"x" * MAX_ANONYMOUS_URLENCODED_BODY_BYTES
+    response = _auth_stack().post("/auth/backchannel-logout", content=body, headers={"content-type": URLENCODED})
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Form body too large."
 
 
 def test_main_registers_the_limit_inside_auth():

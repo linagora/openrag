@@ -4,16 +4,18 @@ Starlette's ``application/x-www-form-urlencoded`` parser takes no field-count or
 size limit, unlike its multipart parser, and FastAPI parses a route's form before
 running its dependencies.
 
-This middleware reads such a body itself, up to :data:`MAX_URLENCODED_BODY_BYTES`
-and :data:`MAX_URLENCODED_FIELDS`, and answers 413 beyond either. A body within both
-is handed on unchanged. The field count is what bounds the parser's cost; the byte
-cap only bounds memory, so it matches Starlette's multipart part limit, which a
-metadata update sent as a form can approach once percent-encoded. Uploads are
-multipart, which Starlette already bounds, and are not touched.
+This middleware reads such a body itself, up to a byte cap and
+:data:`MAX_URLENCODED_FIELDS`, and answers 413 beyond either. A body within both is
+handed on unchanged. The field count is what bounds the parser's cost; the byte cap
+only bounds memory. For an authenticated user it is
+:data:`MAX_URLENCODED_BODY_BYTES`, Starlette's multipart part limit, which a
+metadata update sent as a form can approach once percent-encoded. A request with no
+user gets :data:`MAX_ANONYMOUS_URLENCODED_BODY_BYTES`. Uploads are multipart, which
+Starlette already bounds, and are not touched.
 
 Register it inside Auth: a request Auth refuses is then answered before its body is
-read, and a route Auth lets through without credentials still has its form bounded
-before FastAPI parses it.
+read, a route Auth lets through without credentials still has its form bounded
+before FastAPI parses it, and the user Auth found decides the byte cap.
 """
 
 from __future__ import annotations
@@ -23,8 +25,15 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-#: Largest URL-encoded body accepted, Starlette's ``max_part_size`` for multipart.
+#: Largest URL-encoded body accepted from an authenticated user, Starlette's
+#: ``max_part_size`` for multipart.
 MAX_URLENCODED_BODY_BYTES = 1024 * 1024
+
+#: Largest URL-encoded body accepted on a request Auth let through without a user:
+#: a logout token, Chainlit's login form. It is uvicorn's ``HIGH_WATER_LIMIT``, the
+#: point at which uvicorn stops reading a body nobody consumes, so a client that
+#: stalls mid-body pins about what uvicorn already holds for a stalled connection.
+MAX_ANONYMOUS_URLENCODED_BODY_BYTES = 64 * 1024
 
 #: Most fields accepted in a URL-encoded body. Chainlit's login form has six.
 MAX_URLENCODED_FIELDS = 64
@@ -39,6 +48,14 @@ def _is_urlencoded(headers: Headers) -> bool:
     # also bounds a few headers Starlette would leave unparsed, which is harmless.
     media_type, _ = parse_options_header(headers.get("content-type"))
     return media_type.lower() == _URLENCODED
+
+
+def _body_limit(scope: Scope) -> int:
+    # Auth stores the user it authenticated in the request state, which Starlette
+    # keeps in the scope; a route Auth bypasses has none.
+    if scope.get("state", {}).get("user") is None:
+        return MAX_ANONYMOUS_URLENCODED_BODY_BYTES
+    return MAX_URLENCODED_BODY_BYTES
 
 
 def _declared_length(headers: Headers) -> int | None:
@@ -63,8 +80,9 @@ class UrlencodedBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        limit = _body_limit(scope)
         declared = _declared_length(headers)
-        if declared is not None and declared > MAX_URLENCODED_BODY_BYTES:
+        if declared is not None and declared > limit:
             await _too_large(scope, receive, send, "Form body too large.")
             return
 
@@ -77,7 +95,7 @@ class UrlencodedBodyLimitMiddleware:
                 disconnect = message
                 break
             chunk = message.get("body", b"")
-            if len(body) + len(chunk) > MAX_URLENCODED_BODY_BYTES:
+            if len(body) + len(chunk) > limit:
                 await _too_large(scope, receive, send, "Form body too large.")
                 return
             body += chunk
@@ -110,4 +128,9 @@ async def _too_large(scope: Scope, receive: Receive, send: Send, detail: str) ->
     await response(scope, receive, send)
 
 
-__all__ = ["MAX_URLENCODED_BODY_BYTES", "MAX_URLENCODED_FIELDS", "UrlencodedBodyLimitMiddleware"]
+__all__ = [
+    "MAX_ANONYMOUS_URLENCODED_BODY_BYTES",
+    "MAX_URLENCODED_BODY_BYTES",
+    "MAX_URLENCODED_FIELDS",
+    "UrlencodedBodyLimitMiddleware",
+]
