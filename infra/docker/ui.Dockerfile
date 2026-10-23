@@ -40,7 +40,10 @@ FROM nginx/nginx-unprivileged:1.30-alpine
 USER root
 
 # Alpine publishes package fixes before upstream rebuilds this image, so take them
-# at build time.
+# at build time. The CI workflows pass a new APK_UPGRADE_KEY on every run: a
+# changed build arg invalidates the build cache from here on, so the upgrade runs
+# again instead of being reused from an earlier build on the same base.
+ARG APK_UPGRADE_KEY
 RUN apk upgrade --no-cache
 
 COPY --chown=10001:0 --from=build /app/dist /usr/share/nginx/html
