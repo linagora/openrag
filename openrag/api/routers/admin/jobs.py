@@ -6,9 +6,11 @@ HTTP transport only: the shared admin/current-user ``Depends`` wrappers
 and the ``request.url_for`` link building.
 """
 
+from typing import Annotated
+
 from api.dependencies.auth import current_user, require_admin
 from di.providers import get_job_service
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
@@ -60,6 +62,7 @@ async def get_queue_info(
   - `cancelled`: Show cancelled tasks
   - Any exact status name (case-insensitive)
   - Omit to show all tasks
+- `limit` and `offset`: Optional server-side pagination. When either is supplied, limit defaults to 50 and is capped at 100.
 
 **Permissions:**
 - Regular users: See only their own tasks
@@ -73,6 +76,7 @@ Returns list of tasks with:
 - `details`: Task metadata (file_id, partition, etc.)
 - `created_at`: Date and time when the task was created
 - `duration_ms`: Total task duration in milliseconds
+- `stage_progress`: Compact current stage and history quality, when available
 - `error_summary`: Concise failure reason for admins (if failed)
 - `url`: Link to detailed task status
 - `error_url`: Link to error details (if failed)
@@ -88,6 +92,8 @@ Returns list of tasks with:
 async def list_tasks(
     request: Request,
     task_status: str | None = None,
+    limit: Annotated[int | None, Query(ge=1, le=100)] = None,
+    offset: Annotated[int | None, Query(ge=0)] = None,
     user=Depends(current_user),
     service=Depends(get_job_service),
 ):
@@ -96,11 +102,19 @@ async def list_tasks(
     - ?task_status=<exact> → exact match (case-insensitive)
     - (none)               → all tasks
     """
-    rows = await service.list_tasks(
+    result = await service.list_tasks(
         is_admin=bool(user.get("is_admin")),
         user_id=user.get("id"),
         task_status=task_status,
+        limit=limit,
+        offset=offset,
     )
+    pagination = None
+    if isinstance(result, dict):
+        rows = result["tasks"]
+        pagination = result["pagination"]
+    else:
+        rows = result
 
     tasks = []
     for row in rows:
@@ -112,6 +126,7 @@ async def list_tasks(
             "details": row["details"],
             "created_at": row["created_at"],
             "duration_ms": row["duration_ms"],
+            **({"stage_progress": row["stage_progress"]} if row.get("stage_progress") is not None else {}),
             **({"error_summary": row["error_summary"]} if user.get("is_admin") and row.get("error_summary") else {}),
             **(
                 {"error_url": str(request.url_for("get_task_error", task_id=task_id))}
@@ -122,4 +137,7 @@ async def list_tasks(
         }
         tasks.append(item)
 
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"tasks": tasks})
+    payload = {"tasks": tasks}
+    if pagination is not None:
+        payload["pagination"] = pagination
+    return JSONResponse(status_code=status.HTTP_200_OK, content=payload)
