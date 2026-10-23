@@ -30,6 +30,9 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "pip>=25.0.1",
     "chardet>=5.2.0",
+    # XLSX: read-only reader and safe OOXML preflight.
+    "openpyxl>=3.1.5,<4",
+    "defusedxml>=0.7.1,<1",
     "torch>=2.4.1",
     "robotframework>=7.2.2",
     "robotframework-requests>=0.9.7",

@@ -282,7 +282,7 @@ async def _expand_with_related_chunks(
 
     relationship_ids: set[tuple[str, str]] = set()
     file_infos: set[tuple[str, str]] = set()
-    csv_rows: set[tuple[str, str, int]] = set()
+    csv_rows: set[tuple[str, str, int, str | None]] = set()
 
     for c in results:
         if include_related:
@@ -293,7 +293,7 @@ async def _expand_with_related_chunks(
             file_infos.add((c.partition, c.document_id))
         csv_ref = _csv_row_sibling_ref(c)
         if csv_ref is not None:
-            csv_rows.add((c.partition, c.document_id, csv_ref))
+            csv_rows.add((c.partition, c.document_id, csv_ref, c.metadata.get("table_id")))
 
     async def _safe_related(part: str, rel_id: str) -> list[Chunk]:
         try:
@@ -324,15 +324,18 @@ async def _expand_with_related_chunks(
             logger.warning("get_ancestor_chunks failed (partition=%s, file_id=%s)", part, file_id, exc_info=True)
             return []
 
-    async def _safe_csv_row(part: str, file_id: str, row_number: int) -> list[Chunk]:
+    async def _safe_csv_row(part: str, file_id: str, row_number: int, table_id: str | None) -> list[Chunk]:
         try:
-            return await searcher.get_csv_row_chunks(
-                partition=part,
-                file_id=file_id,
-                row_number=row_number,
-                limit=related_limit,
-                allowed_file_ids=allowed_file_ids,
-            )
+            kwargs = {
+                "partition": part,
+                "file_id": file_id,
+                "row_number": row_number,
+                "limit": related_limit,
+                "allowed_file_ids": allowed_file_ids,
+            }
+            if table_id is not None:
+                kwargs["table_id"] = table_id
+            return await searcher.get_csv_row_chunks(**kwargs)
         except Exception:
             logger.warning(
                 "get_csv_row_chunks failed (partition=%s, file_id=%s, row_number=%s)",
@@ -348,7 +351,7 @@ async def _expand_with_related_chunks(
         tasks.extend(_safe_related(part, rid) for part, rid in relationship_ids)
     if include_ancestors:
         tasks.extend(_safe_ancestors(part, fid) for part, fid in file_infos if part and fid)
-    tasks.extend(_safe_csv_row(part, fid, row) for part, fid, row in csv_rows if part and fid)
+    tasks.extend(_safe_csv_row(part, fid, row, table_id) for part, fid, row, table_id in csv_rows if part and fid)
 
     if tasks:
         all_results = await asyncio.gather(*tasks)
@@ -400,18 +403,20 @@ def order_csv_row_siblings(chunks: list[Chunk]) -> list[Chunk]:
     the complete logical row. Column groups come first, then cell parts within
     each group.
     """
-    groups: dict[tuple[str, str, int], list[Chunk]] = {}
+    groups: dict[tuple[str, str, str | None, int], list[Chunk]] = {}
     for chunk in chunks:
         row_number = _csv_row_sibling_ref(chunk)
         if row_number is not None and chunk.partition and chunk.document_id:
-            groups.setdefault((chunk.partition, chunk.document_id, row_number), []).append(chunk)
+            groups.setdefault(
+                (chunk.partition, chunk.document_id, chunk.metadata.get("table_id"), row_number), []
+            ).append(chunk)
 
     ordered: list[Chunk] = []
-    emitted: set[tuple[str, str, int]] = set()
+    emitted: set[tuple[str, str, str | None, int]] = set()
     for chunk in chunks:
         row_number = _csv_row_sibling_ref(chunk)
         key = (
-            (chunk.partition, chunk.document_id, row_number)
+            (chunk.partition, chunk.document_id, chunk.metadata.get("table_id"), row_number)
             if row_number is not None and chunk.partition and chunk.document_id
             else None
         )

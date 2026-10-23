@@ -32,7 +32,7 @@
 [OpenRag](https://open-rag.ai/) supports a comprehensive range of file formats for seamless document ingestion:
 
 * **Text Files**: `txt`, `md`
-* **Tabular Data**: `csv` - Configurable delimiter-aware parsing with row-preserving, token-bounded table chunks
+* **Tabular Data**: `csv`, `xlsx` - Row-preserving batch ingestion with table chunks and sheet metadata. See [XLSX behavior and limits](docs/content/docs/documentation/xlsx_ingestion.md)
 * **Document Files**: `pdf`, `docx`, `doc`, `pptx` - Advanced PDF parsing with OCR support and Office document processing
 * **E-mail**: `eml` - Message body and headers, with attachments parsed through their own format's pipeline
 * **Audio Files**: `wav`, `mp3`, `flac`, `ogg`, `aac`, `wma` - Audio transcription and content extraction

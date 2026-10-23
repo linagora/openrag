@@ -110,6 +110,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
     ("CSV_BATCH_SIZE", "loader.csv_batch_size", int),
     ("CSV_DELIMITER", "loader.csv_delimiter", str),
+    ("XLSX_BATCH_SIZE", "loader.xlsx_batch_size", int),
+    ("XLSX_HEADER_ROW", "loader.xlsx_header_row", int),
     # Indexing callback
     ("INDEXING_CALLBACK_ALLOW_PRIVATE_URLS", "indexing_callback.allow_private_urls", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),
