@@ -82,6 +82,17 @@ Then open `http://127.0.0.1:8265` (`RAY_DASHBOARD_PORT` changes the port), or
 forward that port over SSH from a server. Bring the stack back up without the
 overlay once you are done.
 
+Adding or removing the overlay recreates the API container: the API restarts,
+the embedded Ray and its actors start over, and indexing in progress is
+interrupted. To inspect Ray on a running stack without restarting it, use its
+CLI inside the container instead:
+
+```bash
+docker compose exec openrag /app/.venv/bin/ray list actors
+```
+
+(`openrag-cpu` on a CPU deployment.)
+
 ## Reverse proxy (TLS)
 
 An opt-in overlay adds [Nginx Proxy Manager](https://nginxproxymanager.com/)

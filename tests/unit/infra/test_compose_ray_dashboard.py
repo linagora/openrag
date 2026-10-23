@@ -51,3 +51,6 @@ def test_the_dashboard_overlay_publishes_it_on_loopback_for_both_api_services():
     assert all(service in base for service in API_SERVICES)
     for service in API_SERVICES:
         assert overlay[service]["ports"] == [f"127.0.0.1:${{RAY_DASHBOARD_PORT:-{DASHBOARD_PORT}}}:{DASHBOARD_PORT}"]
+        # Bound to the container's loopback, the dashboard is out of reach of a
+        # published port.
+        assert overlay[service]["environment"] == {"RAY_DASHBOARD_HOST": "0.0.0.0"}

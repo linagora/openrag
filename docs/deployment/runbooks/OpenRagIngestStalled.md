@@ -42,7 +42,7 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$OPENRAG/queue/tasks?task_statu
 
 - `workers.total_slots` vs `tasks.active` — are all slots occupied by tasks that never finish?
 - Pick a stuck task and read `details.failed_stage`, then `GET /indexer/task/{id}/error`.
-- Ray dashboard (Compose: add `-f ray-dashboard.docker-compose.yaml`, then `127.0.0.1:8265`) → Actors: are the `Indexer` actors alive?
+- Are the `Indexer` actors alive? On Compose, `docker compose exec openrag /app/.venv/bin/ray list actors` (`openrag-cpu` on a CPU deployment). Don't add the Ray dashboard overlay here: it recreates the container, and the stuck actors go with it.
 
 ## Likely causes, most common first
 
