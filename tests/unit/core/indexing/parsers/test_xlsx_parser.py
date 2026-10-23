@@ -127,6 +127,33 @@ def _edit_xml(document, edit, target="xl/worksheets/sheet1.xml"):
     return document.model_copy(update={"raw_bytes": output.getvalue()})
 
 
+def _transcode_xml_parts(document, xml_encoding):
+    """Rewrite OOXML text parts with an explicit encoding and BOM."""
+    import codecs
+    import zipfile
+
+    codec, declaration_encoding, bom = {
+        "utf-8-bom": ("utf-8", "UTF-8", codecs.BOM_UTF8),
+        "utf-16-le": ("utf-16-le", "UTF-16", codecs.BOM_UTF16_LE),
+        "utf-16-be": ("utf-16-be", "UTF-16", codecs.BOM_UTF16_BE),
+    }[xml_encoding]
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            data = source.read(name)
+            if name.endswith((".xml", ".rels")):
+                text = data.decode("utf-8")
+                if text.startswith("<?xml"):
+                    text = text.split("?>", 1)[1]
+                declaration = f'<?xml version="1.0" encoding="{declaration_encoding}"?>'
+                data = bom + (declaration + text).encode(codec)
+            dest.writestr(name, data)
+    return document.model_copy(update={"raw_bytes": output.getvalue()})
+
+
 def test_accepts_workbook_content_type_declared_as_default():
     from xml.etree import ElementTree as ET
 
@@ -158,6 +185,30 @@ def test_renders_numbers_dates_unicode_and_blank_columns():
     )
     [block] = list(XlsxParser().iter_batches(doc))
     assert "|  | 12 | 2025-01-02 | 2025-01-02T12:30:00 | 09:15:00 | true | café René 東京 |" in block.text
+
+
+@pytest.mark.parametrize("xml_encoding", ["utf-8-bom", "utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("use_shared_strings", [False, True])
+def test_preserves_unicode_from_bom_marked_ooxml_parts(xml_encoding, use_shared_strings):
+    rows = [
+        ["kind", "value"],
+        ["composed", "café"],
+        ["decomposed", "cafe\u0301"],
+        ["right-to-left", "مرحبا שלום"],
+        ["cjk", "東京 李明"],
+        ["emoji", "👩🏽‍💻 🧪"],
+        ["embedded-bom", "prefix\ufeffsuffix"],
+    ]
+    document = _document(rows)
+    if use_shared_strings:
+        document = _with_shared_strings(document)
+    document = _transcode_xml_parts(document, xml_encoding)
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_row_numbers"] == list(range(2, 8))
+    for _, value in rows[1:]:
+        assert value in block.text
 
 
 def test_preserves_error_cells_and_reports_missing_formula_caches():
@@ -345,6 +396,19 @@ def test_malformed_coordinates_or_xml_raise_domain_error(edit):
     doc = _edit_xml(_document([["a"], [1]]), edit)
     with pytest.raises(PipelineError):
         list(XlsxParser().iter_batches(doc))
+
+
+def test_mismatched_xml_encoding_is_rejected_before_reader_opens(monkeypatch):
+    doc = _edit_xml(
+        _document([["name"], ["René"]]),
+        lambda xml: '<?xml version="1.0" encoding="UTF-16"?>' + xml,
+    )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="valid XLSX") as error:
+        list(XlsxParser().iter_batches(doc))
+
+    assert error.value.code == "INVALID_XLSX"
 
 
 def test_header_and_sheet_limits():
