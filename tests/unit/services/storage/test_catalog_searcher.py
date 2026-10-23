@@ -145,7 +145,7 @@ async def test_surrounding_orphan_is_removed_after_real_search_expansion(multi):
     ]
     vectors.query_chunks_by_filter.return_value = [{"_id": 6, "file_id": "deleted", "partition": "a", "section_id": 6}]
     embedder = AsyncMock()
-    embedder.embed.return_value = [[0.1]]
+    embedder.embed_query.return_value = [[0.1]]
     repo = AsyncMock()
     repo.get_indexed_documents.return_value = {("a", "live"): datetime.now(UTC)}
     searcher = CatalogSearcher(VectorStoreSearcher(vectors, embedder, repo, "collection"), repo)

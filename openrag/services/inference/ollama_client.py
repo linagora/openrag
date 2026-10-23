@@ -214,6 +214,7 @@ class OllamaEmbedder(Embedder):
         *,
         dimension: int | None = None,
         timeout: float = 60.0,
+        query_timeout: float = 10.0,
         batch_size: int = 32,
         **_kwargs,
     ) -> None:
@@ -221,6 +222,7 @@ class OllamaEmbedder(Embedder):
         if not self._endpoint.endswith("/v1"):
             self._endpoint = f"{self._endpoint}/v1"
         self._model = model_name
+        self._query_timeout = query_timeout
         self._dimension: int | None = dimension
         # The OpenAI-compatible endpoint rejects sufficiently large input
         # arrays.  Indexing one parser batch can produce hundreds of chunks,
@@ -241,11 +243,33 @@ class OllamaEmbedder(Embedder):
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return await self._post_embeddings(texts)
+
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Embed search queries on the query budget: ``query_timeout``, one retry (#1078).
+
+        More queries than one batch take the indexing path.
+        """
+        if not texts:
+            return []
+        if len(texts) > self._batch_size:
+            return await self.embed(texts)
+        return await self._embed_query_batch(texts)
+
+    @with_inference_metrics("embed")
+    @with_circuit_breaker("embedder")
+    @with_retry(max_attempts=2)
+    async def _embed_query_batch(self, texts: list[str]) -> list[list[float]]:
+        return await self._post_embeddings(texts, timeout=self._query_timeout)
+
+    async def _post_embeddings(self, texts: list[str], *, timeout: float | None = None) -> list[list[float]]:
+        """One embeddings request; *timeout* replaces the client's own when given."""
         body = {"model": self._model, "input": texts}
+        post_kwargs = {} if timeout is None else {"timeout": timeout}
         try:
-            resp = await self._client.post(f"{self._endpoint}/embeddings", json=body)
+            resp = await self._client.post(f"{self._endpoint}/embeddings", json=body, **post_kwargs)
             resp.raise_for_status()
-        # Retryable statuses so @with_retry above actually fires (#704).
+        # Retryable statuses so the callers' @with_retry actually fires (#704).
         # TimeoutException before TransportError (it is a subclass); the broader
         # net catches a mid-request connection reset (httpx ReadError) too.
         except httpx.TimeoutException as exc:

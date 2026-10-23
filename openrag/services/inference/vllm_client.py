@@ -575,6 +575,7 @@ class VLLMEmbedder(Embedder):
         max_model_len: int | None = None,
         dimension: int | None = None,
         timeout: float = 120.0,
+        query_timeout: float = 10.0,
         batch_size: int = 32,
         embed_concurrency: int = 4,
         api_key: str = "",
@@ -583,6 +584,7 @@ class VLLMEmbedder(Embedder):
         self._endpoint = endpoint.rstrip("/")
         self._model = model_name
         self._max_model_len = max_model_len
+        self._query_timeout = query_timeout
         # The server's own max_model_len, read from /models by served_window()
         # or once the server refuses our truncation (see
         # _lower_truncation_to_served). None while unknown.
@@ -774,23 +776,50 @@ class VLLMEmbedder(Embedder):
                 return int(entry["max_model_len"])
         return None
 
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Embed search queries on the query budget: ``query_timeout``, one retry.
+
+        Indexing keeps ``timeout`` and two retries, sized for big batches. A
+        search embeds a few short queries while a user waits, and on that budget
+        an embedder that stopped answering held a chat for minutes (#1078).
+        More queries than one batch take the indexing path.
+        """
+        if not texts:
+            return []
+        if len(texts) > self._batch_size:
+            return await self.embed(texts)
+        return await self._embed_query_batch(texts)
+
+    @with_inference_metrics("embed")
+    @with_circuit_breaker("embedder")
+    @with_retry(max_attempts=2)
+    async def _embed_query_batch(self, texts: list[str]) -> list[list[float]]:
+        return await self._post_embeddings(texts, timeout=self._query_timeout)
+
     @with_inference_metrics("embed")
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
     async def _embed_batch(self, texts: list[str], *, offset: int = 0) -> list[list[float]]:
+        return await self._post_embeddings(texts, offset=offset)
+
+    async def _post_embeddings(
+        self, texts: list[str], *, offset: int = 0, timeout: float | None = None
+    ) -> list[list[float]]:
+        """One embeddings request; *timeout* replaces the client's own when given."""
         url = f"{self._endpoint}/embeddings"
+        post_kwargs = {} if timeout is None else {"timeout": timeout}
         try:
             body = self._request_body(texts)
-            resp = await self._client.post(url, json=body)
+            resp = await self._client.post(url, json=body, **post_kwargs)
             if resp.status_code == 400 and await self._lower_truncation_to_served(
                 resp, body.get("truncate_prompt_tokens")
             ):
-                resp = await self._client.post(url, json=self._request_body(texts))
+                resp = await self._client.post(url, json=self._request_body(texts), **post_kwargs)
             resp.raise_for_status()
-        # Transport failures must carry a retryable status so @with_retry above
-        # actually fires (#704) — the translation happens inside the retried
-        # body, so the decorator never sees the underlying httpx exception and
-        # judges retryability purely on the status code we choose here.
+        # Transport failures must carry a retryable status so the callers'
+        # @with_retry actually fires (#704) — the translation happens inside the
+        # retried body, so the decorator never sees the underlying httpx exception
+        # and judges retryability purely on the status code we choose here.
         #
         # TimeoutException is caught first: it is a subclass of TransportError,
         # so the broader clause below would otherwise swallow it as a 503. The
