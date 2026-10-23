@@ -1,4 +1,4 @@
-"""Bound OOXML work before either spreadsheet backend allocates a worksheet."""
+"""Bound OOXML work before OpenPyXL allocates worksheet objects."""
 
 from __future__ import annotations
 
@@ -32,8 +32,6 @@ class XlsxLimits:
     max_columns: int = 4096
     max_cells: int = 5_000_000
     max_sheet_area: int = 5_000_000
-    max_calamine_cells: int = 1_000_000
-    max_calamine_text_bytes: int = 64 * 1024 * 1024
     max_cell_chars: int = 32767
     max_batch_bytes: int = 2 * 1024 * 1024
 
@@ -53,8 +51,6 @@ class SheetInfo:
     rows: int
     columns: int
     missing_formula_values: int
-    error_cells: int
-    text_bytes: int
 
 
 def invalid(message: str):
@@ -81,9 +77,9 @@ def _content_type(types, part_name: str) -> str | None:
     )
 
 
-def _shared_string_sizes(archive, types, limits):
-    """Count referenced text expansion before Calamine clones shared strings."""
-    sizes = []
+def _shared_string_count(archive, types, limits):
+    """Validate the bounded shared-string table and return its entry count."""
+    count = 0
     paths = [
         node.get("PartName", "").lstrip("/")
         for node in types
@@ -104,21 +100,21 @@ def _shared_string_sizes(archive, types, limits):
                     texts = [node.text or "" for node in element.iter() if node.tag.endswith("}t")]
                     if sum(map(len, texts)) > limits.max_cell_chars:
                         raise limit("XLSX shared string exceeds the character limit")
-                    sizes.append(sum(len(text.encode("utf-8")) for text in texts))
-                    if len(sizes) > limits.max_shared_strings:
+                    count += 1
+                    if count > limits.max_shared_strings:
                         raise limit("XLSX shared string count exceeds the memory limit")
                     if len(stack) > 1:
                         stack[-2].remove(element)
                     element.clear()
                 stack.pop()
-    return sizes
+    return count
 
 
 def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
     """Inspect actual cells, not untrusted dimension/count declarations.
 
     Retain at most one XML row. This is an intentional extra sequential read:
-    it prevents a sparse used range from allocating a huge Calamine matrix.
+    it prevents malformed dimensions from driving excessive reader work.
     Shared strings/styles are capped separately because readers load them eagerly.
     """
     try:
@@ -167,7 +163,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 if part.get("ContentType", "").endswith(".styles+xml"):
                     if archive.getinfo(part.get("PartName", "").lstrip("/")).file_size > limits.max_metadata_bytes:
                         raise limit("XLSX styles exceed the memory limit")
-            shared_sizes = _shared_string_sizes(archive, types, limits)
+            shared_count = _shared_string_count(archive, types, limits)
             relationship_nodes = list(xml("xl/_rels/workbook.xml.rels"))
             relationship_ids = [relationship.get("Id") for relationship in relationship_nodes]
             if any(not rel_id for rel_id in relationship_ids) or len(set(relationship_ids)) != len(relationship_ids):
@@ -199,7 +195,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 if path in worksheet_paths:
                     raise invalid("XLSX worksheet relationships contain a duplicate target")
                 worksheet_paths.add(path)
-                max_row = max_col = missing = errors = text_bytes = 0
+                max_row = max_col = missing = 0
                 previous_row = current_row = previous_col = 0
                 # clear completed children so memory does not grow with row count.
                 with archive.open(path) as stream:
@@ -238,17 +234,12 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                             formula = element.find("{*}f")
                             if formula is not None and (value is None or not value.text):
                                 missing += 1
-                            if element.get("t") == "e":
-                                errors += 1
                             if sum(len(t.text or "") for t in element.iter()) > limits.max_cell_chars:
                                 raise limit("XLSX cell text exceeds the character limit")
                             if element.get("t") == "s":
                                 string_index = int(value.text) if value is not None and value.text else -1
-                                if not 0 <= string_index < len(shared_sizes):
+                                if not 0 <= string_index < shared_count:
                                     raise invalid("XLSX cell references a missing shared string")
-                                text_bytes += shared_sizes[string_index]
-                            else:
-                                text_bytes += sum(len((t.text or "").encode("utf-8")) for t in element.iter())
                         if tag in {"c", "row"} or len(stack) <= 2:
                             if len(stack) > 1:
                                 stack[-2].remove(element)
@@ -265,8 +256,6 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                         max_row,
                         max_col,
                         missing,
-                        errors,
-                        text_bytes,
                     )
                 )
             return infos

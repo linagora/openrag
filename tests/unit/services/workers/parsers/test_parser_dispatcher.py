@@ -54,8 +54,6 @@ def _config(
         xlsx_header_row=3,
         xlsx_sheet_header_rows={"People": 2},
         xlsx_limits={"max_batch_bytes": 1024},
-        xlsx_backend="calamine",
-        xlsx_fallback_backend="openpyxl",
     )
     vlm = SimpleNamespace(
         base_url=vlm_base_url,
@@ -116,7 +114,7 @@ def test_resolve_audio_backend_openai() -> None:
     assert disp._resolve_audio_backend("mp3") == "audio_client"
 
 
-def test_xlsx_builder_passes_streaming_backend_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_xlsx_builder_passes_streaming_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     import services.workers.parsers.parser_dispatcher as dispatcher
 
     monkeypatch.setattr(dispatcher, "_create", lambda module, name, **kwargs: (module, name, kwargs))
@@ -129,8 +127,6 @@ def test_xlsx_builder_passes_streaming_backend_configuration(monkeypatch: pytest
         "batch_size": 512,
         "header_row": 3,
         "sheet_header_rows": {"People": 2},
-        "backend": "calamine",
-        "fallback_backend": "openpyxl",
         "limits": {"max_batch_bytes": 1024},
     }
 
