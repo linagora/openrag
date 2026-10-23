@@ -18,8 +18,8 @@ import sys
 import tempfile
 import time
 import zipfile
-from xml.etree import ElementTree as ET
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 PROFILES = {
     "rows-10000": (10000, 4, 40),
@@ -101,11 +101,11 @@ def convert_shared_strings(path):
     converted.replace(path)
 
 
-def measure(path, backend):
+def measure(path):
     from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
     from core.models.document import Document, DocumentType
 
-    parser = XlsxParser(backend=backend, fallback_backend=None)
+    parser = XlsxParser()
     document = Document(filename=path.name, source_path=str(path), content_type=DocumentType.XLSX)
     started = time.perf_counter()
     batches = rows = max_bytes = 0
@@ -120,7 +120,7 @@ def measure(path, backend):
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     peak_mib = peak / (1024**2 if sys.platform == "darwin" else 1024)
     return {
-        "backend": backend,
+        "backend": "openpyxl",
         "seconds": round(elapsed, 3),
         "peak_rss_mib": round(peak_mib, 2),
         "rows": rows,
@@ -135,14 +135,14 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("/tmp/xlsx-audit.json"))
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--generate", choices=PROFILES)
-    parser.add_argument("--measure", choices=["openpyxl", "calamine"])
+    parser.add_argument("--measure", action="store_true")
     parser.add_argument("--file", type=Path)
     args = parser.parse_args()
     if args.generate:
         generate(args.file, args.generate)
         return
     if args.measure:
-        print(json.dumps(measure(args.file, args.measure)))
+        print(json.dumps(measure(args.file)))
         return
     results = []
     script = str(Path(__file__).resolve())
@@ -151,25 +151,24 @@ def main():
             path = Path(temp) / f"{profile}.xlsx"
             subprocess.run([sys.executable, script, "--generate", profile, "--file", str(path)], check=True)
             for repeat in range(args.repeats):
-                for backend in ("openpyxl", "calamine"):
-                    result = subprocess.run(
-                        [sys.executable, script, "--measure", backend, "--file", str(path)],
-                        capture_output=True,
-                        text=True,
-                    )
-                    if result.returncode:
-                        raise RuntimeError(result.stderr)
-                    record = json.loads(result.stdout)
-                    record.update(profile=profile, repeat=repeat + 1, archive_bytes=path.stat().st_size)
-                    assert record["rows"] == PROFILES[profile][0]
-                    results.append(record)
-                    print(f"{profile} {backend}: {record['seconds']} s, {record['peak_rss_mib']} MiB", flush=True)
-            assert len({r["sha256"] for r in results if r["profile"] == profile}) == 1, "Backend output mismatch"
+                result = subprocess.run(
+                    [sys.executable, script, "--measure", "--file", str(path)],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode:
+                    raise RuntimeError(result.stderr)
+                record = json.loads(result.stdout)
+                record.update(profile=profile, repeat=repeat + 1, archive_bytes=path.stat().st_size)
+                assert record["rows"] == PROFILES[profile][0]
+                results.append(record)
+                print(f"{profile}: {record['seconds']} s, {record['peak_rss_mib']} MiB", flush=True)
+            assert len({r["sha256"] for r in results if r["profile"] == profile}) == 1, "Output mismatch"
     report = {
         "platform": platform.platform(),
         "python": sys.version,
         "architecture": platform.machine(),
-        "libraries": {name: importlib.metadata.version(name) for name in ("openpyxl", "python-calamine")},
+        "libraries": {"openpyxl": importlib.metadata.version("openpyxl")},
         "runs": results,
     }
     args.output.write_text(json.dumps(report, indent=2) + "\n")

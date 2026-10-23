@@ -37,9 +37,8 @@ def _workbook_bytes() -> bytes:
     return output.getvalue()
 
 
-@pytest.mark.parametrize("backend", ["calamine", "openpyxl"])
-def test_extracts_visible_sheets_with_physical_rows_and_stable_metadata(backend: str):
-    parser = XlsxParser(batch_size=1, backend=backend, fallback_backend=None)
+def test_extracts_visible_sheets_with_physical_rows_and_stable_metadata():
+    parser = XlsxParser(batch_size=1)
     document = Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes())
 
     blocks = list(parser.iter_batches(document))
@@ -56,43 +55,20 @@ def test_extracts_visible_sheets_with_physical_rows_and_stable_metadata(backend:
     assert "must not be indexed" not in "\n".join(block.text for block in blocks)
 
 
-def test_default_reader_uses_openpyxl_without_fallback():
-    parser = XlsxParser()
+def test_reader_is_openpyxl_only():
+    [block] = list(XlsxParser().iter_batches(_document([["name"], ["Alice"]])))
 
-    assert parser.backend == "openpyxl"
-    assert parser.fallback_backend is None
-
-
-def test_falls_back_before_emitting_any_batch(monkeypatch):
-    def fail(_source, _infos):
-        raise module._BackendReadError("backend unavailable")
-        yield
-
-    monkeypatch.setattr(module, "_calamine_sheets", fail)
-    parser = XlsxParser(backend="calamine", fallback_backend="openpyxl")
-
-    blocks = list(
-        parser.iter_batches(
-            Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes())
-        )
-    )
-
-    assert blocks
-    assert {block.metadata["spreadsheet_backend"] for block in blocks} == {"openpyxl"}
-    assert all(block.metadata["spreadsheet_fallback_used"] for block in blocks)
+    assert block.metadata["spreadsheet_backend"] == "openpyxl"
+    assert "spreadsheet_fallback_used" not in block.metadata
 
 
 def test_rejects_non_xlsx_archives_and_resource_amplification():
     document = Document(filename="fake.xlsx", content_type=DocumentType.XLSX, raw_bytes=b"not a zip")
     with pytest.raises(PipelineError, match="valid XLSX"):
-        list(XlsxParser(backend="openpyxl", fallback_backend=None).iter_batches(document))
+        list(XlsxParser().iter_batches(document))
 
     document = Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes())
-    parser = XlsxParser(
-        backend="openpyxl",
-        fallback_backend=None,
-        limits=XlsxLimits(max_uncompressed_bytes=1),
-    )
+    parser = XlsxParser(limits=XlsxLimits(max_uncompressed_bytes=1))
     with pytest.raises(PipelineError, match="extraction limit"):
         list(parser.iter_batches(document))
 
@@ -106,7 +82,7 @@ def test_rejects_workbook_without_visible_data_rows():
 
     document = Document(filename="empty.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
     with pytest.raises(NoIndexableContentError, match="no visible worksheet"):
-        list(XlsxParser(backend="openpyxl", fallback_backend=None).iter_batches(document))
+        list(XlsxParser().iter_batches(document))
 
 
 def test_names_a_trailing_header_cell_when_its_column_contains_data():
@@ -119,7 +95,7 @@ def test_names_a_trailing_header_cell_when_its_column_contains_data():
     workbook.close()
 
     document = Document(filename="wide.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
-    [block] = list(XlsxParser(backend="openpyxl", fallback_backend=None).iter_batches(document))
+    [block] = list(XlsxParser().iter_batches(document))
 
     assert block.metadata["table_columns"] == ["name", "column_2"]
     assert "unexpected" in block.text
@@ -171,7 +147,7 @@ def test_accepts_workbook_content_type_declared_as_default():
     assert "Alice" in block.text
 
 
-def test_backends_agree_on_numbers_dates_unicode_and_blank_columns():
+def test_renders_numbers_dates_unicode_and_blank_columns():
     from datetime import datetime, time
 
     doc = _document(
@@ -180,30 +156,24 @@ def test_backends_agree_on_numbers_dates_unicode_and_blank_columns():
             [None, 12, date(2025, 1, 2), datetime(2025, 1, 2, 12, 30), time(9, 15), True, "café René 東京"],
         ]
     )
-    blocks = [list(XlsxParser(backend=backend).iter_batches(doc))[0] for backend in ("openpyxl", "calamine")]
-    assert blocks[0].text == blocks[1].text
-    assert "|  | 12 | 2025-01-02 | 2025-01-02T12:30:00 | 09:15:00 | true | café René 東京 |" in blocks[0].text
+    [block] = list(XlsxParser().iter_batches(doc))
+    assert "|  | 12 | 2025-01-02 | 2025-01-02T12:30:00 | 09:15:00 | true | café René 東京 |" in block.text
 
 
 def test_preserves_error_cells_and_reports_missing_formula_caches():
     doc = _document([["error", "formula"], ["#DIV/0!", "=1+1"]])
-    [block] = list(XlsxParser(backend="calamine", fallback_backend="openpyxl").iter_batches(doc))
+    [block] = list(XlsxParser().iter_batches(doc))
     assert "#DIV/0!" in block.text
     assert block.metadata["sheet_missing_formula_values"] == 1
     assert block.metadata["spreadsheet_backend"] == "openpyxl"
-    assert block.metadata["spreadsheet_fallback_from"] == "calamine"
-    assert "error cells" in block.metadata["spreadsheet_fallback_reason"]
-    with pytest.raises(PipelineError, match="error cells"):
-        list(XlsxParser(backend="calamine", fallback_backend=None).iter_batches(doc))
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
-def test_cached_formula_values_are_returned_without_execution(backend):
+def test_cached_formula_values_are_returned_without_execution():
     doc = _document([["formula"], ["=1+1"]])
     doc = _edit_xml(
         doc, lambda xml: xml.replace("<v />", "<v>2</v>").replace("<v/>", "<v>2</v>").replace("<v></v>", "<v>2</v>")
     )
-    [block] = list(XlsxParser(backend=backend).iter_batches(doc))
+    [block] = list(XlsxParser().iter_batches(doc))
     assert "| 2 |" in block.text
     assert block.metadata["sheet_missing_formula_values"] == 0
 
@@ -228,17 +198,6 @@ def test_sparse_rectangle_rejected_before_reader_allocation(monkeypatch):
         list(XlsxParser().iter_batches(doc))
 
 
-def test_calamine_large_rectangle_falls_back_before_first_batch():
-    doc = _document([["id", "name"], [1, "Alice"], [2, "Bob"]])
-    blocks = list(
-        XlsxParser(
-            backend="calamine", fallback_backend="openpyxl", limits=XlsxLimits(max_calamine_cells=4)
-        ).iter_batches(doc)
-    )
-    assert len(blocks) == 1
-    assert blocks[0].metadata["spreadsheet_fallback_used"]
-
-
 def test_batch_bytes_bound_accumulation_without_losing_rows():
     doc = _document([["text"], *[["café & < > | " * 10] for _ in range(7)]])
     blocks = list(XlsxParser(batch_size=10_000, limits=XlsxLimits(max_batch_bytes=800)).iter_batches(doc))
@@ -259,21 +218,19 @@ def test_header_names_are_unique_even_with_generated_name_collisions():
     assert block.metadata["table_columns"] == ["column_3", "name", "column_3_2", "name_3", "name_2"]
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
-def test_whitespace_only_cells_do_not_become_headers_or_data(backend):
+def test_whitespace_only_cells_do_not_become_headers_or_data():
     doc = _document([["title"], ["name", "   "], ["Alice", "\t"], [" ", "\t"], ["Bob", "Lyon"]])
 
-    [block] = list(XlsxParser(backend=backend, header_row=2).iter_batches(doc))
+    [block] = list(XlsxParser(header_row=2).iter_batches(doc))
 
     assert block.metadata["table_columns"] == ["name", "column_2"]
     assert block.metadata["table_row_numbers"] == [3, 5]
     assert "Alice" in block.text and "Bob" in block.text
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
-def test_explicit_whitespace_only_header_is_rejected(backend):
+def test_explicit_whitespace_only_header_is_rejected():
     with pytest.raises(PipelineError, match="selected header row 1 is empty"):
-        list(XlsxParser(backend=backend, header_row=1).iter_batches(_document([["   ", "\t"], [1, 2]])))
+        list(XlsxParser(header_row=1).iter_batches(_document([["   ", "\t"], [1, 2]])))
 
 
 def test_rejects_case_insensitive_duplicate_sheet_names_before_reader_opens(monkeypatch):
@@ -328,32 +285,6 @@ def test_rejects_two_sheets_pointing_to_the_same_worksheet(monkeypatch):
         list(XlsxParser().iter_batches(doc))
 
 
-@pytest.mark.parametrize("failure", [TimeoutError("timeout"), MemoryError("memory"), RuntimeError("bug")])
-def test_fallback_does_not_swallow_resource_failures_or_programming_errors(monkeypatch, failure):
-    def fail(*_):
-        raise failure
-        yield
-
-    monkeypatch.setattr(module, "_calamine_sheets", fail)
-    with pytest.raises(type(failure), match=str(failure)):
-        list(XlsxParser(backend="calamine", fallback_backend="openpyxl").iter_batches(_document([["a"], [1]])))
-
-
-def test_no_fallback_replay_after_a_batch_has_been_emitted(monkeypatch):
-    original = module._calamine_sheets
-
-    def fail_late(source, infos):
-        with module.closing(original(source, infos)) as sheets:
-            yield next(sheets)
-        raise module._BackendReadError("late failure")
-
-    monkeypatch.setattr(module, "_calamine_sheets", fail_late)
-    batches = XlsxParser(backend="calamine", fallback_backend="openpyxl").iter_batches(_document([["a"], [1]]))
-    assert next(batches).metadata["spreadsheet_backend"] == "calamine"
-    with pytest.raises(module._BackendReadError, match="late failure"):
-        next(batches)
-
-
 def test_early_consumer_close_closes_workbook(monkeypatch):
     import openpyxl
 
@@ -372,11 +303,7 @@ def test_early_consumer_close_closes_workbook(monkeypatch):
         return workbook
 
     monkeypatch.setattr(openpyxl, "load_workbook", load)
-    batches = XlsxParser(
-        batch_size=1,
-        backend="openpyxl",
-        fallback_backend=None,
-    ).iter_batches(_document([["a"], [1], [2]]))
+    batches = XlsxParser(batch_size=1).iter_batches(_document([["a"], [1], [2]]))
     next(batches)
     batches.close()
     assert closed == [True]
@@ -502,25 +429,17 @@ def _with_shared_strings(document):
     return document.model_copy(update={"raw_bytes": output.getvalue()})
 
 
-def test_shared_string_expansion_is_bounded_before_calamine_loads_sheet():
+def test_shared_string_count_is_bounded_before_openpyxl_loads_sheet(monkeypatch):
     doc = _with_shared_strings(_document([["text"], *[["long shared text " * 10] for _ in range(10)]]))
-    [block] = list(
-        XlsxParser(
-            backend="calamine", fallback_backend="openpyxl", limits=XlsxLimits(max_calamine_text_bytes=1000)
-        ).iter_batches(doc)
-    )
-    assert block.metadata["spreadsheet_fallback_used"]
-    assert block.metadata["table_row_numbers"] == list(range(2, 12))
-    assert block.text.count("long shared text ") == 100
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
     with pytest.raises(PipelineError, match="shared string count"):
         list(XlsxParser(limits=XlsxLimits(max_shared_strings=1)).iter_batches(doc))
 
 
-def test_shared_string_backend_parity():
+def test_shared_strings_are_preserved():
     doc = _with_shared_strings(_document([["name", "city"], ["René", "Paris"], ["René", "Paris"]]))
-    results = [list(XlsxParser(backend=backend).iter_batches(doc))[0].text for backend in ("openpyxl", "calamine")]
-    assert results[0] == results[1]
-    assert results[0].count("René") == 2
+    [block] = list(XlsxParser().iter_batches(doc))
+    assert block.text.count("René") == 2
 
 
 @pytest.mark.parametrize("strategy", ["recursive", "structured"])
@@ -566,8 +485,7 @@ def test_both_chunkers_preserve_xlsx_identity_across_sheets_and_split_cells(stra
     assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
-def test_explicit_header_skips_report_title_and_preserves_physical_citations(backend):
+def test_explicit_header_skips_report_title_and_preserves_physical_citations():
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Report"
@@ -581,9 +499,7 @@ def test_explicit_header_skips_report_title_and_preserves_physical_citations(bac
     output = BytesIO()
     workbook.save(output)
     workbook.close()
-    blocks = list(
-        XlsxParser(backend=backend, header_row=3, batch_size=1).iter_batches(Document(raw_bytes=output.getvalue()))
-    )
+    blocks = list(XlsxParser(header_row=3, batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
     assert [b.metadata["table_row_numbers"] for b in blocks] == [[4], [6]]
     assert all(b.metadata["table_columns"] == ["name", "city"] for b in blocks)
     assert all(b.metadata["table_header_range"] == "'Report'!A3:B3" for b in blocks)
@@ -593,11 +509,10 @@ def test_explicit_header_skips_report_title_and_preserves_physical_citations(bac
     assert "René" in blocks[1].text
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
 @pytest.mark.parametrize("header_row, message", [(1, "empty"), (99, "missing")])
-def test_invalid_selected_header_is_not_silently_inferred(backend, header_row, message):
+def test_invalid_selected_header_is_not_silently_inferred(header_row, message):
     with pytest.raises(PipelineError, match=message):
-        list(XlsxParser(backend=backend, header_row=header_row).iter_batches(Document(raw_bytes=_workbook_bytes())))
+        list(XlsxParser(header_row=header_row).iter_batches(Document(raw_bytes=_workbook_bytes())))
 
 
 @pytest.mark.parametrize("header_row", [0, -1, True, 1.5, "3", 1_048_577])
@@ -608,8 +523,7 @@ def test_header_row_requires_a_valid_physical_excel_row(header_row):
         XlsxParser(header_row=header_row)
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
-def test_sheet_headers_override_global_and_allow_automatic_selection(backend):
+def test_sheet_headers_override_global_and_allow_automatic_selection():
     workbook = Workbook()
     workbook.active.title = "People"
     for sheet in (workbook.active, workbook.create_sheet("Projects"), workbook.create_sheet("Notes")):
@@ -621,7 +535,7 @@ def test_sheet_headers_override_global_and_allow_automatic_selection(backend):
     workbook.save(output)
     workbook.close()
     mapping = {"People": 3, "Notes": None}
-    parser = XlsxParser(backend=backend, batch_size=1, header_row=2, sheet_header_rows=mapping)
+    parser = XlsxParser(batch_size=1, header_row=2, sheet_header_rows=mapping)
     mapping["People"] = 4  # The parser owns a snapshot of its configuration.
     blocks = list(parser.iter_batches(Document(raw_bytes=output.getvalue())))
     by_sheet = {
@@ -641,19 +555,14 @@ def test_sheet_override_validation_precedes_backend_and_emission(overrides, monk
     def unexpected(*args):
         pytest.fail("invalid overrides must fail before opening a reader")
 
-    monkeypatch.setattr(parser, "_backend_sheets", unexpected)
+    monkeypatch.setattr(module, "_openpyxl_sheets", unexpected)
     with pytest.raises(PipelineError):
         next(parser.iter_batches(Document(raw_bytes=_workbook_bytes())))
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
-def test_sheet_override_empty_header_is_rejected(backend):
+def test_sheet_override_empty_header_is_rejected():
     with pytest.raises(PipelineError, match="empty"):
-        list(
-            XlsxParser(backend=backend, sheet_header_rows={"People": 1}).iter_batches(
-                Document(raw_bytes=_workbook_bytes())
-            )
-        )
+        list(XlsxParser(sheet_header_rows={"People": 1}).iter_batches(Document(raw_bytes=_workbook_bytes())))
 
 
 @pytest.mark.parametrize(
@@ -688,9 +597,8 @@ def test_loader_config_validates_sheet_rows():
             LoaderConfig(xlsx_sheet_header_rows={"People": invalid_row})
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
 @pytest.mark.parametrize("repeated", [False, True])
-def test_auto_header_skips_title_and_preserves_rows(backend, repeated):
+def test_auto_header_skips_title_and_preserves_rows(repeated):
     wb = Workbook()
     ws = wb.active
     ws.append(["Quarterly report"] * (3 if repeated else 1))
@@ -700,10 +608,30 @@ def test_auto_header_skips_title_and_preserves_rows(backend, repeated):
     ws.append(["R-2", "Bob", "Second"])
     output = BytesIO()
     wb.save(output)
-    blocks = list(XlsxParser(backend=backend, batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+    blocks = list(XlsxParser(batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
     assert [b.metadata["table_row_numbers"] for b in blocks] == [[4], [5]]
     assert all(b.metadata["table_header_row"] == 3 for b in blocks)
     assert all(b.metadata["table_columns"] == ["id", "name", "summary"] for b in blocks)
+
+
+def test_auto_header_skips_multiple_narrow_preamble_rows():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Regional report", "Quarter 4"])
+    sheet.append(["Prepared by", "Accessibility team"])
+    sheet.append([])
+    sheet.append(["id", "service", "region", "policy"])
+    sheet.append(["R-1", "Screen reader desk", "West", "Contact allowed"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_header_row"] == 4
+    assert block.metadata["table_row_numbers"] == [5]
+    assert block.metadata["sheet_context_row_numbers"] == [1, 2]
+    assert block.metadata["table_columns"] == ["id", "service", "region", "policy"]
 
 
 def test_auto_header_preserves_single_column_and_explicit_title():
@@ -732,6 +660,13 @@ def test_auto_header_scan_is_bounded_and_replays_all_rows():
 
 def test_auto_header_keeps_ambiguous_header_and_does_not_skip_numeric_data():
     original = [["name", "name"], [1, 2], [3, 4]]
+    selected, replay = module._detect_header(iter(original), 1024)
+    assert selected == 1
+    assert list(replay) == original
+
+
+def test_auto_header_keeps_equal_width_text_rows_ambiguous():
+    original = [["code", "label"], ["A-1", "First"], ["A-2", "Second"]]
     selected, replay = module._detect_header(iter(original), 1024)
     assert selected == 1
     assert list(replay) == original
@@ -842,8 +777,7 @@ def test_invalid_sheet_visibility_is_rejected_before_reader_opens(state, monkeyp
     assert error.value.code == "INVALID_XLSX"
 
 
-@pytest.mark.parametrize("backend", ["openpyxl", "calamine"])
-def test_very_hidden_sheet_is_excluded_and_false_zero_rows_keep_exact_citations(backend):
+def test_very_hidden_sheet_is_excluded_and_false_zero_rows_keep_exact_citations():
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "O'Brien directory"
@@ -859,7 +793,7 @@ def test_very_hidden_sheet_is_excluded_and_false_zero_rows_keep_exact_citations(
     workbook.save(output)
     workbook.close()
 
-    blocks = list(XlsxParser(backend=backend, batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+    blocks = list(XlsxParser(batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
 
     assert len(blocks) == 2
     assert "| 0 | false |" in blocks[0].text
@@ -871,3 +805,20 @@ def test_very_hidden_sheet_is_excluded_and_false_zero_rows_keep_exact_citations(
     ]
     assert all(block.metadata["hidden_sheets_skipped"] == 1 for block in blocks)
     assert all("must not be indexed" not in block.text for block in blocks)
+
+
+def test_hidden_rows_and_columns_remain_indexable():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "internal_note"])
+    sheet.append(["R-1", "still searchable"])
+    sheet.row_dimensions[2].hidden = True
+    sheet.column_dimensions["B"].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_row_numbers"] == [2]
+    assert "still searchable" in block.text
