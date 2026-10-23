@@ -685,6 +685,10 @@ class IndexerWorkerActor:
                 await asyncio.gather(worker_lease, return_exceptions=True)
                 await end_worker_lease(self._task_state_manager, task_id, logger=self._logger)
 
+    async def close_stage_writer(self) -> None:
+        """Drain this worker's bounded stage-history queue before retirement."""
+        await self._worker.close_stage_writer()
+
     async def _report_task_failure(
         self,
         task_id: str,

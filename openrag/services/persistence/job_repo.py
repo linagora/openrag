@@ -44,7 +44,7 @@ _STAGE_EVENT_COLUMNS = (
 _STAGE_STATE_COLUMNS = (
     "task_id, attempt, latest_sequence, snapshot_revision, tracking_version, phase, "
     "current_stage_id, current_stage_rank, position_score, stage_started_at, current_invocation_id, "
-    "persisted_through_sequence, expected_final_sequence, known_loss, known_conflict, "
+    "interrupted_invocation_id, persisted_through_sequence, expected_final_sequence, known_loss, known_conflict, "
     "has_open_invocation, history_truncated"
 )
 
@@ -231,6 +231,10 @@ class PgJobRepository(JobRepository):
                 for task_id in task_ids:
                     task_conflicted_attempts: set[int] = set()
                     try:
+                        # Serialize all writers for one task before reading its
+                        # event coverage. The version marker below only updates
+                        # once, so it cannot serve as a lock for later batches.
+                        await connection.fetchrow("SELECT id FROM jobs WHERE id = $1 FOR UPDATE", task_id)
                         await connection.execute(
                             "UPDATE jobs SET stage_tracking_version = 1 WHERE id = $1 AND stage_tracking_version IS DISTINCT FROM 1",
                             task_id,
@@ -498,11 +502,11 @@ async def _upsert_stage_summary(
         INSERT INTO job_stage_state (
             task_id, attempt, latest_sequence, snapshot_revision, tracking_version, phase,
             current_stage_id, current_stage_rank, position_score, stage_started_at,
-            current_invocation_id, persisted_through_sequence, expected_final_sequence,
+            current_invocation_id, interrupted_invocation_id, persisted_through_sequence, expected_final_sequence,
             known_loss, known_conflict, has_open_invocation, history_truncated, updated_at
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false, $15, $16, now()
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, false, $16, $17, now()
         )
         ON CONFLICT (task_id) DO UPDATE SET
             attempt = EXCLUDED.attempt,
@@ -515,12 +519,16 @@ async def _upsert_stage_summary(
             position_score = EXCLUDED.position_score,
             stage_started_at = EXCLUDED.stage_started_at,
             current_invocation_id = EXCLUDED.current_invocation_id,
+            interrupted_invocation_id = EXCLUDED.interrupted_invocation_id,
             persisted_through_sequence = CASE
                 WHEN EXCLUDED.attempt > job_stage_state.attempt THEN EXCLUDED.persisted_through_sequence
                 ELSE GREATEST(job_stage_state.persisted_through_sequence, EXCLUDED.persisted_through_sequence)
             END,
             expected_final_sequence = CASE
                 WHEN EXCLUDED.attempt > job_stage_state.attempt THEN EXCLUDED.expected_final_sequence
+                WHEN job_stage_state.expected_final_sequence IS NOT NULL
+                    AND job_stage_state.expected_final_sequence < EXCLUDED.latest_sequence
+                    THEN EXCLUDED.expected_final_sequence
                 ELSE COALESCE(job_stage_state.expected_final_sequence, EXCLUDED.expected_final_sequence)
             END,
             known_loss = CASE
@@ -555,6 +563,7 @@ async def _upsert_stage_summary(
         summary.position_score,
         summary.stage_started_at,
         summary.current_invocation_id,
+        summary.interrupted_invocation_id,
         persisted_through_sequence,
         summary.expected_final_sequence,
         summary.known_loss,
