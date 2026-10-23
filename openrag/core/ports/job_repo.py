@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from datetime import datetime
 
 from core.models.catalog import IndexationJob
+from core.models.stage_progress import (
+    DurableStageProgress,
+    StageProgressEvent,
+    StageProgressEventCursor,
+    StageProgressEventPage,
+    StageProgressSummary,
+    StageProgressWriteResult,
+)
 
 
 class JobRepository(ABC):
@@ -29,7 +38,7 @@ class JobRepository(ABC):
         statuses: list[str] | None = None,
         user_id: int | None = None,
         offset: int = 0,
-        limit: int = 50,
+        limit: int | None = 50,
     ) -> list[IndexationJob]: ...
 
     @abstractmethod
@@ -48,6 +57,29 @@ class JobRepository(ABC):
         At least one filter is required: an unfiltered read would scan the
         whole retention window, which is what this narrow read exists to avoid.
         """
+
+    @abstractmethod
+    async def write_stage_progress(
+        self,
+        *,
+        events: Sequence[StageProgressEvent],
+        summaries: Sequence[StageProgressSummary],
+    ) -> StageProgressWriteResult:
+        """Persist bounded, idempotent stage observations and their summary."""
+
+    @abstractmethod
+    async def get_stage_progress_summaries(self, task_ids: list[str]) -> dict[str, DurableStageProgress]:
+        """Bulk-read compact stage summaries without loading event histories."""
+
+    @abstractmethod
+    async def get_stage_progress_events(
+        self,
+        task_id: str,
+        *,
+        before: StageProgressEventCursor | None = None,
+        limit: int = 100,
+    ) -> StageProgressEventPage:
+        """Read a bounded page of one task's history in execution order."""
 
     @abstractmethod
     async def fail_orphaned_jobs(self, *, active_ids: list[str], error: str, before: datetime) -> int:
