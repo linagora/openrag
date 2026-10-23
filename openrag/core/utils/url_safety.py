@@ -77,6 +77,14 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     if not host:
         return False
 
+    # DNS length bounds, checked before any downstream IDN processing: no
+    # valid hostname exceeds 253 characters or a 63-character label, and a
+    # crafted very long internationalized hostname can consume
+    # disproportionate CPU in vulnerable idna releases (GHSA-65pc-fj4g-8rjx)
+    # while the fetch resolves it — stalling the shared event loop.
+    if len(host) > 253 or any(len(label) > 63 for label in host.rstrip(".").split(".")):
+        return False
+
     if allow_private_hosts:
         return True
 
