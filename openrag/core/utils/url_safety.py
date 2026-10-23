@@ -10,7 +10,6 @@ hop, since a public hostname can redirect to a private target.
 
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import socket
 from urllib.parse import urlparse
@@ -56,31 +55,6 @@ def is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> b
     )
 
 
-async def assert_host_resolves_safely(host: str) -> None:
-    """Raise ``ValueError`` if DNS for *host* fails or includes a blocked IP.
-
-    Every returned address must be public. Rejecting mixed public/private
-    answers avoids allowing a client to select the private result. This check
-    narrows DNS-based SSRF risk; callers should still revalidate redirect
-    targets and use network-level egress controls where available.
-    """
-    if not host:
-        raise ValueError("URL has no host")
-
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise ValueError(f"could not resolve host {host!r}: {exc}") from exc
-
-    if not infos:
-        raise ValueError(f"host {host!r} did not resolve to any addresses")
-
-    for info in infos:
-        addr = ipaddress.ip_address(info[4][0])
-        if is_blocked_address(addr):
-            raise ValueError(f"host {host!r} resolves to a disallowed address: {addr}")
-
-
 def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     """Return True only if *url* is safe for a server-side fetch.
 
@@ -119,9 +93,9 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     if allow_private_hosts:
         return True
 
-    # Strip root dots for address checks as resolvers may treat dotted IPs as
-    # the same address. Keep the original suffix count for the length guard.
-    host_for_address_checks = normalized_host.rstrip(".")
+    # Drop only the optional DNS root dot; an additional dot was rejected by
+    # the empty-label check above.
+    host_for_address_checks = hostname_for_length_check
 
     if host_for_address_checks.lower() == "localhost":
         return False
@@ -157,4 +131,4 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     return True
 
 
-__all__ = ["assert_host_resolves_safely", "is_blocked_address", "is_safe_url"]
+__all__ = ["is_blocked_address", "is_safe_url"]

@@ -345,16 +345,15 @@ keys off the return value of `set_failed_if_not_cancelled` and the pool's pre-fl
 up to 5 s of indexing throughput per file, and an actor lost before the task settles notifies
 nothing at all. Clients keep a timeout and fall back to polling the task-status URL.
 
-`callback_url` is checked against the SSRF guard in the router (for an immediate `400`) and again
-in the sender. The literal check covers the scheme, loopback/private/link-local addresses,
-decimal/hex/octal/short-form IPv4 literals (including IDNA-equivalent separators), and DNS hostname
-length limits. The sender also resolves the hostname before posting and skips the callback if DNS
-fails or any returned address is private or reserved. This is a preflight check; DNS can change
-before the HTTP client connects, so use network egress controls when a strict destination guarantee
-is required. HTTP and HTTPS are both allowed. `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS=true` /
-`indexing_callback.allow_private_urls` lifts the literal and DNS address checks for dev stacks whose
-target is a local instance; the scheme check still applies. Keep it off in production: with it on,
-any user allowed to upload can make the server POST to an internal address.
+`callback_url` is checked against the SSRF guard (`is_safe_url`) in the router and again in the
+sender. The literal check covers the scheme, loopback/private/link-local and reserved addresses,
+alternate numeric IPv4 spellings, IDNA-equivalent separators, and a single DNS root dot. DNS
+hostnames are not resolved by this callback check; use network egress controls when hostname
+destinations must be restricted. HTTP and HTTPS are both allowed.
+`INDEXING_CALLBACK_ALLOW_PRIVATE_URLS=true` / `indexing_callback.allow_private_urls` lifts the
+*address* half of the guard for dev stacks whose target is a local instance; the scheme check always
+applies. Keep it off in production: with it on, any user allowed to upload can make the server POST
+to an internal address.
 
 **Rolling deploys:** the worker actors are named, detached and `get_if_exists`, so changing
 `process_file`'s remote contract requires bumping `_INDEXER_ACTOR_PROTOCOL_VERSION` in

@@ -22,7 +22,7 @@ import httpx
 from core.config import load_config
 from core.utils.consts import UPLOAD_METADATA_SERVER_KEYS
 from core.utils.logging import get_logger
-from core.utils.url_safety import assert_host_resolves_safely, is_safe_url
+from core.utils.url_safety import is_safe_url
 
 logger = get_logger()
 
@@ -95,8 +95,7 @@ async def send_indexing_callback(
         return
 
     # Re-checked here, not just in the router: a direct caller bypasses that.
-    allow_private_hosts = _allow_private_callback_urls()
-    if not is_safe_url(callback_url, allow_private_hosts=allow_private_hosts):
+    if not is_safe_url(callback_url, allow_private_hosts=_allow_private_callback_urls()):
         logger.warning(
             "Indexing callback_url is not a safe server-side target; skipping callback",
             callback_url=safe_url,
@@ -120,12 +119,9 @@ async def send_indexing_callback(
     headers = {"Authorization": f"Bearer {callback_token}"} if callback_token else {}
 
     try:
-        async with asyncio.timeout(_CALLBACK_TIMEOUT):
-            if not allow_private_hosts:
-                await assert_host_resolves_safely(parsed.hostname or "")
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                response = await client.post(callback_url, json=payload, headers=headers)
-                response.raise_for_status()
+        async with asyncio.timeout(_CALLBACK_TIMEOUT), httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.post(callback_url, json=payload, headers=headers)
+            response.raise_for_status()
     except Exception as exc:
         error_message = str(exc)
         for secret in url_secrets:
