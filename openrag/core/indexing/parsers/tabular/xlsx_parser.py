@@ -21,6 +21,11 @@ from core.utils.logging import get_logger
 logger = get_logger()
 
 
+def _rendered_header_key(value: str) -> str:
+    """Return the canonical cell text produced by the Markdown renderer."""
+    return markdown_row([value])[2:-2]
+
+
 def _detect_header(rows, byte_limit):
     """Skip obvious title/preamble rows, retaining ambiguous first rows.
 
@@ -226,18 +231,23 @@ class XlsxParser(TabularBatchParser):
                         rendered.extend([""] * (sheet.columns - len(rendered)))
                         if any(len(value) > self.limits.max_cell_chars for value in rendered):
                             raise limit("XLSX header text exceeds the character limit")
-                        header_values = normalize_headers([value if value.strip() else "" for value in rendered])
-                        # Explicit duplicate headers also need unique column identities.
-                        reserved, used = set(header_values), set()
+                        header_values = normalize_headers([value.strip() for value in rendered])
+                        # Column identities must remain unique after Markdown
+                        # normalizes whitespace and line endings.
+                        reserved = {_rendered_header_key(name) for name in header_values}
+                        used = set()
                         for index, name in enumerate(header_values):
                             candidate, suffix = name, 2
-                            if name in used:
+                            candidate_key = _rendered_header_key(candidate)
+                            if candidate_key in used:
                                 candidate = f"{name}_{suffix}"
-                                while candidate in reserved or candidate in used:
+                                candidate_key = _rendered_header_key(candidate)
+                                while candidate_key in reserved or candidate_key in used:
                                     suffix += 1
                                     candidate = f"{name}_{suffix}"
+                                    candidate_key = _rendered_header_key(candidate)
                             header_values[index] = candidate
-                            used.add(candidate)
+                            used.add(candidate_key)
                         header_row = physical_row
                         break
                 if not header_values:
