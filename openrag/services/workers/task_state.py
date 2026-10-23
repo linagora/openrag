@@ -369,6 +369,16 @@ def _merge_stage_progress_snapshot(
         return current, False, True
     if summary.latest_sequence < current.summary.latest_sequence:
         return current, False, True
+    if (
+        current.summary.interrupted_invocation_id is not None
+        and summary.has_open_invocation
+        and summary.current_invocation_id == current.summary.interrupted_invocation_id
+    ):
+        # Worker settlement is authoritative for this invocation. A delayed
+        # sample from before settlement may carry a higher revision, but cannot
+        # make the interrupted stage look active again.
+        return current, False, True
+    settled_open_invocation = current.summary.interrupted_invocation_id is not None and summary.has_open_invocation
 
     by_sequence = {event.sequence: event for event in current.event_tail}
     conflict = False
@@ -385,21 +395,25 @@ def _merge_stage_progress_snapshot(
         history_truncated = True
     merged_summary = summary.model_copy(
         update={
-            "known_loss": summary.known_loss or current.summary.known_loss or conflict,
-            # Once recovery has confirmed the worker settled with an open
-            # invocation, a delayed snapshot must not make that invocation
-            # look live again or erase the liveness evidence.
+            "known_loss": summary.known_loss or current.summary.known_loss or conflict or settled_open_invocation,
+            # A later cumulative snapshot can reveal that the previous stage
+            # ended before this same worker stopped. Its newly observed open
+            # invocation is interrupted too; it must not become live again.
             "interrupted_invocation_id": (
-                current.summary.interrupted_invocation_id
-                if current.summary.interrupted_invocation_id is not None
-                and summary.has_open_invocation
-                and summary.current_invocation_id == current.summary.interrupted_invocation_id
-                else summary.interrupted_invocation_id
+                summary.current_invocation_id if settled_open_invocation else summary.interrupted_invocation_id
             ),
             "history_truncated": history_truncated,
         }
     )
-    merged = incoming.model_copy(update={"summary": merged_summary, "event_tail": merged_events})
+    merged = incoming.model_copy(
+        update={
+            "summary": merged_summary,
+            "event_tail": merged_events,
+            "active_invocation_id": None if settled_open_invocation else incoming.active_invocation_id,
+            "elapsed_ms": None if settled_open_invocation else incoming.elapsed_ms,
+            "elapsed_sampled_at": None if settled_open_invocation else incoming.elapsed_sampled_at,
+        }
+    )
     changed = merged != current
     return merged, changed, True
 
@@ -446,6 +460,8 @@ def _object_ref_status(object_ref: Any) -> str:
 
 
 def _worker_lease_is_live(info: TaskInfo, *, now: float | None = None) -> bool:
+    if getattr(info, "worker_finished", False):
+        return False
     expires_at = getattr(info, "worker_lease_expires_at", None)
     timestamp = time.time() if now is None else now
     return isinstance(expires_at, (int, float)) and expires_at > timestamp
@@ -544,11 +560,11 @@ def _worker_ref_has_settled(info: TaskInfo) -> bool:
     that actor's fate settles it. A ref registered without the worker actor's
     id (a pool from an earlier release) falls back to the lease alone.
     """
+    if getattr(info, "worker_finished", False):
+        return True
     status = _object_ref_status(info.object_ref)
     if status != _REF_OWNER_DIED:
         return status == _REF_SETTLED
-    if getattr(info, "worker_finished", False):
-        return True
     if getattr(info, "worker_started", False):
         return not _worker_lease_is_live(info)
     actor_id = info.object_ref.get(WORKER_ACTOR_ID_KEY) if isinstance(info.object_ref, dict) else None

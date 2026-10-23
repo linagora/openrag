@@ -2353,6 +2353,65 @@ async def test_a_settled_worker_marks_an_open_stage_as_interrupted(clock, monkey
 
 
 @pytest.mark.asyncio
+async def test_worker_finished_settles_stage_immediately_and_rejects_a_delayed_open_snapshot() -> None:
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    assert await manager.renew_worker_lease("task-1") is True
+
+    monotonic = [10.0]
+    tracker = StageTracker("task-1", monotonic=lambda: monotonic[0])
+    tracker.start_stage("embed", 5)
+    await manager.update_stage_progress_snapshot("task-1", tracker.snapshot())
+    monotonic[0] = 11.0
+    tracker.sample_elapsed()
+    monotonic[0] = 12.0
+    delayed_snapshot = tracker.sample_elapsed()
+    assert delayed_snapshot is not None
+
+    await manager.end_worker_lease("task-1")
+    interrupted = await manager.get_stage_progress_snapshot("task-1")
+    assert interrupted is not None
+    assert interrupted.summary.interrupted_invocation_id == tracker.summary().current_invocation_id
+    assert interrupted.active_invocation_id is None
+    assert interrupted.elapsed_ms is None
+
+    assert await manager.update_stage_progress_snapshot("task-1", delayed_snapshot) is True
+    after_delivery = await manager.get_stage_progress_snapshot("task-1")
+    assert after_delivery == interrupted
+
+
+@pytest.mark.asyncio
+async def test_late_snapshot_cannot_reopen_a_later_stage_after_worker_settlement() -> None:
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    assert await manager.renew_worker_lease("task-1") is True
+
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+    parse_invocation = tracker.summary().current_invocation_id
+    await manager.update_stage_progress_snapshot("task-1", tracker.snapshot())
+    tracker.finish_stage()
+    tracker.start_stage("embed", 5)
+    embed_invocation = tracker.summary().current_invocation_id
+    delayed_later_stage = tracker.snapshot()
+
+    await manager.end_worker_lease("task-1")
+    first_interruption = await manager.get_stage_progress_snapshot("task-1")
+    assert first_interruption is not None
+    assert first_interruption.summary.interrupted_invocation_id == parse_invocation
+
+    assert await manager.update_stage_progress_snapshot("task-1", delayed_later_stage) is True
+    after_delivery = await manager.get_stage_progress_snapshot("task-1")
+    assert after_delivery is not None
+    assert after_delivery.summary.current_invocation_id == embed_invocation
+    assert after_delivery.summary.interrupted_invocation_id == embed_invocation
+    assert after_delivery.active_invocation_id is None
+    assert after_delivery.elapsed_ms is None
+
+
+@pytest.mark.asyncio
 async def test_lease_renewal_tells_a_cancelled_worker_to_stop() -> None:
     manager = _task_state_manager()
     await _serializing_task_for_file_1(manager, _FakeWorkerRef())
