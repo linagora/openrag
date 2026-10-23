@@ -173,6 +173,15 @@ def test_terminal_status_label_is_lowercased(monkeypatch: pytest.MonkeyPatch) ->
     assert docs.increments == [{"status": "failed"}]
 
 
+def test_live_snapshot_sink_failure_has_a_distinct_drop_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    dropped = _Recorder()
+    monkeypatch.setattr(ray_metrics, "_STAGE_EVENT_DROPPED_TOTAL", dropped)
+
+    ray_metrics.record_stage_live_snapshot_failure()
+
+    assert dropped.increments == [{"reason": "live_snapshot_failed"}]
+
+
 # ---------------------------------------------------------------------------
 # Wiring: the TaskStateManager counts transitions, not writes
 # ---------------------------------------------------------------------------

@@ -145,6 +145,7 @@ INGEST_STAGE_EVENT_DROP_REASONS: tuple[str, ...] = (
     "missing_parent",
     "shutdown",
     "live_snapshot_overflow",
+    "live_snapshot_failed",
 )
 INGEST_STAGE_EVENT_WRITE_RESULTS: tuple[str, ...] = ("success", "retry", "failure")
 
