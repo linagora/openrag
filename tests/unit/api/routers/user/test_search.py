@@ -3,7 +3,6 @@ import pytest
 from core.config.root import Settings
 from api.routers.admin.partitions import router as partitions_router
 
-import pytest
 from api.dependencies.auth import (
     current_user,
     current_user_or_admin_partitions_list,
@@ -31,6 +30,15 @@ class _RetrievalService:
     async def search(self, **_kwargs):
         raise AssertionError("search must not run without an authorized partition scope")
 
+def _test_settings(*, preferred_scheme=None):
+    settings = Settings()
+    return settings.model_copy(
+        update={
+            "server": settings.server.model_copy(
+                update={"preferred_url_scheme": preferred_scheme}
+            )
+        }
+    )
 
 def _client(*, user_partitions):
     app = FastAPI()
@@ -45,6 +53,7 @@ def _client(*, user_partitions):
     app.dependency_overrides[get_partition_service] = lambda: _PartitionService()
     app.dependency_overrides[get_retrieval_service] = lambda: _RetrievalService()
     app.dependency_overrides[get_workspace_service] = lambda: object()
+    app.dependency_overrides[get_config] = lambda: _test_settings()
     return TestClient(app)
 
 
@@ -93,6 +102,7 @@ def test_search_file_binds_file_id_via_filter_params():
     app.dependency_overrides[require_partition_viewer] = lambda: None
     app.dependency_overrides[validate_file_id] = lambda: "abc123"
     app.dependency_overrides[get_retrieval_service] = lambda: _CapturingRetrieval()
+    app.dependency_overrides[get_config] = lambda: _test_settings()
 
     resp = TestClient(app).get(
         "/search/partition/mine/file/abc123", params={"text": "q", "filter": "page > 5 OR page < 2"}
@@ -143,6 +153,7 @@ def _client_with_workspace(*, user_partitions, workspaces, retrieval):
     app.dependency_overrides[get_partition_service] = lambda: _PartitionService()
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: workspaces
+    app.dependency_overrides[get_config] = lambda: _test_settings()
     return TestClient(app)
 
 
@@ -207,6 +218,7 @@ def test_search_one_partition_valid_workspace_scopes_files():
     app.dependency_overrides[require_partition_viewer] = lambda: None
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces(scope)
+    app.dependency_overrides[get_config] = lambda: _test_settings()
 
     resp = TestClient(app).get("/search/partition/mine", params={"text": "hello", "workspace": "w1"})
 
@@ -225,6 +237,7 @@ def test_search_one_partition_empty_workspace_forwards_empty_file_ids():
     app.dependency_overrides[require_partition_viewer] = lambda: None
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces(scope)
+    app.dependency_overrides[get_config] = lambda: _test_settings()
 
     resp = TestClient(app).get("/search/partition/mine", params={"text": "hello", "workspace": "w1"})
 
@@ -243,6 +256,7 @@ def test_search_one_partition_invalid_workspace_404s():
     app.dependency_overrides[require_partition_viewer] = lambda: None
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces(None)
+    app.dependency_overrides[get_config] = lambda: _test_settings()
 
     resp = TestClient(app).get("/search/partition/mine", params={"text": "hello", "workspace": "ghost"})
 
@@ -271,9 +285,6 @@ def test_search_source_urls_use_preferred_scheme(
 ):
     from api.dependencies.auth import require_partition_viewer
     from api.dependencies.files import validate_file_id
-    from di.providers import get_config
-
-    retrieval = _CapturingRetrieval()
 
     # Return one chunk so that the response contains a link to assert on.
     chunk = SimpleNamespace(
@@ -304,13 +315,8 @@ def test_search_source_urls_use_preferred_scheme(
     app.include_router(search_router, prefix="/search")
     app.include_router(partitions_router)
 
-    settings = Settings()
-    settings = settings.model_copy(
-        update={
-            "server": settings.server.model_copy(
-                update={"preferred_url_scheme": preferred_scheme}
-            )
-        }
+    settings = _test_settings(
+        preferred_scheme=preferred_scheme
     )
 
     app.dependency_overrides[require_partition_viewer] = lambda: None
@@ -358,6 +364,7 @@ def _rerank_client(retrieval):
     app.dependency_overrides[validate_file_id] = lambda: "abc123"
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: object()
+    app.dependency_overrides[get_config] = lambda: _test_settings()
     return TestClient(app)
 
 
