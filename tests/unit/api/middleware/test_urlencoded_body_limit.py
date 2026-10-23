@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from starlette.middleware.exceptions import ExceptionMiddleware
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
@@ -148,6 +148,61 @@ async def test_a_route_that_ignores_the_body_answers_without_waiting_for_it():
     assert sent[0]["status"] == 200
 
 
+@pytest.mark.parametrize(
+    "length",
+    [
+        pytest.param(str(10 * MAX_URLENCODED_BODY_BYTES).encode(), id="declared-too-large"),
+        pytest.param(None, id="chunked"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_streaming_route_that_ignores_the_body_streams_to_the_end(length):
+    """Under ASGI spec 2.3, as uvicorn advertises, StreamingResponse reads receive()
+    for a disconnect while it streams. Body data reaching that listener, however
+    large, must not raise the 413 and cut the stream."""
+
+    async def chunks():
+        for i in range(3):
+            yield f"chunk{i}"
+            await asyncio.sleep(0.01)
+
+    async def stream(scope, receive, send):
+        await StreamingResponse(chunks())(scope, receive, send)
+
+    finished = asyncio.Event()
+    messages = [{"type": "http.request", "body": _fields(MAX_URLENCODED_FIELDS + 1), "more_body": False}]
+
+    async def receive():
+        await asyncio.sleep(0.005)
+        if messages:
+            return messages.pop(0)
+        await finished.wait()
+        return {"type": "http.disconnect"}
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "http.response.body" and not message.get("more_body", False):
+            finished.set()
+
+    headers = [(b"content-type", URLENCODED.encode())]
+    if length is not None:
+        headers.append((b"content-length", length))
+    scope = {
+        "type": "http",
+        "asgi": {"spec_version": "2.3"},
+        "method": "GET",
+        "path": "/stream",
+        "headers": headers,
+        "query_string": b"",
+    }
+    await asyncio.wait_for(UrlencodedBodyLimitMiddleware(stream)(scope, receive, send), timeout=2)
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    assert sent[0]["status"] == 200
+    assert body == b"chunk0chunk1chunk2"
+
+
 @pytest.mark.parametrize(("user", "limit"), LIMITS)
 def test_the_byte_limit_is_inclusive(user, limit):
     client, calls = _client(user)
@@ -173,6 +228,17 @@ async def test_a_chunked_body_over_the_limit_is_refused_before_the_route(user, l
     chunk = b"x" * 8192
     chunks = [b"a="] + [chunk] * (limit // len(chunk))
     status, seen = await _drive(chunks, [(b"content-type", URLENCODED.encode())], user=user)
+    assert status == 413
+    assert seen == []
+
+
+@pytest.mark.parametrize(("user", "limit"), LIMITS)
+@pytest.mark.asyncio
+async def test_a_declared_length_over_the_limit_is_refused_at_the_first_chunk(user, limit):
+    # The declared length is checked on the first chunk read, so the rest of the
+    # body is never read, however little of it has arrived.
+    headers = [(b"content-type", URLENCODED.encode()), (b"content-length", str(limit + 1).encode())]
+    status, seen = await _drive([b"a=1"], headers, user=user)
     assert status == 413
     assert seen == []
 

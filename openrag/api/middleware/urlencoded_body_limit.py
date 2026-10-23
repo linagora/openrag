@@ -87,14 +87,19 @@ class UrlencodedBodyLimitMiddleware:
         declared = _declared_length(headers)
         received = 0
         separators = 0
+        response_started = False
 
         async def bounded_receive() -> Message:
             nonlocal received, separators
+            message = await receive()
+            # Once the response has started, nothing is parsing the body: what reads
+            # it is a disconnect listener, such as StreamingResponse's under ASGI
+            # spec 2.3, and a 413 can no longer be sent. That listener calls receive
+            # before the response starts, so this is checked after the wait.
+            if response_started or message["type"] != "http.request":
+                return message
             if declared is not None and declared > limit:
                 raise HTTPException(status_code=413, detail="Form body too large.")
-            message = await receive()
-            if message["type"] != "http.request":
-                return message
             chunk = message.get("body", b"")
             received += len(chunk)
             if received > limit:
@@ -106,7 +111,13 @@ class UrlencodedBodyLimitMiddleware:
                 raise HTTPException(status_code=413, detail="Form has too many fields.")
             return message
 
-        await self.app(scope, bounded_receive, send)
+        async def tracking_send(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        await self.app(scope, bounded_receive, tracking_send)
 
 
 __all__ = [
