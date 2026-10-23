@@ -1,5 +1,6 @@
 """Tests for the URL-encoded request body limit."""
 
+import asyncio
 import importlib
 import pathlib
 import sys
@@ -15,7 +16,7 @@ from api.middleware.urlencoded_body_limit import (
 )
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
-from starlette.applications import Starlette
+from starlette.middleware.exceptions import ExceptionMiddleware
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -34,18 +35,21 @@ LIMITS = [
 
 
 def _client(user: dict | None = None) -> tuple[TestClient, list[str]]:
+    # A route is recorded once it has read its body, so an empty list means the
+    # body was refused before the route got it.
     calls: list[str] = []
 
     async def form(request: Request):
-        calls.append("form")
         parsed = await request.form()
+        calls.append("form")
         return JSONResponse({key: str(value) for key, value in parsed.items()})
 
     async def body(request: Request):
+        length = len(await request.body())
         calls.append("body")
-        return JSONResponse({"length": len(await request.body())})
+        return JSONResponse({"length": length})
 
-    app = Starlette(routes=[Route("/form", form, methods=["POST"]), Route("/body", body, methods=["POST"])])
+    app = FastAPI(routes=[Route("/form", form, methods=["POST"]), Route("/body", body, methods=["POST"])])
     app.add_middleware(UrlencodedBodyLimitMiddleware)
     if user is None:
         return TestClient(app), calls
@@ -102,7 +106,8 @@ async def _drive(
     scope = {"type": "http", "method": "POST", "path": "/form", "headers": headers, "query_string": b""}
     if user is not None:
         scope["state"] = {"user": user}
-    await UrlencodedBodyLimitMiddleware(inner)(scope, receive, send)
+    # The router sits behind Starlette's ExceptionMiddleware, which answers the 413.
+    await UrlencodedBodyLimitMiddleware(ExceptionMiddleware(inner))(scope, receive, send)
     return sent[0]["status"], seen
 
 
@@ -118,6 +123,29 @@ async def test_a_disconnect_before_the_last_chunk_is_not_replayed_as_a_form():
     status, seen = await _drive([b"logout_token=abc.d"], [(b"content-type", URLENCODED.encode())], complete=False)
     assert status == 200
     assert seen == [{"disconnected": "yes"}]
+
+
+@pytest.mark.asyncio
+async def test_a_route_that_ignores_the_body_answers_without_waiting_for_it():
+    """An incomplete URL-encoded body sent to a route that never reads it, such as
+    a GET on /health_check, must not hold the request open."""
+    never_sent = asyncio.Event()
+
+    async def health(scope, receive, send):
+        await JSONResponse({"status": "ok"})(scope, receive, send)
+
+    async def receive():
+        await never_sent.wait()
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    headers = [(b"content-type", URLENCODED.encode()), (b"content-length", b"1000")]
+    scope = {"type": "http", "method": "GET", "path": "/health_check", "headers": headers, "query_string": b""}
+    await asyncio.wait_for(UrlencodedBodyLimitMiddleware(health)(scope, receive, send), timeout=1)
+    assert sent[0]["status"] == 200
 
 
 @pytest.mark.parametrize(("user", "limit"), LIMITS)
@@ -247,7 +275,7 @@ def _auth_stack() -> TestClient:
     async def form(request: Request):
         return JSONResponse({"fields": len(await request.form())})
 
-    app = Starlette(
+    app = FastAPI(
         routes=[Route("/v1/form", form, methods=["POST"]), Route("/auth/backchannel-logout", form, methods=["POST"])]
     )
     app.add_middleware(UrlencodedBodyLimitMiddleware)
@@ -292,7 +320,7 @@ def test_the_user_auth_found_decides_the_byte_cap(monkeypatch):
     async def form(request: Request):
         return JSONResponse({"fields": len(await request.form())})
 
-    app = Starlette(routes=[Route("/v1/form", form, methods=["POST"])])
+    app = FastAPI(routes=[Route("/v1/form", form, methods=["POST"])])
     app.add_middleware(UrlencodedBodyLimitMiddleware)
     app.add_middleware(AuthMiddleware, get_auth_service=lambda request: _DevAuthService())
     body = b"a=" + b"x" * MAX_ANONYMOUS_URLENCODED_BODY_BYTES
