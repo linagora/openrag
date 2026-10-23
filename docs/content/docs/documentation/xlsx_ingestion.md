@@ -54,6 +54,8 @@ Nonempty preamble rows are appended to each table block as searchable worksheet 
 
 Stored scalar values are indexed. Booleans, dates, datetimes, times, durations, Unicode text, zero, and <code>false</code> are preserved in stable text form. Blank header cells receive generated unique names, and duplicate explicit headers are disambiguated.
 
+XLSX is an OOXML package, so CSV-style character-set detection does not apply. XML parts using UTF-8, with or without a byte-order mark, or correctly BOM-marked UTF-16 are supported, including either UTF-16 byte order. Unicode text is preserved without normalization, including composed and decomposed accents, right-to-left scripts, CJK text, emoji, and embedded byte-order-mark characters. XML with malformed bytes or a mismatched encoding declaration is rejected as <code>INVALID_XLSX</code> rather than decoded with replacement characters.
+
 Formula cells use cached results only. OpenRAG does not execute formulas or recalculate workbooks. A formula without a cached value becomes empty and increments <code>sheet_missing_formula_values</code>; a warning is logged. Cached results may be stale.
 
 Every batch includes:
@@ -117,7 +119,7 @@ These boundaries should remain explicit in the first PR. Multiple-table segmenta
 
 ## Validation and performance
 
-Focused tests cover archive safety, relationships, coordinates, misleading dimensions, shared strings, formulas, error values, hidden sheets, hidden rows and columns, empty data, Unicode and dates, duplicate headers, global and per-sheet headers, multiple preamble rows, ambiguous layouts, byte limits, early close, chunk splitting, citations, retrieval grouping, and indexing cleanup.
+Focused tests cover archive safety, relationships, coordinates, misleading dimensions, shared strings, formulas, error values, hidden sheets, hidden rows and columns, empty data, UTF-8 and UTF-16 OOXML, Unicode scripts and normalization forms, dates, duplicate headers, global and per-sheet headers, multiple preamble rows, ambiguous layouts, byte limits, early close, chunk splitting, citations, retrieval grouping, and indexing cleanup.
 
 The local benchmark now measures the current OpenPyXL-only parser in a fresh process per run. It includes preflight and parsing and excludes fixture generation, embedding, storage, and chat:
 
