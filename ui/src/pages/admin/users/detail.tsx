@@ -7,7 +7,6 @@ import {
   getUser,
   updateUser,
   deleteUser,
-  deleteUserDescription,
   regenerateUserToken,
   listUserMemberships,
   grantMembership,
@@ -51,6 +50,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatDate, copyToClipboard } from "@/lib/utils";
+import { DeleteUserAction } from "./delete-user-action";
 
 export default function UserDetailPage() {
   // Remount the entire detail view when the route's user id changes. React Router
@@ -113,6 +113,7 @@ function UserDetail() {
     onSuccess: () => {
       toast.success("User deleted");
       navigate("/users");
+      queryClient.removeQueries({ queryKey: ["user", id] });
     },
     onError: (e) => toast.error((e as Error).message),
   });
@@ -135,15 +136,11 @@ function UserDetail() {
                 <ArrowLeft className="mr-2 h-4 w-4" /> Back
               </Link>
             </Button>
-            <ConfirmDialog
-              title="Delete user?"
-              description={deleteUserDescription(title, user.memberships)}
-              onConfirm={() => deleteMut.mutate()}
-            >
+            <DeleteUserAction userId={user.id} label={title} onConfirm={() => deleteMut.mutate()}>
               <Button variant="destructive" disabled={user.id === 1}>
                 <Trash2 className="mr-2 h-4 w-4" /> Delete
               </Button>
-            </ConfirmDialog>
+            </DeleteUserAction>
           </div>
         }
       />
