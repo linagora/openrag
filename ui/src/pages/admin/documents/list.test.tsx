@@ -7,7 +7,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
 import { listPartitionFiles } from "@/lib/api/documents";
-import { deleteFile, uploadFile } from "@/lib/api/indexing";
+import { deleteFile, newFileId, uploadFile } from "@/lib/api/indexing";
 import { listModelEndpoints } from "@/lib/api/models";
 import { listPartitions } from "@/lib/api/partitions";
 import { getQueueInfo, type QueueInfo } from "@/lib/api/jobs";
@@ -152,6 +152,7 @@ describe("DocumentListPage", () => {
     permissions.superAdminModeResolved = true;
     deleteFileMock.mockClear();
     uploadFileMock.mockReset();
+    vi.mocked(newFileId).mockImplementation(() => "new-file-id");
     getQueueInfoMock.mockReset();
     listPartitionFilesMock.mockReset();
     listPartitionFilesMock.mockResolvedValue({
@@ -387,6 +388,33 @@ describe("DocumentListPage", () => {
     await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(3));
     expect((uploadFileMock.mock.calls[2][2] as File).name).toBe("bad.txt");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("resends the same file ID when retrying a failed upload", async () => {
+    let next = 0;
+    vi.mocked(newFileId).mockImplementation(() => `file-id-${++next}`);
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "lost.txt") throw new Error("Network error");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["good"], "good.txt", { type: "text/plain" }),
+      new File(["lost"], "lost.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(2));
+    const firstId = uploadFileMock.mock.calls[1][1];
+
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-2" });
+    await userEvent.click(await screen.findByRole("button", { name: "Retry failed" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(3));
+    expect((uploadFileMock.mock.calls[2][2] as File).name).toBe("lost.txt");
+    expect(uploadFileMock.mock.calls[2][1]).toBe(firstId);
   });
 
   it("closes the upload dialog when every file is accepted", async () => {

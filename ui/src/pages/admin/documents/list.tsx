@@ -70,6 +70,9 @@ export default function DocumentListPage() {
   const [uploading, setUploading] = useState(false);
   // Per-file outcome of the last upload, shown when some files failed.
   const [uploadResults, setUploadResults] = useState<{ name: string; error?: string }[]>([]);
+  // File ID generated for each selected file, kept so a retry resends the same
+  // ID and the API can recover a task it accepted but whose response was lost.
+  const fileIds = useRef(new Map<File, string>());
   const [fileSearch, setFileSearch] = useState("");
   const [indexedSince, setIndexedSince] = useState("");
   const [degradedStage, setDegradedStage] = useState<DegradedStage | typeof ALL_DEGRADED_STAGES>(
@@ -284,6 +287,7 @@ export default function DocumentListPage() {
     setUploadOpen(false);
     setFiles([]);
     setUploadResults([]);
+    fileIds.current.clear();
     if (fileRef.current) fileRef.current.value = "";
   };
 
@@ -297,8 +301,13 @@ export default function DocumentListPage() {
       const results: { name: string; error?: string }[] = [];
       const failed: File[] = [];
       for (const f of files) {
+        let fileId = fileIds.current.get(f);
+        if (!fileId) {
+          fileId = newFileId();
+          fileIds.current.set(f, fileId);
+        }
         try {
-          await uploadFile(selected, newFileId(), f, {
+          await uploadFile(selected, fileId, f, {
             filename: f.name,
             ...(f.type ? { mimetype: f.type } : {}),
           });
@@ -543,6 +552,7 @@ export default function DocumentListPage() {
                     onChange={(e) => {
                       setFiles(e.target.files ? Array.from(e.target.files) : []);
                       setUploadResults([]);
+                      fileIds.current.clear();
                     }}
                   />
                   {files.length > 0 && (
