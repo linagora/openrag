@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator
 
@@ -170,8 +170,6 @@ class LoaderConfig(ConfigMixin):
     xlsx_sheet_header_rows: dict[
         Annotated[str, Field(min_length=1)], Annotated[int, Field(ge=1, le=1_048_576, strict=True)] | None
     ] = Field(default_factory=dict)
-    xlsx_backend: Literal["openpyxl", "calamine"] = "openpyxl"
-    xlsx_fallback_backend: Literal["openpyxl", "calamine"] | None = None
     xlsx_limits: dict[str, Annotated[int, Field(gt=0, strict=True)]] = Field(default_factory=dict)
     image_captioning: bool = True
     image_captioning_url: bool = True
