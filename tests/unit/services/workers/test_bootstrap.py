@@ -244,6 +244,46 @@ def test_task_state_manager_without_admission_fence_is_replaced(monkeypatch):
     kill.assert_called_once_with(legacy, no_restart=True)
 
 
+def test_task_state_manager_without_stage_snapshot_support_is_replaced(monkeypatch):
+    required = {
+        "supports_in_place_restart": SimpleNamespace(),
+        "renew_file_delete": SimpleNamespace(),
+        "supports_bounded_task_retention": SimpleNamespace(),
+        "complete_with_degraded_stages": SimpleNamespace(),
+        "supports_explicit_completion_outcomes": SimpleNamespace(),
+        "set_queued_details_v2": SimpleNamespace(),
+        "_ray_actor_method_names": frozenset(
+            {
+                "supports_in_place_restart",
+                "renew_file_delete",
+                "supports_bounded_task_retention",
+                "complete_with_degraded_stages",
+                "supports_explicit_completion_outcomes",
+                "set_queued_details_v2",
+            }
+        ),
+    }
+    legacy = SimpleNamespace(**required)
+    replacement = SimpleNamespace(
+        **{
+            **required,
+            "supports_stage_progress_snapshots": SimpleNamespace(),
+            "_ray_actor_method_names": frozenset(
+                (*required["_ray_actor_method_names"], "supports_stage_progress_snapshots")
+            ),
+        }
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_state_manager() is replacement
+    kill.assert_called_once_with(legacy, no_restart=True)
+
+
 def test_task_completion_tracker_is_detached_and_starts_recovery(monkeypatch):
     calls = []
     tracker = Mock()

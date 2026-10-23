@@ -107,6 +107,12 @@ def get_task_state_manager():
 
 
 def _supports_task_state_recovery(actor) -> bool:
+    method_names = getattr(actor, "_ray_actor_method_names", None)
+    if (
+        isinstance(method_names, (frozenset, list, set, tuple))
+        and "supports_stage_progress_snapshots" not in method_names
+    ):
+        return False
     return (
         getattr(actor, "supports_in_place_restart", None) is not None
         and getattr(actor, "renew_file_delete", None) is not None

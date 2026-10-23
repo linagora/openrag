@@ -67,7 +67,9 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # v13: TaskStateManager fences admission against a task already indexing the
 # same file and is replaced during bootstrap when it lacks that method; the
 # replacement changes the actor id the previous generation's handles point at.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v13"
+# v14: workers carry stage snapshots on their leases and cache the TaskStateManager
+# stage snapshot methods. Bootstrap replaces older TaskStateManager actors.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v14"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -124,6 +126,7 @@ class IndexerWorkerActor:
         import services.inference.vllm_client  # noqa: F401
         from core.config import load_config
         from core.embeddings import embedder_registry
+        from core.observability.ray_metrics import initialize_stage_writer_counters
         from core.utils.logging import get_logger
         from services.storage.milvus_store import MilvusVectorStore
         from services.storage.postgres_store import PostgresStore
@@ -136,6 +139,7 @@ class IndexerWorkerActor:
         from services.workers.pipeline_builder import build_indexing_pipeline
 
         self._namespace = namespace
+        initialize_stage_writer_counters()
         cfg = load_config()
         # Indexing is where PDFs are parsed in bulk, so the PyMuPDF pool lives
         # here; the API replicas keep the dedicated thread (#997).
@@ -240,12 +244,28 @@ class IndexerWorkerActor:
         # Held here too: a pre-flight failure below runs before the worker's own
         # except block, so it must report its own terminal state and callback.
         self._tsm = task_state_manager
+        method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
+        known_methods = set(method_names) if isinstance(method_names, (frozenset, list, set, tuple)) else None
+        stage_snapshot_method = getattr(task_state_manager, "update_stage_progress_snapshot", None)
+        stage_snapshot_remote = getattr(stage_snapshot_method, "remote", None)
+        if known_methods is not None and "update_stage_progress_snapshot" not in known_methods:
+            stage_snapshot_remote = None
+
+        async def publish_stage_snapshot(snapshot: Any) -> bool:
+            if stage_snapshot_remote is None:
+                return False
+            return await retry_idempotent_ray_actor_method(
+                lambda: stage_snapshot_remote(snapshot.summary.task_id, snapshot),
+                task_description=f"update_stage_progress_snapshot({snapshot.summary.task_id})",
+            )
+
         self._worker = IndexerWorker(
             pipeline=pipeline,
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
             job_repo=self._catalog_store.job_repo,
+            stage_snapshot_sink=publish_stage_snapshot if stage_snapshot_remote is not None else None,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
         )
@@ -521,6 +541,7 @@ class IndexerWorkerActor:
                 logger=self._logger,
                 started=lease_started,
                 is_working=lambda: working,
+                snapshot_provider=getattr(self._worker, "get_stage_progress_snapshot", None),
             )
         )
         try:

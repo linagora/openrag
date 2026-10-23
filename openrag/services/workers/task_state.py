@@ -19,6 +19,7 @@ from core.models.catalog import (
     DocumentStatus,
     normalize_degraded_stages,
 )
+from core.models.stage_progress import StageProgressWorkerSnapshot
 from core.observability.ray_metrics import (
     initialize_ingest_counters,
     observe_queue_wait_from,
@@ -242,6 +243,7 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         worker_finished=getattr(info, "worker_finished", False),
         worker_restarts_baseline=getattr(info, "worker_restarts_baseline", None),
         worker_abandoned=getattr(info, "worker_abandoned", False),
+        stage_progress=getattr(info, "stage_progress", None),
     )
     return snapshot, _tombstone_deadline(snapshot, now=timestamp)
 
@@ -340,6 +342,80 @@ class TaskInfo:
     # incarnation the task went to, so the task may still be picked up; this
     # makes its pickup refused instead of indexing a file already released.
     worker_abandoned: bool = False
+    # Newer recoverable records carry stage progress. Read sites use getattr
+    # so cloudpickle records written by an older actor remain compatible.
+    stage_progress: StageProgressWorkerSnapshot | None = None
+
+
+def _merge_stage_progress_snapshot(
+    task_id: str,
+    current: StageProgressWorkerSnapshot | None,
+    incoming: StageProgressWorkerSnapshot,
+) -> tuple[StageProgressWorkerSnapshot | None, bool, bool]:
+    """Merge one cumulative worker snapshot; return (value, changed, valid)."""
+    summary = incoming.summary
+    if summary.task_id != task_id:
+        return current, False, False
+    if any(event.task_id != task_id or event.attempt != summary.attempt for event in incoming.event_tail):
+        return current, False, False
+    if any(event.sequence > summary.latest_sequence for event in incoming.event_tail):
+        return current, False, False
+
+    if current is None or summary.attempt > current.summary.attempt:
+        return incoming, True, True
+    if summary.attempt < current.summary.attempt:
+        return current, False, True
+    if summary.snapshot_revision < current.summary.snapshot_revision:
+        return current, False, True
+    if summary.latest_sequence < current.summary.latest_sequence:
+        return current, False, True
+    if (
+        current.summary.interrupted_invocation_id is not None
+        and summary.has_open_invocation
+        and summary.current_invocation_id == current.summary.interrupted_invocation_id
+    ):
+        # Worker settlement is authoritative for this invocation. A delayed
+        # sample from before settlement may carry a higher revision, but cannot
+        # make the interrupted stage look active again.
+        return current, False, True
+    settled_open_invocation = current.summary.interrupted_invocation_id is not None and summary.has_open_invocation
+
+    by_sequence = {event.sequence: event for event in current.event_tail}
+    conflict = False
+    for event in incoming.event_tail:
+        existing = by_sequence.get(event.sequence)
+        if existing is not None and existing != event:
+            conflict = True
+            continue
+        by_sequence[event.sequence] = event
+    merged_events = [by_sequence[sequence] for sequence in sorted(by_sequence)]
+    history_truncated = summary.history_truncated or current.summary.history_truncated
+    if len(merged_events) > 32:
+        merged_events = merged_events[-32:]
+        history_truncated = True
+    merged_summary = summary.model_copy(
+        update={
+            "known_loss": summary.known_loss or current.summary.known_loss or conflict or settled_open_invocation,
+            # A later cumulative snapshot can reveal that the previous stage
+            # ended before this same worker stopped. Its newly observed open
+            # invocation is interrupted too; it must not become live again.
+            "interrupted_invocation_id": (
+                summary.current_invocation_id if settled_open_invocation else summary.interrupted_invocation_id
+            ),
+            "history_truncated": history_truncated,
+        }
+    )
+    merged = incoming.model_copy(
+        update={
+            "summary": merged_summary,
+            "event_tail": merged_events,
+            "active_invocation_id": None if settled_open_invocation else incoming.active_invocation_id,
+            "elapsed_ms": None if settled_open_invocation else incoming.elapsed_ms,
+            "elapsed_sampled_at": None if settled_open_invocation else incoming.elapsed_sampled_at,
+        }
+    )
+    changed = merged != current
+    return merged, changed, True
 
 
 _REF_PENDING = "pending"
@@ -384,6 +460,8 @@ def _object_ref_status(object_ref: Any) -> str:
 
 
 def _worker_lease_is_live(info: TaskInfo, *, now: float | None = None) -> bool:
+    if getattr(info, "worker_finished", False):
+        return False
     expires_at = getattr(info, "worker_lease_expires_at", None)
     timestamp = time.time() if now is None else now
     return isinstance(expires_at, (int, float)) and expires_at > timestamp
@@ -482,11 +560,11 @@ def _worker_ref_has_settled(info: TaskInfo) -> bool:
     that actor's fate settles it. A ref registered without the worker actor's
     id (a pool from an earlier release) falls back to the lease alone.
     """
+    if getattr(info, "worker_finished", False):
+        return True
     status = _object_ref_status(info.object_ref)
     if status != _REF_OWNER_DIED:
         return status == _REF_SETTLED
-    if getattr(info, "worker_finished", False):
-        return True
     if getattr(info, "worker_started", False):
         return not _worker_lease_is_live(info)
     actor_id = info.object_ref.get(WORKER_ACTOR_ID_KEY) if isinstance(info.object_ref, dict) else None
@@ -752,6 +830,8 @@ class TaskStateManager:
         abandoned = getattr(info, "worker_abandoned", False)
         baseline = getattr(info, "worker_restarts_baseline", None)
         settled = _worker_ref_has_settled(info) if ignore_finished_stamp else _worker_has_settled(info)
+        if settled:
+            self._mark_open_stage_interrupted_locked(task_id, info)
         if abandoned or not getattr(info, "worker_abandoned", False):
             if baseline is None and getattr(info, "worker_restarts_baseline", None) is not None:
                 # A baseline taken from a fresh read must survive a restart of
@@ -767,6 +847,44 @@ class TaskStateManager:
         else:
             self._persist_task_locked(task_id, info)
         return settled
+
+    def _mark_open_stage_interrupted_locked(self, task_id: str, info: TaskInfo) -> None:
+        """Record confirmed worker settlement while its last stage was still open.
+
+        This is a recovery observation, not a stage-end event: the worker can
+        no longer report whether that stage completed, failed, or observed
+        cancellation. Keep the invocation open and qualify the outcome.
+        """
+        if not getattr(info, "worker_started", False) or info.state not in {
+            "SERIALIZING",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED",
+        }:
+            return
+        snapshot = getattr(info, "stage_progress", None)
+        if snapshot is None:
+            return
+        summary = snapshot.summary
+        invocation_id = summary.current_invocation_id
+        if not summary.has_open_invocation or invocation_id is None or summary.interrupted_invocation_id is not None:
+            return
+        interrupted = summary.model_copy(
+            update={
+                "interrupted_invocation_id": invocation_id,
+                "known_loss": True,
+                "snapshot_revision": summary.snapshot_revision + 1,
+            }
+        )
+        info.stage_progress = snapshot.model_copy(
+            update={
+                "summary": interrupted,
+                "active_invocation_id": None,
+                "elapsed_ms": None,
+                "elapsed_sampled_at": None,
+            }
+        )
+        self._persist_task_locked(task_id, info)
 
     def _expire_refless_tasks_if_stale_locked(self, task_ids: Iterable[str] | None = None) -> None:
         for task_id in self.tasks if task_ids is None else task_ids:
@@ -1205,17 +1323,111 @@ class TaskStateManager:
         ignores.
         """
         with self.lock:
+            return self._renew_worker_lease_locked(task_id, None)
+
+    @ray.method(concurrency_group="set")
+    async def renew_worker_lease_with_stage_snapshot(
+        self,
+        task_id: str,
+        stage_snapshot: StageProgressWorkerSnapshot | None,
+    ) -> bool | None:
+        """Renew liveness and carry the cumulative stage tail on the fallback path."""
+        with self.lock:
+            return self._renew_worker_lease_locked(task_id, stage_snapshot)
+
+    def _renew_worker_lease_locked(
+        self,
+        task_id: str,
+        stage_snapshot: StageProgressWorkerSnapshot | None,
+    ) -> bool | None:
+        info = self.tasks.get(task_id)
+        if info is None:
+            return None
+        if getattr(info, "worker_abandoned", False):
+            # Settled as dropped and its file released: it must not start now.
+            return False
+        info.worker_lease_expires_at = time.time() + self._worker_lease_ttl_seconds
+        changed = False
+        if not getattr(info, "worker_started", False):
+            info.worker_started = True
+            changed = True
+        if stage_snapshot is not None:
+            merged, snapshot_changed, valid = _merge_stage_progress_snapshot(
+                task_id,
+                getattr(info, "stage_progress", None),
+                stage_snapshot,
+            )
+            if valid and snapshot_changed:
+                info.stage_progress = merged
+                changed = True
+        if changed:
+            self._persist_task_locked(task_id, info)
+        return info.state != "CANCELLED"
+
+    @ray.method(concurrency_group="set")
+    async def update_stage_progress_snapshot(
+        self,
+        task_id: str,
+        stage_snapshot: StageProgressWorkerSnapshot,
+    ) -> bool:
+        """Persist one cumulative worker snapshot without changing task status."""
+        with self.lock:
             info = self.tasks.get(task_id)
             if info is None:
-                return None
-            if getattr(info, "worker_abandoned", False):
-                # Settled as dropped and its file released: it must not start now.
                 return False
-            info.worker_lease_expires_at = time.time() + self._worker_lease_ttl_seconds
-            if not getattr(info, "worker_started", False):
-                info.worker_started = True
+            merged, changed, valid = _merge_stage_progress_snapshot(
+                task_id,
+                getattr(info, "stage_progress", None),
+                stage_snapshot,
+            )
+            if not valid:
+                return False
+            if changed:
+                info.stage_progress = merged
                 self._persist_task_locked(task_id, info)
-            return info.state != "CANCELLED"
+            # Stale snapshots are benign duplicates from the same worker lease
+            # or a delayed previous attempt; acknowledge without rolling state back.
+            return True
+
+    @ray.method(concurrency_group="get")
+    async def get_stage_progress_snapshot(self, task_id: str) -> StageProgressWorkerSnapshot | None:
+        with self.lock:
+            info = self.tasks.get(task_id)
+            return self._stage_progress_snapshot_for_read_locked(task_id, info) if info else None
+
+    @ray.method(concurrency_group="get")
+    async def get_stage_progress_snapshots(
+        self,
+        task_ids: list[str],
+    ) -> dict[str, StageProgressWorkerSnapshot]:
+        """Return compact snapshots for a list read; omit event tails."""
+        if not task_ids:
+            return {}
+        with self.lock:
+            snapshots = {}
+            for task_id in task_ids:
+                info = self.tasks.get(task_id)
+                snapshot = self._stage_progress_snapshot_for_read_locked(task_id, info) if info else None
+                if snapshot is not None:
+                    snapshots[task_id] = snapshot.model_copy(update={"event_tail": []})
+            return snapshots
+
+    def _stage_progress_snapshot_for_read_locked(
+        self,
+        task_id: str,
+        info: TaskInfo,
+    ) -> StageProgressWorkerSnapshot | None:
+        snapshot = getattr(info, "stage_progress", None)
+        if snapshot is None:
+            return None
+        if getattr(info, "worker_started", False) and not _worker_lease_is_live(info):
+            # The lease expiring does not prove the worker is dead. Ask the
+            # existing reference/actor recovery logic; if it cannot confirm
+            # settlement, expose only the last durable observation.
+            if not self._worker_settled_locked(task_id, info):
+                return None
+            snapshot = getattr(info, "stage_progress", None)
+        return snapshot
 
     @ray.method(concurrency_group="set")
     async def end_worker_lease(self, task_id: str) -> None:
@@ -1398,17 +1610,7 @@ class TaskStateManager:
         with self.lock:
             self._expire_refless_tasks_if_stale_locked()
             self._evict_terminal_tasks_locked()
-            return {
-                task_id: {
-                    "state": info.state,
-                    "error": info.error,
-                    "error_reason": getattr(info, "error_reason", None),
-                    "details": info.details,
-                    "worker_submitted": getattr(info, "worker_submitted", False),
-                    "submission_started_at": getattr(info, "submission_started_at", None),
-                }
-                for task_id, info in self.tasks.items()
-            }
+            return {task_id: self._task_list_info_locked(task_id, info) for task_id, info in self.tasks.items()}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_user_info(self, user_id: int) -> dict[str, dict]:
@@ -1417,16 +1619,23 @@ class TaskStateManager:
             # Before the index lookup: eviction can drop the user's whole entry.
             self._evict_terminal_tasks_locked()
             task_ids = self.user_index.get(user_id, set())
-            return {
-                tid: {
-                    "state": self.tasks[tid].state,
-                    "error": self.tasks[tid].error,
-                    "error_reason": getattr(self.tasks[tid], "error_reason", None),
-                    "details": self.tasks[tid].details,
-                }
-                for tid in task_ids
-                if tid in self.tasks
-            }
+            return {tid: self._task_list_info_locked(tid, self.tasks[tid]) for tid in task_ids if tid in self.tasks}
+
+    def _task_list_info_locked(self, task_id: str, info: TaskInfo) -> dict[str, Any]:
+        """Return task metadata and a compact, lease-checked progress snapshot."""
+        result = {
+            "state": info.state,
+            "error": info.error,
+            "error_reason": getattr(info, "error_reason", None),
+            "details": info.details,
+            "worker_submitted": getattr(info, "worker_submitted", False),
+            "submission_started_at": getattr(info, "submission_started_at", None),
+        }
+        snapshot = self._stage_progress_snapshot_for_read_locked(task_id, info)
+        if snapshot is not None:
+            # The list needs a sortable summary, never the event timeline.
+            result["stage_progress"] = snapshot.model_copy(update={"event_tail": []})
+        return result
 
     @ray.method(concurrency_group="queue_info")
     async def get_pool_info(self) -> dict[str, int]:
@@ -1449,6 +1658,11 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def supports_explicit_completion_outcomes(self) -> bool:
         """Identify actors that distinguish cancellation, loss, and conflicts."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_stage_progress_snapshots(self) -> bool:
+        """Identify actors that recover bounded per-file stage progress."""
         return True
 
     @ray.method(concurrency_group="queue_info")
