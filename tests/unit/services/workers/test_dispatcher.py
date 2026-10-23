@@ -34,6 +34,17 @@ def _pool_with_ref(ref: object) -> MagicMock:
     return pool
 
 
+# A delete budget no runner stall can use up before the check a test is about.
+# With 0.01 s, a slow CI runner timed out the first task-state lookup instead.
+_DELETE_BUDGET = 5.0
+
+
+def _straight_to_final_check():
+    """A wait interval above the budget sends the delete's first pass straight to
+    its final check, so a test given ``_DELETE_BUDGET`` doesn't wait it out."""
+    return patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 999)
+
+
 def _settled_ref() -> asyncio.Future[None]:
     ref = asyncio.get_running_loop().create_future()
     ref.set_result(None)
@@ -2112,10 +2123,10 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with patch("ray.cancel") as cancel:
+    with _straight_to_final_check(), patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
     assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
@@ -2213,10 +2224,14 @@ async def test_delete_file_fails_closed_for_submitted_task_without_ref() -> None
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="expose worker references or settle"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="expose worker references or settle"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2429,10 +2444,14 @@ async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> Non
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="routing details"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="routing details"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     assert tsm.get_all_info.remote.call_count == 2
@@ -2469,10 +2488,14 @@ async def test_delete_file_legacy_lookup_blocks_submitted_task_without_ref() -> 
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="expose worker references or settle"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="expose worker references or settle"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2499,7 +2522,9 @@ async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle(
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        # The ref never settles, so the test waits the whole budget out: 0.5 s
+        # leaves a stalled runner time to reach that wait at all.
+        timeout=0.5,
     )
 
     with pytest.raises(TimeoutError, match="settle after cancellation request"), patch("ray.cancel") as cancel:
@@ -2571,11 +2596,13 @@ async def test_delete_file_does_not_cleanup_while_an_orphaned_worker_still_runs(
         document_repo=document_repo,
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.05,
+        timeout=_DELETE_BUDGET,
     )
 
     with (
-        patch("services.workers.task_cancellation._ORPHANED_WORKER_POLL_SECONDS", 0.01),
+        # A poll interval above the budget raises on the first unsettled answer,
+        # so the test doesn't wait the budget out.
+        patch("services.workers.task_cancellation._ORPHANED_WORKER_POLL_SECONDS", 999),
         pytest.raises(TimeoutError, match="settle after cancellation request"),
         patch("ray.cancel"),
     ):
@@ -2643,10 +2670,10 @@ async def test_delete_file_marks_stale_ref_less_task_failed_before_cleanup() -> 
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with patch("ray.cancel") as cancel:
+    with _straight_to_final_check(), patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
