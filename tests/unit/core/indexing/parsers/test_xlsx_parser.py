@@ -218,6 +218,30 @@ def test_header_names_are_unique_even_with_generated_name_collisions():
     assert block.metadata["table_columns"] == ["column_3", "name", "column_3_2", "name_3", "name_2"]
 
 
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        (["Name", "Name "], ["Name", "Name_2"]),
+        (["Full\r\nName", "Full\nName"], ["Full\r\nName", "Full\nName_2"]),
+    ],
+)
+def test_rendered_header_names_remain_unique_through_recursive_chunking(headers, expected):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.models.document import ProcessedDocument
+
+    doc = _document([headers, ["Alice", "Bob"]])
+    [block] = list(XlsxParser().iter_batches(doc))
+    processed = ProcessedDocument(document_id=doc.id, text_blocks=[block], metadata={"source": doc.filename})
+
+    chunks = RecursiveSplitter(chunk_size=100, length_function=lambda text: len(text.split())).chunk(
+        processed, partition="p1"
+    )
+
+    assert block.metadata["table_columns"] == expected
+    assert chunks
+    assert all(chunk.metadata["table_columns"] == expected for chunk in chunks)
+
+
 def test_whitespace_only_cells_do_not_become_headers_or_data():
     doc = _document([["title"], ["name", "   "], ["Alice", "\t"], [" ", "\t"], ["Bob", "Lyon"]])
 
