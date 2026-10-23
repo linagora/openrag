@@ -151,7 +151,8 @@ export function listTasks(
     query.set("limit", String(pagination.limit));
     query.set("offset", String(pagination.offset));
   }
-  const qs = query.size ? `?${query.toString()}` : "";
+  const search = query.toString();
+  const qs = search ? `?${search}` : "";
   return request<TaskListResponse>(`${QUEUE}/tasks${qs}`);
 }
 

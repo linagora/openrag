@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { MouseEvent } from "react";
@@ -67,6 +67,8 @@ function historyQualityLabel(quality: string | undefined): string {
   }
 }
 
+const TERMINAL_HISTORY_POLL_WINDOW_MS = 30_000;
+
 function stageEventText(
   eventStatus: string,
   failureEffect: string | null | undefined,
@@ -113,6 +115,10 @@ export default function JobDetailPage() {
     }));
   };
   const historyCursor = historyCursors[historyCursors.length - 1] ?? null;
+  const terminalHistoryPollDeadline = useRef<{ identity: string; at: number | null }>({
+    identity: historyIdentity,
+    at: null,
+  });
 
   // OpenRag has no task SSE — poll status until it reaches a terminal state.
   const taskQuery = useQuery({
@@ -136,8 +142,35 @@ export default function JobDetailPage() {
     ],
     queryFn: () => getTaskStageProgress(id!, historyCursor, 50),
     enabled: !!id && !!user,
-    refetchInterval: historyCursors.length === 1 && isActiveState(taskQuery.data?.task_state ?? "") ? 3000 : false,
+    refetchInterval: (query) => {
+      const taskActive = isActiveState(taskQuery.data?.task_state ?? "");
+      const persistencePending = query.state.data?.history_quality === "pending_persistence";
+      if (historyCursors.length !== 1) return false;
+      if (taskActive) return 3000;
+      const taskFinished = isTerminalState(taskQuery.data?.task_state ?? "");
+      const deadline = terminalHistoryPollDeadline.current.identity === historyIdentity
+        ? terminalHistoryPollDeadline.current.at
+        : null;
+      const handoffPending =
+        taskFinished &&
+        persistencePending &&
+        (deadline === null || Date.now() < deadline);
+      return handoffPending ? 3000 : false;
+    },
   });
+
+  useEffect(() => {
+    const taskFinished = isTerminalState(taskQuery.data?.task_state ?? "");
+    const persistencePending = stageQuery.data?.history_quality === "pending_persistence";
+    if (terminalHistoryPollDeadline.current.identity !== historyIdentity) {
+      terminalHistoryPollDeadline.current = { identity: historyIdentity, at: null };
+    }
+    if (!taskFinished || !persistencePending) {
+      terminalHistoryPollDeadline.current.at = null;
+      return;
+    }
+    terminalHistoryPollDeadline.current.at ??= Date.now() + TERMINAL_HISTORY_POLL_WINDOW_MS;
+  }, [historyIdentity, stageQuery.data?.history_quality, taskQuery.data?.task_state]);
 
   const state = taskQuery.data?.task_state;
   const active = !!state && isActiveState(state);
@@ -337,6 +370,7 @@ export default function JobDetailPage() {
                     <span className="absolute -left-[1.34rem] top-1.5 h-2 w-2 rounded-full bg-primary" />
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{event.stage_id.replace(/_/g, " ")}</span>
+                      {event.attempt > 1 && <Badge variant="secondary">Attempt {event.attempt}</Badge>}
                       <Badge variant={event.status === "failed" ? "destructive" : "outline"}>
                         {stageEventText(
                           event.status,

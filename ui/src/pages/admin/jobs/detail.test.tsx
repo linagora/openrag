@@ -399,4 +399,121 @@ describe("JobDetailPage", () => {
     expect(screen.getAllByText("caption").length).toBeGreaterThan(0);
     expect(screen.queryByText(/skipped/i)).toBeNull();
   });
+
+  it("keeps polling terminal tasks while stage history is pending persistence", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "done.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "pending_persistence",
+      is_currently_running: false,
+      persisted_through_sequence: 1,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    const { queryClient } = renderJobDetail();
+
+    expect(await screen.findByText("Recent stage updates may still be saving.")).not.toBeNull();
+    const stageQuery = queryClient.getQueryCache().find({
+      queryKey: ["task-stage-progress", "task-1", 7, "admin", null, null],
+    });
+    if (!stageQuery) throw new Error("Stage history query was not created");
+    const interval = (stageQuery.options as unknown as { refetchInterval?: unknown }).refetchInterval;
+    expect(typeof interval).toBe("function");
+    const getInterval = interval as (query: unknown) => number | false;
+    expect(getInterval(stageQuery)).toBe(3000);
+    now.mockReturnValue(1_031_000);
+    expect(getInterval(stageQuery)).toBe(false);
+    now.mockRestore();
+  });
+
+  it("stops the terminal history poll when persistence completes", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "done.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "pending_persistence",
+      is_currently_running: false,
+      persisted_through_sequence: 1,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    const { queryClient } = renderJobDetail();
+    expect(await screen.findByText("Recent stage updates may still be saving.")).not.toBeNull();
+    const stageQuery = queryClient.getQueryCache().find({
+      queryKey: ["task-stage-progress", "task-1", 7, "admin", null, null],
+    });
+    if (!stageQuery) throw new Error("Stage history query was not created");
+    const interval = (stageQuery.options as unknown as { refetchInterval?: unknown }).refetchInterval;
+    if (typeof interval !== "function") throw new Error("Stage history polling interval was not configured");
+    expect((interval as (query: unknown) => number | false)(stageQuery)).toBe(3000);
+
+    queryClient.setQueryData(stageQuery.queryKey, {
+      freshness: "durable",
+      history_quality: "complete",
+      is_currently_running: false,
+      persisted_through_sequence: 2,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    expect((interval as (query: unknown) => number | false)(stageQuery)).toBe(false);
+    expect(await screen.findByText("All observed stage events are saved.")).not.toBeNull();
+  });
+
+  it("labels events from a retried attempt in the stage timeline", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "retried.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "complete",
+      is_currently_running: false,
+      persisted_through_sequence: 2,
+      events: [
+        {
+          event_id: "attempt-1",
+          task_id: "task-1",
+          attempt: 1,
+          sequence: 1,
+          invocation_id: "invocation-1",
+          stage_id: "parse",
+          stage_rank: 0,
+          status: "started",
+          occurred_at: "2026-10-22T10:00:00Z",
+        },
+        {
+          event_id: "attempt-2",
+          task_id: "task-1",
+          attempt: 2,
+          sequence: 1,
+          invocation_id: "invocation-2",
+          stage_id: "parse",
+          stage_rank: 0,
+          status: "started",
+          occurred_at: "2026-10-22T10:01:00Z",
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText("Attempt 2")).not.toBeNull();
+  });
 });
