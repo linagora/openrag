@@ -31,6 +31,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from core.embeddings.query_embeddings import sharing_query_embeddings
 from core.models.preset import resolve_partition_chat_llm
 from core.models.retrieval_trace import TraceRemovalReason
 from core.prompts import load_template_by_key
@@ -1464,6 +1465,7 @@ class RetrievalService:
             except Exception:
                 pass
 
+    @sharing_query_embeddings
     async def retrieve(
         self,
         *,
@@ -1535,6 +1537,7 @@ class RetrievalService:
             partition_counts=[len(names) for names, _chunks in ranked_groups],
         )
 
+    @sharing_query_embeddings
     async def retrieve_multi(
         self,
         *,
@@ -1606,6 +1609,7 @@ class RetrievalService:
             partition_counts=[len(names) for names, _chunks in ranked_groups],
         )
 
+    @sharing_query_embeddings
     async def retrieve_per_query(
         self,
         *,
