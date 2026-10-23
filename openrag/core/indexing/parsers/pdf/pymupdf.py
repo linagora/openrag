@@ -651,6 +651,7 @@ def _pages_with_fallback(doc: pymupdf.Document, chunks: list[dict], filename: st
     page and log a warning so the silent data-loss is visible in logs.
     """
     pages: list[str] = []
+    fallen_back_pages = []
     for i, (chunk, page) in enumerate(zip(chunks, doc)):
         md_text = (chunk.get("text") or "").strip()
         plain_text = page.get_text().strip()
