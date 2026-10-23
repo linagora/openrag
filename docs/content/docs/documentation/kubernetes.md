@@ -30,6 +30,7 @@ To upgrade a running release to 2.3.0, follow [Upgrading OpenRAG — 2.2.x to 2.
    - Edit the `env.config` and `env.secrets` sections in your `values.yaml`.
    - Secrets (API keys, tokens, Hugging Face credentials, etc.) will be mounted into the cluster as Kubernetes secrets.
    - For managed PostgreSQL, point the `POSTGRES_*` values at the external database and disable database auto-creation.
+   - Set `minioCredentials.accessKey` and `minioCredentials.secretKey` for the bundled object store. They are required: the install fails without them, with a published value such as `minioadmin`, with an access key shorter than 3 characters, or with a secret key shorter than 12. The chart stores them in the Secret `openrag-minio-credentials`, which MinIO and Milvus read. To manage that Secret yourself, for example with External Secrets or Vault, create it with the keys `accesskey` and `secretkey` and set `minioCredentials.create: false`. `env.existingSecret` and the secrets providers don't cover it. With an external S3 store (`milvus.externalS3`), leave them unset: the chart writes the external store's keys to that Secret instead. Existing releases: read [Object storage upgrade](/openrag/documentation/minio_silo_upgrade/) first.
 
 3. **Install or upgrade the release from GHCR**:
 
@@ -259,6 +260,28 @@ for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.
 
+The bundled Infinity reranker answers `/health` only once its model is loaded
+and its warmup benchmark has run. On our test machines that took 100 to 125 s on
+its default 4 CPUs, 180 to 210 s on 2 and 340 to 380 s on 1, whether or not the
+model was already cached. Its startup probe allows 10 minutes for that, plus a
+first-boot model download, and the liveness and readiness probes start only
+once it passes. A start that hangs is therefore restarted after 10 minutes.
+All three probes are set under `reranker.probes`, where each is merged over its
+default, so set only what you change: raise
+`reranker.probes.startup.failureThreshold` for slower CPUs or a slow download.
+Set a probe to `null` to drop it, a field to `null` to remove it, and another
+handler (`tcpSocket`, `exec` or `grpc`) to replace `httpGet`. The defaults are
+listed in `values.yaml`.
+On CPU, `reranker.extraEnv` with `INFINITY_MODEL_WARMUP: "false"` skips the
+warmup benchmark: on 4 CPUs Infinity then answered `/health` in under 20 s.
+
+The reranker's model is set once, in `reranker.model.id`: Infinity loads it and
+OpenRAG names it (`RERANKER_MODEL`). Its port is set once, in
+`reranker.service.port`: Infinity listens on it, the Service exposes it, and
+`RERANKER_BASE_URL` calls it. Extra Infinity flags go in `reranker.extraArgs`,
+which refuses `--model-id` and `--port`, and environment variables for the
+reranker alone in `reranker.extraEnv`.
+
 Readiness uses the configured model endpoints and API keys, just like inference.
 HTTP endpoints do not encrypt those credentials; configure HTTPS when transport
 encryption is required.
@@ -269,10 +292,32 @@ Prometheus exposes aggregate endpoint state through
 and the public readiness endpoint reports aggregate configuration-reference
 counts without exposing partition or preset names.
 
-- If using a public IP instead of a hostname, you can leave `ingress.host` empty in your `values.yaml`.  
-  The ingress will then match all hosts.
+- `openrag.ingress.host` is required when `openrag.ingress.enabled` is true: the chart refuses to
+  render without it. To reach OpenRAG by public IP only, disable the chart's ingress and expose the
+  service another way.
 
-- If you later configure a hostname + TLS (via cert-manager), just update `ingress.host` and redeploy.
+- If you later configure a hostname + TLS (via cert-manager), update `openrag.ingress.host` and redeploy.
+  With an HTTP-01 issuer, cert-manager answers the challenge from a solver pod it starts in the
+  release namespace, on port 8089. The chart's `<fullname>-acme-http01-solver` NetworkPolicy lets
+  that port through on the solver pods only, from any source by default, since a host-network
+  Ingress controller (ingress-nginx with `hostNetwork`, for one) connects from a node address.
+  Narrow it with `networkPolicy.acmeHttp01.from`: a `namespaceSelector` when the controller runs
+  on the pod network, an `ipBlock` with the node addresses when it uses `hostNetwork`, which no
+  selector can match. Do not add 8089 to `networkPolicy.externalPorts`, which would open it on
+  every pod.
+
+  ```yaml
+  networkPolicy:
+    acmeHttp01:
+      from:
+        # Controller on the pod network:
+        # - namespaceSelector:
+        #     matchLabels:
+        #       kubernetes.io/metadata.name: ingress-nginx
+        # Controller with hostNetwork, the node addresses:
+        # - ipBlock:
+        #     cidr: 10.0.0.0/24
+  ```
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
   The bundled vLLM engines run CUDA 12.9 builds (`v0.30.0-cu129`, and `v0.11.2` for the VLM). The
@@ -290,6 +335,53 @@ counts without exposing partition or preset names.
   **Upgrading a release that already booted with that URL**: the endpoint is saved in the database,
   and an empty `BASE_URL` does not remove it, even with `MODEL_ENDPOINT_SYNC_ON_BOOT=true`. Chat keeps
   failing with `Connection error` until you repoint or remove that LLM endpoint in the admin UI.
+
+## Operator-managed accounts
+
+Service accounts whose token comes from your secret store (cozy-stack's, for example) are
+declared under `openrag.seedUsers`. The chart renders the list as `SEED_USERS` in the env
+ConfigMap, only when it is non-empty, and the API provisions the accounts at startup. The
+behaviour is described in
+[Operator-managed accounts](/openrag/documentation/user_auth/#operator-managed-accounts-authseed_users).
+
+```yaml
+openrag:
+  seedUsers:
+    - external_user_id: svc-cozy-stack
+      display_name: cozy-stack
+      token_env: COZY_STACK_TOKEN
+      partitions:
+        - { name: twake, role: editor }
+```
+
+The list carries env var names only. The token itself goes where the chart's other secrets
+go: `env.secrets.COZY_STACK_TOKEN`, or a `COZY_STACK_TOKEN` key in the KV path read by
+`env.secretsProvider.externalSecret` (`dataFrom`) or `vaultStaticSecret`, which project
+every key of that path as an environment variable. Point cozy-stack at the same key.
+
+A change to `openrag.seedUsers` changes the ConfigMap checksum and rolls the API
+Deployment. A rotated token is picked up on the next restart: `vaultStaticSecret` restarts
+the Deployment itself, while with `externalSecret` the Secret refreshes on its
+`refreshInterval` and the pods need a `kubectl rollout restart`. Under Ray Serve the API
+runs on the Ray head, which neither mechanism restarts: cycle the head pod after a change.
+Do not also set `SEED_USERS` in `env.config`; the render fails when both are present, and
+it also fails when an entry carries any key besides `external_user_id`, `display_name`,
+`token_env`, `is_admin` and `partitions` (`name` and `role` inside `partitions`), so a
+`token` or any other stray value never lands in the ConfigMap.
+
+Each API process applies the list it booted with, so the last pod to start wins. A replica
+still running the old ConfigMap or Secret mid-rollout, or a Ray pod that was not cycled,
+re-applies the old list or the old token hash when it restarts. After changing
+`openrag.seedUsers` or a token, let the rollout complete and restart the Ray pods, so every
+process that can boot carries the new values.
+
+The Secret value is hashed exactly as stored, as for `AUTH_TOKEN`: a trailing newline
+(common with `echo` piped into `base64`) becomes part of the token and the client's bearer
+no longer matches. Use `printf '%s'` or `stringData` when writing the Secret.
+
+Restarting the pods automatically when an External Secrets Operator Secret rotates
+(Reloader, or a Secret checksum annotation) is not done here; it is tracked in
+[#985](https://github.com/linagora/openrag/issues/985).
 
 ## Monitoring
 

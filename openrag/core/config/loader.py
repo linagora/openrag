@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
+from .auth import SEED_USERS_ENV_VAR
 from .root import Settings
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("SAVE_MARKDOWN", "loader.save_markdown", bool),
     ("SAVE_UPLOADED_FILES", "loader.save_uploaded_files", bool),
     ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
+    ("CSV_BATCH_SIZE", "loader.csv_batch_size", int),
+    ("CSV_DELIMITER", "loader.csv_delimiter", str),
     # Indexing callback
     ("INDEXING_CALLBACK_ALLOW_PRIVATE_URLS", "indexing_callback.allow_private_urls", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),
@@ -250,6 +254,27 @@ def _coerce(value: str, target_type: type, env_var: str = "") -> Any:
     return value
 
 
+def _parse_seed_users(raw: str) -> list[Any]:
+    """Parse ``SEED_USERS``: a JSON or YAML list of ``auth.seed_users`` entries.
+
+    The value should carry env var *names* only, but a token pasted in by
+    mistake would be quoted back by PyYAML's error snippet, so the complaint
+    names the problem and its position, never the text. A value that is not a
+    list fails the boot: a silently dropped list would leave service accounts
+    unprovisioned.
+    """
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        problem = getattr(exc, "problem", None) or "parse error"
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: not valid JSON or YAML ({problem}{where})") from None
+    if not isinstance(parsed, list):
+        raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: expected a list, got {type(parsed).__name__}")
+    return parsed
+
+
 def _apply_env_overrides(data: dict) -> dict:
     """Apply environment variable overrides to the config dict."""
     for env_var, dotted_path, target_type in _ENV_OVERRIDES:
@@ -263,6 +288,10 @@ def _apply_env_overrides(data: dict) -> dict:
         sem = data.setdefault("semaphore", {})
         sem.setdefault("llm_semaphore", sem_value)
         sem.setdefault("vlm_semaphore", sem_value)
+
+    seed_users = os.environ.get(SEED_USERS_ENV_VAR, "")
+    if seed_users.strip():
+        data.setdefault("auth", {})["seed_users"] = _parse_seed_users(seed_users)
 
     audio_loader = os.environ.get("AUDIOLOADER")
     if audio_loader:
@@ -312,4 +341,23 @@ def load_config(
         if key in paths and paths[key]:
             paths[key] = str(Path(paths[key]).resolve())
 
-    return Settings(**data)
+    try:
+        return Settings(**data)
+    except ValidationError as exc:
+        error = _without_auth_inputs(exc)
+    # Raised outside the handler so the original, with its inputs, is not chained.
+    raise error
+
+
+def _without_auth_inputs(exc: ValidationError) -> ValidationError:
+    """Drop the offending values when an ``auth`` entry fails validation.
+
+    A token typed under ``token:`` or pasted where a ``token_env`` name belongs
+    would otherwise reach the boot log as ``input_value``, or the ``input`` of
+    :meth:`ValidationError.errors` for a caller that logs those.
+    """
+    errors = exc.errors(include_url=False)
+    if not any(error["loc"][:1] == ("auth",) for error in errors):
+        return exc
+    scrubbed = [{**error, "input": None} if error["loc"][:1] == ("auth",) else error for error in errors]
+    return ValidationError.from_exception_data(exc.title, scrubbed, hide_input=True)
