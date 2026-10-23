@@ -547,6 +547,54 @@ class TestOllamaEmbedder:
         await self._make_embedder(handler).embed(["test"])
 
     @pytest.mark.asyncio
+    async def test_embed_splits_large_input_into_configured_batches_in_order(self):
+        """Large parser batches must not become one oversized Ollama request."""
+        requests: list[list[str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            batch = body["input"]
+            requests.append(batch)
+            # Deliberately reverse the provider response: each request is still
+            # normalized by its batch-local indexes before concatenation.
+            data = [
+                {"index": index, "embedding": [float(int(text.removeprefix("chunk-")))]}
+                for index, text in reversed(list(enumerate(batch)))
+            ]
+            return httpx.Response(200, json={"data": data})
+
+        embedder = self._make_embedder(handler, batch_size=2)
+        vectors = await embedder.embed(["chunk-0", "chunk-1", "chunk-2", "chunk-3", "chunk-4"])
+
+        assert requests == [["chunk-0", "chunk-1"], ["chunk-2", "chunk-3"], ["chunk-4"]]
+        assert vectors == [[0.0], [1.0], [2.0], [3.0], [4.0]]
+
+    @pytest.mark.asyncio
+    async def test_embed_retry_does_not_resend_completed_batches(self):
+        import tenacity
+
+        retrying = OllamaEmbedder._embed_batch.retry
+        original_wait = retrying.wait
+        retrying.wait = tenacity.wait_none()
+        requests: list[list[str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            batch = json.loads(request.content)["input"]
+            requests.append(batch)
+            if batch == ["chunk-2"] and requests.count(["chunk-2"]) == 1:
+                raise httpx.ReadError("connection reset by peer")
+            return _embed_response([[float(int(text.removeprefix("chunk-")))] for text in batch])
+
+        try:
+            embedder = self._make_embedder(handler, batch_size=2)
+            vectors = await embedder.embed(["chunk-0", "chunk-1", "chunk-2"])
+        finally:
+            retrying.wait = original_wait
+
+        assert requests == [["chunk-0", "chunk-1"], ["chunk-2"], ["chunk-2"]]
+        assert vectors == [[0.0], [1.0], [2.0]]
+
+    @pytest.mark.asyncio
     async def test_embed_connection_error(self):
         async def fail(*a, **kw):
             raise httpx.ConnectError("refused")
@@ -563,7 +611,7 @@ class TestOllamaEmbedder:
         ConnectError. It must be retried, not escape raw. Regression for #718."""
         import tenacity
 
-        retrying = OllamaEmbedder.embed.retry
+        retrying = OllamaEmbedder._embed_batch.retry
         original_wait = retrying.wait
         retrying.wait = tenacity.wait_none()
         calls = {"n": 0}
@@ -681,7 +729,7 @@ class TestOllamaQueryBudget:
         import tenacity
 
         restore = []
-        for method in (OllamaEmbedder.embed, OllamaEmbedder.embed_query):
+        for method in (OllamaEmbedder._embed_batch, OllamaEmbedder._embed_query_batch):
             restore.append((method.retry, method.retry.wait))
             method.retry.wait = tenacity.wait_none()
         yield
@@ -720,3 +768,25 @@ class TestOllamaQueryBudget:
 
         assert len(calls) == 3
         assert all("timeout" not in call for call in calls)
+
+    @pytest.mark.asyncio
+    async def test_no_query_sends_no_request(self):
+        embedder, calls = self._timing_out()
+
+        assert await embedder.embed_query([]) == []
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_more_queries_than_one_batch_take_the_indexing_path(self):
+        requests: list[list[str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            batch = json.loads(request.content)["input"]
+            requests.append(batch)
+            return httpx.Response(200, json={"data": [{"index": i, "embedding": [0.0]} for i in range(len(batch))]})
+
+        embedder = OllamaEmbedder(endpoint="http://ollama:11434", model_name="nomic-embed-text", batch_size=2)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        assert len(await embedder.embed_query(["a", "b", "c"])) == 3
+        assert requests == [["a", "b"], ["c"]]
