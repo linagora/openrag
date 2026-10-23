@@ -444,6 +444,7 @@ job_stage_state = Table(
     Column("position_score", Integer, nullable=False, server_default="0"),
     Column("stage_started_at", DateTime(timezone=True), nullable=True),
     Column("current_invocation_id", UUID(as_uuid=True), nullable=True),
+    Column("interrupted_invocation_id", UUID(as_uuid=True), nullable=True),
     Column("persisted_through_sequence", BigInteger, nullable=False, server_default="0"),
     Column("expected_final_sequence", BigInteger, nullable=True),
     Column("known_loss", Boolean, nullable=False, server_default="false"),
