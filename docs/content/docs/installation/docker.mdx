@@ -68,6 +68,31 @@ docker compose -f docker-compose.yaml -f logging.docker-compose.yaml up -d
 Set `LOKI_URL` (and the optional `LOKI_USERNAME`, `LOKI_PASSWORD`,
 `LOKI_TENANT_ID`) in `.env`. See [Loki logs](/openrag/documentation/loki_logs/).
 
+## Ray dashboard
+
+The Ray dashboard is not published by default: it has no authentication, and
+its job-submission API runs arbitrary code. To open it on the host's loopback
+while you need it, add its overlay, after any other overlay:
+
+```bash
+docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml up -d
+```
+
+Then open `http://127.0.0.1:8265` (`RAY_DASHBOARD_PORT` changes the port), or
+forward that port over SSH from a server. Bring the stack back up without the
+overlay once you are done.
+
+Adding or removing the overlay recreates the API container: the API restarts,
+the embedded Ray and its actors start over, and indexing in progress is
+interrupted. To inspect Ray on a running stack without restarting it, use its
+CLI inside the container instead:
+
+```bash
+docker compose exec openrag /app/.venv/bin/ray list actors
+```
+
+(`openrag-cpu` on a CPU deployment.)
+
 ## Reverse proxy (TLS)
 
 An opt-in overlay adds [Nginx Proxy Manager](https://nginxproxymanager.com/)
