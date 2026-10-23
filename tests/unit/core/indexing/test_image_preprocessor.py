@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import hashlib
 
+import pytest
 from core.indexing.image_preprocessor import (
     MIN_IMAGE_PIXELS,
+    UPLOADED_IMAGE_FORMATS,
     decode_data_uri,
     ensure_png_compatible_mode,
     extract_data_uri_image_blocks,
@@ -14,7 +16,9 @@ from core.indexing.image_preprocessor import (
     normalize_data_uri_images,
     pil_to_png_bytes,
 )
+from core.models.document import _EXTENSION_TYPES, DocumentType
 from PIL import Image
+from services.workers.parsers.parser_dispatcher import _EML_ATTACHMENT_TYPES
 
 
 class TestEnsurePngCompatibleMode:
@@ -412,3 +416,19 @@ class TestNormalizeDataUriImages:
 
 def test_min_image_pixels_constant():
     assert MIN_IMAGE_PIXELS == 784
+
+
+class TestUploadedImageFormats:
+    """``UPLOADED_IMAGE_FORMATS`` is exactly the raster types an upload can be."""
+
+    @pytest.mark.parametrize(
+        "extension_types",
+        [_EXTENSION_TYPES, _EML_ATTACHMENT_TYPES],
+        ids=["uploads", "eml-attachments"],
+    )
+    def test_matches_the_raster_image_extensions(self, extension_types):
+        raster_extensions = [
+            ext for ext, kind in extension_types.items() if kind is DocumentType.IMAGE and ext != "svg"
+        ]
+        pillow_formats = Image.registered_extensions()
+        assert {pillow_formats[f".{ext}"] for ext in raster_extensions} == set(UPLOADED_IMAGE_FORMATS)
