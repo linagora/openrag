@@ -24,10 +24,10 @@ logger = get_logger()
 def _detect_header(rows, byte_limit):
     """Skip obvious title/preamble rows, retaining ambiguous first rows.
 
-    Look ahead at most 32 physical rows and one batch worth of text. Only
-    promote a later row when the initial row has one distinct value and the
-    candidate has multiple distinct textual labels with a following data row.
-    Replay the buffered rows so physical coordinates and fallback are unchanged.
+    Look ahead at most 32 physical rows and one batch worth of text. Promote a
+    later row only when it is a wider textual row followed by aligned data.
+    Equal-width layouts remain ambiguous and keep the first nonempty row.
+    Replay buffered rows so physical coordinates remain unchanged.
     """
     buffered = []
     size = 0
@@ -44,24 +44,29 @@ def _detect_header(rows, byte_limit):
     selected = None
     if nonempty:
         selected = nonempty[0][0]
-        first = [v for v in nonempty[0][2] if v]
-        if len(set(first)) == 1:
-            for index, (number, raw, values) in enumerate(nonempty[1:], 1):
-                labels = [v for v in values if v]
-                if len(set(labels)) < 2 or not all(isinstance(v, str) for v in raw if v is not None):
-                    continue
-                if index + 1 >= len(nonempty):
-                    break
-                following = nonempty[index + 1][2]
-                occupied = [i for i, v in enumerate(values) if v]
-                if all(i < len(following) and following[i] for i in occupied):
-                    selected = number
-                    break
+        for index, (number, raw, values) in enumerate(nonempty[1:], 1):
+            labels = [value for value in values if value]
+            occupied = [column for column, value in enumerate(values) if value]
+            earlier = nonempty[:index]
+            wider_than_preamble = all(
+                sum(bool(value) for value in earlier_values) < len(occupied) for _, _, earlier_values in earlier
+            )
+            separated_repeated_title = number > nonempty[index - 1][0] + 1 and all(
+                len({value for value in earlier_values if value}) == 1 for _, _, earlier_values in earlier
+            )
+            if (
+                len(set(labels)) < 2
+                or not all(isinstance(value, str) for value in raw if value is not None)
+                or not (wider_than_preamble or separated_repeated_title)
+            ):
+                continue
+            if index + 1 >= len(nonempty):
+                break
+            following = nonempty[index + 1][2]
+            if all(column < len(following) and following[column] for column in occupied):
+                selected = number
+                break
     return selected, chain(buffered, rows)
-
-
-class _BackendReadError(PipelineError):
-    """A recognized reader failure for which a configured fallback is allowed."""
 
 
 def _column_name(number: int) -> str:
@@ -105,30 +110,6 @@ def _document_source(document: Document):
         yield stream
 
 
-def _calamine_sheets(source, infos: list[SheetInfo]):
-    from python_calamine import CalamineError, CalamineWorkbook
-
-    workbook = None
-    try:
-        workbook = (
-            CalamineWorkbook.from_path(source) if isinstance(source, Path) else CalamineWorkbook.from_object(source)
-        )
-        for info in infos:
-            if info.hidden or not info.columns:
-                continue
-            sheet = workbook.get_sheet_by_name(info.name)
-            # iter_rows includes leading empty rows; numbering starts at Excel row 1.
-            leading_columns = sheet.start[1] if sheet.start is not None else 0
-            rows = ([None] * leading_columns + list(row) for row in sheet.iter_rows())
-            with closing(rows):
-                yield info, rows
-    except CalamineError as exc:
-        raise _BackendReadError(f"Calamine could not read the workbook: {exc}") from exc
-    finally:
-        if workbook is not None:
-            workbook.close()
-
-
 def _openpyxl_sheets(source, infos: list[SheetInfo]):
     from openpyxl import load_workbook
 
@@ -158,8 +139,6 @@ class XlsxParser(TabularBatchParser):
         batch_size: int = 10_000,
         header_row: int | None = None,
         sheet_header_rows: dict[str, int | None] | None = None,
-        backend: str = "openpyxl",
-        fallback_backend: str | None = None,
         limits: XlsxLimits | dict[str, int] | None = None,
     ) -> None:
         if type(batch_size) is not int or batch_size < 1:
@@ -175,12 +154,7 @@ class XlsxParser(TabularBatchParser):
             if row is not None and (type(row) is not int or not 1 <= row <= 1_048_576):
                 raise ConfigError("XLSX sheet header rows must be Excel row numbers between 1 and 1048576 or null")
         self.sheet_header_rows = dict(sheet_header_rows or {})
-        allowed = {"calamine", "openpyxl"}
-        if backend not in allowed or fallback_backend not in allowed | {None}:
-            raise ConfigError("XLSX backend must be 'calamine' or 'openpyxl'")
         self.batch_size = batch_size
-        self.backend = backend
-        self.fallback_backend = fallback_backend
         try:
             self.limits = XlsxLimits(**limits) if isinstance(limits, dict) else limits or XlsxLimits()
         except TypeError as exc:
@@ -191,20 +165,6 @@ class XlsxParser(TabularBatchParser):
 
     async def parse(self, document: Document) -> ProcessedDocument:
         return await asyncio.to_thread(self._parse, document)
-
-    def _backend_sheets(self, source, backend: str, infos: list[SheetInfo]):
-        if backend == "calamine":
-            for info in infos:
-                if not info.hidden and (
-                    info.error_cells
-                    or info.rows * info.columns > self.limits.max_calamine_cells
-                    or info.text_bytes > self.limits.max_calamine_text_bytes
-                ):
-                    raise _BackendReadError(
-                        "Calamine requires OpenPyXL for Excel error cells, a large worksheet rectangle, or expanded text"
-                    )
-            return _calamine_sheets(source, infos)
-        return _openpyxl_sheets(source, infos)
 
     def iter_batches(self, document: Document) -> Iterator[TextBlock]:
         with _document_source(document) as source:
@@ -225,28 +185,13 @@ class XlsxParser(TabularBatchParser):
                         code="INVALID_XLSX",
                         status_code=422,
                     )
-            emitted = False
-            try:
-                with closing(self._iter_sheets(document, source, self.backend, infos)) as batches:
-                    for block in batches:
-                        emitted = True
-                        yield block
-                return
-            except (ImportError, _BackendReadError) as exc:
-                if emitted or not self.fallback_backend or self.fallback_backend == self.backend:
-                    raise
-                logger.bind(primary_backend=self.backend, fallback_backend=self.fallback_backend).warning(
-                    f"XLSX backend failed before emitting data; using fallback: {exc}"
-                )
-                if hasattr(source, "seek"):
-                    source.seek(0)
-                with closing(self._iter_sheets(document, source, self.fallback_backend, infos, str(exc))) as batches:
-                    yield from batches
+            with closing(self._iter_sheets(document, source, infos)) as batches:
+                yield from batches
 
-    def _iter_sheets(self, document, source, backend, infos, fallback_reason=None):
+    def _iter_sheets(self, document, source, infos):
         data_rows_seen = 0
         hidden_count = sum(info.hidden for info in infos)
-        with closing(self._backend_sheets(source, backend, infos)) as sheets:
+        with closing(_openpyxl_sheets(source, infos)) as sheets:
             for sheet, row_iterator in sheets:
                 selected_header_row = self.sheet_header_rows.get(sheet.name, self.header_row)
                 if selected_header_row is None:
@@ -318,8 +263,6 @@ class XlsxParser(TabularBatchParser):
                     return self._block(
                         document,
                         sheet,
-                        backend,
-                        fallback_reason,
                         hidden_count,
                         header_values,
                         header_row,
@@ -361,8 +304,6 @@ class XlsxParser(TabularBatchParser):
         self,
         document,
         sheet,
-        backend,
-        fallback_reason,
         hidden_count,
         headers,
         header_row,
@@ -390,8 +331,7 @@ class XlsxParser(TabularBatchParser):
             "hidden_sheets_skipped": hidden_count,
             "formula_policy": "cached_values_only",
             "sheet_missing_formula_values": sheet.missing_formula_values,
-            "spreadsheet_backend": backend,
-            "spreadsheet_fallback_used": fallback_reason is not None,
+            "spreadsheet_backend": "openpyxl",
             # Transitional aliases keep existing chunking/retrieval operational.
             "csv_columns": list(headers),
             "csv_row_start": row_numbers[0],
@@ -401,8 +341,6 @@ class XlsxParser(TabularBatchParser):
         }
         if context:
             metadata.update(sheet_context=context, sheet_context_row_numbers=list(preamble_rows))
-        if fallback_reason is not None:
-            metadata.update(spreadsheet_fallback_from=self.backend, spreadsheet_fallback_reason=fallback_reason)
         return TextBlock(text="\n".join(lines) + context, block_type="table", metadata=metadata)
 
     def _parse(self, document: Document) -> ProcessedDocument:
