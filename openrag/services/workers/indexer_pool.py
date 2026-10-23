@@ -284,15 +284,6 @@ class IndexerWorkerActor:
             await self._catalog_store.initialize()
             self._catalog_initialized = True
 
-    async def __ray_shutdown__(self) -> None:
-        """Give the actor-owned stage writer its bounded best-effort drain."""
-        worker = getattr(self, "_worker", None)
-        if worker is not None:
-            try:
-                await worker.close_stage_writer()
-            except Exception:  # noqa: BLE001 - shutdown must not mask actor teardown
-                self._logger.warning("Stage history writer shutdown drain failed")
-
     def _get_prompt_service(self) -> Any:
         if self._prompt_service is None:
             from services.orchestrators.prompt_service import PromptService
@@ -693,6 +684,10 @@ class IndexerWorkerActor:
                 worker_lease.cancel()
                 await asyncio.gather(worker_lease, return_exceptions=True)
                 await end_worker_lease(self._task_state_manager, task_id, logger=self._logger)
+
+    async def close_stage_writer(self) -> None:
+        """Drain this worker's bounded stage-history queue before retirement."""
+        await self._worker.close_stage_writer()
 
     async def _report_task_failure(
         self,
