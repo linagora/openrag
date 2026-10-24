@@ -175,7 +175,8 @@ class IndexerWorker:
                 "document": document,
                 "partition": partition,
                 "filename": document.filename,
-                "language": metadata.get("language", "en"),
+                # None lets the enrichment stages detect it (see resolve_language).
+                "language": metadata.get("language"),
                 "replace": replace,
                 "user": user,
                 "workspace_ids": workspace_ids,
