@@ -881,6 +881,31 @@ class TEIEmbedder(VLLMEmbedder):
 # ---------------------------------------------------------------------------
 
 
+def downscale_image(image_bytes: bytes, max_side: int) -> bytes:
+    """*image_bytes* as a PNG whose longer side is at most *max_side* pixels.
+
+    Vision models that tile the image at its native resolution (Qwen-VL among
+    them) spend input tokens, and time, in proportion to its area: a 2,000 px
+    page costs about twice the tokens and latency of the same page at 1,024 px,
+    for the same caption. An image already small enough, or bytes Pillow cannot
+    read, are returned unchanged.
+    """
+    from io import BytesIO
+
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            if max(image.size) <= max_side:
+                return image_bytes
+            image.thumbnail((max_side, max_side))
+            out = BytesIO()
+            image.save(out, format="PNG")
+            return out.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError):
+        return image_bytes
+
+
 @vlm_registry.register("vllm")
 class VLLMVision(VLLMClient, VLM):
     """OpenAI-compatible vision client backed by vLLM.
@@ -897,15 +922,21 @@ class VLLMVision(VLLMClient, VLM):
         timeout: float = 60.0,
         api_key: str = "",
         max_tokens: int = 1024,
+        max_image_side: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(endpoint=endpoint, model_name=model_name, api_key=api_key, timeout=timeout, **kwargs)
         self._max_tokens = max_tokens
+        # Taken out of **kwargs on purpose: anything left there is sent to the
+        # provider as a sampling field, and a strict server rejects unknown ones.
+        self._max_image_side = max_image_side
 
     @with_inference_metrics("vlm")
     @with_circuit_breaker("vlm")
     @with_retry(max_attempts=2)
     async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        if self._max_image_side:
+            image_bytes = await asyncio.to_thread(downscale_image, image_bytes, self._max_image_side)
         image_b64 = base64.b64encode(image_bytes).decode()
         messages = [
             {
