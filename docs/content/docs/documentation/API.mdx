@@ -105,7 +105,8 @@ Upload a new file to a specific partition for indexing.
 
 **Responses:**
 - `201 Created`: Returns task status URL
-- `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
+- `400 Bad Request`: malformed URL, non-HTTP(S) scheme, or unsafe literal address
+
 - `409 Conflict`: File already exists in partition. Three more cases name a code,
   as the `[CODE]` prefix of `detail` (`"[CODE]: message"`):
   - `DOCUMENT_INDEXING_IN_PROGRESS`: another task is still indexing this `file_id`.
@@ -151,15 +152,16 @@ held back: the on-disk path, content hash, file size, filenames, and
 `file_id` (already a top-level field).
 
 For an authenticated target, pass `callback_token` — sent as `Authorization:
-Bearer <token>`, never in the URL or the payload. Picking a safe scheme for it
-is on the caller: `callback_url` is otherwise unchecked beyond the public
-`http(s)` requirement below.
+Bearer <token>`, never in the URL or the payload. OpenRAG rejects unsafe
+literal targets, including localhost, loopback, private, link-local, and
+reserved IP addresses and alternate numeric IP spellings. The callback safety
+check does not resolve DNS hostnames, so use network egress controls when
+hostname destinations must be restricted.
 
 Best-effort: one attempt, no retries, a 5 s deadline, and any failure is
 logged without affecting the indexing result. Delivery is not guaranteed, so
 keep a client-side timeout and fall back to polling the task-status URL. The
-`callback_url` is checked against the SSRF guard and must be a public
-`http(s)` address — see
+`callback_url` must use HTTP(S) and pass the literal-address SSRF guard — see
 [`INDEXING_CALLBACK_ALLOW_PRIVATE_URLS`](/openrag/documentation/env_vars) to
 target a local instance in development.
 
@@ -236,7 +238,7 @@ Replace an existing file in the partition. Deletes the current entry and creates
 **Request Body:** Same as POST endpoint
 **Responses:**
 - `202 Accepted`: Returns task status URL
-- `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
+- `400 Bad Request`: malformed URL, non-HTTP(S) scheme, or unsafe literal address
 - `404 Not Found`: File not found in partition
 - `409 Conflict`, with the code as the `[CODE]` prefix of `detail`:
   - `DOCUMENT_CONTENT_EXISTS`: content deduplication finds the same bytes held by
@@ -475,7 +477,7 @@ GET /partition/{partition}
 ```http
 GET /partition/{partition}/file/{file_id}
 ```
-**Viewer**+. **Query:** `limit` (max chunks, default `2000`). Returns `{ "metadata": {…}, "documents": [ { "link": "…/extract/{id}" } ] }`. Returns `404` if the file isn't in the partition.
+**Viewer**+. **Query:** `limit` (max chunks, default `2000`). Returns `{ "metadata": {…}, "documents": [ { "link": "…/extract/{id}" } ], "topic_tags": ["…"] }` (`topic_tags` is empty when the file has none). Returns `404` if the file isn't in the partition.
 
 #### List Chunks in a Partition
 ```http
@@ -898,7 +900,7 @@ List all available RAG models (partitions).
 
 **Model Naming Convention:**
 - Pattern: `openrag-{partition_name}` => This model allows to chat specifically with the partition `{partition_name}`
-- Special model: `partition-all` (queries entire vector database)
+- Special model: `openrag-all` (queries entire vector database)
 
 * Chat Completions
 ```http
