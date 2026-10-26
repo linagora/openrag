@@ -20,6 +20,8 @@ Hidden and veryHidden worksheets are skipped and counted. Hidden or filtered row
 
 The compatibility <code>parse()</code> API collects every emitted block and should not be used for large-file ingestion. Production ingestion uses <code>iter_batches()</code>.
 
+Formula-free workbooks retain the single-reader path. When the bounded preflight finds formulas on a visible sheet, the parser opens a second read-only OpenPyXL stream and pairs formula text with the cached values row by row. It never materializes the worksheet or a formula map in memory.
+
 ## Header selection
 
 By default, a bounded scan examines at most the first 32 physical rows and one batch byte budget. It can skip one or more preamble rows when a later textual row:
@@ -56,7 +58,9 @@ Stored scalar values are indexed. Booleans, dates, datetimes, times, durations, 
 
 XLSX is an OOXML package, so CSV-style character-set detection does not apply. XML parts using UTF-8, with or without a byte-order mark, or correctly BOM-marked UTF-16 are supported, including either UTF-16 byte order. Unicode text is preserved without normalization, including composed and decomposed accents, right-to-left scripts, CJK text, emoji, and embedded byte-order-mark characters. XML with malformed bytes or a mismatched encoding declaration is rejected as <code>INVALID_XLSX</code> rather than decoded with replacement characters.
 
-Formula cells use cached results only. OpenRAG does not execute formulas or recalculate workbooks. A formula without a cached value becomes empty and increments <code>sheet_missing_formula_values</code>; a warning is logged. Cached results may be stale.
+Formula cells index both the cached scalar result and the inert formula expression, for example <code>42 [formula: =SUM(B2:B10)]</code>. This makes calculated values, operators, ranges, and function names searchable without executing workbook code. OpenRAG does not recalculate workbooks. A formula without a cached value is still indexed as formula text, increments <code>sheet_missing_formula_values</code>, and logs a warning. Cached results may be stale.
+
+Numbers use Python's stable scalar representation, preserving all precision returned by OpenPyXL instead of rounding to the worksheet's visual format. Unicode mathematical notation such as <code>∑</code>, <code>√</code>, <code>≤</code>, <code>±</code>, superscripts, and Greek letters is preserved verbatim. For an exact displayed percentage, currency, or rounded value, save that display text in a separate cell; Excel number-format rendering is not treated as the stored value.
 
 Every batch includes:
 
@@ -66,6 +70,7 @@ Every batch includes:
 - <code>cell_range</code> as the batch's bounding worksheet range;
 - <code>sheet_context_row_numbers</code> when preamble context exists;
 - <code>hidden_sheets_skipped</code> and the formula policy.
+- <code>sheet_formula_cells</code> and <code>sheet_missing_formula_values</code> for formula auditability.
 
 <code>cell_range</code> is a bounding range. Exact membership is represented by the row numbers and selected column metadata after chunk splitting. Transitional <code>csv_*</code> aliases keep the existing tabular chunking and sibling-row retrieval path compatible.
 
@@ -108,7 +113,7 @@ The validation pass is an intentional extra sequential read. It validates actual
 | Multiple separate tables in one worksheet | Treated as one table | Add explicit table-region segmentation in a separate feature |
 | Multi-row or merged column headers | Not inferred | Use an explicit single header row or normalize the export |
 | Headerless sheets | First nonempty row becomes the header | Add an explicit headerless mode only with a defined column schema |
-| Formatted display values | Stored scalar value is indexed | Add number-format rendering only if retrieval needs visual text |
+| Formatted display values | Exact stored scalar value is indexed | Put presentation text in a separate cell when visual formatting carries meaning |
 | Formula recalculation | Never performed | Recalculate in Excel/LibreOffice before upload |
 | Images, charts, comments, shapes | Not indexed | Handle through dedicated document/media extraction |
 | Password-protected or encrypted workbooks | Rejected | Decrypt before upload |
