@@ -125,7 +125,7 @@ The local benchmark now measures the current OpenPyXL-only parser in a fresh pro
 
     PYTHONPATH=openrag python tests/load/xlsx_ingestion/benchmark.py --output /tmp/xlsx-audit.json
 
-[Benchmark source](../../../../tests/load/xlsx_ingestion/benchmark.py) · [Saved historical reader comparison](../../../../tests/load/xlsx_ingestion/audit-results.json)
+[Benchmark source](https://github.com/linagora/openrag/blob/develop/tests/load/xlsx_ingestion/benchmark.py) · [Saved historical reader comparison](https://github.com/linagora/openrag/blob/develop/tests/load/xlsx_ingestion/audit-results.json)
 
 The saved comparison explains the reader decision: Calamine parsed the synthetic fixtures faster, while OpenPyXL provided the required error-cell behavior, predictable workbook semantics, and lower peak memory on the large-row fixture. Calamine was therefore removed from the runtime dependency set rather than retained as an unused fallback.
 

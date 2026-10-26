@@ -11,6 +11,7 @@ This module has no IO and no config dependency.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -570,9 +571,15 @@ def _chunk_csv_row_per_column(
 
         source_label = _tabular_label(table_element)
         label = f"[{source_label} row {row_number}; {column_name} continuation 999/999]"
-        cell_budget = chunk_size - length_function(_markdown_table(group_columns, [label]))
-        if cell_budget <= 0:
-            raise PipelineError(f"CSV column {column_name!r} leaves no room for content within the chunk token budget")
+        reserved_tokens = length_function(_markdown_table(group_columns, [label]))
+        # A header is indivisible: when it alone exhausts the configured budget,
+        # use the smallest viable budget instead of rejecting the whole file.
+        # The expanded budget is exposed in metadata so this degradation is
+        # observable without dropping or truncating the original column name.
+        effective_chunk_size = max(chunk_size, reserved_tokens + 1)
+        cell_budget = effective_chunk_size - reserved_tokens
+        if effective_chunk_size > chunk_size:
+            metadata["csv_effective_chunk_size"] = effective_chunk_size
         parts = _split_to_budget(cell, cell_budget, length_function)
         for part_number, part in enumerate(parts, start=1):
             continuation = (
@@ -720,7 +727,7 @@ def _chunk_csv_table(
         cells = _table_cells(row)
         if len(cells) != len(columns):
             # canonical CSV output always has matching cell counts
-            # keeping anunexpected row whole is safer than silently corrupting it
+            # keeping an unexpected row whole is safer than silently corrupting it
             chunks.append(
                 MDElement(
                     type="table",
@@ -792,4 +799,20 @@ def _chunk_csv_table(
             )
 
     emit_current()
+
+    # Retrieval must be able to reconstruct every logical row even when it was
+    # split into more pieces than the general related-content limit.
+    split_row_counts = Counter(
+        int(chunk.metadata["csv_row_number"])
+        for chunk in chunks
+        if chunk.metadata
+        and "csv_row_number" in chunk.metadata
+        and ("csv_part" in chunk.metadata or "csv_column_group" in chunk.metadata)
+    )
+    for chunk in chunks:
+        if not chunk.metadata or "csv_row_number" not in chunk.metadata:
+            continue
+        row_number = int(chunk.metadata["csv_row_number"])
+        if row_number in split_row_counts:
+            chunk.metadata["csv_row_chunks_total"] = split_row_counts[row_number]
     return chunks

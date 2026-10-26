@@ -24,7 +24,13 @@ _NON_ASCII_BYTE = re.compile(b"[\x80-\xff]")
 _LONG_ASCII_RUN = re.compile(rb"[\x00-\x7f]{129,}")
 _DIALECT_SAMPLE_SIZE = 64 * 1024
 _CSV_FIELD_SIZE_LIMIT = 16 * 1024 * 1024
-csv.field_size_limit(max(csv.field_size_limit(), _CSV_FIELD_SIZE_LIMIT))
+
+
+def _ensure_csv_field_size_limit() -> None:
+    """Raise Python's process-wide CSV limit only when parsing actually starts."""
+    current_limit = csv.field_size_limit()
+    if current_limit < _CSV_FIELD_SIZE_LIMIT:
+        csv.field_size_limit(_CSV_FIELD_SIZE_LIMIT)
 
 
 def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
@@ -172,6 +178,7 @@ class CsvParser(TabularBatchParser):
         Close this iterator if stopped early. Blank and malformed data records
         are skipped; their cumulative count is stored in batch metadata.
         """
+        _ensure_csv_field_size_limit()
         with self._open_stream(document) as stream:
             reader = csv.reader(
                 stream,

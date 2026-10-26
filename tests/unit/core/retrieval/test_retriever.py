@@ -257,6 +257,50 @@ async def test_expansion_fetches_and_orders_csv_continuations():
 
 
 @pytest.mark.asyncio
+async def test_csv_sibling_expansion_uses_exact_row_total_above_related_limit():
+    s = FakeSearcher()
+    initial = Chunk(
+        id="part-1",
+        text="one",
+        document_id="file-1",
+        partition="p1",
+        metadata={
+            "csv_row_number": 30,
+            "csv_part": 1,
+            "csv_parts_total": 14,
+            "csv_row_chunks_total": 14,
+        },
+    )
+    s.csv_row_result = [initial]
+
+    await SingleRetriever(searcher=s, related_limit=10).expand_search_results([initial])
+
+    assert s.csv_row_calls[0]["limit"] == 14
+
+
+@pytest.mark.asyncio
+async def test_csv_sibling_expansion_still_runs_when_related_limit_is_zero():
+    s = FakeSearcher()
+    initial = Chunk(
+        id="part-1",
+        text="one",
+        document_id="file-1",
+        partition="p1",
+        metadata={
+            "csv_row_number": 30,
+            "csv_part": 1,
+            "csv_parts_total": 2,
+            "csv_row_chunks_total": 2,
+        },
+    )
+    s.csv_row_result = [initial]
+
+    await SingleRetriever(searcher=s, related_limit=0).expand_search_results([initial])
+
+    assert s.csv_row_calls[0]["limit"] == 2
+
+
+@pytest.mark.asyncio
 async def test_expansion_fetches_and_orders_csv_column_groups():
     s = FakeSearcher()
     s.csv_row_result = [
