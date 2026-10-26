@@ -48,13 +48,11 @@ services:
   openrag:
     ports: !override
       - 127.0.0.1:${APP_PORT:-8080}:${APP_iPORT:-8080}
-      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
       - 127.0.0.1:${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
 
   openrag-cpu:
     ports: !override
       - 127.0.0.1:${APP_PORT:-8080}:${APP_iPORT:-8080}
-      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
       - 127.0.0.1:${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
 
   admin-ui:
