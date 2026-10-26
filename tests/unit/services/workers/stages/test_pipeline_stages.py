@@ -218,6 +218,21 @@ async def test_caption_stage_appends_standalone_image_captions():
 
 
 @pytest.mark.asyncio
+async def test_caption_stage_squeezes_table_padding():
+    # A degenerate table caption repeats padded rows up to its token budget;
+    # the padding is dropped before the caption reaches chunking and storage.
+    padded = "| Plouray         |             |\n" * 3
+    processed = ProcessedDocument(document_id="doc-1", images=[ImageBlock(image_bytes=b"img", page_number=1)])
+    row = {"processed_document": processed}
+
+    await caption_stage(row, FakeVLM([padded]))
+
+    squeezed = "| Plouray | |\n" * 3
+    assert row["processed_document"].images[0].caption == squeezed
+    assert row["processed_document"].text_blocks[-1].text == wrap_caption(squeezed)
+
+
+@pytest.mark.asyncio
 async def test_caption_stage_captions_images_concurrently_and_in_order():
     """Images fan out concurrently (bounded only by the VLM semaphore, stubbed
     here), and each caption lands on its own image even though later images

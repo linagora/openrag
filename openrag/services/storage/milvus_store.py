@@ -34,6 +34,7 @@ Hybrid BM25:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import secrets
@@ -80,6 +81,14 @@ logger = get_logger()
 
 #: Milvus VARCHAR upper bound used for ``text`` / ``partition`` / ``file_id``.
 MAX_LENGTH = 65_535
+
+#: Milvus stores every dynamic key of a row in one JSON value capped at this
+#: many bytes; a row over it fails the whole insert (``VDB_INSERT_ERROR``).
+MAX_DYNAMIC_FIELD_BYTES = 65_536
+
+#: Dynamic keys shortened first when a row is over that cap: ``content``
+#: repeats the chunk body ``text`` already holds, ``context`` is a summary.
+SHRINKABLE_DYNAMIC_KEYS = ("content", "context")
 
 #: Custom collection property holding the schema version integer.
 SCHEMA_VERSION_PROPERTY_KEY = "openrag.schema_version"
@@ -222,6 +231,67 @@ def _changed_by_float64(value: Any) -> bool:
     if isinstance(value, list):
         return any(_changed_by_float64(item) for item in value)
     return False
+
+
+def _json_bytes(value: Any) -> int:
+    """Size of *value* as pymilvus serializes a dynamic field (compact UTF-8 JSON)."""
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    """*value* cut to at most *max_bytes* UTF-8 bytes, never mid-character."""
+    return value.encode("utf-8")[: max(max_bytes, 0)].decode("utf-8", errors="ignore")
+
+
+def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -> None:
+    """Shorten *entity* in place so Milvus accepts it, instead of failing the insert.
+
+    Two per-row limits are counted in bytes: the ``text`` VARCHAR
+    (:data:`MAX_LENGTH`) and the JSON that holds every dynamic key
+    (:data:`MAX_DYNAMIC_FIELD_BYTES`). A degenerate model output — a caption
+    padded with whitespace up to its token budget, say — can exceed either, and
+    one such chunk used to fail its whole file. ``content`` and ``context`` are
+    shortened first, then the longest other strings; each cut is logged.
+    """
+    file_id = entity.get("file_id")
+    text = entity.get("text")
+    if isinstance(text, str) and len(text.encode("utf-8")) > MAX_LENGTH:
+        entity["text"] = _truncate_utf8(text, MAX_LENGTH)
+        logger.bind(file_id=file_id, field="text", bytes=len(text.encode("utf-8")), limit=MAX_LENGTH).warning(
+            "Chunk field over the Milvus limit; truncated."
+        )
+
+    def excess() -> int:
+        return _json_bytes({k: v for k, v in entity.items() if k not in static_fields}) - MAX_DYNAMIC_FIELD_BYTES
+
+    others = sorted(
+        (
+            k
+            for k, v in entity.items()
+            if k not in static_fields and k not in SHRINKABLE_DYNAMIC_KEYS and isinstance(v, str)
+        ),
+        key=lambda k: -len(entity[k]),
+    )
+    for key in (*SHRINKABLE_DYNAMIC_KEYS, *others):
+        over = excess()
+        if over <= 0:
+            return
+        value = entity.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        before = len(value.encode("utf-8"))
+        # JSON escaping can make a value longer than its UTF-8 bytes, so cut
+        # again until the row fits or the value is spent.
+        while over > 0 and entity[key]:
+            entity[key] = _truncate_utf8(entity[key], len(entity[key].encode("utf-8")) - over)
+            over = excess()
+        logger.bind(
+            file_id=file_id,
+            field=key,
+            bytes=before,
+            kept=len(entity[key].encode("utf-8")),
+            limit=MAX_DYNAMIC_FIELD_BYTES,
+        ).warning("Chunk field over the Milvus limit; truncated.")
 
 
 class MilvusVectorStore(VectorStore):
@@ -1014,6 +1084,9 @@ class MilvusVectorStore(VectorStore):
         ):
             if value is not None:
                 entity[field] = value
+        _fit_milvus_row_limits(
+            entity, static_fields={"text", "partition", "file_id", vector_field, *INDEXED_TIME_FIELDS}
+        )
         return entity
 
     # ------------------------------------------------------------------

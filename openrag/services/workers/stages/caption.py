@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import MutableMapping
 from contextlib import nullcontext
 from typing import Any
@@ -11,6 +12,20 @@ from core.vlm.vlm import VLM
 from services.inference.runtime import get_vlm_semaphore
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials, stage_timeout
 from tqdm.asyncio import tqdm
+
+_PADDING_RE = re.compile(r"[ \t]{2,}")
+
+
+def squeeze_padding(caption: str) -> str:
+    """Collapse runs of spaces and tabs in a VLM caption to one space.
+
+    Captions of tables come back as markdown tables padded for alignment, and a
+    degenerate one can spend its whole token budget repeating padded rows. One
+    space-run token can stand for many bytes, so such a caption is far larger
+    than its token count suggests. Markdown tables need no padding, and the
+    padding only costs embedding and storage room.
+    """
+    return _PADDING_RE.sub(" ", caption)
 
 
 async def caption_stage(
@@ -101,7 +116,8 @@ async def _caption_document(
     # and append ordering are deterministic.
     text_blocks = list(processed_document.text_blocks)
     captioned_images: list[ImageBlock] = []
-    for image, caption in zip(images, captions, strict=True):
+    for image, raw_caption in zip(images, captions, strict=True):
+        caption = squeeze_padding(raw_caption)
         wrapped = wrap_caption(caption)
         captioned_images.append(image.model_copy(update={"caption": caption}))
         if not _replace_markdown_ref(text_blocks, image, wrapped):
