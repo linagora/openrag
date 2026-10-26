@@ -813,6 +813,43 @@ class TestChunkToEntity:
         entity = self._entity()
         assert "_id" not in entity
 
+    @staticmethod
+    def _dynamic_bytes(entity: dict[str, Any]) -> int:
+        static = {"text", "partition", "file_id", FIELD, *milvus_store_module.INDEXED_TIME_FIELDS}
+        return milvus_store_module._json_bytes({k: v for k, v in entity.items() if k not in static})
+
+    def test_oversized_content_is_truncated_to_fit_the_dynamic_field(self) -> None:
+        # A 70 000-byte chunk body used to fail the whole file's insert
+        # (VDB_INSERT_ERROR); it is now stored, shortened, with the rest intact.
+        body = "| cell |" + " " * 69_990
+        entity = self._entity(text=body[:1000], content=body, context="ctx", metadata={"title": "t"})
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["content"].startswith("| cell |")
+        assert entity["context"] == "ctx"
+        assert entity["title"] == "t"
+
+    def test_escaping_heavy_content_still_fits(self) -> None:
+        # Quotes and newlines take two bytes each once JSON-escaped.
+        body = '"\n' * 40_000
+        entity = self._entity(content=body, context="ctx")
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["context"] == "ctx"
+
+    def test_context_is_shortened_once_content_is_spent(self) -> None:
+        entity = self._entity(content="c" * 10, context="x" * 70_000)
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["context"].startswith("x")
+
+    def test_oversized_text_is_truncated_on_a_character_boundary(self) -> None:
+        text = "é" * 40_000  # 80 000 bytes
+        entity = self._entity(text=text)
+        assert len(entity["text"].encode("utf-8")) <= milvus_store_module.MAX_LENGTH
+        assert set(entity["text"]) == {"é"}
+
+    def test_rows_within_limits_are_untouched(self) -> None:
+        entity = self._entity(content="C" * 30_000, context="ctx")
+        assert entity["content"] == "C" * 30_000
+
 
 # ---------------------------------------------------------------------------
 # Surface-level ABC-vs-bound-collection enforcement
