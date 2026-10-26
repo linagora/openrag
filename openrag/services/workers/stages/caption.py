@@ -19,15 +19,16 @@ _TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
 
 
 def _pipe_table_cells(line: str) -> list[str] | None:
-    """Return cells for a leading-pipe row with at least two columns."""
+    """Return cells for a pipe-containing row, allowing optional outer pipes."""
     stripped = line.strip()
-    if not stripped.startswith("|"):
+    cells = re.split(r"(?<!\\)\|", stripped)
+    if len(cells) == 1:
         return None
-
-    cells = re.split(r"(?<!\\)\|", stripped[1:])
-    if cells and not cells[-1].strip():
+    if not cells[0]:
+        cells.pop(0)
+    if cells and not cells[-1]:
         cells.pop()
-    return cells if len(cells) >= 2 else None
+    return cells or None
 
 
 def squeeze_padding(caption: str) -> str:
@@ -41,6 +42,7 @@ def squeeze_padding(caption: str) -> str:
     """
     lines = caption.splitlines(keepends=True)
     contents = [line.rstrip("\r\n") for line in lines]
+    parsed_rows = [_pipe_table_cells(content) for content in contents]
     hard_protected_rows: set[int] = set()
     inline_code_rows: set[int] = set()
     fence_char: str | None = None
@@ -63,31 +65,36 @@ def squeeze_padding(caption: str) -> str:
             fence_length = len(marker)
         elif content.startswith(("    ", "\t")):
             hard_protected_rows.add(index)
-        elif "`" in content and _pipe_table_cells(content) is not None:
+        elif "`" in content and parsed_rows[index] is not None:
             inline_code_rows.add(index)
 
     table_rows: set[int] = set()
 
-    # A Markdown delimiter row identifies a table. Keep squeezing within the
-    # contiguous leading-pipe rows that share its column count.
-    for index, content in enumerate(contents):
-        if index in hard_protected_rows or index in inline_code_rows:
+    # Only the header must match the delimiter's width. Scan each table body
+    # once, allowing missing or extra cells without touching preceding prose.
+    index = 1
+    while index < len(contents):
+        cells = parsed_rows[index]
+        header = index - 1
+        header_cells = parsed_rows[header]
+        if (
+            index in hard_protected_rows
+            or header in hard_protected_rows
+            or cells is None
+            or header_cells is None
+            or len(header_cells) != len(cells)
+            or not all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells)
+        ):
+            index += 1
             continue
-        cells = _pipe_table_cells(content)
-        if cells is None or not all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells):
-            continue
+        if header not in inline_code_rows:
+            table_rows.add(header)
         table_rows.add(index)
-        for direction in (-1, 1):
-            neighbor = index + direction
-            while 0 <= neighbor < len(contents):
-                if neighbor in hard_protected_rows:
-                    break
-                neighbor_cells = _pipe_table_cells(contents[neighbor])
-                if neighbor_cells is None or len(neighbor_cells) != len(cells):
-                    break
-                if neighbor not in inline_code_rows:
-                    table_rows.add(neighbor)
-                neighbor += direction
+        index += 1
+        while index < len(contents) and index not in hard_protected_rows and parsed_rows[index] is not None:
+            if index not in inline_code_rows:
+                table_rows.add(index)
+            index += 1
 
     # Some VLM table captions omit the delimiter row and repeat a padded row
     # many times. Preserve that optimization only for repeated multi-cell rows;
@@ -97,8 +104,8 @@ def squeeze_padding(caption: str) -> str:
         if index in hard_protected_rows or index in inline_code_rows:
             index += 1
             continue
-        cells = _pipe_table_cells(contents[index])
-        if cells is None or all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells):
+        cells = parsed_rows[index]
+        if cells is None or len(cells) < 2 or all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells):
             index += 1
             continue
 
@@ -107,7 +114,7 @@ def squeeze_padding(caption: str) -> str:
         while end < len(contents):
             if end in hard_protected_rows or end in inline_code_rows:
                 break
-            next_cells = _pipe_table_cells(contents[end])
+            next_cells = parsed_rows[end]
             if next_cells is None or len(next_cells) != len(cells):
                 break
             if all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in next_cells):

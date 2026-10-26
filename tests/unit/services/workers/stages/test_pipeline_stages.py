@@ -248,6 +248,62 @@ def test_squeeze_padding_only_changes_markdown_table_rows():
     )
 
 
+@pytest.mark.parametrize(
+    ("caption", "expected"),
+    [
+        pytest.param(
+            "| Name     | Value     |\n| --- | --- |\n| short     |\n| extra     | cells     | here     |\n| next     | row     |\n",
+            "| Name | Value |\n| --- | --- |\n| short |\n| extra | cells | here |\n| next | row |\n",
+            id="varying-body-widths",
+        ),
+        pytest.param(
+            "Name     | Value\n--- | ---\nfirst     | second\n",
+            "Name | Value\n--- | ---\nfirst | second\n",
+            id="without-outer-pipes",
+        ),
+        pytest.param(
+            "Name     | Value\r\n| --- | --- |\r\n| first     | second\r\nnext     | row |\r\n",
+            "Name | Value\r\n| --- | --- |\r\n| first | second\r\nnext | row |\r\n",
+            id="mixed-outer-pipes-and-crlf",
+        ),
+        pytest.param(
+            "| Name     |\n| --- |\n| padded     value |\n",
+            "| Name |\n| --- |\n| padded value |\n",
+            id="single-column",
+        ),
+        pytest.param(
+            "Name     | Value\n--- | ---\nfirst  \\| second | third     value\n",
+            "Name | Value\n--- | ---\nfirst \\| second | third value\n",
+            id="escaped-pipe",
+        ),
+        pytest.param(
+            "`a    b` | Value\n--- | ---\nfirst     | second\n",
+            "`a    b` | Value\n--- | ---\nfirst | second\n",
+            id="inline-code-header",
+        ),
+        pytest.param(
+            "Pipe     diagram | keep     spacing\n| Name     | Value |\n| --- | --- |\n| first     | second |\n",
+            "Pipe     diagram | keep     spacing\n| Name | Value |\n| --- | --- |\n| first | second |\n",
+            id="preserve-preceding-pipe-prose",
+        ),
+    ],
+)
+def test_squeeze_padding_supports_markdown_table_layouts(caption, expected):
+    assert caption_module.squeeze_padding(caption) == expected
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "|     A     |\n" * 3,
+        "| Name     | Value     |\n| --- |\n| untouched     |\n",
+        "Name     | Value\n--- | --- | ---\nfirst     | second\n",
+    ],
+)
+def test_squeeze_padding_preserves_rows_without_a_valid_table_header(caption):
+    assert caption_module.squeeze_padding(caption) == caption
+
+
 def test_squeeze_padding_preserves_pipe_diagrams():
     caption = "|     A     |\n|     A     |     B     |\n"
 
