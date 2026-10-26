@@ -130,6 +130,15 @@ NPM keeps its state in `nginx_data/` and its certificates in `letsencrypt/` at
 the repository root. Set `PROXY_DATA_DIR` and `PROXY_LETSENCRYPT_DIR` to move
 them. Both hold private keys: back them up, and keep them readable by root only.
 
+The overlay also turns TLS session tickets off and gives NPM an http-level
+session cache, so sessions resume from that cache instead. It ships this as
+`/etc/nginx/conf.d/openrag-tls-sessions.conf` inside the container. Don't set
+`ssl_session_tickets` again in NPM's `custom/http_top.conf` or
+`custom/http.conf`: nginx rejects the duplicate directive, and the proxy
+doesn't start. An `ssl_session_cache` there that declares the `SSL` zone with a
+size other than `50m` stops it the same way: the overlay declares that zone at
+`50m`, the size NPM gives it in hosts with a Let's Encrypt certificate.
+
 ### Configure OpenRAG for the proxy
 
 Set these in `.env`:
