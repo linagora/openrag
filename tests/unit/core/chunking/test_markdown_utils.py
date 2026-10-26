@@ -6,6 +6,7 @@ preserved through the move into core/.
 
 from __future__ import annotations
 
+import core.chunking.markdown_utils as markdown_utils
 import pytest
 from core.chunking.markdown_utils import (
     MDElement,
@@ -456,6 +457,24 @@ def test_split_to_budget_uses_logarithmic_whitespace_probes():
     assert "".join(pieces) == text
     assert all(len(piece.split()) <= 1_000 for piece in pieces)
     assert calls < 100
+
+
+def test_split_to_budget_scans_whitespace_boundaries_once(monkeypatch):
+    text = " ".join(f"word{number}" for number in range(2_000))
+    original_finditer = markdown_utils.re.finditer
+    calls = 0
+
+    def counted_finditer(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_finditer(*args, **kwargs)
+
+    monkeypatch.setattr(markdown_utils.re, "finditer", counted_finditer)
+
+    pieces = _split_to_budget(text, budget=1, length_function=lambda value: len(value.split()))
+
+    assert "".join(pieces) == text
+    assert calls == 1
 
 
 def test_split_to_budget_rejects_non_positive_budget():

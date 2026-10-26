@@ -11,6 +11,7 @@ This module has no IO and no config dependency.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -609,16 +610,21 @@ def _split_to_budget(text: str, budget: int, length_function: Callable[[str], in
         raise PipelineError("CSV cell split requires a positive token budget")
 
     pieces: list[str] = []
-    remaining = text
-    while remaining and length_function(remaining) > budget:
+    boundaries = [match.end() for match in re.finditer(r"\s+", text)]
+    start = 0
+    text_length = len(text)
+    while start < text_length:
+        if length_function(text[start:]) <= budget:
+            pieces.append(text[start:])
+            break
         # prefer the largest whitespace boundary rather than one over the token budget
-        boundaries = [match.end() for match in re.finditer(r"\s+", remaining)]
         cut = None
-        low, high = 0, len(boundaries) - 1
+        low = bisect_right(boundaries, start)
+        high = len(boundaries) - 1
         while low <= high:
             middle = (low + high) // 2
             boundary = boundaries[middle]
-            if length_function(remaining[:boundary]) <= budget:
+            if length_function(text[start:boundary]) <= budget:
                 cut = boundary
                 low = middle + 1
             else:
@@ -626,23 +632,21 @@ def _split_to_budget(text: str, budget: int, length_function: Callable[[str], in
         if cut is None:
             #  single long word or a URL can still exceed the budget
             # so find the largest character prefix that fits without discarding anything.
-            low, high = 1, len(remaining)
+            low, high = start + 1, text_length
             best = 0
             while low <= high:
                 middle = (low + high) // 2
-                if length_function(remaining[:middle]) <= budget:
+                if length_function(text[start:middle]) <= budget:
                     best = middle
                     low = middle + 1
                 else:
                     high = middle - 1
-            cut = best or 1
+            cut = best or start + 1
         # Keep the separator at the beginning of the following part because stripping
         # it would silently change the original CSV cell when all continuation
         # parts are joined again.
-        pieces.append(remaining[:cut])
-        remaining = remaining[cut:]
-    if remaining or not pieces:
-        pieces.append(remaining)
+        pieces.append(text[start:cut])
+        start = cut
     return pieces
 
 
