@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from core.chunking.registry import chunking_registry
-from core.chunking.structured_section import StructuredSectionChunker
+from core.chunking.structured_section import StructuredSectionChunker, _Unit
 from core.models.chunk import ChunkType
 from core.models.document import ProcessedDocument, TextBlock
 
@@ -290,6 +290,19 @@ def test_table_does_not_absorb_prose_from_another_page():
     assert tables, "the table must stay its own chunk(s)"
     for table in tables:
         assert "Stray label" not in table.text, "table absorbed prose from another page"
+
+
+def test_csv_units_never_merge_and_keep_row_metadata():
+    chunker = _chunker(chunk_size=100, min_tokens=50)
+    units = [
+        _Unit([], "first row", 2, pages={1}, metadata={"csv_row_start": 2, "csv_row_end": 2}),
+        _Unit([], "second row", 2, pages={1}, metadata={"csv_row_start": 3, "csv_row_end": 3}),
+    ]
+
+    merged = chunker._merge_small(units, "people.csv")
+
+    assert [unit.metadata["csv_row_start"] for unit in merged] == [2, 3]
+    assert [unit.text for unit in merged] == ["first row", "second row"]
 
 
 def test_oversize_table_row_is_never_sentence_split():
