@@ -215,6 +215,8 @@ def test_preserves_error_cells_and_reports_missing_formula_caches():
     doc = _document([["error", "formula"], ["#DIV/0!", "=1+1"]])
     [block] = list(XlsxParser().iter_batches(doc))
     assert "#DIV/0!" in block.text
+    assert "[formula: =1+1; cached value unavailable]" in block.text
+    assert block.metadata["sheet_formula_cells"] == 1
     assert block.metadata["sheet_missing_formula_values"] == 1
     assert block.metadata["spreadsheet_backend"] == "openpyxl"
 
@@ -225,8 +227,61 @@ def test_cached_formula_values_are_returned_without_execution():
         doc, lambda xml: xml.replace("<v />", "<v>2</v>").replace("<v/>", "<v>2</v>").replace("<v></v>", "<v>2</v>")
     )
     [block] = list(XlsxParser().iter_batches(doc))
-    assert "| 2 |" in block.text
+    assert "| 2 [formula: =1+1] |" in block.text
+    assert block.metadata["formula_policy"] == "cached_values_and_formula_text"
+    assert block.metadata["sheet_formula_cells"] == 1
     assert block.metadata["sheet_missing_formula_values"] == 0
+
+
+def test_formula_only_rows_remain_searchable_without_cached_results():
+    doc = _document([["calculation"], ["=SUM(1,2,3)"]])
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert "[formula: =SUM(1,2,3); cached value unavailable]" in block.text
+    assert block.metadata["table_row_numbers"] == [2]
+
+
+def test_formula_heavy_sheet_streams_cached_results_and_expressions_across_batches():
+    from xml.etree import ElementTree as ET
+
+    rows = [["input", "calculation"]]
+    for number in range(1, 251):
+        excel_row = number + 1
+        rows.append([number, f"=A{excel_row}^2/7"])
+    doc = _document(rows)
+
+    def add_cached_results(xml):
+        root = ET.fromstring(xml)
+        for cell in root.findall(".//{*}c"):
+            formula = cell.find("{*}f")
+            if formula is None:
+                continue
+            physical_row = int(cell.get("r")[1:])
+            input_value = physical_row - 1
+            cell.find("{*}v").text = repr(input_value**2 / 7)
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(doc, add_cached_results)
+    blocks = list(XlsxParser(batch_size=37).iter_batches(doc))
+
+    assert len(blocks) == 7
+    assert [row for block in blocks for row in block.metadata["table_row_numbers"]] == list(range(2, 252))
+    assert "0.14285714285714285 [formula: =A2^2/7]" in blocks[0].text
+    assert "8928.57142857143 [formula: =A251^2/7]" in blocks[-1].text
+    assert all(block.metadata["sheet_formula_cells"] == 250 for block in blocks)
+    assert all(block.metadata["sheet_missing_formula_values"] == 0 for block in blocks)
+
+
+def test_preserves_precise_numbers_and_mathematical_symbols():
+    precise = 0.123456789012345
+    notation = "σ² = ∑(xᵢ − μ)² / n; x ≤ μ ± √2; Δ ≈ 10⁻⁶"
+    doc = _document([["ratio", "notation"], [precise, notation]])
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert str(precise) in block.text
+    assert notation in block.text
 
 
 @pytest.mark.parametrize("dimension", ["A1:A1", "A1:XFD1048576"])

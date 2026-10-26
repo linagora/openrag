@@ -50,6 +50,7 @@ class SheetInfo:
     hidden: bool
     rows: int
     columns: int
+    formula_cells: int
     missing_formula_values: int
 
 
@@ -195,7 +196,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 if path in worksheet_paths:
                     raise invalid("XLSX worksheet relationships contain a duplicate target")
                 worksheet_paths.add(path)
-                max_row = max_col = missing = 0
+                max_row = max_col = formulas = missing = 0
                 previous_row = current_row = previous_col = 0
                 # clear completed children so memory does not grow with row count.
                 with archive.open(path) as stream:
@@ -232,8 +233,10 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                         if tag == "c":
                             value = element.find("{*}v")
                             formula = element.find("{*}f")
-                            if formula is not None and (value is None or not value.text):
-                                missing += 1
+                            if formula is not None:
+                                formulas += 1
+                                if value is None or not value.text:
+                                    missing += 1
                             if sum(len(t.text or "") for t in element.iter()) > limits.max_cell_chars:
                                 raise limit("XLSX cell text exceeds the character limit")
                             if element.get("t") == "s":
@@ -255,6 +258,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                         sheet.get("state", "visible") != "visible",
                         max_row,
                         max_col,
+                        formulas,
                         missing,
                     )
                 )

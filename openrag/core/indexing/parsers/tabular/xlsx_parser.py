@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import io
 from collections.abc import Iterator
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from itertools import chain
 from pathlib import Path
@@ -19,6 +20,14 @@ from core.utils.exceptions import ConfigError, NoIndexableContentError, Pipeline
 from core.utils.logging import get_logger
 
 logger = get_logger()
+
+
+@dataclass(frozen=True)
+class _FormulaValue:
+    """A cached scalar paired with its inert Excel formula text."""
+
+    cached: Any
+    formula: str
 
 
 def _rendered_header_key(value: str) -> str:
@@ -61,7 +70,11 @@ def _detect_header(rows, byte_limit):
             )
             if (
                 len(set(labels)) < 2
-                or not all(isinstance(value, str) for value in raw if value is not None)
+                or not all(
+                    isinstance(value.cached if isinstance(value, _FormulaValue) else value, str)
+                    for value in raw
+                    if (value.cached if isinstance(value, _FormulaValue) else value) is not None
+                )
                 or not (wider_than_preamble or separated_repeated_title)
             ):
                 continue
@@ -83,20 +96,29 @@ def _column_name(number: int) -> str:
 
 
 def _cell_text(value: Any) -> str:
+    formula = value.formula if isinstance(value, _FormulaValue) else None
+    if formula is not None:
+        value = value.cached
     if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    # Both engines expose integral numbers/dates with different Python types.
-    if isinstance(value, datetime) and value.time() == time():
-        return value.date().isoformat()
-    if isinstance(value, (datetime, date, time)):
-        return value.isoformat()
-    if isinstance(value, timedelta):
-        return str(value)
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
+        rendered = ""
+    elif isinstance(value, bool):
+        rendered = "true" if value else "false"
+    # OpenPyXL exposes integral numbers and dates with different Python types.
+    elif isinstance(value, datetime) and value.time() == time():
+        rendered = value.date().isoformat()
+    elif isinstance(value, (datetime, date, time)):
+        rendered = value.isoformat()
+    elif isinstance(value, timedelta):
+        rendered = str(value)
+    elif isinstance(value, float) and value.is_integer():
+        rendered = str(int(value))
+    else:
+        rendered = str(value)
+    if formula is None:
+        return rendered
+    if rendered:
+        return f"{rendered} [formula: {formula}]"
+    return f"[formula: {formula}; cached value unavailable]"
 
 
 def _has_text(values: list[str]) -> bool:
@@ -115,19 +137,62 @@ def _document_source(document: Document):
         yield stream
 
 
-def _openpyxl_sheets(source, infos: list[SheetInfo]):
+def _formula_text(cell) -> str | None:
+    """Return stable formula text from regular, shared, or array formulas."""
+    if getattr(cell, "data_type", None) != "f":
+        return None
+    value = cell.value
+    text = value if isinstance(value, str) else getattr(value, "text", None)
+    if not isinstance(text, str) or not text:
+        return None
+    return text if text.startswith("=") else f"={text}"
+
+
+def _rows_with_formulas(value_rows, formula_rows):
+    """Merge cached values with formula text while both readers stream."""
+    for values, formula_cells in zip(value_rows, formula_rows, strict=True):
+        yield tuple(
+            _FormulaValue(value, formula) if (formula := _formula_text(cell)) is not None else value
+            for value, cell in zip(values, formula_cells, strict=True)
+        )
+
+
+def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
     from openpyxl import load_workbook
 
     workbook = load_workbook(source, read_only=True, data_only=True, keep_links=False)
+    needs_formulas = any(info.formula_cells for info in infos if not info.hidden and info.columns)
+    formula_source_manager = _document_source(document) if needs_formulas else nullcontext(None)
+    formula_workbook = None
     try:
-        for info in infos:
-            if info.hidden or not info.columns:
-                continue
-            sheet = workbook[info.name]
-            # Exporters may declare A1:A1 or a huge dimension. Use inspected cells.
-            sheet.reset_dimensions()
-            with closing(sheet.iter_rows(max_row=info.rows, max_col=info.columns, values_only=True)) as rows:
-                yield info, rows
+        with formula_source_manager as formula_source:
+            try:
+                formula_workbook = (
+                    load_workbook(formula_source, read_only=True, data_only=False, keep_links=False)
+                    if formula_source is not None
+                    else None
+                )
+                for info in infos:
+                    if info.hidden or not info.columns:
+                        continue
+                    sheet = workbook[info.name]
+                    # Exporters may declare A1:A1 or a huge dimension. Use inspected cells.
+                    sheet.reset_dimensions()
+                    with closing(sheet.iter_rows(max_row=info.rows, max_col=info.columns, values_only=True)) as rows:
+                        if not info.formula_cells:
+                            yield info, rows
+                            continue
+                        if formula_workbook is None:
+                            raise PipelineError("XLSX formula reader is unavailable", code="INVALID_XLSX")
+                        formula_sheet = formula_workbook[info.name]
+                        formula_sheet.reset_dimensions()
+                        with closing(
+                            formula_sheet.iter_rows(max_row=info.rows, max_col=info.columns, values_only=False)
+                        ) as formula_rows:
+                            yield info, _rows_with_formulas(rows, formula_rows)
+            finally:
+                if formula_workbook is not None:
+                    formula_workbook.close()
     finally:
         workbook.close()
 
@@ -196,7 +261,7 @@ class XlsxParser(TabularBatchParser):
     def _iter_sheets(self, document, source, infos):
         data_rows_seen = 0
         hidden_count = sum(info.hidden for info in infos)
-        with closing(_openpyxl_sheets(source, infos)) as sheets:
+        with closing(_openpyxl_sheets(document, source, infos)) as sheets:
             for sheet, row_iterator in sheets:
                 selected_header_row = self.sheet_header_rows.get(sheet.name, self.header_row)
                 if selected_header_row is None:
@@ -260,7 +325,7 @@ class XlsxParser(TabularBatchParser):
                     continue
                 if sheet.missing_formula_values:
                     logger.bind(sheet_name=sheet.name, missing_formula_values=sheet.missing_formula_values).warning(
-                        "XLSX formulas without cached values are empty; formulas are not recalculated"
+                        "XLSX formula text was indexed without a cached result; formulas are not recalculated"
                     )
                 header_lines = [markdown_row(header_values), markdown_row(["---"] * len(header_values))]
                 context = "\n\nWorksheet context (before column headers):\n" + "\n".join(preamble) if preamble else ""
@@ -339,7 +404,8 @@ class XlsxParser(TabularBatchParser):
             "table_header_range": f"{sheet_ref}A{header_row}:{last_column}{header_row}",
             "hidden_sheet": False,
             "hidden_sheets_skipped": hidden_count,
-            "formula_policy": "cached_values_only",
+            "formula_policy": "cached_values_and_formula_text",
+            "sheet_formula_cells": sheet.formula_cells,
             "sheet_missing_formula_values": sheet.missing_formula_values,
             "spreadsheet_backend": "openpyxl",
             # Transitional aliases keep existing chunking/retrieval operational.
