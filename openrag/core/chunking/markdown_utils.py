@@ -259,6 +259,7 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
     context_tokens = length_function(context) if context else 0
     if context_tokens >= chunk_size:
         raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
+    reserved_tokens = length_function("\n") + context_tokens
     original_columns = list(element.metadata["table_columns"])
     rendered_columns = _table_cells(table.split("\n", 1)[0])
     if len(rendered_columns) != len(original_columns):
@@ -277,14 +278,18 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
     chunks = _chunk_csv_table(
         table,
         table_element=safe_element,
-        chunk_size=chunk_size - length_function("\n") - context_tokens,
+        chunk_size=chunk_size - reserved_tokens,
         length_function=length_function,
     )
     for chunk in chunks:
         chunk.content += context
-        if length_function(chunk.content) > chunk_size:
-            raise PipelineError("XLSX chunk exceeds its token budget")
         metadata = chunk.metadata
+        csv_effective_chunk_size = metadata.get("csv_effective_chunk_size")
+        allowed_size = (
+            csv_effective_chunk_size + reserved_tokens if csv_effective_chunk_size is not None else chunk_size
+        )
+        if length_function(chunk.content) > allowed_size:
+            raise PipelineError("XLSX chunk exceeds its token budget")
         positions = [column_positions[name] for name in metadata["table_columns"]]
         metadata["table_column_indices"] = [index + 1 for index in positions]
         metadata["table_columns"] = [original_columns[index] for index in positions]

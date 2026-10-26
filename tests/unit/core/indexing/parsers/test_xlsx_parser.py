@@ -848,6 +848,43 @@ def test_sheet_context_larger_than_chunk_budget_fails():
         chunk_table(element, chunk_size=20, length_function=lambda text: len(text.split()))
 
 
+def test_xlsx_continuation_restores_context_to_expanded_chunk_budget():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    column = " ".join(f"header{number}" for number in range(12))
+    value = " ".join(f"value{number}" for number in range(4))
+    context = "\n\nWorksheet context:\nQuarterly report"
+    table = f"| {column} |\n| --- |\n| {value} |"
+    element = MDElement(
+        type="table",
+        content=table + context,
+        metadata={
+            "tabular_format": "xlsx",
+            "sheet_context": context,
+            "sheet_name": "Sheet",
+            "table_columns": [column],
+            "csv_columns": [column],
+            "table_row_start": 2,
+            "table_row_end": 2,
+            "table_row_numbers": [2],
+        },
+    )
+
+    def count_words(text):
+        return len(text.split())
+
+    chunks = chunk_table(element, chunk_size=10, length_function=count_words)
+
+    assert len(chunks) == 4
+    assert all(chunk.content.endswith(context) for chunk in chunks)
+    assert all(count_words(chunk.content) > 10 for chunk in chunks)
+    assert all(
+        count_words(chunk.content)
+        <= chunk.metadata["csv_effective_chunk_size"] + count_words("\n") + count_words(context)
+        for chunk in chunks
+    )
+
+
 @pytest.mark.parametrize("state", ["", "Visible", "veryhidden", "invalid"])
 def test_invalid_sheet_visibility_is_rejected_before_reader_opens(state, monkeypatch):
     document = _edit_xml(
