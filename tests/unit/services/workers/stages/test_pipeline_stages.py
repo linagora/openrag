@@ -11,7 +11,9 @@ from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.stages import _common as common_module
 from services.workers.stages import caption as caption_module
+from services.workers.stages._common import resolve_language
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
 from services.workers.stages.contextualize import contextualize_stage
@@ -361,6 +363,41 @@ async def test_contextualize_stage_uses_filename_and_language():
 
 
 @pytest.mark.asyncio
+async def test_contextualize_stage_detects_the_language_when_the_upload_names_none(monkeypatch):
+    # Without upload metadata the stage used to pass "en", which overrode the
+    # prompt's "write in the chunk's language" and wrote English contexts for
+    # French corpora.
+    seen: dict = {}
+
+    def fake_detect(text, *, min_confidence=0.0):
+        seen["text"] = text
+        return "fr"
+
+    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    chunks = [Chunk(id="c1", text="La préfecture de région répartit les crédits.")]
+    contextualizer = FakeContextualizer([Chunk(id="c1", text="ctx", context="ctx")])
+    row = {"chunks": chunks, "filename": "note.pdf", "language": None}
+
+    await contextualize_stage(row, contextualizer)
+
+    assert contextualizer.calls == [(chunks, "note.pdf", "fr")]
+    assert row["language"] == "fr"
+    assert "préfecture" in seen["text"]
+
+
+def test_resolve_language_prefers_the_upload_metadata(monkeypatch):
+    monkeypatch.setattr(common_module, "detect_language", lambda *a, **k: pytest.fail("must not detect"))
+    assert resolve_language({"language": "de", "chunks": []}) == "de"
+
+
+def test_resolve_language_falls_back_to_english_when_detection_is_unsure(monkeypatch):
+    monkeypatch.setattr(common_module, "detect_language", lambda *a, **k: None)
+    row = {"chunks": [Chunk(id="c1", text="12 34 56")]}
+    assert resolve_language(row) == "en"
+    assert row["language"] == "en"
+
+
+@pytest.mark.asyncio
 async def test_embed_stage_attaches_vectors_by_chunk_order():
     chunks = [Chunk(id="c1", text="alpha"), Chunk(id="c2", text="beta")]
     embedder = FakeEmbedder([[1.0, 0.0], [0.0, 1.0]])
@@ -568,3 +605,15 @@ async def test_store_stage_provisions_the_partitions_field_then_writes_to_it():
     assert calls == ["ensure", "upsert"]
     assert store.vector_field_calls == [("vector_bge_m3", 3)]
     assert store.upsert_vector_fields == ["vector_bge_m3"]
+
+
+def test_resolve_language_ignores_digits_and_table_markup(monkeypatch):
+    seen: dict = {}
+
+    def fake_detect(text, *, min_confidence=0.0):
+        seen["text"] = text
+        return "fr"
+
+    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    resolve_language({"chunks": [Chunk(id="c1", text="| Montant | 58.3M |\n|---|---|\n| Dossiers acceptés | 22 |")]})
+    assert seen["text"] == "Montant . M Dossiers acceptés"
