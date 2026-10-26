@@ -240,10 +240,31 @@ def _json_bytes(value: Any) -> int:
     return len(convert_to_json(value))
 
 
-def _json_string_bytes(value: str) -> int:
+def _json_string_bytes(value: str, *, ensure_ascii: bool = False) -> int:
     """Size of a string value as encoded inside a JSON container."""
+    if ensure_ascii:
+        return len(json.dumps(value))
     # Wrapping avoids convert_to_json's special case for top-level JSON strings.
     return len(convert_to_json([value])) - 2
+
+
+def _truncate_json_string(value: str, max_bytes: int, *, ensure_ascii: bool) -> str:
+    """Keep the longest prefix whose JSON encoding fits, including its quotes."""
+    if max_bytes <= 2:
+        return ""
+    if _json_string_bytes(value, ensure_ascii=ensure_ascii) == len(value.encode("utf-8")) + 2:
+        return _truncate_utf8(value, max_bytes - 2)
+
+    # Most strings use the UTF-8 fast path above. Only the partially retained
+    # escaped string needs a search; exhausted strings return immediately.
+    lower, upper = 0, min(len(value), max_bytes - 2)
+    while lower < upper:
+        middle = (lower + upper + 1) // 2
+        if _json_string_bytes(value[:middle], ensure_ascii=ensure_ascii) <= max_bytes:
+            lower = middle
+        else:
+            upper = middle - 1
+    return value[:lower]
 
 
 def _has_cyclic_json_reference(value: Any) -> bool:
@@ -352,7 +373,8 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
         return value
 
     minimum_payload = {key: without_strings(value) for key, value in entity.items() if key not in static_fields}
-    minimum_bytes = _json_bytes(minimum_payload)
+    serialized_minimum = convert_to_json(minimum_payload)
+    minimum_bytes = len(serialized_minimum)
 
     def fail_oversized_metadata(actual_bytes: int) -> None:
         raise VDBInsertError(
@@ -366,6 +388,10 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
 
     if minimum_bytes > MAX_DYNAMIC_FIELD_BYTES:
         fail_oversized_metadata(len(serialized_dynamic))
+
+    # Emptying string values preserves container depth and therefore PyMilvus's
+    # serializer choice. Its standard-json fallback also escapes non-ASCII.
+    ensure_ascii = serialized_minimum == json.dumps(minimum_payload).encode("utf-8")
 
     def nested_string_paths(value: Any, path: tuple[str | int, ...]) -> Iterable[tuple[tuple[str | int, ...], str]]:
         if isinstance(value, str):
@@ -415,14 +441,10 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
         value = get_value(path)
         if not isinstance(value, str) or not value:
             continue
-        string_bytes = _json_string_bytes(value)
-        while over > 0 and value:
-            value = _truncate_utf8(value, len(value.encode("utf-8")) - over)
-            new_string_bytes = _json_string_bytes(value)
-            actual_bytes += new_string_bytes - string_bytes
-            string_bytes = new_string_bytes
-            set_value(path, value)
-            over = actual_bytes - MAX_DYNAMIC_FIELD_BYTES
+        string_bytes = _json_string_bytes(value, ensure_ascii=ensure_ascii)
+        value = _truncate_json_string(value, string_bytes - over, ensure_ascii=ensure_ascii)
+        actual_bytes += _json_string_bytes(value, ensure_ascii=ensure_ascii) - string_bytes
+        set_value(path, value)
         if value != original:
             truncated_fields += 1
 

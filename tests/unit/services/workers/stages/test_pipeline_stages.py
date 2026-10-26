@@ -286,10 +286,58 @@ def test_squeeze_padding_only_changes_markdown_table_rows():
             "Pipe     diagram | keep     spacing\n| Name | Value |\n| --- | --- |\n| first | second |\n",
             id="preserve-preceding-pipe-prose",
         ),
+        pytest.param(
+            "| Name | Value |\n| --- | --- |\n١. first     | second\n| next     | row     |\n",
+            "| Name | Value |\n| --- | --- |\n١. first | second\n| next | row |\n",
+            id="unicode-digit-is-not-a-list-marker",
+        ),
     ],
 )
 def test_squeeze_padding_supports_markdown_table_layouts(caption, expected):
     assert caption_module.squeeze_padding(caption) == expected
+
+
+@pytest.mark.parametrize("delimiter", ["| - | - |", "|:--|--:|", "- | -"])
+def test_squeeze_padding_supports_short_delimiters(delimiter):
+    caption = f"| Name     | Value     |\n{delimiter}\n| first     | second     |\n"
+
+    assert caption_module.squeeze_padding(caption) == f"| Name | Value |\n{delimiter}\n| first | second |\n"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_body"),
+    [("short", "short"), ("short     row", "short row"), ("`a    b`", "`a    b`")],
+)
+def test_squeeze_padding_continues_after_body_rows_without_pipes(body, expected_body):
+    caption = f"| Name     | Value     |\n| --- | --- |\n{body}\n| next     | row     |\n"
+
+    assert caption_module.squeeze_padding(caption) == (
+        f"| Name | Value |\n| --- | --- |\n{expected_body}\n| next | row |\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        ">     foo    |    bar\n" * 2,
+        "   >     foo    |    bar\n" * 2,
+        "# Heading    |    text\n",
+        "- List    |    item\n" * 2,
+        "1. List    |    item\n" * 2,
+        "\nProse    |    text\n",
+        "---\nProse    |    text\n",
+        "<pre>\n    foo    |    bar\n</pre>\n",
+        ' \tprint("foo    bar")\n',
+        '  \tprint("foo    bar")\n',
+        '   \tprint("foo    bar")\n',
+    ],
+)
+def test_squeeze_padding_stops_at_other_markdown_blocks(block):
+    table = "| Name     | Value     |\n| --- | --- |\n| first     | second     |\n"
+
+    assert caption_module.squeeze_padding(table + block) == (
+        "| Name | Value |\n| --- | --- |\n| first | second |\n" + block
+    )
 
 
 @pytest.mark.parametrize(

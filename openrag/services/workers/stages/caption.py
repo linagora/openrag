@@ -15,7 +15,19 @@ from tqdm.asyncio import tqdm
 
 _PADDING_RE = re.compile(r"[ \t]{2,}")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+_INDENTED_CODE_RE = re.compile(r"^(?: {4}| {0,3}\t)")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-+:?")
+_BLOCK_START_RE = re.compile(r"^ {0,3}(?:>|#{1,6}(?:[ \t]|$)|(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$))")
+_THEMATIC_BREAK_RE = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_HTML_BLOCK_START_RE = re.compile(
+    r"^ {0,3}(?:<(?:!--|\?|!\[CDATA\[|![A-Z])"
+    r"|</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|"
+    r"dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|"
+    r"legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|script|section|source|"
+    r"style|summary|table|tbody|td|textarea|tfoot|th|thead|title|tr|track|ul)(?=[ \t/>]|$)"
+    r"|</?[A-Za-z][^<>]*>[ \t]*$)",
+    re.IGNORECASE,
+)
 
 
 def _pipe_table_cells(line: str) -> list[str] | None:
@@ -43,6 +55,11 @@ def squeeze_padding(caption: str) -> str:
     lines = caption.splitlines(keepends=True)
     contents = [line.rstrip("\r\n") for line in lines]
     parsed_rows = [_pipe_table_cells(content) for content in contents]
+    delimiter_rows = {
+        index
+        for index, cells in enumerate(parsed_rows)
+        if cells is not None and all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells)
+    }
     hard_protected_rows: set[int] = set()
     inline_code_rows: set[int] = set()
     fence_char: str | None = None
@@ -63,9 +80,15 @@ def squeeze_padding(caption: str) -> str:
             marker = fence_match.group(1)
             fence_char = marker[0]
             fence_length = len(marker)
-        elif content.startswith(("    ", "\t")):
+        elif _INDENTED_CODE_RE.match(content):
             hard_protected_rows.add(index)
-        elif "`" in content and parsed_rows[index] is not None:
+        elif index not in delimiter_rows and (
+            _BLOCK_START_RE.match(content)
+            or _THEMATIC_BREAK_RE.fullmatch(content)
+            or _HTML_BLOCK_START_RE.match(content)
+        ):
+            hard_protected_rows.add(index)
+        elif "`" in content:
             inline_code_rows.add(index)
 
     table_rows: set[int] = set()
@@ -83,7 +106,7 @@ def squeeze_padding(caption: str) -> str:
             or cells is None
             or header_cells is None
             or len(header_cells) != len(cells)
-            or not all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells)
+            or index not in delimiter_rows
         ):
             index += 1
             continue
@@ -91,7 +114,7 @@ def squeeze_padding(caption: str) -> str:
             table_rows.add(header)
         table_rows.add(index)
         index += 1
-        while index < len(contents) and index not in hard_protected_rows and parsed_rows[index] is not None:
+        while index < len(contents) and index not in hard_protected_rows and contents[index].strip():
             if index not in inline_code_rows:
                 table_rows.add(index)
             index += 1

@@ -834,17 +834,37 @@ class TestChunkToEntity:
 
     def test_many_nested_strings_use_incremental_sizing_and_one_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         entity = {"payload": ["abcdefgh"] * 10_000}
-        json_bytes = MagicMock(wraps=milvus_store_module._json_bytes)
+        serializer = MagicMock(wraps=milvus_store_module.convert_to_json)
         logger = MagicMock()
-        monkeypatch.setattr(milvus_store_module, "_json_bytes", json_bytes)
+        monkeypatch.setattr(milvus_store_module, "convert_to_json", serializer)
         monkeypatch.setattr(milvus_store_module, "logger", logger)
 
         milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
 
-        assert json_bytes.call_count == 1
+        full_payload_calls = [call for call in serializer.call_args_list if isinstance(call.args[0], dict)]
+        assert len(full_payload_calls) <= 2
         logger.bind.assert_called_once()
         logger.bind.return_value.warning.assert_called_once()
         assert len(convert_to_json(entity)) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+
+    @pytest.mark.parametrize("depth", [0, 254, 300])
+    @pytest.mark.parametrize("character", ["é", "🙂", '"', "\u0001"])
+    def test_fitting_preserves_longest_prefix_for_serializer_encoding(self, depth: int, character: str) -> None:
+        nested: Any = 0
+        for _ in range(depth):
+            nested = {"child": nested}
+        body = character * 40_000
+        entity = {"payload": nested, "content": body}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert entity["content"]
+        assert body.startswith(entity["content"])
+        assert len(entity["content"]) < len(body)
+        assert len(convert_to_json(entity)) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert len(convert_to_json({**entity, "content": entity["content"] + character})) > (
+            milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        )
 
     def test_numpy_metadata_is_counted_when_content_is_truncated(self) -> None:
         body = "x" * 70_000
