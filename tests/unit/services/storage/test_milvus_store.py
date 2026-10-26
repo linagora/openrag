@@ -855,6 +855,37 @@ class TestChunkToEntity:
         assert entity["payload"][0]["body"].startswith("x")
         assert len(entity["payload"][0]["body"]) < len(body)
 
+    def test_nested_tuple_metadata_string_is_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        chunk = _make_chunk(metadata={"payload": (body,)})
+        entity = MilvusVectorStore._chunk_to_entity(
+            chunk,
+            indexed_at="2026-01-01T00:00:00+00:00",
+            order={"prev_section_id": 1, "section_id": 2, "next_section_id": 3},
+            vector_field=FIELD,
+        )
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["payload"][0].startswith("x")
+        assert len(entity["payload"][0]) < len(body)
+        assert chunk.metadata["payload"] == (body,)
+
+    def test_numpy_string_metadata_is_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        metadata = np.array([body])
+        chunk = _make_chunk(metadata={"payload": metadata})
+        entity = MilvusVectorStore._chunk_to_entity(
+            chunk,
+            indexed_at="2026-01-01T00:00:00+00:00",
+            order={"prev_section_id": 1, "section_id": 2, "next_section_id": 3},
+            vector_field=FIELD,
+        )
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["payload"][0].startswith("x")
+        assert len(entity["payload"][0]) < len(body)
+        assert metadata[0] == body
+
     @pytest.mark.asyncio
     async def test_irreducible_numpy_metadata_fails_before_milvus_insert(self, store: MilvusVectorStore) -> None:
         chunk = _make_chunk(metadata={"payload": np.arange(100_000)})

@@ -34,6 +34,7 @@ Hybrid BM25:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import secrets
@@ -266,19 +267,15 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
     def excess() -> int:
         return _json_bytes({k: v for k, v in entity.items() if k not in static_fields}) - MAX_DYNAMIC_FIELD_BYTES
 
-    if excess() <= 0:
+    dynamic_payload = {k: v for k, v in entity.items() if k not in static_fields}
+    serialized_dynamic = convert_to_json(dynamic_payload)
+    if len(serialized_dynamic) <= MAX_DYNAMIC_FIELD_BYTES:
         return
 
-    def copy_containers(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: copy_containers(child) for key, child in value.items()}
-        if isinstance(value, list):
-            return [copy_containers(child) for child in value]
-        return value
-
-    for key, value in entity.items():
-        if key not in static_fields and isinstance(value, (dict, list)):
-            entity[key] = copy_containers(value)
+    # Work on the same JSON-shaped values PyMilvus will store. This also
+    # exposes strings nested in tuples and NumPy arrays to the truncator
+    # without mutating the source Chunk metadata.
+    entity.update(json.loads(serialized_dynamic))
 
     def without_strings(value: Any) -> Any:
         if isinstance(value, str):
