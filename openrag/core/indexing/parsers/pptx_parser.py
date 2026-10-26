@@ -25,7 +25,7 @@ from io import BytesIO
 from typing import Any
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
-from ..image_preprocessor import ensure_png_compatible_mode, pil_to_png_bytes
+from ..image_preprocessor import UPLOADED_IMAGE_FORMATS, ensure_png_compatible_mode, pil_to_png_bytes
 from .document_parser import DocumentParser
 from .registry import parser_registry
 
@@ -101,7 +101,7 @@ class PptxParser(DocumentParser):
                     if len(images) >= _MAX_IMAGES:
                         continue
                     try:
-                        with Image.open(BytesIO(shape.image.blob)) as im:
+                        with Image.open(BytesIO(shape.image.blob), formats=UPLOADED_IMAGE_FORMATS) as im:
                             im = ensure_png_compatible_mode(im)
                             png_bytes = pil_to_png_bytes(im)
                         ref = _image_ref(len(images))
