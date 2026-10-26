@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -893,6 +894,16 @@ class TestChunkToEntity:
         with pytest.raises(VDBInsertError, match="(?i)dynamic metadata.*65536-byte limit"):
             await store.upsert([chunk], vector_field=FIELD)
 
+        store._async_client.insert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unsupported_metadata_serialization_raises_insert_error(self, store: MilvusVectorStore) -> None:
+        chunk = _make_chunk(metadata={"amount": Decimal("1.25")})
+
+        with pytest.raises(VDBInsertError, match="Failed to serialize dynamic metadata") as exc_info:
+            await store.upsert([chunk], vector_field=FIELD)
+
+        assert isinstance(exc_info.value.__cause__, TypeError)
         store._async_client.insert.assert_not_called()
 
     def test_oversized_content_is_truncated_to_fit_the_dynamic_field(self) -> None:

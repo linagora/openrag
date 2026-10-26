@@ -268,7 +268,13 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
         return _json_bytes({k: v for k, v in entity.items() if k not in static_fields}) - MAX_DYNAMIC_FIELD_BYTES
 
     dynamic_payload = {k: v for k, v in entity.items() if k not in static_fields}
-    serialized_dynamic = convert_to_json(dynamic_payload)
+    try:
+        serialized_dynamic = convert_to_json(dynamic_payload)
+    except (MilvusException, TypeError, ValueError, RecursionError) as exc:
+        raise VDBInsertError(
+            f"Failed to serialize dynamic metadata for chunk {file_id!r}.",
+            file_id=file_id,
+        ) from exc
     if len(serialized_dynamic) <= MAX_DYNAMIC_FIELD_BYTES:
         return
 
