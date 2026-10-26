@@ -99,6 +99,27 @@ class TestExtractEmbeddedImages:
         assert len(result) == 1
         assert result[0] is not None
 
+    @pytest.mark.parametrize("fmt", ["PNG", "JPEG", "GIF", "WEBP", "BMP"])
+    def test_upload_image_formats_are_decoded(self, fmt, encoded_image):
+        docx = _fake_docx({"image1.img": encoded_image(fmt)})
+        result = DocxParser._extract_embedded_images(str(docx))
+        assert len(result) == 1
+        assert Image.open(BytesIO(result[0])).format == "PNG"
+
+    def test_other_formats_are_not_decoded_whatever_the_entry_name(self, psd_bytes, encoded_image):
+        # The entry name says PNG, but Pillow would pick its decoder from the bytes.
+        docx = _fake_docx(
+            {
+                "image1.png": psd_bytes,
+                "image2.png": encoded_image("TIFF"),
+                "image3.png": _png_bytes(),
+            }
+        )
+        result = DocxParser._extract_embedded_images(str(docx))
+        assert result[0] is None
+        assert result[1] is None
+        assert result[2] is not None
+
 
 class TestRewritePlaceholdersAndBuildBlocks:
     """The parser→caption contract: synthetic refs + ImageBlock metadata."""
