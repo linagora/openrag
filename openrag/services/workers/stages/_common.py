@@ -30,7 +30,7 @@ def resolve_language(row: MutableMapping[str, Any]) -> str:
     English wrote English contexts for whole non-English corpora, which then
     no longer matched their own keywords in the lexical search.
     """
-    explicit = row.get("language") or row.get("lang")
+    explicit = row.get("language")
     if explicit:
         return str(explicit)
     chunks = row.get("chunks") or []
