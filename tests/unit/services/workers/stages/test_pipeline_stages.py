@@ -232,6 +232,21 @@ async def test_caption_stage_squeezes_table_padding():
     assert row["processed_document"].text_blocks[-1].text == wrap_caption(squeezed)
 
 
+def test_squeeze_padding_preserves_preformatted_markdown():
+    caption = (
+        "| name             | notes        |\n"
+        "|---|---|\n"
+        "| value      | `a    b`  |\n"
+        "```\n"
+        "| code    | data      |\n"
+        "```\n"
+        "    | x    | y    |\n"
+        "This  prose remains  as written.\n"
+    )
+
+    assert caption_module.squeeze_padding(caption) == caption
+
+
 @pytest.mark.asyncio
 async def test_caption_stage_captions_images_concurrently_and_in_order():
     """Images fan out concurrently (bounded only by the VLM semaphore, stubbed

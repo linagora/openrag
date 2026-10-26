@@ -6,15 +6,16 @@
 
 ## [SYSTEM_FLOW]
 
-- Chunk metadata is prepared for Milvus's dynamic field. String values are shortened when needed to meet the 65,536-byte dynamic-field limit; unsupported values fail before the insert call with the vector store's insert error.
+- Plain Markdown table captions have repeated cell spacing collapsed. Captions containing code or indented text pass through unchanged; chunk metadata is then prepared for Milvus's dynamic field, shortening strings when needed to meet its 65,536-byte limit.
 
 ## [ARCHITECTURE]
 
-- `MilvusVectorStore` owns chunk-to-entity conversion and writes through PyMilvus. Serialization validation errors surface as `VDBInsertError` before a write; the collection schema and public API are unchanged.
+- `caption_stage` normalizes table padding before chunking. `MilvusVectorStore` owns chunk-to-entity conversion and writes through PyMilvus; serialization validation errors surface as `VDBInsertError` before a write. The collection schema and public API are unchanged.
 
 ## [DECISIONS]
 
 - Map PyMilvus serialization validation errors to `VDBInsertError` because preflight runs before the existing insert error handler; preserve the underlying exception as the cause.
+- Skip caption normalization whenever code or indented text is present so transcription does not alter preformatted content.
 
 ## [OUT_OF_SCOPE]
 
@@ -27,7 +28,8 @@
 ## [VERIFICATION STATUS]
 
 - Unsupported `Decimal` metadata is rejected as `VDBInsertError` before insertion: pass.
-- Focused storage and pipeline suites: 247 passed.
-- Full unit suite: 6,375 passed, 304 skipped; baseline was 6,374 passed, 304 skipped.
+- Plain table padding is squeezed; captions with fenced, inline, or indented code are preserved: pass.
+- Focused storage and pipeline suites: 248 passed.
+- Full unit suite on the latest PR head: 6,376 passed, 304 skipped, 51 warnings.
 - Ruff check, Ruff format check, and `git diff --check`: pass.
-- Final diff review: pass; only row-limit handling, regression coverage, and this map changed.
+- Final diff review: pass; the follow-up covers the current inline findings and serializer error mapping.

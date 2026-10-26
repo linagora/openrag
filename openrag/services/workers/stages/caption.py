@@ -14,18 +14,32 @@ from services.workers.stages._common import run_with_optional_timeout, scrub_cre
 from tqdm.asyncio import tqdm
 
 _PADDING_RE = re.compile(r"[ \t]{2,}")
+_FENCE_RE = re.compile(r"(?m)^ {0,3}~{3,}")
+_INDENTED_CODE_RE = re.compile(r"(?m)^(?: {4}|\t)")
 
 
 def squeeze_padding(caption: str) -> str:
-    """Collapse runs of spaces and tabs in a VLM caption to one space.
+    """Collapse padding in plain Markdown table captions only.
 
     Captions of tables come back as markdown tables padded for alignment, and a
     degenerate one can spend its whole token budget repeating padded rows. One
     space-run token can stand for many bytes, so such a caption is far larger
-    than its token count suggests. Markdown tables need no padding, and the
-    padding only costs embedding and storage room.
+    than its token count suggests. Captions containing code are passed through
+    unchanged so transcription keeps its original spacing.
     """
-    return _PADDING_RE.sub(" ", caption)
+    if "`" in caption or _FENCE_RE.search(caption) or _INDENTED_CODE_RE.search(caption):
+        return caption
+
+    squeezed: list[str] = []
+    for line in caption.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        stripped = content.lstrip(" \t")
+        if stripped.startswith("|") and stripped.count("|") >= 2:
+            squeezed.append(_PADDING_RE.sub(" ", line))
+        else:
+            squeezed.append(line)
+
+    return "".join(squeezed)
 
 
 async def caption_stage(
