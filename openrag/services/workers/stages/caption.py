@@ -14,8 +14,20 @@ from services.workers.stages._common import run_with_optional_timeout, scrub_cre
 from tqdm.asyncio import tqdm
 
 _PADDING_RE = re.compile(r"[ \t]{2,}")
-_FENCE_RE = re.compile(r"(?m)^ {0,3}~{3,}")
-_INDENTED_CODE_RE = re.compile(r"(?m)^(?: {4}|\t)")
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+
+
+def _pipe_table_cells(line: str) -> list[str] | None:
+    """Return cells for a leading-pipe row with at least two columns."""
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return None
+
+    cells = re.split(r"(?<!\\)\|", stripped[1:])
+    if cells and not cells[-1].strip():
+        cells.pop()
+    return cells if len(cells) >= 2 else None
 
 
 def squeeze_padding(caption: str) -> str:
@@ -24,20 +36,91 @@ def squeeze_padding(caption: str) -> str:
     Captions of tables come back as markdown tables padded for alignment, and a
     degenerate one can spend its whole token budget repeating padded rows. One
     space-run token can stand for many bytes, so such a caption is far larger
-    than its token count suggests. Captions containing code are passed through
-    unchanged so transcription keeps its original spacing.
+    than its token count suggests. Fenced code, indented lines, and table rows
+    containing inline code keep their original spacing.
     """
-    if "`" in caption or _FENCE_RE.search(caption) or _INDENTED_CODE_RE.search(caption):
-        return caption
+    lines = caption.splitlines(keepends=True)
+    contents = [line.rstrip("\r\n") for line in lines]
+    hard_protected_rows: set[int] = set()
+    inline_code_rows: set[int] = set()
+    fence_char: str | None = None
+    fence_length = 0
 
-    squeezed: list[str] = []
-    for line in caption.splitlines(keepends=True):
-        content = line.rstrip("\r\n")
-        stripped = content.lstrip(" \t")
-        if stripped.startswith("|") and stripped.count("|") >= 2:
-            squeezed.append(_PADDING_RE.sub(" ", line))
-        else:
-            squeezed.append(line)
+    for index, content in enumerate(contents):
+        fence_match = _FENCE_RE.match(content)
+        if fence_char is not None:
+            hard_protected_rows.add(index)
+            if fence_match:
+                marker = fence_match.group(1)
+                trailing = content[fence_match.end() :]
+                if marker[0] == fence_char and len(marker) >= fence_length and not trailing.strip(" \t"):
+                    fence_char = None
+            continue
+        if fence_match:
+            hard_protected_rows.add(index)
+            marker = fence_match.group(1)
+            fence_char = marker[0]
+            fence_length = len(marker)
+        elif content.startswith(("    ", "\t")):
+            hard_protected_rows.add(index)
+        elif "`" in content and _pipe_table_cells(content) is not None:
+            inline_code_rows.add(index)
+
+    table_rows: set[int] = set()
+
+    # A Markdown delimiter row identifies a table. Keep squeezing within the
+    # contiguous leading-pipe rows that share its column count.
+    for index, content in enumerate(contents):
+        if index in hard_protected_rows or index in inline_code_rows:
+            continue
+        cells = _pipe_table_cells(content)
+        if cells is None or not all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells):
+            continue
+        table_rows.add(index)
+        for direction in (-1, 1):
+            neighbor = index + direction
+            while 0 <= neighbor < len(contents):
+                if neighbor in hard_protected_rows:
+                    break
+                neighbor_cells = _pipe_table_cells(contents[neighbor])
+                if neighbor_cells is None or len(neighbor_cells) != len(cells):
+                    break
+                if neighbor not in inline_code_rows:
+                    table_rows.add(neighbor)
+                neighbor += direction
+
+    # Some VLM table captions omit the delimiter row and repeat a padded row
+    # many times. Preserve that optimization only for repeated multi-cell rows;
+    # a standalone pipe diagram is left untouched.
+    index = 0
+    while index < len(contents):
+        if index in hard_protected_rows or index in inline_code_rows:
+            index += 1
+            continue
+        cells = _pipe_table_cells(contents[index])
+        if cells is None or all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells):
+            index += 1
+            continue
+
+        normalized = tuple(_PADDING_RE.sub(" ", cell).strip() for cell in cells)
+        end = index + 1
+        while end < len(contents):
+            if end in hard_protected_rows or end in inline_code_rows:
+                break
+            next_cells = _pipe_table_cells(contents[end])
+            if next_cells is None or len(next_cells) != len(cells):
+                break
+            if all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in next_cells):
+                break
+            next_normalized = tuple(_PADDING_RE.sub(" ", cell).strip() for cell in next_cells)
+            if next_normalized != normalized:
+                break
+            end += 1
+        if end - index >= 2:
+            table_rows.update(range(index, end))
+        index = max(end, index + 1)
+
+    squeezed = [_PADDING_RE.sub(" ", line) if index in table_rows else line for index, line in enumerate(lines)]
 
     return "".join(squeezed)
 

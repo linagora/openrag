@@ -39,11 +39,12 @@ import math
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import numpy as np
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk
 from core.models.retrieval_trace import RemovalReasonCode, TraceCandidate, TraceRemovalReason
@@ -239,6 +240,62 @@ def _json_bytes(value: Any) -> int:
     return len(convert_to_json(value))
 
 
+def _json_string_bytes(value: str) -> int:
+    """Size of a string value as encoded inside a JSON container."""
+    # Wrapping avoids convert_to_json's special case for top-level JSON strings.
+    return len(convert_to_json([value])) - 2
+
+
+def _has_cyclic_json_reference(value: Any) -> bool:
+    """Return whether JSON containers in *value* refer back to an ancestor.
+
+    PyMilvus converts NumPy object arrays, mappings, and sequences before JSON
+    encoding. Its converter walks mappings and lists with a work stack, so a
+    cyclic reference can keep that stack growing instead of raising a normal
+    serialization error. Track the active traversal path to detect cycles
+    while still allowing shared but acyclic values.
+    """
+
+    def children(container: Any) -> Iterable[Any] | None:
+        if isinstance(container, dict):
+            return container.values()
+        if isinstance(container, (list, tuple)):
+            return container
+        if isinstance(container, np.ndarray) and container.dtype.hasobject:
+            return container.flat
+        return None
+
+    root_children = children(value)
+    if root_children is None:
+        return False
+
+    active = {id(value)}
+    visited: set[int] = set()
+    pending: list[tuple[Any, Iterator[Any]]] = [(value, iter(root_children))]
+    while pending:
+        container, values = pending[-1]
+        try:
+            child = next(values)
+        except StopIteration:
+            pending.pop()
+            active.remove(id(container))
+            visited.add(id(container))
+            continue
+
+        child_values = children(child)
+        if child_values is None:
+            continue
+        child_id = id(child)
+        if child_id in active:
+            return True
+        if child_id in visited:
+            continue
+        active.add(child_id)
+        pending.append((child, iter(child_values)))
+
+    return False
+
+
 def _truncate_utf8(value: str, max_bytes: int) -> str:
     """*value* cut to at most *max_bytes* UTF-8 bytes, never mid-character."""
     return value.encode("utf-8")[: max(max_bytes, 0)].decode("utf-8", errors="ignore")
@@ -264,10 +321,12 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
             "Chunk field over the Milvus limit; truncated."
         )
 
-    def excess() -> int:
-        return _json_bytes({k: v for k, v in entity.items() if k not in static_fields}) - MAX_DYNAMIC_FIELD_BYTES
-
     dynamic_payload = {k: v for k, v in entity.items() if k not in static_fields}
+    if _has_cyclic_json_reference(dynamic_payload):
+        raise VDBInsertError(
+            f"Cyclic dynamic metadata for chunk {file_id!r} cannot be serialized.",
+            file_id=file_id,
+        )
     try:
         serialized_dynamic = convert_to_json(dynamic_payload)
     except (MilvusException, TypeError, ValueError, RecursionError) as exc:
@@ -306,7 +365,7 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
         )
 
     if minimum_bytes > MAX_DYNAMIC_FIELD_BYTES:
-        fail_oversized_metadata(excess() + MAX_DYNAMIC_FIELD_BYTES)
+        fail_oversized_metadata(len(serialized_dynamic))
 
     def nested_string_paths(value: Any, path: tuple[str | int, ...]) -> Iterable[tuple[tuple[str | int, ...], str]]:
         if isinstance(value, str):
@@ -335,38 +394,48 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
         for key in SHRINKABLE_DYNAMIC_KEYS
         if key not in static_fields and isinstance(entity.get(key), str)
     ]
+    shrink_first_paths = {path for path, _ in shrink_first}
     remaining_strings = [
         item
         for key, value in entity.items()
-        if key not in static_fields and key not in SHRINKABLE_DYNAMIC_KEYS
+        if key not in static_fields
         for item in nested_string_paths(value, (key,))
+        if item[0] not in shrink_first_paths
     ]
     remaining_strings.sort(key=lambda item: -len(item[1].encode("utf-8")))
 
+    actual_bytes = len(serialized_dynamic)
+    truncated_fields = 0
     for path, original in (*shrink_first, *remaining_strings):
+        over = actual_bytes - MAX_DYNAMIC_FIELD_BYTES
+        if over <= 0:
+            break
         if not original:
             continue
-        over = excess()
-        if over <= 0:
-            return
         value = get_value(path)
         if not isinstance(value, str) or not value:
             continue
-        before = len(value.encode("utf-8"))
+        string_bytes = _json_string_bytes(value)
         while over > 0 and value:
             value = _truncate_utf8(value, len(value.encode("utf-8")) - over)
+            new_string_bytes = _json_string_bytes(value)
+            actual_bytes += new_string_bytes - string_bytes
+            string_bytes = new_string_bytes
             set_value(path, value)
-            over = excess()
-        field = ".".join(map(str, path))
+            over = actual_bytes - MAX_DYNAMIC_FIELD_BYTES
+        if value != original:
+            truncated_fields += 1
+
+    if actual_bytes > MAX_DYNAMIC_FIELD_BYTES:
+        fail_oversized_metadata(actual_bytes)
+    if truncated_fields:
         logger.bind(
             file_id=file_id,
-            field=field,
-            bytes=before,
-            kept=len(value.encode("utf-8")),
+            fields_truncated=truncated_fields,
+            dynamic_bytes_before=len(serialized_dynamic),
+            dynamic_bytes_after=actual_bytes,
             limit=MAX_DYNAMIC_FIELD_BYTES,
-        ).warning("Chunk field over the Milvus limit; truncated.")
-
-    fail_oversized_metadata(excess() + MAX_DYNAMIC_FIELD_BYTES)
+        ).warning("Chunk metadata over the Milvus limit; strings truncated.")
 
 
 class MilvusVectorStore(VectorStore):

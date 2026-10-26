@@ -232,19 +232,66 @@ async def test_caption_stage_squeezes_table_padding():
     assert row["processed_document"].text_blocks[-1].text == wrap_caption(squeezed)
 
 
+def test_squeeze_padding_only_changes_markdown_table_rows():
+    caption = (
+        "This  prose remains  as written.\n"
+        "| Header        | Value          |\n"
+        "| ------------- | -------------- |\n"
+        "| padded   name | padded     row |\n"
+    )
+
+    assert caption_module.squeeze_padding(caption) == (
+        "This  prose remains  as written.\n"
+        "| Header | Value |\n"
+        "| ------------- | -------------- |\n"
+        "| padded name | padded row |\n"
+    )
+
+
+def test_squeeze_padding_preserves_pipe_diagrams():
+    caption = "|     A     |\n|     A     |     B     |\n"
+
+    assert caption_module.squeeze_padding(caption) == caption
+
+
 def test_squeeze_padding_preserves_preformatted_markdown():
     caption = (
+        "The column `Total` lists sums.\n"
+        "- Regions\n"
+        "    - Bretagne\n"
+        "    \n"
         "| name             | notes        |\n"
         "|---|---|\n"
         "| value      | `a    b`  |\n"
         "```\n"
         "| code    | data      |\n"
         "```\n"
+        "~~~text\n"
+        "| tilde    | data      |\n"
+        "~~~\n"
         "    | x    | y    |\n"
         "This  prose remains  as written.\n"
     )
 
-    assert caption_module.squeeze_padding(caption) == caption
+    expected = (
+        "The column `Total` lists sums.\n"
+        "- Regions\n"
+        "    - Bretagne\n"
+        "    \n"
+        "| name | notes |\n"
+        "|---|---|\n"
+        "| value      | `a    b`  |\n"
+        "```\n"
+        "| code    | data      |\n"
+        "```\n"
+        "~~~text\n"
+        "| tilde    | data      |\n"
+        "~~~\n"
+        "    | x    | y    |\n"
+        "This  prose remains  as written.\n"
+    )
+
+    assert caption_module.squeeze_padding(caption) == expected
 
 
 @pytest.mark.asyncio

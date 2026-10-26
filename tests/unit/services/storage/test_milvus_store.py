@@ -825,6 +825,27 @@ class TestChunkToEntity:
         payload = {"values": np.arange(100_000)}
         assert milvus_store_module._json_bytes(payload) == len(convert_to_json(payload))
 
+    @pytest.mark.parametrize("values", [["plain", '"quoted"', "é🙂", "\u0001\n\\", '{"json":"text"}']])
+    def test_json_string_byte_sizes_match_pymilvus_container_encoding(self, values: list[str]) -> None:
+        baseline = len(convert_to_json({"values": []}))
+        predicted = baseline + sum(milvus_store_module._json_string_bytes(value) for value in values) + len(values) - 1
+
+        assert predicted == len(convert_to_json({"values": values}))
+
+    def test_many_nested_strings_use_incremental_sizing_and_one_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        entity = {"payload": ["abcdefgh"] * 10_000}
+        json_bytes = MagicMock(wraps=milvus_store_module._json_bytes)
+        logger = MagicMock()
+        monkeypatch.setattr(milvus_store_module, "_json_bytes", json_bytes)
+        monkeypatch.setattr(milvus_store_module, "logger", logger)
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert json_bytes.call_count == 1
+        logger.bind.assert_called_once()
+        logger.bind.return_value.warning.assert_called_once()
+        assert len(convert_to_json(entity)) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+
     def test_numpy_metadata_is_counted_when_content_is_truncated(self) -> None:
         body = "x" * 70_000
         entity = self._entity(content=body, metadata={"payload": np.arange(1_000)})
@@ -905,6 +926,68 @@ class TestChunkToEntity:
 
         assert isinstance(exc_info.value.__cause__, TypeError)
         store._async_client.insert.assert_not_called()
+
+    @pytest.mark.parametrize("container_kind", ["dict", "list", "tuple_list", "numpy_object_array"])
+    def test_cyclic_metadata_fails_before_pymilvus_serialization(
+        self, monkeypatch: pytest.MonkeyPatch, container_kind: str
+    ) -> None:
+        if container_kind == "dict":
+            value: Any = {}
+            value["self"] = value
+        elif container_kind == "list":
+            value = []
+            value.append(value)
+        elif container_kind == "tuple_list":
+            child: list[Any] = []
+            value = (child,)
+            child.append(value)
+        else:
+            value = np.empty(1, dtype=object)
+            value[0] = value
+
+        serializer = MagicMock(side_effect=AssertionError("serializer must not receive cyclic metadata"))
+        monkeypatch.setattr(milvus_store_module, "convert_to_json", serializer)
+
+        with pytest.raises(VDBInsertError, match="Cyclic dynamic metadata"):
+            milvus_store_module._fit_milvus_row_limits(
+                {"file_id": "doc-1", "payload": value},
+                static_fields={"file_id"},
+            )
+
+        serializer.assert_not_called()
+
+    def test_shared_acyclic_metadata_is_accepted(self) -> None:
+        shared = {"value": "present"}
+        entity = {"left": shared, "right": shared}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert entity["left"] == {"value": "present"}
+        assert entity["right"] == {"value": "present"}
+
+    @pytest.mark.parametrize(
+        ("field", "container_kind"),
+        [("content", "dict"), ("content", "list"), ("context", "dict"), ("context", "list")],
+    )
+    def test_nested_strings_under_shrinkable_fields_are_truncated(self, field: str, container_kind: str) -> None:
+        body = "x" * 70_000
+        value: Any = {"body": body} if container_kind == "dict" else [{"body": body}]
+        entity = {"file_id": "doc-1", field: value}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields={"file_id"})
+
+        truncated = entity[field]["body"] if container_kind == "dict" else entity[field][0]["body"]
+        assert len(truncated) < len(body)
+        assert milvus_store_module._json_bytes({field: entity[field]}) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+
+    def test_last_string_can_be_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        entity = {"payload": body}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert len(entity["payload"]) < len(body)
+        assert milvus_store_module._json_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
 
     def test_oversized_content_is_truncated_to_fit_the_dynamic_field(self) -> None:
         # A 70 000-byte chunk body used to fail the whole file's insert
