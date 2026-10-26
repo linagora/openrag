@@ -1215,6 +1215,24 @@ class TestVLLMVision:
         assert downscale_image(small, 1024) is small
         assert downscale_image(b"not an image", 1024) == b"not an image"
 
+    def test_downscale_converts_modes_png_cannot_store(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        cmyk = BytesIO()
+        Image.new("CMYK", (2000, 1000)).save(cmyk, format="JPEG")
+        with Image.open(BytesIO(downscale_image(cmyk.getvalue(), 1024))) as image:
+            assert (image.format, image.mode, image.size) == ("PNG", "RGB", (1024, 512))
+
+    def test_max_image_side_is_coerced_to_int(self):
+        assert self._make_vision(lambda request: None, max_image_side="1024")._max_image_side == 1024
+
+    @pytest.mark.parametrize("value", [0, -5, "abc"])
+    def test_max_image_side_rejects_invalid_values(self, value):
+        with pytest.raises(ValueError):
+            self._make_vision(lambda request: None, max_image_side=value)
+
     @pytest.mark.asyncio
     async def test_caption_image_default_prompt(self):
         def handler(request: httpx.Request) -> httpx.Response:

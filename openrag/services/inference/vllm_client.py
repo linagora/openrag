@@ -892,6 +892,7 @@ def downscale_image(image_bytes: bytes, max_side: int) -> bytes:
     """
     from io import BytesIO
 
+    from core.indexing.image_preprocessor import pil_to_png_bytes
     from PIL import Image, UnidentifiedImageError
 
     try:
@@ -899,9 +900,9 @@ def downscale_image(image_bytes: bytes, max_side: int) -> bytes:
             if max(image.size) <= max_side:
                 return image_bytes
             image.thumbnail((max_side, max_side))
-            out = BytesIO()
-            image.save(out, format="PNG")
-            return out.getvalue()
+            # Converts CMYK and other modes PNG cannot store, which would
+            # otherwise fail the save and send the full-size original.
+            return pil_to_png_bytes(image)
     except (UnidentifiedImageError, OSError, ValueError):
         return image_bytes
 
@@ -922,13 +923,19 @@ class VLLMVision(VLLMClient, VLM):
         timeout: float = 60.0,
         api_key: str = "",
         max_tokens: int = 1024,
-        max_image_side: int | None = None,
+        max_image_side: int | str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(endpoint=endpoint, model_name=model_name, api_key=api_key, timeout=timeout, **kwargs)
         self._max_tokens = max_tokens
         # Taken out of **kwargs on purpose: anything left there is sent to the
         # provider as a sampling field, and a strict server rejects unknown ones.
+        # Coerced here because endpoint ``extra`` values are not type-checked: a
+        # string would fail every caption instead of the endpoint's creation.
+        if max_image_side is not None:
+            max_image_side = int(max_image_side)
+            if max_image_side <= 0:
+                raise ValueError(f"max_image_side must be a positive number of pixels, got {max_image_side}")
         self._max_image_side = max_image_side
 
     @with_inference_metrics("vlm")
