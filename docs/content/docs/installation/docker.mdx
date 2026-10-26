@@ -75,12 +75,17 @@ its job-submission API runs arbitrary code. To open it on the host's loopback
 while you need it, add its overlay, after any other overlay:
 
 ```bash
-docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml up -d
+docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml up -d                # GPU
+docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml --profile cpu up -d  # CPU
 ```
 
 Then open `http://127.0.0.1:8265` (`RAY_DASHBOARD_PORT` changes the port), or
 forward that port over SSH from a server. Bring the stack back up without the
 overlay once you are done.
+
+On Docker Engine releases older than 28.0.0, hosts on the same L2 network can
+reach ports published to `127.0.0.1`, so on those releases use the overlay
+only on a network where every host is trusted.
 
 Adding or removing the overlay recreates the API container: the API restarts,
 the embedded Ray and its actors start over, and indexing in progress is
