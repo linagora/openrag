@@ -617,3 +617,52 @@ def test_resolve_language_ignores_digits_and_table_markup(monkeypatch):
     monkeypatch.setattr(common_module, "detect_language", fake_detect)
     resolve_language({"chunks": [Chunk(id="c1", text="| Montant | 58.3M |\n|---|---|\n| Dossiers acceptés | 22 |")]})
     assert seen["text"] == "Montant . M Dossiers acceptés"
+
+
+def _detected_sample(monkeypatch, text: str) -> str:
+    seen: dict = {}
+
+    def fake_detect(sample, *, min_confidence=0.0):
+        seen["text"] = sample
+        return "fr"
+
+    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    resolve_language({"chunks": [Chunk(id="c1", text=text)]})
+    return seen["text"]
+
+
+def test_resolve_language_leaves_image_captions_and_placeholders_out(monkeypatch):
+    text = (
+        "La préfecture répartit les crédits.\n\n"
+        "<image_description>\n\nA bar chart of the yearly budget.\n\n</image_description>\n\n"
+        "<image_description>\n\n[Image Placeholder]\n\n</image_description>\n\n"
+        "Les dossiers sont instruits en mars."
+    )
+    assert (
+        _detected_sample(monkeypatch, text)
+        == "La préfecture répartit les crédits. Les dossiers sont instruits en mars."
+    )
+
+
+def test_resolve_language_ignores_html_tags(monkeypatch):
+    text = '<table class="data"><tr><td>Dossiers acceptés</td><td>vingt</td></tr></table><br/>'
+    assert _detected_sample(monkeypatch, text) == "Dossiers acceptés vingt"
+
+
+def test_resolve_language_samples_the_captions_when_the_text_is_only_images(monkeypatch):
+    text = "<image_description>\n\nUn schéma du circuit de validation.\n\n</image_description>"
+    assert _detected_sample(monkeypatch, text) == "Un schéma du circuit de validation."
+
+
+def test_resolve_language_detects_french_despite_english_captions(monkeypatch):
+    from fast_langdetect import LangDetectConfig, LangDetector
+    from services.inference import runtime
+
+    # The bundled model, so the test needs no download.
+    monkeypatch.setattr(runtime, "_lang_detector", LangDetector(LangDetectConfig(model="lite", max_input_length=1024)))
+    text = (
+        "<image_description>\n\nA bar chart showing the yearly budget by department, with values in millions.\n\n"
+        "</image_description>\n\nLa préfecture de région répartit les crédits entre les départements."
+    )
+    row = {"chunks": [Chunk(id="c1", text=text)]}
+    assert resolve_language(row) == "fr"

@@ -18,6 +18,11 @@ _LANGUAGE_SAMPLE_CHARS = 1000
 # Digits and Markdown table/markup characters carry no language and pull the
 # detector towards English on number-heavy chunks.
 _LANGUAGE_NOISE = re.compile(r"[\d|#*_~`>\-=+]+")
+# Image captions are written in the language shown in the image, often English
+# whatever the document's language, so they are left out of the sample.
+_IMAGE_DESCRIPTION = re.compile(r"<image_description>.*?</image_description>", re.DOTALL)
+_IMAGE_PLACEHOLDER = re.compile(r"\[Image Placeholder\]", re.IGNORECASE)
+_HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
 
 
 def resolve_language(row: MutableMapping[str, Any]) -> str:
@@ -35,10 +40,24 @@ def resolve_language(row: MutableMapping[str, Any]) -> str:
         return str(explicit)
     chunks = row.get("chunks") or []
     sample = " ".join(str(getattr(chunk, "text", "") or "") for chunk in chunks[:_LANGUAGE_SAMPLE_CHUNKS])
-    sample = " ".join(_LANGUAGE_NOISE.sub(" ", sample).split())
+    sample = _language_sample(sample)
     language = detect_language(sample[:_LANGUAGE_SAMPLE_CHARS], min_confidence=_LANGUAGE_MIN_CONFIDENCE)
     row["language"] = language or DEFAULT_LANGUAGE
     return row["language"]
+
+
+def _language_sample(text: str) -> str:
+    """*text* without the parts that carry no language, or another language.
+
+    A file whose first chunks hold nothing but image captions is sampled from
+    the captions, rather than not at all.
+    """
+
+    def clean(value: str) -> str:
+        value = _IMAGE_PLACEHOLDER.sub(" ", _HTML_TAG.sub(" ", value))
+        return " ".join(_LANGUAGE_NOISE.sub(" ", value).split())
+
+    return clean(_IMAGE_DESCRIPTION.sub(" ", text)) or clean(text)
 
 
 def scrub_credentials(row: MutableMapping[str, Any]) -> None:
