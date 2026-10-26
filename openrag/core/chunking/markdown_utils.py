@@ -602,6 +602,45 @@ def _chunk_csv_row_per_column(
     return chunks
 
 
+def _largest_fitting_prefix_end(
+    text: str,
+    start: int,
+    budget: int,
+    length_function: Callable[[str], int],
+) -> int:
+    """Find a bounded prefix by probing forward instead of rescanning the suffix."""
+    text_length = len(text)
+    first_end = start + 1
+    if length_function(text[start:first_end]) > budget:
+        # Preserve the established progress guarantee even for a length function
+        # where one character is already larger than the available budget.
+        return first_end
+
+    best = first_end
+    span = 2
+    first_over_budget = text_length
+    while best < text_length:
+        probe = min(text_length, start + span)
+        if length_function(text[start:probe]) <= budget:
+            best = probe
+            if probe == text_length:
+                return best
+            span *= 2
+            continue
+        first_over_budget = probe
+        break
+
+    low, high = best + 1, first_over_budget - 1
+    while low <= high:
+        middle = (low + high) // 2
+        if length_function(text[start:middle]) <= budget:
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
 def _split_to_budget(text: str, budget: int, length_function: Callable[[str], int]) -> list[str]:
     """Without loss, divide text at whitespace and then characters when necessary."""
     if not text:
@@ -614,35 +653,19 @@ def _split_to_budget(text: str, budget: int, length_function: Callable[[str], in
     start = 0
     text_length = len(text)
     while start < text_length:
-        if length_function(text[start:]) <= budget:
-            pieces.append(text[start:])
-            break
-        # prefer the largest whitespace boundary rather than one over the token budget
-        cut = None
-        low = bisect_right(boundaries, start)
-        high = len(boundaries) - 1
-        while low <= high:
-            middle = (low + high) // 2
-            boundary = boundaries[middle]
-            if length_function(text[start:boundary]) <= budget:
-                cut = boundary
-                low = middle + 1
-            else:
-                high = middle - 1
-        if cut is None:
-            #  single long word or a URL can still exceed the budget
-            # so find the largest character prefix that fits without discarding anything.
-            low, high = start + 1, text_length
-            best = 0
-            while low <= high:
-                middle = (low + high) // 2
-                if length_function(text[start:middle]) <= budget:
-                    best = middle
-                    low = middle + 1
-                else:
-                    high = middle - 1
-            cut = best or start + 1
-        # Keep the separator at the beginning of the following part because stripping
+        fitting_end = _largest_fitting_prefix_end(text, start, budget, length_function)
+        if fitting_end == text_length:
+            cut = fitting_end
+        else:
+            # Prefer the largest whitespace boundary in the bounded prefix.
+            # If it contains no separator, split the long word or URL by character.
+            boundary_index = bisect_right(boundaries, fitting_end) - 1
+            cut = (
+                boundaries[boundary_index]
+                if boundary_index >= 0 and boundaries[boundary_index] > start
+                else fitting_end
+            )
+        # Keep the separator at the end of the preceding part because stripping
         # it would silently change the original CSV cell when all continuation
         # parts are joined again.
         pieces.append(text[start:cut])

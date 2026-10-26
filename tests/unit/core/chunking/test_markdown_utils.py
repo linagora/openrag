@@ -459,22 +459,29 @@ def test_split_to_budget_uses_logarithmic_whitespace_probes():
     assert calls < 100
 
 
-def test_split_to_budget_scans_whitespace_boundaries_once(monkeypatch):
+def test_split_to_budget_bounds_tokenization_and_scans_boundaries_once(monkeypatch):
     text = " ".join(f"word{number}" for number in range(2_000))
     original_finditer = markdown_utils.re.finditer
-    calls = 0
+    finditer_calls = 0
+    tokenized_characters = 0
 
     def counted_finditer(*args, **kwargs):
-        nonlocal calls
-        calls += 1
+        nonlocal finditer_calls
+        finditer_calls += 1
         return original_finditer(*args, **kwargs)
+
+    def counted_length(value: str) -> int:
+        nonlocal tokenized_characters
+        tokenized_characters += len(value)
+        return len(value.split())
 
     monkeypatch.setattr(markdown_utils.re, "finditer", counted_finditer)
 
-    pieces = _split_to_budget(text, budget=1, length_function=lambda value: len(value.split()))
+    pieces = _split_to_budget(text, budget=1, length_function=counted_length)
 
     assert "".join(pieces) == text
-    assert calls == 1
+    assert finditer_calls == 1
+    assert tokenized_characters < len(text) * 20
 
 
 def test_split_to_budget_rejects_non_positive_budget():
