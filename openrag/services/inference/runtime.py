@@ -5,13 +5,24 @@ from fast_langdetect import LangDetectConfig, LangDetector
 from services.inference.distributed_semaphore import DistributedSemaphore
 
 _LANG_DETECT_CACHE_DIR = "/app/model_weights/"
-_lang_detector = LangDetector(
-    config=LangDetectConfig(
-        max_input_length=1024,
-        model="auto",
-        cache_dir=_LANG_DETECT_CACHE_DIR,
-    )
-)
+# Built on first use, with the model from ``language_detection.model``.
+_lang_detector: LangDetector | None = None
+
+
+def _get_lang_detector() -> LangDetector:
+    # ``full`` and ``auto`` download the full model on first use and cache it
+    # only once the download succeeds: without network access, every call
+    # retries it. ``lite`` ships inside the fast-langdetect package.
+    global _lang_detector
+    if _lang_detector is None:
+        _lang_detector = LangDetector(
+            config=LangDetectConfig(
+                max_input_length=1024,
+                model=load_config().language_detection.model,
+                cache_dir=_LANG_DETECT_CACHE_DIR,
+            )
+        )
+    return _lang_detector
 
 
 def detect_language(text: str, *, min_confidence: float = 0.0):
@@ -20,7 +31,7 @@ def detect_language(text: str, *, min_confidence: float = 0.0):
     if not normalized:
         return None
     try:
-        outputs = _lang_detector.detect(normalized, k=1, threshold=min_confidence)
+        outputs = _get_lang_detector().detect(normalized, k=1, threshold=min_confidence)
     except Exception:
         return None
     if not outputs:
