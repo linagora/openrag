@@ -35,9 +35,16 @@ RUN npm run build
 # image runs under a hardened container security context (runAsNonRoot,
 # drop ALL capabilities) — required by the Helm chart and good practice in
 # compose too. COPY runs as root, then we drop back to a fixed non-root UID.
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginx/nginx-unprivileged:1.30-alpine
 
 USER root
+
+# Alpine publishes package fixes before upstream rebuilds this image, so take them
+# at build time. The CI workflows pass a new APK_UPGRADE_KEY on every run: a
+# changed build arg invalidates the build cache from here on, so the upgrade runs
+# again instead of being reused from an earlier build on the same base.
+ARG APK_UPGRADE_KEY
+RUN apk upgrade --no-cache
 
 COPY --chown=10001:0 --from=build /app/dist /usr/share/nginx/html
 COPY --chown=10001:0 infra/compose/nginx/openrag-admin.conf /etc/nginx/conf.d/default.conf
