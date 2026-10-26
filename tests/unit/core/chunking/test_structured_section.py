@@ -157,6 +157,36 @@ def test_large_table_is_atomic_table_chunk():
     assert any(c.chunk_type == ChunkType.TABLE for c in chunks), "expected an atomic table chunk"
 
 
+def test_table_caption_travels_into_the_table_chunk():
+    """A caption below its table used to open the next prose chunk, leaving the
+    table untitled and the prose chunk led by a stray caption."""
+    table = "| Domain | Value |\n|---|---|\n" + "\n".join(f"| D{i} | {' '.join(['x'] * 40)} |" for i in range(8))
+    doc = _doc(f"Some intro prose.\n\n{table}\n\n*Table 1. Regional totals*\n\nMore prose after the table.")
+    chunks = _chunker(chunk_size=50).chunk(doc)
+    table_chunk = next(c for c in chunks if c.chunk_type == ChunkType.TABLE)
+    assert "*Table 1. Regional totals*\n\n| Domain | Value |" in table_chunk.content
+    assert all(c.chunk_type == ChunkType.TABLE for c in chunks if "Table 1. Regional totals" in c.text)
+
+
+def test_split_table_repeats_its_caption_on_every_piece():
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    doc = _doc(f"| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n\nTable 4: Quarterly sales\n\nClosing remarks.")
+    tables = [c for c in _chunker(chunk_size=200).chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    for piece in tables:
+        assert "Table 4: Quarterly sales\n\n| Region | Q1 | Q2 | Q3 |" in piece.content
+
+
+def test_caption_beside_a_placeholder_image_stays_in_the_text():
+    """A placeholder takes no caption, so the caption neither keeps an empty
+    image block alive nor moves onto another block."""
+    placeholder = "<image_description>\n\n[Image Placeholder]\n\n</image_description>"
+    doc = _doc(f"Some prose.\n\n*Figure 2. Logo*\n\n{placeholder}\n\nMore prose.")
+    joined = "\n".join(c.content for c in _chunker(chunk_size=512).chunk(doc))
+    assert "Figure 2. Logo" in joined
+    assert "<image_description>" not in joined
+
+
 def test_oversize_article_is_split_not_dropped():
     big_body = " ".join(f"clause{i}." for i in range(200))
     doc = _doc(f"Article L1\n{big_body}")
