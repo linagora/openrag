@@ -34,7 +34,6 @@ Hybrid BM25:
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 import re
 import secrets
@@ -71,6 +70,7 @@ from pymilvus import (
     MilvusException,
     RRFRanker,
 )
+from pymilvus.client.entity_helper import convert_to_json
 
 logger = get_logger()
 
@@ -234,8 +234,8 @@ def _changed_by_float64(value: Any) -> bool:
 
 
 def _json_bytes(value: Any) -> int:
-    """Size of *value* as pymilvus serializes a dynamic field (compact UTF-8 JSON)."""
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
+    """Size of *value* using the serializer PyMilvus uses for dynamic fields."""
+    return len(convert_to_json(value))
 
 
 def _truncate_utf8(value: str, max_bytes: int) -> str:
@@ -251,7 +251,9 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
     (:data:`MAX_DYNAMIC_FIELD_BYTES`). A degenerate model output — a caption
     padded with whitespace up to its token budget, say — can exceed either, and
     one such chunk used to fail its whole file. ``content`` and ``context`` are
-    shortened first, then the longest other strings; each cut is logged.
+    shortened first, then the longest remaining strings at any nesting depth;
+    each cut is logged. If non-string metadata alone still exceeds the limit,
+    fail before sending the row to Milvus.
     """
     file_id = entity.get("file_id")
     text = entity.get("text")
@@ -264,34 +266,104 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
     def excess() -> int:
         return _json_bytes({k: v for k, v in entity.items() if k not in static_fields}) - MAX_DYNAMIC_FIELD_BYTES
 
-    others = sorted(
-        (
-            k
-            for k, v in entity.items()
-            if k not in static_fields and k not in SHRINKABLE_DYNAMIC_KEYS and isinstance(v, str)
-        ),
-        key=lambda k: -len(entity[k]),
-    )
-    for key in (*SHRINKABLE_DYNAMIC_KEYS, *others):
+    if excess() <= 0:
+        return
+
+    def copy_containers(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: copy_containers(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [copy_containers(child) for child in value]
+        return value
+
+    for key, value in entity.items():
+        if key not in static_fields and isinstance(value, (dict, list)):
+            entity[key] = copy_containers(value)
+
+    def without_strings(value: Any) -> Any:
+        if isinstance(value, str):
+            return ""
+        if isinstance(value, dict):
+            return {key: without_strings(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [without_strings(child) for child in value]
+        return value
+
+    minimum_payload = {key: without_strings(value) for key, value in entity.items() if key not in static_fields}
+    minimum_bytes = _json_bytes(minimum_payload)
+
+    def fail_oversized_metadata(actual_bytes: int) -> None:
+        raise VDBInsertError(
+            f"Dynamic metadata for chunk {file_id!r} cannot fit Milvus's {MAX_DYNAMIC_FIELD_BYTES}-byte limit "
+            f"(current size: {actual_bytes}; size after removing all strings: {minimum_bytes} bytes).",
+            file_id=file_id,
+            dynamic_bytes=actual_bytes,
+            minimum_bytes=minimum_bytes,
+            limit=MAX_DYNAMIC_FIELD_BYTES,
+        )
+
+    if minimum_bytes > MAX_DYNAMIC_FIELD_BYTES:
+        fail_oversized_metadata(excess() + MAX_DYNAMIC_FIELD_BYTES)
+
+    def nested_string_paths(value: Any, path: tuple[str | int, ...]) -> Iterable[tuple[tuple[str | int, ...], str]]:
+        if isinstance(value, str):
+            yield path, value
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                yield from nested_string_paths(child, (*path, key))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                yield from nested_string_paths(child, (*path, index))
+
+    def get_value(path: tuple[str | int, ...]) -> Any:
+        value: Any = entity
+        for part in path:
+            value = value[part]
+        return value
+
+    def set_value(path: tuple[str | int, ...], value: str) -> None:
+        parent: Any = entity
+        for part in path[:-1]:
+            parent = parent[part]
+        parent[path[-1]] = value
+
+    shrink_first = [
+        ((key,), entity[key])
+        for key in SHRINKABLE_DYNAMIC_KEYS
+        if key not in static_fields and isinstance(entity.get(key), str)
+    ]
+    remaining_strings = [
+        item
+        for key, value in entity.items()
+        if key not in static_fields and key not in SHRINKABLE_DYNAMIC_KEYS
+        for item in nested_string_paths(value, (key,))
+    ]
+    remaining_strings.sort(key=lambda item: -len(item[1].encode("utf-8")))
+
+    for path, original in (*shrink_first, *remaining_strings):
+        if not original:
+            continue
         over = excess()
         if over <= 0:
             return
-        value = entity.get(key)
+        value = get_value(path)
         if not isinstance(value, str) or not value:
             continue
         before = len(value.encode("utf-8"))
-        # JSON escaping can make a value longer than its UTF-8 bytes, so cut
-        # again until the row fits or the value is spent.
-        while over > 0 and entity[key]:
-            entity[key] = _truncate_utf8(entity[key], len(entity[key].encode("utf-8")) - over)
+        while over > 0 and value:
+            value = _truncate_utf8(value, len(value.encode("utf-8")) - over)
+            set_value(path, value)
             over = excess()
+        field = ".".join(map(str, path))
         logger.bind(
             file_id=file_id,
-            field=key,
+            field=field,
             bytes=before,
-            kept=len(entity[key].encode("utf-8")),
+            kept=len(value.encode("utf-8")),
             limit=MAX_DYNAMIC_FIELD_BYTES,
         ).warning("Chunk field over the Milvus limit; truncated.")
+
+    fail_oversized_metadata(excess() + MAX_DYNAMIC_FIELD_BYTES)
 
 
 class MilvusVectorStore(VectorStore):

@@ -17,6 +17,7 @@ import threading
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 import services.storage.milvus_store as milvus_store_module
 from api.error_handlers import register_error_handlers
@@ -35,6 +36,7 @@ from core.vector_stores import VectorStore
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pymilvus import DataType, MilvusException
+from pymilvus.client.entity_helper import convert_to_json
 from services.storage.milvus_store import (
     MAX_SECTION_ID,
     SCHEMA_VERSION_PROPERTY_KEY,
@@ -817,6 +819,50 @@ class TestChunkToEntity:
     def _dynamic_bytes(entity: dict[str, Any]) -> int:
         static = {"text", "partition", "file_id", FIELD, *milvus_store_module.INDEXED_TIME_FIELDS}
         return milvus_store_module._json_bytes({k: v for k, v in entity.items() if k not in static})
+
+    def test_dynamic_size_matches_pymilvus_numpy_serialization(self) -> None:
+        payload = {"values": np.arange(100_000)}
+        assert milvus_store_module._json_bytes(payload) == len(convert_to_json(payload))
+
+    def test_numpy_metadata_is_counted_when_content_is_truncated(self) -> None:
+        body = "x" * 70_000
+        entity = self._entity(content=body, metadata={"payload": np.arange(1_000)})
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["content"].startswith("x")
+        assert len(entity["content"]) < len(body)
+
+    def test_nested_metadata_string_is_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        chunk = _make_chunk(metadata={"payload": {"body": body}})
+        entity = MilvusVectorStore._chunk_to_entity(
+            chunk,
+            indexed_at="2026-01-01T00:00:00+00:00",
+            order={"prev_section_id": 1, "section_id": 2, "next_section_id": 3},
+            vector_field=FIELD,
+        )
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["payload"]["body"].startswith("x")
+        assert len(entity["payload"]["body"]) < len(body)
+        assert chunk.metadata["payload"]["body"] == body
+
+    def test_nested_list_metadata_string_is_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        entity = self._entity(metadata={"payload": [{"body": body}]})
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["payload"][0]["body"].startswith("x")
+        assert len(entity["payload"][0]["body"]) < len(body)
+
+    @pytest.mark.asyncio
+    async def test_irreducible_numpy_metadata_fails_before_milvus_insert(self, store: MilvusVectorStore) -> None:
+        chunk = _make_chunk(metadata={"payload": np.arange(100_000)})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata.*65536-byte limit"):
+            await store.upsert([chunk], vector_field=FIELD)
+
+        store._async_client.insert.assert_not_called()
 
     def test_oversized_content_is_truncated_to_fit_the_dynamic_field(self) -> None:
         # A 70 000-byte chunk body used to fail the whole file's insert
