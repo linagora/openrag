@@ -11,7 +11,9 @@ from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.stages import _common as common_module
 from services.workers.stages import caption as caption_module
+from services.workers.stages._common import resolve_language
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
 from services.workers.stages.contextualize import contextualize_stage
@@ -218,6 +220,187 @@ async def test_caption_stage_appends_standalone_image_captions():
 
 
 @pytest.mark.asyncio
+async def test_caption_stage_squeezes_table_padding():
+    # A degenerate table caption repeats padded rows up to its token budget;
+    # the padding is dropped before the caption reaches chunking and storage.
+    padded = "| Plouray         |             |\n" * 3
+    processed = ProcessedDocument(document_id="doc-1", images=[ImageBlock(image_bytes=b"img", page_number=1)])
+    row = {"processed_document": processed}
+
+    await caption_stage(row, FakeVLM([padded]))
+
+    squeezed = "| Plouray | |\n" * 3
+    assert row["processed_document"].images[0].caption == squeezed
+    assert row["processed_document"].text_blocks[-1].text == wrap_caption(squeezed)
+
+
+def test_squeeze_padding_only_changes_markdown_table_rows():
+    caption = (
+        "This  prose remains  as written.\n"
+        "| Header        | Value          |\n"
+        "| ------------- | -------------- |\n"
+        "| padded   name | padded     row |\n"
+    )
+
+    assert caption_module.squeeze_padding(caption) == (
+        "This  prose remains  as written.\n"
+        "| Header | Value |\n"
+        "| ------------- | -------------- |\n"
+        "| padded name | padded row |\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("caption", "expected"),
+    [
+        pytest.param(
+            "| Name     | Value     |\n| --- | --- |\n| short     |\n| extra     | cells     | here     |\n| next     | row     |\n",
+            "| Name | Value |\n| --- | --- |\n| short |\n| extra | cells | here |\n| next | row |\n",
+            id="varying-body-widths",
+        ),
+        pytest.param(
+            "Name     | Value\n--- | ---\nfirst     | second\n",
+            "Name | Value\n--- | ---\nfirst | second\n",
+            id="without-outer-pipes",
+        ),
+        pytest.param(
+            "Name     | Value\r\n| --- | --- |\r\n| first     | second\r\nnext     | row |\r\n",
+            "Name | Value\r\n| --- | --- |\r\n| first | second\r\nnext | row |\r\n",
+            id="mixed-outer-pipes-and-crlf",
+        ),
+        pytest.param(
+            "| Name     |\n| --- |\n| padded     value |\n",
+            "| Name |\n| --- |\n| padded value |\n",
+            id="single-column",
+        ),
+        pytest.param(
+            "Name     | Value\n--- | ---\nfirst  \\| second | third     value\n",
+            "Name | Value\n--- | ---\nfirst \\| second | third value\n",
+            id="escaped-pipe",
+        ),
+        pytest.param(
+            "`a    b` | Value\n--- | ---\nfirst     | second\n",
+            "`a    b` | Value\n--- | ---\nfirst | second\n",
+            id="inline-code-header",
+        ),
+        pytest.param(
+            "Pipe     diagram | keep     spacing\n| Name     | Value |\n| --- | --- |\n| first     | second |\n",
+            "Pipe     diagram | keep     spacing\n| Name | Value |\n| --- | --- |\n| first | second |\n",
+            id="preserve-preceding-pipe-prose",
+        ),
+        pytest.param(
+            "| Name | Value |\n| --- | --- |\n١. first     | second\n| next     | row     |\n",
+            "| Name | Value |\n| --- | --- |\n١. first | second\n| next | row |\n",
+            id="unicode-digit-is-not-a-list-marker",
+        ),
+    ],
+)
+def test_squeeze_padding_supports_markdown_table_layouts(caption, expected):
+    assert caption_module.squeeze_padding(caption) == expected
+
+
+@pytest.mark.parametrize("delimiter", ["| - | - |", "|:--|--:|", "- | -"])
+def test_squeeze_padding_supports_short_delimiters(delimiter):
+    caption = f"| Name     | Value     |\n{delimiter}\n| first     | second     |\n"
+
+    assert caption_module.squeeze_padding(caption) == f"| Name | Value |\n{delimiter}\n| first | second |\n"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_body"),
+    [("short", "short"), ("short     row", "short row"), ("`a    b`", "`a    b`")],
+)
+def test_squeeze_padding_continues_after_body_rows_without_pipes(body, expected_body):
+    caption = f"| Name     | Value     |\n| --- | --- |\n{body}\n| next     | row     |\n"
+
+    assert caption_module.squeeze_padding(caption) == (
+        f"| Name | Value |\n| --- | --- |\n{expected_body}\n| next | row |\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        ">     foo    |    bar\n" * 2,
+        "   >     foo    |    bar\n" * 2,
+        "# Heading    |    text\n",
+        "- List    |    item\n" * 2,
+        "1. List    |    item\n" * 2,
+        "\nProse    |    text\n",
+        "---\nProse    |    text\n",
+        "<pre>\n    foo    |    bar\n</pre>\n",
+        ' \tprint("foo    bar")\n',
+        '  \tprint("foo    bar")\n',
+        '   \tprint("foo    bar")\n',
+    ],
+)
+def test_squeeze_padding_stops_at_other_markdown_blocks(block):
+    table = "| Name     | Value     |\n| --- | --- |\n| first     | second     |\n"
+
+    assert caption_module.squeeze_padding(table + block) == (
+        "| Name | Value |\n| --- | --- |\n| first | second |\n" + block
+    )
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "|     A     |\n" * 3,
+        "| Name     | Value     |\n| --- |\n| untouched     |\n",
+        "Name     | Value\n--- | --- | ---\nfirst     | second\n",
+    ],
+)
+def test_squeeze_padding_preserves_rows_without_a_valid_table_header(caption):
+    assert caption_module.squeeze_padding(caption) == caption
+
+
+def test_squeeze_padding_preserves_pipe_diagrams():
+    caption = "|     A     |\n|     A     |     B     |\n"
+
+    assert caption_module.squeeze_padding(caption) == caption
+
+
+def test_squeeze_padding_preserves_preformatted_markdown():
+    caption = (
+        "The column `Total` lists sums.\n"
+        "- Regions\n"
+        "    - Bretagne\n"
+        "    \n"
+        "| name             | notes        |\n"
+        "|---|---|\n"
+        "| value      | `a    b`  |\n"
+        "```\n"
+        "| code    | data      |\n"
+        "```\n"
+        "~~~text\n"
+        "| tilde    | data      |\n"
+        "~~~\n"
+        "    | x    | y    |\n"
+        "This  prose remains  as written.\n"
+    )
+
+    expected = (
+        "The column `Total` lists sums.\n"
+        "- Regions\n"
+        "    - Bretagne\n"
+        "    \n"
+        "| name | notes |\n"
+        "|---|---|\n"
+        "| value      | `a    b`  |\n"
+        "```\n"
+        "| code    | data      |\n"
+        "```\n"
+        "~~~text\n"
+        "| tilde    | data      |\n"
+        "~~~\n"
+        "    | x    | y    |\n"
+        "This  prose remains  as written.\n"
+    )
+
+    assert caption_module.squeeze_padding(caption) == expected
+
+
+@pytest.mark.asyncio
 async def test_caption_stage_captions_images_concurrently_and_in_order():
     """Images fan out concurrently (bounded only by the VLM semaphore, stubbed
     here), and each caption lands on its own image even though later images
@@ -343,6 +526,41 @@ async def test_contextualize_stage_uses_filename_and_language():
     assert row["chunks"] == contextualized
     assert row["stage"] == "contextualized"
     assert "token" not in row
+
+
+@pytest.mark.asyncio
+async def test_contextualize_stage_detects_the_language_when_the_upload_names_none(monkeypatch):
+    # Without upload metadata the stage used to pass "en", which overrode the
+    # prompt's "write in the chunk's language" and wrote English contexts for
+    # French corpora.
+    seen: dict = {}
+
+    def fake_detect(text, *, min_confidence=0.0):
+        seen["text"] = text
+        return "fr"
+
+    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    chunks = [Chunk(id="c1", text="La préfecture de région répartit les crédits.")]
+    contextualizer = FakeContextualizer([Chunk(id="c1", text="ctx", context="ctx")])
+    row = {"chunks": chunks, "filename": "note.pdf", "language": None}
+
+    await contextualize_stage(row, contextualizer)
+
+    assert contextualizer.calls == [(chunks, "note.pdf", "fr")]
+    assert row["language"] == "fr"
+    assert "préfecture" in seen["text"]
+
+
+def test_resolve_language_prefers_the_upload_metadata(monkeypatch):
+    monkeypatch.setattr(common_module, "detect_language", lambda *a, **k: pytest.fail("must not detect"))
+    assert resolve_language({"language": "de", "chunks": []}) == "de"
+
+
+def test_resolve_language_falls_back_to_english_when_detection_is_unsure(monkeypatch):
+    monkeypatch.setattr(common_module, "detect_language", lambda *a, **k: None)
+    row = {"chunks": [Chunk(id="c1", text="12 34 56")]}
+    assert resolve_language(row) == "en"
+    assert row["language"] == "en"
 
 
 @pytest.mark.asyncio
@@ -553,3 +771,15 @@ async def test_store_stage_provisions_the_partitions_field_then_writes_to_it():
     assert calls == ["ensure", "upsert"]
     assert store.vector_field_calls == [("vector_bge_m3", 3)]
     assert store.upsert_vector_fields == ["vector_bge_m3"]
+
+
+def test_resolve_language_ignores_digits_and_table_markup(monkeypatch):
+    seen: dict = {}
+
+    def fake_detect(text, *, min_confidence=0.0):
+        seen["text"] = text
+        return "fr"
+
+    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    resolve_language({"chunks": [Chunk(id="c1", text="| Montant | 58.3M |\n|---|---|\n| Dossiers acceptés | 22 |")]})
+    assert seen["text"] == "Montant . M Dossiers acceptés"

@@ -36,6 +36,11 @@ services:
       # so the defaults land at the repo root.
       - ${PROXY_DATA_DIR:-../../nginx_data}:/data
       - ${PROXY_LETSENCRYPT_DIR:-../../letsencrypt}:/etc/letsencrypt
+    # TLS session settings for every proxy host (see `configs` below). NPM
+    # includes /etc/nginx/conf.d/*.conf inside `http {}`.
+    configs:
+      - source: npm_tls_sessions
+        target: /etc/nginx/conf.d/openrag-tls-sessions.conf
 
   # With TLS terminated here, the app ports must not stay on 0.0.0.0: that
   # would offer a plaintext path around TLS and the OIDC redirect (and, for
@@ -48,15 +53,35 @@ services:
   openrag:
     ports: !override
       - 127.0.0.1:${APP_PORT:-8080}:${APP_iPORT:-8080}
-      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
       - 127.0.0.1:${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
 
   openrag-cpu:
     ports: !override
       - 127.0.0.1:${APP_PORT:-8080}:${APP_iPORT:-8080}
-      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
       - 127.0.0.1:${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
 
   admin-ui:
     ports: !override
       - "127.0.0.1:${ADMIN_UI_PORT:-8081}:8080"
+
+configs:
+  # Resume TLS sessions from the server-side cache rather than from session
+  # tickets, as Mozilla's server-side TLS guidelines recommend: a ticket key
+  # can decrypt every session it issued for as long as it lives. NPM only sets
+  # ssl_session_cache inside hosts with a Let's Encrypt certificate, but under
+  # SNI nginx resumes from the default server's cache, so tickets off without
+  # an http-level cache would stop resumption altogether.
+  # Those hosts include NPM's own conf.d/include/ssl-cache.conf, so the cache
+  # line must match it: nginx refuses to start when the `SSL` zone is declared
+  # with two sizes. Hosts with a custom certificate don't include it and
+  # inherit this cache. Recheck that file whenever NPM is bumped.
+  # Inline `content` (Docker Compose >= 2.23.1) is copied into the container,
+  # not bind-mounted: NPM's startup chowns /etc/nginx/conf.d under `set -e`,
+  # which aborts on a read-only mount and re-owns a writable one on the host.
+  # Compose copies it only when it creates the container, and an edit to
+  # `content` alone doesn't recreate it: rename the entry along with the edit
+  # so that `up -d` delivers it.
+  npm_tls_sessions:
+    content: |
+      ssl_session_tickets off;
+      ssl_session_cache shared:SSL:50m;
