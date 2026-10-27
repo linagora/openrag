@@ -17,6 +17,9 @@ _CREDENTIAL_KEYS = frozenset({"credentials", "credential", "api_key", "token", "
 DEFAULT_LANGUAGE = "en"
 _LANGUAGE_MIN_CONFIDENCE = 0.5
 _LANGUAGE_SAMPLE_CHARS = 1000
+# The sample is spread over this many chunks through the file: its opening alone
+# (cover page, an English abstract) often is not in the language of its body.
+_LANGUAGE_SAMPLE_SPREAD = 5
 # Digits and Markdown table/markup characters carry no language and pull the
 # detector towards English on number-heavy chunks.
 _LANGUAGE_NOISE = re.compile(r"[\d|#*_~`>\-=+]+")
@@ -44,13 +47,13 @@ def resolve_language(row: MutableMapping[str, Any]) -> str:
     """Language the file's contextualization and topic tags are written in.
 
     The upload's ``language`` metadata wins. Without it, the language is
-    detected from the start of the file's text, and stored on the row so later
+    detected from text spread through the file, and stored on the row so later
     stages agree. The prompts already ask for "the language of the chunk", but
     the stage passes an explicit language that overrides them: defaulting it
     to English wrote English contexts for whole non-English corpora, which
     then no longer matched their own keywords in the lexical search.
     """
-    explicit = row.get("language") or row.get("lang")
+    explicit = row.get("language")
     if explicit:
         return str(explicit)
     chunks = row.get("chunks") or []
@@ -65,38 +68,71 @@ def resolve_language(row: MutableMapping[str, Any]) -> str:
 
 
 def _language_sample(chunks: list[Any], *, captions: bool) -> str:
-    """The first ``_LANGUAGE_SAMPLE_CHARS`` of the chunks' text that carries the file's language.
+    """Up to ``_LANGUAGE_SAMPLE_CHARS`` of the chunks' text that carries the file's language.
+
+    The sample takes a slice from each of ``_LANGUAGE_SAMPLE_SPREAD`` chunks
+    spaced evenly from the first chunk with text to the last, then fills what is
+    left of its budget from the other chunks in order, and then from what the
+    slices left out, so a file of few or short chunks is still sampled in full.
 
     Without *captions*, image captions are left out, and so are chunks that
     hold nothing else: a file opening on figures is sampled from the text that
     follows them. With it, a file that has nothing but captions is sampled from
     them, rather than not at all.
     """
-    parts: list[str] = []
+    texts = [_language_text(chunk, captions=captions) for chunk in chunks]
+    # The spread is taken over the chunks with text: a slot on one that has none
+    # (captions only, a table of figures) would hand its share to the fill,
+    # which reads from the opening.
+    candidates = [index for index, text in enumerate(texts) if text]
+    count = min(len(candidates), _LANGUAGE_SAMPLE_SPREAD)
+    # A step of ``len(candidates) // count`` rounds down, so a file of five to
+    # nine chunks would be sampled from its first five only.
+    spread = [candidates[i * (len(candidates) - 1) // max(1, count - 1)] for i in range(count)]
+    rest = set(candidates) - set(spread)
+    order = spread + sorted(rest)
+    share = _LANGUAGE_SAMPLE_CHARS // max(1, count)
+    picked: dict[int, str] = {}
     size = 0
-    for chunk in chunks:
-        # ``content`` is the chunk without the ``[Source | Page | Section]``
-        # header structured_section writes in English in front of every chunk.
-        content = getattr(chunk, "content", None)
-        # CSV cells reach the chunk HTML-escaped (``&amp;``, ``&#124;``).
-        text = html.unescape(str(content if content is not None else getattr(chunk, "text", "") or ""))
-        if not captions:
-            # A caption too long for one chunk is split into pieces that keep
-            # the caption type; a middle piece carries neither marker. A caption
-            # chunk can also hold short prose after the caption, so only an
-            # unmarked one is dropped whole.
-            if getattr(chunk, "chunk_type", None) is ChunkType.IMAGE_CAPTION and "image_description>" not in text:
-                continue
-            text = _IMAGE_DESCRIPTION_TAIL.sub(" ", _IMAGE_DESCRIPTION.sub(" ", text))
-        for pattern in (_HTML_TAG, _IMAGE_PLACEHOLDER, _IMAGE_REF, PAGE_RE):
-            text = pattern.sub(" ", text)
-        text = " ".join(_LANGUAGE_NOISE.sub(" ", text).split())
-        if text:
-            parts.append(text)
-            size += len(text) + 1
-            if size > _LANGUAGE_SAMPLE_CHARS:
-                break
-    return " ".join(parts)[:_LANGUAGE_SAMPLE_CHARS]
+    for rank, index in enumerate(order):
+        if size >= _LANGUAGE_SAMPLE_CHARS:
+            break
+        # One share per spread chunk, so the first ones leave room for the rest.
+        # A chunk filling the budget gets only what is left of it: the sample is
+        # joined in file order and then cut, so a whole one near the start would
+        # push the spread slices after it out of the sample.
+        picked[index] = texts[index][:share] if rank < len(spread) else texts[index][: _LANGUAGE_SAMPLE_CHARS - size]
+        size += len(picked[index]) + 1
+    # Budget left means every chunk is in: the spread chunks add what their
+    # share cut off, or a short title and one long chunk would leave most of
+    # the budget unused.
+    for index in spread:
+        if size < _LANGUAGE_SAMPLE_CHARS:
+            taken = len(picked[index])
+            more = texts[index][taken : taken + _LANGUAGE_SAMPLE_CHARS - size]
+            picked[index] += more
+            size += len(more)
+    return " ".join(picked[index] for index in sorted(picked))[:_LANGUAGE_SAMPLE_CHARS]
+
+
+def _language_text(chunk: Any, *, captions: bool) -> str:
+    """The text of *chunk* that carries the file's language, cleaned for the detector."""
+    # ``content`` is the chunk without the ``[Source | Page | Section]``
+    # header structured_section writes in English in front of every chunk.
+    content = getattr(chunk, "content", None)
+    # CSV cells reach the chunk HTML-escaped (``&amp;``, ``&#124;``).
+    text = html.unescape(str(content if content is not None else getattr(chunk, "text", "") or ""))
+    if not captions:
+        # A caption too long for one chunk is split into pieces that keep
+        # the caption type; a middle piece carries neither marker. A caption
+        # chunk can also hold short prose after the caption, so only an
+        # unmarked one is dropped whole.
+        if getattr(chunk, "chunk_type", None) is ChunkType.IMAGE_CAPTION and "image_description>" not in text:
+            return ""
+        text = _IMAGE_DESCRIPTION_TAIL.sub(" ", _IMAGE_DESCRIPTION.sub(" ", text))
+    for pattern in (_HTML_TAG, _IMAGE_PLACEHOLDER, _IMAGE_REF, PAGE_RE):
+        text = pattern.sub(" ", text)
+    return " ".join(_LANGUAGE_NOISE.sub(" ", text).split())
 
 
 def scrub_credentials(row: MutableMapping[str, Any]) -> None:

@@ -10,6 +10,7 @@ from core.models.document import Document, DocumentType, ImageBlock, ProcessedDo
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.utils.exceptions import ConfigError, InferenceError, NoIndexableContentError, PipelineError
 from services.workers.pipeline_builder import build_indexing_pipeline
+from services.workers.stages import _common as common_module
 from services.workers.stages import caption as caption_module
 
 
@@ -22,6 +23,12 @@ def _noop_vlm_semaphore(monkeypatch):
         yield
 
     monkeypatch.setattr(caption_module, "get_vlm_semaphore", _noop)
+
+
+@pytest.fixture(autouse=True)
+def _stub_language_detector(monkeypatch):
+    """Keep these tests off the real language detector and its model download."""
+    monkeypatch.setattr(common_module, "detect_language", lambda _text, **_kwargs: "en")
 
 
 class FakeParser:

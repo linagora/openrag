@@ -911,6 +911,56 @@ def test_resolve_language_sample_is_capped(monkeypatch):
     assert len(_detected_sample(monkeypatch, *["Les dossiers sont instruits en mars."] * 100)) == 1000
 
 
+def test_resolve_language_samples_chunks_spread_through_the_file(monkeypatch):
+    # The opening alone (here a long English abstract) is not the file's language.
+    chunks = ["Abstract " * 120] + [f"Chapitre {i} : les dossiers sont instruits. " * 10 for i in range(19)]
+    sample = _detected_sample(monkeypatch, *chunks)
+    assert sample.count("Abstract") < 30
+    assert "Chapitre" in sample
+
+
+def test_resolve_language_keeps_the_spread_when_a_spread_chunk_is_short(monkeypatch):
+    # The short title leaves room in the budget; filling it with the whole
+    # abstract that follows used to push every later spread slice out.
+    body = ["Les dossiers sont instruits en mars. " * 10] * 13
+    ending = ["Conclusion : les dossiers sont clos. " * 10] * 5
+    sample = _detected_sample(monkeypatch, "Rapport", "Abstract " * 120, *body, *ending)
+    assert sample.count("Abstract") < 30
+    assert "Conclusion" in sample
+
+
+def test_resolve_language_spreads_the_sample_over_the_chunks_that_have_text(monkeypatch):
+    # Chunks that clean to nothing (captions, a table of figures) used to take
+    # spread slots, and the abstract after the title filled what they left.
+    caption = "<image_description>\n\nA bar chart of the yearly budget.\n\n</image_description>"
+    figures = "| 2024 | 2025 |\n|---|---|\n| 12 | 34 |"
+    body = "Les dossiers sont instruits en mars. " * 10
+    ending = "Conclusion : les dossiers sont clos. " * 10
+    chunks = ["Rapport", "Abstract " * 120, caption, body, caption, body, caption, body, ending, figures]
+    sample = _detected_sample(monkeypatch, *chunks)
+    assert sample.count("Abstract") < 30
+    assert "Conclusion" in sample
+
+
+@pytest.mark.parametrize("count", [5, 7, 9, 12, 20])
+def test_resolve_language_samples_the_first_and_last_chunks(monkeypatch, count):
+    body = ["Les dossiers sont instruits en mars. " * 10] * (count - 2)
+    chunks = ["Ouverture du rapport.", *body, "Conclusion."]
+    sample = _detected_sample(monkeypatch, *chunks)
+    assert sample.startswith("Ouverture")
+    assert sample.endswith("Conclusion.")
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_resolve_language_sample_uses_the_budget_on_a_file_of_few_chunks(monkeypatch, count):
+    assert len(_detected_sample(monkeypatch, *["Les dossiers sont instruits en mars. " * 50] * count)) == 1000
+
+
+def test_resolve_language_sample_reads_on_where_a_short_chunk_leaves_room(monkeypatch):
+    long = "Les dossiers sont instruits en mars. " * 20 + "Conclusion du rapport. " * 10
+    assert "Conclusion" in _detected_sample(monkeypatch, "Rapport", long)
+
+
 @pytest.fixture
 def bundled_lang_detector(monkeypatch):
     from fast_langdetect import LangDetectConfig, LangDetector
@@ -946,6 +996,18 @@ def test_resolve_language_detects_french_after_opening_figures(bundled_lang_dete
         "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés.",
     )
     assert [chunk.chunk_type.value for chunk in chunks[:5]] == ["image_caption"] * 5
+    assert resolve_language({"chunks": chunks}) == "fr"
+
+
+@pytest.mark.parametrize("opening", [[], ["Rapport d'activité 2025"]], ids=["abstract-first", "title-first"])
+def test_resolve_language_detects_french_after_an_english_abstract(bundled_lang_detector, opening):
+    abstract = (
+        "This report reviews how regional budgets were allocated in 2025 and what the audit found. "
+        "It summarises the main findings and the recommendations made to each department. "
+    ) * 6
+    body = "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés. " * 6
+    texts = [*opening, abstract] + [body] * 9
+    chunks = [Chunk(id=f"c{i}", text=text) for i, text in enumerate(texts)]
     assert resolve_language({"chunks": chunks}) == "fr"
 
 
