@@ -7,6 +7,7 @@
 - CSV files are parsed incrementally and indexed one batch at a time.
 - CSV batches skip contextualization; when topic tagging is enabled, language is detected once after all batches finish.
 - The bounded topic-tag sample preserves chunk content so language detection can ignore generated English source headers.
+- When the content budget is exhausted, later sample chunks leave content unset so language detection can fall back to display text.
 
 [ARCHITECTURE]
 - CSV batch orchestration: `openrag/services/workers/csv_pipeline.py`.
@@ -24,7 +25,7 @@
 
 [VERIFICATION STATUS]
 - CSV language-path test: detection runs once after three batches and excludes generated source headers.
-- Topic-tag sample tests: text and source content both stay within the sample budget.
+- Topic-tag sample tests: text and source content stay within budget; exhausted content falls back to display text.
 - CSV worker suite: 26 passed.
-- Topic-tag suite: 9 passed.
-- Unit suite: 6514 passed, 304 skipped.
+- Topic-tag suite: 10 passed.
+- Unit suite: 6515 passed, 304 skipped.

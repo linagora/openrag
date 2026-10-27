@@ -39,6 +39,19 @@ def test_streaming_topic_sample_matches_existing_prompt_and_is_bounded(size):
     assert _build_messages(chunks=sample.chunks, **args) == _build_messages(chunks=chunks, **args)
 
 
+def test_topic_sample_uses_missing_content_marker_after_content_budget_is_exhausted():
+    sample = TopicTagSample()
+    sample.add(
+        [
+            Chunk(text="short display text", content="c" * 8000),
+            Chunk(text="later display text", content="later content"),
+        ]
+    )
+
+    assert sample.chunks[1].text == "later display text"
+    assert sample.chunks[1].content is None
+
+
 @pytest.mark.asyncio
 async def test_topic_tagger_extracts_normalized_unique_tags():
     llm = FakeLLM('["Finance", "climate risk", "Finance", ""]')

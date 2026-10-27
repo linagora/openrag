@@ -32,9 +32,11 @@ class TopicTagSample:
                 break
             text = chunk.text[: self._remaining_chars] if chunk.text.strip() else ""
             content = chunk.content
-            if content is not None:
+            if content is not None and self._remaining_content_chars > 0:
                 content = content[: self._remaining_content_chars]
                 self._remaining_content_chars -= len(content)
+            else:
+                content = None
             self.chunks.append(Chunk(text=text, content=content))
             self._remaining_chars -= len(text)
 
