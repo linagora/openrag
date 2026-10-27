@@ -307,6 +307,8 @@ The vector database stores embeddings and is configured using the following envi
 |`VDB_HYBRID_SEARCH`| `bool` | true |To activate hybrid search (semantic similarity + Keyword search)|
 | `VDB_ENABLE_INSERTION` | bool | true | Enable or disable vector database insertion. When disabled, documents are processed but not inserted into Milvus. Useful for testing. |
 | `VDB_TIMEOUT` | float | 120.0 | Per-request timeout (seconds) applied to the Milvus sync and async clients |
+| `VDB_JSON_MAX_LENGTH` | int | 65536 | Maximum JSON metadata size in bytes per row. Must match the Milvus server's `common.JSONMaxLength` |
+| `VDB_JSON_SAFETY_MARGIN_BYTES` | int | 1024 | Bytes reserved below the limit when shortening oversized rows. Must be positive and leave at least two bytes |
 
 These variables can be overridden when using an external vector database service.
 

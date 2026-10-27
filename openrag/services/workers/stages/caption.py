@@ -14,18 +14,145 @@ from services.workers.stages._common import run_with_optional_timeout, scrub_cre
 from tqdm.asyncio import tqdm
 
 _PADDING_RE = re.compile(r"[ \t]{2,}")
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_INDENTED_CODE_RE = re.compile(r"^(?: {4}| {0,3}\t)")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-+:?")
+_BLOCK_START_RE = re.compile(r"^ {0,3}(?:>|#{1,6}(?:[ \t]|$)|(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$))")
+_THEMATIC_BREAK_RE = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_HTML_BLOCK_START_RE = re.compile(
+    r"^ {0,3}(?:<(?:!--|\?|!\[CDATA\[|![A-Z])"
+    r"|</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|"
+    r"dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|"
+    r"legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|script|section|source|"
+    r"style|summary|table|tbody|td|textarea|tfoot|th|thead|title|tr|track|ul)(?=[ \t/>]|$)"
+    r"|</?[A-Za-z][^<>]*>[ \t]*$)",
+    re.IGNORECASE,
+)
+
+
+def _pipe_table_cells(line: str) -> list[str] | None:
+    """Return cells for a pipe-containing row, allowing optional outer pipes."""
+    stripped = line.strip()
+    cells = re.split(r"(?<!\\)\|", stripped)
+    if len(cells) == 1:
+        return None
+    if not cells[0]:
+        cells.pop(0)
+    if cells and not cells[-1]:
+        cells.pop()
+    return cells or None
 
 
 def squeeze_padding(caption: str) -> str:
-    """Collapse runs of spaces and tabs in a VLM caption to one space.
+    """Collapse padding in plain Markdown table captions only.
 
     Captions of tables come back as markdown tables padded for alignment, and a
     degenerate one can spend its whole token budget repeating padded rows. One
     space-run token can stand for many bytes, so such a caption is far larger
-    than its token count suggests. Markdown tables need no padding, and the
-    padding only costs embedding and storage room.
+    than its token count suggests. Fenced code, indented lines, and table rows
+    containing inline code keep their original spacing.
     """
-    return _PADDING_RE.sub(" ", caption)
+    lines = caption.splitlines(keepends=True)
+    contents = [line.rstrip("\r\n") for line in lines]
+    parsed_rows = [_pipe_table_cells(content) for content in contents]
+    delimiter_rows = {
+        index
+        for index, cells in enumerate(parsed_rows)
+        if cells is not None and all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells)
+    }
+    hard_protected_rows: set[int] = set()
+    inline_code_rows: set[int] = set()
+    fence_char: str | None = None
+    fence_length = 0
+
+    for index, content in enumerate(contents):
+        fence_match = _FENCE_RE.match(content)
+        if fence_char is not None:
+            hard_protected_rows.add(index)
+            if fence_match:
+                marker = fence_match.group(1)
+                trailing = content[fence_match.end() :]
+                if marker[0] == fence_char and len(marker) >= fence_length and not trailing.strip(" \t"):
+                    fence_char = None
+            continue
+        if fence_match:
+            hard_protected_rows.add(index)
+            marker = fence_match.group(1)
+            fence_char = marker[0]
+            fence_length = len(marker)
+        elif _INDENTED_CODE_RE.match(content):
+            hard_protected_rows.add(index)
+        elif index not in delimiter_rows and (
+            _BLOCK_START_RE.match(content)
+            or _THEMATIC_BREAK_RE.fullmatch(content)
+            or _HTML_BLOCK_START_RE.match(content)
+        ):
+            hard_protected_rows.add(index)
+        elif "`" in content:
+            inline_code_rows.add(index)
+
+    table_rows: set[int] = set()
+
+    # Only the header must match the delimiter's width. Scan each table body
+    # once, allowing missing or extra cells without touching preceding prose.
+    index = 1
+    while index < len(contents):
+        cells = parsed_rows[index]
+        header = index - 1
+        header_cells = parsed_rows[header]
+        if (
+            index in hard_protected_rows
+            or header in hard_protected_rows
+            or cells is None
+            or header_cells is None
+            or len(header_cells) != len(cells)
+            or index not in delimiter_rows
+        ):
+            index += 1
+            continue
+        if header not in inline_code_rows:
+            table_rows.add(header)
+        table_rows.add(index)
+        index += 1
+        while index < len(contents) and index not in hard_protected_rows and contents[index].strip():
+            if index not in inline_code_rows:
+                table_rows.add(index)
+            index += 1
+
+    # Some VLM table captions omit the delimiter row and repeat a padded row
+    # many times. Preserve that optimization only for repeated multi-cell rows;
+    # a standalone pipe diagram is left untouched.
+    index = 0
+    while index < len(contents):
+        if index in hard_protected_rows or index in inline_code_rows:
+            index += 1
+            continue
+        cells = parsed_rows[index]
+        if cells is None or len(cells) < 2 or all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells):
+            index += 1
+            continue
+
+        normalized = tuple(_PADDING_RE.sub(" ", cell).strip() for cell in cells)
+        end = index + 1
+        while end < len(contents):
+            if end in hard_protected_rows or end in inline_code_rows:
+                break
+            next_cells = parsed_rows[end]
+            if next_cells is None or len(next_cells) != len(cells):
+                break
+            if all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in next_cells):
+                break
+            next_normalized = tuple(_PADDING_RE.sub(" ", cell).strip() for cell in next_cells)
+            if next_normalized != normalized:
+                break
+            end += 1
+        if end - index >= 2:
+            table_rows.update(range(index, end))
+        index = max(end, index + 1)
+
+    squeezed = [_PADDING_RE.sub(" ", line) if index in table_rows else line for index, line in enumerate(lines)]
+
+    return "".join(squeezed)
 
 
 async def caption_stage(
