@@ -910,6 +910,19 @@ def test_resolve_language_keeps_the_spread_when_a_spread_chunk_is_short(monkeypa
     assert "Conclusion" in sample
 
 
+def test_resolve_language_spreads_the_sample_over_the_chunks_that_have_text(monkeypatch):
+    # Chunks that clean to nothing (captions, a table of figures) used to take
+    # spread slots, and the abstract after the title filled what they left.
+    caption = "<image_description>\n\nA bar chart of the yearly budget.\n\n</image_description>"
+    figures = "| 2024 | 2025 |\n|---|---|\n| 12 | 34 |"
+    body = "Les dossiers sont instruits en mars. " * 10
+    ending = "Conclusion : les dossiers sont clos. " * 10
+    chunks = ["Rapport", "Abstract " * 120, caption, body, caption, body, caption, body, ending, figures]
+    sample = _detected_sample(monkeypatch, *chunks)
+    assert sample.count("Abstract") < 30
+    assert "Conclusion" in sample
+
+
 @pytest.mark.parametrize("count", [5, 7, 9, 12, 20])
 def test_resolve_language_samples_the_first_and_last_chunks(monkeypatch, count):
     body = ["Les dossiers sont instruits en mars. " * 10] * (count - 2)

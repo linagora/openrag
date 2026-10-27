@@ -71,20 +71,25 @@ def _language_sample(chunks: list[Any], *, captions: bool) -> str:
     """Up to ``_LANGUAGE_SAMPLE_CHARS`` of the chunks' text that carries the file's language.
 
     The sample takes a slice from each of ``_LANGUAGE_SAMPLE_SPREAD`` chunks
-    spaced evenly from the first chunk to the last, then fills what is left of
-    its budget from the other chunks in order, and then from what the slices
-    left out, so a file of few or short chunks is still sampled in full.
+    spaced evenly from the first chunk with text to the last, then fills what is
+    left of its budget from the other chunks in order, and then from what the
+    slices left out, so a file of few or short chunks is still sampled in full.
 
     Without *captions*, image captions are left out, and so are chunks that
     hold nothing else: a file opening on figures is sampled from the text that
     follows them. With it, a file that has nothing but captions is sampled from
     them, rather than not at all.
     """
-    count = min(len(chunks), _LANGUAGE_SAMPLE_SPREAD)
-    # A step of ``len(chunks) // count`` rounds down, so a file of five to nine
-    # chunks would be sampled from its first five only.
-    spread = [i * (len(chunks) - 1) // max(1, count - 1) for i in range(count)]
-    rest = set(range(len(chunks))) - set(spread)
+    texts = [_language_text(chunk, captions=captions) for chunk in chunks]
+    # The spread is taken over the chunks with text: a slot on one that has none
+    # (captions only, a table of figures) would hand its share to the fill,
+    # which reads from the opening.
+    candidates = [index for index, text in enumerate(texts) if text]
+    count = min(len(candidates), _LANGUAGE_SAMPLE_SPREAD)
+    # A step of ``len(candidates) // count`` rounds down, so a file of five to
+    # nine chunks would be sampled from its first five only.
+    spread = [candidates[i * (len(candidates) - 1) // max(1, count - 1)] for i in range(count)]
+    rest = set(candidates) - set(spread)
     order = spread + sorted(rest)
     share = _LANGUAGE_SAMPLE_CHARS // max(1, count)
     picked: dict[int, str] = {}
@@ -92,22 +97,19 @@ def _language_sample(chunks: list[Any], *, captions: bool) -> str:
     for rank, index in enumerate(order):
         if size >= _LANGUAGE_SAMPLE_CHARS:
             break
-        text = _language_text(chunks[index], captions=captions)
-        if not text:
-            continue
         # One share per spread chunk, so the first ones leave room for the rest.
         # A chunk filling the budget gets only what is left of it: the sample is
         # joined in file order and then cut, so a whole one near the start would
         # push the spread slices after it out of the sample.
-        picked[index] = text[:share] if rank < len(spread) else text[: _LANGUAGE_SAMPLE_CHARS - size]
+        picked[index] = texts[index][:share] if rank < len(spread) else texts[index][: _LANGUAGE_SAMPLE_CHARS - size]
         size += len(picked[index]) + 1
     # Budget left means every chunk is in: the spread chunks add what their
     # share cut off, or a short title and one long chunk would leave most of
     # the budget unused.
     for index in spread:
-        if index in picked and size < _LANGUAGE_SAMPLE_CHARS:
+        if size < _LANGUAGE_SAMPLE_CHARS:
             taken = len(picked[index])
-            more = _language_text(chunks[index], captions=captions)[taken : taken + _LANGUAGE_SAMPLE_CHARS - size]
+            more = texts[index][taken : taken + _LANGUAGE_SAMPLE_CHARS - size]
             picked[index] += more
             size += len(more)
     return " ".join(picked[index] for index in sorted(picked))[:_LANGUAGE_SAMPLE_CHARS]
