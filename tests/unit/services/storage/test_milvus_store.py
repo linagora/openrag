@@ -15,6 +15,7 @@ import asyncio
 import re
 import threading
 from copy import deepcopy
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -1246,6 +1247,277 @@ class TestChunkToEntity:
 # ---------------------------------------------------------------------------
 # Surface-level ABC-vs-bound-collection enforcement
 # ---------------------------------------------------------------------------
+
+
+class TestRawEntitySizing:
+    @staticmethod
+    def _dynamic_payload(entity: dict[str, Any]) -> dict[str, Any]:
+        static = {"_id", "text", "partition", "file_id", "sparse", *milvus_store_module.INDEXED_TIME_FIELDS}
+        return {
+            key: value
+            for key, value in entity.items()
+            if key not in static and not milvus_store_module.is_vector_field_key(key)
+        }
+
+    @pytest.mark.parametrize(
+        ("method_name", "client_method", "count_key"),
+        [
+            ("insert_entities", "insert", "insert_count"),
+            ("upsert_entities", "upsert", "upsert_count"),
+        ],
+    )
+    async def test_raw_entity_writes_fit_oversized_dynamic_metadata(
+        self,
+        store: MilvusVectorStore,
+        method_name: str,
+        client_method: str,
+        count_key: str,
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "sparse": dict.fromkeys(range(100), 0.1),
+            "vector_bge_m3": [0.1] * 768,
+            "vector": [0.2] * 32,
+            "filename": "source.pdf",
+            "content": "x" * 600,
+            "details": {"caption": "y" * 40},
+        }
+        if method_name == "upsert_entities":
+            entity["_id"] = 7
+        original = deepcopy(entity)
+        client = AsyncMock(return_value={count_key: 1})
+        setattr(store._async_client, client_method, client)
+
+        assert await getattr(store, method_name)([entity]) == 1
+
+        client.assert_awaited_once()
+        fitted = client.await_args.kwargs["data"][0]
+        assert len(convert_to_json(self._dynamic_payload(fitted))) == 240
+        if "_id" in original:
+            assert fitted["_id"] == 7
+        assert fitted["text"] == "chunk text"
+        assert fitted["partition"] == "tenant-a"
+        assert fitted["file_id"] == "file-1"
+        assert fitted["created_at"] == datetime(2026, 1, 1, tzinfo=UTC)
+        assert fitted["sparse"] == original["sparse"]
+        assert fitted["vector_bge_m3"] == original["vector_bge_m3"]
+        assert fitted["vector"] == original["vector"]
+        assert fitted["filename"] == "source.pdf"
+        assert 0 < len(fitted["content"]) < len(original["content"])
+        assert entity == original
+
+    @pytest.mark.parametrize(
+        ("method_name", "client_method", "count_key"),
+        [
+            ("insert_entities", "insert", "insert_count"),
+            ("upsert_entities", "upsert", "upsert_count"),
+        ],
+    )
+    async def test_raw_entity_writes_preserve_catalog_metadata_keys(
+        self,
+        store: MilvusVectorStore,
+        method_name: str,
+        client_method: str,
+        count_key: str,
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "title": "catalog title " + "t" * 40,
+            "content": "x" * 500,
+        }
+        if method_name == "upsert_entities":
+            entity["_id"] = 7
+        client = AsyncMock(return_value={count_key: 1})
+        setattr(store._async_client, client_method, client)
+
+        assert await getattr(store, method_name)([entity], protected_metadata={"title": entity["title"]}) == 1
+
+        fitted = client.await_args.kwargs["data"][0]
+        assert fitted["title"] == entity["title"]
+        assert 0 < len(fitted["content"]) < len(entity["content"])
+        assert len(convert_to_json(self._dynamic_payload(fitted))) <= 240
+
+    async def test_raw_entity_writes_reject_oversized_catalog_metadata(self, store: MilvusVectorStore) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "title": "t" * 300,
+            "content": "",
+            "context": "",
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert_entities([entity], protected_metadata={"title": entity["title"]})
+
+        store._async_client.upsert.assert_not_awaited()
+
+    async def test_raw_entity_writes_reject_oversized_protected_text(self, store: MilvusVectorStore) -> None:
+        entity = {
+            "text": "t" * (milvus_store_module.MAX_LENGTH + 1),
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)protected metadata field 'text'"):
+            await store.upsert_entities([entity], protected_metadata={"text": entity["text"]})
+
+        store._async_client.upsert.assert_not_awaited()
+
+    def test_fitting_rows_skip_metadata_matching_when_no_truncation_is_needed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "title": "catalog title",
+        }
+
+        def fail_if_matched(*_args):
+            pytest.fail("metadata matching is unnecessary for rows within the JSON limit")
+
+        monkeypatch.setattr(milvus_store_module, "_matching_metadata_keys", fail_if_matched)
+        milvus_store_module._fit_milvus_row_limits(
+            entity,
+            static_fields={"text", "partition", "file_id", "vector_bge_m3"},
+            protected_metadata={"title": "catalog title"},
+        )
+
+        assert entity["title"] == "catalog title"
+
+    async def test_raw_entity_writes_shrink_chunk_content_when_catalog_value_differs(
+        self, store: MilvusVectorStore
+    ) -> None:
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "content": "x" * 6_000,
+            "summary": "s" * 60_000,
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        assert (
+            await store.upsert_entities(
+                [entity],
+                protected_metadata={"content": "report", "summary": entity["summary"]},
+            )
+            == 1
+        )
+
+        fitted = store._async_client.upsert.await_args.kwargs["data"][0]
+        assert fitted["summary"] == entity["summary"]
+        assert 0 < len(fitted["content"]) < len(entity["content"])
+        assert len(convert_to_json(self._dynamic_payload(fitted))) <= (
+            store._config.json_max_length - store._config.json_safety_margin_bytes
+        )
+
+    async def test_raw_entity_writes_preserve_catalog_metadata_when_nested_key_order_differs(
+        self, store: MilvusVectorStore
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        catalog_details = {"first": "x" * 300, "second": 1}
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "details": {"second": 1, "first": "x" * 300},
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert_entities([entity], protected_metadata={"details": catalog_details})
+
+        store._async_client.upsert.assert_not_awaited()
+
+    async def test_upload_rejects_oversized_catalog_metadata_before_milvus_write(
+        self, store: MilvusVectorStore
+    ) -> None:
+        description = "d" * 70_000
+        chunk = Chunk(
+            document_id="file-1",
+            partition="tenant-a",
+            text="chunk text",
+            embedding=[0.1, 0.2],
+            metadata={"description": description},
+        )
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert(
+                [chunk],
+                vector_field="vector_bge_m3",
+                protected_metadata={"description": description},
+            )
+
+        store._async_client.insert.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("method_name", "client_method"),
+        [("insert_entities", "insert"), ("upsert_entities", "upsert")],
+    )
+    async def test_raw_entity_writes_reject_unfit_protected_metadata(
+        self,
+        store: MilvusVectorStore,
+        method_name: str,
+        client_method: str,
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "filename": "f" * 270,
+            "content": "",
+            "context": "",
+        }
+        original = deepcopy(entity)
+        client = AsyncMock(return_value={"insert_count": 1, "upsert_count": 1})
+        setattr(store._async_client, client_method, client)
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await getattr(store, method_name)([entity])
+
+        client.assert_not_awaited()
+        assert entity == original
+
+    async def test_copy_fitting_preserves_task_id_used_for_cleanup(self, store: MilvusVectorStore) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 100, "json_safety_margin_bytes": 16})
+        task_id = "task-" + "a" * 32
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "_openrag_indexing_task_id": task_id,
+            "caption": "y" * 20,
+        }
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        assert await store.insert_entities([entity]) == 1
+
+        inserted = store._async_client.insert.await_args.kwargs["data"][0]
+        assert inserted["_openrag_indexing_task_id"] == task_id
+        assert 0 < len(inserted["caption"]) < 20
+        assert len(convert_to_json(self._dynamic_payload(inserted))) <= 84
 
 
 class TestCollectionArgDiscipline:
