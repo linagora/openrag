@@ -1,5 +1,7 @@
 """Runtime inference helpers that depend on infrastructure services."""
 
+import os
+
 from core.config import load_config
 from core.utils.logging import get_logger
 from fast_langdetect import LangDetectConfig, LangDetector
@@ -19,13 +21,15 @@ def _get_lang_detector() -> LangDetector:
     # ``full`` and ``auto`` download the full model on first use and cache it
     # only once the download succeeds: without network access, every call
     # retries it. ``lite`` ships inside the fast-langdetect package.
+    # fast-langdetect refuses a cache_dir that doesn't exist, so outside the
+    # images (which create /app/model_weights) let it use its own temp cache.
     global _lang_detector
     if _lang_detector is None:
         _lang_detector = LangDetector(
             config=LangDetectConfig(
                 max_input_length=1024,
                 model=load_config().language_detection.model,
-                cache_dir=_LANG_DETECT_CACHE_DIR,
+                cache_dir=_LANG_DETECT_CACHE_DIR if os.path.isdir(_LANG_DETECT_CACHE_DIR) else None,
             )
         )
     return _lang_detector

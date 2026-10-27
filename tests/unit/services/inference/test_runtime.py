@@ -1,4 +1,5 @@
 from core.utils.logging import get_logger
+from fast_langdetect import infer as fast_langdetect_infer
 from services.inference import runtime
 
 logger = get_logger()
@@ -72,6 +73,21 @@ def test_detector_uses_the_configured_model(monkeypatch):
 
     assert runtime._get_lang_detector().config.model == "full"
     assert runtime._get_lang_detector() is runtime._lang_detector
+
+
+def test_detector_uses_the_library_cache_when_the_image_cache_is_missing(monkeypatch, tmp_path):
+    class _Settings:
+        class language_detection:
+            model = "full"
+
+    monkeypatch.setattr(runtime, "_lang_detector", None)
+    monkeypatch.setattr(runtime, "load_config", lambda: _Settings())
+    monkeypatch.setattr(runtime, "_LANG_DETECT_CACHE_DIR", str(tmp_path / "missing"))
+    assert runtime._get_lang_detector().config.cache_dir == fast_langdetect_infer.CACHE_DIRECTORY
+
+    monkeypatch.setattr(runtime, "_lang_detector", None)
+    monkeypatch.setattr(runtime, "_LANG_DETECT_CACHE_DIR", str(tmp_path))
+    assert runtime._get_lang_detector().config.cache_dir == str(tmp_path)
 
 
 def test_lite_model_detects_without_network_access(monkeypatch):
