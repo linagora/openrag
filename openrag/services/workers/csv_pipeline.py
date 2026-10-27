@@ -109,6 +109,7 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
                 row["stored_count"] = stored_total
                 for key in (
                     "indexed_at",
+                    "language",
                     "embedder_provenance",
                     "embedder_fingerprint",
                     "degraded_stages",

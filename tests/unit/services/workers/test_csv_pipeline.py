@@ -16,6 +16,7 @@ from core.models.document import Document, DocumentType
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
 from services.workers.pipeline_builder import IndexingPipeline, PipelineTimeouts
+from services.workers.stages import _common as common_module
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
 
@@ -152,6 +153,54 @@ async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
 
     assert row["batch_count"] == 3
     assert resolved == ["default"]
+
+
+async def test_batches_reuse_language_resolved_by_an_earlier_batch(setup_pipeline, monkeypatch):
+    pipeline, row, _ = setup_pipeline
+    original = IndexingPipeline.run_processed_batch
+    seen_languages = []
+    detected_languages = []
+
+    async def detect_language_for_batch(self, child, processed, **kwargs):
+        seen_languages.append(child.get("language"))
+        if child.get("language") is None:
+            child["language"] = "fr" if not detected_languages else "en"
+            detected_languages.append(child["language"])
+        return await original(self, child, processed, **kwargs)
+
+    monkeypatch.setattr(IndexingPipeline, "run_processed_batch", detect_language_for_batch)
+
+    await pipeline.run(row)
+
+    assert detected_languages == ["fr"]
+    assert seen_languages == [None, "fr", "fr"]
+    assert row["language"] == "fr"
+
+
+async def test_csv_detects_language_once_after_all_batches(setup_pipeline, monkeypatch):
+    pipeline, row, _ = setup_pipeline
+    detected_samples = []
+
+    def detect_language(text, *, min_confidence=0.0):
+        detected_samples.append(text)
+        return "fr"
+
+    monkeypatch.setattr(common_module, "detect_language", detect_language)
+
+    async def tag_after_storing(messages):
+        assert len(pipeline.vector_store.calls) == 3
+        return '["Customers"]'
+
+    llm = SimpleNamespace(chat=AsyncMock(side_effect=tag_after_storing))
+    pipeline = replace(pipeline, topic_tagger=TopicTagger(llm, "topic prompt"))
+    row.update(filename="people.csv", indexation_config={"enable_topic_tagging": True})
+
+    await pipeline.run(row)
+
+    assert len(detected_samples) == 1
+    assert "Alice" in detected_samples[0] and "Eve" in detected_samples[0]
+    assert row["language"] == "fr"
+    llm.chat.assert_awaited_once()
 
 
 async def test_csv_batches_do_not_overwrite_a_markdown_sidecar(setup_pipeline, tmp_path):
