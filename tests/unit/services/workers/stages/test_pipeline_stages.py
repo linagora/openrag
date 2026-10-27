@@ -938,3 +938,15 @@ def test_resolve_language_samples_the_captions_when_the_text_is_only_labels(bund
     )
     chunks = [Chunk(id=f"c{page}", text=f"{caption}\n\n{label.format(page)}") for page in range(1, 7)]
     assert resolve_language({"chunks": chunks}) == "fr"
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [("政府将在三月审查所有申请文件。", "zh"), ("申請書類はすべて三月に審査されます。", "ja")],
+)
+def test_resolve_language_counts_the_words_of_scripts_written_without_spaces(bundled_lang_detector, text, language):
+    caption = wrap_caption(
+        "A bar chart showing the yearly budget allocated to each department, broken down by programme, "
+        "with the totals in the last column."
+    )
+    assert resolve_language({"chunks": [Chunk(id="c1", text=f"{caption}\n\n{text}")]}) == language

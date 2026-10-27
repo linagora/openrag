@@ -31,8 +31,12 @@ _IMAGE_REF = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
 # A sample left with fewer distinct words than this, once captions are out
 # (page numbers, "Fig. 3", dashes), says nothing about the language: the
-# detector still answers on it, confidently and wrongly.
-_LANGUAGE_WORD = re.compile(r"[^\W\d_]{2,}")
+# detector still answers on it, confidently and wrongly. Scripts written
+# without spaces (Thai, Lao, Tibetan, Myanmar, Khmer, Japanese kana, Han)
+# count one word per character, or a whole sentence would count as one.
+_LANGUAGE_WORD = re.compile(
+    r"[\u0e00-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\W\d_]{2,}"
+)
 _LANGUAGE_MIN_WORDS = 3
 
 
