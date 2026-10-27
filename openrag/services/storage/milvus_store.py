@@ -92,6 +92,29 @@ MAX_DYNAMIC_FIELD_BYTES = 65_536
 #: repeats the chunk body ``text`` already holds, ``context`` is a summary.
 SHRINKABLE_DYNAMIC_KEYS = ("content", "context")
 
+#: Identity, routing, and timestamp metadata must survive fitting unchanged,
+#: including when these keys appear inside nested user metadata.
+PROTECTED_DYNAMIC_KEYS = frozenset(
+    {
+        "source",
+        "filename",
+        "original_filename",
+        "_id",
+        "id",
+        "document_id",
+        "file_id",
+        "chunk_id",
+        "partition",
+        "section_id",
+        "prev_section_id",
+        "next_section_id",
+        "chunk_type",
+        "indexed_at",
+        "created_at",
+        "updated_at",
+    }
+)
+
 #: Custom collection property holding the schema version integer.
 SCHEMA_VERSION_PROPERTY_KEY = "openrag.schema_version"
 
@@ -331,8 +354,8 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
     padded with whitespace up to its token budget, say — can exceed either, and
     one such chunk used to fail its whole file. ``content`` and ``context`` are
     shortened first, then the longest remaining strings at any nesting depth;
-    each cut is logged. If non-string metadata alone still exceeds the limit,
-    fail before sending the row to Milvus.
+    each cut is logged. If protected or non-string metadata alone still
+    exceeds the limit, fail before sending the row to Milvus.
     """
     file_id = entity.get("file_id")
     text = entity.get("text")
@@ -363,23 +386,30 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
     # without mutating the source Chunk metadata.
     entity.update(json.loads(serialized_dynamic))
 
-    def without_strings(value: Any) -> Any:
+    def without_reducible_strings(value: Any) -> Any:
         if isinstance(value, str):
             return ""
         if isinstance(value, dict):
-            return {key: without_strings(child) for key, child in value.items()}
+            return {
+                key: child if key in PROTECTED_DYNAMIC_KEYS else without_reducible_strings(child)
+                for key, child in value.items()
+            }
         if isinstance(value, list):
-            return [without_strings(child) for child in value]
+            return [without_reducible_strings(child) for child in value]
         return value
 
-    minimum_payload = {key: without_strings(value) for key, value in entity.items() if key not in static_fields}
+    minimum_payload = {
+        key: value if key in PROTECTED_DYNAMIC_KEYS else without_reducible_strings(value)
+        for key, value in entity.items()
+        if key not in static_fields
+    }
     serialized_minimum = convert_to_json(minimum_payload)
     minimum_bytes = len(serialized_minimum)
 
     def fail_oversized_metadata(actual_bytes: int) -> None:
         raise VDBInsertError(
             f"Dynamic metadata for chunk {file_id!r} cannot fit Milvus's {MAX_DYNAMIC_FIELD_BYTES}-byte limit "
-            f"(current size: {actual_bytes}; size after removing all strings: {minimum_bytes} bytes).",
+            f"(current size: {actual_bytes}; size after removing reducible strings: {minimum_bytes} bytes).",
             file_id=file_id,
             dynamic_bytes=actual_bytes,
             minimum_bytes=minimum_bytes,
@@ -398,7 +428,8 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
             yield path, value
         elif isinstance(value, dict):
             for key, child in value.items():
-                yield from nested_string_paths(child, (*path, key))
+                if key not in PROTECTED_DYNAMIC_KEYS:
+                    yield from nested_string_paths(child, (*path, key))
         elif isinstance(value, list):
             for index, child in enumerate(value):
                 yield from nested_string_paths(child, (*path, index))
@@ -424,7 +455,7 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
     remaining_strings = [
         item
         for key, value in entity.items()
-        if key not in static_fields
+        if key not in static_fields and key not in PROTECTED_DYNAMIC_KEYS
         for item in nested_string_paths(value, (key,))
         if item[0] not in shrink_first_paths
     ]

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from copy import deepcopy
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -820,6 +821,44 @@ class TestChunkToEntity:
     def _dynamic_bytes(entity: dict[str, Any]) -> int:
         static = {"text", "partition", "file_id", FIELD, *milvus_store_module.INDEXED_TIME_FIELDS}
         return milvus_store_module._json_bytes({k: v for k, v in entity.items() if k not in static})
+
+    @pytest.mark.parametrize("key", ["source", "filename", "original_filename"])
+    @pytest.mark.parametrize("location", ["root", "dict", "list"])
+    @pytest.mark.asyncio
+    async def test_oversized_identifying_metadata_fails_without_changes(
+        self, store: MilvusVectorStore, key: str, location: str
+    ) -> None:
+        metadata: dict[str, Any] = {key: "a" * 70_000 + ".pdf"}
+        if location == "dict":
+            metadata = {"payload": metadata}
+        elif location == "list":
+            metadata = {"payload": [metadata]}
+        chunk = _make_chunk(content="", context="", metadata=metadata)
+        original = deepcopy(chunk.metadata)
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert([chunk], vector_field=FIELD)
+
+        assert chunk.metadata == original
+        store._async_client.insert.assert_not_called()
+
+    def test_fitting_preserves_identifiers_while_shortening_nested_body(self) -> None:
+        entity = self._entity(
+            metadata={
+                "source": "/docs/source.pdf",
+                "filename": "source.pdf",
+                "original_filename": "original.pdf",
+                "payload": [{"filename": "nested.pdf", "body": "x" * 70_000}],
+            }
+        )
+
+        assert entity["source"] == "/docs/source.pdf"
+        assert entity["filename"] == "source.pdf"
+        assert entity["original_filename"] == "original.pdf"
+        assert entity["payload"][0]["filename"] == "nested.pdf"
+        assert 0 < len(entity["payload"][0]["body"]) < 70_000
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
 
     def test_dynamic_size_matches_pymilvus_numpy_serialization(self) -> None:
         payload = {"values": np.arange(100_000)}
