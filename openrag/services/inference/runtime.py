@@ -1,12 +1,18 @@
 """Runtime inference helpers that depend on infrastructure services."""
 
 from core.config import load_config
+from core.utils.logging import get_logger
 from fast_langdetect import LangDetectConfig, LangDetector
 from services.inference.distributed_semaphore import DistributedSemaphore
+
+logger = get_logger()
 
 _LANG_DETECT_CACHE_DIR = "/app/model_weights/"
 # Built on first use, with the model from ``language_detection.model``.
 _lang_detector: LangDetector | None = None
+# Callers fall back to a default language, so a broken detector is otherwise
+# silent: report its first failure once per process.
+_detector_failure_logged = False
 
 
 def _get_lang_detector() -> LangDetector:
@@ -32,7 +38,11 @@ def detect_language(text: str, *, min_confidence: float = 0.0):
         return None
     try:
         outputs = _get_lang_detector().detect(normalized, k=1, threshold=min_confidence)
-    except Exception:
+    except Exception as exc:
+        global _detector_failure_logged
+        if not _detector_failure_logged:
+            _detector_failure_logged = True
+            logger.warning("Language detection failed, falling back to the default language: {}", exc)
         return None
     if not outputs:
         return None

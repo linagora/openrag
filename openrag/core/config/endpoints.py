@@ -116,7 +116,8 @@ class LanguageDetectionConfig(ConfigMixin):
     """fast-langdetect model used to detect the language of queries and documents.
 
     ``lite`` ships inside the package and needs no network access. ``full``
-    and ``auto`` download the larger, more accurate model on first use.
+    and ``auto`` download the larger model on first use; it is more accurate
+    than ``lite`` on very short text.
     """
 
     model: Literal["lite", "full", "auto"] = "lite"

@@ -44,9 +44,10 @@ semaphore:
 
 # --- Language detection (fast-langdetect) ---
 # Env: LANGDETECT_MODEL
-# lite: bundled with the package, no network access needed, less accurate.
-# full / auto: download the larger, more accurate model to /app/model_weights
-# on first use.
+# lite: bundled with the package, no network access needed; slightly less
+#   accurate than full on very short text (a query of a few words).
+# full / auto: download the larger model to /app/model_weights on first use.
+#   auto falls back to lite only on MemoryError, not when the download fails.
 language_detection:
   model: lite
 

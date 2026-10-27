@@ -1,4 +1,7 @@
+from core.utils.logging import get_logger
 from services.inference import runtime
+
+logger = get_logger()
 
 
 class _Detector:
@@ -20,6 +23,21 @@ def test_detect_language_returns_none_when_detector_fails(monkeypatch):
     monkeypatch.setattr(runtime, "_lang_detector", _Detector(error=RuntimeError("boom")))
 
     assert runtime.detect_language("hello") is None
+
+
+def test_detector_failure_is_logged_once(monkeypatch):
+    records: list[str] = []
+    monkeypatch.setattr(runtime, "_detector_failure_logged", False)
+    monkeypatch.setattr(runtime, "_lang_detector", _Detector(error=RuntimeError("download failed")))
+    sink_id = logger.add(records.append, level="WARNING", format="{message}")
+    try:
+        assert runtime.detect_language("hello") is None
+        assert runtime.detect_language("hello again") is None
+    finally:
+        logger.remove(sink_id)
+
+    assert len(records) == 1
+    assert "download failed" in records[0]
 
 
 def test_detect_language_returns_none_for_empty_output(monkeypatch):
