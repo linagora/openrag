@@ -714,6 +714,8 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
     tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
+    tsm.set_cancelled_if_active = MagicMock()
+    tsm.set_cancelled_if_active.remote = AsyncMock(return_value=True)
     tsm.finish_cancellation = MagicMock()
     tsm.finish_cancellation.remote = AsyncMock(return_value=True)
 
@@ -722,7 +724,7 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
 
     tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="p1", file_id=None)
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
 
@@ -753,6 +755,8 @@ async def test_delete_partition_uses_legacy_task_state_lookup_when_matching_api_
     tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
+    tsm.set_cancelled_if_active = MagicMock()
+    tsm.set_cancelled_if_active.remote = AsyncMock(return_value=True)
     tsm.finish_cancellation = MagicMock()
     tsm.finish_cancellation.remote = AsyncMock(return_value=True)
 
@@ -762,7 +766,7 @@ async def test_delete_partition_uses_legacy_task_state_lookup_when_matching_api_
     tsm.get_all_info.remote.assert_called_once_with()
     tsm.get_object_ref.remote.assert_called_once_with("task-1")
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
     assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
     assert prepo.deleted == ["p1"]
