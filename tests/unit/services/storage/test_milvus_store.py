@@ -756,6 +756,33 @@ def _make_chunk(**overrides: Any) -> Chunk:
     return Chunk(**defaults)
 
 
+def _wrap_deep_metadata(leaf: Any, depth: int, kind: str, *, siblings: bool = False) -> Any:
+    value = leaf
+    for index in range(depth):
+        use_dict = kind == "dict" or (kind == "mixed" and index % 2 == 0)
+        if use_dict:
+            value = {"child": value, "label": f"level-{index}"} if siblings else {"child": value}
+        else:
+            value = [value, f"level-{index}"] if siblings else [value]
+    return value
+
+
+def _deep_leaf(value: Any, depth: int, kind: str, *, siblings: bool = False) -> Any:
+    for index in reversed(range(depth)):
+        use_dict = kind == "dict" or (kind == "mixed" and index % 2 == 0)
+        if use_dict:
+            if siblings:
+                assert list(value) == ["child", "label"]
+                assert value["label"] == f"level-{index}"
+            value = value["child"]
+        else:
+            if siblings:
+                assert len(value) == 2
+                assert value[1] == f"level-{index}"
+            value = value[0]
+    return value
+
+
 class TestChunkToEntity:
     @staticmethod
     def _entity(**overrides: Any) -> dict[str, Any]:
@@ -971,6 +998,74 @@ class TestChunkToEntity:
         assert len(entity["content"]) < len(body)
         assert len(convert_to_json(entity)) <= target
         assert len(convert_to_json({**entity, "content": entity["content"] + character})) > target
+
+    @pytest.mark.parametrize("depth", [600, 1000, 1200])
+    @pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
+    @pytest.mark.asyncio
+    async def test_upsert_fits_deep_metadata_and_preserves_structure(
+        self, store: MilvusVectorStore, depth: int, kind: str
+    ) -> None:
+        leaf = {"filename": "deep.pdf", "source": {"path": "keep  spacing"}, "body": "unchanged"}
+        metadata = {"payload": _wrap_deep_metadata(leaf, depth, kind, siblings=True)}
+        chunk = _make_chunk(content="x" * 70_000, metadata=metadata)
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        assert await store.upsert([chunk], vector_field=FIELD) == 1
+
+        entity = store._async_client.insert.call_args.kwargs["data"][0]
+        assert 0 < len(entity["content"]) < 70_000
+        assert self._dynamic_bytes(entity) <= 64_512
+        assert _deep_leaf(entity["payload"], depth, kind, siblings=True) == leaf
+        assert leaf == {"filename": "deep.pdf", "source": {"path": "keep  spacing"}, "body": "unchanged"}
+        assert chunk.content == "x" * 70_000
+
+    def test_fitting_shortens_a_string_at_the_bottom_of_deep_metadata(self) -> None:
+        leaf = {"filename": "deep.pdf", "body": "é" * 40_000}
+        entity = {"payload": _wrap_deep_metadata(leaf, 1200, "mixed")}
+
+        milvus_store_module._fit_milvus_row_limits(
+            entity, static_fields=set(), json_max_length=70_000, json_safety_margin_bytes=1024
+        )
+
+        fitted = _deep_leaf(entity["payload"], 1200, "mixed")
+        assert fitted["filename"] == "deep.pdf"
+        assert fitted["body"] and leaf["body"].startswith(fitted["body"])
+        assert len(fitted["body"]) < len(leaf["body"])
+        assert len(convert_to_json(entity)) <= 68_976
+        assert leaf["body"] == "é" * 40_000
+
+    @pytest.mark.parametrize(
+        "protected", [pytest.param("x" * 70_000, id="string"), pytest.param({"body": "x" * 70_000}, id="subtree")]
+    )
+    def test_deep_protected_metadata_that_cannot_fit_raises(self, protected: Any) -> None:
+        leaf = {"source": protected}
+        entity = {"payload": _wrap_deep_metadata(leaf, 1000, "dict"), "content": "x" * 70_000}
+        original = deepcopy(protected)
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert leaf["source"] == original
+        assert _deep_leaf(entity["payload"], 1000, "dict")["source"] == original
+        assert entity["content"] == "x" * 70_000
+
+    def test_equal_length_nested_strings_keep_their_original_priority(self) -> None:
+        entity = {"payload": [{"body": "a" * 40_000}, {"body": "b" * 40_000}]}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert 0 < len(entity["payload"][0]["body"]) < 40_000
+        assert entity["payload"][1]["body"] == "b" * 40_000
+        assert len(convert_to_json(entity)) <= 64_512
+
+    def test_equal_length_strings_keep_depth_first_priority(self) -> None:
+        entity = {"payload": {"deep": {"body": "a" * 40_000}, "shallow": "b" * 40_000}}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert 0 < len(entity["payload"]["deep"]["body"]) < 40_000
+        assert entity["payload"]["shallow"] == "b" * 40_000
+        assert len(convert_to_json(entity)) <= 64_512
 
     def test_numpy_metadata_is_counted_when_content_is_truncated(self) -> None:
         body = "x" * 70_000

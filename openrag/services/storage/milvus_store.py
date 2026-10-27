@@ -395,17 +395,36 @@ def _fit_milvus_row_limits(
     # without mutating the source Chunk metadata.
     entity.update(json.loads(serialized_dynamic))
 
+    def json_children(value: dict[str, Any] | list[Any]) -> Iterator[tuple[str | int, Any]]:
+        return iter(value.items()) if isinstance(value, dict) else enumerate(value)
+
     def without_reducible_strings(value: Any) -> Any:
         if isinstance(value, str):
             return ""
-        if isinstance(value, dict):
-            return {
-                key: child if key in PROTECTED_DYNAMIC_KEYS else without_reducible_strings(child)
-                for key, child in value.items()
-            }
-        if isinstance(value, list):
-            return [without_reducible_strings(child) for child in value]
-        return value
+        if not isinstance(value, (dict, list)):
+            return value
+
+        result: Any = {} if isinstance(value, dict) else [None] * len(value)
+        pending: list[tuple[Iterator[tuple[str | int, Any]], Any]] = [(json_children(value), result)]
+        while pending:
+            children, target = pending[-1]
+            try:
+                key, child = next(children)
+            except StopIteration:
+                pending.pop()
+                continue
+
+            if key in PROTECTED_DYNAMIC_KEYS:
+                target[key] = child
+            elif isinstance(child, str):
+                target[key] = ""
+            elif isinstance(child, (dict, list)):
+                replacement: Any = {} if isinstance(child, dict) else [None] * len(child)
+                target[key] = replacement
+                pending.append((json_children(child), replacement))
+            else:
+                target[key] = child
+        return result
 
     minimum_payload = {
         key: value if key in PROTECTED_DYNAMIC_KEYS else without_reducible_strings(value)
@@ -434,59 +453,61 @@ def _fit_milvus_row_limits(
     # serializer choice. Its standard-json fallback also escapes non-ASCII.
     ensure_ascii = serialized_minimum == json.dumps(minimum_payload).encode("utf-8")
 
-    def nested_string_paths(value: Any, path: tuple[str | int, ...]) -> Iterable[tuple[tuple[str | int, ...], str]]:
+    def nested_string_slots(parent: Any, key: str | int) -> Iterable[tuple[Any, str | int, str]]:
+        value = parent[key]
         if isinstance(value, str):
-            yield path, value
-        elif isinstance(value, dict):
-            for key, child in value.items():
-                if key not in PROTECTED_DYNAMIC_KEYS:
-                    yield from nested_string_paths(child, (*path, key))
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                yield from nested_string_paths(child, (*path, index))
+            yield parent, key, value
+            return
+        if not isinstance(value, (dict, list)):
+            return
 
-    def get_value(path: tuple[str | int, ...]) -> Any:
-        value: Any = entity
-        for part in path:
-            value = value[part]
-        return value
-
-    def set_value(path: tuple[str | int, ...], value: str) -> None:
-        parent: Any = entity
-        for part in path[:-1]:
-            parent = parent[part]
-        parent[path[-1]] = value
+        # JSON normalization makes the tree acyclic and gives each nested
+        # value its own container. Keeping parent/key slots avoids copying an
+        # entire path at every level while preserving depth-first order.
+        pending = [(value, json_children(value))]
+        while pending:
+            current, children = pending[-1]
+            try:
+                child_key, child = next(children)
+            except StopIteration:
+                pending.pop()
+                continue
+            if child_key in PROTECTED_DYNAMIC_KEYS:
+                continue
+            if isinstance(child, str):
+                yield current, child_key, child
+            elif isinstance(child, (dict, list)):
+                pending.append((child, json_children(child)))
 
     shrink_first = [
-        ((key,), entity[key])
+        (entity, key, entity[key])
         for key in SHRINKABLE_DYNAMIC_KEYS
         if key not in static_fields and isinstance(entity.get(key), str)
     ]
-    shrink_first_paths = {path for path, _ in shrink_first}
+    shrink_first_keys = {key for _, key, _ in shrink_first}
     remaining_strings = [
         item
-        for key, value in entity.items()
-        if key not in static_fields and key not in PROTECTED_DYNAMIC_KEYS
-        for item in nested_string_paths(value, (key,))
-        if item[0] not in shrink_first_paths
+        for key in entity
+        if key not in static_fields and key not in PROTECTED_DYNAMIC_KEYS and key not in shrink_first_keys
+        for item in nested_string_slots(entity, key)
     ]
-    remaining_strings.sort(key=lambda item: -len(item[1].encode("utf-8")))
+    remaining_strings.sort(key=lambda item: -len(item[2].encode("utf-8")))
 
     actual_bytes = len(serialized_dynamic)
     truncated_fields = 0
-    for path, original in (*shrink_first, *remaining_strings):
+    for parent, key, original in (*shrink_first, *remaining_strings):
         over = actual_bytes - fit_target_bytes
         if over <= 0:
             break
         if not original:
             continue
-        value = get_value(path)
+        value = parent[key]
         if not isinstance(value, str) or not value:
             continue
         string_bytes = _json_string_bytes(value, ensure_ascii=ensure_ascii)
         value = _truncate_json_string(value, string_bytes - over, ensure_ascii=ensure_ascii)
         actual_bytes += _json_string_bytes(value, ensure_ascii=ensure_ascii) - string_bytes
-        set_value(path, value)
+        parent[key] = value
         if value != original:
             truncated_fields += 1
 
