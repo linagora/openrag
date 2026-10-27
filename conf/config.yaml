@@ -66,7 +66,7 @@ embedder:
 
 # --- Vector Database (Milvus) ---
 # Env: VDB_HOST, VDB_PORT, VDB_CONNECTOR_NAME, VDB_COLLECTION_NAME, VDB_HYBRID_SEARCH,
-#      VDB_ENABLE_INSERTION, VDB_TIMEOUT
+#      VDB_ENABLE_INSERTION, VDB_TIMEOUT, VDB_JSON_MAX_LENGTH, VDB_JSON_SAFETY_MARGIN_BYTES
 vectordb:
   host: milvus
   port: 19530
@@ -75,6 +75,9 @@ vectordb:
   hybrid_search: true
   enable: true
   timeout: 120.0 # per-request timeout (s) for the Milvus sync/async clients
+  # Match Milvus's common.JSONMaxLength. Oversized rows are fitted below it.
+  json_max_length: 65536
+  json_safety_margin_bytes: 1024
   schema_version: 3 # Increment when the collection schema changes and a migration is required
 
 # --- Relational Database (PostgreSQL) ---
