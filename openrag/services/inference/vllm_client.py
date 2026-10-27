@@ -893,12 +893,15 @@ def downscale_image(image_bytes: bytes, max_side: int) -> bytes:
     from io import BytesIO
 
     from core.indexing.image_preprocessor import pil_to_png_bytes
-    from PIL import Image, UnidentifiedImageError
+    from PIL import Image, ImageOps, UnidentifiedImageError
 
     try:
         with Image.open(BytesIO(image_bytes)) as image:
             if max(image.size) <= max_side:
                 return image_bytes
+            # The PNG carries no EXIF, so apply the orientation to the pixels
+            # or a rotated photo reaches the model sideways.
+            image = ImageOps.exif_transpose(image)
             # reducing_gap=None keeps thumbnail() from calling draft(), whose
             # scaled JPEG decode overflows the heap on lossless JPEGs in
             # Pillow <= 12.3.0 (GHSA-8g5g-8vmr-9782). marker-pdf keeps Pillow

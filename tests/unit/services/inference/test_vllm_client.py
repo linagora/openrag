@@ -1239,6 +1239,18 @@ class TestVLLMVision:
         with Image.open(BytesIO(downscale_image(jpeg.getvalue(), 1024))) as image:
             assert image.size == (1024, 939)
 
+    def test_downscale_applies_the_exif_orientation(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        exif = Image.Exif()
+        exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to display
+        jpeg = BytesIO()
+        Image.new("RGB", (2000, 1000)).save(jpeg, format="JPEG", exif=exif)
+        with Image.open(BytesIO(downscale_image(jpeg.getvalue(), 1024))) as image:
+            assert image.size == (512, 1024)
+
     def test_max_image_side_is_coerced_to_int(self):
         assert self._make_vision(lambda request: None, max_image_side="1024")._max_image_side == 1024
 
