@@ -39,7 +39,7 @@ import math
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -1435,10 +1435,20 @@ class MilvusVectorStore(VectorStore):
             if raw_id is None:
                 continue
             raw_document_id = row.get("file_id")
+            raw_metadata = row.get("$meta")
+            raw_benchmark_id = row.get("benchmark_id")
+            if raw_benchmark_id is None and isinstance(raw_metadata, Mapping):
+                raw_benchmark_id = raw_metadata.get("benchmark_id")
+            metadata = (
+                {"benchmark_id": raw_benchmark_id}
+                if isinstance(raw_benchmark_id, str) and raw_benchmark_id
+                else {}
+            )
             chunks.append(
                 Chunk(
                     id=str(raw_id),
                     document_id=str(raw_document_id) if raw_document_id is not None else "",
+                    metadata=metadata,
                     partition=str(row["partition"]) if row.get("partition") is not None else "default",
                 )
             )
@@ -1603,7 +1613,7 @@ class MilvusVectorStore(VectorStore):
                 search_params=search_params,
                 limit=top_k,
                 filter=expr,
-                output_fields=["file_id", "partition"],
+                output_fields=["file_id", "partition", "$meta"],
             )
             rows = self._parse_search_response(response)
             return (

@@ -19,7 +19,7 @@ Identification of "the same item" is delegated to the caller via
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import TYPE_CHECKING, TypeVar
 
 from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason, TraceStageName
@@ -28,6 +28,12 @@ if TYPE_CHECKING:
     from core.retrieval.trace import RetrievalTraceBuilder
 
 T = TypeVar("T")
+
+
+def _benchmark_id(item: object) -> str | None:
+    metadata = getattr(item, "metadata", None)
+    value = metadata.get("benchmark_id") if isinstance(metadata, Mapping) else None
+    return value if isinstance(value, str) and value else None
 
 
 def rrf_reranking(
@@ -126,6 +132,7 @@ def _record_rrf_trace(
             candidate = TraceCandidate(
                 id=str(getattr(item, "id", key)),
                 document_id=getattr(item, "document_id", None) or None,
+                benchmark_id=_benchmark_id(item),
                 partition=getattr(item, "partition", None) or None,
                 rank=rank,
                 scores={"fused": scores.get(key, 0.0)},
@@ -139,6 +146,7 @@ def _record_rrf_trace(
                     TraceCandidate(
                         id=str(getattr(duplicate, "id", key)),
                         document_id=getattr(duplicate, "document_id", None) or None,
+                        benchmark_id=_benchmark_id(duplicate),
                         partition=getattr(duplicate, "partition", None) or None,
                         rank=rank,
                         scores={"fused": scores.get(key, 0.0)},
@@ -198,6 +206,7 @@ def _record_single_list_trace(
                 TraceCandidate(
                     id=candidate_id,
                     document_id=getattr(item, "document_id", None) or None,
+                    benchmark_id=_benchmark_id(item),
                     partition=getattr(item, "partition", None) or None,
                     rank=rank,
                     scores={"fused": scores[key]},

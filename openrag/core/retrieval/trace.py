@@ -174,7 +174,7 @@ def _truncate_utf8(value: str, limit: int) -> str:
 def _string_limit(key: str | None) -> int:
     if key in {"original_query", "query"}:
         return MAX_TRACE_QUERY_STRING_BYTES
-    if key in {"id", "document_id", "partition", "request_id", "duplicate_of"}:
+    if key in {"id", "document_id", "benchmark_id", "partition", "request_id", "duplicate_of"}:
         return MAX_TRACE_IDENTIFIER_BYTES
     return MAX_TRACE_STRING_BYTES
 
@@ -225,7 +225,11 @@ def _safe_public_value(
                 return _OMITTED
             candidate_consumed = True
         if isinstance(value, TraceCandidate):
-            exclude = {"partition"} if value.partition is None else None
+            exclude = {
+                field
+                for field in ("partition", "benchmark_id")
+                if getattr(value, field) is None
+            }
             value = value.model_dump(mode="json", exclude=exclude)
         elif isinstance(value, (RetrievalTraceV1, TraceComparisons, TraceComparison)):
             value = {field: getattr(value, field) for field in value.model_fields_set}
@@ -422,10 +426,13 @@ def candidates_from_chunks(chunks: Sequence[Chunk], *, limit: int | None = None)
                 scores["fused"] = chunk.combined_score
             if chunk.rerank_score is not None:
                 scores["reranker"] = chunk.rerank_score
+        raw_benchmark_id = chunk.metadata.get("benchmark_id")
+        benchmark_id = raw_benchmark_id if isinstance(raw_benchmark_id, str) and raw_benchmark_id else None
         candidates.append(
             TraceCandidate(
                 id=chunk.id,
                 document_id=chunk.document_id or None,
+                benchmark_id=benchmark_id,
                 partition=chunk.partition or None,
                 rank=rank,
                 scores=scores,

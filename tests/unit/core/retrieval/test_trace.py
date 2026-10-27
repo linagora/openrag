@@ -365,6 +365,7 @@ def test_candidates_from_chunks_keeps_only_identifiers_ranks_and_public_scores()
         {
             "id": "plain",
             "document_id": "doc-1",
+            "benchmark_id": None,
             "partition": "legal",
             "rank": 1,
             "scores": {},
@@ -374,6 +375,7 @@ def test_candidates_from_chunks_keeps_only_identifiers_ranks_and_public_scores()
         {
             "id": "scored",
             "document_id": "doc-2",
+            "benchmark_id": None,
             "partition": "science",
             "rank": 2,
             "scores": {"dense": 0.9, "fused": 0.7, "reranker": 0.8},

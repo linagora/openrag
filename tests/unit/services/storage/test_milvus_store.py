@@ -1441,7 +1441,7 @@ class TestHybridDispatch:
         for call in diagnostic_calls:
             assert 'partition in ["allowed"]' in call.kwargs["filter"]
             assert "forbidden" not in call.kwargs["filter"]
-            assert call.kwargs["output_fields"] == ["file_id", "partition"]
+            assert call.kwargs["output_fields"] == ["file_id", "partition", "$meta"]
 
     @pytest.mark.asyncio
     async def test_hybrid_threshold_diagnostic_keeps_scoped_candidates_when_outside_hits_rank_higher(
