@@ -364,3 +364,227 @@ def test_symbol_only_caption_is_not_treated_as_a_placeholder():
 
     assert not is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n©\n\n</image_description>")
     assert is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n   \n\n</image_description>")
+
+
+def _standalone_table(rows: int = 8) -> str:
+    """An oversized markdown table (>100 tokens) that must stay standalone.
+
+    Each row pads its value column so the whole table exceeds the inline
+    threshold; with a small chunk_size the table splits via chunk_table.
+    """
+    header = "| Group | Value |\n|-------|-------|\n"
+    return header + "\n".join(f"| row{i} | {' '.join(['x'] * 30)} |" for i in range(rows))
+
+
+def test_recursive_splitter_preserves_source_order_around_standalone_table():
+    """#353: `intro -> large table -> outro` on one page must emit chunks in
+    source order — the table must not jump ahead of the intro, the intro and
+    outro prose must not merge across the table boundary, and chunk() must
+    number chunk_index in reading order."""
+    md = f"Intro paragraph one.\n\n{_standalone_table()}\n\nOutro paragraph two."
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=md, page_number=1)],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    # The reading order is text(intro) -> table(s) -> text(outro).
+    assert chunks[0].chunk_type == ChunkType.TEXT
+    assert "Intro paragraph one." in chunks[0].text
+    assert chunks[-1].chunk_type == ChunkType.TEXT
+    assert "Outro paragraph two." in chunks[-1].text
+    assert all(c.chunk_type == ChunkType.TABLE for c in chunks[1:-1])
+    # No chunk welds prose from opposite sides of the table.
+    for c in chunks:
+        assert not ("Intro paragraph" in c.text and "Outro paragraph" in c.text)
+
+
+def test_recursive_splitter_preserves_source_order_around_standalone_image():
+    """#353: an oversized image caption must not reorder content — the prose
+    before and after an <image_description> block stays on either side and
+    the caption lands between them."""
+    long_caption = "lorem ipsum dolor sit amet " * 60  # well above inline threshold
+    md = f"Intro paragraph one.\n\n<image_description>\n{long_caption}\n</image_description>\n\nOutro paragraph two."
+    splitter = RecursiveSplitter(chunk_size=400, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=md, page_number=1)],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    assert chunks[0].chunk_type == ChunkType.TEXT
+    assert "Intro paragraph one." in chunks[0].text
+    image_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMAGE_CAPTION]
+    assert image_chunks, "expected at least one image_caption chunk"
+    assert chunks[-1].chunk_type == ChunkType.TEXT
+    assert "Outro paragraph two." in chunks[-1].text
+    # No chunk welds prose from opposite sides of the image.
+    for c in chunks:
+        assert not ("Intro paragraph" in c.text and "Outro paragraph" in c.text)
+
+
+def test_recursive_splitter_order_and_pages_hold_across_page_flushes():
+    """#353: with the final page-sort gone, buffered text flushed between
+    standalone elements must still resolve its pages correctly — a markerless
+    run following a table inherits the table's end page, and source order is
+    preserved even when it disagrees with page order."""
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text="Intro paragraph one.", page_number=1),
+            TextBlock(text=_standalone_table() + "\n\nBetween the table and the next page.", page_number=2),
+            TextBlock(text="Outro paragraph two.", page_number=3),
+        ],
+        metadata={"source": "multipage.md"},
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    table_chunks = [c for c in chunks if c.chunk_type == ChunkType.TABLE]
+    assert table_chunks
+    # The intro opens the document and the outro closes it, whatever pages they sit on.
+    assert chunks[0].chunk_type == ChunkType.TEXT
+    assert "Intro paragraph one." in chunks[0].text
+    assert chunks[0].page_number == 1
+    assert chunks[-1].chunk_type == ChunkType.TEXT
+    assert "Outro paragraph two." in chunks[-1].text
+    # The table lives on page 2, mid-sequence, never before the intro.
+    assert chunks[0].chunk_index < table_chunks[0].chunk_index
+    assert table_chunks[-1].chunk_index < chunks[-1].chunk_index
+    assert all(c.page_number == 2 for c in table_chunks)
+    # The prose following the table has no marker of its own; it must resolve
+    # to the table's page, not rewind to the last text chunk's end page.
+    between_chunks = [c for c in chunks if c.chunk_type == ChunkType.TEXT and "Between the table" in c.text]
+    assert between_chunks and all(c.page_number == 2 for c in between_chunks)
+
+
+def test_recursive_splitter_small_table_inline_keeps_source_order():
+    """A table under the inline threshold still flows through the text path
+    (no standalone TABLE chunk) — and its position between the surrounding
+    prose survives, inside the chunk the splitter produces."""
+    table = "| A | B |\n|---|---|\n| 1 | 2 |"
+    md = f"Intro paragraph one.\n\n{table}\n\nOutro paragraph two."
+    splitter = RecursiveSplitter(chunk_size=400, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=md, page_number=1)],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert chunks
+    assert all(c.chunk_type == ChunkType.TEXT for c in chunks)
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    intro_pos = next(i for i, c in enumerate(chunks) if "Intro paragraph one." in c.text)
+    table_pos = next(i for i, c in enumerate(chunks) if "| 1 | 2 |" in c.text)
+    outro_pos = next(i for i, c in enumerate(chunks) if "Outro paragraph two." in c.text)
+    assert intro_pos <= table_pos <= outro_pos
+
+
+def _strip_page_markers(text: str) -> str:
+    """Remove ``[PAGE_N]`` markers and surrounding whitespace from ``text``."""
+    import re
+
+    return re.sub(r"\[PAGE_\d+\]", "", text).strip()
+
+
+def test_page_starting_with_standalone_table_emits_no_marker_only_text_chunk():
+    """A document that opens on a table-only page used to emit a text chunk
+    holding nothing but the page's ``[PAGE_1]`` marker: the buffer flushed
+    ahead of the standalone table contained only the marker. That chunk must
+    be dropped — the standalone table keeps its place in order, and the page
+    transition must not strand content or rewind page attribution."""
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=_standalone_table(), page_number=2),
+            TextBlock(text="Outro paragraph two.", page_number=3),
+        ],
+        metadata={"source": "table-first.md"},
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    text_chunks = [c for c in chunks if c.chunk_type == ChunkType.TEXT]
+    for c in text_chunks:
+        assert _strip_page_markers(c.text), f"text chunk holds nothing but a page marker: {c.text!r}"
+    # The standalone table is emitted before the prose that follows it, and
+    # the marker-only flush did not push it around.
+    table_chunks = [c for c in chunks if c.chunk_type == ChunkType.TABLE]
+    assert table_chunks
+    assert chunks[0].chunk_type == ChunkType.TABLE
+    outro_chunks = [c for c in text_chunks if "Outro paragraph two." in c.text]
+    assert len(outro_chunks) == 1, f"outro lost or duplicated: {[c.text for c in text_chunks]}"
+
+
+def test_consecutive_standalone_pages_emit_no_marker_only_text_chunks():
+    """Pages whose entire content is a standalone image description used to
+    emit ``[PAGE_1]``/``[PAGE_2]`` text chunks between the image chunks — the
+    marker flushed alone as each next standalone element took over (#353
+    review). The images must come out alone, one per page, in order."""
+    splitter = RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    caption = "<image_description>\n" + " ".join(["caption"] * 120) + "\n</image_description>"
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=caption, page_number=page) for page in (1, 2, 3)],
+        metadata={"source": "images-only.md"},
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    assert [c.page_number for c in chunks] == [1, 2, 3]
+    assert all(c.chunk_type == ChunkType.IMAGE_CAPTION for c in chunks), [
+        f"{c.chunk_type.name}: {c.text[:40]!r}" for c in chunks
+    ]
+    # Nothing was lost: every page's caption made it into exactly one chunk.
+    chunks_per_page = {page: [c for c in chunks if c.page_number == page] for page in (1, 2, 3)}
+    assert all(len(parts) == 1 for parts in chunks_per_page.values())
+
+
+def test_page_break_isolating_a_trailing_marker_emits_no_marker_only_text_chunk():
+    """Prose that fills ``chunk_size`` just before a page break makes the
+    splitter emit ``[PAGE_N]`` as a piece of its own: the guard that checked
+    the whole flushed buffer froze ``has_prose`` at ``True`` and let that
+    marker-only text chunk through. The check must happen per split piece —
+    the page state still advances for every piece before one is skipped."""
+    prose = " ".join(f"word{i}" for i in range(40))  # 40 tokens, fills chunk_size
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=prose, page_number=1),
+            TextBlock(text=_standalone_table(), page_number=2),
+            TextBlock(text="Outro paragraph two.", page_number=3),
+        ],
+        metadata={"source": "dense-prose-then-table.md"},
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert chunks, "expected chunks to be produced"
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    # No text chunk may hold nothing but page markers. This is what the
+    # buffer-level guard missed: the marker piece split off a prose-bearing
+    # buffer still only carries the marker.
+    text_chunks = [c for c in chunks if c.chunk_type == ChunkType.TEXT]
+    assert text_chunks
+    for c in text_chunks:
+        assert _strip_page_markers(c.text), f"text chunk holds nothing but a page marker: {c.text!r}"
+    # The prose survives exactly once, on the page it was written on.
+    prose_chunks = [c for c in text_chunks if "word0 " in c.text and "word39" in c.text]
+    assert len(prose_chunks) == 1, f"prose lost or duplicated: {[c.text[:60] for c in text_chunks]}"
+    assert prose_chunks[0].chunk_index == 0
+    assert prose_chunks[0].page_number == 1
+    # The standalone table follows the prose in source order, on its page.
+    table_chunks = [c for c in chunks if c.chunk_type == ChunkType.TABLE]
+    assert table_chunks
+    assert prose_chunks[0].chunk_index < table_chunks[0].chunk_index
+    assert all(c.page_number == 2 for c in table_chunks)
+    # The outro's page resolves through the untouched prev_page chain — the
+    # skipped marker piece must not have rewound or lost the page state.
+    outro_chunks = [c for c in text_chunks if "Outro paragraph two." in c.text]
+    assert len(outro_chunks) == 1
+    assert outro_chunks[0].page_number == 3
