@@ -665,7 +665,8 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
-        if await self._document_repo.get_file_metadata(file_id, partition) is None:
+        catalog_metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        if catalog_metadata is None:
             return
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
@@ -685,7 +686,8 @@ class WorkerDispatcher(IndexingDispatcher):
             entity.update(internal_metadata)
             entities.append(entity)
 
-        await self._upsert_entities(entities)
+        protected_metadata_keys = set(catalog_metadata) | set(public_metadata)
+        await self._upsert_entities(entities, protected_metadata_keys=protected_metadata_keys)
 
         await self._document_repo.update_file_metadata_in_db(file_id, partition, public_metadata)
 
@@ -735,6 +737,9 @@ class WorkerDispatcher(IndexingDispatcher):
 
             public_metadata = strip_internal_metadata(metadata)
             indexed_at = datetime.now(UTC)
+            file_metadata = dict(source_file_metadata)
+            file_metadata.update(public_metadata)
+            file_metadata["indexed_at"] = indexed_at.isoformat()
             entities = []
             for row in rows:
                 entity = strip_internal_metadata(row)
@@ -760,11 +765,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     catalog_kwargs["embedder_fingerprint"] = embedder_fingerprint
             if indexation_config is not None:
                 catalog_kwargs["indexation_config"] = indexation_config
-            await self._insert_entities(entities)
-
-            file_metadata = dict(source_file_metadata)
-            file_metadata.update(public_metadata)
-            file_metadata["indexed_at"] = indexed_at.isoformat()
+            await self._insert_entities(entities, protected_metadata_keys=set(file_metadata))
             try:
                 await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
@@ -840,17 +841,17 @@ class WorkerDispatcher(IndexingDispatcher):
                 provenance["embedder_dimension"] = widths.pop()
         return provenance
 
-    async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
+    async def _upsert_entities(self, entities: list[dict[str, Any]], *, protected_metadata_keys: set[str]) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)
         if upsert_entities is None:
             raise TypeError("vector_store must expose upsert_entities for file metadata mutations")
-        await upsert_entities(entities, self._collection)
+        await upsert_entities(entities, self._collection, protected_metadata_keys=protected_metadata_keys)
 
-    async def _insert_entities(self, entities: list[dict[str, Any]]) -> None:
+    async def _insert_entities(self, entities: list[dict[str, Any]], *, protected_metadata_keys: set[str]) -> None:
         insert_entities = getattr(self._vector_store, "insert_entities", None)
         if insert_entities is None:
             raise TypeError("vector_store must expose insert_entities for file copy mutations")
-        await insert_entities(entities, self._collection)
+        await insert_entities(entities, self._collection, protected_metadata_keys=protected_metadata_keys)
 
     async def _record_job(
         self,
