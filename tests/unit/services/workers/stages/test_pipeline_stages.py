@@ -892,6 +892,14 @@ def test_resolve_language_sample_is_capped(monkeypatch):
     assert len(_detected_sample(monkeypatch, *["Les dossiers sont instruits en mars."] * 100)) == 1000
 
 
+def test_resolve_language_samples_chunks_spread_through_the_file(monkeypatch):
+    # The opening alone (here a long English abstract) is not the file's language.
+    chunks = ["Abstract " * 120] + [f"Chapitre {i} : les dossiers sont instruits. " * 10 for i in range(19)]
+    sample = _detected_sample(monkeypatch, *chunks)
+    assert sample.count("Abstract") < 30
+    assert "Chapitre" in sample
+
+
 @pytest.fixture
 def bundled_lang_detector(monkeypatch):
     from fast_langdetect import LangDetectConfig, LangDetector
@@ -927,6 +935,16 @@ def test_resolve_language_detects_french_after_opening_figures(bundled_lang_dete
         "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés.",
     )
     assert [chunk.chunk_type.value for chunk in chunks[:5]] == ["image_caption"] * 5
+    assert resolve_language({"chunks": chunks}) == "fr"
+
+
+def test_resolve_language_detects_french_after_an_english_abstract(bundled_lang_detector):
+    abstract = (
+        "This report reviews how regional budgets were allocated in 2025 and what the audit found. "
+        "It summarises the main findings and the recommendations made to each department. "
+    ) * 6
+    body = "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés. " * 6
+    chunks = [Chunk(id="c0", text=abstract)] + [Chunk(id=f"c{i}", text=body) for i in range(1, 10)]
     assert resolve_language({"chunks": chunks}) == "fr"
 
 
