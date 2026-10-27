@@ -6,7 +6,7 @@ import pytest
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
-from core.models.chunk import Chunk
+from core.models.chunk import Chunk, ChunkType
 from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
@@ -783,3 +783,170 @@ def test_resolve_language_ignores_digits_and_table_markup(monkeypatch):
     monkeypatch.setattr(common_module, "detect_language", fake_detect)
     resolve_language({"chunks": [Chunk(id="c1", text="| Montant | 58.3M |\n|---|---|\n| Dossiers acceptés | 22 |")]})
     assert seen["text"] == "Montant . M Dossiers acceptés"
+
+
+def _detected_sample(monkeypatch, *chunks: Chunk | str) -> str:
+    seen: dict = {}
+
+    def fake_detect(sample, *, min_confidence=0.0):
+        seen["text"] = sample
+        return "fr"
+
+    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    resolve_language(
+        {
+            "chunks": [
+                chunk if isinstance(chunk, Chunk) else Chunk(id=f"c{i}", text=chunk) for i, chunk in enumerate(chunks)
+            ]
+        }
+    )
+    return seen["text"]
+
+
+def test_resolve_language_leaves_image_captions_and_placeholders_out(monkeypatch):
+    text = (
+        "La préfecture répartit les crédits.\n\n"
+        "<image_description>\n\nA bar chart of the yearly budget.\n\n</image_description>\n\n"
+        "<image_description>\n\n[Image Placeholder]\n\n</image_description>\n\n"
+        "Les dossiers sont instruits en mars."
+    )
+    assert (
+        _detected_sample(monkeypatch, text)
+        == "La préfecture répartit les crédits. Les dossiers sont instruits en mars."
+    )
+
+
+def test_resolve_language_leaves_out_a_caption_cut_by_a_chunk_boundary(monkeypatch):
+    first = "Les dossiers sont instruits.\n\n<image_description>\n\nA bar chart"
+    second = "of the yearly budget.\n\n</image_description>\n\nIls sont payés en mai."
+    assert _detected_sample(monkeypatch, first, second) == "Les dossiers sont instruits. Ils sont payés en mai."
+
+
+def test_resolve_language_leaves_out_the_middle_of_a_caption_split_across_chunks(monkeypatch):
+    pieces = [
+        "<image_description>\n\nA bar chart of the yearly budget,",
+        "broken down by department and by programme,",
+        "with the totals in the last column.\n\n</image_description>",
+    ]
+    captions = [Chunk(id=f"c{i}", text=text, chunk_type=ChunkType.IMAGE_CAPTION) for i, text in enumerate(pieces)]
+    assert _detected_sample(monkeypatch, *captions, "Les dossiers sont instruits.") == "Les dossiers sont instruits."
+
+
+def test_resolve_language_keeps_the_text_after_a_caption_in_a_caption_chunk(monkeypatch):
+    chunk = Chunk(
+        id="c1",
+        text="<image_description>\n\nA bar chart.\n\n</image_description>\n\nSource : les services de la préfecture.",
+        chunk_type=ChunkType.IMAGE_CAPTION,
+    )
+    assert _detected_sample(monkeypatch, chunk) == "Source : les services de la préfecture."
+
+
+def test_resolve_language_decodes_html_entities(monkeypatch):
+    assert _detected_sample(monkeypatch, "| Dupont &amp; fils &#124; Montant |") == "Dupont & fils Montant"
+
+
+def test_resolve_language_ignores_html_tags(monkeypatch):
+    text = '<table class="data"><tr><td>Dossiers acceptés</td><td>vingt</td></tr></table><br/>'
+    assert _detected_sample(monkeypatch, text) == "Dossiers acceptés vingt"
+
+
+def test_resolve_language_ignores_page_markers_and_uncaptioned_image_references(monkeypatch):
+    text = "Les dossiers [PAGE_3] sont instruits ![](docling_img_3) en mars ![logo](_page_0_Picture_1.jpeg)."
+    assert _detected_sample(monkeypatch, text) == "Les dossiers sont instruits en mars ."
+
+
+def test_resolve_language_ignores_the_chunk_header(monkeypatch):
+    chunk = Chunk(
+        id="c1",
+        text="[Source: Annual_Report.pdf | Page: 1 | Section: Synthèse]\n\nLes dossiers sont instruits.",
+        header="[Source: Annual_Report.pdf | Page: 1 | Section: Synthèse]",
+        content="Les dossiers sont instruits.",
+    )
+    assert _detected_sample(monkeypatch, chunk) == "Les dossiers sont instruits."
+
+
+def test_resolve_language_samples_the_text_after_the_opening_figures(monkeypatch):
+    figures = [f"<image_description>\n\nFigure {i} of the report.\n\n</image_description>" for i in range(8)]
+    assert _detected_sample(monkeypatch, *figures, "Les dossiers sont instruits.") == "Les dossiers sont instruits."
+
+
+def test_resolve_language_samples_the_captions_when_the_text_is_only_images(monkeypatch):
+    text = "<image_description>\n\nUn schéma du circuit de validation.\n\n</image_description>"
+    assert _detected_sample(monkeypatch, text) == "Un schéma du circuit de validation."
+
+
+def test_resolve_language_samples_the_captions_when_the_text_is_unclassified(monkeypatch):
+    samples: list[str] = []
+
+    def fake_detect(sample, *, min_confidence=0.0):
+        samples.append(sample)
+        return "fr" if "schéma" in sample else None
+
+    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    text = "<image_description>\n\nUn schéma du circuit.\n\n</image_description>\n\nAnnexe technique jointe."
+    assert resolve_language({"chunks": [Chunk(id="c1", text=text)]}) == "fr"
+    assert samples == ["Annexe technique jointe.", "Un schéma du circuit. Annexe technique jointe."]
+
+
+def test_resolve_language_sample_is_capped(monkeypatch):
+    assert len(_detected_sample(monkeypatch, *["Les dossiers sont instruits en mars."] * 100)) == 1000
+
+
+@pytest.fixture
+def bundled_lang_detector(monkeypatch):
+    from fast_langdetect import LangDetectConfig, LangDetector
+    from services.inference import runtime
+
+    # The bundled model, so the tests need no download.
+    monkeypatch.setattr(runtime, "_lang_detector", LangDetector(LangDetectConfig(model="lite", max_input_length=1024)))
+
+
+def _structured_chunks(*pages: str, filename: str = "Annual_Report.pdf") -> list[Chunk]:
+    from core.chunking.structured_section import StructuredSectionChunker
+
+    document = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=text, page_number=page) for page, text in enumerate(pages, start=1)],
+        metadata={"filename": filename},
+    )
+    return StructuredSectionChunker(chunk_size=256, length_function=lambda text: len(text.split())).chunk(document)
+
+
+def test_resolve_language_detects_a_short_document_despite_the_chunk_header(bundled_lang_detector):
+    chunks = _structured_chunks("Réduire les délais d'instruction.", filename="Meeting_Notes_Final.docx")
+    assert chunks[0].text.startswith("[Source: Meeting_Notes_Final.docx")
+    assert resolve_language({"chunks": chunks}) == "fr"
+
+
+def test_resolve_language_detects_french_after_opening_figures(bundled_lang_detector):
+    caption = wrap_caption(
+        "The chart shows the yearly budget allocated to each department, broken down by programme. " * 12
+    )
+    chunks = _structured_chunks(
+        *[caption] * 5,
+        "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés.",
+    )
+    assert [chunk.chunk_type.value for chunk in chunks[:5]] == ["image_caption"] * 5
+    assert resolve_language({"chunks": chunks}) == "fr"
+
+
+@pytest.mark.parametrize("label", ["1 / {}", "— {} —", "Figure {}", "Fig. {}"])
+def test_resolve_language_samples_the_captions_when_the_text_is_only_labels(bundled_lang_detector, label):
+    caption = wrap_caption(
+        "Le graphique montre l'évolution des ventes annuelles dans les différentes régions, "
+        "avec une forte hausse en Bretagne."
+    )
+    chunks = [Chunk(id=f"c{page}", text=f"{caption}\n\n{label.format(page)}") for page in range(1, 7)]
+    assert resolve_language({"chunks": chunks}) == "fr"
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [("政府将在三月审查所有申请文件。", "zh"), ("申請書類はすべて三月に審査されます。", "ja")],
+)
+def test_resolve_language_counts_the_words_of_scripts_written_without_spaces(bundled_lang_detector, text, language):
+    caption = wrap_caption(
+        "A bar chart showing the yearly budget allocated to each department, broken down by programme, "
+        "with the totals in the last column."
+    )
+    assert resolve_language({"chunks": [Chunk(id="c1", text=f"{caption}\n\n{text}")]}) == language
