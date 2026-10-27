@@ -860,6 +860,70 @@ class TestChunkToEntity:
         assert 0 < len(entity["payload"][0]["body"]) < 70_000
         assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
 
+    @pytest.mark.parametrize("content_length", [40_000, 70_000])
+    @pytest.mark.asyncio
+    async def test_upsert_uses_independent_store_json_budgets(self, store, content_length: int) -> None:
+        stores = [
+            MilvusVectorStore(VectorDBConfig(json_max_length=32768, json_safety_margin_bytes=1024)),
+            MilvusVectorStore(VectorDBConfig(json_max_length=49152, json_safety_margin_bytes=512)),
+        ]
+        for current, cap, target in zip(stores, [32768, 49152], [31744, 48640], strict=True):
+            current._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+            chunk = _make_chunk(content="x" * content_length, metadata={"filename": "source.pdf"})
+
+            assert await current.upsert([chunk], vector_field=FIELD) == 1
+
+            entity = current._async_client.insert.call_args.kwargs["data"][0]
+            if content_length > cap:
+                assert self._dynamic_bytes(entity) == target
+            else:
+                assert entity["content"] == "x" * content_length
+                assert self._dynamic_bytes(entity) <= cap
+            assert entity["filename"] == "source.pdf"
+            assert chunk.content == "x" * content_length
+
+    @pytest.mark.asyncio
+    async def test_default_store_budget_reserves_headroom(self, store: MilvusVectorStore) -> None:
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        await store.upsert([_make_chunk(content="x" * 70_000)], vector_field=FIELD)
+
+        entity = store._async_client.insert.call_args.kwargs["data"][0]
+        assert self._dynamic_bytes(entity) == 64_512
+
+    @pytest.mark.parametrize(
+        ("initial_size", "expected_size"),
+        [(239, 239), (240, 240), (241, 241), (255, 255), (256, 256), (257, 240), (300, 240)],
+    )
+    def test_json_budget_only_adds_headroom_when_truncating(self, initial_size: int, expected_size: int) -> None:
+        # The content key, quotes and braces use 14 bytes in compact JSON.
+        original = "x" * (initial_size - 14)
+        entity = {"content": original}
+
+        milvus_store_module._fit_milvus_row_limits(
+            entity, static_fields=set(), json_max_length=256, json_safety_margin_bytes=16
+        )
+
+        assert len(convert_to_json(entity)) == expected_size
+        if initial_size <= 256:
+            assert entity["content"] == original
+
+    def test_protected_metadata_must_fit_the_truncation_target(self) -> None:
+        # Empty content plus the protected filename occupy 250 bytes: below
+        # the 256-byte cap, but above the 240-byte fitting target.
+        entity = {"filename": "f" * 222, "content": "x" * 100}
+        original = deepcopy(entity)
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata") as exc_info:
+            milvus_store_module._fit_milvus_row_limits(
+                entity, static_fields=set(), json_max_length=256, json_safety_margin_bytes=16
+            )
+
+        assert entity == original
+        assert exc_info.value.extra["limit"] == 256
+        assert exc_info.value.extra["target_bytes"] == 240
+        assert exc_info.value.extra["minimum_bytes"] == 250
+
     def test_dynamic_size_matches_pymilvus_numpy_serialization(self) -> None:
         payload = {"values": np.arange(100_000)}
         assert milvus_store_module._json_bytes(payload) == len(convert_to_json(payload))
@@ -888,22 +952,25 @@ class TestChunkToEntity:
 
     @pytest.mark.parametrize("depth", [0, 254, 300])
     @pytest.mark.parametrize("character", ["é", "🙂", '"', "\u0001"])
-    def test_fitting_preserves_longest_prefix_for_serializer_encoding(self, depth: int, character: str) -> None:
+    @pytest.mark.parametrize(("cap", "margin", "target"), [(65536, 1024, 64512), (32768, 512, 32256)])
+    def test_fitting_preserves_longest_prefix_for_serializer_encoding(
+        self, depth: int, character: str, cap: int, margin: int, target: int
+    ) -> None:
         nested: Any = 0
         for _ in range(depth):
             nested = {"child": nested}
         body = character * 40_000
         entity = {"payload": nested, "content": body}
 
-        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+        milvus_store_module._fit_milvus_row_limits(
+            entity, static_fields=set(), json_max_length=cap, json_safety_margin_bytes=margin
+        )
 
         assert entity["content"]
         assert body.startswith(entity["content"])
         assert len(entity["content"]) < len(body)
-        assert len(convert_to_json(entity)) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
-        assert len(convert_to_json({**entity, "content": entity["content"] + character})) > (
-            milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
-        )
+        assert len(convert_to_json(entity)) <= target
+        assert len(convert_to_json({**entity, "content": entity["content"] + character})) > target
 
     def test_numpy_metadata_is_counted_when_content_is_truncated(self) -> None:
         body = "x" * 70_000

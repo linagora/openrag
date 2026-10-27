@@ -84,9 +84,10 @@ logger = get_logger()
 #: Milvus VARCHAR upper bound used for ``text`` / ``partition`` / ``file_id``.
 MAX_LENGTH = 65_535
 
-#: Milvus stores every dynamic key of a row in one JSON value capped at this
-#: many bytes; a row over it fails the whole insert (``VDB_INSERT_ERROR``).
+#: Default cap matching Milvus's common.JSONMaxLength. A deployment can
+#: override it through VectorDBConfig to match its server configuration.
 MAX_DYNAMIC_FIELD_BYTES = 65_536
+DEFAULT_JSON_SAFETY_MARGIN_BYTES = 1_024
 
 #: Dynamic keys shortened first when a row is over that cap: ``content``
 #: repeats the chunk body ``text`` already holds, ``context`` is a summary.
@@ -345,18 +346,26 @@ def _truncate_utf8(value: str, max_bytes: int) -> str:
     return value.encode("utf-8")[: max(max_bytes, 0)].decode("utf-8", errors="ignore")
 
 
-def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -> None:
+def _fit_milvus_row_limits(
+    entity: dict[str, Any],
+    *,
+    static_fields: set[str],
+    json_max_length: int = MAX_DYNAMIC_FIELD_BYTES,
+    json_safety_margin_bytes: int = DEFAULT_JSON_SAFETY_MARGIN_BYTES,
+) -> None:
     """Shorten *entity* in place so Milvus accepts it, instead of failing the insert.
 
     Two per-row limits are counted in bytes: the ``text`` VARCHAR
-    (:data:`MAX_LENGTH`) and the JSON that holds every dynamic key
-    (:data:`MAX_DYNAMIC_FIELD_BYTES`). A degenerate model output — a caption
+    (:data:`MAX_LENGTH`) and the configured JSON limit for dynamic metadata.
+    Rows already within that limit are left alone; oversized rows must fit
+    below it by the configured safety margin. A degenerate output — a caption
     padded with whitespace up to its token budget, say — can exceed either, and
     one such chunk used to fail its whole file. ``content`` and ``context`` are
     shortened first, then the longest remaining strings at any nesting depth;
     each cut is logged. If protected or non-string metadata alone still
     exceeds the limit, fail before sending the row to Milvus.
     """
+    fit_target_bytes = json_max_length - json_safety_margin_bytes
     file_id = entity.get("file_id")
     text = entity.get("text")
     if isinstance(text, str) and len(text.encode("utf-8")) > MAX_LENGTH:
@@ -378,7 +387,7 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
             f"Failed to serialize dynamic metadata for chunk {file_id!r}.",
             file_id=file_id,
         ) from exc
-    if len(serialized_dynamic) <= MAX_DYNAMIC_FIELD_BYTES:
+    if len(serialized_dynamic) <= json_max_length:
         return
 
     # Work on the same JSON-shaped values PyMilvus will store. This also
@@ -408,15 +417,17 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
 
     def fail_oversized_metadata(actual_bytes: int) -> None:
         raise VDBInsertError(
-            f"Dynamic metadata for chunk {file_id!r} cannot fit Milvus's {MAX_DYNAMIC_FIELD_BYTES}-byte limit "
+            f"Dynamic metadata for chunk {file_id!r} cannot fit the {fit_target_bytes}-byte truncation target "
+            f"below Milvus's {json_max_length}-byte limit "
             f"(current size: {actual_bytes}; size after removing reducible strings: {minimum_bytes} bytes).",
             file_id=file_id,
             dynamic_bytes=actual_bytes,
             minimum_bytes=minimum_bytes,
-            limit=MAX_DYNAMIC_FIELD_BYTES,
+            limit=json_max_length,
+            target_bytes=fit_target_bytes,
         )
 
-    if minimum_bytes > MAX_DYNAMIC_FIELD_BYTES:
+    if minimum_bytes > fit_target_bytes:
         fail_oversized_metadata(len(serialized_dynamic))
 
     # Emptying string values preserves container depth and therefore PyMilvus's
@@ -464,7 +475,7 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
     actual_bytes = len(serialized_dynamic)
     truncated_fields = 0
     for path, original in (*shrink_first, *remaining_strings):
-        over = actual_bytes - MAX_DYNAMIC_FIELD_BYTES
+        over = actual_bytes - fit_target_bytes
         if over <= 0:
             break
         if not original:
@@ -479,7 +490,7 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
         if value != original:
             truncated_fields += 1
 
-    if actual_bytes > MAX_DYNAMIC_FIELD_BYTES:
+    if actual_bytes > fit_target_bytes:
         fail_oversized_metadata(actual_bytes)
     if truncated_fields:
         logger.bind(
@@ -487,7 +498,8 @@ def _fit_milvus_row_limits(entity: dict[str, Any], *, static_fields: set[str]) -
             fields_truncated=truncated_fields,
             dynamic_bytes_before=len(serialized_dynamic),
             dynamic_bytes_after=actual_bytes,
-            limit=MAX_DYNAMIC_FIELD_BYTES,
+            limit=json_max_length,
+            target_bytes=fit_target_bytes,
         ).warning("Chunk metadata over the Milvus limit; strings truncated.")
 
 
@@ -1249,6 +1261,8 @@ class MilvusVectorStore(VectorStore):
         indexed_at: str,
         order: dict[str, int | None],
         vector_field: str,
+        json_max_length: int = MAX_DYNAMIC_FIELD_BYTES,
+        json_safety_margin_bytes: int = DEFAULT_JSON_SAFETY_MARGIN_BYTES,
     ) -> dict[str, Any]:
         """Build the Milvus insert payload for one chunk.
 
@@ -1282,7 +1296,10 @@ class MilvusVectorStore(VectorStore):
             if value is not None:
                 entity[field] = value
         _fit_milvus_row_limits(
-            entity, static_fields={"text", "partition", "file_id", vector_field, *INDEXED_TIME_FIELDS}
+            entity,
+            static_fields={"text", "partition", "file_id", vector_field, *INDEXED_TIME_FIELDS},
+            json_max_length=json_max_length,
+            json_safety_margin_bytes=json_safety_margin_bytes,
         )
         return entity
 
@@ -1324,7 +1341,14 @@ class MilvusVectorStore(VectorStore):
         order_metadata = self._gen_chunk_order_metadata(len(chunks))
         field = resolve_vector_field(vector_field)
         entities = [
-            self._chunk_to_entity(c, indexed_at=indexed_at, order=o, vector_field=field)
+            self._chunk_to_entity(
+                c,
+                indexed_at=indexed_at,
+                order=o,
+                vector_field=field,
+                json_max_length=self._config.json_max_length,
+                json_safety_margin_bytes=self._config.json_safety_margin_bytes,
+            )
             for c, o in zip(chunks, order_metadata, strict=True)
         ]
 
