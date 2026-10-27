@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from unittest.mock import AsyncMock
 
@@ -24,6 +25,7 @@ from services.inference.vllm_client import (
     VLLMVision,
     _find_suspect_escapes,
     _log_safe_error_detail,
+    downscale_image,
 )
 
 
@@ -1164,6 +1166,54 @@ class TestVLLMVision:
 
         result = await self._make_vision(handler).caption_image(b"\x89PNG\r\n\x1a\n", prompt="What is this?")
         assert result == "A red car"
+
+    @staticmethod
+    def _png(width: int, height: int) -> bytes:
+        from io import BytesIO
+
+        from PIL import Image
+
+        out = BytesIO()
+        Image.new("RGB", (width, height), "white").save(out, format="PNG")
+        return out.getvalue()
+
+    @staticmethod
+    def _sent_size(request: httpx.Request) -> tuple[int, int]:
+        from io import BytesIO
+
+        from PIL import Image
+
+        url = json.loads(request.content)["messages"][0]["content"][0]["image_url"]["url"]
+        with Image.open(BytesIO(base64.b64decode(url.split(",", 1)[1]))) as image:
+            return image.size
+
+    @pytest.mark.asyncio
+    async def test_caption_image_downscales_to_max_image_side(self):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["size"] = self._sent_size(request)
+            assert "max_image_side" not in json.loads(request.content)
+            return _chat_response("ok")
+
+        await self._make_vision(handler, max_image_side=1024).caption_image(self._png(2000, 1000))
+        assert seen["size"] == (1024, 512)
+
+    @pytest.mark.asyncio
+    async def test_caption_image_keeps_the_image_without_max_image_side(self):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["size"] = self._sent_size(request)
+            return _chat_response("ok")
+
+        await self._make_vision(handler).caption_image(self._png(2000, 1000))
+        assert seen["size"] == (2000, 1000)
+
+    def test_downscale_leaves_small_and_unreadable_images_unchanged(self):
+        small = self._png(800, 600)
+        assert downscale_image(small, 1024) is small
+        assert downscale_image(b"not an image", 1024) == b"not an image"
 
     @pytest.mark.asyncio
     async def test_caption_image_default_prompt(self):
