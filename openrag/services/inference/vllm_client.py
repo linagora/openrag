@@ -892,16 +892,20 @@ def downscale_image(image_bytes: bytes, max_side: int) -> bytes:
     """
     from io import BytesIO
 
-    from core.indexing.image_preprocessor import pil_to_png_bytes
+    from core.indexing.image_preprocessor import UPLOADED_IMAGE_FORMATS, pil_to_png_bytes
     from PIL import Image, ImageOps, UnidentifiedImageError
 
     try:
-        with Image.open(BytesIO(image_bytes)) as image:
+        # Only the formats the image parsers accept: resizing must not decode
+        # formats (TIFF among them) that are deliberately left out elsewhere.
+        # Any other image is sent as it is.
+        with Image.open(BytesIO(image_bytes), formats=UPLOADED_IMAGE_FORMATS) as image:
             if max(image.size) <= max_side:
                 return image_bytes
             # The PNG carries no EXIF, so apply the orientation to the pixels
-            # or a rotated photo reaches the model sideways.
-            image = ImageOps.exif_transpose(image)
+            # or a rotated photo reaches the model sideways. In place, so an
+            # unrotated image is not copied at full size.
+            ImageOps.exif_transpose(image, in_place=True)
             # reducing_gap=None keeps thumbnail() from calling draft(), whose
             # scaled JPEG decode overflows the heap on lossless JPEGs in
             # Pillow <= 12.3.0 (GHSA-8g5g-8vmr-9782). marker-pdf keeps Pillow
@@ -937,12 +941,16 @@ class VLLMVision(VLLMClient, VLM):
         self._max_tokens = max_tokens
         # Taken out of **kwargs on purpose: anything left there is sent to the
         # provider as a sampling field, and a strict server rejects unknown ones.
-        # Coerced here because endpoint ``extra`` values are not type-checked: a
-        # string would fail every caption instead of the endpoint's creation.
+        # Checked here as well as on the admin API, which config and env
+        # sources bypass. A digit string is accepted for them; ``True`` and
+        # fractional values are not silently turned into a size.
         if max_image_side is not None:
+            is_digits = isinstance(max_image_side, str) and max_image_side.strip().isdigit()
+            if isinstance(max_image_side, bool) or not (isinstance(max_image_side, int) or is_digits):
+                raise ValueError(f"max_image_side must be a positive integer, got {max_image_side!r}")
             max_image_side = int(max_image_side)
             if max_image_side <= 0:
-                raise ValueError(f"max_image_side must be a positive number of pixels, got {max_image_side}")
+                raise ValueError(f"max_image_side must be a positive integer, got {max_image_side}")
         self._max_image_side = max_image_side
 
     @with_inference_metrics("vlm")

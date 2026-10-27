@@ -1251,10 +1251,19 @@ class TestVLLMVision:
         with Image.open(BytesIO(downscale_image(jpeg.getvalue(), 1024))) as image:
             assert image.size == (512, 1024)
 
+    def test_downscale_leaves_formats_the_parsers_refuse_undecoded(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        tiff = BytesIO()
+        Image.new("RGB", (2000, 1000)).save(tiff, format="TIFF")
+        assert downscale_image(tiff.getvalue(), 1024) == tiff.getvalue()
+
     def test_max_image_side_is_coerced_to_int(self):
         assert self._make_vision(lambda request: None, max_image_side="1024")._max_image_side == 1024
 
-    @pytest.mark.parametrize("value", [0, -5, "abc"])
+    @pytest.mark.parametrize("value", [0, -5, "abc", True, 1024.5, "1024.5"])
     def test_max_image_side_rejects_invalid_values(self, value):
         with pytest.raises(ValueError):
             self._make_vision(lambda request: None, max_image_side=value)
