@@ -19,7 +19,7 @@ _MAX_SAMPLE_CHUNKS = 12
 
 
 class TopicTagSample:
-    """Retain only bounded text from the first chunks, without their vectors."""
+    """Retain bounded text and optional content from the first chunks, without vectors."""
 
     def __init__(self) -> None:
         self.chunks: list[Chunk] = []
