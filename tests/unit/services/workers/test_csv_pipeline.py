@@ -16,6 +16,7 @@ from core.models.document import Document, DocumentType
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
 from services.workers.pipeline_builder import IndexingPipeline, PipelineTimeouts
+from services.workers.stages import _common as common_module
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
 
@@ -60,7 +61,7 @@ class FakeStore:
     async def ensure_collection(self, *args, **kwargs):
         pass
 
-    async def upsert(self, chunks, *, indexed_at, vector_field=None):
+    async def upsert(self, chunks, *, indexed_at, vector_field=None, protected_metadata=None):
         self.events.append("store")
         # Only tests retain chunks so we can inspect them after the run.
         self.calls.append((list(chunks), indexed_at))
@@ -152,6 +153,33 @@ async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
 
     assert row["batch_count"] == 3
     assert resolved == ["default"]
+
+
+async def test_csv_detects_language_once_after_all_batches(setup_pipeline, monkeypatch):
+    pipeline, row, _ = setup_pipeline
+    detected_samples = []
+
+    def detect_language(text, *, min_confidence=0.0):
+        detected_samples.append(text)
+        return "fr"
+
+    monkeypatch.setattr(common_module, "detect_language", detect_language)
+
+    async def tag_after_storing(messages):
+        assert len(pipeline.vector_store.calls) == 3
+        return '["Customers"]'
+
+    llm = SimpleNamespace(chat=AsyncMock(side_effect=tag_after_storing))
+    pipeline = replace(pipeline, topic_tagger=TopicTagger(llm, "topic prompt"))
+    row.update(filename="people.csv", indexation_config={"enable_topic_tagging": True})
+
+    await pipeline.run(row)
+
+    assert len(detected_samples) == 1
+    assert "Alice" in detected_samples[0] and "Eve" in detected_samples[0]
+    assert "Source" not in detected_samples[0]
+    assert row["language"] == "fr"
+    llm.chat.assert_awaited_once()
 
 
 async def test_csv_batches_do_not_overwrite_a_markdown_sidecar(setup_pipeline, tmp_path):
