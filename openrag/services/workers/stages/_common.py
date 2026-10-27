@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
 from core.chunking.markdown_utils import PAGE_RE
+from core.models.chunk import ChunkType
 from services.inference.runtime import detect_language
 
 _CREDENTIAL_KEYS = frozenset({"credentials", "credential", "api_key", "token", "secret", "password"})
@@ -27,6 +29,11 @@ _IMAGE_PLACEHOLDER = re.compile(r"\[Image Placeholder\]", re.IGNORECASE)
 # Image references left in the text when captioning is off, e.g. ``![](docling_img_3)``.
 _IMAGE_REF = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
+# A sample left with fewer distinct words than this, once captions are out
+# (page numbers, "Fig. 3", dashes), says nothing about the language: the
+# detector still answers on it, confidently and wrongly.
+_LANGUAGE_WORD = re.compile(r"[^\W\d_]{2,}")
+_LANGUAGE_MIN_WORDS = 3
 
 
 def resolve_language(row: MutableMapping[str, Any]) -> str:
@@ -43,8 +50,12 @@ def resolve_language(row: MutableMapping[str, Any]) -> str:
     if explicit:
         return str(explicit)
     chunks = row.get("chunks") or []
-    sample = _language_sample(chunks, captions=False) or _language_sample(chunks, captions=True)
-    language = detect_language(sample, min_confidence=_LANGUAGE_MIN_CONFIDENCE)
+    text = _language_sample(chunks, captions=False)
+    language = None
+    if len({word.lower() for word in _LANGUAGE_WORD.findall(text)}) >= _LANGUAGE_MIN_WORDS:
+        language = detect_language(text, min_confidence=_LANGUAGE_MIN_CONFIDENCE)
+    if language is None:
+        language = detect_language(_language_sample(chunks, captions=True), min_confidence=_LANGUAGE_MIN_CONFIDENCE)
     row["language"] = language or DEFAULT_LANGUAGE
     return row["language"]
 
@@ -63,8 +74,15 @@ def _language_sample(chunks: list[Any], *, captions: bool) -> str:
         # ``content`` is the chunk without the ``[Source | Page | Section]``
         # header structured_section writes in English in front of every chunk.
         content = getattr(chunk, "content", None)
-        text = str(content if content is not None else getattr(chunk, "text", "") or "")
+        # CSV cells reach the chunk HTML-escaped (``&amp;``, ``&#124;``).
+        text = html.unescape(str(content if content is not None else getattr(chunk, "text", "") or ""))
         if not captions:
+            # A caption too long for one chunk is split into pieces that keep
+            # the caption type; a middle piece carries neither marker. A caption
+            # chunk can also hold short prose after the caption, so only an
+            # unmarked one is dropped whole.
+            if getattr(chunk, "chunk_type", None) is ChunkType.IMAGE_CAPTION and "image_description>" not in text:
+                continue
             text = _IMAGE_DESCRIPTION_TAIL.sub(" ", _IMAGE_DESCRIPTION.sub(" ", text))
         for pattern in (_HTML_TAG, _IMAGE_PLACEHOLDER, _IMAGE_REF, PAGE_RE):
             text = pattern.sub(" ", text)

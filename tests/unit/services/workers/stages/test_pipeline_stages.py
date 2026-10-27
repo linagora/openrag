@@ -6,7 +6,7 @@ import pytest
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
-from core.models.chunk import Chunk
+from core.models.chunk import Chunk, ChunkType
 from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
@@ -656,6 +656,29 @@ def test_resolve_language_leaves_out_a_caption_cut_by_a_chunk_boundary(monkeypat
     assert _detected_sample(monkeypatch, first, second) == "Les dossiers sont instruits. Ils sont payés en mai."
 
 
+def test_resolve_language_leaves_out_the_middle_of_a_caption_split_across_chunks(monkeypatch):
+    pieces = [
+        "<image_description>\n\nA bar chart of the yearly budget,",
+        "broken down by department and by programme,",
+        "with the totals in the last column.\n\n</image_description>",
+    ]
+    captions = [Chunk(id=f"c{i}", text=text, chunk_type=ChunkType.IMAGE_CAPTION) for i, text in enumerate(pieces)]
+    assert _detected_sample(monkeypatch, *captions, "Les dossiers sont instruits.") == "Les dossiers sont instruits."
+
+
+def test_resolve_language_keeps_the_text_after_a_caption_in_a_caption_chunk(monkeypatch):
+    chunk = Chunk(
+        id="c1",
+        text="<image_description>\n\nA bar chart.\n\n</image_description>\n\nSource : les services de la préfecture.",
+        chunk_type=ChunkType.IMAGE_CAPTION,
+    )
+    assert _detected_sample(monkeypatch, chunk) == "Source : les services de la préfecture."
+
+
+def test_resolve_language_decodes_html_entities(monkeypatch):
+    assert _detected_sample(monkeypatch, "| Dupont &amp; fils &#124; Montant |") == "Dupont & fils Montant"
+
+
 def test_resolve_language_ignores_html_tags(monkeypatch):
     text = '<table class="data"><tr><td>Dossiers acceptés</td><td>vingt</td></tr></table><br/>'
     assert _detected_sample(monkeypatch, text) == "Dossiers acceptés vingt"
@@ -684,6 +707,19 @@ def test_resolve_language_samples_the_text_after_the_opening_figures(monkeypatch
 def test_resolve_language_samples_the_captions_when_the_text_is_only_images(monkeypatch):
     text = "<image_description>\n\nUn schéma du circuit de validation.\n\n</image_description>"
     assert _detected_sample(monkeypatch, text) == "Un schéma du circuit de validation."
+
+
+def test_resolve_language_samples_the_captions_when_the_text_is_unclassified(monkeypatch):
+    samples: list[str] = []
+
+    def fake_detect(sample, *, min_confidence=0.0):
+        samples.append(sample)
+        return "fr" if "schéma" in sample else None
+
+    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    text = "<image_description>\n\nUn schéma du circuit.\n\n</image_description>\n\nAnnexe technique jointe."
+    assert resolve_language({"chunks": [Chunk(id="c1", text=text)]}) == "fr"
+    assert samples == ["Annexe technique jointe.", "Un schéma du circuit. Annexe technique jointe."]
 
 
 def test_resolve_language_sample_is_capped(monkeypatch):
@@ -725,4 +761,14 @@ def test_resolve_language_detects_french_after_opening_figures(bundled_lang_dete
         "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés.",
     )
     assert [chunk.chunk_type.value for chunk in chunks[:5]] == ["image_caption"] * 5
+    assert resolve_language({"chunks": chunks}) == "fr"
+
+
+@pytest.mark.parametrize("label", ["1 / {}", "— {} —", "Figure {}", "Fig. {}"])
+def test_resolve_language_samples_the_captions_when_the_text_is_only_labels(bundled_lang_detector, label):
+    caption = wrap_caption(
+        "Le graphique montre l'évolution des ventes annuelles dans les différentes régions, "
+        "avec une forte hausse en Bretagne."
+    )
+    chunks = [Chunk(id=f"c{page}", text=f"{caption}\n\n{label.format(page)}") for page in range(1, 7)]
     assert resolve_language({"chunks": chunks}) == "fr"
