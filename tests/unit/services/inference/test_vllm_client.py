@@ -10,6 +10,7 @@ import tenacity
 from core.utils.exceptions import (
     EmbeddingAPIError,
     EmbeddingResponseError,
+    EmbeddingTimeoutError,
     InferenceConnectionError,
     InferenceError,
     InferenceTimeoutError,
@@ -1569,3 +1570,78 @@ def test_a_content_delta_without_usage_is_not_parsed(monkeypatch):
     monkeypatch.setattr(vllm_client, "record_usage_from_response", lambda payload, operation: seen.append(payload))
     vllm_client._record_stream_usage('data:{"choices":[{"delta":{"content":"hi"}}]}')
     assert seen == []
+
+
+class TestQueryBudget:
+    """Search embeds on ``query_timeout`` with one retry; indexing keeps ``timeout``
+    with two. On the indexing budget an embedder that stopped answering held a chat
+    for minutes (#1078)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self):
+        restore = []
+        for method in (VLLMEmbedder._embed_batch, VLLMEmbedder._embed_query_batch):
+            restore.append((method.retry, method.retry.wait))
+            method.retry.wait = tenacity.wait_none()
+        yield
+        for retrying, wait in restore:
+            retrying.wait = wait
+
+    def _timing_out(self, **kwargs):
+        calls: list[dict] = []
+
+        async def post(*args, **post_kwargs):
+            calls.append(post_kwargs)
+            raise httpx.TimeoutException("timed out")
+
+        embedder = VLLMEmbedder(endpoint="http://vllm:8000/v1", model_name="bge-m3", timeout=120.0, **kwargs)
+        embedder._client = AsyncMock()
+        embedder._client.post = post
+        return embedder, calls
+
+    @pytest.mark.asyncio
+    async def test_a_query_is_sent_with_the_query_timeout_and_retried_once(self):
+        embedder, calls = self._timing_out(query_timeout=7.0)
+
+        with pytest.raises(EmbeddingTimeoutError):
+            await embedder.embed_query(["what is the leave policy?"])
+
+        assert [call.get("timeout") for call in calls] == [7.0, 7.0]
+
+    @pytest.mark.asyncio
+    async def test_indexing_keeps_the_client_timeout_and_two_retries(self):
+        embedder, calls = self._timing_out(query_timeout=7.0)
+
+        with pytest.raises(EmbeddingTimeoutError):
+            await embedder.embed(["a chunk"])
+
+        assert len(calls) == 3
+        assert all("timeout" not in call for call in calls)
+
+    @pytest.mark.asyncio
+    async def test_a_query_returns_vectors_in_input_order(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert json.loads(request.content)["input"] == ["q1", "q2"]
+            return httpx.Response(
+                200, json={"data": [{"index": 1, "embedding": [0.2]}, {"index": 0, "embedding": [0.1]}]}
+            )
+
+        embedder = VLLMEmbedder(endpoint="http://vllm:8000/v1", model_name="bge-m3")
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        assert await embedder.embed_query(["q1", "q2"]) == [[0.1], [0.2]]
+
+    @pytest.mark.asyncio
+    async def test_more_queries_than_one_batch_take_the_indexing_path(self):
+        sizes: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            texts = json.loads(request.content)["input"]
+            sizes.append(len(texts))
+            return _embed_response([[0.0]] * len(texts))
+
+        embedder = VLLMEmbedder(endpoint="http://vllm:8000/v1", model_name="bge-m3", batch_size=2)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        assert len(await embedder.embed_query(["a", "b", "c"])) == 3
+        assert sorted(sizes) == [1, 2]
