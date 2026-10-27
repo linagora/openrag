@@ -16,7 +16,14 @@ from core.models.document import Document, DocumentType
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
 from services.workers.pipeline_builder import IndexingPipeline, PipelineTimeouts
+from services.workers.stages import _common as common_module
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+
+@pytest.fixture(autouse=True)
+def _stub_language_detector(monkeypatch):
+    """Keep these tests off the real language detector and its model download."""
+    monkeypatch.setattr(common_module, "detect_language", lambda _text, **_kwargs: "en")
 
 
 class RecordingParser(CsvParser):
