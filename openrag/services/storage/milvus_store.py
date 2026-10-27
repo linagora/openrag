@@ -342,34 +342,30 @@ def _has_cyclic_json_reference(value: Any) -> bool:
     return False
 
 
+def _metadata_values_match(actual: Any, expected: Any) -> bool:
+    if actual is expected:
+        return True
+    # Cycles are reported by the row fitter itself; don't ask PyMilvus's
+    # serializer to compare them while deciding which values to protect.
+    if _has_cyclic_json_reference([actual, expected]):
+        return False
+    try:
+        actual_json = json.loads(convert_to_json({"value": actual}))
+        expected_json = json.loads(convert_to_json({"value": expected}))
+        return json.dumps(actual_json, sort_keys=True, separators=(",", ":")) == json.dumps(
+            expected_json, sort_keys=True, separators=(",", ":")
+        )
+    except (MilvusException, TypeError, ValueError, RecursionError):
+        return False
+
+
 def _matching_metadata_keys(entity: dict[str, Any], metadata: Mapping[str, Any] | None) -> frozenset[str]:
     """Return catalog keys whose serialized values match the current row."""
     if not metadata:
         return frozenset()
-
-    matching = set()
-    for key, expected in metadata.items():
-        if key not in entity:
-            continue
-        actual = entity[key]
-        if actual is expected:
-            matching.add(key)
-            continue
-        # Cycles are reported by the row fitter itself; don't ask PyMilvus's
-        # serializer to compare them while deciding which values to protect.
-        if _has_cyclic_json_reference([actual, expected]):
-            continue
-        try:
-            actual_json = json.loads(convert_to_json({"value": actual}))
-            expected_json = json.loads(convert_to_json({"value": expected}))
-            values_match = json.dumps(actual_json, sort_keys=True, separators=(",", ":")) == json.dumps(
-                expected_json, sort_keys=True, separators=(",", ":")
-            )
-        except (MilvusException, TypeError, ValueError, RecursionError):
-            continue
-        if values_match:
-            matching.add(key)
-    return frozenset(matching)
+    return frozenset(
+        key for key, expected in metadata.items() if key in entity and _metadata_values_match(entity[key], expected)
+    )
 
 
 def _truncate_utf8(value: str, max_bytes: int) -> str:
@@ -397,12 +393,16 @@ def _fit_milvus_row_limits(
     each cut is logged. If protected or non-string metadata alone still
     exceeds the limit, fail before sending the row to Milvus.
     """
-    protected_keys = PROTECTED_DYNAMIC_KEYS | _matching_metadata_keys(entity, protected_metadata)
     fit_target_bytes = json_max_length - json_safety_margin_bytes
     file_id = entity.get("file_id")
     text = entity.get("text")
     if isinstance(text, str) and len(text.encode("utf-8")) > MAX_LENGTH:
-        if "text" in protected_keys:
+        text_is_protected = "text" in PROTECTED_DYNAMIC_KEYS or (
+            protected_metadata is not None
+            and "text" in protected_metadata
+            and _metadata_values_match(text, protected_metadata["text"])
+        )
+        if text_is_protected:
             raise VDBInsertError(
                 f"Protected metadata field 'text' for chunk {file_id!r} exceeds Milvus's {MAX_LENGTH}-byte limit.",
                 file_id=file_id,
@@ -430,6 +430,8 @@ def _fit_milvus_row_limits(
         ) from exc
     if len(serialized_dynamic) <= json_max_length:
         return
+
+    protected_keys = PROTECTED_DYNAMIC_KEYS | _matching_metadata_keys(entity, protected_metadata)
 
     # Work on the same JSON-shaped values PyMilvus will store. This also
     # exposes strings nested in tuples and NumPy arrays to the truncator

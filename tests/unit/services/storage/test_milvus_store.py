@@ -1377,6 +1377,29 @@ class TestRawEntitySizing:
 
         store._async_client.upsert.assert_not_awaited()
 
+    def test_fitting_rows_skip_metadata_matching_when_no_truncation_is_needed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "title": "catalog title",
+        }
+
+        def fail_if_matched(*_args):
+            pytest.fail("metadata matching is unnecessary for rows within the JSON limit")
+
+        monkeypatch.setattr(milvus_store_module, "_matching_metadata_keys", fail_if_matched)
+        milvus_store_module._fit_milvus_row_limits(
+            entity,
+            static_fields={"text", "partition", "file_id", "vector_bge_m3"},
+            protected_metadata={"title": "catalog title"},
+        )
+
+        assert entity["title"] == "catalog title"
+
     async def test_raw_entity_writes_shrink_chunk_content_when_catalog_value_differs(
         self, store: MilvusVectorStore
     ) -> None:
