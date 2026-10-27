@@ -919,6 +919,16 @@ def test_resolve_language_samples_the_first_and_last_chunks(monkeypatch, count):
     assert sample.endswith("Conclusion.")
 
 
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_resolve_language_sample_uses_the_budget_on_a_file_of_few_chunks(monkeypatch, count):
+    assert len(_detected_sample(monkeypatch, *["Les dossiers sont instruits en mars. " * 50] * count)) == 1000
+
+
+def test_resolve_language_sample_reads_on_where_a_short_chunk_leaves_room(monkeypatch):
+    long = "Les dossiers sont instruits en mars. " * 20 + "Conclusion du rapport. " * 10
+    assert "Conclusion" in _detected_sample(monkeypatch, "Rapport", long)
+
+
 @pytest.fixture
 def bundled_lang_detector(monkeypatch):
     from fast_langdetect import LangDetectConfig, LangDetector
