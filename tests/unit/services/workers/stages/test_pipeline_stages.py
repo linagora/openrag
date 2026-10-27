@@ -900,6 +900,16 @@ def test_resolve_language_samples_chunks_spread_through_the_file(monkeypatch):
     assert "Chapitre" in sample
 
 
+def test_resolve_language_keeps_the_spread_when_a_spread_chunk_is_short(monkeypatch):
+    # The short title leaves room in the budget; filling it with the whole
+    # abstract that follows used to push every later spread slice out.
+    body = ["Les dossiers sont instruits en mars. " * 10] * 13
+    ending = ["Conclusion : les dossiers sont clos. " * 10] * 5
+    sample = _detected_sample(monkeypatch, "Rapport", "Abstract " * 120, *body, *ending)
+    assert sample.count("Abstract") < 30
+    assert "Conclusion" in sample
+
+
 @pytest.fixture
 def bundled_lang_detector(monkeypatch):
     from fast_langdetect import LangDetectConfig, LangDetector
@@ -938,13 +948,15 @@ def test_resolve_language_detects_french_after_opening_figures(bundled_lang_dete
     assert resolve_language({"chunks": chunks}) == "fr"
 
 
-def test_resolve_language_detects_french_after_an_english_abstract(bundled_lang_detector):
+@pytest.mark.parametrize("opening", [[], ["Rapport d'activité 2025"]], ids=["abstract-first", "title-first"])
+def test_resolve_language_detects_french_after_an_english_abstract(bundled_lang_detector, opening):
     abstract = (
         "This report reviews how regional budgets were allocated in 2025 and what the audit found. "
         "It summarises the main findings and the recommendations made to each department. "
     ) * 6
     body = "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés. " * 6
-    chunks = [Chunk(id="c0", text=abstract)] + [Chunk(id=f"c{i}", text=body) for i in range(1, 10)]
+    texts = [*opening, abstract] + [body] * 9
+    chunks = [Chunk(id=f"c{i}", text=text) for i, text in enumerate(texts)]
     assert resolve_language({"chunks": chunks}) == "fr"
 
 

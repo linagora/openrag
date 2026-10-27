@@ -87,14 +87,17 @@ def _language_sample(chunks: list[Any], *, captions: bool) -> str:
     picked: dict[int, str] = {}
     size = 0
     for rank, index in enumerate(order):
+        if size >= _LANGUAGE_SAMPLE_CHARS:
+            break
         text = _language_text(chunks[index], captions=captions)
         if not text:
             continue
         # One share per spread chunk, so the first ones leave room for the rest.
-        picked[index] = text[:share] if rank < len(spread) else text
+        # A chunk filling the budget gets only what is left of it: the sample is
+        # joined in file order and then cut, so a whole one near the start would
+        # push the spread slices after it out of the sample.
+        picked[index] = text[:share] if rank < len(spread) else text[: _LANGUAGE_SAMPLE_CHARS - size]
         size += len(picked[index]) + 1
-        if size > _LANGUAGE_SAMPLE_CHARS:
-            break
     return " ".join(picked[index] for index in sorted(picked))[:_LANGUAGE_SAMPLE_CHARS]
 
 
