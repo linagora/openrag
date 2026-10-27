@@ -18,9 +18,10 @@ from typing import Any
 
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.chunking.markdown_utils import (
+    PAGE_RE,
     MDElement,
     chunk_table,
-    get_chunk_page_number,
+    get_page_number,
     split_md_elements,
 )
 from core.chunking.registry import chunking_registry
@@ -85,6 +86,10 @@ def strip_placeholder_markers(content: str) -> str:
 # Tables/images smaller than this token count are inlined with surrounding
 # text rather than emitted as standalone chunks.
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
+
+# [PAGE_N] markers (and the whitespace around them) a chunk opens with: its
+# page is the one its first word sits on, after them.
+_LEADING_PAGE_MARKERS_RE = re.compile(r"(?:\s*\[PAGE_\d+\])*\s*")
 
 # A line that begins a markdown block (heading, list item, blockquote, table
 # row, code fence, horizontal rule, or a synthetic [PAGE_N] marker). Such lines
@@ -354,15 +359,30 @@ class BaseChunker(ChunkingStrategy):
                     }
                 )
 
-        prev_page = 1
+        # A chunk is on the page of its first word, read from where it starts
+        # in `sanitized` (#1204). Carrying the previous chunk's end page put a
+        # chunk that follows a trailing [PAGE_N] one page too low, and one that
+        # overlap starts before that marker one page too high.
+        page_markers = [(match.start(), int(match.group(1))) for match in PAGE_RE.finditer(sanitized)]
+        previous_start = -1
+        previous_end = 0
         for c in text_chunks:
-            page_info = get_chunk_page_number(chunk_str=c, previous_chunk_ending_page=prev_page)
-            prev_page = page_info["end_page"]
+            # The splitter returns substrings of `sanitized` in order, each
+            # starting after the previous one and, overlap or not, ending past
+            # it. Requiring both keeps repeated text from matching inside the
+            # previous chunk, where it would read that chunk's page.
+            search_from = max(previous_start + 1, previous_end - len(c) + 1)
+            start = sanitized.find(c, search_from)
+            if start < 0:
+                start = search_from
+            previous_start = start
+            previous_end = start + len(c)
+            first_word = start + _LEADING_PAGE_MARKERS_RE.match(c).end()
             chunks.append(
                 {
                     **metadata,
                     "page_content": c.strip(),
-                    "page": page_info["start_page"],
+                    "page": get_page_number(first_word, page_markers),
                     "chunk_type": "text",
                 }
             )

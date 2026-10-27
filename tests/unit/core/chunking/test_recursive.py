@@ -251,6 +251,78 @@ def test_recursive_splitter_skips_pages_get_correct_marker():
     assert 5 in pages, f"page 5 missing despite second block on page 5: {pages}"
 
 
+def _page_paragraphs(page: int, *lengths: int) -> str:
+    """Paragraphs made of the word ``p<page>``, so a chunk's text names its page."""
+    return "\n\n".join(" ".join([f"p{page}"] * length) + "." for length in lengths)
+
+
+def test_text_after_a_trailing_page_marker_is_on_the_next_page():
+    """#1204: the splitter ends the first chunk on the [PAGE_1] marker. The
+    next chunk took that chunk's end page, 1, though its text is on page 2."""
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=_page_paragraphs(page, 31), page_number=page) for page in (1, 2, 3)],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert chunks[0].text.endswith("[PAGE_1]")
+    assert [c.page_number for c in chunks] == [1, 2, 3]
+
+
+def test_overlap_keeps_a_chunk_on_the_page_it_starts_on():
+    """#1204: overlap starts the second chunk with page 1's last paragraph,
+    from before the [PAGE_1] marker. It took the page after that marker, 2."""
+    splitter = RecursiveSplitter(chunk_size=12, chunk_overlap_rate=0.5, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=_page_paragraphs(1, 5, 2), page_number=1),
+            TextBlock(text=_page_paragraphs(2, 2, 5), page_number=2),
+        ],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert chunks[1].text.startswith("p1 p1.")
+    assert [c.page_number for c in chunks] == [1, 1]
+
+
+def test_repeated_text_is_not_found_inside_the_previous_chunk():
+    """#1204: page 2's 30 words all appear in page 1's chunk too. The page 2
+    chunk must not be located there, which would put it on page 1."""
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=" ".join(["foo"] * 31), page_number=1),
+            TextBlock(text=" ".join(["foo"] * 30), page_number=2),
+        ],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert chunks[1].text in chunks[0].text
+    assert [c.page_number for c in chunks] == [1, 2]
+
+
+def test_a_chunk_opening_on_two_page_markers_is_on_the_page_after_both():
+    """#1204: page 2 holds only an image, which becomes its own chunk, so the
+    text chunk after page 1 opens on [PAGE_1] and [PAGE_2]. Its text is on page 3."""
+    image = "<image_description>\n" + " ".join(["caption"] * 120) + "\n</image_description>"
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=_page_paragraphs(1, 40), page_number=1),
+            TextBlock(text=image, page_number=2),
+            TextBlock(text=_page_paragraphs(3, 20), page_number=3),
+        ],
+    )
+    text_chunks = [c for c in splitter.chunk(doc, partition="p1") if c.chunk_type == ChunkType.TEXT]
+
+    assert text_chunks[1].text.startswith("[PAGE_1]")
+    assert [c.page_number for c in text_chunks] == [1, 3]
+
+
 def test_dewrap_paragraphs_collapses_line_wraps_but_keeps_structure():
     from core.chunking.recursive import dewrap_paragraphs
 
