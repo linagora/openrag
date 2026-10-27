@@ -60,7 +60,7 @@ class FakeStore:
     async def ensure_collection(self, *args, **kwargs):
         pass
 
-    async def upsert(self, chunks, *, indexed_at, vector_field=None):
+    async def upsert(self, chunks, *, indexed_at, vector_field=None, protected_metadata=None):
         self.events.append("store")
         # Only tests retain chunks so we can inspect them after the run.
         self.calls.append((list(chunks), indexed_at))

@@ -1338,7 +1338,7 @@ class TestRawEntitySizing:
         client = AsyncMock(return_value={count_key: 1})
         setattr(store._async_client, client_method, client)
 
-        assert await getattr(store, method_name)([entity], protected_metadata_keys={"title"}) == 1
+        assert await getattr(store, method_name)([entity], protected_metadata={"title": entity["title"]}) == 1
 
         fitted = client.await_args.kwargs["data"][0]
         assert fitted["title"] == entity["title"]
@@ -1359,7 +1359,7 @@ class TestRawEntitySizing:
         store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
 
         with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
-            await store.upsert_entities([entity], protected_metadata_keys={"title"})
+            await store.upsert_entities([entity], protected_metadata={"title": entity["title"]})
 
         store._async_client.upsert.assert_not_awaited()
 
@@ -1373,9 +1373,78 @@ class TestRawEntitySizing:
         store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
 
         with pytest.raises(VDBInsertError, match="(?i)protected metadata field 'text'"):
-            await store.upsert_entities([entity], protected_metadata_keys={"text"})
+            await store.upsert_entities([entity], protected_metadata={"text": entity["text"]})
 
         store._async_client.upsert.assert_not_awaited()
+
+    async def test_raw_entity_writes_shrink_chunk_content_when_catalog_value_differs(
+        self, store: MilvusVectorStore
+    ) -> None:
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "content": "x" * 6_000,
+            "summary": "s" * 60_000,
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        assert (
+            await store.upsert_entities(
+                [entity],
+                protected_metadata={"content": "report", "summary": entity["summary"]},
+            )
+            == 1
+        )
+
+        fitted = store._async_client.upsert.await_args.kwargs["data"][0]
+        assert fitted["summary"] == entity["summary"]
+        assert 0 < len(fitted["content"]) < len(entity["content"])
+        assert len(convert_to_json(self._dynamic_payload(fitted))) <= (
+            store._config.json_max_length - store._config.json_safety_margin_bytes
+        )
+
+    async def test_raw_entity_writes_preserve_catalog_metadata_when_nested_key_order_differs(
+        self, store: MilvusVectorStore
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        catalog_details = {"first": "x" * 300, "second": 1}
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "details": {"second": 1, "first": "x" * 300},
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert_entities([entity], protected_metadata={"details": catalog_details})
+
+        store._async_client.upsert.assert_not_awaited()
+
+    async def test_upload_rejects_oversized_catalog_metadata_before_milvus_write(
+        self, store: MilvusVectorStore
+    ) -> None:
+        description = "d" * 70_000
+        chunk = Chunk(
+            document_id="file-1",
+            partition="tenant-a",
+            text="chunk text",
+            embedding=[0.1, 0.2],
+            metadata={"description": description},
+        )
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert(
+                [chunk],
+                vector_field="vector_bge_m3",
+                protected_metadata={"description": description},
+            )
+
+        store._async_client.insert.assert_not_awaited()
 
     @pytest.mark.parametrize(
         ("method_name", "client_method"),

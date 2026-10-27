@@ -39,7 +39,7 @@ import math
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -342,6 +342,36 @@ def _has_cyclic_json_reference(value: Any) -> bool:
     return False
 
 
+def _matching_metadata_keys(entity: dict[str, Any], metadata: Mapping[str, Any] | None) -> frozenset[str]:
+    """Return catalog keys whose serialized values match the current row."""
+    if not metadata:
+        return frozenset()
+
+    matching = set()
+    for key, expected in metadata.items():
+        if key not in entity:
+            continue
+        actual = entity[key]
+        if actual is expected:
+            matching.add(key)
+            continue
+        # Cycles are reported by the row fitter itself; don't ask PyMilvus's
+        # serializer to compare them while deciding which values to protect.
+        if _has_cyclic_json_reference([actual, expected]):
+            continue
+        try:
+            actual_json = json.loads(convert_to_json({"value": actual}))
+            expected_json = json.loads(convert_to_json({"value": expected}))
+            values_match = json.dumps(actual_json, sort_keys=True, separators=(",", ":")) == json.dumps(
+                expected_json, sort_keys=True, separators=(",", ":")
+            )
+        except (MilvusException, TypeError, ValueError, RecursionError):
+            continue
+        if values_match:
+            matching.add(key)
+    return frozenset(matching)
+
+
 def _truncate_utf8(value: str, max_bytes: int) -> str:
     """*value* cut to at most *max_bytes* UTF-8 bytes, never mid-character."""
     return value.encode("utf-8")[: max(max_bytes, 0)].decode("utf-8", errors="ignore")
@@ -353,7 +383,7 @@ def _fit_milvus_row_limits(
     static_fields: set[str],
     json_max_length: int = MAX_DYNAMIC_FIELD_BYTES,
     json_safety_margin_bytes: int = DEFAULT_JSON_SAFETY_MARGIN_BYTES,
-    protected_metadata_keys: Iterable[str] = (),
+    protected_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     """Shorten *entity* in place so Milvus accepts it, instead of failing the insert.
 
@@ -367,7 +397,7 @@ def _fit_milvus_row_limits(
     each cut is logged. If protected or non-string metadata alone still
     exceeds the limit, fail before sending the row to Milvus.
     """
-    protected_keys = PROTECTED_DYNAMIC_KEYS | frozenset(protected_metadata_keys)
+    protected_keys = PROTECTED_DYNAMIC_KEYS | _matching_metadata_keys(entity, protected_metadata)
     fit_target_bytes = json_max_length - json_safety_margin_bytes
     file_id = entity.get("file_id")
     text = entity.get("text")
@@ -1295,6 +1325,7 @@ class MilvusVectorStore(VectorStore):
         vector_field: str,
         json_max_length: int = MAX_DYNAMIC_FIELD_BYTES,
         json_safety_margin_bytes: int = DEFAULT_JSON_SAFETY_MARGIN_BYTES,
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the Milvus insert payload for one chunk.
 
@@ -1332,6 +1363,7 @@ class MilvusVectorStore(VectorStore):
             static_fields={"text", "partition", "file_id", vector_field, *INDEXED_TIME_FIELDS},
             json_max_length=json_max_length,
             json_safety_margin_bytes=json_safety_margin_bytes,
+            protected_metadata=protected_metadata,
         )
         return entity
 
@@ -1346,6 +1378,7 @@ class MilvusVectorStore(VectorStore):
         *,
         indexed_at: datetime | None = None,
         vector_field: str | None = None,
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> int:
         """Insert pre-embedded chunks into the backing Milvus collection.
 
@@ -1380,6 +1413,7 @@ class MilvusVectorStore(VectorStore):
                 vector_field=field,
                 json_max_length=self._config.json_max_length,
                 json_safety_margin_bytes=self._config.json_safety_margin_bytes,
+                protected_metadata=protected_metadata,
             )
             for c, o in zip(chunks, order_metadata, strict=True)
         ]
@@ -2284,14 +2318,13 @@ class MilvusVectorStore(VectorStore):
         self,
         entities: list[dict[str, Any]],
         *,
-        protected_metadata_keys: Iterable[str] = (),
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Fit dynamic metadata in raw rows before metadata updates or copies are written."""
         static_fields = {"_id", "text", "partition", "file_id", *INDEXED_TIME_FIELDS}
         if self._hybrid:
             static_fields.add("sparse")
         static_fields.update(key for entity in entities for key in entity if is_vector_field_key(key))
-        protected_keys = frozenset(protected_metadata_keys)
         fitted_entities = []
         for entity in entities:
             fitted = dict(entity)
@@ -2300,7 +2333,7 @@ class MilvusVectorStore(VectorStore):
                 static_fields=static_fields,
                 json_max_length=self._config.json_max_length,
                 json_safety_margin_bytes=self._config.json_safety_margin_bytes,
-                protected_metadata_keys=protected_keys,
+                protected_metadata=protected_metadata,
             )
             fitted_entities.append(fitted)
         return fitted_entities
@@ -2310,7 +2343,7 @@ class MilvusVectorStore(VectorStore):
         entities: list[dict[str, Any]],
         collection: str = "default",
         *,
-        protected_metadata_keys: Iterable[str] = (),
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> int:
         """Upsert raw Milvus entities that already include vector data.
 
@@ -2321,7 +2354,7 @@ class MilvusVectorStore(VectorStore):
         self._resolve_collection(collection)
         if not entities:
             return 0
-        fitted_entities = self._fit_raw_entities(entities, protected_metadata_keys=protected_metadata_keys)
+        fitted_entities = self._fit_raw_entities(entities, protected_metadata=protected_metadata)
 
         try:
             result = await self._async_client.upsert(
@@ -2423,13 +2456,13 @@ class MilvusVectorStore(VectorStore):
         entities: list[dict[str, Any]],
         collection: str = "default",
         *,
-        protected_metadata_keys: Iterable[str] = (),
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> int:
         """Insert raw Milvus entities that already include vector data."""
         self._resolve_collection(collection)
         if not entities:
             return 0
-        fitted_entities = self._fit_raw_entities(entities, protected_metadata_keys=protected_metadata_keys)
+        fitted_entities = self._fit_raw_entities(entities, protected_metadata=protected_metadata)
 
         try:
             result = await self._async_client.insert(

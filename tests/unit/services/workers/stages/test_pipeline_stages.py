@@ -7,7 +7,7 @@ from core.chunking.chunking_strategy import ChunkingStrategy
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.models.chunk import Chunk
-from core.models.document import ImageBlock, ProcessedDocument, TextBlock
+from core.models.document import Document, ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
@@ -115,12 +115,20 @@ class FakeVectorStore(VectorStore):
         self.ensure_calls: list[tuple[str, int]] = []
         self.vector_field_calls: list[tuple[str, int]] = []
         self.upsert_vector_fields: list[str | None] = []
+        self.protected_metadata: dict | None = None
 
     async def upsert(
-        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+        self,
+        chunks: list[Chunk],
+        collection: str = "default",
+        *,
+        indexed_at=None,
+        vector_field=None,
+        protected_metadata=None,
     ) -> int:
         self.calls.append((chunks, collection))
         self.upsert_vector_fields.append(vector_field)
+        self.protected_metadata = protected_metadata
         if self.error is not None:
             raise self.error
         return self.count
@@ -590,6 +598,17 @@ async def test_store_stage_upserts_to_default_collection_with_chunk_partitions()
     assert row["stored_count"] == 1
     assert row["stage"] == "stored"
     assert "credentials" not in row
+
+
+@pytest.mark.asyncio
+async def test_store_stage_passes_catalog_metadata_for_upload_fitting():
+    chunks = [Chunk(id="c1", text="alpha", embedding=[1.0])]
+    store = FakeVectorStore(count=1)
+    document = Document(id="file-1", filename="a.pdf", metadata={"description": "catalog value"})
+
+    await store_stage({"document": document, "chunks": chunks}, store)
+
+    assert store.protected_metadata == document.metadata
 
 
 @pytest.mark.asyncio

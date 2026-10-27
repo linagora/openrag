@@ -686,8 +686,9 @@ class WorkerDispatcher(IndexingDispatcher):
             entity.update(internal_metadata)
             entities.append(entity)
 
-        protected_metadata_keys = set(catalog_metadata) | set(public_metadata)
-        await self._upsert_entities(entities, protected_metadata_keys=protected_metadata_keys)
+        target_catalog_metadata = dict(catalog_metadata)
+        target_catalog_metadata.update(public_metadata)
+        await self._upsert_entities(entities, protected_metadata=target_catalog_metadata)
 
         await self._document_repo.update_file_metadata_in_db(file_id, partition, public_metadata)
 
@@ -765,7 +766,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     catalog_kwargs["embedder_fingerprint"] = embedder_fingerprint
             if indexation_config is not None:
                 catalog_kwargs["indexation_config"] = indexation_config
-            await self._insert_entities(entities, protected_metadata_keys=set(file_metadata))
+            await self._insert_entities(entities, protected_metadata=file_metadata)
             try:
                 await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
@@ -841,17 +842,27 @@ class WorkerDispatcher(IndexingDispatcher):
                 provenance["embedder_dimension"] = widths.pop()
         return provenance
 
-    async def _upsert_entities(self, entities: list[dict[str, Any]], *, protected_metadata_keys: set[str]) -> None:
+    async def _upsert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        protected_metadata: Mapping[str, Any],
+    ) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)
         if upsert_entities is None:
             raise TypeError("vector_store must expose upsert_entities for file metadata mutations")
-        await upsert_entities(entities, self._collection, protected_metadata_keys=protected_metadata_keys)
+        await upsert_entities(entities, self._collection, protected_metadata=protected_metadata)
 
-    async def _insert_entities(self, entities: list[dict[str, Any]], *, protected_metadata_keys: set[str]) -> None:
+    async def _insert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        protected_metadata: Mapping[str, Any],
+    ) -> None:
         insert_entities = getattr(self._vector_store, "insert_entities", None)
         if insert_entities is None:
             raise TypeError("vector_store must expose insert_entities for file copy mutations")
-        await insert_entities(entities, self._collection, protected_metadata_keys=protected_metadata_keys)
+        await insert_entities(entities, self._collection, protected_metadata=protected_metadata)
 
     async def _record_job(
         self,

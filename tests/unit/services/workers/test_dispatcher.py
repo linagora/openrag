@@ -1584,11 +1584,9 @@ async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() 
     await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
 
     assert document_repo.update_file_metadata_in_db.await_args.args[2] == {"title": "new"}
-    assert vector_store.upsert_entities.await_args.kwargs["protected_metadata_keys"] >= {
-        "file_id",
-        "partition",
-        "title",
-    }
+    protected_metadata = vector_store.upsert_entities.await_args.kwargs["protected_metadata"]
+    assert protected_metadata["title"] == "new"
+    assert protected_metadata["degraded_stages"] == ["caption", "topic_tag"]
 
 
 @pytest.mark.asyncio
@@ -1626,13 +1624,12 @@ async def test_copy_inherits_catalog_degraded_stages(degraded_stages: list[str])
     assert copied_metadata["partition"] == "tenant-b"
     assert copied_metadata["title"] == "Copy"
     assert copied_metadata["degraded_stages"] == degraded_stages
-    assert vector_store.insert_entities.await_args.kwargs["protected_metadata_keys"] >= {
-        "file_id",
-        "partition",
-        "title",
-        "degraded_stages",
-        "indexed_at",
-    }
+    protected_metadata = vector_store.insert_entities.await_args.kwargs["protected_metadata"]
+    assert protected_metadata["file_id"] == "copy"
+    assert protected_metadata["partition"] == "tenant-b"
+    assert protected_metadata["title"] == "Copy"
+    assert protected_metadata["degraded_stages"] == degraded_stages
+    assert "indexed_at" in protected_metadata
 
 
 @pytest.mark.asyncio
@@ -1699,7 +1696,7 @@ async def test_copy_receives_grace_before_catalog_write_and_matches_afterward() 
         for offset in range(0, len(rows), batch_size):
             yield rows[offset : offset + batch_size]
 
-    async def insert(entities, collection, *, protected_metadata_keys):
+    async def insert(entities, collection, *, protected_metadata):
         copied.extend({**entity, "_id": index + 10} for index, entity in enumerate(entities))
         events = [e async for e in reconcile_partition(catalog, vectors, collection, "b", repair=True)]
         assert events[-1]["recent_chunks_skipped"] == 2

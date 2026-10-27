@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any
 
 from core.models.chunk import Chunk
@@ -32,6 +32,7 @@ class VectorStore(ABC):
         *,
         indexed_at: datetime | None = None,
         vector_field: str | None = None,
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> int:
         """Insert or update chunks. Returns count of upserted items.
 
@@ -41,6 +42,9 @@ class VectorStore(ABC):
         ``vector_field`` is the dense field of the embedder that produced the
         embeddings; a missing one is an error. Callers make sure it exists with
         :meth:`ensure_vector_field`.
+
+        ``protected_metadata`` contains file-catalog values that must not be
+        shortened when they match a chunk's metadata.
         """
         ...
 
