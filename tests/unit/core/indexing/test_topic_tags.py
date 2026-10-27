@@ -18,12 +18,22 @@ class FakeLLM:
 
 @pytest.mark.parametrize("size", [50, 2000, 20000])
 def test_streaming_topic_sample_matches_existing_prompt_and_is_bounded(size):
-    chunks = [Chunk(text=str(i) + "x" * size, embedding=[1.0] * 100, metadata={"large": "y" * 1000}) for i in range(20)]
+    chunks = [
+        Chunk(
+            text=str(i) + "x" * size,
+            content=f"body-{i}-" + "c" * size,
+            embedding=[1.0] * 100,
+            metadata={"large": "y" * 1000},
+        )
+        for i in range(20)
+    ]
     sample = TopicTagSample()
     for start in range(0, len(chunks), 3):
         sample.add(chunks[start : start + 3])
     assert len(sample.chunks) <= 12
     assert sum(len(chunk.text) for chunk in sample.chunks) <= 8000
+    assert sum(len(chunk.content or "") for chunk in sample.chunks) <= 8000
+    assert sample.chunks[0].content == chunks[0].content[:8000]
     assert all(chunk.embedding is None and not chunk.metadata for chunk in sample.chunks)
     args = {"system_prompt": "topics", "filename": "people.csv", "max_tags": 7, "lang": "en"}
     assert _build_messages(chunks=sample.chunks, **args) == _build_messages(chunks=chunks, **args)

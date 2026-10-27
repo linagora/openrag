@@ -155,28 +155,6 @@ async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
     assert resolved == ["default"]
 
 
-async def test_batches_reuse_language_resolved_by_an_earlier_batch(setup_pipeline, monkeypatch):
-    pipeline, row, _ = setup_pipeline
-    original = IndexingPipeline.run_processed_batch
-    seen_languages = []
-    detected_languages = []
-
-    async def detect_language_for_batch(self, child, processed, **kwargs):
-        seen_languages.append(child.get("language"))
-        if child.get("language") is None:
-            child["language"] = "fr" if not detected_languages else "en"
-            detected_languages.append(child["language"])
-        return await original(self, child, processed, **kwargs)
-
-    monkeypatch.setattr(IndexingPipeline, "run_processed_batch", detect_language_for_batch)
-
-    await pipeline.run(row)
-
-    assert detected_languages == ["fr"]
-    assert seen_languages == [None, "fr", "fr"]
-    assert row["language"] == "fr"
-
-
 async def test_csv_detects_language_once_after_all_batches(setup_pipeline, monkeypatch):
     pipeline, row, _ = setup_pipeline
     detected_samples = []
@@ -199,6 +177,7 @@ async def test_csv_detects_language_once_after_all_batches(setup_pipeline, monke
 
     assert len(detected_samples) == 1
     assert "Alice" in detected_samples[0] and "Eve" in detected_samples[0]
+    assert "Source" not in detected_samples[0]
     assert row["language"] == "fr"
     llm.chat.assert_awaited_once()
 

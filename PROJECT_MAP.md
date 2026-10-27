@@ -4,17 +4,17 @@
 - Python 3.12+ (`pyproject.toml`); unit tests run with pytest.
 
 [SYSTEM_FLOW]
-- CSV files are parsed incrementally; each batch is indexed using a copy of the file row.
-- Batch-derived per-file state, including a language resolved during a batch, is copied back before the next batch starts.
+- CSV files are parsed incrementally and indexed one batch at a time.
 - CSV batches skip contextualization; when topic tagging is enabled, language is detected once after all batches finish.
+- The bounded topic-tag sample preserves chunk content so language detection can ignore generated English source headers.
 
 [ARCHITECTURE]
 - CSV batch orchestration: `openrag/services/workers/csv_pipeline.py`.
 - CSV batch flow tests: `tests/unit/services/workers/test_csv_pipeline.py`.
+- Bounded topic-tag sample: `openrag/core/indexing/topic_tags.py`.
 
 [DECISIONS]
-- Preserve a language resolved in one batch for subsequent batches.
-- In the current CSV flow, topic tagging resolves language once after all batches; the carry-over also covers any batch stage that resolves it.
+- Keep CSV language detection on the combined post-batch sample and preserve the source content used to filter generated headers.
 
 [OUT_OF_SCOPE]
 - CSV parsing, API contracts, and persistence schemas are unchanged.
@@ -23,8 +23,8 @@
 - None.
 
 [VERIFICATION STATUS]
-- CSV worker baseline: 25 passed.
-- Batch carry-over check: a language resolved in one batch is reused by later batches.
-- Current CSV flow check: detector called once on the combined sample after three batches.
-- CSV worker suite: 27 passed.
-- Unit baseline: 6493 passed, 304 skipped; after: 6495 passed, 304 skipped.
+- CSV language-path test: detection runs once after three batches and excludes generated source headers.
+- Topic-tag sample tests: text and source content both stay within the sample budget.
+- CSV worker suite: 26 passed.
+- Topic-tag suite: 9 passed.
+- Unit suite: 6514 passed, 304 skipped.

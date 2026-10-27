@@ -24,13 +24,18 @@ class TopicTagSample:
     def __init__(self) -> None:
         self.chunks: list[Chunk] = []
         self._remaining_chars = _MAX_PROMPT_CHARS
+        self._remaining_content_chars = _MAX_PROMPT_CHARS
 
     def add(self, chunks: Sequence[Chunk]) -> None:
         for chunk in chunks:
             if len(self.chunks) >= _MAX_SAMPLE_CHUNKS or self._remaining_chars <= 0:
                 break
             text = chunk.text[: self._remaining_chars] if chunk.text.strip() else ""
-            self.chunks.append(Chunk(text=text))
+            content = chunk.content
+            if content is not None:
+                content = content[: self._remaining_content_chars]
+                self._remaining_content_chars -= len(content)
+            self.chunks.append(Chunk(text=text, content=content))
             self._remaining_chars -= len(text)
 
 
