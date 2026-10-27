@@ -234,6 +234,172 @@ async def test_caption_stage_squeezes_table_padding():
     assert row["processed_document"].text_blocks[-1].text == wrap_caption(squeezed)
 
 
+def test_squeeze_padding_only_changes_markdown_table_rows():
+    caption = (
+        "This  prose remains  as written.\n"
+        "| Header        | Value          |\n"
+        "| ------------- | -------------- |\n"
+        "| padded   name | padded     row |\n"
+    )
+
+    assert caption_module.squeeze_padding(caption) == (
+        "This  prose remains  as written.\n"
+        "| Header | Value |\n"
+        "| ------------- | -------------- |\n"
+        "| padded name | padded row |\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("caption", "expected"),
+    [
+        pytest.param(
+            "| Name     | Value     |\n| --- | --- |\n| short     |\n| extra     | cells     | here     |\n| next     | row     |\n",
+            "| Name | Value |\n| --- | --- |\n| short |\n| extra | cells | here |\n| next | row |\n",
+            id="varying-body-widths",
+        ),
+        pytest.param(
+            "Name     | Value\n--- | ---\nfirst     | second\n",
+            "Name | Value\n--- | ---\nfirst | second\n",
+            id="without-outer-pipes",
+        ),
+        pytest.param(
+            "Name     | Value\r\n| --- | --- |\r\n| first     | second\r\nnext     | row |\r\n",
+            "Name | Value\r\n| --- | --- |\r\n| first | second\r\nnext | row |\r\n",
+            id="mixed-outer-pipes-and-crlf",
+        ),
+        pytest.param(
+            "| Name     |\n| --- |\n| padded     value |\n",
+            "| Name |\n| --- |\n| padded value |\n",
+            id="single-column",
+        ),
+        pytest.param(
+            "Name     | Value\n--- | ---\nfirst  \\| second | third     value\n",
+            "Name | Value\n--- | ---\nfirst \\| second | third value\n",
+            id="escaped-pipe",
+        ),
+        pytest.param(
+            "`a    b` | Value\n--- | ---\nfirst     | second\n",
+            "`a    b` | Value\n--- | ---\nfirst | second\n",
+            id="inline-code-header",
+        ),
+        pytest.param(
+            "Pipe     diagram | keep     spacing\n| Name     | Value |\n| --- | --- |\n| first     | second |\n",
+            "Pipe     diagram | keep     spacing\n| Name | Value |\n| --- | --- |\n| first | second |\n",
+            id="preserve-preceding-pipe-prose",
+        ),
+        pytest.param(
+            "| Name | Value |\n| --- | --- |\n١. first     | second\n| next     | row     |\n",
+            "| Name | Value |\n| --- | --- |\n١. first | second\n| next | row |\n",
+            id="unicode-digit-is-not-a-list-marker",
+        ),
+    ],
+)
+def test_squeeze_padding_supports_markdown_table_layouts(caption, expected):
+    assert caption_module.squeeze_padding(caption) == expected
+
+
+@pytest.mark.parametrize("delimiter", ["| - | - |", "|:--|--:|", "- | -"])
+def test_squeeze_padding_supports_short_delimiters(delimiter):
+    caption = f"| Name     | Value     |\n{delimiter}\n| first     | second     |\n"
+
+    assert caption_module.squeeze_padding(caption) == f"| Name | Value |\n{delimiter}\n| first | second |\n"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_body"),
+    [("short", "short"), ("short     row", "short row"), ("`a    b`", "`a    b`")],
+)
+def test_squeeze_padding_continues_after_body_rows_without_pipes(body, expected_body):
+    caption = f"| Name     | Value     |\n| --- | --- |\n{body}\n| next     | row     |\n"
+
+    assert caption_module.squeeze_padding(caption) == (
+        f"| Name | Value |\n| --- | --- |\n{expected_body}\n| next | row |\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        ">     foo    |    bar\n" * 2,
+        "   >     foo    |    bar\n" * 2,
+        "# Heading    |    text\n",
+        "- List    |    item\n" * 2,
+        "1. List    |    item\n" * 2,
+        "\nProse    |    text\n",
+        "---\nProse    |    text\n",
+        "<pre>\n    foo    |    bar\n</pre>\n",
+        ' \tprint("foo    bar")\n',
+        '  \tprint("foo    bar")\n',
+        '   \tprint("foo    bar")\n',
+    ],
+)
+def test_squeeze_padding_stops_at_other_markdown_blocks(block):
+    table = "| Name     | Value     |\n| --- | --- |\n| first     | second     |\n"
+
+    assert caption_module.squeeze_padding(table + block) == (
+        "| Name | Value |\n| --- | --- |\n| first | second |\n" + block
+    )
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "|     A     |\n" * 3,
+        "| Name     | Value     |\n| --- |\n| untouched     |\n",
+        "Name     | Value\n--- | --- | ---\nfirst     | second\n",
+    ],
+)
+def test_squeeze_padding_preserves_rows_without_a_valid_table_header(caption):
+    assert caption_module.squeeze_padding(caption) == caption
+
+
+def test_squeeze_padding_preserves_pipe_diagrams():
+    caption = "|     A     |\n|     A     |     B     |\n"
+
+    assert caption_module.squeeze_padding(caption) == caption
+
+
+def test_squeeze_padding_preserves_preformatted_markdown():
+    caption = (
+        "The column `Total` lists sums.\n"
+        "- Regions\n"
+        "    - Bretagne\n"
+        "    \n"
+        "| name             | notes        |\n"
+        "|---|---|\n"
+        "| value      | `a    b`  |\n"
+        "```\n"
+        "| code    | data      |\n"
+        "```\n"
+        "~~~text\n"
+        "| tilde    | data      |\n"
+        "~~~\n"
+        "    | x    | y    |\n"
+        "This  prose remains  as written.\n"
+    )
+
+    expected = (
+        "The column `Total` lists sums.\n"
+        "- Regions\n"
+        "    - Bretagne\n"
+        "    \n"
+        "| name | notes |\n"
+        "|---|---|\n"
+        "| value      | `a    b`  |\n"
+        "```\n"
+        "| code    | data      |\n"
+        "```\n"
+        "~~~text\n"
+        "| tilde    | data      |\n"
+        "~~~\n"
+        "    | x    | y    |\n"
+        "This  prose remains  as written.\n"
+    )
+
+    assert caption_module.squeeze_padding(caption) == expected
+
+
 @pytest.mark.asyncio
 async def test_caption_stage_captions_images_concurrently_and_in_order():
     """Images fan out concurrently (bounded only by the VLM semaphore, stubbed
