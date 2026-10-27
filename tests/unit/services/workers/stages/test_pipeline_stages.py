@@ -910,6 +910,15 @@ def test_resolve_language_keeps_the_spread_when_a_spread_chunk_is_short(monkeypa
     assert "Conclusion" in sample
 
 
+@pytest.mark.parametrize("count", [5, 7, 9, 12, 20])
+def test_resolve_language_samples_the_first_and_last_chunks(monkeypatch, count):
+    body = ["Les dossiers sont instruits en mars. " * 10] * (count - 2)
+    chunks = ["Ouverture du rapport.", *body, "Conclusion."]
+    sample = _detected_sample(monkeypatch, *chunks)
+    assert sample.startswith("Ouverture")
+    assert sample.endswith("Conclusion.")
+
+
 @pytest.fixture
 def bundled_lang_detector(monkeypatch):
     from fast_langdetect import LangDetectConfig, LangDetector

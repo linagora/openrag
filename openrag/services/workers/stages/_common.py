@@ -71,16 +71,19 @@ def _language_sample(chunks: list[Any], *, captions: bool) -> str:
     """Up to ``_LANGUAGE_SAMPLE_CHARS`` of the chunks' text that carries the file's language.
 
     The sample takes a slice from each of ``_LANGUAGE_SAMPLE_SPREAD`` chunks
-    spread through the file, then fills what is left of its budget from the
-    other chunks in order, so a file of short chunks is still sampled in full.
+    spaced evenly from the first chunk to the last, then fills what is left of
+    its budget from the other chunks in order, so a file of short chunks is
+    still sampled in full.
 
     Without *captions*, image captions are left out, and so are chunks that
     hold nothing else: a file opening on figures is sampled from the text that
     follows them. With it, a file that has nothing but captions is sampled from
     them, rather than not at all.
     """
-    stride = max(1, len(chunks) // _LANGUAGE_SAMPLE_SPREAD)
-    spread = list(range(0, len(chunks), stride))[:_LANGUAGE_SAMPLE_SPREAD]
+    count = min(len(chunks), _LANGUAGE_SAMPLE_SPREAD)
+    # A step of ``len(chunks) // count`` rounds down, so a file of five to nine
+    # chunks would be sampled from its first five only.
+    spread = [i * (len(chunks) - 1) // max(1, count - 1) for i in range(count)]
     rest = set(range(len(chunks))) - set(spread)
     order = spread + sorted(rest)
     share = _LANGUAGE_SAMPLE_CHARS // _LANGUAGE_SAMPLE_SPREAD
