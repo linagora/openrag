@@ -436,6 +436,12 @@ Enable only where every API caller is already trusted with both.
 | `VLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `VLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the VLM service |
 
+#### Language Detection
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory, not when the download fails. Without that access, every detection retries the download, which can block for about two minutes when the host doesn't answer, and then falls back to English. |
+
 ### RAG Pipeline Mode
 
 | Variable | Type | Default | Description |

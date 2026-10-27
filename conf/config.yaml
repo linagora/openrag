@@ -42,6 +42,15 @@ semaphore:
   llm_semaphore: 10
   vlm_semaphore: 10
 
+# --- Language detection (fast-langdetect) ---
+# Env: LANGDETECT_MODEL
+# lite: bundled with the package, no network access needed; slightly less
+#   accurate than full on very short text (a query of a few words).
+# full / auto: download the larger model to /app/model_weights on first use.
+#   auto falls back to lite only on MemoryError, not when the download fails.
+language_detection:
+  model: lite
+
 # --- Embedder ---
 # Env: EMBEDDER_PROVIDER, EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY,
 #      MAX_MODEL_LEN, EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY

@@ -73,7 +73,13 @@ class FakeVectorStore:
         self.ensure_calls: list[tuple[str, int]] = []
 
     async def upsert(
-        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+        self,
+        chunks: list[Chunk],
+        collection: str = "default",
+        *,
+        indexed_at=None,
+        vector_field=None,
+        protected_metadata=None,
     ) -> int:
         self.calls.append((chunks, collection))
         return len(chunks)
@@ -1020,7 +1026,13 @@ class RecordingVectorStore:
         return list(self.existing_ids)
 
     async def upsert(
-        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+        self,
+        chunks: list[Chunk],
+        collection: str = "default",
+        *,
+        indexed_at=None,
+        vector_field=None,
+        protected_metadata=None,
     ) -> int:
         self.events.append("upsert")
         return len(chunks)

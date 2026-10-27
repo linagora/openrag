@@ -39,6 +39,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     # Semaphore
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
+    # Language detection
+    ("LANGDETECT_MODEL", "language_detection.model", str),
     # Embedder
     ("EMBEDDER_PROVIDER", "embedder.provider", str),
     ("EMBEDDER_MODEL_NAME", "embedder.model_name", str),
