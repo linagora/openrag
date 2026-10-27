@@ -37,6 +37,7 @@ MAX_TRACE_QUERY_TRACES_TOTAL = 500
 MAX_TRACE_SERIALIZED_BYTES = 4 * 1024 * 1024
 MAX_TRACE_QUERY_STRING_BYTES = 4096
 MAX_TRACE_IDENTIFIER_BYTES = 1024
+MAX_TRACE_DOCUMENT_NAME_BYTES = 256
 MAX_TRACE_STRING_BYTES = 1024
 MAX_TRACE_COLLECTION_ITEMS = 500
 TRACE_FILE_SCOPE_KIND_KEY = "_trace_file_scope_kind"
@@ -174,6 +175,8 @@ def _truncate_utf8(value: str, limit: int) -> str:
 def _string_limit(key: str | None) -> int:
     if key in {"original_query", "query"}:
         return MAX_TRACE_QUERY_STRING_BYTES
+    if key == "document_name":
+        return MAX_TRACE_DOCUMENT_NAME_BYTES
     if key in {"id", "document_id", "partition", "request_id", "duplicate_of"}:
         return MAX_TRACE_IDENTIFIER_BYTES
     return MAX_TRACE_STRING_BYTES
@@ -225,7 +228,7 @@ def _safe_public_value(
                 return _OMITTED
             candidate_consumed = True
         if isinstance(value, TraceCandidate):
-            exclude = {"partition"} if value.partition is None else None
+            exclude = {field for field in ("partition", "document_name") if getattr(value, field) is None}
             value = value.model_dump(mode="json", exclude=exclude)
         elif isinstance(value, (RetrievalTraceV1, TraceComparisons, TraceComparison)):
             value = {field: getattr(value, field) for field in value.model_fields_set}
@@ -422,10 +425,13 @@ def candidates_from_chunks(chunks: Sequence[Chunk], *, limit: int | None = None)
                 scores["fused"] = chunk.combined_score
             if chunk.rerank_score is not None:
                 scores["reranker"] = chunk.rerank_score
+        raw_document_name = chunk.metadata.get("title")
+        document_name = raw_document_name[:256] if isinstance(raw_document_name, str) and raw_document_name else None
         candidates.append(
             TraceCandidate(
                 id=chunk.id,
                 document_id=chunk.document_id or None,
+                document_name=document_name,
                 partition=chunk.partition or None,
                 rank=rank,
                 scores=scores,

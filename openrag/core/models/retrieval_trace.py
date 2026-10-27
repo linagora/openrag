@@ -74,6 +74,7 @@ class TraceCandidate(_TraceModel):
 
     id: str
     document_id: str | None = None
+    document_name: str | None = Field(default=None, max_length=256)
     partition: str | None = None
     rank: int = Field(ge=1)
     scores: dict[TraceScoreName, float] = Field(default_factory=dict)

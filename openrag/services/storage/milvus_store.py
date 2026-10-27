@@ -1435,10 +1435,15 @@ class MilvusVectorStore(VectorStore):
             if raw_id is None:
                 continue
             raw_document_id = row.get("file_id")
+            raw_document_name = row.get("title")
+            metadata = (
+                {"title": raw_document_name[:256]} if isinstance(raw_document_name, str) and raw_document_name else {}
+            )
             chunks.append(
                 Chunk(
                     id=str(raw_id),
                     document_id=str(raw_document_id) if raw_document_id is not None else "",
+                    metadata=metadata,
                     partition=str(row["partition"]) if row.get("partition") is not None else "default",
                 )
             )
@@ -1603,7 +1608,7 @@ class MilvusVectorStore(VectorStore):
                 search_params=search_params,
                 limit=top_k,
                 filter=expr,
-                output_fields=["file_id", "partition"],
+                output_fields=["file_id", "partition", "title"],
             )
             rows = self._parse_search_response(response)
             return (
