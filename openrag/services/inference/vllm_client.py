@@ -899,7 +899,11 @@ def downscale_image(image_bytes: bytes, max_side: int) -> bytes:
         with Image.open(BytesIO(image_bytes)) as image:
             if max(image.size) <= max_side:
                 return image_bytes
-            image.thumbnail((max_side, max_side))
+            # reducing_gap=None keeps thumbnail() from calling draft(), whose
+            # scaled JPEG decode overflows the heap on lossless JPEGs in
+            # Pillow <= 12.3.0 (GHSA-8g5g-8vmr-9782). marker-pdf keeps Pillow
+            # below 11, so the image is decoded at full scale instead.
+            image.thumbnail((max_side, max_side), reducing_gap=None)
             # Converts CMYK and other modes PNG cannot store, which would
             # otherwise fail the save and send the full-size original.
             return pil_to_png_bytes(image)
