@@ -101,6 +101,21 @@ def validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | N
     return extra
 
 
+def validate_vlm_extra(extra: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reject an ``extra.max_image_side`` that is not a positive integer — VLMs only.
+
+    The VLM client is built lazily, so a bad value saved here would only
+    surface later, failing every caption. ``bool`` is excluded as for the LLM
+    token budgets; ``null`` leaves resizing off.
+    """
+    if not extra or extra.get("max_image_side") is None:
+        return extra
+    value = extra["max_image_side"]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("extra.max_image_side must be a positive integer")
+    return extra
+
+
 def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) -> None:
     """Validate fields that are meaningful for an OpenAI-compatible STT endpoint.
 
@@ -164,6 +179,8 @@ class CreateModelEndpointRequest(RedactedExtraRepr, BaseModel):
         and present in ``info.data`` here (absent only when it failed its own
         validation, in which case the request is rejected regardless).
         """
+        if info.data.get("model_type") == "vlm":
+            return validate_vlm_extra(value)
         if info.data.get("model_type") != "llm":
             return value
         return validate_llm_token_extra(value)

@@ -1215,6 +1215,59 @@ class TestVLLMVision:
         assert downscale_image(small, 1024) is small
         assert downscale_image(b"not an image", 1024) == b"not an image"
 
+    def test_downscale_converts_modes_png_cannot_store(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        cmyk = BytesIO()
+        Image.new("CMYK", (2000, 1000)).save(cmyk, format="JPEG")
+        with Image.open(BytesIO(downscale_image(cmyk.getvalue(), 1024))) as image:
+            assert (image.format, image.mode, image.size) == ("PNG", "RGB", (1024, 512))
+
+    def test_downscale_never_uses_the_scaled_jpeg_decode(self, monkeypatch):
+        from io import BytesIO
+
+        from PIL import Image, JpegImagePlugin
+
+        def fail_draft(self, mode, size):
+            pytest.fail("draft() must not run: its scaled decode is GHSA-8g5g-8vmr-9782")
+
+        monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", fail_draft)
+        jpeg = BytesIO()
+        Image.new("L", (2400, 2200)).save(jpeg, format="JPEG")
+        with Image.open(BytesIO(downscale_image(jpeg.getvalue(), 1024))) as image:
+            assert image.size == (1024, 939)
+
+    def test_downscale_applies_the_exif_orientation(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        exif = Image.Exif()
+        exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to display
+        jpeg = BytesIO()
+        Image.new("RGB", (2000, 1000)).save(jpeg, format="JPEG", exif=exif)
+        with Image.open(BytesIO(downscale_image(jpeg.getvalue(), 1024))) as image:
+            assert image.size == (512, 1024)
+
+    def test_downscale_leaves_formats_the_parsers_refuse_undecoded(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        tiff = BytesIO()
+        Image.new("RGB", (2000, 1000)).save(tiff, format="TIFF")
+        assert downscale_image(tiff.getvalue(), 1024) == tiff.getvalue()
+
+    def test_max_image_side_is_coerced_to_int(self):
+        assert self._make_vision(lambda request: None, max_image_side="1024")._max_image_side == 1024
+
+    @pytest.mark.parametrize("value", [0, -5, "abc", True, 1024.5, "1024.5"])
+    def test_max_image_side_rejects_invalid_values(self, value):
+        with pytest.raises(ValueError):
+            self._make_vision(lambda request: None, max_image_side=value)
+
     @pytest.mark.asyncio
     async def test_caption_image_default_prompt(self):
         def handler(request: httpx.Request) -> httpx.Response:
