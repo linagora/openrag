@@ -107,6 +107,19 @@ class PathsConfig(ConfigMixin):
 
 class ServerConfig(ConfigMixin):
     preferred_url_scheme: str | None = None
+
+    @field_validator("preferred_url_scheme")
+    @classmethod
+    def _validate_preferred_url_scheme(
+        cls, value: str | None
+    ) -> str | None:
+        if isinstance(value, str):
+            value = value.lower()
+        if value is not None and value not in {"http", "https"}:
+            raise ValueError(
+                "preferred_url_scheme must be 'http' or 'https'"
+            )
+        return value
     assistant_name: str = ""
     # Access to ``GET /metrics``. Fails closed: with neither field set the
     # route answers 403 to every scrape. ``metrics_token`` (METRICS_TOKEN) is
