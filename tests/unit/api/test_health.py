@@ -43,7 +43,10 @@ async def test_readiness_rejects_incomplete_startup(async_client_factory, contai
     }
 
 
-@pytest.mark.parametrize("dependency_status,expected_status", [("ok", 200), ("unavailable", 503), ("timeout", 503)])
+@pytest.mark.parametrize(
+    "dependency_status,expected_status",
+    [("ok", 200), ("unavailable", 503), ("timeout", 503), ("migration_required", 503)],
+)
 async def test_readiness_reports_dependency_status(async_client_factory, dependency_status, expected_status):
     checks = {"postgres": "ok", "milvus": dependency_status}
     snapshot = ReadinessSnapshot(checks=checks)

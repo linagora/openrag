@@ -146,7 +146,7 @@ finishes. Each procedure has three parts:
 
 | Change | Impact on an existing deployment |
 |---|---|
-| Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` while OpenRAG reports ready, and uploads fail. The old `vector` field is dropped. |
+| Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` and uploads fail. OpenRAG 2.3.0 to 2.3.3 still report ready; from 2.3.4, `/ready` fails with `checks.milvus: migration_required`. The old `vector` field is dropped. |
 | New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job if you enabled it. |
 | Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
 | `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`, unless unauthenticated scrapes are enabled (see [Metrics scraping](#metrics-scraping)). |
@@ -598,9 +598,10 @@ kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
 kubectl rollout restart -n "$NS" deploy/"$FULLNAME-openrag"
 ```
 
-Once the PostgreSQL migrations are applied, the pod becomes Ready, but searches
-answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5:
-readiness does not check the Milvus schema version.
+Once the PostgreSQL migrations are applied, searches answer `503` with
+`VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5. OpenRAG 2.3.0 to
+2.3.3 report the pod Ready anyway. From 2.3.4 it stays unready until step 5, and
+`/ready` reports `checks.milvus: migration_required`.
 
 #### 5. Migrate the Milvus collection
 
