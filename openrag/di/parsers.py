@@ -11,6 +11,8 @@ def register_parsers() -> None:
     import core.indexing.parsers.html_parser  # noqa: F401
     import core.indexing.parsers.image_parser  # noqa: F401
     import core.indexing.parsers.markdown_parser  # noqa: F401
+    import core.indexing.parsers.odp_parser  # noqa: F401
+    import core.indexing.parsers.odt_parser  # noqa: F401
     import core.indexing.parsers.pdf.client_based  # noqa: F401
     import core.indexing.parsers.pdf.docling  # noqa: F401
     import core.indexing.parsers.pdf.marker  # noqa: F401
