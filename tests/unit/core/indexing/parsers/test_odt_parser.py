@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 from core.indexing.parsers.odf import _MAX_REPEATED_CHARS, _MAX_TABLE_CELLS
@@ -297,3 +298,19 @@ async def test_padding_short_rows_to_a_wide_one_is_bounded(odf_package):
     md = await _markdown(odf_package, tables)
 
     assert md.count("|") <= 2 * (_MAX_TABLE_CELLS + 50 * 256)
+
+
+@pytest.mark.asyncio
+async def test_a_libreoffice_document():
+    """LibreOffice 26.8, exported from a python-docx document."""
+    raw = (Path(__file__).resolve().parents[4] / "resources" / "test_file.odt").read_bytes()
+
+    processed = await _parse(raw)
+
+    assert processed.text_blocks[0].text == (
+        "# Rapport annuel\n\nPremier paragraphe du rapport.\n\n## Plan d'action\n\n"
+        "1. Premier point\n2. Second point\n\n- Une puce\n\n"
+        "| Poste | Montant |\n| --- | --- |\n| Loyer | 900 |\n\n"
+        "![](odt-image-0)\n\nFin du document."
+    )
+    assert len(processed.images) == 1
