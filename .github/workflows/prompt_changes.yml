@@ -6,9 +6,8 @@ on:
       - main
       - develop
       - 'release/**'
-    # Not `edited`: the check reads the files and labels, never the title or
-    # the description.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # `edited` also covers a change of base branch, which the check diffs against.
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
 
 permissions:
   contents: read
