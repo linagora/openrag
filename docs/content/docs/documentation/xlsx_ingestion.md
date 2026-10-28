@@ -27,10 +27,10 @@ Formula-free workbooks retain the single-reader path. When the bounded preflight
 By default, a bounded scan examines at most the first 32 physical rows and one batch byte budget. It can skip one or more preamble rows when a later textual row:
 
 - has at least two distinct labels;
-- is wider than all preceding nonempty preamble rows, or follows a blank separator after a repeated-value title; and
+- is wider than all preceding nonempty preamble rows (or follows repeated-value title rows) and follows a blank separator; and
 - is followed by a row containing values in the candidate header columns.
 
-Equal-width layouts remain ambiguous and keep the first nonempty row. Single-column tables also keep their first nonempty row. This conservative rule avoids silently treating ordinary data as a header.
+Layouts without a blank boundary remain ambiguous and keep the first nonempty row, even if later rows are wider. Equal-width layouts and single-column tables also keep their first nonempty row. This conservative rule avoids silently consuming an ordinary first data record as a header.
 
 For deterministic exports, set a global physical header row:
 
@@ -83,7 +83,7 @@ Every batch includes:
 | Total uncompressed archive | 1 GiB |
 | Individual ZIP entry | 256 MiB |
 | Compression ratio per entry | 200 |
-| Metadata or styles XML | 8 MiB |
+| Eagerly loaded metadata, XML, or chart media part | 8 MiB |
 | Shared-string XML | 32 MiB |
 | Shared-string entries | 250,000 |
 | Worksheets, including hidden sheets | 128 |

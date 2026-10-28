@@ -65,9 +65,14 @@ def _detect_header(rows, byte_limit):
             wider_than_preamble = all(
                 sum(bool(value) for value in earlier_values) < len(occupied) for _, _, earlier_values in earlier
             )
-            separated_repeated_title = number > nonempty[index - 1][0] + 1 and all(
+            repeated_value_preamble = all(
                 len({value for value in earlier_values if value}) == 1 for _, _, earlier_values in earlier
             )
+            # Width alone is not enough evidence: a narrow first data record
+            # followed by wider records is a valid table and must not lose its
+            # first row. A blank physical row is the structural boundary that
+            # distinguishes an optional preamble from the table below it.
+            separated_from_preamble = number > nonempty[index - 1][0] + 1
             if (
                 len(set(labels)) < 2
                 or not all(
@@ -75,7 +80,8 @@ def _detect_header(rows, byte_limit):
                     for value in raw
                     if (value.cached if isinstance(value, _FormulaValue) else value) is not None
                 )
-                or not (wider_than_preamble or separated_repeated_title)
+                or not (wider_than_preamble or repeated_value_preamble)
+                or not separated_from_preamble
             ):
                 continue
             if index + 1 >= len(nonempty):
