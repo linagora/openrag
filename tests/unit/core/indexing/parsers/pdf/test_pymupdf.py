@@ -42,16 +42,6 @@ def _minimal_pdf_bytes() -> bytes:
         doc.close()
 
 
-def _pdf_with_text(text: str) -> bytes:
-    doc = pymupdf.open()
-    try:
-        page = doc.new_page()
-        page.insert_text((72, 72), text)
-        return doc.tobytes()
-    finally:
-        doc.close()
-
-
 class TestExtractMarkdownFallback:
     def test_retries_once_against_cleaned_copy_on_runtime_error(self):
         raw = _minimal_pdf_bytes()
@@ -82,20 +72,6 @@ class TestExtractMarkdownFallback:
 
         assert pages == ["hello world"]
         assert mock.call_count == 1
-
-    def test_retries_once_against_cleaned_copy_on_runtime_error_and_falls_back_to_plain_text_when_markdown_is_nearly_empty(
-        self,
-    ):
-        raw = _pdf_with_text("hello world this is a longer sentence to exceed the threshold")
-        # Simulate pymupdf4llm returning nearly nothing
-        good_chunks = [{"text": "x"}]
-
-        with patch(_TO_MARKDOWN, side_effect=[RuntimeError("code=4: no font file for digest"), good_chunks]) as mock:
-            pages, images = _extract_markdown(raw, "broken.pdf")
-
-        assert pages == ["hello world this is a longer sentence to exceed the threshold"]
-        assert images == []
-        assert mock.call_count == 2
 
 
 class TestPyMuPDFParserRecovery:
@@ -1102,9 +1078,18 @@ def _bounded_mmap(headroom_mb: int) -> str:
 class TestPagesWithFallback:
     """Per-page plain-text fallback when pymupdf4llm drops text (issue #1102)."""
 
+    def _pdf_with_text(self, text: str) -> bytes:
+        doc = pymupdf.open()
+        try:
+            page = doc.new_page()
+            page.insert_text((72, 72), text)
+            return doc.tobytes()
+        finally:
+            doc.close()
+
     def test_keeps_markdown_when_text_is_retained(self):
         """No fallback when markdown length is at least the threshold fraction."""
-        raw = _pdf_with_text("hello world")
+        raw = self._pdf_with_text("hello world")
         with pymupdf.open(stream=raw, filetype="pdf") as doc:
             chunks = [{"text": "hello world"}]
             pages = _pages_with_fallback(doc, chunks, "ok.pdf")
@@ -1112,7 +1097,7 @@ class TestPagesWithFallback:
 
     def test_falls_back_to_plain_text_when_markdown_is_nearly_empty(self):
         """Markdown returning almost no text is replaced with page.get_text()."""
-        raw = _pdf_with_text("hello world this is a longer sentence to exceed the threshold")
+        raw = self._pdf_with_text("hello world this is a longer sentence to exceed the threshold")
         with pymupdf.open(stream=raw, filetype="pdf") as doc:
             plain_text = doc[0].get_text().strip()
             # Simulate pymupdf4llm returning nearly nothing
@@ -1159,6 +1144,7 @@ class TestPagesWithFallback:
     def test_threshold_constant_is_below_one(self):
         """Sanity check: the threshold must be a fraction in (0, 1)."""
         assert 0 < _MARKDOWN_TEXT_RATIO_THRESHOLD < 1
+
 
 class TestExtractMarkdownPerPageFallback:
     """Integration: _extract_markdown uses per-page fallback via _pages_with_fallback."""
