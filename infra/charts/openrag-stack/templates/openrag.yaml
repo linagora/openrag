@@ -43,6 +43,18 @@ spec:
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
       automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.openrag "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
+      {{- if .Values.openrag.runtimeClassName }}
+      runtimeClassName: {{ .Values.openrag.runtimeClassName }}
+      {{- end }}
+      {{- with .Values.openrag.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openrag.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openrag.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if or .Values.openrag.extraInitContainers .Values.ray.enabled }}
       initContainers:
         {{- with .Values.openrag.extraInitContainers }}
@@ -105,10 +117,16 @@ spec:
           livenessProbe:
             {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
-          {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
+          {{- $embeddedRay := eq (include "openrag-stack.embeddedRay" .) "true" }}
+          {{- if or $embeddedRay .Values.openrag.extraEnv }}
           env:
+            {{- if $embeddedRay }}
             - name: RAY_METRICS_EXPORT_PORT
               value: {{ include "openrag-stack.rayMetricsPort" . | quote }}
+            {{- end }}
+            {{- with .Values.openrag.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           envFrom:
             - configMapRef:

@@ -1013,6 +1013,19 @@ openrag:
       memory: "16Gi"
       nvidia.com/gpu: 1
   replicas: 1
+  # Pod placement, as for the reranker. On a GPU node shared with the embedder
+  # and reranker, pin the API there with nodeSelector and tolerate the node's
+  # GPU taint. To share the card without a request, set runtimeClassName (e.g.
+  # nvidia), drop nvidia.com/gpu from resources and add NVIDIA_VISIBLE_DEVICES
+  # to extraEnv. See "GPU sharing" in docs/documentation/kubernetes.md.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  runtimeClassName: ""
+  # Environment variables for the API container alone (Kubernetes EnvVar
+  # objects). They take precedence over the shared env.config ConfigMap the
+  # container also reads.
+  extraEnv: []
   # Size of the /dev/shm emptyDir volume. Ray's plasma object store and Python
   # multiprocessing both use /dev/shm for POSIX semaphores and shared memory.
   # Kubernetes defaults /dev/shm to 64Mi which causes OOM/ENOSPC errors when
