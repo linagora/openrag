@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import zipfile
 from collections.abc import Iterator
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
@@ -243,6 +244,8 @@ class XlsxParser(TabularBatchParser):
         return await asyncio.to_thread(self._parse, document)
 
     def iter_batches(self, document: Document) -> Iterator[TextBlock]:
+        from openpyxl.utils.exceptions import InvalidFileException
+
         with _document_source(document) as source:
             infos = validate_ooxml(source, self.limits)
             # Validate overrides before opening a backend or emitting any batches.
@@ -262,7 +265,23 @@ class XlsxParser(TabularBatchParser):
                         status_code=422,
                     )
             with closing(self._iter_sheets(document, source, infos)) as batches:
-                yield from batches
+                try:
+                    yield from batches
+                except PipelineError:
+                    raise
+                except (
+                    InvalidFileException,
+                    OSError,
+                    KeyError,
+                    IndexError,
+                    TypeError,
+                    ValueError,
+                    SyntaxError,
+                    zipfile.BadZipFile,
+                ) as exc:
+                    raise PipelineError(
+                        "File is not a valid XLSX workbook", code="INVALID_XLSX", status_code=422
+                    ) from exc
 
     def _iter_sheets(self, document, source, infos):
         data_rows_seen = 0
@@ -302,6 +321,8 @@ class XlsxParser(TabularBatchParser):
                         rendered.extend([""] * (sheet.columns - len(rendered)))
                         if any(len(value) > self.limits.max_cell_chars for value in rendered):
                             raise limit("XLSX header text exceeds the character limit")
+                        if sum(len(value.encode("utf-8")) for value in rendered) >= self.limits.max_batch_bytes:
+                            raise limit("XLSX header exceeds the batch byte limit")
                         header_values = normalize_headers([value.strip() for value in rendered])
                         # Column identities must remain unique after Markdown
                         # normalizes whitespace and line endings.
@@ -362,6 +383,11 @@ class XlsxParser(TabularBatchParser):
                     rendered.extend([""] * (len(header_values) - len(rendered)))
                     if len(rendered) > len(header_values):
                         raise PipelineError("XLSX reader returned more columns than inspected", code="INVALID_XLSX")
+                    if (
+                        header_bytes + sum(len(value.encode("utf-8")) for value in rendered)
+                        >= self.limits.max_batch_bytes
+                    ):
+                        raise limit(f"XLSX row {physical_row} exceeds the batch byte limit")
                     row = markdown_row(rendered)
                     row_bytes = len(row.encode("utf-8")) + 1
                     if header_bytes + row_bytes > self.limits.max_batch_bytes:
