@@ -1,0 +1,411 @@
+"""OpenDocument (ODF) reading shared by the ``.odt`` and ``.odp`` parsers.
+
+An ODF file is a zip package: the document body is ``content.xml``, list styles
+may also live in ``styles.xml``, and embedded pictures sit under ``Pictures/``,
+referenced from ``draw:image`` elements by ``xlink:href``. This module reads the
+XML with ``lxml`` and converts it to Markdown. No office suite is involved.
+
+What is kept: headings, paragraphs, bulleted and numbered lists (nested
+included), tables, text boxes, slide titles and speaker notes. What is dropped:
+character formatting, footnotes and endnotes, comments, tracked deletions,
+generated indexes (a table of contents repeats the headings), and embedded
+objects such as charts and formulas, which are sub-documents of their own.
+
+Pictures become synthetic ``![](<prefix>-N)`` refs in the Markdown, with one
+:class:`ImageBlock` per ref carrying it in ``metadata['markdown_ref']``, as the
+DOCX and PPTX parsers do. Captioning is not done here.
+
+Parser-bomb caps mirror the DOCX and PPTX parsers: the XML parts and each
+picture are size-checked from the zip header before they are decompressed, and
+the slide, picture and table-repeat counts are bounded.
+"""
+
+from __future__ import annotations
+
+import html
+import logging
+import zipfile
+from collections.abc import Iterator
+from io import BytesIO
+
+from ...models.document import ImageBlock
+from ..image_preprocessor import UPLOADED_IMAGE_FORMATS, ensure_png_compatible_mode, pil_to_png_bytes
+
+logger = logging.getLogger(__name__)
+
+_MAX_XML_BYTES = 64 * 1024 * 1024
+_MAX_ARCHIVE_ENTRY_BYTES = 100 * 1024 * 1024
+_MAX_SLIDES = 2000
+_MAX_IMAGES = 2000
+# ``table:number-columns-repeated`` and ``number-rows-repeated`` are counts from
+# the file: a spreadsheet-style table routinely declares 1024 empty columns.
+_MAX_TABLE_COLUMNS = 256
+_MAX_TABLE_ROWS = 10_000
+
+_NS = {
+    "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
+    "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
+    "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
+    "draw": "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0",
+    "presentation": "urn:oasis:names:tc:opendocument:xmlns:presentation:1.0",
+    "style": "urn:oasis:names:tc:opendocument:xmlns:style:1.0",
+    "xlink": "http://www.w3.org/1999/xlink",
+}
+
+
+def _q(prefix: str, name: str) -> str:
+    return f"{{{_NS[prefix]}}}{name}"
+
+
+_TEXT_H = _q("text", "h")
+_TEXT_P = _q("text", "p")
+_TEXT_LIST = _q("text", "list")
+_TEXT_LIST_ITEM = _q("text", "list-item")
+_TEXT_LIST_HEADER = _q("text", "list-header")
+_TEXT_LIST_STYLE = _q("text", "list-style")
+_TEXT_LEVEL_NUMBER = _q("text", "list-level-style-number")
+_TEXT_S = _q("text", "s")
+_TEXT_TAB = _q("text", "tab")
+_TEXT_LINE_BREAK = _q("text", "line-break")
+_TABLE_TABLE = _q("table", "table")
+_TABLE_ROW = _q("table", "table-row")
+_TABLE_CELL = _q("table", "table-cell")
+_TABLE_COVERED_CELL = _q("table", "covered-table-cell")
+_DRAW_FRAME = _q("draw", "frame")
+_DRAW_IMAGE = _q("draw", "image")
+_DRAW_TEXT_BOX = _q("draw", "text-box")
+_DRAW_PAGE = _q("draw", "page")
+_DRAW_G = _q("draw", "g")
+_PRESENTATION_NOTES = _q("presentation", "notes")
+_PRESENTATION_CLASS = _q("presentation", "class")
+_XLINK_HREF = _q("xlink", "href")
+
+# Inline content that is not the document's running text.
+_SKIPPED_INLINE = frozenset(
+    {
+        _q("text", "note"),
+        _q("office", "annotation"),
+        _q("office", "annotation-end"),
+        _q("draw", "object"),
+        _q("draw", "object-ole"),
+    }
+)
+# Block content left out: generated indexes repeat text found elsewhere, and
+# tracked changes hold the deleted text.
+_SKIPPED_BLOCKS = _SKIPPED_INLINE | frozenset(
+    {
+        _q("text", "tracked-changes"),
+        _q("text", "table-of-content"),
+        _q("text", "illustration-index"),
+        _q("text", "table-index"),
+        _q("text", "object-index"),
+        _q("text", "user-index"),
+        _q("text", "alphabetical-index"),
+        _q("text", "bibliography"),
+        _q("office", "forms"),
+        _q("text", "sequence-decls"),
+        _q("text", "variable-decls"),
+        _q("text", "user-field-decls"),
+    }
+)
+# Slide placeholders that repeat on every slide rather than carry its content.
+_SKIPPED_SLIDE_CLASSES = frozenset({"page-number", "footer", "header", "date-time", "page"})
+
+
+class OdfError(Exception):
+    """The package cannot be read as an ODF document."""
+
+
+def _xml_parser():
+    from lxml import etree
+
+    # No entity expansion, DTD loading or network access: the XML is untrusted.
+    return etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True, huge_tree=False)
+
+
+def _read_xml(package: zipfile.ZipFile, name: str, required: bool):
+    from lxml import etree
+
+    try:
+        info = package.getinfo(name)
+    except KeyError:
+        if required:
+            raise OdfError(f"missing {name}") from None
+        return None
+    if info.file_size > _MAX_XML_BYTES:
+        raise OdfError(f"{name} is {info.file_size} bytes, over the {_MAX_XML_BYTES} byte limit")
+    try:
+        return etree.fromstring(package.read(name), parser=_xml_parser())
+    except etree.XMLSyntaxError as exc:
+        if required:
+            raise OdfError(f"{name} is not well-formed XML: {exc}") from exc
+        logger.warning("Ignoring unreadable ODF %s: %s", name, exc)
+        return None
+
+
+class OdfConverter:
+    """Convert one open ODF package to Markdown, collecting its pictures."""
+
+    def __init__(self, package: zipfile.ZipFile, image_prefix: str) -> None:
+        self._package = package
+        self._image_prefix = image_prefix
+        self.content = _read_xml(package, "content.xml", required=True)
+        self._numbered_levels = self._list_styles()
+        self.images: list[ImageBlock] = []
+        self._page_number = 1
+
+    # ----- documents -----
+
+    def text_markdown(self) -> str:
+        """The body of an ``.odt``, as one Markdown string."""
+        body = self.content.find(f"{_q('office', 'body')}/{_q('office', 'text')}")
+        if body is None:
+            raise OdfError("content.xml has no office:text body")
+        return self._blocks_markdown(body)
+
+    def slides(self) -> Iterator[tuple[int, str]]:
+        """``(slide number, Markdown)`` for each slide of an ``.odp``, 1-indexed.
+
+        A slide with no text is skipped but still counted, as in the PPTX parser.
+        """
+        body = self.content.find(f"{_q('office', 'body')}/{_q('office', 'presentation')}")
+        if body is None:
+            raise OdfError("content.xml has no office:presentation body")
+        for number, page in enumerate(body.iter(_DRAW_PAGE), start=1):
+            if number > _MAX_SLIDES:
+                logger.warning("Capping ODP slide processing at %d slides", _MAX_SLIDES)
+                return
+            self._page_number = number
+            parts = [part for shape in page if (part := self._shape_markdown(shape))]
+            md = "\n".join(parts).strip()
+            notes = page.find(_PRESENTATION_NOTES)
+            if notes is not None:
+                notes_md = "\n".join(
+                    self._blocks_markdown(frame)
+                    for frame in notes.iter(_DRAW_FRAME)
+                    if frame.get(_PRESENTATION_CLASS) == "notes"
+                ).strip()
+                if notes_md:
+                    md = (md + "\n\n### Notes:\n" + notes_md).strip()
+            if md:
+                yield number, md
+
+    def slide_count(self) -> int:
+        body = self.content.find(f"{_q('office', 'body')}/{_q('office', 'presentation')}")
+        return 0 if body is None else sum(1 for _ in body.iter(_DRAW_PAGE))
+
+    # ----- slides -----
+
+    def _shape_markdown(self, shape) -> str:
+        tag = shape.tag
+        if tag == _PRESENTATION_NOTES:
+            return ""
+        if tag == _DRAW_G:
+            return "\n".join(part for child in shape if (part := self._shape_markdown(child)))
+        if tag != _DRAW_FRAME:
+            # Custom shapes, rectangles, ellipses... hold their text directly.
+            return self._blocks_markdown(shape)
+        shape_class = shape.get(_PRESENTATION_CLASS)
+        if shape_class in _SKIPPED_SLIDE_CLASSES:
+            return ""
+        if shape_class == "title":
+            title = self._blocks_markdown(shape, separator=" ").strip()
+            return f"# {title}" if title else ""
+        if shape.find(_TABLE_TABLE) is not None:
+            return self._table_markdown(shape.find(_TABLE_TABLE))
+        return self._frame_markdown(shape)
+
+    # ----- blocks -----
+
+    def _blocks_markdown(self, parent, separator: str = "\n\n") -> str:
+        parts = [part for child in parent if (part := self._block_markdown(child))]
+        return separator.join(parts)
+
+    def _block_markdown(self, element) -> str:
+        tag = element.tag
+        if not isinstance(tag, str) or tag in _SKIPPED_BLOCKS:
+            return ""
+        if tag == _TEXT_H:
+            text = self._inline(element).strip()
+            if not text:
+                return ""
+            level = _int_attr(element, _q("text", "outline-level"), 1)
+            return "#" * min(max(level, 1), 6) + " " + text
+        if tag == _TEXT_P:
+            return self._inline(element).strip()
+        if tag == _TEXT_LIST:
+            return "\n".join(self._list_lines(element, depth=0, style=None))
+        if tag == _TABLE_TABLE:
+            return self._table_markdown(element)
+        if tag == _DRAW_FRAME:
+            return self._frame_markdown(element)
+        # Sections, text boxes and other containers: their children are blocks.
+        return self._blocks_markdown(element)
+
+    def _list_lines(self, element, depth: int, style: str | None) -> list[str]:
+        style = element.get(_q("text", "style-name")) or style
+        numbered = depth + 1 in self._numbered_levels.get(style or "", frozenset())
+        indent = "  " * depth
+        lines: list[str] = []
+        number = 0
+        for item in element:
+            if item.tag not in (_TEXT_LIST_ITEM, _TEXT_LIST_HEADER):
+                continue
+            marker = ""
+            if item.tag == _TEXT_LIST_ITEM:
+                number += 1
+                marker = f"{number}. " if numbered else "- "
+            first = True
+            for child in item:
+                if child.tag == _TEXT_LIST:
+                    lines.extend(self._list_lines(child, depth + 1, style))
+                    continue
+                text = self._block_markdown(child)
+                if not text:
+                    continue
+                prefix = indent + (marker if first else " " * len(marker))
+                lines.append(prefix + text.replace("\n", "\n" + indent + " " * len(marker)))
+                first = False
+        return lines
+
+    def _list_styles(self) -> dict[str, frozenset[int]]:
+        """``{list style name: levels numbered rather than bulleted}``."""
+        levels: dict[str, frozenset[int]] = {}
+        roots = [self.content, _read_xml(self._package, "styles.xml", required=False)]
+        for root in roots:
+            if root is None:
+                continue
+            for style in root.iter(_TEXT_LIST_STYLE):
+                name = style.get(_q("style", "name"))
+                if not name:
+                    continue
+                levels[name] = frozenset(
+                    _int_attr(level, _q("text", "level"), 0)
+                    for level in style
+                    if level.tag == _TEXT_LEVEL_NUMBER and level.get(_q("style", "num-format")) != ""
+                )
+        return levels
+
+    # ----- tables -----
+
+    def _table_markdown(self, table) -> str:
+        from html_to_markdown import convert
+
+        rows: list[list[str]] = []
+        for row in table.iter(_TABLE_ROW):
+            if len(rows) >= _MAX_TABLE_ROWS:
+                logger.warning("Capping ODF table at %d rows", _MAX_TABLE_ROWS)
+                break
+            cells: list[str] = []
+            for cell in row:
+                if cell.tag not in (_TABLE_CELL, _TABLE_COVERED_CELL):
+                    continue
+                text = self._blocks_markdown(cell, separator=" ").replace("\n", " ").strip()
+                repeat = _int_attr(cell, _q("table", "number-columns-repeated"), 1)
+                cells.extend([text] * max(1, min(repeat, _MAX_TABLE_COLUMNS - len(cells))))
+                if len(cells) >= _MAX_TABLE_COLUMNS:
+                    break
+            while cells and not cells[-1]:
+                cells.pop()
+            repeat = _int_attr(row, _q("table", "number-rows-repeated"), 1)
+            # A repeated empty row is filler; a repeated row with content is kept once per repeat.
+            rows.extend([cells] * (max(1, min(repeat, _MAX_TABLE_ROWS - len(rows))) if cells else 1))
+        while rows and not rows[-1]:
+            rows.pop()
+        if not rows:
+            return ""
+        width = max(len(row) for row in rows)
+        html_rows = ["<html><body><table>"]
+        for index, row in enumerate(rows):
+            tag = "th" if index == 0 else "td"
+            padded = row + [""] * (width - len(row))
+            html_rows.append("<tr>" + "".join(f"<{tag}>{html.escape(c)}</{tag}>" for c in padded) + "</tr>")
+        html_rows.append("</table></body></html>")
+        return convert("".join(html_rows)).strip()
+
+    # ----- inline text and pictures -----
+
+    def _inline(self, element) -> str:
+        parts = [element.text or ""]
+        for child in element:
+            parts.append(self._inline_child(child))
+            parts.append(child.tail or "")
+        return "".join(parts)
+
+    def _inline_child(self, child) -> str:
+        tag = child.tag
+        if not isinstance(tag, str) or tag in _SKIPPED_INLINE:
+            return ""
+        if tag == _TEXT_S:
+            return " " * max(1, _int_attr(child, _q("text", "c"), 1))
+        if tag == _TEXT_TAB:
+            return "\t"
+        if tag == _TEXT_LINE_BREAK:
+            return "\n"
+        if tag == _DRAW_FRAME:
+            return self._frame_markdown(child)
+        return self._inline(child)
+
+    def _frame_markdown(self, frame) -> str:
+        """A frame holds a picture (possibly with fallbacks), a text box, or an object."""
+        images = frame.findall(_DRAW_IMAGE)
+        if images:
+            # Several draw:image children are alternatives of one picture
+            # (an SVG and its PNG fallback): keep the first that decodes.
+            for image in images:
+                ref = self._image_ref(image.get(_XLINK_HREF))
+                if ref:
+                    return ref
+            return ""
+        text_box = frame.find(_DRAW_TEXT_BOX)
+        if text_box is not None:
+            return self._blocks_markdown(text_box, separator="\n")
+        return ""
+
+    def _image_ref(self, href: str | None) -> str:
+        if not href or "://" in href:
+            return ""
+        if len(self.images) >= _MAX_IMAGES:
+            return ""
+        name = href.removeprefix("./")
+        try:
+            info = self._package.getinfo(name)
+        except KeyError:
+            return ""
+        if info.file_size > _MAX_ARCHIVE_ENTRY_BYTES:
+            logger.warning("Skipping oversized ODF picture %s (%d bytes)", name, info.file_size)
+            return ""
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(self._package.read(name)), formats=UPLOADED_IMAGE_FORMATS) as im:
+                im = ensure_png_compatible_mode(im)
+                png_bytes = pil_to_png_bytes(im)
+        except Exception as exc:
+            # EMF/WMF/SVG pictures and broken entries: no ref, as DOCX does.
+            logger.warning("Skipping unsupported ODF picture %s: %s", name, exc)
+            return ""
+        ref = f"![]({self._image_prefix}-{len(self.images)})"
+        self.images.append(
+            ImageBlock(
+                image_bytes=png_bytes,
+                page_number=self._page_number,
+                mime_type="image/png",
+                metadata={"markdown_ref": ref},
+            )
+        )
+        return ref
+
+
+def open_odf(path: str) -> zipfile.ZipFile:
+    try:
+        return zipfile.ZipFile(path, "r")
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise OdfError(f"not a readable zip package: {exc}") from exc
+
+
+def _int_attr(element, name: str, default: int) -> int:
+    try:
+        return int(element.get(name, default))
+    except (TypeError, ValueError):
+        return default

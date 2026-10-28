@@ -192,6 +192,8 @@ loader:
     message/rfc822: .eml
     application/vnd.openxmlformats-officedocument.wordprocessingml.document: .docx
     application/vnd.openxmlformats-officedocument.presentationml.presentation: .pptx
+    application/vnd.oasis.opendocument.text: .odt
+    application/vnd.oasis.opendocument.presentation: .odp
     application/msword: .doc
     image/png: .png
     image/jpeg: .jpeg
@@ -223,6 +225,8 @@ loader:
     eml: EmlLoader
     docx: DocxLoader
     pptx: PPTXLoader
+    odt: OdtLoader
+    odp: OdpLoader
     doc: DocLoader
     png: ImageLoader
     jpeg: ImageLoader

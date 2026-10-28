@@ -641,7 +641,9 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
             file_url = f"{file_url}?token={api_key}"
         page_label = str(page).strip() if page is not None else ""
         source_label = f"{filename}" + (
-            f" (page: {page_label})" if suffix in [".pdf", ".pptx", ".docx", ".doc"] and page_label else ""
+            f" (page: {page_label})"
+            if suffix in [".pdf", ".pptx", ".docx", ".doc", ".odp", ".odt"] and page_label
+            else ""
         )
         source_name = _safe_source_name(source_label, d)
 
