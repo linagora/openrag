@@ -62,6 +62,24 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+## OpenRAG 2.3.4 on Kubernetes: a larger venv volume
+
+With `ray.enabled: true`, the Ray head installs the Python dependencies into the
+`<fullname>-venv` volume when it first starts. They take about 7 GB, which left
+little room in the former 10Gi default. From OpenRAG 2.3.4, that default is
+20Gi, and an install that fails stops the Ray head's `init-venv-sync` init
+container instead of being marked complete.
+
+`helm upgrade` resizes the existing volume, which fails unless its StorageClass
+sets `allowVolumeExpansion: true`. On a StorageClass that does not, keep
+`persistence.volumes.venv.size: 10Gi` in your values, or delete the volume and
+let the upgrade create it again.
+
+If an earlier install failed, the volume can hold a half-installed environment
+already marked complete, and the pods start on it. To install it again, delete
+`/app/.venv/.ready` in the Ray head and restart the Ray head pod, then the Ray
+workers and the OpenRAG pod.
+
 ## OpenRAG 2.3.3 on Docker Compose: the Ray dashboard is not published
 
 From OpenRAG 2.3.3, Docker Compose no longer maps port 8265. With the default
