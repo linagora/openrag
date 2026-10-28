@@ -136,3 +136,38 @@ def test_no_env_without_embedded_ray_or_extra_env(tmp_path: Path) -> None:
     spec = _pod_spec(tmp_path, None, "--set", "env.config.RAY_ADDRESS=ray://head:10001")
 
     assert "env" not in spec["containers"][0]
+
+
+@requires_helm
+def test_extra_env_cannot_move_the_embedded_ray_metrics_port(tmp_path: Path) -> None:
+    """The ray-metrics containerPort and the PodMonitor follow the chart's
+    entry; a second one would win in the container and break the scrape."""
+    assert HELM is not None
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(
+        yaml.safe_dump({"openrag": {"extraEnv": [{"name": "RAY_METRICS_EXPORT_PORT", "value": "9999"}]}}),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [HELM, "template", "test", str(_isolated_chart(tmp_path)), "--show-only", "templates/openrag.yaml"]
+        + ["-f", str(values_file)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "openrag.extraEnv sets RAY_METRICS_EXPORT_PORT" in result.stderr
+
+
+@requires_helm
+def test_extra_env_may_set_the_metrics_port_without_embedded_ray(tmp_path: Path) -> None:
+    """Pointed at an external Ray, the chart sets no metrics port of its own."""
+    spec = _pod_spec(
+        tmp_path,
+        {"openrag": {"extraEnv": [{"name": "RAY_METRICS_EXPORT_PORT", "value": "9999"}]}},
+        "--set",
+        "env.config.RAY_ADDRESS=ray://head:10001",
+    )
+
+    assert spec["containers"][0]["env"] == [{"name": "RAY_METRICS_EXPORT_PORT", "value": "9999"}]
