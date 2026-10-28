@@ -496,7 +496,9 @@ postgresql:
 postgresProvisioning:
   # Keep the bundled PostgreSQL chart self-contained by default. Managed
   # Postgres deployments should set this to false and point POSTGRES_* values
-  # at a pre-created database.
+  # at a pre-created database. Sets POSTGRES_AUTO_CREATE_DB: the chart refuses
+  # an env.config or env.secrets entry for it that disagrees, as it does for
+  # runMigrationsInApp below.
   autoCreateDatabase: true
   # Leave app-start migrations enabled for compose-like installs. Operators can
   # disable this when they run migrations through the Helm hook below. Sets
