@@ -6,7 +6,7 @@ import io
 import zipfile
 
 import pytest
-from core.indexing.parsers.odf import _MAX_REPEATED_CHARS
+from core.indexing.parsers.odf import _MAX_REPEATED_CHARS, _MAX_TABLE_CELLS
 from core.indexing.parsers.odt_parser import OdtParser
 from core.models.document import Document, DocumentType
 
@@ -285,3 +285,15 @@ async def test_nested_tables_are_read_once(odf_package):
     md = await _markdown(odf_package, body)
 
     assert md.count("fond") == 1
+
+
+@pytest.mark.asyncio
+async def test_padding_short_rows_to_a_wide_one_is_bounded(odf_package):
+    """One 256-column row makes every other row pad to 256 cells."""
+    wide = "<table:table-row>" + "<table:table-cell><text:p>w</text:p></table:table-cell>" * 256 + "</table:table-row>"
+    short = '<table:table-row table:number-rows-repeated="10000"><table:table-cell><text:p>x</text:p></table:table-cell></table:table-row>'
+    tables = f"<table:table>{wide}{short}</table:table>" * 50
+
+    md = await _markdown(odf_package, tables)
+
+    assert md.count("|") <= 2 * (_MAX_TABLE_CELLS + 50 * 256)
