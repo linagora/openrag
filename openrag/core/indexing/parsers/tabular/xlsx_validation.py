@@ -16,7 +16,6 @@ from defusedxml.ElementTree import fromstring, iterparse
 MAIN_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
 CELL_REF = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
 STREAMED_XML_PARTS = {"xl/sharedStrings.xml"}
-STREAMED_XML_PREFIXES = ("xl/worksheets/",)
 
 
 @dataclass(frozen=True)
@@ -125,9 +124,7 @@ def _streamed_xml_parts(types) -> set[str]:
 
 def _is_eager_xml_part(name: str, streamed_parts: set[str]) -> bool:
     """Return whether OpenPyXL may materialize this XML package part."""
-    return (
-        name.endswith((".xml", ".rels")) and name not in streamed_parts and not name.startswith(STREAMED_XML_PREFIXES)
-    )
+    return name.endswith((".xml", ".rels")) and name not in streamed_parts
 
 
 def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
@@ -178,9 +175,10 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
             if _content_type(types, "/xl/workbook.xml") != MAIN_TYPE:
                 raise invalid("OOXML package is not an XLSX workbook")
             streamed_parts = _streamed_xml_parts(types)
-            for entry in entries:
-                if _is_eager_xml_part(entry.filename, streamed_parts) and entry.file_size > limits.max_metadata_bytes:
-                    raise limit("XLSX metadata exceeds the memory limit")
+            eager_entries = [entry for entry in entries if _is_eager_xml_part(entry.filename, streamed_parts)]
+            eager_metadata_bytes = sum(entry.file_size for entry in eager_entries)
+            if any(entry.file_size > limits.max_metadata_bytes for entry in eager_entries):
+                raise limit("XLSX metadata exceeds the memory limit")
             for part in types:
                 if part.get("ContentType", "").endswith(".styles+xml"):
                     if archive.getinfo(part.get("PartName", "").lstrip("/")).file_size > limits.max_metadata_bytes:
@@ -196,9 +194,11 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
             # before the backend can allocate them; ordinary worksheet media
             # remains ignored and is governed by the archive limits instead.
             if any(relationship.get("Type", "").endswith("/chartsheet") for relationship in relationship_nodes):
-                for entry in entries:
-                    if entry.filename.startswith("xl/media/") and entry.file_size > limits.max_metadata_bytes:
-                        raise limit("XLSX chart media exceed the memory limit")
+                eager_metadata_bytes += sum(
+                    entry.file_size for entry in entries if entry.filename.startswith("xl/media/")
+                )
+            if eager_metadata_bytes > limits.max_metadata_bytes:
+                raise limit("XLSX metadata exceeds the memory limit")
             sheets = xml("xl/workbook.xml").findall("{*}sheets/{*}sheet")
             if len(sheets) > limits.max_sheets:
                 raise limit("XLSX worksheet count exceeds the limit")

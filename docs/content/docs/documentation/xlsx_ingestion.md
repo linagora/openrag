@@ -83,7 +83,7 @@ Every batch includes:
 | Total uncompressed archive | 1 GiB |
 | Individual ZIP entry | 256 MiB |
 | Compression ratio per entry | 200 |
-| Eagerly loaded metadata, XML, or chart media part | 8 MiB |
+| Total eagerly loaded metadata, XML, and chart media | 8 MiB |
 | Shared-string XML | 32 MiB |
 | Shared-string entries | 250,000 |
 | Worksheets, including hidden sheets | 128 |
