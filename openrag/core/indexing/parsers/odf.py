@@ -41,6 +41,10 @@ _MAX_IMAGES = 2000
 # the file: a spreadsheet-style table routinely declares 1024 empty columns.
 _MAX_TABLE_COLUMNS = 256
 _MAX_TABLE_ROWS = 10_000
+# Everything else in the output is bounded by the size of content.xml. Only the
+# counts the file declares (``text:c`` on ``text:s``, the table repeats) make
+# text out of nothing, so they share one budget per document.
+_MAX_REPEATED_CHARS = 1_000_000
 
 _NS = {
     "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
@@ -68,6 +72,11 @@ _TEXT_S = _q("text", "s")
 _TEXT_TAB = _q("text", "tab")
 _TEXT_LINE_BREAK = _q("text", "line-break")
 _TABLE_TABLE = _q("table", "table")
+# Containers a table's own rows may sit in. A row inside a nested table is that
+# table's, and is read when the cell holding it is.
+_TABLE_ROW_CONTAINERS = frozenset(
+    {_q("table", "table-header-rows"), _q("table", "table-rows"), _q("table", "table-row-group")}
+)
 _TABLE_ROW = _q("table", "table-row")
 _TABLE_CELL = _q("table", "table-cell")
 _TABLE_COVERED_CELL = _q("table", "covered-table-cell")
@@ -153,6 +162,7 @@ class OdfConverter:
         self._numbered_levels = self._list_styles()
         self.images: list[ImageBlock] = []
         self._page_number = 1
+        self._repeat_budget = _MAX_REPEATED_CHARS
 
     # ----- documents -----
 
@@ -292,7 +302,7 @@ class OdfConverter:
         from html_to_markdown import convert
 
         rows: list[list[str]] = []
-        for row in table.iter(_TABLE_ROW):
+        for row in _table_rows(table):
             if len(rows) >= _MAX_TABLE_ROWS:
                 logger.warning("Capping ODF table at %d rows", _MAX_TABLE_ROWS)
                 break
@@ -302,14 +312,14 @@ class OdfConverter:
                     continue
                 text = self._blocks_markdown(cell, separator=" ").replace("\n", " ").strip()
                 repeat = _int_attr(cell, _q("table", "number-columns-repeated"), 1)
-                cells.extend([text] * max(1, min(repeat, _MAX_TABLE_COLUMNS - len(cells))))
+                cells.extend([text] * self._repeats(text, repeat, _MAX_TABLE_COLUMNS - len(cells)))
                 if len(cells) >= _MAX_TABLE_COLUMNS:
                     break
             while cells and not cells[-1]:
                 cells.pop()
             repeat = _int_attr(row, _q("table", "number-rows-repeated"), 1)
-            # A repeated empty row is filler; a repeated row with content is kept once per repeat.
-            rows.extend([cells] * (max(1, min(repeat, _MAX_TABLE_ROWS - len(rows))) if cells else 1))
+            # A repeated empty row is filler, kept once and trimmed below.
+            rows.extend([cells] * (self._repeats(" ".join(cells), repeat, _MAX_TABLE_ROWS - len(rows)) if cells else 1))
         while rows and not rows[-1]:
             rows.pop()
         if not rows:
@@ -322,6 +332,21 @@ class OdfConverter:
             html_rows.append("<tr>" + "".join(f"<{tag}>{html.escape(c)}</{tag}>" for c in padded) + "</tr>")
         html_rows.append("</table></body></html>")
         return convert("".join(html_rows)).strip()
+
+    def _repeats(self, text: str, declared: int, room: int) -> int:
+        """How many copies of *text* a declared repeat count may produce.
+
+        At least one, at most *room*, and copies past the first are charged to
+        the document's budget. An empty cell costs nothing: it is filler.
+        """
+        wanted = max(1, min(declared, room))
+        if wanted == 1 or not text:
+            return wanted
+        extra = min(wanted - 1, self._repeat_budget // len(text))
+        if extra < wanted - 1:
+            logger.warning("ODF repeat counts exceed the %d character budget; truncating", _MAX_REPEATED_CHARS)
+        self._repeat_budget -= extra * len(text)
+        return 1 + extra
 
     # ----- inline text and pictures -----
 
@@ -337,7 +362,7 @@ class OdfConverter:
         if not isinstance(tag, str) or tag in _SKIPPED_INLINE:
             return ""
         if tag == _TEXT_S:
-            return " " * max(1, _int_attr(child, _q("text", "c"), 1))
+            return " " * self._repeats(" ", _int_attr(child, _q("text", "c"), 1), _MAX_REPEATED_CHARS)
         if tag == _TEXT_TAB:
             return "\t"
         if tag == _TEXT_LINE_BREAK:
@@ -395,6 +420,15 @@ class OdfConverter:
             )
         )
         return ref
+
+
+def _table_rows(table) -> Iterator:
+    """A table's own rows, in order, without those of tables nested in its cells."""
+    for child in table:
+        if child.tag == _TABLE_ROW:
+            yield child
+        elif child.tag in _TABLE_ROW_CONTAINERS:
+            yield from _table_rows(child)
 
 
 def open_odf(path: str) -> zipfile.ZipFile:
