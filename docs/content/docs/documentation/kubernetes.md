@@ -615,7 +615,7 @@ When `postgresProvisioning.migrationJob` is disabled (the default), the Job is n
 
 ## GPU sharing
 
-The API pod requests `nvidia.com/gpu: 1` by default (`openrag.resources`), for Marker. On a single-GPU node it shares the card with the embedder and the reranker. Pin it to that node with `openrag.nodeSelector`, `openrag.tolerations` or `openrag.affinity`, as `reranker.nodeSelector` does for the reranker, and pick one of two ways to share the card:
+The API pod requests `nvidia.com/gpu: 1` by default (`openrag.resources`), for Marker. On a single-GPU node it shares the card with the embedder and the reranker. Pin it to that node with `openrag.nodeSelector`, `openrag.tolerations` or `openrag.affinity` (the reranker has `reranker.nodeSelector` only, so it cannot tolerate a taint), and pick one of two ways to share the card:
 
 - **Time-slicing, with a request.** Configure the NVIDIA device plugin to advertise each GPU as several `nvidia.com/gpu` replicas, and keep the request in every pod. The scheduler then counts the shares.
 - **A runtime class, without a request.** Set `openrag.runtimeClassName` (for example `nvidia`), remove `nvidia.com/gpu` from `openrag.resources.requests` and `openrag.resources.limits`, and expose the card through the container's environment:
@@ -635,7 +635,9 @@ The API pod requests `nvidia.com/gpu: 1` by default (`openrag.resources`), for M
 
   The scheduler no longer sees the GPU use, so the node selector is what keeps the pod on the GPU node.
 
-`openrag.extraEnv` holds Kubernetes `EnvVar` objects for the API container alone. They take precedence over the shared `env.config` ConfigMap.
+  This relies on the NVIDIA Container Toolkit honouring `NVIDIA_VISIBLE_DEVICES` in an unprivileged container. A node configured with `accept-nvidia-visible-devices-envvar-when-unprivileged = false` ignores it, and the container then starts without a GPU and with no error. Check that setting on your nodes, or use time-slicing.
+
+`openrag.extraEnv` holds Kubernetes `EnvVar` objects for the API container alone. They take precedence over the shared `env.config` ConfigMap. The chart refuses `RAY_METRICS_EXPORT_PORT` there, since it sets that one itself.
 
 ## GPU metrics
 

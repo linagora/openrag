@@ -118,6 +118,13 @@ spec:
             {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
           {{- $embeddedRay := eq (include "openrag-stack.embeddedRay" .) "true" }}
+          {{- /* The chart owns this one: the ray-metrics port and the PodMonitor
+             follow it, so a second entry would move the export away from them. */}}
+          {{- range .Values.openrag.extraEnv }}
+          {{- if and $embeddedRay (eq (toString .name) "RAY_METRICS_EXPORT_PORT") }}
+          {{- fail "openrag.extraEnv sets RAY_METRICS_EXPORT_PORT, which the chart pins for the embedded Ray: the ray-metrics port and the PodMonitor follow it. Remove it from openrag.extraEnv." }}
+          {{- end }}
+          {{- end }}
           {{- if or $embeddedRay .Values.openrag.extraEnv }}
           env:
             {{- if $embeddedRay }}
