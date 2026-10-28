@@ -17,3 +17,5 @@ async function bootstrap() {
 }
 
 bootstrap();
+
+// CI probe for #1279, not for merging
