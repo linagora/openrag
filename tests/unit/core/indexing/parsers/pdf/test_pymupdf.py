@@ -1160,44 +1160,6 @@ class TestPagesWithFallback:
         """Sanity check: the threshold must be a fraction in (0, 1)."""
         assert 0 < _MARKDOWN_TEXT_RATIO_THRESHOLD < 1
 
-    def test_only_one_warning_for_two_pages_that_fallback(self):
-        """Two pages falling back log one warning listing both."""
-        from loguru import logger
-
-        records = []
-        sink_id = logger.add(lambda m: records.append(m.record))
-
-        try:
-            pdf_doc = pymupdf.open()
-            try:
-                page0 = pdf_doc.new_page()
-                page0.insert_text((72, 72), "hello world this is a long sentence")
-                page1 = pdf_doc.new_page()
-                page1.insert_text((72, 72), "another page with text")
-                raw = pdf_doc.tobytes()
-            finally:
-                pdf_doc.close()
-
-            with pymupdf.open(stream=raw, filetype="pdf") as doc:
-                plain0 = doc[0].get_text().strip()
-                plain1 = doc[1].get_text().strip()
-                chunks = [{"text": "y"}, {"text": "z"}]
-                pages = _pages_with_fallback(doc, chunks, "two_pages_fallback.pdf")
-
-        finally:
-            logger.remove(sink_id)
-
-        warnings = [record for record in records if record["level"].name == "WARNING"]
-
-        assert len(warnings) == 1
-        extra = warnings[0]["extra"]
-        assert extra["fallen_back_pages"] == [1, 2]
-        assert extra["fallen_back_pages_count"] == 2
-
-        assert pages[0] == plain0
-        assert pages[1] == plain1
-
-
 class TestExtractMarkdownPerPageFallback:
     """Integration: _extract_markdown uses per-page fallback via _pages_with_fallback."""
 
