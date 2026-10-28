@@ -15,6 +15,8 @@ from defusedxml.ElementTree import fromstring, iterparse
 
 MAIN_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
 CELL_REF = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
+STREAMED_XML_PARTS = {"xl/sharedStrings.xml"}
+STREAMED_XML_PREFIXES = ("xl/worksheets/",)
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,23 @@ def _shared_string_count(archive, types, limits):
     return count
 
 
+def _streamed_xml_parts(types) -> set[str]:
+    """Return explicitly declared large XML parts consumed as streams."""
+    suffixes = (".worksheet+xml", ".sharedStrings+xml")
+    return STREAMED_XML_PARTS | {
+        node.get("PartName", "").lstrip("/")
+        for node in types
+        if node.get("PartName") and node.get("ContentType", "").endswith(suffixes)
+    }
+
+
+def _is_eager_xml_part(name: str, streamed_parts: set[str]) -> bool:
+    """Return whether OpenPyXL may materialize this XML package part."""
+    return (
+        name.endswith((".xml", ".rels")) and name not in streamed_parts and not name.startswith(STREAMED_XML_PREFIXES)
+    )
+
+
 def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
     """Inspect actual cells, not untrusted dimension/count declarations.
 
@@ -149,8 +168,6 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                     raise invalid("Macro-enabled workbooks are not accepted as XLSX")
                 if name == "xl/sharedStrings.xml" and entry.file_size > limits.max_shared_strings_bytes:
                     raise limit("XLSX shared strings exceed the memory limit")
-                if name == "xl/styles.xml" and entry.file_size > limits.max_metadata_bytes:
-                    raise limit("XLSX styles exceed the memory limit")
 
             def xml(name):
                 if archive.getinfo(name).file_size > limits.max_metadata_bytes:
@@ -160,6 +177,10 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
             types = xml("[Content_Types].xml")
             if _content_type(types, "/xl/workbook.xml") != MAIN_TYPE:
                 raise invalid("OOXML package is not an XLSX workbook")
+            streamed_parts = _streamed_xml_parts(types)
+            for entry in entries:
+                if _is_eager_xml_part(entry.filename, streamed_parts) and entry.file_size > limits.max_metadata_bytes:
+                    raise limit("XLSX metadata exceeds the memory limit")
             for part in types:
                 if part.get("ContentType", "").endswith(".styles+xml"):
                     if archive.getinfo(part.get("PartName", "").lstrip("/")).file_size > limits.max_metadata_bytes:
@@ -170,6 +191,14 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
             if any(not rel_id for rel_id in relationship_ids) or len(set(relationship_ids)) != len(relationship_ids):
                 raise invalid("XLSX workbook relationships have missing or duplicate identifiers")
             relationships = dict(zip(relationship_ids, relationship_nodes, strict=True))
+            # Read-only OpenPyXL still materializes chart sheets and their
+            # drawing media while opening a workbook. Bound those binary parts
+            # before the backend can allocate them; ordinary worksheet media
+            # remains ignored and is governed by the archive limits instead.
+            if any(relationship.get("Type", "").endswith("/chartsheet") for relationship in relationship_nodes):
+                for entry in entries:
+                    if entry.filename.startswith("xl/media/") and entry.file_size > limits.max_metadata_bytes:
+                        raise limit("XLSX chart media exceed the memory limit")
             sheets = xml("xl/workbook.xml").findall("{*}sheets/{*}sheet")
             if len(sheets) > limits.max_sheets:
                 raise limit("XLSX worksheet count exceeds the limit")

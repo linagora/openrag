@@ -127,6 +127,19 @@ def _edit_xml(document, edit, target="xl/worksheets/sheet1.xml"):
     return document.model_copy(update={"raw_bytes": output.getvalue()})
 
 
+def _replace_part(document, target, data):
+    import zipfile
+
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            dest.writestr(name, data if name == target else source.read(name))
+    return document.model_copy(update={"raw_bytes": output.getvalue()})
+
+
 def _transcode_xml_parts(document, xml_encoding):
     """Rewrite OOXML text parts with an explicit encoding and BOM."""
     import codecs
@@ -688,7 +701,9 @@ def test_sheet_headers_override_global_and_allow_automatic_selection():
     assert by_sheet["People"][0].metadata["table_header_range"] == "'People'!A3:B3"
     assert by_sheet["People"][0].metadata["cell_range"] == "'People'!A4:B4"
     assert [b.metadata["table_row_numbers"] for b in by_sheet["Projects"]] == [[3], [4]]
-    assert by_sheet["Notes"][0].metadata["table_header_row"] == 2
+    # Without a blank structural boundary, automatic detection keeps the
+    # first nonempty row rather than risking loss of an ordinary data record.
+    assert by_sheet["Notes"][0].metadata["table_header_row"] == 1
 
 
 @pytest.mark.parametrize("overrides", [{"people": 2}, {"Hidden": 1}, {"People": 99}])
@@ -813,6 +828,29 @@ def test_auto_header_keeps_equal_width_text_rows_ambiguous():
     selected, replay = module._detect_header(iter(original), 1024)
     assert selected == 1
     assert list(replay) == original
+
+
+def test_auto_header_does_not_consume_a_narrow_first_data_record():
+    document = _document([["record"], ["HL-001", "Alice"], ["HL-002", "Bob"]])
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_row_numbers"] == [2, 3]
+    assert "HL-001" in block.text
+
+
+@pytest.mark.parametrize("target", ["xl/theme/theme1.xml", "docProps/core.xml"])
+def test_eager_openpyxl_metadata_is_bounded_before_reader_opens(target, monkeypatch):
+    document = _replace_part(_document([["id"], [1]]), target, bytes(range(251)) * 100)
+
+    def unexpected_reader(*args):
+        pytest.fail("Oversized eager metadata must be rejected before opening the reader")
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", unexpected_reader)
+    with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
+        list(XlsxParser(limits={"max_metadata_bytes": 20_000}).iter_batches(document))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
 
 
 @pytest.mark.parametrize("strategy", ["recursive", "structured"])
