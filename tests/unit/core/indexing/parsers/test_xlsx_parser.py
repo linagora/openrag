@@ -331,6 +331,19 @@ def test_single_row_larger_than_byte_budget_fails_explicitly():
         list(XlsxParser(limits=XlsxLimits(max_batch_bytes=100)).iter_batches(doc))
 
 
+def test_oversized_row_is_rejected_before_markdown_allocation(monkeypatch):
+    original = module.markdown_row
+
+    def bounded_markdown_row(cells):
+        if any(len(cell) >= 200 for cell in cells):
+            pytest.fail("oversized data row reached Markdown rendering")
+        return original(cells)
+
+    monkeypatch.setattr(module, "markdown_row", bounded_markdown_row)
+    with pytest.raises(PipelineError, match="batch byte limit"):
+        list(XlsxParser(limits={"max_batch_bytes": 100}).iter_batches(_document([["text"], ["x" * 200]])))
+
+
 def test_header_names_are_unique_even_with_generated_name_collisions():
     doc = _document([["column_3", "name", None, "name", "name_2"], [1, 2, 3, 4, 5]])
     [block] = list(XlsxParser().iter_batches(doc))
@@ -851,6 +864,47 @@ def test_eager_openpyxl_metadata_is_bounded_before_reader_opens(target, monkeypa
     with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
         list(XlsxParser(limits={"max_metadata_bytes": 20_000}).iter_batches(document))
     assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+def test_aggregate_eager_metadata_is_bounded_before_reader_opens(monkeypatch):
+    document = _document([["id"], [1]])
+    document = _replace_part(document, "xl/theme/theme1.xml", bytes(range(251)) * 60)
+    document = _replace_part(document, "docProps/core.xml", bytes(range(250, -1, -1)) * 60)
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
+        list(XlsxParser(limits={"max_metadata_bytes": 30_000}).iter_batches(document))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+def test_worksheet_relationship_metadata_is_bounded_before_reader_opens(monkeypatch):
+    import zipfile
+
+    document = _document([["id"], [1]])
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            dest.writestr(name, source.read(name))
+        dest.writestr("xl/worksheets/_rels/sheet1.xml.rels", bytes(range(251)) * 120)
+    document = document.model_copy(update={"raw_bytes": output.getvalue()})
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
+        list(XlsxParser(limits={"max_metadata_bytes": 30_000}).iter_batches(document))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+@pytest.mark.parametrize("target", ["xl/styles.xml", "docProps/core.xml"])
+def test_malformed_backend_metadata_raises_domain_error(target):
+    document = _replace_part(_document([["id"], [1]]), target, b"<broken")
+
+    with pytest.raises(PipelineError, match="valid XLSX workbook") as error:
+        list(XlsxParser().iter_batches(document))
+    assert error.value.code == "INVALID_XLSX"
+    assert error.value.status_code == 422
 
 
 @pytest.mark.parametrize("strategy", ["recursive", "structured"])
