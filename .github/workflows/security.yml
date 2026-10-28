@@ -107,7 +107,9 @@ jobs:
             core.info(`languages: ${languages.join(', ') || 'none'}`);
 
   dependencies:
-    name: Dependencies (${{ matrix.lockfile }})
+    # GitHub appends the lockfile, as in "Dependencies (uv.lock)". Spelling the
+    # matrix out here would show unexpanded when `changes` skips every lockfile.
+    name: Dependencies
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.lockfiles != '[]' }}
     runs-on: ubuntu-latest
@@ -233,7 +235,8 @@ jobs:
             --redact --verbose --no-banner --exit-code 1
 
   codeql:
-    name: CodeQL (${{ matrix.language }})
+    # GitHub appends the language, as in "CodeQL (python)"; see Dependencies.
+    name: CodeQL
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.languages != '[]' }}
     runs-on: ubuntu-latest
