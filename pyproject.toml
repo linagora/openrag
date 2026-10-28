@@ -1,6 +1,6 @@
 [project]
 name = "openrag"
-version = "2.3.2"
+version = "2.3.3"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
