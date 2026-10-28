@@ -6,6 +6,7 @@ import io
 import zipfile
 
 import pytest
+from core.indexing.parsers.odf import _MAX_REPEATED_CHARS
 from core.indexing.parsers.odt_parser import OdtParser
 from core.models.document import Document, DocumentType
 
@@ -235,3 +236,52 @@ async def test_empty_document_has_no_block():
     processed = await OdtParser().parse(Document(filename="x.odt", content_type=DocumentType.ODT, raw_bytes=b""))
 
     assert processed.text_blocks == []
+
+
+# ---------------------------------------------------------------------------
+# Declared counts must not make output out of nothing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_huge_space_count_is_bounded(odf_package):
+    md = await _markdown(odf_package, '<text:p>a<text:s text:c="999999999"/>b</text:p>')
+
+    assert len(md) <= _MAX_REPEATED_CHARS + 2
+
+
+@pytest.mark.asyncio
+async def test_space_counts_share_one_budget_across_the_document(odf_package):
+    spaces = '<text:s text:c="1000000"/>' * 50
+    md = await _markdown(odf_package, f"<text:p>a{spaces}b</text:p>")
+
+    assert len(md) <= _MAX_REPEATED_CHARS + 50 + 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_cells_and_rows_with_content_are_bounded(odf_package):
+    cell = f'<table:table-cell table:number-columns-repeated="1024"><text:p>{"x" * 1000}</text:p></table:table-cell>'
+    md = await _markdown(
+        odf_package,
+        f'<table:table><table:table-row table:number-rows-repeated="1048576">{cell}</table:table-row></table:table>',
+    )
+
+    assert len(md) < 3 * _MAX_REPEATED_CHARS
+
+
+@pytest.mark.asyncio
+async def test_nested_tables_are_read_once(odf_package):
+    """Walking every descendant row made each nesting level re-read the levels
+    below it: 2^depth work for a file a few kilobytes long."""
+    body = "<text:p>fond</text:p>"
+    for _ in range(40):
+        body = (
+            "<table:table><table:table-row>"
+            f"<table:table-cell>{body}</table:table-cell>"
+            "<table:table-cell><text:p>x</text:p></table:table-cell>"
+            "</table:table-row></table:table>"
+        )
+
+    md = await _markdown(odf_package, body)
+
+    assert md.count("fond") == 1
