@@ -6,10 +6,11 @@ referenced from ``draw:image`` elements by ``xlink:href``. This module reads the
 XML with ``lxml`` and converts it to Markdown. No office suite is involved.
 
 What is kept: headings, paragraphs, bulleted and numbered lists (nested
-included), tables, text boxes, slide titles and speaker notes. What is dropped:
-character formatting, footnotes and endnotes, comments, tracked deletions,
-generated indexes (a table of contents repeats the headings), and embedded
-objects such as charts and formulas, which are sub-documents of their own.
+included), tables, text boxes, slide titles, speaker notes, and charts, as their
+title and data table (``### Chart: <title>``, as the PPTX parser renders them).
+What is dropped: character formatting, footnotes and endnotes, comments,
+tracked deletions, generated indexes (a table of contents repeats the headings),
+and embedded objects other than charts, such as formulas.
 
 Pictures become synthetic ``![](<prefix>-N)`` refs in the Markdown, with one
 :class:`ImageBlock` per ref carrying it in ``metadata['markdown_ref']``, as the
@@ -34,6 +35,9 @@ from ..image_preprocessor import UPLOADED_IMAGE_FORMATS, ensure_png_compatible_m
 logger = logging.getLogger(__name__)
 
 _MAX_XML_BYTES = 64 * 1024 * 1024
+# Each chart is a sub-document with a content.xml of its own, and several frames
+# may name the same one: what the charts read is budgeted per document.
+_MAX_OBJECT_XML_BYTES = 64 * 1024 * 1024
 _MAX_ARCHIVE_ENTRY_BYTES = 100 * 1024 * 1024
 _MAX_SLIDES = 2000
 _MAX_IMAGES = 2000
@@ -86,11 +90,15 @@ _TABLE_COVERED_CELL = _q("table", "covered-table-cell")
 _DRAW_FRAME = _q("draw", "frame")
 _DRAW_IMAGE = _q("draw", "image")
 _DRAW_TEXT_BOX = _q("draw", "text-box")
+_DRAW_OBJECT = _q("draw", "object")
 _DRAW_PAGE = _q("draw", "page")
 _DRAW_G = _q("draw", "g")
 _PRESENTATION_NOTES = _q("presentation", "notes")
 _PRESENTATION_CLASS = _q("presentation", "class")
 _XLINK_HREF = _q("xlink", "href")
+_CHART_NS = "urn:oasis:names:tc:opendocument:xmlns:chart:1.0"
+_CHART_PATH = f"{_q('office', 'body')}/{_q('office', 'chart')}/{{{_CHART_NS}}}chart"
+_CHART_TITLE = f"{{{_CHART_NS}}}title"
 
 # Inline content that is not the document's running text.
 _SKIPPED_INLINE = frozenset(
@@ -167,6 +175,7 @@ class OdfConverter:
         self._page_number = 1
         self._repeat_budget = _MAX_REPEATED_CHARS
         self._cell_budget = _MAX_TABLE_CELLS
+        self._object_xml_budget = _MAX_OBJECT_XML_BYTES
 
     # ----- documents -----
 
@@ -383,6 +392,10 @@ class OdfConverter:
 
     def _frame_markdown(self, frame) -> str:
         """A frame holds a picture (possibly with fallbacks), a text box, or an object."""
+        embedded = frame.find(_DRAW_OBJECT)
+        if embedded is not None:
+            # Its draw:image siblings are a rendering of the object, not a picture.
+            return self._chart_markdown(embedded.get(_XLINK_HREF))
         images = frame.findall(_DRAW_IMAGE)
         if images:
             # Several draw:image children are alternatives of one picture
@@ -396,6 +409,34 @@ class OdfConverter:
         if text_box is not None:
             return self._blocks_markdown(text_box, separator="\n")
         return ""
+
+    def _chart_markdown(self, href: str | None) -> str:
+        """An embedded chart as ``### Chart: <title>`` and its data table; any other object as nothing."""
+        if not href or "://" in href:
+            return ""
+        name = href.removeprefix("./").rstrip("/") + "/content.xml"
+        try:
+            size = self._package.getinfo(name).file_size
+        except KeyError:
+            return ""
+        if size > self._object_xml_budget:
+            logger.warning("Skipping ODF object %s: embedded objects exceed their XML budget", name)
+            return ""
+        self._object_xml_budget -= size
+        try:
+            root = _read_xml(self._package, name, required=False)
+        except OdfError as exc:
+            logger.warning("Skipping ODF object %s: %s", name, exc)
+            return ""
+        chart = root.find(_CHART_PATH) if root is not None else None
+        if chart is None:
+            return ""
+        title_element = chart.find(_CHART_TITLE)
+        title = "" if title_element is None else self._blocks_markdown(title_element, separator=" ").strip()
+        data = chart.find(_TABLE_TABLE)
+        table = self._table_markdown(data) if data is not None else ""
+        heading = f"### Chart: {title}" if title else "### Chart"
+        return f"{heading}\n\n{table}" if table else heading
 
     def _image_ref(self, href: str | None) -> str:
         if not href or "://" in href:
