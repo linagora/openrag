@@ -10,6 +10,7 @@ import pytest
 from core.chunking.markdown_utils import (
     MDElement,
     _split_to_budget,
+    attach_captions,
     chunk_table,
     get_chunk_page_number,
     parse_markdown_table,
@@ -153,6 +154,91 @@ class TestSplitMdElements:
         assert images[0].page_number == 3
 
 
+TABLE = "| A | B |\n|---|---|\n| 1 | 2 |"
+
+
+def _captions(md: str) -> list[str]:
+    return [e.caption for e in attach_captions(split_md_elements(md)) if e.type != "text"]
+
+
+class TestAttachCaptions:
+    def test_caption_below_a_table_moves_to_its_head(self):
+        parts = attach_captions(split_md_elements(f"Intro.\n\n{TABLE}\n\n*Table 1. Totals*\n\nNext paragraph."))
+        assert [p.type for p in parts] == ["text", "table", "text"]
+        assert parts[1].caption == "*Table 1. Totals*"
+        assert parts[1].content == f"*Table 1. Totals*\n\n{TABLE}"
+        assert parts[2].content == "Next paragraph."
+
+    def test_caption_above_a_table_loses_its_heading_marks(self):
+        parts = attach_captions(split_md_elements(f"Intro.\n\n#### Tableau 2 - Totaux\n\n{TABLE}"))
+        assert parts[0].content == "Intro."
+        assert parts[1].caption == "Tableau 2 - Totaux"
+
+    def test_caption_between_two_blocks_follows_the_document_majority(self):
+        below = f"{TABLE}\n\nTable 1: First\n\nProse.\n\n{TABLE}\n\nTable 2: Second\n\n{TABLE}"
+        above = f"Table 1: First\n\n{TABLE}\n\nProse.\n\n{TABLE}\n\nTable 2: Second\n\n{TABLE}"
+        assert _captions(below) == ["Table 1: First", "Table 2: Second", ""]
+        assert _captions(above) == ["Table 1: First", "", "Table 2: Second"]
+
+    def test_page_marker_between_caption_and_block_stays_in_the_text(self):
+        parts = attach_captions(split_md_elements(f"*Table 2. Key features*\n\n[PAGE_27]\n\n{TABLE}"))
+        assert parts[0].content == "[PAGE_27]"
+        assert parts[1].caption == "*Table 2. Key features*"
+
+    @pytest.mark.parametrize(
+        "after",
+        [
+            "Table 2 below summarises the results.",
+            "Table 1.1 presents the results.",
+            "Some prose.\n\nFigure 1: A caption too far from its block",
+            "Source: Authors",
+            "Figure 1: Alpha .... 3\nFigure 2: Beta .... 7",
+            "Figure 1: Alpha 3\n\nFigure 2: Beta 7",
+        ],
+    )
+    def test_text_that_is_not_an_adjacent_caption_stays(self, after):
+        assert _captions(f"{TABLE}\n\n{after}\n\nNext.") == [""]
+
+    def test_credit_travels_with_its_caption(self):
+        assert _captions(f"{TABLE}\n\n*Figure 1. Map*\n\nSource: Authors\n\nNext.") == [
+            "*Figure 1. Map*\nSource: Authors"
+        ]
+
+    def test_several_captions_can_label_one_block(self):
+        chart = "<image_description>\n\nTwo bar charts.\n\n</image_description>"
+        assert _captions(f"Prose.\n\nFigure 2.1: Tech firms\n\nFigure 2.2: AI investment\n\n{chart}") == [
+            "Figure 2.1: Tech firms\nFigure 2.2: AI investment"
+        ]
+
+    @pytest.mark.parametrize(
+        "md",
+        [
+            f"{TABLE}\n\nTable 1: Regional totals\n(in millions)\n\nNext.",
+            f"Intro.\n\nTable 1: Regional totals\n(in millions)\n\n{TABLE}",
+        ],
+    )
+    def test_wrapped_caption_moves_whole(self, md):
+        assert _captions(md) == ["Table 1: Regional totals\n(in millions)"]
+
+    def test_caption_touching_a_block_that_takes_none_stays_in_the_text(self):
+        image = "<image_description>\n\nA logo.\n\n</image_description>"
+        md = f"{TABLE}\n\nFigure 2: Logo\n\n{image}\n\nProse."
+        parts = attach_captions(split_md_elements(md), takes_caption=lambda block: block.type != "image")
+        assert [p.caption for p in parts] == ["", "", "", ""]
+        assert parts[1].content == "Figure 2: Logo"
+
+    def test_caption_emitted_as_its_own_block_is_recognised(self):
+        caption_table = "| Table 5. Ranking |  |  |\n|---|--|--|\n|  |  |  |"
+        caption_image = "<image_description>\n\nFigure 1.2: Approaches\n\n</image_description>"
+        chart = "<image_description>\n\nA bar chart.\n\n</image_description>"
+        assert _captions(f"{TABLE}\n\n{caption_table}\n\nProse.") == ["Table 5. Ranking"]
+        assert _captions(f"Prose.\n\n{caption_image}\n\n{chart}") == ["Figure 1.2: Approaches"]
+
+    def test_list_of_figures_stays_a_table(self):
+        listing = "| Figure 1: Alpha 3 |\n|---|\n| Figure 2: Beta 7 |"
+        assert _captions(f"Prose.\n\n{listing}\n\nProse.") == [""]
+
+
 class TestGetChunkPageNumber:
     def test_no_markers_returns_previous_page(self):
         result = get_chunk_page_number("Just some plain text content.", previous_chunk_ending_page=1)
@@ -181,6 +267,16 @@ class TestChunkTable:
         assert chunks[0].page_number == 1
         assert "John" in chunks[0].content
         assert "Jane" in chunks[0].content
+
+    def test_caption_is_repeated_on_every_piece(self):
+        caption = "Table 3: Totals"
+        rows = "\n".join(f"| R{i} | {i} |" for i in range(40))
+        elem = MDElement(type="table", content=f"{caption}\n\n| K | V |\n|---|---|\n{rows}", caption=caption)
+        chunks = chunk_table(elem, chunk_size=60, length_function=_mock_length)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert chunk.content.startswith(f"{caption}\n\n| K | V |")
+            assert chunk.content.count(caption) == 1
 
     def test_chunking_preserves_groups(self):
         header = "| Country | Strategy | Goals |"
