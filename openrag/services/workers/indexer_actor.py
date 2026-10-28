@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
-from core.models.document import Document
+from core.models.document import Document, DocumentType
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
@@ -175,7 +175,8 @@ class IndexerWorker:
                 "document": document,
                 "partition": partition,
                 "filename": document.filename,
-                "language": metadata.get("language", "en"),
+                # None lets the enrichment stages detect it (see resolve_language).
+                "language": metadata.get("language"),
                 "replace": replace,
                 "user": user,
                 "workspace_ids": workspace_ids,
@@ -484,7 +485,8 @@ async def _load_document(
     # (see IndexerWorker.process_file); it is intentionally not stamped into the
     # document metadata so it never leaks into chunk metadata.
     filename = _display_filename(path, metadata)
-    raw_bytes = await asyncio.to_thread(p.read_bytes)
+    content_type = Document.detect_content_type(filename, metadata.get("mimetype"))
+    raw_bytes = None if content_type is DocumentType.CSV else await asyncio.to_thread(p.read_bytes)
     return Document(
         id=file_id,
         filename=filename,
@@ -504,7 +506,7 @@ async def _load_document(
         # pre-existing #911 behaviour for that route rather than a regression,
         # and closing it means downloading into ``data_dir``.
         source_path=str(p),
-        content_type=Document.detect_content_type(filename, metadata.get("mimetype")),
+        content_type=content_type,
         partition=partition,
         metadata=dict(metadata),
     )
