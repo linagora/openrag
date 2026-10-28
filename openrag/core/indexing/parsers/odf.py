@@ -45,6 +45,9 @@ _MAX_TABLE_ROWS = 10_000
 # counts the file declares (``text:c`` on ``text:s``, the table repeats) make
 # text out of nothing, so they share one budget per document.
 _MAX_REPEATED_CHARS = 1_000_000
+# Cells the document's tables may render, after short rows are padded to the
+# widest one: padding is made of nothing too, and a row is cheap to write.
+_MAX_TABLE_CELLS = 500_000
 
 _NS = {
     "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
@@ -163,6 +166,7 @@ class OdfConverter:
         self.images: list[ImageBlock] = []
         self._page_number = 1
         self._repeat_budget = _MAX_REPEATED_CHARS
+        self._cell_budget = _MAX_TABLE_CELLS
 
     # ----- documents -----
 
@@ -325,6 +329,12 @@ class OdfConverter:
         if not rows:
             return ""
         width = max(len(row) for row in rows)
+        if len(rows) * width > self._cell_budget:
+            logger.warning("ODF tables exceed the %d cell budget; truncating", _MAX_TABLE_CELLS)
+            rows = rows[: self._cell_budget // width]
+            if not rows:
+                return ""
+        self._cell_budget -= len(rows) * width
         html_rows = ["<html><body><table>"]
         for index, row in enumerate(rows):
             tag = "th" if index == 0 else "td"
