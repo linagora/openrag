@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import time
 
+import pytest
 from core.indexing.image_preprocessor import (
     MIN_IMAGE_PIXELS,
+    UPLOADED_IMAGE_FORMATS,
     decode_data_uri,
     ensure_png_compatible_mode,
     extract_data_uri_image_blocks,
@@ -14,7 +17,9 @@ from core.indexing.image_preprocessor import (
     normalize_data_uri_images,
     pil_to_png_bytes,
 )
+from core.models.document import _EXTENSION_TYPES, DocumentType
 from PIL import Image
+from services.workers.parsers.parser_dispatcher import _EML_ATTACHMENT_TYPES
 
 
 class TestEnsurePngCompatibleMode:
@@ -310,6 +315,18 @@ class TestNormalizeDataUriImages:
         assert text == "![diagram]([Image]"
         assert blocks == []
 
+    def test_a_long_target_that_fails_to_match_is_rejected_in_linear_time(self):
+        # A target run the pattern could split many ways used to double the
+        # matching time with each character: 26 of them took seconds.
+        source = "![](data:image/" + "!" * 26 + "') x"
+
+        started = time.perf_counter()
+        text, blocks = normalize_data_uri_images(source)
+
+        assert time.perf_counter() - started < 0.5
+        assert "data:image" not in text.lower()
+        assert blocks == []
+
     def test_residual_scrubber_handles_case_and_line_wrapping(self):
         wrapped = base64.encodebytes(b"image payload" * 8).decode()
         source = f'before <img src="DATA:IMAGE/PNG;BASE64,{wrapped}"> after'
@@ -412,3 +429,19 @@ class TestNormalizeDataUriImages:
 
 def test_min_image_pixels_constant():
     assert MIN_IMAGE_PIXELS == 784
+
+
+class TestUploadedImageFormats:
+    """``UPLOADED_IMAGE_FORMATS`` is exactly the raster types an upload can be."""
+
+    @pytest.mark.parametrize(
+        "extension_types",
+        [_EXTENSION_TYPES, _EML_ATTACHMENT_TYPES],
+        ids=["uploads", "eml-attachments"],
+    )
+    def test_matches_the_raster_image_extensions(self, extension_types):
+        raster_extensions = [
+            ext for ext, kind in extension_types.items() if kind is DocumentType.IMAGE and ext != "svg"
+        ]
+        pillow_formats = Image.registered_extensions()
+        assert {pillow_formats[f".{ext}"] for ext in raster_extensions} == set(UPLOADED_IMAGE_FORMATS)

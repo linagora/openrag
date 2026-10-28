@@ -5,7 +5,12 @@ from typing import Any
 
 from core.indexing.contextualize import ChunkContextualizer
 from core.models.chunk import Chunk
-from services.workers.stages._common import run_with_optional_timeout, scrub_credentials, stage_timeout
+from services.workers.stages._common import (
+    resolve_language,
+    run_with_optional_timeout,
+    scrub_credentials,
+    stage_timeout,
+)
 
 
 async def contextualize_stage(
@@ -23,7 +28,7 @@ async def contextualize_stage(
             raise ValueError("contextualize_stage row must contain a list[Chunk] under 'chunks'")
 
         filename = str(row.get("filename") or "")
-        language = str(row.get("language") or row.get("lang") or "en")
+        language = resolve_language(row)
         # DB-resolved per-partition prompt for this file, if any; otherwise the
         # contextualizer falls back to its own (disk-loaded) default.
         system_prompt = row.get("contextualizer_prompt")

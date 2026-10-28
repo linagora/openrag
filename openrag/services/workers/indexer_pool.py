@@ -1407,8 +1407,8 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
                 # leave it half-initialised (which would later raise a stray
                 # KeyError on the missing key, misread as an unresolvable LLM).
                 system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "chunk_contextualizer")
-                # Built directly from config to avoid importing
-                # services.inference.runtime, which eagerly constructs a LangDetector.
+                # Built from ``cfg``: runtime.get_llm_semaphore() would read the
+                # global config instead of the one this factory was given.
                 llm_semaphore = DistributedSemaphore(
                     name="llmSemaphore", max_concurrent_ops=cfg.semaphore.llm_semaphore
                 )

@@ -881,6 +881,43 @@ class TEIEmbedder(VLLMEmbedder):
 # ---------------------------------------------------------------------------
 
 
+def downscale_image(image_bytes: bytes, max_side: int) -> bytes:
+    """*image_bytes* as a PNG whose longer side is at most *max_side* pixels.
+
+    Vision models that tile the image at its native resolution (Qwen-VL among
+    them) spend input tokens, and time, in proportion to its area: a 2,000 px
+    page costs about twice the tokens and latency of the same page at 1,024 px,
+    for the same caption. An image already small enough, or bytes Pillow cannot
+    read, are returned unchanged.
+    """
+    from io import BytesIO
+
+    from core.indexing.image_preprocessor import UPLOADED_IMAGE_FORMATS, pil_to_png_bytes
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    try:
+        # Only the formats the image parsers accept: resizing must not decode
+        # formats (TIFF among them) that are deliberately left out elsewhere.
+        # Any other image is sent as it is.
+        with Image.open(BytesIO(image_bytes), formats=UPLOADED_IMAGE_FORMATS) as image:
+            if max(image.size) <= max_side:
+                return image_bytes
+            # The PNG carries no EXIF, so apply the orientation to the pixels
+            # or a rotated photo reaches the model sideways. In place, so an
+            # unrotated image is not copied at full size.
+            ImageOps.exif_transpose(image, in_place=True)
+            # reducing_gap=None keeps thumbnail() from calling draft(), whose
+            # scaled JPEG decode overflows the heap on lossless JPEGs in
+            # Pillow <= 12.3.0 (GHSA-8g5g-8vmr-9782). marker-pdf keeps Pillow
+            # below 11, so the image is decoded at full scale instead.
+            image.thumbnail((max_side, max_side), reducing_gap=None)
+            # Converts CMYK and other modes PNG cannot store, which would
+            # otherwise fail the save and send the full-size original.
+            return pil_to_png_bytes(image)
+    except (UnidentifiedImageError, OSError, ValueError):
+        return image_bytes
+
+
 @vlm_registry.register("vllm")
 class VLLMVision(VLLMClient, VLM):
     """OpenAI-compatible vision client backed by vLLM.
@@ -897,15 +934,31 @@ class VLLMVision(VLLMClient, VLM):
         timeout: float = 60.0,
         api_key: str = "",
         max_tokens: int = 1024,
+        max_image_side: int | str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(endpoint=endpoint, model_name=model_name, api_key=api_key, timeout=timeout, **kwargs)
         self._max_tokens = max_tokens
+        # Taken out of **kwargs on purpose: anything left there is sent to the
+        # provider as a sampling field, and a strict server rejects unknown ones.
+        # Checked here as well as on the admin API, which config and env
+        # sources bypass. A digit string is accepted for them; ``True`` and
+        # fractional values are not silently turned into a size.
+        if max_image_side is not None:
+            is_digits = isinstance(max_image_side, str) and max_image_side.strip().isdigit()
+            if isinstance(max_image_side, bool) or not (isinstance(max_image_side, int) or is_digits):
+                raise ValueError(f"max_image_side must be a positive integer, got {max_image_side!r}")
+            max_image_side = int(max_image_side)
+            if max_image_side <= 0:
+                raise ValueError(f"max_image_side must be a positive integer, got {max_image_side}")
+        self._max_image_side = max_image_side
 
     @with_inference_metrics("vlm")
     @with_circuit_breaker("vlm")
     @with_retry(max_attempts=2)
     async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        if self._max_image_side:
+            image_bytes = await asyncio.to_thread(downscale_image, image_bytes, self._max_image_side)
         image_b64 = base64.b64encode(image_bytes).decode()
         messages = [
             {

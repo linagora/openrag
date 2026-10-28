@@ -34,7 +34,7 @@ import zipfile
 from io import BytesIO
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
-from ..image_preprocessor import ensure_png_compatible_mode, pil_to_png_bytes
+from ..image_preprocessor import UPLOADED_IMAGE_FORMATS, ensure_png_compatible_mode, pil_to_png_bytes
 from .document_parser import DocumentParser
 from .registry import parser_registry
 
@@ -169,7 +169,7 @@ class DocxParser(DocumentParser):
                         continue
                     raw = zf.read(name)
                     try:
-                        with Image.open(BytesIO(raw)) as im:
+                        with Image.open(BytesIO(raw), formats=UPLOADED_IMAGE_FORMATS) as im:
                             im = ensure_png_compatible_mode(im)
                             ordered[order_num] = pil_to_png_bytes(im)
                     except Exception as exc:

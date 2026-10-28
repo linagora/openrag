@@ -147,3 +147,42 @@ class TestPptxParserConvertPath:
         texts = [text for _, text in slides]
         assert any("Slide one text" in t for t in texts)
         assert any("Slide three text" in t for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# Picture decoding is limited to the upload image formats
+# ---------------------------------------------------------------------------
+
+
+def _deck_with_pictures(tmp_path, pictures: list[bytes], replace: dict[bytes, bytes]):
+    """Build a real .pptx with one picture per slide, then swap media bytes in the zip."""
+    import zipfile
+    from io import BytesIO
+
+    import pptx
+    from pptx.util import Inches
+
+    presentation = pptx.Presentation()
+    for picture in pictures:
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        slide.shapes.add_picture(BytesIO(picture), Inches(1), Inches(1))
+    built = tmp_path / "built.pptx"
+    presentation.save(built)
+
+    deck = tmp_path / "deck.pptx"
+    with zipfile.ZipFile(built) as source, zipfile.ZipFile(deck, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename.startswith("ppt/media/"):
+                data = replace.get(data, data)
+            target.writestr(item, data)
+    return deck
+
+
+def test_a_picture_in_another_format_is_skipped(tmp_path, psd_bytes, encoded_image):
+    first, second = encoded_image("PNG"), encoded_image("JPEG")
+    deck = _deck_with_pictures(tmp_path, [first, second], replace={first: psd_bytes})
+
+    _, _, images = PptxParser()._convert(str(deck))
+
+    assert [image.page_number for image in images] == [2]

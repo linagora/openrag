@@ -138,6 +138,23 @@ async def test_unsafe_callback_url_is_skipped_not_sent(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hostname", ["127。0。0。1", "127．0．0．1", "127｡0｡0｡1", "127。1", "localhost."])
+async def test_noncanonical_loopback_callback_is_not_sent(monkeypatch: pytest.MonkeyPatch, hostname: str) -> None:
+    sent_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent_requests
+        sent_requests += 1
+        return httpx.Response(200)
+
+    _patch_async_client(monkeypatch, handler)
+
+    await send_indexing_callback(f"http://{hostname}/callback", "p", "f1", "success")
+
+    assert sent_requests == 0
+
+
+@pytest.mark.asyncio
 async def test_callback_url_credentials_are_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must never be called
         raise AssertionError("no HTTP call should be made to an unsafe callback_url")

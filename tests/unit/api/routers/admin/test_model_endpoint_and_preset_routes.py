@@ -1216,6 +1216,50 @@ async def test_update_non_llm_endpoint_accepts_same_named_extra_keys(async_clien
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", [0, -1, True, "1024", 1024.5])
+async def test_update_vlm_endpoint_rejects_bad_max_image_side(async_client_factory, value):
+    """The client is built lazily, so a bad value must fail the save, not every caption."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put("/model-endpoints/vlm/default", json={"extra": {"max_image_side": value}})
+
+    assert response.status_code == 422
+    assert "max_image_side" in response.text
+    assert model_service.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_type", ["embedder", "reranker", "llm"])
+async def test_update_non_vlm_endpoint_accepts_a_max_image_side_key(async_client_factory, model_type):
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put(f"/model-endpoints/{model_type}/default", json={"extra": {"max_image_side": "x"}})
+
+    assert response.status_code == 200
+
+
+def test_create_vlm_endpoint_validates_max_image_side():
+    from api.schemas.admin.model_endpoint_schemas import CreateModelEndpointRequest
+    from pydantic import ValidationError
+
+    body = {"name": "vlm", "model_type": "vlm", "endpoint": "http://vlm:8000/v1"}
+    assert CreateModelEndpointRequest(**body, extra={"max_image_side": 1024}).extra == {"max_image_side": 1024}
+    assert CreateModelEndpointRequest(**body, extra={"max_image_side": None}).extra == {"max_image_side": None}
+    with pytest.raises(ValidationError, match="max_image_side"):
+        CreateModelEndpointRequest(**body, extra={"max_image_side": 0})
+
+
+@pytest.mark.asyncio
 async def test_update_stt_endpoint_validates_model_and_language_hint(async_client_factory):
     """The route knows the endpoint type that the generic update schema lacks."""
     from api.error_handlers import register_error_handlers

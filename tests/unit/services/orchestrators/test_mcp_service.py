@@ -950,6 +950,37 @@ async def test_safe_download_rejects_redirect_to_private(monkeypatch, tmp_path):
         await svc._safe_download("http://public.example/file.pdf", tmp_path / "out")
 
 
+@pytest.mark.asyncio
+async def test_safe_download_resolves_the_httpx_idna_hostname(monkeypatch, tmp_path):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    sent_hosts: list[str] = []
+    resolved_hosts: list[str] = []
+
+    def handler(request):
+        sent_hosts.append(request.url.raw_host.decode("ascii"))
+        return httpx.Response(200, content=_PDF_HEADER + b"data")
+
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+    svc = _service()
+
+    async def capture_resolved_host(host):
+        resolved_hosts.append(host)
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", capture_resolved_host)
+
+    await svc._safe_download("https://faß.example/file.pdf", tmp_path / "out")
+
+    assert resolved_hosts == ["xn--fa-hia.example"]
+    assert sent_hosts == ["xn--fa-hia.example"]
+
+
 # ---------------------------------------------------------------------------
 # Metadata hardening + input bounds
 # ---------------------------------------------------------------------------

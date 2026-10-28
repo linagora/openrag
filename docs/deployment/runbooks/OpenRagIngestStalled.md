@@ -42,7 +42,10 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$OPENRAG/queue/tasks?task_statu
 
 - `workers.total_slots` vs `tasks.active` — are all slots occupied by tasks that never finish?
 - Pick a stuck task and read `details.failed_stage`, then `GET /indexer/task/{id}/error`.
-- Ray dashboard (`:8265`, loopback-bound) → Actors: are the `Indexer` actors alive?
+- Are the indexer actors (`IndexerPoolDispatcher-*`, `IndexerWorker-*`) alive? With Ray inside the OpenRAG container or pod, list them with the Ray CLI there:
+  `docker compose exec openrag /app/.venv/bin/ray list actors` on Compose (`openrag-cpu` on a CPU deployment),
+  `kubectl -n <ns> exec deploy/openrag-openrag -- /app/.venv/bin/ray list actors` on Kubernetes (each pod has its own Ray: with several replicas, exec into each pod).
+  On a separate Ray cluster (`ray.enabled: true`, or an external cluster), run `ray list actors` on its head node instead. On Compose, don't add the Ray dashboard overlay here: it recreates the container, and the stuck actors go with it.
 
 ## Likely causes, most common first
 
@@ -55,8 +58,8 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$OPENRAG/queue/tasks?task_statu
    exiting keeps its pool slot; enough of those and the pool has no free slot to schedule
    into. Check for parse stages with no progress and restart the pool.
 3. **A worker was OOM-killed mid-batch.** `max_restarts=5` brings it back, but every
-   document that worker was holding goes with it. Look for restart counts in the Ray
-   dashboard and memory pressure on the node.
+   document that worker was holding goes with it. Look for restart counts (`ray list actors --detail`
+   shows `num_restarts`) and memory pressure on the node.
 4. **The GPU is gone** — driver reset, node eviction, or the inference endpoint the
    parse stage depends on is unreachable. Check `OpenRagInferenceProviderDown`.
 
@@ -75,8 +78,8 @@ healthy. It clears as soon as that parse lands.
 
 Set `monitoring.prometheusRule.thresholds.ingestIdleSeconds` above the longest parse
 that is normal on the deployment. On a single-GPU Marker deployment that ingests long
-scans, that is well above 12 minutes. If this fired and the Ray dashboard shows a parse
-still making progress, this is the cause: raise the threshold rather than restarting
+scans, that is well above 12 minutes. If this fired while a parse is still making
+progress, this is the cause: raise the threshold rather than restarting
 anything.
 
 ## Known blind spot
@@ -93,4 +96,4 @@ and nothing replaces them.
 There is deliberately no `absent()` branch to close it: wherever Ray's agent is not
 scraped (Helm without the Ray `PodMonitor`) the gauge is never there, and such a branch
 would page on every long batch. `OpenRagBacklogGrowing` covers a queue that rises from zero; after a
-restart with work queued, check the Ray dashboard rather than waiting for this alert.
+restart with work queued, check the indexer actors (see above) rather than waiting for this alert.

@@ -14,9 +14,13 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from copy import deepcopy
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 import services.storage.milvus_store as milvus_store_module
 from api.error_handlers import register_error_handlers
@@ -35,6 +39,7 @@ from core.vector_stores import VectorStore
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pymilvus import DataType, MilvusException
+from pymilvus.client.entity_helper import convert_to_json
 from services.storage.milvus_store import (
     MAX_SECTION_ID,
     SCHEMA_VERSION_PROPERTY_KEY,
@@ -752,6 +757,33 @@ def _make_chunk(**overrides: Any) -> Chunk:
     return Chunk(**defaults)
 
 
+def _wrap_deep_metadata(leaf: Any, depth: int, kind: str, *, siblings: bool = False) -> Any:
+    value = leaf
+    for index in range(depth):
+        use_dict = kind == "dict" or (kind == "mixed" and index % 2 == 0)
+        if use_dict:
+            value = {"child": value, "label": f"level-{index}"} if siblings else {"child": value}
+        else:
+            value = [value, f"level-{index}"] if siblings else [value]
+    return value
+
+
+def _deep_leaf(value: Any, depth: int, kind: str, *, siblings: bool = False) -> Any:
+    for index in reversed(range(depth)):
+        use_dict = kind == "dict" or (kind == "mixed" and index % 2 == 0)
+        if use_dict:
+            if siblings:
+                assert list(value) == ["child", "label"]
+                assert value["label"] == f"level-{index}"
+            value = value["child"]
+        else:
+            if siblings:
+                assert len(value) == 2
+                assert value[1] == f"level-{index}"
+            value = value[0]
+    return value
+
+
 class TestChunkToEntity:
     @staticmethod
     def _entity(**overrides: Any) -> dict[str, Any]:
@@ -813,10 +845,679 @@ class TestChunkToEntity:
         entity = self._entity()
         assert "_id" not in entity
 
+    @staticmethod
+    def _dynamic_bytes(entity: dict[str, Any]) -> int:
+        static = {"text", "partition", "file_id", FIELD, *milvus_store_module.INDEXED_TIME_FIELDS}
+        return milvus_store_module._json_bytes({k: v for k, v in entity.items() if k not in static})
+
+    @pytest.mark.parametrize("key", ["source", "filename", "original_filename"])
+    @pytest.mark.parametrize("location", ["root", "dict", "list"])
+    @pytest.mark.asyncio
+    async def test_oversized_identifying_metadata_fails_without_changes(
+        self, store: MilvusVectorStore, key: str, location: str
+    ) -> None:
+        metadata: dict[str, Any] = {key: "a" * 70_000 + ".pdf"}
+        if location == "dict":
+            metadata = {"payload": metadata}
+        elif location == "list":
+            metadata = {"payload": [metadata]}
+        chunk = _make_chunk(content="", context="", metadata=metadata)
+        original = deepcopy(chunk.metadata)
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert([chunk], vector_field=FIELD)
+
+        assert chunk.metadata == original
+        store._async_client.insert.assert_not_called()
+
+    def test_fitting_preserves_identifiers_while_shortening_nested_body(self) -> None:
+        entity = self._entity(
+            metadata={
+                "source": "/docs/source.pdf",
+                "filename": "source.pdf",
+                "original_filename": "original.pdf",
+                "payload": [{"filename": "nested.pdf", "body": "x" * 70_000}],
+            }
+        )
+
+        assert entity["source"] == "/docs/source.pdf"
+        assert entity["filename"] == "source.pdf"
+        assert entity["original_filename"] == "original.pdf"
+        assert entity["payload"][0]["filename"] == "nested.pdf"
+        assert 0 < len(entity["payload"][0]["body"]) < 70_000
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+
+    @pytest.mark.parametrize("content_length", [40_000, 70_000])
+    @pytest.mark.asyncio
+    async def test_upsert_uses_independent_store_json_budgets(self, store, content_length: int) -> None:
+        stores = [
+            MilvusVectorStore(VectorDBConfig(json_max_length=32768, json_safety_margin_bytes=1024)),
+            MilvusVectorStore(VectorDBConfig(json_max_length=49152, json_safety_margin_bytes=512)),
+        ]
+        for current, cap, target in zip(stores, [32768, 49152], [31744, 48640], strict=True):
+            current._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+            chunk = _make_chunk(content="x" * content_length, metadata={"filename": "source.pdf"})
+
+            assert await current.upsert([chunk], vector_field=FIELD) == 1
+
+            entity = current._async_client.insert.call_args.kwargs["data"][0]
+            if content_length > cap:
+                assert self._dynamic_bytes(entity) == target
+            else:
+                assert entity["content"] == "x" * content_length
+                assert self._dynamic_bytes(entity) <= cap
+            assert entity["filename"] == "source.pdf"
+            assert chunk.content == "x" * content_length
+
+    @pytest.mark.asyncio
+    async def test_default_store_budget_reserves_headroom(self, store: MilvusVectorStore) -> None:
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        await store.upsert([_make_chunk(content="x" * 70_000)], vector_field=FIELD)
+
+        entity = store._async_client.insert.call_args.kwargs["data"][0]
+        assert self._dynamic_bytes(entity) == 64_512
+
+    @pytest.mark.parametrize(
+        ("initial_size", "expected_size"),
+        [(239, 239), (240, 240), (241, 241), (255, 255), (256, 256), (257, 240), (300, 240)],
+    )
+    def test_json_budget_only_adds_headroom_when_truncating(self, initial_size: int, expected_size: int) -> None:
+        # The content key, quotes and braces use 14 bytes in compact JSON.
+        original = "x" * (initial_size - 14)
+        entity = {"content": original}
+
+        milvus_store_module._fit_milvus_row_limits(
+            entity, static_fields=set(), json_max_length=256, json_safety_margin_bytes=16
+        )
+
+        assert len(convert_to_json(entity)) == expected_size
+        if initial_size <= 256:
+            assert entity["content"] == original
+
+    def test_protected_metadata_must_fit_the_truncation_target(self) -> None:
+        # Empty content plus the protected filename occupy 250 bytes: below
+        # the 256-byte cap, but above the 240-byte fitting target.
+        entity = {"filename": "f" * 222, "content": "x" * 100}
+        original = deepcopy(entity)
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata") as exc_info:
+            milvus_store_module._fit_milvus_row_limits(
+                entity, static_fields=set(), json_max_length=256, json_safety_margin_bytes=16
+            )
+
+        assert entity == original
+        assert exc_info.value.extra["limit"] == 256
+        assert exc_info.value.extra["target_bytes"] == 240
+        assert exc_info.value.extra["minimum_bytes"] == 250
+
+    def test_dynamic_size_matches_pymilvus_numpy_serialization(self) -> None:
+        payload = {"values": np.arange(100_000)}
+        assert milvus_store_module._json_bytes(payload) == len(convert_to_json(payload))
+
+    @pytest.mark.parametrize("values", [["plain", '"quoted"', "é🙂", "\u0001\n\\", '{"json":"text"}']])
+    def test_json_string_byte_sizes_match_pymilvus_container_encoding(self, values: list[str]) -> None:
+        baseline = len(convert_to_json({"values": []}))
+        predicted = baseline + sum(milvus_store_module._json_string_bytes(value) for value in values) + len(values) - 1
+
+        assert predicted == len(convert_to_json({"values": values}))
+
+    def test_many_nested_strings_use_incremental_sizing_and_one_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        entity = {"payload": ["abcdefgh"] * 10_000}
+        serializer = MagicMock(wraps=milvus_store_module.convert_to_json)
+        logger = MagicMock()
+        monkeypatch.setattr(milvus_store_module, "convert_to_json", serializer)
+        monkeypatch.setattr(milvus_store_module, "logger", logger)
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        full_payload_calls = [call for call in serializer.call_args_list if isinstance(call.args[0], dict)]
+        assert len(full_payload_calls) <= 2
+        logger.bind.assert_called_once()
+        logger.bind.return_value.warning.assert_called_once()
+        assert len(convert_to_json(entity)) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+
+    @pytest.mark.parametrize("depth", [0, 254, 300])
+    @pytest.mark.parametrize("character", ["é", "🙂", '"', "\u0001"])
+    @pytest.mark.parametrize(("cap", "margin", "target"), [(65536, 1024, 64512), (32768, 512, 32256)])
+    def test_fitting_preserves_longest_prefix_for_serializer_encoding(
+        self, depth: int, character: str, cap: int, margin: int, target: int
+    ) -> None:
+        nested: Any = 0
+        for _ in range(depth):
+            nested = {"child": nested}
+        body = character * 40_000
+        entity = {"payload": nested, "content": body}
+
+        milvus_store_module._fit_milvus_row_limits(
+            entity, static_fields=set(), json_max_length=cap, json_safety_margin_bytes=margin
+        )
+
+        assert entity["content"]
+        assert body.startswith(entity["content"])
+        assert len(entity["content"]) < len(body)
+        assert len(convert_to_json(entity)) <= target
+        assert len(convert_to_json({**entity, "content": entity["content"] + character})) > target
+
+    @pytest.mark.parametrize("depth", [600, 1000, 1200])
+    @pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
+    @pytest.mark.asyncio
+    async def test_upsert_fits_deep_metadata_and_preserves_structure(
+        self, store: MilvusVectorStore, depth: int, kind: str
+    ) -> None:
+        leaf = {"filename": "deep.pdf", "source": {"path": "keep  spacing"}, "body": "unchanged"}
+        metadata = {"payload": _wrap_deep_metadata(leaf, depth, kind, siblings=True)}
+        chunk = _make_chunk(content="x" * 70_000, metadata=metadata)
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        assert await store.upsert([chunk], vector_field=FIELD) == 1
+
+        entity = store._async_client.insert.call_args.kwargs["data"][0]
+        assert 0 < len(entity["content"]) < 70_000
+        assert self._dynamic_bytes(entity) <= 64_512
+        assert _deep_leaf(entity["payload"], depth, kind, siblings=True) == leaf
+        assert leaf == {"filename": "deep.pdf", "source": {"path": "keep  spacing"}, "body": "unchanged"}
+        assert chunk.content == "x" * 70_000
+
+    def test_fitting_shortens_a_string_at_the_bottom_of_deep_metadata(self) -> None:
+        leaf = {"filename": "deep.pdf", "body": "é" * 40_000}
+        entity = {"payload": _wrap_deep_metadata(leaf, 1200, "mixed")}
+
+        milvus_store_module._fit_milvus_row_limits(
+            entity, static_fields=set(), json_max_length=70_000, json_safety_margin_bytes=1024
+        )
+
+        fitted = _deep_leaf(entity["payload"], 1200, "mixed")
+        assert fitted["filename"] == "deep.pdf"
+        assert fitted["body"] and leaf["body"].startswith(fitted["body"])
+        assert len(fitted["body"]) < len(leaf["body"])
+        assert len(convert_to_json(entity)) <= 68_976
+        assert leaf["body"] == "é" * 40_000
+
+    @pytest.mark.parametrize(
+        "protected", [pytest.param("x" * 70_000, id="string"), pytest.param({"body": "x" * 70_000}, id="subtree")]
+    )
+    def test_deep_protected_metadata_that_cannot_fit_raises(self, protected: Any) -> None:
+        leaf = {"source": protected}
+        entity = {"payload": _wrap_deep_metadata(leaf, 1000, "dict"), "content": "x" * 70_000}
+        original = deepcopy(protected)
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert leaf["source"] == original
+        assert _deep_leaf(entity["payload"], 1000, "dict")["source"] == original
+        assert entity["content"] == "x" * 70_000
+
+    def test_equal_length_nested_strings_keep_their_original_priority(self) -> None:
+        entity = {"payload": [{"body": "a" * 40_000}, {"body": "b" * 40_000}]}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert 0 < len(entity["payload"][0]["body"]) < 40_000
+        assert entity["payload"][1]["body"] == "b" * 40_000
+        assert len(convert_to_json(entity)) <= 64_512
+
+    def test_equal_length_strings_keep_depth_first_priority(self) -> None:
+        entity = {"payload": {"deep": {"body": "a" * 40_000}, "shallow": "b" * 40_000}}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert 0 < len(entity["payload"]["deep"]["body"]) < 40_000
+        assert entity["payload"]["shallow"] == "b" * 40_000
+        assert len(convert_to_json(entity)) <= 64_512
+
+    def test_numpy_metadata_is_counted_when_content_is_truncated(self) -> None:
+        body = "x" * 70_000
+        entity = self._entity(content=body, metadata={"payload": np.arange(1_000)})
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["content"].startswith("x")
+        assert len(entity["content"]) < len(body)
+
+    def test_nested_metadata_string_is_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        chunk = _make_chunk(metadata={"payload": {"body": body}})
+        entity = MilvusVectorStore._chunk_to_entity(
+            chunk,
+            indexed_at="2026-01-01T00:00:00+00:00",
+            order={"prev_section_id": 1, "section_id": 2, "next_section_id": 3},
+            vector_field=FIELD,
+        )
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["payload"]["body"].startswith("x")
+        assert len(entity["payload"]["body"]) < len(body)
+        assert chunk.metadata["payload"]["body"] == body
+
+    def test_nested_list_metadata_string_is_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        entity = self._entity(metadata={"payload": [{"body": body}]})
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["payload"][0]["body"].startswith("x")
+        assert len(entity["payload"][0]["body"]) < len(body)
+
+    def test_nested_tuple_metadata_string_is_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        chunk = _make_chunk(metadata={"payload": (body,)})
+        entity = MilvusVectorStore._chunk_to_entity(
+            chunk,
+            indexed_at="2026-01-01T00:00:00+00:00",
+            order={"prev_section_id": 1, "section_id": 2, "next_section_id": 3},
+            vector_field=FIELD,
+        )
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["payload"][0].startswith("x")
+        assert len(entity["payload"][0]) < len(body)
+        assert chunk.metadata["payload"] == (body,)
+
+    def test_numpy_string_metadata_is_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        metadata = np.array([body])
+        chunk = _make_chunk(metadata={"payload": metadata})
+        entity = MilvusVectorStore._chunk_to_entity(
+            chunk,
+            indexed_at="2026-01-01T00:00:00+00:00",
+            order={"prev_section_id": 1, "section_id": 2, "next_section_id": 3},
+            vector_field=FIELD,
+        )
+
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["payload"][0].startswith("x")
+        assert len(entity["payload"][0]) < len(body)
+        assert metadata[0] == body
+
+    @pytest.mark.asyncio
+    async def test_irreducible_numpy_metadata_fails_before_milvus_insert(self, store: MilvusVectorStore) -> None:
+        chunk = _make_chunk(metadata={"payload": np.arange(100_000)})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata.*65536-byte limit"):
+            await store.upsert([chunk], vector_field=FIELD)
+
+        store._async_client.insert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unsupported_metadata_serialization_raises_insert_error(self, store: MilvusVectorStore) -> None:
+        chunk = _make_chunk(metadata={"amount": Decimal("1.25")})
+
+        with pytest.raises(VDBInsertError, match="Failed to serialize dynamic metadata") as exc_info:
+            await store.upsert([chunk], vector_field=FIELD)
+
+        assert isinstance(exc_info.value.__cause__, TypeError)
+        store._async_client.insert.assert_not_called()
+
+    @pytest.mark.parametrize("container_kind", ["dict", "list", "tuple_list", "numpy_object_array"])
+    def test_cyclic_metadata_fails_before_pymilvus_serialization(
+        self, monkeypatch: pytest.MonkeyPatch, container_kind: str
+    ) -> None:
+        if container_kind == "dict":
+            value: Any = {}
+            value["self"] = value
+        elif container_kind == "list":
+            value = []
+            value.append(value)
+        elif container_kind == "tuple_list":
+            child: list[Any] = []
+            value = (child,)
+            child.append(value)
+        else:
+            value = np.empty(1, dtype=object)
+            value[0] = value
+
+        serializer = MagicMock(side_effect=AssertionError("serializer must not receive cyclic metadata"))
+        monkeypatch.setattr(milvus_store_module, "convert_to_json", serializer)
+
+        with pytest.raises(VDBInsertError, match="Cyclic dynamic metadata"):
+            milvus_store_module._fit_milvus_row_limits(
+                {"file_id": "doc-1", "payload": value},
+                static_fields={"file_id"},
+            )
+
+        serializer.assert_not_called()
+
+    def test_shared_acyclic_metadata_is_accepted(self) -> None:
+        shared = {"value": "present"}
+        entity = {"left": shared, "right": shared}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert entity["left"] == {"value": "present"}
+        assert entity["right"] == {"value": "present"}
+
+    @pytest.mark.parametrize(
+        ("field", "container_kind"),
+        [("content", "dict"), ("content", "list"), ("context", "dict"), ("context", "list")],
+    )
+    def test_nested_strings_under_shrinkable_fields_are_truncated(self, field: str, container_kind: str) -> None:
+        body = "x" * 70_000
+        value: Any = {"body": body} if container_kind == "dict" else [{"body": body}]
+        entity = {"file_id": "doc-1", field: value}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields={"file_id"})
+
+        truncated = entity[field]["body"] if container_kind == "dict" else entity[field][0]["body"]
+        assert len(truncated) < len(body)
+        assert milvus_store_module._json_bytes({field: entity[field]}) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+
+    def test_last_string_can_be_truncated_to_fit(self) -> None:
+        body = "x" * 70_000
+        entity = {"payload": body}
+
+        milvus_store_module._fit_milvus_row_limits(entity, static_fields=set())
+
+        assert len(entity["payload"]) < len(body)
+        assert milvus_store_module._json_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+
+    def test_oversized_content_is_truncated_to_fit_the_dynamic_field(self) -> None:
+        # A 70 000-byte chunk body used to fail the whole file's insert
+        # (VDB_INSERT_ERROR); it is now stored, shortened, with the rest intact.
+        body = "| cell |" + " " * 69_990
+        entity = self._entity(text=body[:1000], content=body, context="ctx", metadata={"title": "t"})
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["content"].startswith("| cell |")
+        assert entity["context"] == "ctx"
+        assert entity["title"] == "t"
+
+    def test_escaping_heavy_content_still_fits(self) -> None:
+        # Quotes and newlines take two bytes each once JSON-escaped.
+        body = '"\n' * 40_000
+        entity = self._entity(content=body, context="ctx")
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["context"] == "ctx"
+
+    def test_context_is_shortened_once_content_is_spent(self) -> None:
+        entity = self._entity(content="c" * 10, context="x" * 70_000)
+        assert self._dynamic_bytes(entity) <= milvus_store_module.MAX_DYNAMIC_FIELD_BYTES
+        assert entity["context"].startswith("x")
+
+    def test_oversized_text_is_truncated_on_a_character_boundary(self) -> None:
+        text = "é" * 40_000  # 80 000 bytes
+        entity = self._entity(text=text)
+        assert len(entity["text"].encode("utf-8")) <= milvus_store_module.MAX_LENGTH
+        assert set(entity["text"]) == {"é"}
+
+    def test_rows_within_limits_are_untouched(self) -> None:
+        entity = self._entity(content="C" * 30_000, context="ctx")
+        assert entity["content"] == "C" * 30_000
+
 
 # ---------------------------------------------------------------------------
 # Surface-level ABC-vs-bound-collection enforcement
 # ---------------------------------------------------------------------------
+
+
+class TestRawEntitySizing:
+    @staticmethod
+    def _dynamic_payload(entity: dict[str, Any]) -> dict[str, Any]:
+        static = {"_id", "text", "partition", "file_id", "sparse", *milvus_store_module.INDEXED_TIME_FIELDS}
+        return {
+            key: value
+            for key, value in entity.items()
+            if key not in static and not milvus_store_module.is_vector_field_key(key)
+        }
+
+    @pytest.mark.parametrize(
+        ("method_name", "client_method", "count_key"),
+        [
+            ("insert_entities", "insert", "insert_count"),
+            ("upsert_entities", "upsert", "upsert_count"),
+        ],
+    )
+    async def test_raw_entity_writes_fit_oversized_dynamic_metadata(
+        self,
+        store: MilvusVectorStore,
+        method_name: str,
+        client_method: str,
+        count_key: str,
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "sparse": dict.fromkeys(range(100), 0.1),
+            "vector_bge_m3": [0.1] * 768,
+            "vector": [0.2] * 32,
+            "filename": "source.pdf",
+            "content": "x" * 600,
+            "details": {"caption": "y" * 40},
+        }
+        if method_name == "upsert_entities":
+            entity["_id"] = 7
+        original = deepcopy(entity)
+        client = AsyncMock(return_value={count_key: 1})
+        setattr(store._async_client, client_method, client)
+
+        assert await getattr(store, method_name)([entity]) == 1
+
+        client.assert_awaited_once()
+        fitted = client.await_args.kwargs["data"][0]
+        assert len(convert_to_json(self._dynamic_payload(fitted))) == 240
+        if "_id" in original:
+            assert fitted["_id"] == 7
+        assert fitted["text"] == "chunk text"
+        assert fitted["partition"] == "tenant-a"
+        assert fitted["file_id"] == "file-1"
+        assert fitted["created_at"] == datetime(2026, 1, 1, tzinfo=UTC)
+        assert fitted["sparse"] == original["sparse"]
+        assert fitted["vector_bge_m3"] == original["vector_bge_m3"]
+        assert fitted["vector"] == original["vector"]
+        assert fitted["filename"] == "source.pdf"
+        assert 0 < len(fitted["content"]) < len(original["content"])
+        assert entity == original
+
+    @pytest.mark.parametrize(
+        ("method_name", "client_method", "count_key"),
+        [
+            ("insert_entities", "insert", "insert_count"),
+            ("upsert_entities", "upsert", "upsert_count"),
+        ],
+    )
+    async def test_raw_entity_writes_preserve_catalog_metadata_keys(
+        self,
+        store: MilvusVectorStore,
+        method_name: str,
+        client_method: str,
+        count_key: str,
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "title": "catalog title " + "t" * 40,
+            "content": "x" * 500,
+        }
+        if method_name == "upsert_entities":
+            entity["_id"] = 7
+        client = AsyncMock(return_value={count_key: 1})
+        setattr(store._async_client, client_method, client)
+
+        assert await getattr(store, method_name)([entity], protected_metadata={"title": entity["title"]}) == 1
+
+        fitted = client.await_args.kwargs["data"][0]
+        assert fitted["title"] == entity["title"]
+        assert 0 < len(fitted["content"]) < len(entity["content"])
+        assert len(convert_to_json(self._dynamic_payload(fitted))) <= 240
+
+    async def test_raw_entity_writes_reject_oversized_catalog_metadata(self, store: MilvusVectorStore) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "title": "t" * 300,
+            "content": "",
+            "context": "",
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert_entities([entity], protected_metadata={"title": entity["title"]})
+
+        store._async_client.upsert.assert_not_awaited()
+
+    async def test_raw_entity_writes_reject_oversized_protected_text(self, store: MilvusVectorStore) -> None:
+        entity = {
+            "text": "t" * (milvus_store_module.MAX_LENGTH + 1),
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)protected metadata field 'text'"):
+            await store.upsert_entities([entity], protected_metadata={"text": entity["text"]})
+
+        store._async_client.upsert.assert_not_awaited()
+
+    def test_fitting_rows_skip_metadata_matching_when_no_truncation_is_needed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "title": "catalog title",
+        }
+
+        def fail_if_matched(*_args):
+            pytest.fail("metadata matching is unnecessary for rows within the JSON limit")
+
+        monkeypatch.setattr(milvus_store_module, "_matching_metadata_keys", fail_if_matched)
+        milvus_store_module._fit_milvus_row_limits(
+            entity,
+            static_fields={"text", "partition", "file_id", "vector_bge_m3"},
+            protected_metadata={"title": "catalog title"},
+        )
+
+        assert entity["title"] == "catalog title"
+
+    async def test_raw_entity_writes_shrink_chunk_content_when_catalog_value_differs(
+        self, store: MilvusVectorStore
+    ) -> None:
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "content": "x" * 6_000,
+            "summary": "s" * 60_000,
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        assert (
+            await store.upsert_entities(
+                [entity],
+                protected_metadata={"content": "report", "summary": entity["summary"]},
+            )
+            == 1
+        )
+
+        fitted = store._async_client.upsert.await_args.kwargs["data"][0]
+        assert fitted["summary"] == entity["summary"]
+        assert 0 < len(fitted["content"]) < len(entity["content"])
+        assert len(convert_to_json(self._dynamic_payload(fitted))) <= (
+            store._config.json_max_length - store._config.json_safety_margin_bytes
+        )
+
+    async def test_raw_entity_writes_preserve_catalog_metadata_when_nested_key_order_differs(
+        self, store: MilvusVectorStore
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        catalog_details = {"first": "x" * 300, "second": 1}
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "details": {"second": 1, "first": "x" * 300},
+        }
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert_entities([entity], protected_metadata={"details": catalog_details})
+
+        store._async_client.upsert.assert_not_awaited()
+
+    async def test_upload_rejects_oversized_catalog_metadata_before_milvus_write(
+        self, store: MilvusVectorStore
+    ) -> None:
+        description = "d" * 70_000
+        chunk = Chunk(
+            document_id="file-1",
+            partition="tenant-a",
+            text="chunk text",
+            embedding=[0.1, 0.2],
+            metadata={"description": description},
+        )
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await store.upsert(
+                [chunk],
+                vector_field="vector_bge_m3",
+                protected_metadata={"description": description},
+            )
+
+        store._async_client.insert.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("method_name", "client_method"),
+        [("insert_entities", "insert"), ("upsert_entities", "upsert")],
+    )
+    async def test_raw_entity_writes_reject_unfit_protected_metadata(
+        self,
+        store: MilvusVectorStore,
+        method_name: str,
+        client_method: str,
+    ) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 256, "json_safety_margin_bytes": 16})
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "filename": "f" * 270,
+            "content": "",
+            "context": "",
+        }
+        original = deepcopy(entity)
+        client = AsyncMock(return_value={"insert_count": 1, "upsert_count": 1})
+        setattr(store._async_client, client_method, client)
+
+        with pytest.raises(VDBInsertError, match="(?i)dynamic metadata"):
+            await getattr(store, method_name)([entity])
+
+        client.assert_not_awaited()
+        assert entity == original
+
+    async def test_copy_fitting_preserves_task_id_used_for_cleanup(self, store: MilvusVectorStore) -> None:
+        store._config = store._config.model_copy(update={"json_max_length": 100, "json_safety_margin_bytes": 16})
+        task_id = "task-" + "a" * 32
+        entity = {
+            "text": "chunk text",
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "vector_bge_m3": [0.1, 0.2],
+            "_openrag_indexing_task_id": task_id,
+            "caption": "y" * 20,
+        }
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+        assert await store.insert_entities([entity]) == 1
+
+        inserted = store._async_client.insert.await_args.kwargs["data"][0]
+        assert inserted["_openrag_indexing_task_id"] == task_id
+        assert 0 < len(inserted["caption"]) < 20
+        assert len(convert_to_json(self._dynamic_payload(inserted))) <= 84
 
 
 class TestCollectionArgDiscipline:

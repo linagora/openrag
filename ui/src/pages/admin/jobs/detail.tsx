@@ -1,7 +1,7 @@
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { MouseEvent } from "react";
-import { ArrowLeft, Ban, Copy } from "lucide-react";
+import { ArrowLeft, Ban, Copy, Lock } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/lib/auth";
@@ -27,6 +27,7 @@ import {
   isActiveState,
   isTerminalState,
 } from "@/lib/api/jobs";
+import { listPartitions } from "@/lib/api/partitions";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { copyToClipboard } from "@/lib/utils";
 
@@ -45,10 +46,20 @@ function failedStage(details: unknown): string {
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
-  const { isAdmin } = usePermissions();
+  const { isAdmin, canRead, superAdminModeResolved } = usePermissions();
   const queryClient = useQueryClient();
   const userId = user?.id ?? 0;
   const authorizationScope = isAdmin ? "admin" : "user";
+
+  // Admins see every user's tasks, but opening a file still needs a role on its
+  // partition (or SUPER_ADMIN_MODE), so the file is only linked when the API will
+  // serve it. Keyed per viewer like the task queries below, so roles cached for a
+  // previous account never decide the link.
+  const partitionsQuery = useQuery({
+    queryKey: ["partitions", userId, authorizationScope],
+    queryFn: listPartitions,
+    enabled: !!user,
+  });
 
   // OpenRag has no task SSE — poll status until it reaches a terminal state.
   const taskQuery = useQuery({
@@ -104,6 +115,17 @@ export default function JobDetailPage() {
   const degradedStages = normalizeDegradedStages(details?.degraded_stages);
   const degraded = task.task_state === "COMPLETED" && degradedStages.length > 0;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
+  const partition = str(details?.partition);
+  const partitionRole = partitionsQuery.data?.partitions.find((p) => p.partition === partition)?.role;
+  const fileReadable = canRead(partitionRole);
+  const fileUnlinked = !!details?.file_id && !!partition && !fileReadable && superAdminModeResolved;
+  const fileAccessDenied = fileUnlinked && partitionsQuery.isSuccess;
+  const fileAccessUnknown = fileUnlinked && partitionsQuery.isError;
+  // GET /partition/ lists only the viewer's partitions, so a deleted partition
+  // looks the same as one they aren't a member of.
+  const noFileAccessMessage = isAdmin
+    ? `You can see this job because you're an admin, but you can't open its file: partition '${partition}' no longer exists or you're not a member of it. If it still exists, ask its owner for access, or turn on Super Admin Mode (SUPER_ADMIN_MODE=true) for debugging.`
+    : `You can't open this file: partition '${partition}' no longer exists or you're not a member of it. If it still exists, ask its owner for access.`;
   const traceback = errorQuery.data?.traceback ?? [];
   const reason =
     errorQuery.data?.reason?.trim() ||
@@ -200,9 +222,9 @@ export default function JobDetailPage() {
             <div className="flex justify-between sm:flex-col sm:gap-1">
               <dt className="text-muted-foreground">File</dt>
               <dd className="font-medium">
-                {details?.file_id && details?.partition ? (
+                {details?.file_id && partition && fileReadable ? (
                   <Link
-                    to={`/documents/${encodeURIComponent(str(details.partition))}/${encodeURIComponent(str(details.file_id))}`}
+                    to={`/documents/${encodeURIComponent(partition)}/${encodeURIComponent(str(details.file_id))}`}
                     className="text-primary hover:underline"
                   >
                     {filename}
@@ -216,6 +238,29 @@ export default function JobDetailPage() {
               <dt className="text-muted-foreground">Partition</dt>
               <dd className="font-medium">{str(details?.partition) || "—"}</dd>
             </div>
+            {fileAccessDenied && (
+              <p className="sm:col-span-2 flex items-start gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>{noFileAccessMessage}</span>
+              </p>
+            )}
+            {fileAccessUnknown && (
+              <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                <span>
+                  Couldn't check your access to partition '{partition}', so the file isn't linked:{" "}
+                  {(partitionsQuery.error as Error).message}
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void partitionsQuery.refetch()}
+                  disabled={partitionsQuery.isFetching}
+                >
+                  {partitionsQuery.isFetching ? "Retrying..." : "Retry"}
+                </Button>
+              </div>
+            )}
             <Separator className="sm:col-span-2" />
             <div className="flex justify-between sm:flex-col sm:gap-1">
               <dt className="text-muted-foreground">File ID</dt>

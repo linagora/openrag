@@ -394,7 +394,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.2"
+    tag: "v2.3.3"
   resources:
     head:
       requests:
@@ -881,7 +881,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.3.2"
+    tag: "v2.3.3"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -904,7 +904,7 @@ adminUi:
   # security.containerSecurityContext defaults for this workload specifically.
   # automountServiceAccountToken: false
   # containerSecurityContext: {}
-  # Base image is nginxinc/nginx-unprivileged:1.27-alpine, listening on 8080 so
+  # Base image is nginx/nginx-unprivileged:1.30-alpine, listening on 8080 so
   # it never needs root/NET_BIND_SERVICE. infra/docker/ui.Dockerfile chowns
   # /var/cache/nginx, /etc/nginx/conf.d and /var/run to 10001:0 and makes them
   # group-writable, so runAsGroup must stay 0 (not 10001) — the same
@@ -938,7 +938,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.2"
+    tag: "v2.3.3"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP

@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { getTaskError, getTaskStatus, cancelTask } from "@/lib/api/jobs";
+import { listPartitions, type PartitionResponse } from "@/lib/api/partitions";
 import { copyToClipboard } from "@/lib/utils";
 import JobDetailPage from "./detail";
 
@@ -15,13 +16,22 @@ vi.mock("sonner", () => ({
   },
 }));
 
-const permissions = vi.hoisted(() => ({ isAdmin: true }));
+const permissions = vi.hoisted(() => ({ isAdmin: true, superAdmin: false }));
 const auth = vi.hoisted(() => ({
   user: { id: 7, is_admin: true },
 }));
 
 vi.mock("@/lib/permissions", () => ({
-  usePermissions: () => ({ isAdmin: permissions.isAdmin }),
+  usePermissions: () => ({
+    isAdmin: permissions.isAdmin,
+    superAdminModeResolved: true,
+    canRead: (role: string | null | undefined) => permissions.superAdmin || !!role,
+  }),
+}));
+
+vi.mock("@/lib/api/partitions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api/partitions")>()),
+  listPartitions: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -45,6 +55,11 @@ const getTaskErrorMock = vi.mocked(getTaskError);
 const cancelTaskMock = vi.mocked(cancelTask);
 const copyToClipboardMock = vi.mocked(copyToClipboard);
 const toastSuccessMock = vi.mocked(toast.success);
+const listPartitionsMock = vi.mocked(listPartitions);
+
+function partitionRows(...rows: { partition: string; role: string | null }[]) {
+  return { partitions: rows as unknown as PartitionResponse[] };
+}
 
 function jobDetailTree(queryClient: QueryClient, taskId: string) {
   return (
@@ -77,8 +92,10 @@ function renderJobDetail(taskId = "task-1") {
 describe("JobDetailPage", () => {
   beforeEach(() => {
     permissions.isAdmin = true;
+    permissions.superAdmin = false;
     auth.user = { id: 7, is_admin: true };
     vi.clearAllMocks();
+    listPartitionsMock.mockResolvedValue(partitionRows({ partition: "docs", role: "owner" }));
     getTaskStatusMock.mockResolvedValue({
       task_id: "task-1",
       task_state: "FAILED",
@@ -227,5 +244,105 @@ describe("JobDetailPage", () => {
 
     expect((await screen.findAllByText("Completed with degradation")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("Caption, Contextualization").length).toBeGreaterThan(0);
+  });
+
+  describe("file link", () => {
+    beforeEach(() => {
+      getTaskStatusMock.mockResolvedValue({
+        task_id: "task-1",
+        task_state: "COMPLETED",
+        details: {
+          file_id: "file-1",
+          partition: "docs",
+          metadata: { filename: "report.pdf" },
+          user_id: 2,
+        },
+      });
+    });
+
+    it("links the file when the viewer has a role on its partition", async () => {
+      listPartitionsMock.mockResolvedValue(partitionRows({ partition: "docs", role: "viewer" }));
+
+      renderJobDetail();
+
+      const link = await screen.findByRole("link", { name: "report.pdf" });
+      expect(link.getAttribute("href")).toBe("/documents/docs/file-1");
+    });
+
+    it("does not link an admin to a partition they are not a member of when super-admin mode is off", async () => {
+      // An admin sees every user's task, but with SUPER_ADMIN_MODE off the API
+      // only lets them read partitions they belong to, and GET /partition/
+      // returns just those (here: "default", not the task's "docs").
+      permissions.isAdmin = true;
+      permissions.superAdmin = false;
+      auth.user = { id: 1, is_admin: true };
+      listPartitionsMock.mockResolvedValue(partitionRows({ partition: "default", role: "owner" }));
+
+      renderJobDetail();
+
+      await screen.findByText(
+        "You can see this job because you're an admin, but you can't open its file: partition 'docs' no longer exists or you're not a member of it. If it still exists, ask its owner for access, or turn on Super Admin Mode (SUPER_ADMIN_MODE=true) for debugging.",
+      );
+      expect(screen.getByText("report.pdf").closest("a")).toBeNull();
+      expect(screen.queryByRole("link", { name: "report.pdf" })).toBeNull();
+    });
+
+    it("tells a regular user who lost access to ask the owner, without the super-admin hint", async () => {
+      permissions.isAdmin = false;
+      auth.user = { id: 2, is_admin: false };
+      listPartitionsMock.mockResolvedValue(partitionRows({ partition: "default", role: "owner" }));
+
+      renderJobDetail();
+
+      await screen.findByText(
+        "You can't open this file: partition 'docs' no longer exists or you're not a member of it. If it still exists, ask its owner for access.",
+      );
+      expect(screen.queryByText(/SUPER_ADMIN_MODE/)).toBeNull();
+      expect(screen.queryByRole("link", { name: "report.pdf" })).toBeNull();
+    });
+
+    it("says the access check failed, not that access is missing, and retries it", async () => {
+      listPartitionsMock.mockRejectedValueOnce(new Error("Network down"));
+      listPartitionsMock.mockResolvedValueOnce(partitionRows({ partition: "docs", role: "viewer" }));
+
+      renderJobDetail();
+
+      await screen.findByText(/Couldn't check your access to partition 'docs'.*Network down/);
+      expect(screen.queryByText(/no longer exists or you're not a member/)).toBeNull();
+      expect(screen.queryByRole("link", { name: "report.pdf" })).toBeNull();
+
+      await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+      const link = await screen.findByRole("link", { name: "report.pdf" });
+      expect(link.getAttribute("href")).toBe("/documents/docs/file-1");
+      expect(screen.queryByText(/Couldn't check your access/)).toBeNull();
+    });
+
+    it("does not link the file from partitions cached for a previous viewer", async () => {
+      listPartitionsMock.mockResolvedValue(partitionRows({ partition: "docs", role: "owner" }));
+      const { rerenderJobDetail } = renderJobDetail();
+
+      expect(await screen.findByRole("link", { name: "report.pdf" })).not.toBeNull();
+
+      // Another account takes over the same tab (token logout, then login).
+      permissions.isAdmin = false;
+      auth.user = { id: 8, is_admin: false };
+      listPartitionsMock.mockResolvedValue(partitionRows({ partition: "default", role: "owner" }));
+      rerenderJobDetail();
+
+      expect(screen.queryByRole("link", { name: "report.pdf" })).toBeNull();
+      await screen.findByText(/You can't open this file: partition 'docs' no longer exists/);
+      expect(listPartitionsMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("links any partition's file in super-admin mode", async () => {
+      permissions.superAdmin = true;
+      listPartitionsMock.mockResolvedValue(partitionRows({ partition: "docs", role: null }));
+
+      renderJobDetail();
+
+      const link = await screen.findByRole("link", { name: "report.pdf" });
+      expect(link.getAttribute("href")).toBe("/documents/docs/file-1");
+    });
   });
 });

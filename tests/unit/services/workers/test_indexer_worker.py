@@ -87,7 +87,13 @@ class FakeVectorStore:
         self.deleted_ids: list[tuple[list[str], str]] = []
 
     async def upsert(
-        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+        self,
+        chunks: list[Chunk],
+        collection: str = "default",
+        *,
+        indexed_at=None,
+        vector_field=None,
+        protected_metadata=None,
     ) -> int:
         self.calls.append((chunks, collection, indexed_at))
         return len(chunks)
