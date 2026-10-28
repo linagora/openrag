@@ -104,6 +104,8 @@ class ServerConfig(ConfigMixin):
     def _validate_preferred_url_scheme(
         cls, value: str | None
     ) -> str | None:
+        if isinstance(value, str):
+            value = value.lower()
         if value is not None and value not in {"http", "https"}:
             raise ValueError(
                 "preferred_url_scheme must be 'http' or 'https'"
