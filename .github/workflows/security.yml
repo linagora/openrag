@@ -17,6 +17,11 @@
 #                 workflow files. Results go to code scanning; whether a new
 #                 alert blocks a merge is a repository ruleset, not this file.
 #
+# On a pull request, `changes` limits the dependency scan to the lockfiles it
+# touches and CodeQL to the languages it touches, to spare the organization's
+# shared runners (#1277); the secrets scan always runs. Pushes to main/develop,
+# the weekly run and manual runs scan everything.
+#
 # Trivy and gitleaks run from container images pinned by digest, not through
 # their marketplace actions: a tag can be re-pointed and a digest cannot. The
 # dependency findings are written to files, never to the job log, because the
@@ -45,8 +50,66 @@ env:
   GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
 
 jobs:
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      lockfiles: ${{ steps.areas.outputs.lockfiles }}
+      languages: ${{ steps.areas.outputs.languages }}
+    steps:
+      # A failure here leaves the outputs empty, and the jobs below then fall
+      # back to scanning everything rather than skipping.
+      - name: Find the lockfiles and languages this pull request changes
+        id: areas
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let lockfiles = ['uv.lock', 'ui/package-lock.json'];
+            let languages = ['python', 'javascript-typescript', 'actions'];
+            if (context.eventName === 'pull_request') {
+              try {
+                const files = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                  per_page: 100,
+                });
+                // The API lists at most 3,000 files; past that, scan everything.
+                const paths = files.flatMap(({ filename, previous_filename }) =>
+                  [filename, previous_filename].filter(Boolean)
+                );
+                // A change to this workflow, the gate script or the accepted
+                // advisories can change any result.
+                const scanAll = files.length >= 3000 || paths.some((path) =>
+                  ['.github/workflows/security.yml', 'scripts/new_vulnerabilities.py', '.trivyignore.yaml'].includes(path)
+                );
+                if (!scanAll) {
+                  // CodeQL's paths-ignore below leaves these out of the analysis.
+                  const analysed = paths.filter((path) => !/^(tests|docs|extern)\//.test(path));
+                  lockfiles = lockfiles.filter((lockfile) => paths.includes(lockfile));
+                  languages = languages.filter((language) => analysed.some((path) => ({
+                    python: /\.py$/,
+                    'javascript-typescript': /\.([cm]?[jt]sx?|html?|vue)$/,
+                    actions: /^\.github\//,
+                  })[language].test(path)));
+                }
+              } catch (error) {
+                core.warning(`Could not list the changed files, scanning everything: ${error.message}`);
+              }
+            }
+            core.setOutput('lockfiles', JSON.stringify(lockfiles));
+            core.setOutput('languages', JSON.stringify(languages));
+            core.info(`lockfiles: ${lockfiles.join(', ') || 'none'}`);
+            core.info(`languages: ${languages.join(', ') || 'none'}`);
+
   dependencies:
     name: Dependencies (${{ matrix.lockfile }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.lockfiles != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -58,7 +121,7 @@ jobs:
         # The lockfiles whose packages reach a deployment: the backend (the API
         # and Ray images install it at container start) and the admin UI bundle.
         # The docs site and tests/load are deliberately out of scope.
-        lockfile: [uv.lock, ui/package-lock.json]
+        lockfile: ${{ fromJSON(needs.changes.outputs.lockfiles || '["uv.lock", "ui/package-lock.json"]') }}
     env:
       LOCKFILE: ${{ matrix.lockfile }}
     steps:
@@ -171,6 +234,8 @@ jobs:
 
   codeql:
     name: CodeQL (${{ matrix.language }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.languages != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -179,7 +244,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [python, javascript-typescript, actions]
+        language: ${{ fromJSON(needs.changes.outputs.languages || '["python", "javascript-typescript", "actions"]') }}
     steps:
       - uses: actions/checkout@v4
         with:

@@ -6,11 +6,18 @@ on:
       - main
       - develop
       - 'release/**'
-    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+    # Not `edited`: the check reads the files and labels, never the title or
+    # the description.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
   pull-requests: read
+
+# A burst of label changes needs only the run for the last one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   require-prompt-label:
