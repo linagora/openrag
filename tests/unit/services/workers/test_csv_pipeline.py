@@ -1,6 +1,7 @@
 """Exercise the real CSV parse/chunk/embed/store path without external services."""
 
 import asyncio
+import itertools
 import threading
 from contextlib import closing
 from dataclasses import replace
@@ -13,6 +14,7 @@ from core.config.indexation import LoaderConfig
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType
+from services.workers import csv_pipeline
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
 from services.workers.pipeline_builder import IndexingPipeline, PipelineTimeouts
@@ -143,6 +145,35 @@ async def test_batches_are_stored_before_reading_the_next_batch(setup_pipeline):
         assert any(f"| {number} | {name} |" in chunk.text for chunk in chunks)
     assert "chunks" not in row and "processed_document" not in row
     assert pipeline.parser.closed
+
+
+async def test_csv_stage_timings_accumulate_across_batches(setup_pipeline, monkeypatch):
+    pipeline, row, _ = setup_pipeline
+    batch_timings = iter(
+        [
+            {"chunk": 0.1, "embed": 0.2, "store": 0.3},
+            {"chunk": 0.4, "embed": 0.5, "store": 0.6},
+            {"chunk": 0.7, "embed": 0.8, "store": 0.9},
+        ]
+    )
+
+    async def run_processed_batch(_pipeline, child, _processed, **_kwargs):
+        child["stage_timings"] = next(batch_timings)
+        child["stored_count"] = 1
+        child["chunks"] = []
+        return child
+
+    monkeypatch.setattr(IndexingPipeline, "run_processed_batch", run_processed_batch)
+    ticks = itertools.count()
+    monkeypatch.setattr(
+        csv_pipeline,
+        "time",
+        SimpleNamespace(perf_counter=lambda: next(ticks) * 0.25),
+    )
+
+    result = await pipeline.run(row)
+
+    assert result["stage_timings"] == pytest.approx({"parse": 1.0, "chunk": 1.2, "embed": 1.5, "store": 1.8})
 
 
 async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
@@ -279,6 +310,7 @@ async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure
         error, message = RuntimeError, "chunk unavailable"
     with pytest.raises(error, match=message):
         await pipeline.run(row)
+    assert {"parse", "chunk", "embed", "store"} <= set(row["stage_timings"])
     store = pipeline.vector_store
     assert store.deleted_ids == []
     assert store.deleted_filters == [
@@ -372,6 +404,7 @@ async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipe
     assert "people.csv" in messages[1]["content"]
     assert "Alice" in messages[1]["content"] and "Eve" in messages[1]["content"]
     assert row["topic_tags"] == ["Customers", "Contacts"]
+    assert {"parse", "chunk", "embed", "store", "topic_tag"} <= set(row["stage_timings"])
     assert events == ["parse", "embed", "store"] * 3
     assert row["stage"] == "stored"
     assert "chunks" not in row
@@ -418,6 +451,7 @@ async def test_csv_tag_failure_preserves_successful_indexing(setup_pipeline, fai
     assert row["stored_count"] > 0
     assert row["topic_tags"] == []
     assert "topic_tag" in row["degraded_stages"]
+    assert "topic_tag" in row["stage_timings"]
     assert pipeline.vector_store.deleted_filters == []
 
 

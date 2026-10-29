@@ -23,6 +23,7 @@ def _row(**kwargs):
         "error": None,
         "error_reason": None,
         "degraded_stages": [],
+        "stage_timings": None,
         "created_at": _NOW,
         "updated_at": _NOW,
         "started_at": None,
@@ -102,6 +103,24 @@ async def test_upsert_job_persists_degraded_stages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_job_persists_stage_timings() -> None:
+    timings = {"parse": 0.25, "chunk": 0.5, "embed": 1.0, "store": 0.75}
+    pool = _FakePool(fetchrow=_row(status="COMPLETED", stage_timings=timings))
+    repo = _repo(pool)
+
+    job = await repo.upsert_job(
+        IndexationJob(id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a", stage_timings=timings)
+    )
+
+    query, params = pool.calls[0]
+    assert params[11] == timings
+    compact = " ".join(query.split())
+    assert "stage_timings" in compact
+    assert "stage_timings = CASE WHEN jobs.status = ANY($13::text[]) THEN jobs.stage_timings" in compact
+    assert job.stage_timings == timings
+
+
+@pytest.mark.asyncio
 async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
     pool = _FakePool(fetchrow=_row(status="FAILED", error="boom"))
     repo = _repo(pool)
@@ -112,8 +131,8 @@ async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
 
     query, params = pool.calls[0]
     # A settled row never reopens, mirroring the TaskStateManager guard.
-    assert "WHEN jobs.status = ANY($12::text[]) THEN jobs.status" in query
-    assert sorted(params[11]) == ["CANCELLED", "COMPLETED", "FAILED"]
+    assert "WHEN jobs.status = ANY($13::text[]) THEN jobs.status" in query
+    assert sorted(params[12]) == ["CANCELLED", "COMPLETED", "FAILED"]
     assert len(params[5]) == 8_000
 
 
@@ -163,13 +182,14 @@ async def test_upsert_job_freezes_the_outcome_fields_together_on_a_settled_row()
 
     query, _params = pool.calls[0]
     compact = " ".join(query.split())
-    settled = "jobs.status = ANY($12::text[])"
+    settled = "jobs.status = ANY($13::text[])"
     for field, frozen in (
         ("status", "jobs.status"),
         ("error", "jobs.error"),
         ("error_reason", "jobs.error_reason"),
         ("completed_at", "jobs.completed_at"),
         ("degraded_stages", "jobs.degraded_stages"),
+        ("stage_timings", "jobs.stage_timings"),
     ):
         assert f"{field} = CASE WHEN {settled} THEN {frozen}" in compact, field
 
@@ -218,6 +238,14 @@ async def test_upsert_job_never_rewrites_user_id_on_conflict():
 @pytest.mark.asyncio
 async def test_get_job_returns_none_when_absent():
     assert await _repo(_FakePool(fetchrow=None)).get_job("nope") is None
+
+
+@pytest.mark.asyncio
+async def test_get_job_keeps_null_stage_timings_for_legacy_rows() -> None:
+    job = await _repo(_FakePool(fetchrow=_row(stage_timings=None))).get_job("task-1")
+
+    assert job is not None
+    assert job.stage_timings is None
 
 
 @pytest.mark.asyncio
