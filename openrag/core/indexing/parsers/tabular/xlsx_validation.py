@@ -68,6 +68,8 @@ class SheetInfo:
     formula_cells: int
     missing_formula_values: int
     tables: tuple[TableRegion, ...]
+    hidden_rows: frozenset[int]
+    hidden_columns: frozenset[int]
 
 
 def _column_runs(columns: set[int]):
@@ -311,6 +313,8 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 band_columns: set[int] = set()
                 regions: list[TableRegion] = []
                 merged_ranges: list[tuple[int, int, int, int]] = []
+                hidden_rows: set[int] = set()
+                hidden_columns: set[int] = set()
 
                 def finish_band():
                     nonlocal band_start, band_end, band_columns
@@ -334,6 +338,8 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                                     raise limit("XLSX row coordinate exceeds the row limit")
                                 previous_row, previous_col = current_row, 0
                                 row_content_columns = set()
+                                if element.get("hidden", "0").lower() in {"1", "true"}:
+                                    hidden_rows.add(current_row)
                             if element.tag.endswith("}c"):
                                 match = CELL_REF.fullmatch(element.get("r", ""))
                                 if match is None:
@@ -354,6 +360,12 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                                 max_row, max_col = max(max_row, row), max(max_col, col)
                             continue
                         tag = element.tag.rsplit("}", 1)[-1]
+                        if tag == "col" and element.get("hidden", "0").lower() in {"1", "true"}:
+                            start_column = int(element.get("min", "0"))
+                            end_column = int(element.get("max", "0"))
+                            if start_column < 1 or end_column < start_column or end_column > 16_384:
+                                raise invalid("XLSX hidden column range is invalid")
+                            hidden_columns.update(range(start_column, min(end_column, limits.max_columns) + 1))
                         if tag == "c":
                             value = element.find("{*}v")
                             formula = element.find("{*}f")
@@ -447,6 +459,8 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                         formulas,
                         missing,
                         tuple(regions),
+                        frozenset(hidden_rows),
+                        frozenset(hidden_columns),
                     )
                 )
             return infos
