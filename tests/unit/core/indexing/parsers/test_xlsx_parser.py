@@ -1365,11 +1365,12 @@ def test_very_hidden_sheet_is_excluded_and_false_zero_rows_keep_exact_citations(
     assert all("must not be indexed" not in block.text for block in blocks)
 
 
-def test_hidden_rows_and_columns_remain_indexable():
+def test_hidden_rows_and_columns_are_not_indexed():
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(["id", "internal_note"])
-    sheet.append(["R-1", "still searchable"])
+    sheet.append(["id", "internal_note", "public_value"])
+    sheet.append(["R-1", "row secret", "hidden row value"])
+    sheet.append(["R-2", "column secret", "visible value"])
     sheet.row_dimensions[2].hidden = True
     sheet.column_dimensions["B"].hidden = True
     output = BytesIO()
@@ -1378,5 +1379,70 @@ def test_hidden_rows_and_columns_remain_indexable():
 
     [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
 
+    assert block.metadata["table_columns"] == ["id", "public_value"]
+    assert block.metadata["table_row_numbers"] == [3]
+    assert "visible value" in block.text
+    assert "row secret" not in block.text
+    assert "hidden row value" not in block.text
+    assert "internal_note" not in block.text
+    assert "column secret" not in block.text
+    assert block.metadata["hidden_rows_skipped"] == 1
+    assert block.metadata["hidden_columns_skipped"] == 1
+    assert block.metadata["table_worksheet_column_indices"] == [1, 3]
+
+
+def test_hidden_columns_keep_physical_cell_coordinates_after_chunking():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Report"
+    sheet.append(["id", "secret", "description"])
+    sheet.append(["R-1", "classified", "public"])
+    sheet.column_dimensions["B"].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=200,
+        length_function=lambda text: len(text.split()),
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].metadata["cell_range"] == "'Report'!A2:C2"
+    assert chunks[0].metadata["table_worksheet_column_indices"] == [1, 3]
+    assert "classified" not in chunks[0].content
+
+
+def test_hidden_header_override_is_rejected():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "name"])
+    sheet.append(["R-1", "Alice"])
+    sheet.row_dimensions[1].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    with pytest.raises(PipelineError, match="selected header row 1 is hidden"):
+        list(XlsxParser(header_row=1).iter_batches(Document(raw_bytes=output.getvalue())))
+
+
+def test_hidden_unused_columns_beyond_parser_limit_do_not_reject_workbook():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id"])
+    sheet.append(["R-1"])
+    sheet.column_dimensions.group("B", "XFD", hidden=True)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_columns"] == ["id"]
     assert block.metadata["table_row_numbers"] == [2]
-    assert "still searchable" in block.text
+    assert block.metadata["hidden_columns_skipped"] == 4095
