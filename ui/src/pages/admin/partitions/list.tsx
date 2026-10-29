@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/table";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { DEFAULT_PAGE_SIZE } from "@/components/shared/data-table";
 import {
   listPartitions,
   createPartition,
@@ -53,7 +54,6 @@ import { intOr } from "@/lib/utils";
 import { partitionDetailPath } from "@/lib/routes";
 
 type SortDir = "asc" | "desc" | null;
-const PARTITIONS_PAGE_SIZE = 10;
 const PARTITIONS_REFETCH_INTERVAL_MS = 5000;
 // Seeded at startup; the API refuses to delete it.
 const DEFAULT_PARTITION_NAME = "default";
@@ -289,7 +289,7 @@ export default function PartitionListPage() {
     canManagePartitions ||
     filteredAndSorted.some((p) => canWrite(p.role) || canConfigurePartition(p.role));
 
-  const pageCount = Math.ceil(filteredAndSorted.length / PARTITIONS_PAGE_SIZE);
+  const pageCount = Math.ceil(filteredAndSorted.length / DEFAULT_PAGE_SIZE);
   useEffect(() => {
     if (pageIndex > 0 && pageIndex > pageCount - 1) {
       setPageIndex(Math.max(0, pageCount - 1));
@@ -297,8 +297,8 @@ export default function PartitionListPage() {
   }, [pageCount, pageIndex]);
 
   const visiblePartitions = useMemo(() => {
-    const start = pageIndex * PARTITIONS_PAGE_SIZE;
-    return filteredAndSorted.slice(start, start + PARTITIONS_PAGE_SIZE);
+    const start = pageIndex * DEFAULT_PAGE_SIZE;
+    return filteredAndSorted.slice(start, start + DEFAULT_PAGE_SIZE);
   }, [filteredAndSorted, pageIndex]);
   const visibleDeletablePartitionNames = useMemo(
     () => visiblePartitions.filter(canDeletePartition).map((p) => p.name),
