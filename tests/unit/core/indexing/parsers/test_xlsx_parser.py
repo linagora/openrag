@@ -46,8 +46,8 @@ def test_extracts_visible_sheets_with_physical_rows_and_stable_metadata():
     assert [block.metadata["sheet_name"] for block in blocks] == ["People", "People", "Projects"]
     assert [block.metadata["table_row_numbers"] for block in blocks] == [[3], [5], [2]]
     assert blocks[0].metadata["table_columns"] == ["name", "column_2", "active", "joined"]
-    assert blocks[0].metadata["table_id"] == "sheet:0"
-    assert blocks[2].metadata["table_id"] == "sheet:1"
+    assert blocks[0].metadata["table_id"] == "sheet:0:table:0"
+    assert blocks[2].metadata["table_id"] == "sheet:1:table:0"
     assert blocks[2].metadata["table_columns"] == ["name", "summary", "column_3"]
     assert blocks[0].metadata["cell_range"] == "'People'!A3:D3"
     assert "2025-01-02" in blocks[0].text
@@ -60,6 +60,156 @@ def test_reader_is_openpyxl_only():
 
     assert block.metadata["spreadsheet_backend"] == "openpyxl"
     assert "spreadsheet_fallback_used" not in block.metadata
+
+
+def test_detects_and_extracts_each_table_region_with_exact_coordinates():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Dashboard"
+    for row in (("person_id", "name"), ("P-1", "Alice")):
+        sheet.append(row)
+    sheet["D1"], sheet["E1"] = "office_id", "city"
+    sheet["D2"], sheet["E2"] = "O-1", "Paris"
+    sheet["L30"], sheet["M30"] = "metric", "value"
+    sheet["L31"], sheet["M31"] = "latency", 42
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_id"] for block in blocks] == [
+        "sheet:0:table:0",
+        "sheet:0:table:1",
+        "sheet:0:table:2",
+    ]
+    assert all(block.metadata["worksheet_table_count"] == 3 for block in blocks)
+    assert [block.metadata["table_range"] for block in blocks] == [
+        "'Dashboard'!A1:B2",
+        "'Dashboard'!D1:E2",
+        "'Dashboard'!L30:M31",
+    ]
+    assert [block.metadata["table_header_range"] for block in blocks] == [
+        "'Dashboard'!A1:B1",
+        "'Dashboard'!D1:E1",
+        "'Dashboard'!L30:M30",
+    ]
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[2], [2], [31]]
+    assert "latency" in blocks[2].text
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunk_table(
+            MDElement(type="table", content=block.text, metadata=block.metadata),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+    ]
+    assert [chunk.metadata["table_id"] for chunk in chunks] == [
+        "sheet:0:table:0",
+        "sheet:0:table:1",
+        "sheet:0:table:2",
+    ]
+
+
+def test_chunked_offset_table_keeps_absolute_worksheet_citations():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["L30"], sheet["M30"] = "metric", "value"
+    sheet["L31"], sheet["M31"] = "latency", "long value " * 20
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=20,
+        length_function=lambda text: len(text.split()),
+    )
+
+    assert len(chunks) > 1
+    ranges = {chunk.metadata["cell_range"] for chunk in chunks}
+    assert ranges == {"'Sheet'!L31:L31", "'Sheet'!M31:M31"}
+    assert all(chunk.metadata["table_id"] == "sheet:0:table:0" for chunk in chunks)
+
+
+def test_merged_table_titles_are_context_not_column_headers():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.merge_cells("A1:B1")
+    sheet["A1"] = "People"
+    sheet.append(["id", "name"])
+    sheet.append(["P-1", "Alice"])
+    sheet.append([])
+    sheet.merge_cells("A5:B5")
+    sheet["A5"] = "Offices"
+    sheet.append(["id", "city"])
+    sheet.append(["O-1", "Paris"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [["id", "name"], ["id", "city"]]
+    assert [block.metadata["table_header_row"] for block in blocks] == [2, 6]
+    assert [block.metadata["table_range"] for block in blocks] == ["'Sheet'!A2:B3", "'Sheet'!A6:B7"]
+    assert [block.metadata["table_region_range"] for block in blocks] == ["'Sheet'!A1:B3", "'Sheet'!A5:B7"]
+    assert [block.metadata["sheet_context_row_numbers"] for block in blocks] == [[1], [5]]
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[3], [7]]
+
+
+def test_blank_cells_inside_a_table_do_not_split_its_region():
+    document = _document(
+        [
+            ["id", "optional", "summary"],
+            ["A-1", None, "First"],
+            ["A-2", "present", "Second"],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["worksheet_table_count"] == 1
+    assert block.metadata["table_range"] == "'Sheet'!A1:C3"
+    assert block.metadata["table_row_numbers"] == [2, 3]
+
+
+def test_style_only_cells_do_not_create_false_table_regions():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "value"])
+    sheet.append([1, "kept"])
+    sheet["Z100"].number_format = "0.00"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["worksheet_table_count"] == 1
+    assert block.metadata["table_range"] == "'Sheet'!A1:B2"
+
+
+def test_rejects_excessive_detected_table_fragmentation_before_reader_opens(monkeypatch):
+    workbook = Workbook()
+    sheet = workbook.active
+    for column in (1, 4, 7):
+        sheet.cell(1, column, "id")
+        sheet.cell(2, column, column)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="table count exceeds") as error:
+        list(XlsxParser(limits={"max_tables": 2}).iter_batches(Document(raw_bytes=output.getvalue())))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
 
 
 def test_rejects_non_xlsx_archives_and_resource_amplification():
@@ -197,7 +347,9 @@ def test_renders_numbers_dates_unicode_and_blank_columns():
         ]
     )
     [block] = list(XlsxParser().iter_batches(doc))
-    assert "|  | 12 | 2025-01-02 | 2025-01-02T12:30:00 | 09:15:00 | true | café René 東京 |" in block.text
+    assert "| 12 | 2025-01-02 | 2025-01-02T12:30:00 | 09:15:00 | true | café René 東京 |" in block.text
+    assert block.metadata["table_start_column"] == 2
+    assert block.metadata["table_header_range"] == "'Sheet'!B1:G1"
 
 
 @pytest.mark.parametrize("xml_encoding", ["utf-8-bom", "utf-16-le", "utf-16-be"])
@@ -640,7 +792,7 @@ def test_both_chunkers_preserve_xlsx_identity_across_sheets_and_split_cells(stra
     )
     chunks = chunker.chunk(processed, partition="p1")
     assert 4 < len(chunks) < 100
-    assert {c.metadata["table_id"] for c in chunks} == {"sheet:0", "sheet:1"}
+    assert {c.metadata["table_id"] for c in chunks} == {"sheet:0:table:0", "sheet:1:table:0"}
     for chunk in chunks:
         assert chunk.chunk_type == ChunkType.TABLE
         assert chunk.document_id == doc.id and chunk.partition == "p1"

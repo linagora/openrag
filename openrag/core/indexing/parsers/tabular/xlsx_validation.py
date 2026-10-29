@@ -15,6 +15,7 @@ from defusedxml.ElementTree import fromstring, iterparse
 
 MAIN_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
 CELL_REF = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
+CELL_RANGE = re.compile(r"([A-Z]+)([1-9][0-9]*):([A-Z]+)([1-9][0-9]*)\Z")
 STREAMED_XML_PARTS = {"xl/sharedStrings.xml"}
 
 
@@ -33,6 +34,7 @@ class XlsxLimits:
     max_columns: int = 4096
     max_cells: int = 5_000_000
     max_sheet_area: int = 5_000_000
+    max_tables: int = 128
     max_cell_chars: int = 32767
     max_batch_bytes: int = 2 * 1024 * 1024
 
@@ -41,6 +43,18 @@ class XlsxLimits:
             value = getattr(self, field.name)
             if type(value) is not int or value <= 0:
                 raise ConfigError(f"XLSX {field.name} must be a positive integer")
+
+
+@dataclass(frozen=True)
+class TableRegion:
+    """A bounded, content-bearing table rectangle in a worksheet."""
+
+    index: int
+    start_row: int
+    end_row: int
+    start_column: int
+    end_column: int
+    header_row_hint: int | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +67,69 @@ class SheetInfo:
     columns: int
     formula_cells: int
     missing_formula_values: int
+    tables: tuple[TableRegion, ...]
+
+
+def _column_runs(columns: set[int]):
+    """Yield contiguous occupied-column ranges."""
+    start = previous = None
+    for column in sorted(columns):
+        if start is None:
+            start = previous = column
+        elif column == previous + 1:
+            previous = column
+        else:
+            yield start, previous
+            start = previous = column
+    if start is not None:
+        yield start, previous
+
+
+def _merge_preambles(regions: list[TableRegion]) -> list[TableRegion]:
+    """Attach obvious title bands and isolated rows to their surrounding table."""
+    merged: list[TableRegion] = []
+    for region in regions:
+        if merged:
+            previous = merged[-1]
+            previous_height = previous.end_row - previous.start_row + 1
+            previous_width = previous.end_column - previous.start_column + 1
+            region_height = region.end_row - region.start_row + 1
+            region_width = region.end_column - region.start_column + 1
+            is_preamble = previous_height == 1 or previous_width < region_width
+            same_columns = previous.start_column == region.start_column and previous.end_column == region.end_column
+            # A lone band after a table cannot itself contain both a header and
+            # data. Preserve the established behavior of treating it as a row
+            # in the preceding table, even when a blank spacer separates it.
+            if region_height == 1 and region.start_row - previous.end_row <= 32 and same_columns:
+                merged[-1] = TableRegion(
+                    previous.index,
+                    previous.start_row,
+                    region.end_row,
+                    previous.start_column,
+                    previous.end_column,
+                )
+                continue
+            if (
+                previous.end_row < region.start_row - 1
+                and region.start_row - previous.end_row <= 32
+                and region_height >= 2
+                and region.start_column <= previous.start_column
+                and previous.end_column <= region.end_column
+                and is_preamble
+            ):
+                merged[-1] = TableRegion(
+                    previous.index,
+                    previous.start_row,
+                    region.end_row,
+                    region.start_column,
+                    region.end_column,
+                )
+                continue
+        merged.append(region)
+    return [
+        TableRegion(index, region.start_row, region.end_row, region.start_column, region.end_column)
+        for index, region in enumerate(merged)
+    ]
 
 
 def invalid(message: str):
@@ -210,6 +287,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
             if any(sheet.get("state", "visible") not in {"visible", "hidden", "veryHidden"} for sheet in sheets):
                 raise invalid("XLSX worksheet has an invalid visibility state")
             cells_seen = 0
+            tables_seen = 0
             worksheet_paths = set()
             for index, sheet in enumerate(sheets):
                 rel_id = next((v for k, v in sheet.attrib.items() if k.endswith("}id")), None)
@@ -227,6 +305,21 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 worksheet_paths.add(path)
                 max_row = max_col = formulas = missing = 0
                 previous_row = current_row = previous_col = 0
+                current_cell_column = 0
+                row_content_columns: set[int] = set()
+                band_start = band_end = None
+                band_columns: set[int] = set()
+                regions: list[TableRegion] = []
+                merged_ranges: list[tuple[int, int, int, int]] = []
+
+                def finish_band():
+                    nonlocal band_start, band_end, band_columns
+                    if band_start is not None and band_end is not None:
+                        for start_column, end_column in _column_runs(band_columns):
+                            regions.append(TableRegion(len(regions), band_start, band_end, start_column, end_column))
+                    band_start = band_end = None
+                    band_columns = set()
+
                 # clear completed children so memory does not grow with row count.
                 with archive.open(path) as stream:
                     stack = []
@@ -240,6 +333,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                                 if current_row > limits.max_rows:
                                     raise limit("XLSX row coordinate exceeds the row limit")
                                 previous_row, previous_col = current_row, 0
+                                row_content_columns = set()
                             if element.tag.endswith("}c"):
                                 match = CELL_REF.fullmatch(element.get("r", ""))
                                 if match is None:
@@ -253,6 +347,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                                 if row != current_row or col <= previous_col:
                                     raise invalid("XLSX cell coordinates are inconsistent or out of order")
                                 previous_col = col
+                                current_cell_column = col
                                 cells_seen += 1
                                 if cells_seen > limits.max_cells:
                                     raise limit("XLSX cell count exceeds the limit")
@@ -272,11 +367,73 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                                 string_index = int(value.text) if value is not None and value.text else -1
                                 if not 0 <= string_index < shared_count:
                                     raise invalid("XLSX cell references a missing shared string")
+                            inline_text = any(node.text for node in element.iter() if node.tag.endswith("}t"))
+                            if formula is not None or (value is not None and value.text is not None) or inline_text:
+                                row_content_columns.add(current_cell_column)
+                        if tag == "row":
+                            if row_content_columns:
+                                if band_start is None:
+                                    band_start = current_row
+                                elif current_row > band_end + 1:
+                                    finish_band()
+                                    band_start = current_row
+                                band_end = current_row
+                                band_columns.update(row_content_columns)
+                            else:
+                                finish_band()
+                        if tag == "mergeCell":
+                            match = CELL_RANGE.fullmatch(element.get("ref", ""))
+                            if match is None:
+                                raise invalid("XLSX merged cell has an invalid range")
+
+                            def column_number(label: str) -> int:
+                                number = 0
+                                for char in label:
+                                    number = number * 26 + ord(char) - 64
+                                return number
+
+                            start_column = column_number(match[1])
+                            start_row = int(match[2])
+                            end_column = column_number(match[3])
+                            end_row = int(match[4])
+                            if (
+                                start_row > end_row
+                                or start_column > end_column
+                                or end_row > limits.max_rows
+                                or end_column > limits.max_columns
+                            ):
+                                raise invalid("XLSX merged cell has an invalid range")
+                            merged_ranges.append((start_row, end_row, start_column, end_column))
                         if tag in {"c", "row"} or len(stack) <= 2:
                             if len(stack) > 1:
                                 stack[-2].remove(element)
                             element.clear()
                         stack.pop()
+                finish_band()
+                regions = _merge_preambles(regions)
+                regions = [
+                    TableRegion(
+                        region.index,
+                        region.start_row,
+                        region.end_row,
+                        region.start_column,
+                        region.end_column,
+                        region.start_row + 1
+                        if region.start_row < region.end_row
+                        and any(
+                            start_row == end_row == region.start_row
+                            and start_column <= region.start_column
+                            and end_column >= region.end_column
+                            and end_column > start_column
+                            for start_row, end_row, start_column, end_column in merged_ranges
+                        )
+                        else None,
+                    )
+                    for region in regions
+                ]
+                tables_seen += len(regions)
+                if tables_seen > limits.max_tables:
+                    raise limit("XLSX table count exceeds the limit")
                 if max_row * max_col > limits.max_sheet_area:
                     raise limit("XLSX worksheet rectangle exceeds the traversal limit")
                 infos.append(
@@ -289,6 +446,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                         max_col,
                         formulas,
                         missing,
+                        tuple(regions),
                     )
                 )
             return infos

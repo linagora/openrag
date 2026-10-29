@@ -75,6 +75,8 @@ loader:
 
 `xlsx_batch_size` limits the number of data rows emitted in one parser batch. `xlsx_limits` accepts the positive-integer limit names listed below. Values not specified retain their defaults.
 
+OpenRAG detects independent table regions from content-bearing cells before extraction. Blank row and column separators define table boundaries, so tables may be stacked vertically, placed side by side, or start away from `A1`. Each detected table is extracted and chunked independently with its own stable table ID and exact worksheet range. Obvious title rows immediately above a table remain attached as searchable worksheet context.
+
 ## Default safety limits
 
 Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relationships, worksheet coordinates, shared strings, and resource bounds.
@@ -94,6 +96,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_columns` | Column coordinate | 4,096 |
 | `max_cells` | Physical cells across worksheets | 5,000,000 |
 | `max_sheet_area` | Worksheet rectangle, including gaps | 5,000,000 positions |
+| `max_tables` | Detected table regions across the workbook | 128 |
 | `max_cell_chars` | Characters in one cell | 32,767 |
 | `max_batch_bytes` | Rendered batch size | 2 MiB |
 
@@ -109,7 +112,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 
 | Workbook case | Current behavior | Recommended action |
 | --- | --- | --- |
-| Multiple independent tables on one worksheet | Treated as one logical table | Place each table on its own worksheet |
+| Tables without a blank row or column boundary | Contiguous content is treated as one table | Add a fully blank separator row or column between independent tables |
 | Merged or multi-row headers | Labels and pre-header context are retained, but merged spans and hierarchy are not reconstructed | Provide one explicit header row |
 | Headerless worksheet | First nonempty row is retained and content remains searchable, but column semantics are not source-backed | Add a header row or configure a normalized export |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
@@ -120,7 +123,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 
 ## Operational guidance
 
-- Use one logical table per worksheet and include explicit column headers.
+- Separate independent tables with at least one fully blank row or column and include explicit column headers.
 - Recalculate and save formula-heavy workbooks before uploading them.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
 - Use a fresh partition when comparing ingestion behavior across parser versions.
