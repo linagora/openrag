@@ -164,6 +164,102 @@ def test_merged_table_titles_are_context_not_column_headers():
     assert [block.metadata["table_row_numbers"] for block in blocks] == [[3], [7]]
 
 
+def test_detects_extracts_and_chunks_ten_tables_in_one_worksheet():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Ten Tables"
+    expected_ranges = []
+    for table_index in range(10):
+        header_row = table_index * 3 + 1
+        data_row = header_row + 1
+        sheet.cell(header_row, 1, "id")
+        sheet.cell(header_row, 2, "value")
+        sheet.cell(data_row, 1, f"T-{table_index + 1:02d}")
+        sheet.cell(data_row, 2, table_index + 1)
+        expected_ranges.append(f"'Ten Tables'!A{header_row}:B{data_row}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 10
+    assert [block.metadata["table_index"] for block in blocks] == list(range(10))
+    assert [block.metadata["table_range"] for block in blocks] == expected_ranges
+    assert all(block.metadata["worksheet_table_count"] == 10 for block in blocks)
+    assert all(block.metadata["sheet_name"] == "Ten Tables" for block in blocks)
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunk_table(
+            MDElement(type="table", content=block.text, metadata=block.metadata),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+    ]
+    assert len(chunks) == 10
+    assert [chunk.metadata["table_id"] for chunk in chunks] == [f"sheet:0:table:{index}" for index in range(10)]
+    assert [chunk.metadata["cell_range"] for chunk in chunks] == [
+        f"'Ten Tables'!A{index * 3 + 2}:B{index * 3 + 2}" for index in range(10)
+    ]
+
+
+def test_multiple_tables_across_sheets_keep_sheet_identity_and_context_when_chunked():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    workbook.active.title = "North Region"
+    workbook.create_sheet("South Region")
+    expected = []
+    for sheet_index, sheet in enumerate(workbook.worksheets):
+        for table_index in range(2):
+            title_row = table_index * 4 + 1
+            header_row = title_row + 1
+            data_row = title_row + 2
+            title = f"{sheet.title} table {table_index + 1} context"
+            sheet.merge_cells(start_row=title_row, start_column=1, end_row=title_row, end_column=2)
+            sheet.cell(title_row, 1, title)
+            sheet.cell(header_row, 1, "id")
+            sheet.cell(header_row, 2, "value")
+            sheet.cell(data_row, 1, f"S{sheet_index}-T{table_index}")
+            sheet.cell(data_row, 2, title)
+            expected.append((sheet_index, sheet.title, table_index, title, data_row))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 4
+    for block, (sheet_index, sheet_name, table_index, title, data_row) in zip(blocks, expected, strict=True):
+        assert block.metadata["sheet_index"] == sheet_index
+        assert block.metadata["sheet_name"] == sheet_name
+        assert block.metadata["table_index"] == table_index
+        assert block.metadata["table_id"] == f"sheet:{sheet_index}:table:{table_index}"
+        assert block.metadata["worksheet_table_count"] == 2
+        assert block.metadata["sheet_context_row_numbers"] == [data_row - 2]
+        assert title in block.metadata["sheet_context"]
+        assert title in block.text
+
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunk_table(
+            MDElement(type="table", content=block.text, metadata=block.metadata),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+    ]
+    assert len(chunks) == 4
+    for chunk, (_, sheet_name, table_index, title, _) in zip(chunks, expected, strict=True):
+        assert chunk.metadata["sheet_name"] == sheet_name
+        assert chunk.metadata["table_index"] == table_index
+        assert title in chunk.metadata["sheet_context"]
+        assert title in chunk.content
+
+
 def test_blank_cells_inside_a_table_do_not_split_its_region():
     document = _document(
         [
