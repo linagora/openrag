@@ -310,8 +310,10 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
 
         sheet = "'" + metadata["sheet_name"].replace("'", "''") + "'!"
         start, end = metadata["table_row_start"], metadata["table_row_end"]
+        first_worksheet_column = metadata.get("table_start_column", 1)
         metadata["cell_range"] = (
-            f"{sheet}{column_name(min(positions) + 1)}{start}:{column_name(max(positions) + 1)}{end}"
+            f"{sheet}{column_name(first_worksheet_column + min(positions))}{start}:"
+            f"{column_name(first_worksheet_column + max(positions))}{end}"
         )
         # The bounding range can span blank rows/unselected columns. Exact
         # membership is table_row_numbers plus table_column_indices.

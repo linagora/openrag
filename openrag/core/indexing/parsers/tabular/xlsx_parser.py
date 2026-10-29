@@ -15,7 +15,7 @@ from typing import Any
 
 from core.indexing.parsers.registry import parser_registry
 from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row, normalize_headers
-from core.indexing.parsers.tabular.xlsx_validation import SheetInfo, XlsxLimits, limit, validate_ooxml
+from core.indexing.parsers.tabular.xlsx_validation import SheetInfo, TableRegion, XlsxLimits, limit, validate_ooxml
 from core.models.document import Document, ProcessedDocument, TextBlock
 from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
 from core.utils.logging import get_logger
@@ -36,7 +36,7 @@ def _rendered_header_key(value: str) -> str:
     return markdown_row([value])[2:-2]
 
 
-def _detect_header(rows, byte_limit):
+def _detect_header(rows, byte_limit, start_row=1):
     """Skip obvious title/preamble rows, retaining ambiguous first rows.
 
     Look ahead at most 32 physical rows and one batch worth of text. Promote a
@@ -53,7 +53,7 @@ def _detect_header(rows, byte_limit):
             break
     nonempty = [
         (i, row, [_cell_text(v).strip() for v in row])
-        for i, row in enumerate(buffered, 1)
+        for i, row in enumerate(buffered, start_row)
         if any(_cell_text(v).strip() for v in row)
     ]
     selected = None
@@ -185,18 +185,33 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                     sheet = workbook[info.name]
                     # Exporters may declare A1:A1 or a huge dimension. Use inspected cells.
                     sheet.reset_dimensions()
-                    with closing(sheet.iter_rows(max_row=info.rows, max_col=info.columns, values_only=True)) as rows:
-                        if not info.formula_cells:
-                            yield info, rows
-                            continue
-                        if formula_workbook is None:
-                            raise PipelineError("XLSX formula reader is unavailable", code="INVALID_XLSX")
-                        formula_sheet = formula_workbook[info.name]
-                        formula_sheet.reset_dimensions()
+                    for table in info.tables:
                         with closing(
-                            formula_sheet.iter_rows(max_row=info.rows, max_col=info.columns, values_only=False)
-                        ) as formula_rows:
-                            yield info, _rows_with_formulas(rows, formula_rows)
+                            sheet.iter_rows(
+                                min_row=table.start_row,
+                                max_row=table.end_row,
+                                min_col=table.start_column,
+                                max_col=table.end_column,
+                                values_only=True,
+                            )
+                        ) as rows:
+                            if not info.formula_cells:
+                                yield info, table, rows
+                                continue
+                            if formula_workbook is None:
+                                raise PipelineError("XLSX formula reader is unavailable", code="INVALID_XLSX")
+                            formula_sheet = formula_workbook[info.name]
+                            formula_sheet.reset_dimensions()
+                            with closing(
+                                formula_sheet.iter_rows(
+                                    min_row=table.start_row,
+                                    max_row=table.end_row,
+                                    min_col=table.start_column,
+                                    max_col=table.end_column,
+                                    values_only=False,
+                                )
+                            ) as formula_rows:
+                                yield info, table, _rows_with_formulas(rows, formula_rows)
             finally:
                 if formula_workbook is not None:
                     formula_workbook.close()
@@ -250,6 +265,21 @@ class XlsxParser(TabularBatchParser):
             infos = validate_ooxml(source, self.limits)
             # Validate overrides before opening a backend or emitting any batches.
             by_name = {info.name: info for info in infos}
+            if self.header_row is not None:
+                visible = [info for info in infos if not info.hidden and info.columns]
+                for info in visible:
+                    if self.header_row > info.rows:
+                        raise PipelineError(
+                            f"XLSX sheet {info.name!r}: selected header row {self.header_row} is missing",
+                            code="INVALID_XLSX",
+                            status_code=422,
+                        )
+                    if not any(table.start_row <= self.header_row <= table.end_row for table in info.tables):
+                        raise PipelineError(
+                            f"XLSX sheet {info.name!r}: selected header row {self.header_row} is empty",
+                            code="INVALID_XLSX",
+                            status_code=422,
+                        )
             for name, row in self.sheet_header_rows.items():
                 info = by_name.get(name)
                 if info is None or info.hidden or not info.columns:
@@ -261,6 +291,12 @@ class XlsxParser(TabularBatchParser):
                 if row is not None and row > info.rows:
                     raise PipelineError(
                         f"XLSX sheet {name!r}: selected header row {row} is missing",
+                        code="INVALID_XLSX",
+                        status_code=422,
+                    )
+                if row is not None and not any(table.start_row <= row <= table.end_row for table in info.tables):
+                    raise PipelineError(
+                        f"XLSX sheet {name!r}: selected header row {row} is empty",
                         code="INVALID_XLSX",
                         status_code=422,
                     )
@@ -287,16 +323,25 @@ class XlsxParser(TabularBatchParser):
         data_rows_seen = 0
         hidden_count = sum(info.hidden for info in infos)
         with closing(_openpyxl_sheets(document, source, infos)) as sheets:
-            for sheet, row_iterator in sheets:
-                selected_header_row = self.sheet_header_rows.get(sheet.name, self.header_row)
+            for sheet, table, row_iterator in sheets:
+                configured_header_row = self.sheet_header_rows.get(sheet.name, self.header_row)
+                selected_header_row = (
+                    configured_header_row
+                    if configured_header_row is not None and table.start_row <= configured_header_row <= table.end_row
+                    else None
+                )
+                if configured_header_row is None and table.header_row_hint is not None:
+                    selected_header_row = table.header_row_hint
                 if selected_header_row is None:
-                    selected_header_row, row_iterator = _detect_header(row_iterator, self.limits.max_batch_bytes)
+                    selected_header_row, row_iterator = _detect_header(
+                        row_iterator, self.limits.max_batch_bytes, table.start_row
+                    )
                 preamble = []
                 preamble_rows = []
                 preamble_bytes = 0
                 header_values = None
-                header_row = 1
-                for physical_row, values in enumerate(row_iterator, start=1):
+                header_row = table.start_row
+                for physical_row, values in enumerate(row_iterator, start=table.start_row):
                     if selected_header_row is not None and physical_row < selected_header_row:
                         # Repeated merged-title values are one piece of context.
                         values_text = list(
@@ -318,7 +363,7 @@ class XlsxParser(TabularBatchParser):
                             status_code=422,
                         )
                     if _has_text(rendered):
-                        rendered.extend([""] * (sheet.columns - len(rendered)))
+                        rendered.extend([""] * (table.end_column - table.start_column + 1 - len(rendered)))
                         if any(len(value) > self.limits.max_cell_chars for value in rendered):
                             raise limit("XLSX header text exceeds the character limit")
                         if sum(len(value.encode("utf-8")) for value in rendered) >= self.limits.max_batch_bytes:
@@ -365,6 +410,7 @@ class XlsxParser(TabularBatchParser):
                     return self._block(
                         document,
                         sheet,
+                        table,
                         hidden_count,
                         header_values,
                         header_row,
@@ -411,6 +457,7 @@ class XlsxParser(TabularBatchParser):
         self,
         document,
         sheet,
+        table: TableRegion,
         hidden_count,
         headers,
         header_row,
@@ -420,20 +467,30 @@ class XlsxParser(TabularBatchParser):
         preamble_rows,
     ):
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
-        last_column = _column_name(len(headers))
+        first_column = _column_name(table.start_column)
+        last_column = _column_name(table.end_column)
         metadata = {
             "tabular_format": "xlsx",
             "workbook_filename": document.filename,
             "sheet_name": sheet.name,
             "sheet_index": sheet.index,
-            "table_id": f"sheet:{sheet.index}",
+            "table_id": f"sheet:{sheet.index}:table:{table.index}",
+            "table_index": table.index,
+            "worksheet_table_count": len(sheet.tables),
             "table_columns": list(headers),
             "table_header_row": header_row,
+            "table_start_row": header_row,
+            "table_end_row": table.end_row,
+            "table_start_column": table.start_column,
+            "table_end_column": table.end_column,
+            "table_range": f"{sheet_ref}{first_column}{header_row}:{last_column}{table.end_row}",
+            "table_region_range": f"{sheet_ref}{first_column}{table.start_row}:{last_column}{table.end_row}",
+            "table_region_start_row": table.start_row,
             "table_row_start": row_numbers[0],
             "table_row_end": row_numbers[-1],
             "table_row_numbers": list(row_numbers),
-            "cell_range": f"{sheet_ref}A{row_numbers[0]}:{last_column}{row_numbers[-1]}",
-            "table_header_range": f"{sheet_ref}A{header_row}:{last_column}{header_row}",
+            "cell_range": f"{sheet_ref}{first_column}{row_numbers[0]}:{last_column}{row_numbers[-1]}",
+            "table_header_range": f"{sheet_ref}{first_column}{header_row}:{last_column}{header_row}",
             "hidden_sheet": False,
             "hidden_sheets_skipped": hidden_count,
             "formula_policy": "cached_values_and_formula_text",
