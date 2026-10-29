@@ -530,6 +530,27 @@ async def test_query_hint_preserves_acknowledgement_rules_with_a_stored_contextu
 
 
 @pytest.mark.asyncio
+async def test_contextualizer_prompt_defaults_to_english_when_detection_fails(monkeypatch):
+    """``detect_language`` returns None when the detector fails or the message
+    is blank; the prompt then said "Language for `query` field: None" (#1272).
+    """
+
+    class StoredPromptService:
+        async def resolve_prompt(self, prompt_type, names=None):
+            return "Language for `query` field: {query_language}"
+
+    monkeypatch.setattr(qs, "detect_language", lambda _t, **_kwargs: None)
+    payload = json.dumps({"query_list": [{"query": "q", "temporal_filters": None}]})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+    svc._prompt_service = StoredPromptService()
+
+    await svc.generate_query([{"role": "user", "content": "q"}])
+
+    assert llm.chat_calls[0][0][0]["content"].startswith("Language for `query` field: en\n")
+
+
+@pytest.mark.asyncio
 async def test_generate_query_chatbotrag_falls_back_on_garbage():
     svc = _svc(llm=FakeLLM(chat_responses=["not json", "still not json"]), mode="ChatBotRag")
     sq = await svc.generate_query([{"role": "user", "content": "raw question"}])
