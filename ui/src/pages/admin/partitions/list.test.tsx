@@ -182,6 +182,18 @@ describe("PartitionListPage bulk actions", () => {
     expect(deletePartitionMock).not.toHaveBeenCalledWith("default");
   });
 
+  it("sorts partitions by name by default", async () => {
+    listPartitionsMock.mockResolvedValue({
+      partitions: ["zeta", "alpha", "mid"].map((name) => makePartition(name)),
+    });
+
+    renderPartitions();
+
+    expect(await screen.findByText("alpha")).not.toBeNull();
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(rows.map((row) => row.textContent?.match(/alpha|mid|zeta/)?.[0])).toEqual(["alpha", "mid", "zeta"]);
+  });
+
   it("paginates partitions with 20 rows per page", async () => {
     listPartitionsMock.mockResolvedValue({
       partitions: Array.from({ length: 21 }, (_, i) =>
