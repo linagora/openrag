@@ -1,6 +1,6 @@
 # XLSX ingestion
 
-OpenRAG indexes `.xlsx` workbooks as structured tabular content. It uses OpenPyXL in read-only mode and sends each visible worksheet through the same bounded indexing pipeline used for CSV data.
+OpenRAG indexes `.xlsx` workbooks as structured tabular content. It uses OpenPyXL in read-only mode and sends every detected table in each visible worksheet through the same bounded indexing pipeline used for CSV data.
 
 The parser is designed for retrieval, not spreadsheet execution: it preserves stored values, formulas, worksheet context, and physical row references, but it does not recalculate formulas or reproduce Excel's visual layout.
 
@@ -9,21 +9,38 @@ The parser is designed for retrieval, not spreadsheet execution: it preserves st
 For every visible, nonempty worksheet, OpenRAG preserves:
 
 - workbook and worksheet names;
+- the detected table index, table count, boundaries, and stable table ID;
 - the selected column header row and column names;
 - physical Excel row numbers and cell ranges;
 - nonempty rows above the header as worksheet context;
 - stored scalar values, including numbers, booleans, dates, durations, and Unicode text;
 - formula text and the cached value saved in the workbook, when available.
 
-Rows are emitted incrementally as bounded Markdown table batches. Chunk metadata keeps rows scoped to their worksheet so sibling-row retrieval does not mix tables from different sheets.
+Rows are emitted incrementally as bounded Markdown table batches. Chunk metadata keeps rows scoped by both worksheet and table ID, so sibling-row retrieval does not mix independent tables from the same or different sheets.
 
 Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a visible worksheet remain indexable because their visibility is presentation metadata rather than an access-control boundary.
 
+## Table detection
+
+OpenRAG detects independent table regions from content-bearing cells during its bounded OOXML preflight. A fully blank row or column separates tables, so tables may be stacked vertically, placed side by side, or start away from `A1`, such as at `L30`.
+
+Every detected table is extracted and chunked independently. Its metadata includes:
+
+- `table_id`, unique within the workbook;
+- `table_index` and `worksheet_table_count`;
+- `table_range` for the header and data rectangle;
+- `table_region_range` when preceding title/context rows are also attached;
+- `table_start_row`, `table_end_row`, `table_start_column`, and `table_end_column`;
+- `sheet_name` and `sheet_index`, preserved on every batch and chunk;
+- exact `table_header_range`, data-row numbers, and chunk `cell_range` citations.
+
+An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Detection and chunking are covered for at least ten tables in one worksheet and for multiple tables across multiple worksheets. The default safety limit permits at most 128 detected tables across a workbook.
+
 ## Header selection
 
-Header selection runs independently for each worksheet.
+Header selection runs independently for each detected table.
 
-By default, OpenRAG performs a bounded scan of the first 32 physical rows. It may select a later textual row when a blank row clearly separates a title or preamble from a wider table. Ambiguous layouts keep the first nonempty row to avoid silently discarding a data record.
+By default, OpenRAG performs a bounded scan of the first 32 physical rows in each detected region. It may select a later textual row when a blank row clearly separates a title or preamble from a wider table. A merged title spanning the table also selects the following row as the header. Other ambiguous layouts keep the first nonempty row to avoid silently discarding a data record.
 
 For deterministic exports, configure a physical Excel row number:
 
@@ -45,7 +62,7 @@ loader:
     Notes: null
 ```
 
-A per-sheet value overrides the global row. `null` restores automatic selection for that sheet. An override that targets an absent, hidden, empty, or out-of-range worksheet fails before any content is indexed.
+A per-sheet value overrides the global row. `null` restores automatic selection for every table on that sheet. A configured row is used by the table region containing it; other detected tables on that sheet retain automatic header selection. An override that targets an absent, hidden, empty, or out-of-range worksheet fails before any content is indexed.
 
 Blank header cells receive generated names such as `column_2`. Duplicate rendered names are made unique.
 
@@ -71,11 +88,10 @@ loader:
   xlsx_limits:
     max_batch_bytes: 2097152
     max_shared_strings: 250000
+    max_tables: 128
 ```
 
 `xlsx_batch_size` limits the number of data rows emitted in one parser batch. `xlsx_limits` accepts the positive-integer limit names listed below. Values not specified retain their defaults.
-
-OpenRAG detects independent table regions from content-bearing cells before extraction. Blank row and column separators define table boundaries, so tables may be stacked vertically, placed side by side, or start away from `A1`. Each detected table is extracted and chunked independently with its own stable table ID and exact worksheet range. Obvious title rows immediately above a table remain attached as searchable worksheet context.
 
 ## Default safety limits
 
@@ -113,7 +129,8 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Workbook case | Current behavior | Recommended action |
 | --- | --- | --- |
 | Tables without a blank row or column boundary | Contiguous content is treated as one table | Add a fully blank separator row or column between independent tables |
-| Merged or multi-row headers | Labels and pre-header context are retained, but merged spans and hierarchy are not reconstructed | Provide one explicit header row |
+| Merged title above a single header row | The title is retained as table context and the following row becomes the header | No action is required when the title spans the detected table |
+| Merged or multi-row column headers | Labels and pre-header context are retained, but merged spans and hierarchy are not reconstructed | Provide one explicit column-header row |
 | Headerless worksheet | First nonempty row is retained and content remains searchable, but column semantics are not source-backed | Add a header row or configure a normalized export |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
