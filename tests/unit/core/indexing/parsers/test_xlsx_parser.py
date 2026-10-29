@@ -50,6 +50,10 @@ def test_extracts_visible_sheets_with_physical_rows_and_stable_metadata():
     assert blocks[2].metadata["table_id"] == "sheet:1:table:0"
     assert blocks[2].metadata["table_columns"] == ["name", "summary", "column_3"]
     assert blocks[0].metadata["cell_range"] == "'People'!A3:D3"
+    assert blocks[0].metadata["worksheet_context"] == "\n\nWorksheet: People"
+    assert blocks[2].metadata["worksheet_context"] == "\n\nWorksheet: Projects"
+    assert "Worksheet: People" in blocks[0].text
+    assert "Worksheet: Projects" in blocks[2].text
     assert "2025-01-02" in blocks[0].text
     assert "true" in blocks[0].text
     assert "must not be indexed" not in "\n".join(block.text for block in blocks)
@@ -60,6 +64,33 @@ def test_reader_is_openpyxl_only():
 
     assert block.metadata["spreadsheet_backend"] == "openpyxl"
     assert "spreadsheet_fallback_used" not in block.metadata
+
+
+def test_worksheet_name_is_searchable_without_a_table_preamble():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Research O'Brien"
+    sheet.append(["dataset_id", "dataset"])
+    sheet.append(["DAT-001", "Public services"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    [chunk] = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=100,
+        length_function=lambda text: len(text.split()),
+    )
+
+    expected_context = "\n\nWorksheet: Research O'Brien"
+    assert block.metadata["sheet_name"] == "Research O'Brien"
+    assert block.metadata["worksheet_context"] == expected_context
+    assert block.text.endswith(expected_context)
+    assert chunk.content.endswith(expected_context)
+    assert chunk.metadata["cell_range"] == "'Research O''Brien'!A2:B2"
 
 
 def test_detects_and_extracts_each_table_region_with_exact_coordinates():
@@ -239,8 +270,10 @@ def test_multiple_tables_across_sheets_keep_sheet_identity_and_context_when_chun
         assert block.metadata["table_index"] == table_index
         assert block.metadata["table_id"] == f"sheet:{sheet_index}:table:{table_index}"
         assert block.metadata["worksheet_table_count"] == 2
+        assert block.metadata["worksheet_context"] == f"\n\nWorksheet: {sheet_name}"
         assert block.metadata["sheet_context_row_numbers"] == [data_row - 2]
         assert title in block.metadata["sheet_context"]
+        assert f"Worksheet: {sheet_name}" in block.text
         assert title in block.text
 
     chunks = [
@@ -256,7 +289,9 @@ def test_multiple_tables_across_sheets_keep_sheet_identity_and_context_when_chun
     for chunk, (_, sheet_name, table_index, title, _) in zip(chunks, expected, strict=True):
         assert chunk.metadata["sheet_name"] == sheet_name
         assert chunk.metadata["table_index"] == table_index
+        assert chunk.metadata["worksheet_context"] == f"\n\nWorksheet: {sheet_name}"
         assert title in chunk.metadata["sheet_context"]
+        assert f"Worksheet: {sheet_name}" in chunk.content
         assert title in chunk.content
 
 
@@ -791,7 +826,7 @@ def test_xlsx_multirow_chunk_citations_do_not_retain_batch_end():
 
     [block] = list(XlsxParser().iter_batches(_document([["name"], ["Alice"], ["Bob"], ["Claire"]])))
     chunks = chunk_table(
-        MDElement(type="table", content=block.text, metadata=block.metadata), chunk_size=30, length_function=len
+        MDElement(type="table", content=block.text, metadata=block.metadata), chunk_size=50, length_function=len
     )
     assert len(chunks) == 3
     assert [chunk.metadata["cell_range"] for chunk in chunks] == [f"'Sheet'!A{i}:A{i}" for i in (2, 3, 4)]
@@ -896,6 +931,7 @@ def test_both_chunkers_preserve_xlsx_identity_across_sheets_and_split_cells(stra
         assert chunk.metadata["table_row_numbers"] == [2]
         assert chunk.metadata["cell_range"].endswith(("A2:A2", "B2:B2"))
         assert chunk.metadata["cell_range"].startswith(f"'{chunk.metadata['sheet_name']}'!")
+        assert f"Worksheet: {chunk.metadata['sheet_name']}" in chunk.text
         assert "XLSX row 2" in chunk.text
         assert "CSV row" not in chunk.text
         assert "&#124;" in chunk.text or chunk.metadata["table_columns"] == ["name"]
@@ -1196,6 +1232,8 @@ def test_preamble_is_searchable_in_each_split_chunk(strategy, header_row):
 def test_blank_preamble_does_not_create_context():
     blocks = list(XlsxParser(header_row=2).iter_batches(Document(raw_bytes=_workbook_bytes())))
     assert "sheet_context" not in blocks[0].metadata
+    assert blocks[0].metadata["worksheet_context"] == "\n\nWorksheet: People"
+    assert blocks[0].text.endswith("\n\nWorksheet: People")
 
 
 def test_explicit_preamble_retains_multiple_rows_and_values():
