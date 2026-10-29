@@ -170,6 +170,22 @@ def _rows_with_formulas(value_rows, formula_rows):
         )
 
 
+def _visible_rows(rows, table: TableRegion, info: SheetInfo):
+    """Mask hidden rows and remove hidden columns while preserving row offsets."""
+    visible_offsets = [
+        column - table.start_column
+        for column in range(table.start_column, table.end_column + 1)
+        if column not in info.hidden_columns
+    ]
+    width = len(visible_offsets)
+    for row_number, row in enumerate(rows, start=table.start_row):
+        if row_number in info.hidden_rows:
+            # Keep a placeholder so downstream physical row coordinates do not shift.
+            yield (None,) * width
+        else:
+            yield tuple(row[offset] for offset in visible_offsets)
+
+
 def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
     from openpyxl import load_workbook
 
@@ -201,8 +217,9 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                                 values_only=True,
                             )
                         ) as rows:
+                            visible_rows = _visible_rows(rows, table, info)
                             if not info.formula_cells:
-                                yield info, table, rows
+                                yield info, table, visible_rows
                                 continue
                             if formula_workbook is None:
                                 raise PipelineError("XLSX formula reader is unavailable", code="INVALID_XLSX")
@@ -217,7 +234,8 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                                     values_only=False,
                                 )
                             ) as formula_rows:
-                                yield info, table, _rows_with_formulas(rows, formula_rows)
+                                visible_formula_rows = _visible_rows(formula_rows, table, info)
+                                yield info, table, _rows_with_formulas(visible_rows, visible_formula_rows)
             finally:
                 if formula_workbook is not None:
                     formula_workbook.close()
@@ -286,6 +304,12 @@ class XlsxParser(TabularBatchParser):
                             code="INVALID_XLSX",
                             status_code=422,
                         )
+                    if self.header_row in info.hidden_rows:
+                        raise PipelineError(
+                            f"XLSX sheet {info.name!r}: selected header row {self.header_row} is hidden",
+                            code="INVALID_XLSX",
+                            status_code=422,
+                        )
             for name, row in self.sheet_header_rows.items():
                 info = by_name.get(name)
                 if info is None or info.hidden or not info.columns:
@@ -303,6 +327,12 @@ class XlsxParser(TabularBatchParser):
                 if row is not None and not any(table.start_row <= row <= table.end_row for table in info.tables):
                     raise PipelineError(
                         f"XLSX sheet {name!r}: selected header row {row} is empty",
+                        code="INVALID_XLSX",
+                        status_code=422,
+                    )
+                if row is not None and row in info.hidden_rows:
+                    raise PipelineError(
+                        f"XLSX sheet {name!r}: selected header row {row} is hidden",
                         code="INVALID_XLSX",
                         status_code=422,
                     )
@@ -330,6 +360,11 @@ class XlsxParser(TabularBatchParser):
         hidden_count = sum(info.hidden for info in infos)
         with closing(_openpyxl_sheets(document, source, infos)) as sheets:
             for sheet, table, row_iterator in sheets:
+                visible_column_count = sum(
+                    column not in sheet.hidden_columns for column in range(table.start_column, table.end_column + 1)
+                )
+                if visible_column_count == 0:
+                    continue
                 configured_header_row = self.sheet_header_rows.get(sheet.name, self.header_row)
                 selected_header_row = (
                     configured_header_row
@@ -369,7 +404,7 @@ class XlsxParser(TabularBatchParser):
                             status_code=422,
                         )
                     if _has_text(rendered):
-                        rendered.extend([""] * (table.end_column - table.start_column + 1 - len(rendered)))
+                        rendered.extend([""] * (visible_column_count - len(rendered)))
                         if any(len(value) > self.limits.max_cell_chars for value in rendered):
                             raise limit("XLSX header text exceeds the character limit")
                         if sum(len(value.encode("utf-8")) for value in rendered) >= self.limits.max_batch_bytes:
@@ -479,8 +514,11 @@ class XlsxParser(TabularBatchParser):
         preamble_rows,
     ):
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
-        first_column = _column_name(table.start_column)
-        last_column = _column_name(table.end_column)
+        visible_columns = [
+            column for column in range(table.start_column, table.end_column + 1) if column not in sheet.hidden_columns
+        ]
+        first_column = _column_name(visible_columns[0])
+        last_column = _column_name(visible_columns[-1])
         metadata = {
             "tabular_format": "xlsx",
             "workbook_filename": document.filename,
@@ -494,8 +532,9 @@ class XlsxParser(TabularBatchParser):
             "table_header_row": header_row,
             "table_start_row": header_row,
             "table_end_row": table.end_row,
-            "table_start_column": table.start_column,
-            "table_end_column": table.end_column,
+            "table_start_column": visible_columns[0],
+            "table_end_column": visible_columns[-1],
+            "table_worksheet_column_indices": visible_columns,
             "table_range": f"{sheet_ref}{first_column}{header_row}:{last_column}{table.end_row}",
             "table_region_range": f"{sheet_ref}{first_column}{table.start_row}:{last_column}{table.end_row}",
             "table_region_start_row": table.start_row,
@@ -506,6 +545,8 @@ class XlsxParser(TabularBatchParser):
             "table_header_range": f"{sheet_ref}{first_column}{header_row}:{last_column}{header_row}",
             "hidden_sheet": False,
             "hidden_sheets_skipped": hidden_count,
+            "hidden_rows_skipped": len(sheet.hidden_rows),
+            "hidden_columns_skipped": len(sheet.hidden_columns),
             "formula_policy": "cached_values_and_formula_text",
             "sheet_formula_cells": sheet.formula_cells,
             "sheet_missing_formula_values": sheet.missing_formula_values,
