@@ -10,6 +10,7 @@ from .base import ConfigMixin
 from .chunking import ChunkerConfig
 from .endpoints import (
     EmbedderConfig,
+    LanguageDetectionConfig,
     LLMConfig,
     LLMContextConfig,
     SemaphoreConfig,
@@ -50,6 +51,7 @@ class Settings(ConfigMixin):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     vlm: VLMConfig = Field(default_factory=VLMConfig)
     semaphore: SemaphoreConfig = Field(default_factory=SemaphoreConfig)
+    language_detection: LanguageDetectionConfig = Field(default_factory=LanguageDetectionConfig)
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
     vectordb: VectorDBConfig = Field(default_factory=VectorDBConfig)
     rdb: RDBConfig = Field(default_factory=RDBConfig)

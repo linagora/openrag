@@ -68,6 +68,43 @@ docker compose -f docker-compose.yaml -f logging.docker-compose.yaml up -d
 Set `LOKI_URL` (and the optional `LOKI_USERNAME`, `LOKI_PASSWORD`,
 `LOKI_TENANT_ID`) in `.env`. See [Loki logs](/openrag/documentation/loki_logs/).
 
+## Ray dashboard
+
+The Ray dashboard is not published by default: it has no authentication, and
+its job-submission API runs arbitrary code. To open it on the host's loopback
+while you need it, add its overlay, after any other overlay:
+
+```bash
+docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml up -d                # GPU
+docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml --profile cpu up -d  # CPU
+```
+
+Then open `http://127.0.0.1:8265` (`RAY_DASHBOARD_PORT` changes the port), or
+forward that port over SSH from a server. Bring the stack back up without the
+overlay once you are done.
+
+On Docker Engine releases older than 28.0.0, hosts on the same L2 network can
+reach ports published to `127.0.0.1`, so on those releases use the overlay
+only on a network where every host is trusted.
+
+While the overlay is in use, the dashboard is also reachable from the other
+containers on the Compose network, and from the host through the container's
+own address.
+
+Adding or removing the overlay recreates the API container: the API restarts,
+the embedded Ray and its actors start over, and indexing in progress is
+interrupted. To inspect Ray on a running stack without restarting it, use its
+CLI inside the container instead:
+
+```bash
+docker compose exec openrag /app/.venv/bin/ray list actors      # GPU
+docker compose exec openrag-cpu /app/.venv/bin/ray list actors  # CPU
+```
+
+With `RAY_ADDRESS` set, the API attaches to an external Ray cluster and starts
+no dashboard of its own, so the overlay has nothing to publish: use the head
+node's dashboard. See [Ray Cluster deployment](/openrag/documentation/deploy_ray_cluster/).
+
 ## Reverse proxy (TLS)
 
 An opt-in overlay adds [Nginx Proxy Manager](https://nginxproxymanager.com/)
@@ -92,6 +129,15 @@ recreates a container. Without it, the container comes back on the base file's
 NPM keeps its state in `nginx_data/` and its certificates in `letsencrypt/` at
 the repository root. Set `PROXY_DATA_DIR` and `PROXY_LETSENCRYPT_DIR` to move
 them. Both hold private keys: back them up, and keep them readable by root only.
+
+The overlay also turns TLS session tickets off and gives NPM an http-level
+session cache, so sessions resume from that cache instead. It ships this as
+`/etc/nginx/conf.d/openrag-tls-sessions.conf` inside the container. Don't set
+`ssl_session_tickets` again in NPM's `custom/http_top.conf` or
+`custom/http.conf`: nginx rejects the duplicate directive, and the proxy
+doesn't start. An `ssl_session_cache` there that declares the `SSL` zone with a
+size other than `50m` stops it the same way: the overlay declares that zone at
+`50m`, the size NPM gives it in hosts with a Let's Encrypt certificate.
 
 ### Configure OpenRAG for the proxy
 

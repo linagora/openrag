@@ -65,7 +65,7 @@ The following directories are excluded from linting:
 
 ## CI/CD Integration
 
-A GitHub Actions workflow (`.github/workflows/lint.yml`) automatically runs on every push and pull request. The workflow:
+The `lint` job of the CI workflow (`.github/workflows/ci.yml`) runs on every push to main and develop, and on every pull request that changes more than the UI or the docs. It:
 
 1. Checks for linting issues with `ruff check`
 2. Verifies code formatting with `ruff format --check`
