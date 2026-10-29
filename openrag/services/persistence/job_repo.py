@@ -265,19 +265,27 @@ class PgJobRepository(JobRepository):
                                 if await _has_conflicting_invocation_pair(connection, task_id, attempt):
                                     task_conflicted_attempts.add(attempt)
                                 through = await _persisted_through_sequence(connection, task_id, attempt)
-                                await connection.execute(
+                                updated = await connection.fetchrow(
                                     """
                                     UPDATE job_stage_state
                                     SET persisted_through_sequence = GREATEST(persisted_through_sequence, $3),
                                         known_conflict = known_conflict OR $4,
                                         updated_at = now()
                                     WHERE task_id = $1 AND attempt = $2
+                                    RETURNING task_id
                                     """,
                                     task_id,
                                     attempt,
                                     through,
                                     attempt in task_conflicted_attempts,
                                 )
+                                if updated is None and attempt in task_conflicted_attempts:
+                                    await _upsert_stage_conflict_marker(
+                                        connection,
+                                        task_id,
+                                        attempt,
+                                        persisted_through_sequence=through,
+                                    )
                                 coverage.append(
                                     StageProgressCoverage(
                                         task_id=task_id,
@@ -304,7 +312,7 @@ class PgJobRepository(JobRepository):
         if not task_ids:
             return {}
         rows = await self.pool.fetch(
-            f"SELECT {_STAGE_STATE_COLUMNS} FROM job_stage_state WHERE task_id = ANY($1::text[])",
+            f"SELECT {_STAGE_STATE_COLUMNS} FROM job_stage_state WHERE task_id = ANY($1::text[]) AND has_summary",
             task_ids,
         )
         return {row["task_id"]: DurableStageProgress(**dict(row)) for row in rows}
@@ -460,6 +468,49 @@ async def _persisted_through_sequence(connection: asyncpg.Connection, task_id: s
     return expected - 1
 
 
+async def _upsert_stage_conflict_marker(
+    connection: asyncpg.Connection,
+    task_id: str,
+    attempt: int,
+    *,
+    persisted_through_sequence: int,
+) -> None:
+    """Retain a conflict until a summary for this attempt is available."""
+    await connection.execute(
+        """
+        INSERT INTO job_stage_state (
+            task_id, attempt, latest_sequence, snapshot_revision, tracking_version, phase,
+            persisted_through_sequence, known_conflict, has_summary
+        )
+        VALUES ($1, $2, 0, 0, 1, 'preparing', $3, true, false)
+        ON CONFLICT (task_id) DO UPDATE SET
+            attempt = EXCLUDED.attempt,
+            latest_sequence = EXCLUDED.latest_sequence,
+            snapshot_revision = EXCLUDED.snapshot_revision,
+            tracking_version = EXCLUDED.tracking_version,
+            phase = EXCLUDED.phase,
+            current_stage_id = NULL,
+            current_stage_rank = NULL,
+            position_score = 0,
+            stage_started_at = NULL,
+            current_invocation_id = NULL,
+            interrupted_invocation_id = NULL,
+            persisted_through_sequence = EXCLUDED.persisted_through_sequence,
+            expected_final_sequence = NULL,
+            known_loss = false,
+            known_conflict = true,
+            has_open_invocation = false,
+            history_truncated = false,
+            has_summary = false,
+            updated_at = now()
+        WHERE EXCLUDED.attempt > job_stage_state.attempt
+        """,
+        task_id,
+        attempt,
+        persisted_through_sequence,
+    )
+
+
 async def _has_conflicting_invocation_pair(connection: asyncpg.Connection, task_id: str, attempt: int) -> bool:
     rows = await connection.fetch(
         """
@@ -503,10 +554,10 @@ async def _upsert_stage_summary(
             task_id, attempt, latest_sequence, snapshot_revision, tracking_version, phase,
             current_stage_id, current_stage_rank, position_score, stage_started_at,
             current_invocation_id, interrupted_invocation_id, persisted_through_sequence, expected_final_sequence,
-            known_loss, known_conflict, has_open_invocation, history_truncated, updated_at
+            known_loss, known_conflict, has_open_invocation, history_truncated, has_summary, updated_at
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, false, $16, $17, now()
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, false, $16, $17, true, now()
         )
         ON CONFLICT (task_id) DO UPDATE SET
             attempt = EXCLUDED.attempt,
@@ -540,6 +591,7 @@ async def _upsert_stage_summary(
                 ELSE job_stage_state.known_conflict
             END,
             has_open_invocation = EXCLUDED.has_open_invocation,
+            has_summary = true,
             history_truncated = CASE
                 WHEN EXCLUDED.attempt > job_stage_state.attempt THEN EXCLUDED.history_truncated
                 ELSE job_stage_state.history_truncated OR EXCLUDED.history_truncated
@@ -547,7 +599,8 @@ async def _upsert_stage_summary(
             updated_at = now()
         WHERE EXCLUDED.attempt > job_stage_state.attempt
            OR (EXCLUDED.attempt = job_stage_state.attempt AND (
-                EXCLUDED.latest_sequence > job_stage_state.latest_sequence
+                NOT job_stage_state.has_summary
+                OR EXCLUDED.latest_sequence > job_stage_state.latest_sequence
                 OR (EXCLUDED.latest_sequence = job_stage_state.latest_sequence
                     AND EXCLUDED.snapshot_revision > job_stage_state.snapshot_revision)
            ))

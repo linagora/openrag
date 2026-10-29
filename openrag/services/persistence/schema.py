@@ -451,6 +451,7 @@ job_stage_state = Table(
     Column("known_conflict", Boolean, nullable=False, server_default="false"),
     Column("has_open_invocation", Boolean, nullable=False, server_default="false"),
     Column("history_truncated", Boolean, nullable=False, server_default="false"),
+    Column("has_summary", Boolean, nullable=False, server_default="true"),
     Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     CheckConstraint("attempt > 0", name="ck_job_stage_state_attempt_positive"),
     CheckConstraint("latest_sequence >= 0", name="ck_job_stage_state_sequence_nonnegative"),

@@ -27,6 +27,7 @@ def test_stage_history_schema_has_bounded_task_scoped_storage() -> None:
         "persisted_through_sequence",
         "expected_final_sequence",
     } <= set(state.c.keys())
+    assert "has_summary" in state.c
     assert "stage_tracking_version" in metadata.tables["jobs"].c
 
 

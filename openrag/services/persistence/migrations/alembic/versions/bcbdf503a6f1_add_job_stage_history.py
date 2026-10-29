@@ -92,6 +92,7 @@ def _create_stage_state_table() -> None:
         sa.Column("known_conflict", sa.Boolean(), server_default=sa.false(), nullable=False),
         sa.Column("has_open_invocation", sa.Boolean(), server_default=sa.false(), nullable=False),
         sa.Column("history_truncated", sa.Boolean(), server_default=sa.false(), nullable=False),
+        sa.Column("has_summary", sa.Boolean(), server_default=sa.true(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["task_id"], ["jobs.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("task_id"),

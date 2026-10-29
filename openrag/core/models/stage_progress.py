@@ -9,6 +9,9 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+_MAX_POSTGRES_INTEGER = 2**31 - 1
+_MIN_POSTGRES_INTEGER = -(2**31)
+
 
 class StageEventStatus(str, Enum):
     STARTED = "started"
@@ -37,11 +40,11 @@ class StageProgressEvent(BaseModel):
 
     event_id: UUID = Field(default_factory=uuid4)
     task_id: str = Field(min_length=1, max_length=256)
-    attempt: int = Field(ge=1)
+    attempt: int = Field(ge=1, le=_MAX_POSTGRES_INTEGER)
     sequence: int = Field(ge=1)
     invocation_id: UUID
     stage_id: str = Field(min_length=1, max_length=64)
-    stage_rank: int | None = Field(default=None, ge=0)
+    stage_rank: int | None = Field(default=None, ge=0, le=_MAX_POSTGRES_INTEGER)
     status: StageEventStatus
     occurred_at: datetime
     duration_ms: int | None = Field(default=None, ge=0)
@@ -69,14 +72,14 @@ class StageProgressSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_id: str = Field(min_length=1, max_length=256)
-    attempt: int = Field(default=1, ge=1)
+    attempt: int = Field(default=1, ge=1, le=_MAX_POSTGRES_INTEGER)
     latest_sequence: int = Field(default=0, ge=0)
     snapshot_revision: int = Field(default=0, ge=0)
     tracking_version: Literal[1] = 1
     phase: StageTaskPhase = StageTaskPhase.PREPARING
     current_stage_id: str | None = Field(default=None, max_length=64)
-    current_stage_rank: int | None = Field(default=None, ge=0)
-    position_score: int = 0
+    current_stage_rank: int | None = Field(default=None, ge=0, le=_MAX_POSTGRES_INTEGER)
+    position_score: int = Field(default=0, ge=_MIN_POSTGRES_INTEGER, le=_MAX_POSTGRES_INTEGER)
     stage_started_at: datetime | None = None
     current_invocation_id: UUID | None = None
     interrupted_invocation_id: UUID | None = None
@@ -118,12 +121,12 @@ class DurableStageProgress(StageProgressSummary):
 
 class StageProgressCoverage(BaseModel):
     task_id: str
-    attempt: int = Field(ge=1)
+    attempt: int = Field(ge=1, le=_MAX_POSTGRES_INTEGER)
     persisted_through_sequence: int = Field(ge=0)
 
 
 class StageProgressEventCursor(BaseModel):
-    attempt: int = Field(ge=1)
+    attempt: int = Field(ge=1, le=_MAX_POSTGRES_INTEGER)
     sequence: int = Field(ge=1)
 
 

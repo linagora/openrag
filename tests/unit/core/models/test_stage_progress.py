@@ -53,3 +53,51 @@ def test_stage_end_allows_unknown_duration_and_start_cannot_have_one() -> None:
     assert unknown_duration.duration_ms is None
     with pytest.raises(ValidationError, match="duration_ms"):
         models.StageProgressEvent(**(base | {"status": "started", "duration_ms": 12}))
+
+
+def test_stage_event_rejects_values_outside_postgres_integer_range() -> None:
+    models = _stage_models()
+    event = {
+        "task_id": "task-1",
+        "attempt": 1,
+        "sequence": 1,
+        "invocation_id": uuid4(),
+        "stage_id": "parse",
+        "status": "started",
+        "occurred_at": datetime.now(UTC),
+    }
+
+    for field in ("attempt", "stage_rank"):
+        with pytest.raises(ValidationError):
+            models.StageProgressEvent(**(event | {field: 2**31}))
+
+    maximum = models.StageProgressEvent(**(event | {"attempt": 2**31 - 1, "stage_rank": 2**31 - 1}))
+    assert maximum.attempt == 2**31 - 1
+    assert maximum.stage_rank == 2**31 - 1
+
+
+def test_stage_summary_rejects_values_outside_postgres_integer_range() -> None:
+    models = _stage_models()
+    summary = {"task_id": "task-1"}
+
+    for field in ("attempt", "current_stage_rank"):
+        with pytest.raises(ValidationError):
+            models.StageProgressSummary(**(summary | {field: 2**31}))
+    with pytest.raises(ValidationError):
+        models.StageProgressSummary(**(summary | {"position_score": 2**31}))
+    with pytest.raises(ValidationError):
+        models.StageProgressSummary(**(summary | {"position_score": -(2**31) - 1}))
+
+    minimum_score = models.StageProgressSummary(**(summary | {"position_score": -(2**31)}))
+    maximum_score = models.StageProgressSummary(**(summary | {"position_score": 2**31 - 1}))
+    assert minimum_score.position_score == -(2**31)
+    assert maximum_score.position_score == 2**31 - 1
+
+
+def test_stage_progress_cursors_and_coverage_reject_attempt_overflow() -> None:
+    models = _stage_models()
+
+    with pytest.raises(ValidationError):
+        models.StageProgressCoverage(task_id="task-1", attempt=2**31, persisted_through_sequence=0)
+    with pytest.raises(ValidationError):
+        models.StageProgressEventCursor(attempt=2**31, sequence=1)

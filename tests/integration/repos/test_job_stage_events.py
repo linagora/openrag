@@ -179,6 +179,66 @@ async def test_stage_event_delivery_is_idempotent_and_reports_conflicting_outcom
     await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
 
 
+async def test_conflict_before_first_summary_is_retained_until_summary_arrives(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"stage-history-{uuid4()}"
+    previous_attempt_task_id = f"stage-history-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="test"))
+    await repo.upsert_job(
+        IndexationJob(id=previous_attempt_task_id, status=DocumentStatus.SERIALIZING, partition="test")
+    )
+
+    started = _events(task_id)[0]
+    await repo.write_stage_progress(events=[started], summaries=[])
+    conflicting_start = started.model_copy(update={"event_id": uuid4(), "invocation_id": uuid4()})
+    result = await repo.write_stage_progress(events=[conflicting_start], summaries=[])
+
+    assert result.conflicted_task_ids == [task_id]
+    assert await repo.get_stage_progress_summaries([task_id]) == {}
+    marker = await postgres_store.pool.fetchrow(
+        "SELECT attempt, known_conflict, has_summary FROM job_stage_state WHERE task_id = $1",
+        task_id,
+    )
+    assert (marker["attempt"], marker["known_conflict"], marker["has_summary"]) == (1, True, False)
+
+    await repo.write_stage_progress(events=[], summaries=[_summary(task_id, final_sequence=1, revision=1)])
+    summary = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert summary.latest_sequence == 1
+    assert summary.known_conflict is True
+
+    await repo.write_stage_progress(
+        events=[],
+        summaries=[_summary(previous_attempt_task_id, attempt=1, final_sequence=0, revision=0)],
+    )
+    previous_attempt_start = _events(previous_attempt_task_id, attempt=2)[0]
+    await repo.write_stage_progress(events=[previous_attempt_start], summaries=[])
+    previous_attempt_conflict = previous_attempt_start.model_copy(
+        update={"event_id": uuid4(), "invocation_id": uuid4()}
+    )
+    result = await repo.write_stage_progress(events=[previous_attempt_conflict], summaries=[])
+
+    assert result.conflicted_task_ids == [previous_attempt_task_id]
+    assert await repo.get_stage_progress_summaries([previous_attempt_task_id]) == {}
+    marker = await postgres_store.pool.fetchrow(
+        "SELECT attempt, known_conflict, has_summary FROM job_stage_state WHERE task_id = $1",
+        previous_attempt_task_id,
+    )
+    assert (marker["attempt"], marker["known_conflict"], marker["has_summary"]) == (2, True, False)
+
+    await repo.write_stage_progress(
+        events=[],
+        summaries=[_summary(previous_attempt_task_id, attempt=2, final_sequence=1, revision=1)],
+    )
+    previous_attempt_summary = (await repo.get_stage_progress_summaries([previous_attempt_task_id]))[
+        previous_attempt_task_id
+    ]
+    assert previous_attempt_summary.latest_sequence == 1
+    assert previous_attempt_summary.known_conflict is True
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", previous_attempt_task_id)
+
+
 async def test_stage_summary_persists_interrupted_invocation_and_resets_for_retry(postgres_store) -> None:
     repo = postgres_store.job_repo
     task_id = f"stage-history-{uuid4()}"
