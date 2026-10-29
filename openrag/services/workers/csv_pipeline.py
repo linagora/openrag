@@ -9,6 +9,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 
 from core.indexing.topic_tags import TopicTagSample
+from core.models.catalog import normalize_stage_timings
 from core.models.document import ProcessedDocument
 from core.observability.ray_metrics import observe_stage_duration, record_parse_completion, seed_parse_watchdog
 from core.utils.logging import get_logger
@@ -17,6 +18,11 @@ from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.stages.topic_tag import topic_tag_stage
 
 logger = get_logger()
+
+
+def _accumulate_stage_timings(target: dict[str, float], values: object) -> None:
+    for stage, duration in normalize_stage_timings(values).items():
+        target[stage] = target.get(stage, 0.0) + duration
 
 
 async def _next_batch(batches):
@@ -43,9 +49,11 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
     chunk_offset = 0
     batch_number = 0
     remaining_parse_time = pipeline.timeouts.parse
+    stage_timings: dict[str, float] = {}
     store_attempted = False
     child = None
     topic_sample = TopicTagSample() if topic_tagger is not None else None
+    row.pop("stage_timings", None)
     if topic_sample is not None:
         row.pop("topic_tags", None)
 
@@ -67,6 +75,7 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
                     batch = await run_with_optional_timeout(lambda: _next_batch(batches), remaining_parse_time)
                 finally:
                     elapsed = time.perf_counter() - start
+                    _accumulate_stage_timings(stage_timings, {"parse": elapsed})
                     observe_stage_duration("parse", elapsed)
                     if remaining_parse_time is not None:
                         remaining_parse_time -= elapsed
@@ -95,13 +104,16 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
                 # Reuse the real chunking/embedding/storage path. Only parsing
                 # is bypassed because this batch has already been parsed.
                 store_attempted = True
-                await pipeline.run_processed_batch(
-                    child,
-                    processed,
-                    chunk_offset=chunk_offset,
-                    indexed_at=indexed_at,
-                    context=batch_context,
-                )
+                try:
+                    await pipeline.run_processed_batch(
+                        child,
+                        processed,
+                        chunk_offset=chunk_offset,
+                        indexed_at=indexed_at,
+                        context=batch_context,
+                    )
+                finally:
+                    _accumulate_stage_timings(stage_timings, child.get("stage_timings"))
                 if topic_sample is not None:
                     topic_sample.add(child.get("chunks") or [])
                 chunk_offset += len(child.get("chunks") or [])
@@ -143,7 +155,9 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
                 logger.warning(f"CSV topic tagging failed; indexing the file without tags: {exc}")
             finally:
                 row.pop("chunks", None)
-                observe_stage_duration("topic_tag", time.perf_counter() - start)
+                elapsed = time.perf_counter() - start
+                _accumulate_stage_timings(stage_timings, {"topic_tag": elapsed})
+                observe_stage_duration("topic_tag", elapsed)
 
         # Replacement cleanup happens once, after every new batch succeeds.
         # Workers defer deletion until the catalog write also succeeds.
@@ -178,6 +192,9 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
                 logger.warning(f"CSV failure cleanup could not finish: {cleanup_error}")
         raise
     finally:
+        normalized_timings = normalize_stage_timings(stage_timings)
+        if normalized_timings:
+            row["stage_timings"] = normalized_timings
         row.pop("chunks", None)
         row.pop("processed_document", None)
         scrub_credentials(row)
