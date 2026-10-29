@@ -178,8 +178,8 @@ export default function PartitionListPage() {
   const [llmValidating, setLlmValidating] = useState(false);
 
   const [search, setSearch] = useState("");
-  const [sortDir, setSortDir] = useState<SortDir>(null);
-  const [sortColumn, setSortColumn] = useState<"name" | "created_at">("created_at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sortColumn, setSortColumn] = useState<"name" | "created_at">("name");
   const [selectedPartitionNames, setSelectedPartitionNames] = useState<string[]>([]);
   const [pageIndex, setPageIndex] = useState(0);
   const [manualRefreshing, setManualRefreshing] = useState(false);
@@ -266,21 +266,16 @@ export default function PartitionListPage() {
       );
     }
 
-    // Sort
-    if (sortDir) {
-      const dir = sortDir === "asc" ? 1 : -1;
-      items = [...items].sort((a, b) => {
-        if (sortColumn === "name") {
-          return a.name.localeCompare(b.name) * dir;
-        }
-        // created_at
-        const aDate = a.created_at ?? "";
-        const bDate = b.created_at ?? "";
-        return aDate.localeCompare(bDate) * dir;
-      });
-    }
-
-    return items;
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      if (sortColumn === "name") {
+        return a.name.localeCompare(b.name) * dir;
+      }
+      // created_at
+      const aDate = a.created_at ?? "";
+      const bDate = b.created_at ?? "";
+      return aDate.localeCompare(bDate) * dir;
+    });
   }, [partitionsQuery.data, search, sortDir, sortColumn]);
 
   // Show the actions column whenever the row has at least one available row
@@ -341,12 +336,8 @@ export default function PartitionListPage() {
     if (sortColumn !== column) {
       setSortColumn(column);
       setSortDir("asc");
-    } else if (sortDir === null) {
-      setSortDir("asc");
-    } else if (sortDir === "asc") {
-      setSortDir("desc");
     } else {
-      setSortDir(null);
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
     }
   };
 
