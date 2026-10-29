@@ -106,6 +106,29 @@ def _workspace_repo() -> MagicMock:
 
 def _task_state_manager() -> MagicMock:
     tsm = MagicMock()
+    tsm._ray_actor_method_names = {
+        "set_state",
+        "set_failed_if_not_cancelled",
+        "set_cancelled_if_active",
+        "finish_cancellation",
+        "set_details",
+        "set_object_ref",
+        "get_state",
+        "get_error",
+        "get_details",
+        "get_object_ref",
+        "get_matching_active_task_refs_v2",
+        "get_matching_active_task_refs",
+        "get_content_claim_task_ids",
+        "get_active_indexing_task_for_file",
+        "set_queued_details",
+        "set_queued_details_v2",
+        "begin_worker_submission",
+        "begin_file_delete",
+        "renew_file_delete",
+        "end_file_delete",
+        "has_worker_settled",
+    }
     tsm.set_state = _remote_mock()
     tsm.set_failed_if_not_cancelled = _remote_mock()
     tsm.set_cancelled_if_active = _remote_mock(True)
@@ -2324,6 +2347,7 @@ async def test_delete_file_fails_closed_when_active_task_lookup_missing() -> Non
 
     tsm = _task_state_manager()
     del tsm.get_matching_active_task_refs_v2
+    tsm._ray_actor_method_names.discard("get_matching_active_task_refs_v2")
     vector_store = _vector_store()
     document_repo = _document_repo()
     workspace_repo = _workspace_repo()
@@ -2352,6 +2376,8 @@ async def test_delete_file_uses_legacy_task_state_lookup_when_matching_api_missi
     ref = _settled_ref()
     tsm = _task_state_manager()
     del tsm.get_matching_active_task_refs_v2
+    tsm._ray_actor_method_names.discard("get_matching_active_task_refs_v2")
+    tsm._ray_actor_method_names.update({"get_all_info", "get_object_ref"})
     tsm.get_all_info = _remote_mock(
         {
             "task-1": {
@@ -2433,6 +2459,8 @@ async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> Non
 
     tsm = _task_state_manager()
     del tsm.get_matching_active_task_refs_v2
+    tsm._ray_actor_method_names.discard("get_matching_active_task_refs_v2")
+    tsm._ray_actor_method_names.add("get_all_info")
     tsm.get_all_info = _remote_mock(
         {
             "task-1": {
@@ -2478,6 +2506,8 @@ async def test_delete_file_legacy_lookup_blocks_submitted_task_without_ref() -> 
 
     tsm = _task_state_manager()
     del tsm.get_matching_active_task_refs_v2
+    tsm._ray_actor_method_names.discard("get_matching_active_task_refs_v2")
+    tsm._ray_actor_method_names.update({"get_all_info", "get_object_ref"})
     tsm.get_all_info = _remote_mock(
         {
             "task-1": {
