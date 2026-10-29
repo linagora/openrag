@@ -250,7 +250,7 @@ def chunk_table(
 
 def _chunk_xlsx_table(table, element, chunk_size, length_function):
     """Reuse row splitting with escaped headers and exact sheet/column metadata."""
-    context = element.metadata.get("sheet_context", "")
+    context = element.metadata.get("worksheet_context", "") + element.metadata.get("sheet_context", "")
     if context:
         if not table.endswith(context):
             raise PipelineError("XLSX sheet context does not match table content")
