@@ -102,6 +102,12 @@ def _column_name(number: int) -> str:
     return result or "A"
 
 
+def _worksheet_context(sheet_name: str) -> str:
+    """Render the worksheet identity as searchable, single-line chunk context."""
+    safe_name = sheet_name.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return f"\n\nWorksheet: {safe_name}"
+
+
 def _cell_text(value: Any) -> str:
     formula = value.formula if isinstance(value, _FormulaValue) else None
     if formula is not None:
@@ -400,7 +406,11 @@ class XlsxParser(TabularBatchParser):
                         "XLSX formula text was indexed without a cached result; formulas are not recalculated"
                     )
                 header_lines = [markdown_row(header_values), markdown_row(["---"] * len(header_values))]
-                context = "\n\nWorksheet context (before column headers):\n" + "\n".join(preamble) if preamble else ""
+                worksheet_context = _worksheet_context(sheet.name)
+                sheet_context = (
+                    "\n\nWorksheet context (before column headers):\n" + "\n".join(preamble) if preamble else ""
+                )
+                context = worksheet_context + sheet_context
                 header_bytes = len(("\n".join(header_lines) + context).encode("utf-8"))
                 if header_bytes >= self.limits.max_batch_bytes:
                     raise limit("XLSX header exceeds the batch byte limit")
@@ -416,7 +426,8 @@ class XlsxParser(TabularBatchParser):
                         header_row,
                         lines,
                         row_numbers,
-                        context,
+                        worksheet_context,
+                        sheet_context,
                         preamble_rows,
                     )
 
@@ -463,7 +474,8 @@ class XlsxParser(TabularBatchParser):
         header_row,
         lines,
         row_numbers,
-        context,
+        worksheet_context,
+        sheet_context,
         preamble_rows,
     ):
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
@@ -473,6 +485,7 @@ class XlsxParser(TabularBatchParser):
             "tabular_format": "xlsx",
             "workbook_filename": document.filename,
             "sheet_name": sheet.name,
+            "worksheet_context": worksheet_context,
             "sheet_index": sheet.index,
             "table_id": f"sheet:{sheet.index}:table:{table.index}",
             "table_index": table.index,
@@ -504,9 +517,13 @@ class XlsxParser(TabularBatchParser):
             "csv_row_numbers": list(row_numbers),
             "csv_bad_rows": 0,
         }
-        if context:
-            metadata.update(sheet_context=context, sheet_context_row_numbers=list(preamble_rows))
-        return TextBlock(text="\n".join(lines) + context, block_type="table", metadata=metadata)
+        if sheet_context:
+            metadata.update(sheet_context=sheet_context, sheet_context_row_numbers=list(preamble_rows))
+        return TextBlock(
+            text="\n".join(lines) + worksheet_context + sheet_context,
+            block_type="table",
+            metadata=metadata,
+        )
 
     def _parse(self, document: Document) -> ProcessedDocument:
         # The compatibility API collects blocks; production ingestion uses iter_batches.
