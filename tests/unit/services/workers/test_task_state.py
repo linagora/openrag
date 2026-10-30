@@ -361,6 +361,47 @@ async def test_stale_refless_task_rejects_late_worker_registration() -> None:
     assert await manager.get_object_ref("task-1") is None
 
 
+class _ReadableRef:
+    read = False
+
+    def future(self) -> None:
+        self.read = True
+
+
+@pytest.mark.asyncio
+async def test_registered_ref_is_read_even_when_refused(monkeypatch) -> None:
+    """#1296: a failed result the TSM drops unread is printed by Ray as an unhandled error."""
+    monkeypatch.setattr(task_state_module.ray, "ObjectRef", _ReadableRef)
+    manager = _task_state_manager()
+    ref = _ReadableRef()
+
+    assert await manager.set_object_ref("unknown", {"ref": ref}) is False
+    assert ref.read
+
+
+def test_recovered_ref_is_read_on_restart(monkeypatch) -> None:
+    """A reconstructed actor holds the refs it recovered, and drops them like any other."""
+    monkeypatch.setattr(task_state_module.ray, "ObjectRef", _ReadableRef)
+    ref = _ReadableRef()
+    recovered = {"task-1": TaskInfo(state="SERIALIZING", object_ref={"ref": ref})}
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: (recovered, {}))
+
+    _task_state_manager()
+
+    assert ref.read
+
+
+@pytest.mark.asyncio
+async def test_has_object_ref_reports_registration_without_the_ref() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=None)
+
+    assert await manager.has_object_ref("task-1") is False
+    assert await manager.set_object_ref("task-1", {"ref": _FakeWorkerRef()}) is True
+    assert await manager.has_object_ref("task-1") is True
+    assert await manager.has_object_ref("unknown") is False
+
+
 @pytest.mark.asyncio
 async def test_pending_count_expires_stale_refless_submission_after_grace(monkeypatch) -> None:
     manager = _task_state_manager()
