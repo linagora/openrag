@@ -250,6 +250,7 @@ def test_task_completion_tracker_is_detached_and_starts_recovery(monkeypatch):
     tracker.supports_cancellation_recovery.remote.return_value = "capability-ref"
     tracker.supports_degraded_stage_history.remote.return_value = "degradation-capability-ref"
     tracker.supports_error_reason_history.remote.return_value = "error-reason-capability-ref"
+    tracker.supports_file_slot_release.remote.return_value = "file-slot-capability-ref"
     monkeypatch.setattr(bootstrap, "actor_creation_map", {})
     monkeypatch.setattr(ray, "get", Mock(return_value=True))
 
@@ -278,6 +279,7 @@ def test_legacy_task_completion_tracker_is_replaced_before_recovery(monkeypatch)
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
         supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
         supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_file_slot_release=SimpleNamespace(remote=Mock(return_value="file-slot-capability-ref")),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -308,6 +310,7 @@ def test_task_completion_tracker_without_durable_history_is_replaced(monkeypatch
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
         supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
         supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_file_slot_release=SimpleNamespace(remote=Mock(return_value="file-slot-capability-ref")),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -335,6 +338,7 @@ def test_task_completion_tracker_without_degraded_history_capability_is_replaced
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
         supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
         supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_file_slot_release=SimpleNamespace(remote=Mock(return_value="file-slot-capability-ref")),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -363,6 +367,7 @@ def test_task_completion_tracker_without_error_reason_history_is_replaced(monkey
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
         supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
         supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_file_slot_release=SimpleNamespace(remote=Mock(return_value="file-slot-capability-ref")),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -378,6 +383,39 @@ def test_task_completion_tracker_without_error_reason_history_is_replaced(monkey
     assert bootstrap.get_task_completion_tracker() is replacement
 
     kill.assert_called_once_with(legacy, no_restart=True)
+
+
+def test_task_completion_tracker_without_file_slot_release_is_replaced(monkeypatch):
+    # A tracker from before #664 settles jobs but never gives back the quota
+    # slot of an upload that ends without a file, so it must not be kept.
+    legacy = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    replacement = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_file_slot_release=SimpleNamespace(remote=Mock(return_value="file-slot-capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get", Mock(return_value=True))
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_completion_tracker() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
+    legacy.recover.remote.assert_not_called()
 
 
 @pytest.mark.parametrize(

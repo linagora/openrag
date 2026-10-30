@@ -63,6 +63,10 @@ class TaskCompletionTracker:
         """Identify trackers that persist canonical failure reasons."""
         return True
 
+    def supports_file_slot_release(self) -> bool:
+        """Identify trackers that give back the quota slot a settled task held."""
+        return True
+
     async def track(self, task_id: str, object_ref: dict[str, Any]) -> None:
         ref = object_ref.get("ref")
         if ref is None:
@@ -73,6 +77,7 @@ class TaskCompletionTracker:
         try:
             (outcome,) = await asyncio.gather(ref, return_exceptions=True)
             await self._await_orphaned_worker(task_id, outcome)
+            await self._release_file_slot(task_id)
             await self._record_finished_at(task_id)
         except Exception as exc:
             self._logger.warning(
@@ -95,6 +100,7 @@ class TaskCompletionTracker:
                     "get_all_info_for_completion_recovery",
                 )
                 await self.reconcile_jobs(list(all_info))
+                await self.reconcile_file_slots(all_info)
                 if self._reconcile_loop is None or self._reconcile_loop.done():
                     self._reconcile_loop = asyncio.ensure_future(self._periodic_reconcile())
                 for task_id, info in all_info.items():
@@ -350,7 +356,7 @@ class TaskCompletionTracker:
                 await asyncio.sleep(_SETTLED_STATE_POLL_INTERVAL_SECONDS)
         return None
 
-    async def _job_repo(self) -> Any:
+    async def _catalog(self) -> Any:
         """Build the catalog store lazily: this actor outlives any API process."""
         if self._catalog_store is None:
             async with self._catalog_lock:
@@ -361,7 +367,64 @@ class TaskCompletionTracker:
                     store = PostgresStore(catalog_rdb_config(load_config()), run_migrations=False)
                     await store.initialize()
                     self._catalog_store = store
-        return self._catalog_store.job_repo
+        return self._catalog_store
+
+    async def _job_repo(self) -> Any:
+        return (await self._catalog()).job_repo
+
+    async def _user_repo(self) -> Any:
+        return (await self._catalog()).user_repo
+
+    async def _release_file_slot(self, task_id: str) -> None:
+        """Give back the quota slot the task was admitted with, if it still holds one (#664).
+
+        Runs once the worker ref has settled, whatever the outcome. That is the
+        one point every dispatched task reaches: a failure, a cancellation the
+        worker saw, one ``ray.cancel`` applied before the worker started (which
+        no code in the worker would see), and a worker that died. A task that
+        wrote its file consumed the slot then, so for it, and for a task that
+        never held one, this is a no-op.
+
+        Best-effort: a failed release is retried by ``reconcile_file_slots``
+        once the task is no longer live.
+        """
+        try:
+            repo = await self._user_repo()
+            await repo.release_file_slot(task_id)
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to release the file slot of a settled indexing task; the reconcile sweep will retry",
+                task_id=task_id,
+                error=str(exc),
+            )
+
+    async def reconcile_file_slots(self, all_info: dict[str, dict]) -> None:
+        """Release the quota slots no live task can still consume (#664).
+
+        The backstop for :meth:`_release_file_slot`: a release that failed, a
+        tracker restarted mid-watch, or a restart that took the task-state
+        actor and its workers with it. A task the actor still runs keeps its
+        slot. One the actor has settled gives it back now; one the actor does
+        not know gives it back once past the grace window, since a slot that
+        recent may belong to an upload not yet queued.
+
+        Releasing early is safe: the catalog insert counts the file anyway when
+        its slot is gone, so the count stays true and only the quota is briefly
+        loose. Keeping a slot too long would block the user's uploads.
+        """
+        live_ids = [task_id for task_id, info in all_info.items() if (info or {}).get("state") not in _TERMINAL_STATES]
+        settled_ids = [task_id for task_id, info in all_info.items() if (info or {}).get("state") in _TERMINAL_STATES]
+        try:
+            repo = await self._user_repo()
+            released = await repo.release_stale_file_slots(
+                live_ids=live_ids,
+                settled_ids=settled_ids,
+                created_before=datetime.now(UTC) - timedelta(seconds=_ORPHAN_GRACE_SECONDS),
+            )
+            if released:
+                self._logger.info("Released file slots no live indexing task holds", released=released)
+        except Exception as exc:
+            self._logger.warning("Failed to reconcile file-quota reservations", error=str(exc))
 
     async def _record_settled_job(self, task_id: str, details: dict[str, Any]) -> bool:
         """Persist the final state of a settled task. History must never fail indexing.
@@ -471,6 +534,7 @@ class TaskCompletionTracker:
                     "get_all_info_for_periodic_reconcile",
                 )
                 await self.reconcile_jobs(list(all_info))
+                await self.reconcile_file_slots(all_info)
             except Exception as exc:
                 self._logger.warning("Periodic indexing job reconciliation failed", error=str(exc))
 
