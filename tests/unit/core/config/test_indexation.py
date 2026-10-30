@@ -34,6 +34,16 @@ def test_csv_loader_settings_can_be_overridden_by_env(monkeypatch, tmp_path):
     assert settings.loader.csv_delimiter == ";"
 
 
+def test_xlsx_loader_defaults_are_bounded_and_automatic():
+    cfg = LoaderConfig()
+
+    assert cfg.xlsx_batch_size == 10_000
+    assert cfg.xlsx_header_row is None
+    assert cfg.xlsx_sheet_header_rows == {}
+    assert cfg.xlsx_sheet_headerless_schemas == {}
+    assert cfg.xlsx_limits == {}
+
+
 def test_transcriber_config_default_direct_upload_suffixes():
     cfg = TranscriberConfig()
     assert cfg.direct_upload_suffixes == set(_DEFAULT_DIRECT_UPLOAD_SUFFIXES)

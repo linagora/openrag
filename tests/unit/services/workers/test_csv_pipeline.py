@@ -10,9 +10,10 @@ from unittest.mock import AsyncMock
 import pytest
 from core.chunking.structured_section import StructuredSectionChunker
 from core.config.indexation import LoaderConfig
+from core.indexing.parsers.tabular.base import TabularBatchParser
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
-from core.models.document import Document, DocumentType
+from core.models.document import Document, DocumentType, TextBlock
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
 from services.workers.pipeline_builder import IndexingPipeline, PipelineTimeouts
@@ -42,6 +43,35 @@ class RecordingParser(CsvParser):
                 yield batch
         finally:
             self.closed = True
+
+
+class RecordingXlsxParser(TabularBatchParser):
+    tabular_format = "xlsx"
+
+    def supported_types(self):
+        return ["xlsx"]
+
+    async def parse(self, document):
+        raise AssertionError("XLSX indexing must consume batches")
+
+    def iter_batches(self, document):
+        yield TextBlock(
+            text="| name |\n| --- |\n| Alice |",
+            block_type="table",
+            metadata={
+                "tabular_format": "xlsx",
+                "sheet_name": "People",
+                "table_id": "sheet:0",
+                "table_columns": ["name"],
+                "table_row_start": 2,
+                "table_row_end": 2,
+                "table_row_numbers": [2],
+                "csv_columns": ["name"],
+                "csv_row_start": 2,
+                "csv_row_end": 2,
+                "csv_row_numbers": [2],
+            },
+        )
 
 
 class FakeEmbedder:
@@ -89,6 +119,43 @@ class FakeStore:
     async def delete_by_filter(self, filters):
         self.deleted_filters.append(filters)
         return 1
+
+
+def _use_workbook(pipeline, row):
+    from io import BytesIO
+
+    from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
+    from openpyxl import Workbook
+
+    class RecordingWorkbookParser(XlsxParser):
+        closed = False
+
+        async def parse(self, document):
+            raise AssertionError("Workbook ingestion must not collect all batches")
+
+        def iter_batches(self, document):
+            try:
+                with closing(super().iter_batches(document)) as batches:
+                    yield from batches
+            finally:
+                self.closed = True
+
+    workbook = Workbook()
+    workbook.active.append(["id", "name"])
+    for index in range(5):
+        workbook.active.append([index, f"Person {index}"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    row["document"] = row["document"].model_copy(
+        update={
+            "filename": "people.xlsx",
+            "content_type": DocumentType.XLSX,
+            "raw_bytes": output.getvalue(),
+            "source_path": None,
+        }
+    )
+    return replace(pipeline, parser=RecordingWorkbookParser(batch_size=2))
 
 
 @pytest.fixture
@@ -143,6 +210,27 @@ async def test_batches_are_stored_before_reading_the_next_batch(setup_pipeline):
         assert any(f"| {number} | {name} |" in chunk.text for chunk in chunks)
     assert "chunks" not in row and "processed_document" not in row
     assert pipeline.parser.closed
+
+
+async def test_xlsx_uses_the_same_streaming_pipeline_with_sheet_metadata(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    pipeline = replace(pipeline, parser=RecordingXlsxParser())
+    row["document"] = Document(
+        id="xlsx-file",
+        filename="people.xlsx",
+        content_type=DocumentType.XLSX,
+        partition="customers",
+        raw_bytes=b"unused by fake parser",
+    )
+
+    result = await pipeline.run(row)
+
+    assert result["stage"] == "stored"
+    (([chunk], _indexed_at),) = pipeline.vector_store.calls
+    assert chunk.metadata["xlsx_batch_index"] == 1
+    assert chunk.metadata["tabular_batch_index"] == 1
+    assert chunk.metadata["sheet_name"] == "People"
+    assert chunk.metadata["table_id"] == "sheet:0"
 
 
 async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
@@ -224,8 +312,11 @@ async def test_long_csv_cell_is_stored_as_labelled_continuations(setup_pipeline)
 
 
 @pytest.mark.parametrize("defer", [False, True])
-async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_pipeline, defer):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_pipeline, defer, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     pipeline = replace(pipeline, defer_replace_cleanup=defer)
     row["replace"] = True
     await pipeline.run(row)
@@ -241,8 +332,11 @@ async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_
 
 
 @pytest.mark.parametrize("failure", ["parse", "chunk", "embed", "store"])
-async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     row["replace"] = True
     if failure == "parse":
         original = pipeline.parser.iter_batches
@@ -449,8 +543,11 @@ async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline)
     assert "topic_tags" not in row and "chunks" not in row
 
 
-async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     started, release = threading.Event(), threading.Event()
     original = pipeline.parser.iter_batches
 

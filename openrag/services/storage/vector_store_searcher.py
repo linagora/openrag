@@ -210,17 +210,21 @@ class VectorStoreSearcher(RetrievalSearcher):
         row_number: int,
         limit: int = 10,
         allowed_file_ids: list[str] | None = None,
+        table_id: str | None = None,
     ) -> list[Chunk]:
         """Return every stored continuation for one CSV row in part order."""
         if allowed_file_ids is not None and file_id not in allowed_file_ids:
             return []
+        metadata_filter = {
+            "partition": partition,
+            "file_id": file_id,
+            "csv_row_number": row_number,
+        }
+        if table_id is not None:
+            metadata_filter["table_id"] = table_id
         rows = await self._store.query_chunks_by_filter(
             self._collection,
-            {
-                "partition": partition,
-                "file_id": file_id,
-                "csv_row_number": row_number,
-            },
+            metadata_filter,
             limit=limit,
         )
         chunks = [_dict_to_chunk(row) for row in rows]

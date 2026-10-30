@@ -11,6 +11,8 @@ This module has no IO and no config dependency.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -200,8 +202,12 @@ def chunk_table(
     row of the previous chunk is replayed as overlap so context is preserved
     across the boundary.
     """
+    if table_element.metadata and table_element.metadata.get("tabular_format") == "xlsx":
+        return _chunk_xlsx_table(table_element.content, table_element, chunk_size, length_function)
     txt = clean_markdown_table_spacing(table_element.content)
     if table_element.metadata and table_element.metadata.get("csv_columns"):
+        if table_element.metadata.get("tabular_format") == "xlsx":
+            return _chunk_xlsx_table(txt, table_element, chunk_size, length_function)
         return _chunk_csv_table(
             txt,
             table_element=table_element,
@@ -242,6 +248,111 @@ def chunk_table(
     return [MDElement(type="table", content=subtable, page_number=table_element.page_number) for subtable in subtables]
 
 
+def _chunk_xlsx_table(table, element, chunk_size, length_function):
+    """Reuse row splitting with escaped headers and exact sheet/column metadata."""
+    base_context = element.metadata.get("worksheet_context", "") + element.metadata.get("sheet_context", "")
+    formula_context = element.metadata.get("formula_context", "")
+    complete_context = base_context + formula_context
+    if complete_context:
+        if not table.endswith(complete_context):
+            raise PipelineError("XLSX sheet context does not match table content")
+        table = table[: -len(complete_context)]
+    table = clean_markdown_table_spacing(table)
+    context_tokens = length_function(complete_context) if complete_context else 0
+    if context_tokens >= chunk_size:
+        raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
+    reserved_tokens = length_function("\n") + context_tokens
+    original_columns = list(element.metadata["table_columns"])
+    rendered_columns = _table_cells(table.split("\n", 1)[0])
+    if len(rendered_columns) != len(original_columns):
+        raise PipelineError("XLSX table header does not match its column metadata")
+    column_positions = {name: index for index, name in enumerate(rendered_columns)}
+    if len(column_positions) != len(rendered_columns):
+        raise PipelineError("XLSX rendered column names are ambiguous")
+    safe_element = MDElement(
+        type="table",
+        content=table,
+        page_number=element.page_number,
+        metadata={**element.metadata, "table_columns": rendered_columns, "csv_columns": rendered_columns},
+    )
+    # Reserve the separator between header and body (the shared CSV splitter
+    # counts those independently). Verify the complete rendered result below.
+    chunks = _chunk_csv_table(
+        table,
+        table_element=safe_element,
+        chunk_size=chunk_size - reserved_tokens,
+        length_function=length_function,
+    )
+    for chunk in chunks:
+        metadata = chunk.metadata
+        positions = [column_positions[name] for name in metadata["table_columns"]]
+        metadata["table_column_indices"] = [index + 1 for index in positions]
+        metadata["table_columns"] = [original_columns[index] for index in positions]
+        metadata["csv_columns"] = list(metadata["table_columns"])
+        for key in ("column_group", "column_groups_total", "part", "parts_total"):
+            if f"csv_{key}" in metadata:
+                metadata[f"table_{key}"] = metadata[f"csv_{key}"]
+        if "csv_column" in metadata:
+            name = original_columns[column_positions[metadata["csv_column"]]]
+            metadata.update(table_column=name, csv_column=name)
+
+        def column_name(index):
+            name = ""
+            while index:
+                index, remainder = divmod(index - 1, 26)
+                name = chr(65 + remainder) + name
+            return name
+
+        sheet = "'" + metadata["sheet_name"].replace("'", "''") + "'!"
+        start, end = metadata["table_row_start"], metadata["table_row_end"]
+        worksheet_columns = metadata.get("table_worksheet_column_indices")
+        selected_worksheet_columns = (
+            [worksheet_columns[index] for index in positions]
+            if isinstance(worksheet_columns, list) and len(worksheet_columns) == len(original_columns)
+            else [metadata.get("table_start_column", 1) + index for index in positions]
+        )
+        selected_excel_columns = {column_name(index) for index in selected_worksheet_columns}
+        selected_groups = [
+            group
+            for group in metadata.get("formula_groups", [])
+            if group.get("target_column") in selected_excel_columns
+        ]
+        selected_cells = [
+            cell for cell in metadata.get("formula_cells", []) if cell.get("target_column") in selected_excel_columns
+        ]
+        if selected_groups:
+            metadata["formula_groups"] = selected_groups
+        else:
+            metadata.pop("formula_groups", None)
+        if selected_cells:
+            metadata["formula_cells"] = selected_cells
+        else:
+            metadata.pop("formula_cells", None)
+        chunk_formula_context = _xlsx_formula_context(selected_groups)
+        if chunk_formula_context:
+            metadata["formula_context"] = chunk_formula_context
+        else:
+            metadata.pop("formula_context", None)
+        chunk_context = base_context + chunk_formula_context
+        chunk.content += chunk_context
+        chunk_context_tokens = length_function(chunk_context) if chunk_context else 0
+        csv_effective_chunk_size = metadata.get("csv_effective_chunk_size")
+        allowed_size = (
+            csv_effective_chunk_size + length_function("\n") + chunk_context_tokens
+            if csv_effective_chunk_size is not None
+            else chunk_size
+        )
+        if length_function(chunk.content) > allowed_size:
+            raise PipelineError("XLSX chunk exceeds its token budget")
+        metadata["cell_range"] = (
+            f"{sheet}{column_name(min(selected_worksheet_columns))}{start}:"
+            f"{column_name(max(selected_worksheet_columns))}{end}"
+        )
+        # The bounding range can span blank rows/unselected columns. Exact
+        # membership is table_row_numbers plus table_column_indices.
+    return chunks
+
+
 def _table_cells(row: str) -> list[str]:
     """Return cells from a canonical Markdown row that was emitted by ``CsvParser``.
 
@@ -265,6 +376,88 @@ def _markdown_table(columns: list[str], cells: list[str]) -> str:
             _markdown_row(cells),
         ]
     )
+
+
+def _tabular_row_metadata(
+    metadata: dict,
+    row_numbers: list[int],
+    *,
+    columns: list[str] | None = None,
+) -> dict:
+    """Update both generic table metadata and transitional CSV aliases."""
+    updated = {
+        **metadata,
+        "csv_row_start": row_numbers[0],
+        "csv_row_end": row_numbers[-1],
+        "csv_row_numbers": list(row_numbers),
+    }
+    if columns is not None:
+        updated["csv_columns"] = list(columns)
+    if metadata.get("tabular_format"):
+        updated.update(
+            {
+                "table_row_start": row_numbers[0],
+                "table_row_end": row_numbers[-1],
+                "table_row_numbers": list(row_numbers),
+            }
+        )
+        if columns is not None:
+            updated["table_columns"] = list(columns)
+    if len(row_numbers) == 1:
+        updated["csv_row_number"] = row_numbers[0]
+        if metadata.get("tabular_format"):
+            updated["table_row_number"] = row_numbers[0]
+    row_header_paths = metadata.get("table_row_header_paths")
+    if isinstance(row_header_paths, dict):
+        updated["table_row_header_paths"] = {
+            str(row_number): row_header_paths[str(row_number)]
+            for row_number in row_numbers
+            if str(row_number) in row_header_paths
+        }
+    formula_groups = metadata.get("formula_groups")
+    if isinstance(formula_groups, list):
+        selected_rows = set(row_numbers)
+        selected_groups = [
+            group
+            for group in formula_groups
+            if isinstance(group, dict)
+            and any(group.get("start_row", 0) <= row <= group.get("end_row", -1) for row in selected_rows)
+        ]
+        if selected_groups:
+            updated["formula_groups"] = selected_groups
+        else:
+            updated.pop("formula_groups", None)
+    formula_cells = metadata.get("formula_cells")
+    if isinstance(formula_cells, list):
+        selected_cells = [
+            cell for cell in formula_cells if isinstance(cell, dict) and cell.get("row") in set(row_numbers)
+        ]
+        if selected_cells:
+            updated["formula_cells"] = selected_cells
+        else:
+            updated.pop("formula_cells", None)
+    updated.pop("formula_context", None)
+    return updated
+
+
+def _xlsx_formula_context(groups: list[dict]) -> str:
+    if not groups:
+        return ""
+
+    def single_line(value) -> str:
+        return str(value).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+    lines = ["Formula context (calculated columns):"]
+    for group in groups:
+        lines.append(
+            f"- {group['target_column']} ({single_line(group['target_header'])}), {group['range']}: "
+            f"{single_line(group['semantic_expression'])} [pattern: {single_line(group['pattern'])}]"
+        )
+    return "\n\n" + "\n".join(lines)
+
+
+def _tabular_label(table_element: MDElement) -> str:
+    return str((table_element.metadata or {}).get("tabular_format") or "CSV").upper()
 
 
 def _identity_column_indexes(columns: list[str]) -> list[int]:
@@ -373,12 +566,7 @@ def _chunk_wide_csv_row(
         group_cells = [cells[index] for index in indexes]
         group_text = _markdown_table(group_columns, group_cells)
         metadata = {
-            **(table_element.metadata or {}),
-            "csv_columns": group_columns,
-            "csv_row_start": row_number,
-            "csv_row_end": row_number,
-            "csv_row_numbers": [row_number],
-            "csv_row_number": row_number,
+            **_tabular_row_metadata(table_element.metadata or {}, [row_number], columns=group_columns),
             "csv_column_group": group_number,
             "csv_column_groups_total": total_groups,
         }
@@ -401,7 +589,8 @@ def _chunk_wide_csv_row(
         split_index = payload_in_group[0]
         split_position = indexes.index(split_index)
         column_name = columns[split_index]
-        label = f"[CSV row {row_number}; {column_name} continuation 999/999]"
+        source_label = _tabular_label(table_element)
+        label = f"[{source_label} row {row_number}; {column_name} continuation 999/999]"
         reserved_cells = list(group_cells)
         reserved_cells[split_position] = label
         cell_budget = chunk_size - length_function(_markdown_table(group_columns, reserved_cells))
@@ -418,7 +607,7 @@ def _chunk_wide_csv_row(
         for part_number, part in enumerate(parts, start=1):
             continuation_cells = list(group_cells)
             continuation_cells[split_position] = (
-                f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+                f"[{source_label} row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
             )
             chunks.append(
                 MDElement(
@@ -451,12 +640,7 @@ def _chunk_csv_row_per_column(
     for group_number, (column_name, cell) in enumerate(zip(columns, cells, strict=True), start=1):
         group_columns = [column_name]
         metadata = {
-            **(table_element.metadata or {}),
-            "csv_columns": group_columns,
-            "csv_row_start": row_number,
-            "csv_row_end": row_number,
-            "csv_row_numbers": [row_number],
-            "csv_row_number": row_number,
+            **_tabular_row_metadata(table_element.metadata or {}, [row_number], columns=group_columns),
             "csv_column_group": group_number,
             "csv_column_groups_total": total_groups,
         }
@@ -472,13 +656,22 @@ def _chunk_csv_row_per_column(
             )
             continue
 
-        label = f"[CSV row {row_number}; {column_name} continuation 999/999]"
-        cell_budget = chunk_size - length_function(_markdown_table(group_columns, [label]))
-        if cell_budget <= 0:
-            raise PipelineError(f"CSV column {column_name!r} leaves no room for content within the chunk token budget")
+        source_label = _tabular_label(table_element)
+        label = f"[{source_label} row {row_number}; {column_name} continuation 999/999]"
+        reserved_tokens = length_function(_markdown_table(group_columns, [label]))
+        # A header is indivisible: when it alone exhausts the configured budget,
+        # use the smallest viable budget instead of rejecting the whole file.
+        # The expanded budget is exposed in metadata so this degradation is
+        # observable without dropping or truncating the original column name.
+        effective_chunk_size = max(chunk_size, reserved_tokens + 1)
+        cell_budget = effective_chunk_size - reserved_tokens
+        if effective_chunk_size > chunk_size:
+            metadata["csv_effective_chunk_size"] = effective_chunk_size
         parts = _split_to_budget(cell, cell_budget, length_function)
         for part_number, part in enumerate(parts, start=1):
-            continuation = f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+            continuation = (
+                f"[{source_label} row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+            )
             chunks.append(
                 MDElement(
                     type="table",
@@ -495,6 +688,45 @@ def _chunk_csv_row_per_column(
     return chunks
 
 
+def _largest_fitting_prefix_end(
+    text: str,
+    start: int,
+    budget: int,
+    length_function: Callable[[str], int],
+) -> int:
+    """Find a bounded prefix by probing forward instead of rescanning the suffix."""
+    text_length = len(text)
+    first_end = start + 1
+    if length_function(text[start:first_end]) > budget:
+        # Preserve the established progress guarantee even for a length function
+        # where one character is already larger than the available budget.
+        return first_end
+
+    best = first_end
+    span = 2
+    first_over_budget = text_length
+    while best < text_length:
+        probe = min(text_length, start + span)
+        if length_function(text[start:probe]) <= budget:
+            best = probe
+            if probe == text_length:
+                return best
+            span *= 2
+            continue
+        first_over_budget = probe
+        break
+
+    low, high = best + 1, first_over_budget - 1
+    while low <= high:
+        middle = (low + high) // 2
+        if length_function(text[start:middle]) <= budget:
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
 def _split_to_budget(text: str, budget: int, length_function: Callable[[str], int]) -> list[str]:
     """Without loss, divide text at whitespace and then characters when necessary."""
     if not text:
@@ -503,40 +735,27 @@ def _split_to_budget(text: str, budget: int, length_function: Callable[[str], in
         raise PipelineError("CSV cell split requires a positive token budget")
 
     pieces: list[str] = []
-    remaining = text
-    while remaining and length_function(remaining) > budget:
-        # prefer the largest whitespace boundary rather than one over the token budget
-        boundaries = [match.end() for match in re.finditer(r"\s+", remaining)]
-        cut = None
-        low, high = 0, len(boundaries) - 1
-        while low <= high:
-            middle = (low + high) // 2
-            boundary = boundaries[middle]
-            if length_function(remaining[:boundary]) <= budget:
-                cut = boundary
-                low = middle + 1
-            else:
-                high = middle - 1
-        if cut is None:
-            #  single long word or a URL can still exceed the budget
-            # so find the largest character prefix that fits without discarding anything.
-            low, high = 1, len(remaining)
-            best = 0
-            while low <= high:
-                middle = (low + high) // 2
-                if length_function(remaining[:middle]) <= budget:
-                    best = middle
-                    low = middle + 1
-                else:
-                    high = middle - 1
-            cut = best or 1
-        # Keep the separator at the beginning of the following part because stripping
+    boundaries = [match.end() for match in re.finditer(r"\s+", text)]
+    start = 0
+    text_length = len(text)
+    while start < text_length:
+        fitting_end = _largest_fitting_prefix_end(text, start, budget, length_function)
+        if fitting_end == text_length:
+            cut = fitting_end
+        else:
+            # Prefer the largest whitespace boundary in the bounded prefix.
+            # If it contains no separator, split the long word or URL by character.
+            boundary_index = bisect_right(boundaries, fitting_end) - 1
+            cut = (
+                boundaries[boundary_index]
+                if boundary_index >= 0 and boundaries[boundary_index] > start
+                else fitting_end
+            )
+        # Keep the separator at the end of the preceding part because stripping
         # it would silently change the original CSV cell when all continuation
         # parts are joined again.
-        pieces.append(remaining[:cut])
-        remaining = remaining[cut:]
-    if remaining or not pieces:
-        pieces.append(remaining)
+        pieces.append(text[start:cut])
+        start = cut
     return pieces
 
 
@@ -566,9 +785,17 @@ def _chunk_csv_table(
     data_rows = lines[2:]
     header_text = "\n".join(header_lines)
     header_tokens = length_function(header_text)
-    columns = list(table_element.metadata.get("csv_columns") or _table_cells(header_lines[0]))
-    first_row_number = int(table_element.metadata.get("csv_row_start", 2))
-    source_row_numbers = table_element.metadata.get("csv_row_numbers")
+    columns = list(
+        table_element.metadata.get("table_columns")
+        or table_element.metadata.get("csv_columns")
+        or _table_cells(header_lines[0])
+    )
+    first_row_number = int(
+        table_element.metadata.get("table_row_start", table_element.metadata.get("csv_row_start", 2))
+    )
+    source_row_numbers = table_element.metadata.get("table_row_numbers") or table_element.metadata.get(
+        "csv_row_numbers"
+    )
     if not isinstance(source_row_numbers, list) or len(source_row_numbers) != len(data_rows):
         source_row_numbers = list(range(first_row_number, first_row_number + len(data_rows)))
     else:
@@ -584,12 +811,7 @@ def _chunk_csv_table(
         nonlocal current_rows, current_row_numbers, current_start, current_end
         if not current_rows:
             return
-        metadata = {
-            **table_element.metadata,
-            "csv_row_start": current_start,
-            "csv_row_end": current_end,
-            "csv_row_numbers": list(current_row_numbers),
-        }
+        metadata = _tabular_row_metadata(table_element.metadata, list(current_row_numbers))
         chunks.append(
             MDElement(
                 type="table",
@@ -618,18 +840,13 @@ def _chunk_csv_table(
         cells = _table_cells(row)
         if len(cells) != len(columns):
             # canonical CSV output always has matching cell counts
-            # keeping anunexpected row whole is safer than silently corrupting it
+            # keeping an unexpected row whole is safer than silently corrupting it
             chunks.append(
                 MDElement(
                     type="table",
                     content="\n".join([header_text, row]),
                     page_number=table_element.page_number,
-                    metadata={
-                        **table_element.metadata,
-                        "csv_row_start": row_number,
-                        "csv_row_end": row_number,
-                        "csv_row_numbers": [row_number],
-                    },
+                    metadata=_tabular_row_metadata(table_element.metadata, [row_number]),
                 )
             )
             continue
@@ -657,7 +874,8 @@ def _chunk_csv_table(
         cell_index = max(range(len(cells)), key=lambda index: length_function(cells[index]))
         column_name = columns[cell_index]
         base_cells = list(cells)
-        base_cells[cell_index] = f"[CSV row {row_number}; {column_name} continuation 999/999]"
+        source_label = _tabular_label(table_element)
+        base_cells[cell_index] = f"[{source_label} row {row_number}; {column_name} continuation 999/999]"
         label_reserve = length_function(_markdown_row(base_cells))
         cell_budget = body_budget - label_reserve
         if cell_budget <= 0:
@@ -676,7 +894,7 @@ def _chunk_csv_table(
         for part_number, part in enumerate(parts, start=1):
             continuation_cells = list(cells)
             continuation_cells[cell_index] = (
-                f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+                f"[{source_label} row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
             )
             continuation_row = _markdown_row(continuation_cells)
             chunks.append(
@@ -685,11 +903,7 @@ def _chunk_csv_table(
                     content="\n".join([header_text, continuation_row]),
                     page_number=table_element.page_number,
                     metadata={
-                        **table_element.metadata,
-                        "csv_row_start": row_number,
-                        "csv_row_end": row_number,
-                        "csv_row_numbers": [row_number],
-                        "csv_row_number": row_number,
+                        **_tabular_row_metadata(table_element.metadata, [row_number]),
                         "csv_column": column_name,
                         "csv_part": part_number,
                         "csv_parts_total": len(parts),
@@ -698,4 +912,20 @@ def _chunk_csv_table(
             )
 
     emit_current()
+
+    # Retrieval must be able to reconstruct every logical row even when it was
+    # split into more pieces than the general related-content limit.
+    split_row_counts = Counter(
+        int(chunk.metadata["csv_row_number"])
+        for chunk in chunks
+        if chunk.metadata
+        and "csv_row_number" in chunk.metadata
+        and ("csv_part" in chunk.metadata or "csv_column_group" in chunk.metadata)
+    )
+    for chunk in chunks:
+        if not chunk.metadata or "csv_row_number" not in chunk.metadata:
+            continue
+        row_number = int(chunk.metadata["csv_row_number"])
+        if row_number in split_row_counts:
+            chunk.metadata["csv_row_chunks_total"] = split_row_counts[row_number]
     return chunks

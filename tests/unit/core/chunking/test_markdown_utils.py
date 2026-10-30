@@ -6,6 +6,7 @@ preserved through the move into core/.
 
 from __future__ import annotations
 
+import core.chunking.markdown_utils as markdown_utils
 import pytest
 from core.chunking.markdown_utils import (
     MDElement,
@@ -306,8 +307,28 @@ class TestChunkTable:
             assert chunk.metadata["csv_column"] == "note"
             assert chunk.metadata["csv_part"] == part_number
             assert chunk.metadata["csv_parts_total"] == len(chunks)
+            assert chunk.metadata["csv_row_chunks_total"] == len(chunks)
             reconstructed.append(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0])
         assert "".join(reconstructed) == long_note
+
+    def test_csv_header_larger_than_budget_uses_smallest_viable_budget(self):
+        column_name = " ".join(f"header{number}" for number in range(20))
+        table = f"| {column_name} |\n| --- |\n| value |"
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": [column_name], "csv_row_start": 2},
+            ),
+            chunk_size=10,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert chunks
+        assert all(column_name in chunk.content for chunk in chunks)
+        assert all(chunk.metadata["csv_effective_chunk_size"] > 10 for chunk in chunks)
+        assert all(len(chunk.content.split()) <= chunk.metadata["csv_effective_chunk_size"] for chunk in chunks)
 
     def test_csv_wide_row_is_grouped_by_columns_without_losing_values(self):
         columns = ["person_id", "legal_name", *(f"fact_{number}" for number in range(1, 9))]
@@ -348,6 +369,7 @@ class TestChunkTable:
             assert chunk.metadata["csv_row_number"] == 7
             assert chunk.metadata["csv_column_group"] == group_number
             assert chunk.metadata["csv_column_groups_total"] == len(chunks)
+            assert chunk.metadata["csv_row_chunks_total"] == len(chunks)
             assert chunk.metadata["csv_columns"] == group_columns
             assert len(chunk.content.split()) <= 35
             recovered.update(dict(zip(group_columns[2:], group_values[2:], strict=True)))
@@ -435,6 +457,31 @@ def test_split_to_budget_uses_logarithmic_whitespace_probes():
     assert "".join(pieces) == text
     assert all(len(piece.split()) <= 1_000 for piece in pieces)
     assert calls < 100
+
+
+def test_split_to_budget_bounds_tokenization_and_scans_boundaries_once(monkeypatch):
+    text = " ".join(f"word{number}" for number in range(2_000))
+    original_finditer = markdown_utils.re.finditer
+    finditer_calls = 0
+    tokenized_characters = 0
+
+    def counted_finditer(*args, **kwargs):
+        nonlocal finditer_calls
+        finditer_calls += 1
+        return original_finditer(*args, **kwargs)
+
+    def counted_length(value: str) -> int:
+        nonlocal tokenized_characters
+        tokenized_characters += len(value)
+        return len(value.split())
+
+    monkeypatch.setattr(markdown_utils.re, "finditer", counted_finditer)
+
+    pieces = _split_to_budget(text, budget=1, length_function=counted_length)
+
+    assert "".join(pieces) == text
+    assert finditer_calls == 1
+    assert tokenized_characters < len(text) * 20
 
 
 def test_split_to_budget_rejects_non_positive_budget():

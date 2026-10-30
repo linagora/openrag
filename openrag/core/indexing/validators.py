@@ -130,7 +130,7 @@ CONTENT_SNIFF_BYTES = 8192
 #: * Audio and video containers other than those above are left out until the
 #:   accepted brand variants can be checked against real samples; guessing at
 #:   them risks refusing valid media.
-#: * ``docx``/``pptx`` are **not** here: a ZIP's authoritative index is its
+#: * ``docx``/``pptx``/``xlsx`` are **not** here: a ZIP's authoritative index is its
 #:   central directory, which sits at the end of the file, so no head buffer can
 #:   settle them. They are checked by :func:`validate_ooxml_package` instead.
 _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
@@ -196,6 +196,7 @@ _TOLERANT_SIGNATURES: dict[str, frozenset[str]] = {
 _OOXML_MAIN_PARTS: dict[str, str] = {
     "docx": "word/document.xml",
     "pptx": "ppt/presentation.xml",
+    "xlsx": "xl/workbook.xml",
 }
 
 #: Parts every OPC package carries whatever its flavour: the content-type map
@@ -284,7 +285,7 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
 
 
 def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
-    """Reject a ``.docx``/``.pptx`` upload that is not a real OOXML package.
+    """Reject a ``.docx``/``.pptx``/``.xlsx`` upload that is not a real OOXML package.
 
     ``filetype`` cannot settle this, and was verified failing both ways: its
     matcher looks for an entry *named* ``word/`` or ``ppt/`` among the first few

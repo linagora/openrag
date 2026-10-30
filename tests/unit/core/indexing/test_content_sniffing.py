@@ -51,6 +51,7 @@ def _ooxml(main_part: str, *extra: str) -> bytes:
 
 DOCX = _ooxml("word/document.xml")
 PPTX = _ooxml("ppt/presentation.xml")
+XLSX = _ooxml("xl/workbook.xml")
 
 
 @pytest.mark.parametrize(
@@ -61,10 +62,10 @@ def test_matching_content_is_accepted(extension, head):
     validate_content_matches_extension(extension, head)
 
 
-@pytest.mark.parametrize("extension", ["docx", "pptx"])
+@pytest.mark.parametrize("extension", ["docx", "pptx", "xlsx"])
 def test_the_head_check_does_not_judge_ooxml(extension):
     """A ZIP is settled by its central directory, at the end of the file, so the
-    head check must stay silent on docx/pptx rather than guess either way."""
+    head check must stay silent on OOXML formats rather than guess either way."""
     validate_content_matches_extension(extension, PDF)
     validate_content_matches_extension(extension, DOCX)
 
@@ -184,9 +185,20 @@ def _real_pptx() -> bytes:
     return buf.getvalue()
 
 
+def _real_xlsx() -> bytes:
+    openpyxl = pytest.importorskip("openpyxl")
+    buf = io.BytesIO()
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["hello"])
+    workbook.save(buf)
+    workbook.close()
+    return buf.getvalue()
+
+
 def test_documents_from_a_real_producer_are_accepted():
     validate_ooxml_package("docx", io.BytesIO(_real_docx()))
     validate_ooxml_package("pptx", io.BytesIO(_real_pptx()))
+    validate_ooxml_package("xlsx", io.BytesIO(_real_xlsx()))
 
 
 def test_a_package_that_writes_the_content_type_map_last_is_accepted():
@@ -230,6 +242,9 @@ def test_a_zip_named_like_a_document_is_rejected():
         ("docx", PDF, "a PDF renamed .docx"),
         ("pptx", DOCX, "a docx renamed .pptx"),
         ("docx", PPTX, "a pptx renamed .docx"),
+        ("xlsx", DOCX, "a docx renamed .xlsx"),
+        ("xlsx", PPTX, "a pptx renamed .xlsx"),
+        ("docx", XLSX, "an xlsx renamed .docx"),
     ],
 )
 def test_contradicting_content_is_refused_by_the_package_check(extension, payload, reason):
