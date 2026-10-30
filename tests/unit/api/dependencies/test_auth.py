@@ -1,8 +1,5 @@
-from types import SimpleNamespace
-
 import pytest
 from api.dependencies.auth import (
-    check_user_file_quota,
     ensure_partition_role,
     require_partitions_viewer,
     require_task_owner,
@@ -24,32 +21,6 @@ class FakeAuthService:
         super_admin_mode: bool = False,
     ) -> bool:
         return True
-
-    @classmethod
-    def validate_file_quota(
-        cls,
-        user,
-        *,
-        pending_task_count: int,
-        default_quota: int,
-    ) -> None:
-        return None
-
-
-class EnforcingAuthService(FakeAuthService):
-    @classmethod
-    def validate_file_quota(
-        cls,
-        user,
-        *,
-        pending_task_count: int,
-        default_quota: int,
-    ) -> None:
-        quota = user.get("file_quota")
-        if quota is None:
-            quota = default_quota
-        if user.get("file_count", 0) + pending_task_count >= quota:
-            raise AuthError("File quota exceeded")
 
 
 class DenyingAuthService(FakeAuthService):
@@ -77,23 +48,13 @@ class FakePartitionService:
 
 
 class FakeJobService:
-    def __init__(self, *, details=None, pending_count=0) -> None:
+    def __init__(self, *, details=None) -> None:
         self.details = details
-        self.pending_count = pending_count
         self.detail_checks: list[str] = []
-        self.pending_checks: list[int | None] = []
 
     async def get_task_details(self, task_id: str):
         self.detail_checks.append(task_id)
         return self.details
-
-    async def get_user_pending_task_count(self, user_id: int | None) -> int:
-        self.pending_checks.append(user_id)
-        return self.pending_count
-
-
-def _config(default_file_quota: int):
-    return SimpleNamespace(rdb=SimpleNamespace(default_file_quota=default_file_quota))
 
 
 @pytest.mark.asyncio
@@ -229,62 +190,6 @@ async def test_require_task_owner_rejects_non_owner_non_admin():
             auth_service=AuthService,
         )
     assert exc.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_check_user_file_quota_reads_pending_count_through_job_service():
-    job_service = FakeJobService(pending_count=2)
-
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 1, "file_quota": 5},
-        auth_service=FakeAuthService,
-        job_service=job_service,
-        config=_config(default_file_quota=10),
-    )
-
-    assert user["id"] == 7
-    assert job_service.pending_checks == [7]
-
-
-@pytest.mark.asyncio
-async def test_check_user_file_quota_skips_pending_count_when_default_is_unlimited():
-    """Skip queue I/O when the resolved quota is unlimited."""
-    job_service = FakeJobService(pending_count=2)
-
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 1, "file_quota": None},
-        auth_service=FakeAuthService,
-        job_service=job_service,
-        config=_config(default_file_quota=-1),
-    )
-
-    assert user["id"] == 7
-    assert job_service.pending_checks == []
-
-
-@pytest.mark.asyncio
-async def test_check_user_file_quota_default_zero_enforces_zero():
-    allowed_job_service = FakeJobService(pending_count=0)
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 0, "file_quota": 1},
-        auth_service=EnforcingAuthService,
-        job_service=allowed_job_service,
-        config=_config(default_file_quota=0),
-    )
-    assert user["id"] == 7
-    assert allowed_job_service.pending_checks == [7]
-
-    denied_job_service = FakeJobService(pending_count=0)
-    with pytest.raises(HTTPException) as exc:
-        await check_user_file_quota(
-            user={"id": 8, "file_count": 1, "file_quota": None},
-            auth_service=EnforcingAuthService,
-            job_service=denied_job_service,
-            config=_config(default_file_quota=0),
-        )
-    assert exc.value.status_code == 403
-    assert exc.value.detail == "File quota exceeded"
-    assert denied_job_service.pending_checks == [8]
 
 
 # ---------------------------------------------------------------------------
@@ -455,41 +360,3 @@ async def test_admin_bypasses_partition_check_when_super_admin_mode_on(monkeypat
         auth_service=FakeAuthService,
         partition_service=FakePartitionService(existing={"other-tenant"}),
     )
-
-
-# --- quota: the in-flight half (the #664 race) was unverified ---
-
-
-@pytest.mark.asyncio
-async def test_quota_denies_on_pending_tasks_alone():
-    """Pending tasks alone must be able to exhaust the quota.
-
-    Uses the real AuthService, not a fake: forcing `pending_task_count=0` in the
-    dependency previously failed no test, because every enforcing case already
-    passed pending_count=0. This is the in-flight half that #664 is about.
-    """
-    job_service = FakeJobService(pending_count=5)
-
-    with pytest.raises(HTTPException) as exc:
-        await check_user_file_quota(
-            user={"id": 7, "is_admin": False, "file_count": 0, "file_quota": 5},
-            auth_service=AuthService,
-            job_service=job_service,
-            config=_config(default_file_quota=10),
-        )
-
-    assert exc.value.status_code == 403
-    assert job_service.pending_checks == [7]
-
-
-@pytest.mark.asyncio
-async def test_quota_allows_when_indexed_plus_pending_is_under_limit():
-    job_service = FakeJobService(pending_count=1)
-
-    user = await check_user_file_quota(
-        user={"id": 7, "is_admin": False, "file_count": 1, "file_quota": 5},
-        auth_service=AuthService,
-        job_service=job_service,
-        config=_config(default_file_quota=10),
-    )
-    assert user["id"] == 7

@@ -307,8 +307,9 @@ class WorkerDispatcher(IndexingDispatcher):
         callback_token: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
+        task_id: str | None = None,
     ) -> str:
-        task_id = uuid.uuid4().hex
+        task_id = task_id or uuid.uuid4().hex
         file_id = str(metadata.get("file_id") or "")
         content_sha256 = metadata.get("content_sha256")
         content_claim_token = f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}"
@@ -703,6 +704,7 @@ class WorkerDispatcher(IndexingDispatcher):
         embedder: Any = None,
         embedder_reference: str | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        quota_reservation_id: str | None = None,
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
@@ -778,6 +780,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                     indexed_at=indexed_at,
                     chunk_count=len(entities),
+                    quota_reservation_id=quota_reservation_id,
                     **catalog_kwargs,
                 )
             except Exception:

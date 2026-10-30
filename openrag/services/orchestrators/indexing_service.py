@@ -292,12 +292,17 @@ class IndexingService:
         content_sha256: str | None = None,
         callback_url: str | None = None,
         callback_token: str | None = None,
+        task_id: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
         *callback_url*/*callback_token* are forwarded to the worker as-is.
+
+        *task_id* is the id of the file-slot reservation the caller took at
+        admission, when it took one (#664); the task runs under it so the
+        worker consumes that slot. Otherwise the dispatcher picks an id.
         """
         if self._deduplication_enabled() and content_sha256 is None:
             content_sha256 = await asyncio.to_thread(_sha256_file, file_path)
@@ -333,6 +338,7 @@ class IndexingService:
                 callback_token=callback_token,
                 require_existing_partition=require_existing_partition,
                 allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+                task_id=task_id,
             )
 
     async def delete_file(self, file_id: str, partition: str) -> None:
@@ -370,7 +376,13 @@ class IndexingService:
         target_partition: str,
         metadata: dict,
         user: dict | None,
+        quota_reservation_id: str | None = None,
     ) -> None:
+        """Copy a file into another partition.
+
+        *quota_reservation_id* names the file slot the caller reserved for the
+        copy (#664); the catalog insert consumes it.
+        """
         # Same guard as update_metadata (#713): the copy carries caller-supplied
         # metadata onto the new rows, so a spoofed ``source`` would land there too.
         metadata, dropped = strip_protected_metadata(metadata)
@@ -397,7 +409,14 @@ class IndexingService:
                 await self._pin_partition_embedder(target_partition)
                 destination = self._copy_destination(target_partition)
                 await copying.enter_async_context(self._copy_in_flight(target_partition))
-            await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user, **destination)
+            await self._dispatcher.copy_file(
+                source_file_id,
+                metadata,
+                source_partition,
+                user,
+                quota_reservation_id=quota_reservation_id,
+                **destination,
+            )
 
     def _copy_in_flight(self, partition: str) -> AbstractAsyncContextManager[None]:
         copy_in_flight = getattr(self._partition_service, "copy_in_flight", None)

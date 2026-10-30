@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 from core.config.auth import OIDCConfig
-from core.models.user import PartitionRole, User, UserPartition
+from core.models.user import FileSlotGrant, PartitionRole, User, UserPartition
 from core.utils.exceptions import OpenRAGError
 from cryptography.fernet import Fernet
 from services.auth import StateCookieSerializer, hash_session_token
@@ -641,25 +641,65 @@ def test_authorize_unknown_action_raises():
         AuthService.authorize(user={"id": 1, "is_admin": True}, action="bogus:action")
 
 
-def test_validate_file_quota():
-    # Admin bypass.
-    AuthService.validate_file_quota({"is_admin": True}, pending_task_count=99, default_quota=1)
-    # Disabled globally.
-    AuthService.validate_file_quota({"file_count": 50}, pending_task_count=50, default_quota=-1)
-    # Specific limit exceeded (3 indexed + 2 pending >= 5).
+@pytest.mark.parametrize(
+    ("user", "default_quota", "unlimited"),
+    [
+        ({"is_admin": True, "file_quota": 0}, 1, True),
+        ({"file_quota": None}, -1, True),
+        ({"file_quota": -1}, 10, True),
+        ({"file_quota": 5}, 10, False),
+        ({"file_quota": None}, 0, False),
+        # A per-user limit holds even when the global default is unlimited.
+        ({"file_quota": 10}, -1, False),
+    ],
+    ids=["admin", "unlimited-default", "unlimited-user", "capped-user", "zero-default", "limit-over-negative-default"],
+)
+def test_has_unlimited_file_quota(user, default_quota, unlimited):
+    assert AuthService.has_unlimited_file_quota(user, default_quota=default_quota) is unlimited
+
+
+class _SlotRepo:
+    def __init__(self, grant: FileSlotGrant = FileSlotGrant.RESERVED, release_error: Exception | None = None):
+        self.grant = grant
+        self.release_error = release_error
+        self.reserved: list[tuple[int, str, int]] = []
+        self.released: list[str] = []
+
+    async def try_reserve_file_slot(self, user_id, reservation_id, *, default_quota):
+        self.reserved.append((user_id, reservation_id, default_quota))
+        return self.grant
+
+    async def release_file_slot(self, reservation_id):
+        if self.release_error is not None:
+            raise self.release_error
+        self.released.append(reservation_id)
+        return True
+
+
+@pytest.mark.parametrize("grant", [FileSlotGrant.RESERVED, FileSlotGrant.UNLIMITED])
+@pytest.mark.asyncio
+async def test_reserve_file_slot_returns_the_grant(grant):
+    repo = _SlotRepo(grant)
+
+    assert await _service(user_repo=repo).reserve_file_slot(7, "r-1", default_quota=3) is grant
+    assert repo.reserved == [(7, "r-1", 3)]
+
+
+@pytest.mark.asyncio
+async def test_reserve_file_slot_refuses_a_full_quota_with_403():
     with pytest.raises(OpenRAGError) as ei:
-        AuthService.validate_file_quota({"file_count": 3, "file_quota": 5}, pending_task_count=2, default_quota=10)
+        await _service(user_repo=_SlotRepo(FileSlotGrant.DENIED)).reserve_file_slot(7, "r-1", default_quota=3)
+
     assert ei.value.code == "FILE_QUOTA_EXCEEDED"
-    # Under the limit is fine.
-    AuthService.validate_file_quota({"file_count": 1, "file_quota": 5}, pending_task_count=1, default_quota=10)
-    # Regression: a per-user limit is enforced even when the global default
-    # is unlimited (-1). The negative default used to short-circuit to
-    # "unlimited" and ignore the per-user quota entirely.
-    with pytest.raises(OpenRAGError) as ei:
-        AuthService.validate_file_quota({"file_count": 10, "file_quota": 10}, pending_task_count=0, default_quota=-1)
-    assert ei.value.code == "FILE_QUOTA_EXCEEDED"
-    # ...but a user with no per-user quota still inherits the unlimited default.
-    AuthService.validate_file_quota({"file_count": 999}, pending_task_count=0, default_quota=-1)
+    assert ei.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_release_file_slot_never_raises():
+    """It runs on cleanup paths; raising there would replace the caller's real error."""
+    repo = _SlotRepo(release_error=RuntimeError("postgres down"))
+
+    await _service(user_repo=repo).release_file_slot("r-1")
 
 
 # --------------------------------------------------------------------------- #

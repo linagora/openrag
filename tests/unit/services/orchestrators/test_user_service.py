@@ -18,9 +18,15 @@ class FakeUserRepo:
         self.regen_results: dict[int, dict] = {}
         self.updated: list[tuple[int, dict]] = []
         self._users: dict[int, User] = {}
+        self.held_slots: dict[int, int] = {}
+        self.held_slot_reads: list[int] = []
 
     async def user_exists(self, user_id: int) -> bool:
         return user_id in self._existing
+
+    async def count_file_slot_reservations(self, user_id: int) -> int:
+        self.held_slot_reads.append(user_id)
+        return self.held_slots.get(user_id, 0)
 
     async def create_legacy_user(self, *, display_name, external_user_id, email, is_admin, file_quota):
         rec = {
@@ -593,6 +599,33 @@ async def test_current_user_info_specific_quota_and_pending():
     assert out["file_quota"] == 5
     assert out["id"] == 7  # original fields preserved
     assert job.calls == [7]
+
+
+@pytest.mark.asyncio
+async def test_current_user_info_does_not_count_an_in_flight_upload_twice():
+    """``users.file_count`` already holds the slots of uploads still indexing (#664)."""
+    repo = FakeUserRepo()
+    repo.held_slots[7] = 3
+    svc = _svc(repo, default_quota=10, job_service=FakeJobService(pending=3))
+
+    out = await svc.get_current_user_info({"id": 7, "is_admin": False, "file_quota": 10, "file_count": 7})
+
+    assert out["file_count"] == 4
+    assert out["pending_files"] == 3
+    assert out["total_files"] == 7
+    assert repo.held_slot_reads == [7]
+
+
+@pytest.mark.asyncio
+async def test_current_user_info_skips_the_slot_read_for_an_unlimited_user():
+    repo = FakeUserRepo()
+    svc = _svc(repo, default_quota=-1, job_service=FakeJobService(pending=2))
+
+    out = await svc.get_current_user_info({"id": 7, "is_admin": False, "file_quota": None, "file_count": 5})
+
+    assert out["file_count"] == 5
+    assert out["total_files"] == 7
+    assert repo.held_slot_reads == []
 
 
 @pytest.mark.asyncio

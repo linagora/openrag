@@ -45,6 +45,8 @@ class FakeDispatcher:
         self.copied: list[tuple] = []
         self.cancelled: list[str] = []
         self.cancel_result = True
+        self.task_ids: list[str | None] = []
+        self.copy_reservations: list[str | None] = []
 
     async def dispatch_indexing(
         self,
@@ -61,7 +63,9 @@ class FakeDispatcher:
         callback_token=None,
         require_existing_partition=False,
         allow_legacy_require_existing_partition_retry=False,
+        task_id=None,
     ):
+        self.task_ids.append(task_id)
         self.dispatched.append(
             {
                 "path": path,
@@ -86,8 +90,9 @@ class FakeDispatcher:
     async def update_file_metadata(self, file_id, metadata, partition, user):
         self.updated.append((file_id, metadata, partition, user))
 
-    async def copy_file(self, file_id, metadata, partition, user, **destination):
+    async def copy_file(self, file_id, metadata, partition, user, *, quota_reservation_id=None, **destination):
         self.copied.append((file_id, metadata, partition, user))
+        self.copy_reservations.append(quota_reservation_id)
         self.copy_destination = destination
 
     async def get_task_state(self, task_id):
@@ -301,6 +306,28 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
     assert md["file_id"] == "f1"
     assert md["file_size"] == "11.00 B"
     assert md["content_sha256"] is None
+
+
+@pytest.mark.parametrize("task_id", [None, "reservation-1"], ids=["dispatcher-mints", "reserved-upload"])
+@pytest.mark.asyncio
+async def test_add_file_runs_the_task_under_the_callers_reservation(tmp_path, task_id):
+    """A capped upload's task id is its file-slot reservation, which the worker consumes (#664)."""
+    f = tmp_path / "doc.txt"
+    f.write_text("hello world")
+    disp = FakeDispatcher()
+
+    await _service(disp=disp).add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+        task_id=task_id,
+    )
+
+    assert disp.task_ids == [task_id]
 
 
 @pytest.mark.asyncio
@@ -786,6 +813,24 @@ async def test_copy_file_sets_target_fields():
     assert partition == "p-src"
     assert md == {"k": "v", "file_id": "dst", "partition": "p-dst", "content_sha256": None}
     assert user == {"id": 2}
+    assert disp.copy_reservations == [None]
+
+
+@pytest.mark.asyncio
+async def test_copy_file_forwards_the_reserved_file_slot():
+    disp = FakeDispatcher()
+
+    await _service(disp=disp).copy_file(
+        source_file_id="src",
+        source_partition="p-src",
+        target_file_id="dst",
+        target_partition="p-dst",
+        metadata={},
+        user={"id": 2},
+        quota_reservation_id="reservation-1",
+    )
+
+    assert disp.copy_reservations == ["reservation-1"]
 
 
 @pytest.mark.asyncio
