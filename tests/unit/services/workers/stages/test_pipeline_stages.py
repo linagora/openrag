@@ -453,58 +453,90 @@ async def test_caption_stage_captions_images_concurrently_and_in_order():
 
 
 @pytest.mark.asyncio
-async def test_caption_stage_cancels_sibling_captions_on_failure():
-    """Do not leave background VLM calls running after one caption fails."""
+async def test_caption_stage_keeps_other_captions_when_one_image_fails():
+    """One failed image must not drop the captions of the others (#1293)."""
 
-    class FailingVLM(VLM):
-        def __init__(self) -> None:
-            self.started: set[bytes] = set()
-            self.cancelled: set[bytes] = set()
-            self.completed: set[bytes] = set()
-            self.all_started = asyncio.Event()
-            self.release = asyncio.Event()
-
+    class OneFailingVLM(VLM):
         async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
-            self.started.add(image_bytes)
-            if len(self.started) == 3:
-                self.all_started.set()
-
             if image_bytes == b"fail":
-                await self.all_started.wait()
                 raise RuntimeError("caption failed")
-
-            try:
-                await self.release.wait()
-            except asyncio.CancelledError:
-                self.cancelled.add(image_bytes)
-                raise
-            self.completed.add(image_bytes)
-            return image_bytes.decode()
+            await asyncio.sleep(0.01)
+            return f"caption:{image_bytes.decode()}"
 
         async def caption_images_batch(self, images: list[bytes], prompt: str | None = None) -> list[str]:
             return [await self.caption_image(image, prompt=prompt) for image in images]
 
     processed = ProcessedDocument(
         document_id="doc-1",
-        text_blocks=[TextBlock(text="body", page_number=1)],
+        text_blocks=[TextBlock(text="a ![](ref-ok) b ![](ref-fail)", page_number=1)],
         images=[
-            ImageBlock(image_bytes=b"slow-1", page_number=1),
-            ImageBlock(image_bytes=b"fail", page_number=1),
-            ImageBlock(image_bytes=b"slow-2", page_number=1),
+            ImageBlock(image_bytes=b"ok", page_number=1, metadata={"markdown_ref": "![](ref-ok)"}),
+            ImageBlock(image_bytes=b"fail", page_number=1, metadata={"markdown_ref": "![](ref-fail)"}),
+            ImageBlock(image_bytes=b"standalone", page_number=2),
         ],
     )
     row = {"processed_document": processed}
-    vlm = FailingVLM()
 
-    try:
-        with pytest.raises(RuntimeError, match="caption failed"):
-            await caption_stage(row, vlm)
+    await caption_stage(row, OneFailingVLM())
 
-        assert vlm.cancelled == {b"slow-1", b"slow-2"}
-        assert vlm.completed == set()
-    finally:
-        vlm.release.set()
-        await asyncio.sleep(0)
+    out = row["processed_document"]
+    assert [img.caption for img in out.images] == ["caption:ok", None, "caption:standalone"]
+    assert "caption:ok" in out.text_blocks[0].text
+    assert "![](ref-fail)" in out.text_blocks[0].text
+    assert "caption:standalone" in out.text_blocks[1].text
+    assert row["stage"] == "captioned"
+    assert row["degraded_stages"]["caption"].startswith("1/3 image(s) failed")
+    assert "caption failed" in row["degraded_stages"]["caption"]
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_raises_when_every_image_fails():
+    """All images failed: the stage fails as a whole so the #702 fallback applies."""
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        images=[ImageBlock(image_bytes=b"a", page_number=1), ImageBlock(image_bytes=b"b", page_number=1)],
+    )
+    row = {"processed_document": processed}
+
+    with pytest.raises(RuntimeError, match="caption failed"):
+        await caption_stage(row, FakeVLM([], error=RuntimeError("caption failed")))
+
+    assert row["stage"] == "caption_failed"
+    assert "degraded_stages" not in row
+    assert row["processed_document"] is processed
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_cancels_in_flight_captions_on_timeout():
+    """Do not leave background VLM calls running after the stage times out."""
+
+    class HangingVLM(VLM):
+        def __init__(self) -> None:
+            self.cancelled: set[bytes] = set()
+
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.add(image_bytes)
+                raise
+            return ""
+
+        async def caption_images_batch(self, images: list[bytes], prompt: str | None = None) -> list[str]:
+            return [await self.caption_image(image, prompt=prompt) for image in images]
+
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        images=[ImageBlock(image_bytes=b"a", page_number=1), ImageBlock(image_bytes=b"b", page_number=1)],
+    )
+    row = {"processed_document": processed}
+    vlm = HangingVLM()
+
+    with pytest.raises(TimeoutError):
+        await caption_stage(row, vlm, timeout=0.05)
+
+    assert vlm.cancelled == {b"a", b"b"}
+    assert row["stage"] == "caption_failed"
 
 
 @pytest.mark.asyncio

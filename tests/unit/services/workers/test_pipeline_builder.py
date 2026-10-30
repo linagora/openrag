@@ -1733,6 +1733,30 @@ async def test_image_bytes_are_released_when_captioning_fails():
     assert all(image.image_bytes == b"" for image in images)
 
 
+class OneFailingVLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("vlm timeout")
+        return "caption"
+
+
+@pytest.mark.asyncio
+async def test_one_failed_image_keeps_the_other_captions():
+    """#1293: one failed image used to fail the stage and drop every caption."""
+    pipeline, document = _image_pipeline(vlm=OneFailingVLM())
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored"
+    assert [image.caption for image in row["processed_document"].images].count("caption") == 5
+    assert row["degraded_stages"]["caption"].startswith("1/6 image(s) failed captioning")
+
+
 @pytest.mark.asyncio
 async def test_release_keeps_everything_the_caption_substitution_reads():
     """Only the payload goes.
