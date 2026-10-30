@@ -40,7 +40,11 @@ carry valid JSON, and the compose overlay and the Helm chart set both:
 workers and rewrites the survivor as `{…} [repeated 2x across cluster]`, which
 is no longer JSON) and `RAY_COLOR_PREFIX=0` (the prefix is otherwise
 ANSI-colorized even on a pipe). Both pipelines still strip escape sequences
-first, before the prefix regex, as a belt-and-braces. Some lines are not JSON
+first, before the prefix regex, as a belt-and-braces. The overlay and the
+chart also set `TQDM_DISABLE=1`: tqdm progress bars (embedding, captioning,
+Marker's OCR and layout) are not JSON, and every refresh, plus the bare
+newlines tqdm writes to move between stacked bars, becomes its own log line.
+Some lines are not JSON
 (the startup banner, Ray's own startup messages); they are shipped as-is with
 no `level` label.
 
@@ -52,6 +56,7 @@ no `level` label.
 | `LOG_LEVEL` | `INFO` | `DEBUG` records user queries; use it briefly. |
 | `RAY_DEDUP_LOGS` | `1` (Ray) | Must be `0` with `LOG_FORMAT=json`: the overlay and the chart set it. See above. |
 | `RAY_COLOR_PREFIX` | `1` (Ray) | Set to `0` by the overlay and the chart so the relay prefix is plain text. |
+| `TQDM_DISABLE` | unset | Set to `1` by the overlay and the chart: no progress bars, Marker's included. Any non-empty value disables them, `0` too. |
 | `RAY_LOG_TO_STDERR` | unset | Set to `1` by the chart when `ray.enabled=true`: workers write to their own pod's stderr instead of the API driver's relay. See the Kubernetes section. |
 
 JSON mode also routes every library's stdlib logs to the collector (the

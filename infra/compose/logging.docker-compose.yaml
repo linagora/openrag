@@ -12,11 +12,13 @@
 # workers and rewrites the survivor as "{...} [repeated 2x across cluster]",
 # which is no longer JSON; and the "(Actor pid=N)" prefix is ANSI-colorized
 # even on a pipe. Both are switched off here (Alloy still strips escapes as
-# a belt-and-braces).
+# a belt-and-braces). tqdm progress bars are not JSON and every refresh
+# becomes a log line, so they are off too (Marker's own bars included).
 x-json-logs: &json_logs
   LOG_FORMAT: json
   RAY_DEDUP_LOGS: "0"
   RAY_COLOR_PREFIX: "0"
+  TQDM_DISABLE: "1"
 
 services:
   openrag:

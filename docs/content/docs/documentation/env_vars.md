@@ -543,6 +543,7 @@ there too.
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
 | `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and `openai` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
+| `TQDM_DISABLE` | `str` | (unset) | Turns off tqdm progress bars, Marker's included. Any non-empty value disables them, `0` too. The logging overlay and the Helm chart set it to `1`: with `LOG_FORMAT=json` every bar refresh becomes a non-JSON log line. |
 
 #### Text format
 ```bash title="Logging message in the terminal..."
