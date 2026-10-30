@@ -280,11 +280,15 @@ class TestReleaseIfGrantedLogLevel:
         assert not [r for r in records if r["level"].no >= logger.level("WARNING").no]
         semaphore_actor.release.remote.assert_awaited_once_with("incarnation-1")
 
-    async def test_failed_release_still_warns(self):
+    @pytest.mark.parametrize(
+        ("error", "reason"),
+        [(ray.exceptions.RayActorError(), "RayActorError"), (asyncio.CancelledError(), "cancelled")],
+    )
+    async def test_failed_release_still_warns(self, error, reason):
         acquire_task = asyncio.get_running_loop().create_future()
         acquire_task.set_result("incarnation-1")
         semaphore_actor = MagicMock()
-        semaphore_actor.release.remote = AsyncMock(side_effect=ray.exceptions.RayActorError())
+        semaphore_actor.release.remote = AsyncMock(side_effect=error)
 
         records = []
         sink_id = logger.add(lambda m: records.append(m.record), level="WARNING")
@@ -297,4 +301,4 @@ class TestReleaseIfGrantedLogLevel:
 
         failures = [r for r in records if "Failed to release permit" in r["message"]]
         assert [r["level"].name for r in failures] == ["WARNING"]
-        assert "RayActorError" in failures[0]["extra"]["reason"]
+        assert reason in failures[0]["extra"]["reason"]
