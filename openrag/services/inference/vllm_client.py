@@ -40,7 +40,6 @@ from core.utils.exceptions import (
 )
 from core.utils.logging import get_logger
 from core.vlm import VLM, vlm_registry
-from tqdm.asyncio import tqdm
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
@@ -634,16 +633,13 @@ class VLLMEmbedder(Embedder):
             async with semaphore:
                 return await self._embed_batch(batch, offset=offset)
 
-        # Explicit tasks so that when one batch fails we can cancel the rest.
-        # tqdm.gather (like asyncio.gather) propagates the first exception but
-        # leaves the other in-flight batches running, where they would keep
-        # consuming embedder capacity after embed() has already failed.
+        # Explicit tasks so that when one batch fails we can cancel the rest:
+        # asyncio.gather propagates the first exception but leaves the other
+        # in-flight batches running, consuming embedder capacity. Not tqdm.gather:
+        # its wrapper tasks leak "Task exception was never retrieved" (#1299).
         tasks = [asyncio.ensure_future(_run(batch, offset)) for batch, offset in zip(batches, offsets, strict=True)]
         try:
-            results = await tqdm.gather(
-                *tasks,
-                desc=f"Embedding {len(texts)} chunks ({len(batches)} batches of {self._batch_size})",
-            )
+            results = await asyncio.gather(*tasks)
         except BaseException as exc:
             done = sum(1 for task in tasks if task.done() and not task.cancelled() and task.exception() is None)
             # `.extra` carries the provider's raw response and, on a 400, snippets
