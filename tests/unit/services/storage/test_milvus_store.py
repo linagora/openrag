@@ -405,6 +405,30 @@ async def test_health_accepts_a_fresh_collection_and_bounds_the_rpc(store):
         await store.check_health()
 
 
+async def test_health_refuses_a_collection_awaiting_migration_until_it_is_migrated(store):
+    # The fixture's build expects version 1. Searches refuse version 0, so readiness must too (#1064).
+    store._async_client.has_collection = AsyncMock(return_value=True)
+    store._async_client.describe_collection = AsyncMock(return_value={"properties": {SCHEMA_VERSION_PROPERTY_KEY: "0"}})
+    with pytest.raises(VDBSchemaMigrationRequiredError):
+        await store.check_health()
+    store._async_client.describe_collection.assert_awaited_once_with("test_collection", timeout=2.0)
+
+    # The migration runs while the pod is up: readiness recovers without a restart.
+    store._async_client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
+    await store.check_health()
+
+    # A confirmed version is not read again on every probe.
+    await store.check_health()
+    assert store._async_client.describe_collection.await_count == 2
+
+
+async def test_health_refuses_a_collection_ahead_of_the_build(store):
+    store._async_client.has_collection = AsyncMock(return_value=True)
+    store._async_client.describe_collection = AsyncMock(return_value={"properties": {SCHEMA_VERSION_PROPERTY_KEY: "2"}})
+    with pytest.raises(VDBSchemaMigrationRequiredError):
+        await store.check_health()
+
+
 class TestFormatValue:
     def test_int_renders_unquoted(self) -> None:
         assert MilvusVectorStore._format_value(42) == "42"

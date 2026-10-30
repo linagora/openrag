@@ -22,6 +22,7 @@ from core.models.readiness import (
     ReadinessSnapshot,
     ReadinessStatus,
 )
+from core.utils.exceptions import VDBSchemaMigrationRequiredError
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -256,6 +257,8 @@ class ReadinessService:
             return "ok"
         except (TimeoutError, httpx.TimeoutException):
             return "timeout"
+        except VDBSchemaMigrationRequiredError:
+            return "migration_required"
         except Exception:
             # This endpoint is public: never return connection strings or keys.
             return "unavailable"
