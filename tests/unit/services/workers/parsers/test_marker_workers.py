@@ -247,6 +247,19 @@ def test_marker_runs_pdftext_with_one_worker_whatever_is_configured(monkeypatch,
     )
 
 
+@pytest.mark.parametrize(("env", "disabled"), [(None, False), ("", False), ("1", True), ("0", True)])
+def test_marker_bars_follow_tqdm_disable(monkeypatch, env, disabled):
+    """Surya passes disable= explicitly, which beats TQDM_DISABLE, so the actor
+    maps it to Marker's own switch with tqdm's reading: non-empty = off (#1297)."""
+    if env is None:
+        monkeypatch.delenv("TQDM_DISABLE", raising=False)
+    else:
+        monkeypatch.setenv("TQDM_DISABLE", env)
+    worker, _ = _initialized_marker_worker(monkeypatch, 1)
+
+    assert worker.converter_config["disable_tqdm"] is disabled
+
+
 def test_pdftext_with_one_worker_starts_no_process(monkeypatch, tmp_path):
     """The pin relies on pdftext extracting in-process with one worker, even
     over the 20 pages from which it otherwise starts a pool; a pdftext release
