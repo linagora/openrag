@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+import services.workers.stage_event_writer as stage_event_writer_module
 from core.models.stage_progress import (
     StageEventStatus,
     StageProgressEvent,
@@ -97,6 +98,42 @@ async def test_writer_retries_once_then_drops_without_raising() -> None:
     assert len(repo.calls) == 2
     assert writer.write_failures == 1
     assert writer.dropped_events == 1
+
+
+@pytest.mark.asyncio
+async def test_writer_scales_write_deadline_with_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _Repo()
+    writer = StageEventWriter(repo, batch_size=32, write_timeout=0.075)
+    events = [_transition(f"task-{index}", 1) for index in range(32)]
+    summaries = [_summary(f"task-{index}", 1) for index in range(32)]
+    observed_timeouts = []
+    original_wait_for = asyncio.wait_for
+
+    async def observe_wait_for(awaitable, *, timeout):
+        observed_timeouts.append(timeout)
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(stage_event_writer_module.asyncio, "wait_for", observe_wait_for)
+
+    await writer._write_batch(events, summaries)
+
+    assert observed_timeouts == [pytest.approx(2.4)]
+
+
+@pytest.mark.asyncio
+async def test_writer_counts_summary_only_write_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _Repo(error=RuntimeError("database unavailable"))
+    writer = StageEventWriter(repo, retry_delay=0.001)
+    drops = []
+    monkeypatch.setattr(
+        stage_event_writer_module,
+        "record_stage_event_drop",
+        lambda reason, count=1: drops.append((reason, count)),
+    )
+
+    await writer._write_batch([], [_summary("summary-only")])
+
+    assert drops == [("write_failed", 1)]
 
 
 @pytest.mark.asyncio

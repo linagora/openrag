@@ -283,7 +283,7 @@ class StageEventWriter:
             if previous is None and len(self._live_pending) >= self._queue_capacity:
                 evicted_task_id, _ = self._live_pending.popitem(last=False)
                 self._dropped_live_snapshots += 1
-                record_stage_live_snapshot_failure()
+                record_stage_event_drop("live_snapshot_overflow")
                 self._mark_snapshot_loss(evicted_task_id)
                 self._remember_incomplete(evicted_task_id)
             self._live_pending[task_id] = snapshot
@@ -345,16 +345,19 @@ class StageEventWriter:
         events: Sequence[StageProgressEvent],
         summaries: Sequence[StageProgressSummary],
     ) -> None:
+        # The repository performs work per event and per task summary. Keep each
+        # write bounded while giving larger batches a proportional deadline.
+        write_timeout = self._write_timeout * max(1, len(events), len(summaries))
         for attempt in range(2):
             started = time.perf_counter()
             try:
                 result = await asyncio.wait_for(
                     self._job_repo.write_stage_progress(events=events, summaries=summaries),
-                    timeout=self._write_timeout,
+                    timeout=write_timeout,
                 )
             except asyncio.CancelledError:
                 self._dropped_events += len(events)
-                record_stage_event_drop("shutdown", len(events))
+                record_stage_event_drop("shutdown", len(events) or len(summaries))
                 for summary in summaries:
                     self._mark_snapshot_loss(summary.task_id)
                 raise
@@ -368,7 +371,7 @@ class StageEventWriter:
                 self._write_failures += 1
                 self._dropped_events += len(events)
                 record_stage_event_write("failure", duration)
-                record_stage_event_drop("write_failed", len(events))
+                record_stage_event_drop("write_failed", len(events) or len(summaries))
                 for summary in summaries:
                     self._mark_snapshot_loss(summary.task_id)
                     self._remember_incomplete(summary.task_id)
@@ -405,8 +408,10 @@ class StageEventWriter:
                         self._pending_ack.pop(key, None)
                 for task_id in result.missing_parent_task_ids:
                     self._mark_snapshot_loss(task_id)
-                    self._dropped_events += sum(event.task_id == task_id for event in events)
-                    record_stage_event_drop("missing_parent", sum(event.task_id == task_id for event in events))
+                    dropped_events = sum(event.task_id == task_id for event in events)
+                    has_summary = any(summary.task_id == task_id for summary in summaries)
+                    self._dropped_events += dropped_events
+                    record_stage_event_drop("missing_parent", dropped_events or int(has_summary))
                     self._remember_incomplete(task_id)
             return
 

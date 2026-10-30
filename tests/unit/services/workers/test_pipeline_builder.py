@@ -11,8 +11,8 @@ from core.models.stage_progress import StageEventStatus, StageFailureEffect
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.utils.exceptions import ConfigError, InferenceError, NoIndexableContentError, PipelineError
 from services.workers.pipeline_builder import build_indexing_pipeline
-from services.workers.stages import _common as common_module
 from services.workers.stage_tracker import StageTracker
+from services.workers.stages import _common as common_module
 from services.workers.stages import caption as caption_module
 
 
@@ -1571,6 +1571,8 @@ async def test_enrichment_records_failures_swallowed_by_best_effort_helpers(stag
         vector_store=vector_store,
         **components,
     )
+    observed = []
+    tracker = StageTracker(stage, deliver=lambda event, summary, tail: observed.append(event) or True)
 
     result = await pipeline.run(
         {
@@ -1578,12 +1580,17 @@ async def test_enrichment_records_failures_swallowed_by_best_effort_helpers(stag
             "partition": "tenant-a",
             "filename": "note.txt",
             "indexation_config": config,
-        }
+        },
+        stage_tracker=tracker,
     )
 
     assert result["stored_count"] == 1
     assert set(result["degraded_stages"]) == {stage}
     assert "llm unavailable" in result["degraded_stages"][stage]
+    events = [event for event in observed if event is not None]
+    failure = next(event for event in events if event.stage_id == stage and event.status is StageEventStatus.FAILED)
+    assert failure.failure_effect is StageFailureEffect.CONTINUED_DEGRADED
+    assert any(event.stage_id == "embed" and event.status is StageEventStatus.STARTED for event in events)
 
 
 @pytest.mark.asyncio

@@ -115,7 +115,6 @@ def initialize_ingest_counters() -> None:
         start_counter_at_zero(_CLOCK_SKEW_TOTAL)
     except Exception as exc:  # noqa: BLE001 - metrics must never stop the actor starting
         report_once(INGEST_DOCUMENTS_TOTAL.name, exc)
-    initialize_stage_writer_counters()
 
 
 def initialize_stage_writer_counters() -> None:
@@ -139,7 +138,10 @@ def set_stage_event_queue_size(size: int) -> None:
 def record_stage_event_drop(reason: str, count: int = 1) -> None:
     selected = reason if reason in INGEST_STAGE_EVENT_DROP_REASONS else "shutdown"
     try:
-        _STAGE_EVENT_DROPPED_TOTAL.inc(max(0, int(count)), tags={"reason": selected})
+        increment = int(count)
+        if increment <= 0:
+            return
+        _STAGE_EVENT_DROPPED_TOTAL.inc(increment, tags={"reason": selected})
     except Exception as exc:  # noqa: BLE001 - metrics must never fail indexing
         report_once(INGEST_STAGE_EVENT_DROPPED_TOTAL.name, exc)
 
@@ -164,7 +166,7 @@ def set_stage_history_counts(*, pending: int, incomplete: int) -> None:
 
 def record_stage_live_snapshot_failure() -> None:
     try:
-        _STAGE_EVENT_DROPPED_TOTAL.inc(1, tags={"reason": "live_snapshot_overflow"})
+        _STAGE_EVENT_DROPPED_TOTAL.inc(1, tags={"reason": "live_snapshot_failed"})
     except Exception as exc:  # noqa: BLE001 - metrics must never fail indexing
         report_once(INGEST_STAGE_EVENT_DROPPED_TOTAL.name, exc)
 

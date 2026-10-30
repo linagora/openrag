@@ -67,7 +67,9 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # v13: TaskStateManager fences admission against a task already indexing the
 # same file and is replaced during bootstrap when it lacks that method; the
 # replacement changes the actor id the previous generation's handles point at.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v13"
+# v14: workers emit stage history and stamp its tracking version; old detached
+# workers are reused by name and would keep settling jobs without that history.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v14"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -663,6 +665,10 @@ class IndexerWorkerActor:
                 worker_lease.cancel()
                 await asyncio.gather(worker_lease, return_exceptions=True)
                 await end_worker_lease(self._task_state_manager, task_id, logger=self._logger)
+
+    async def close_stage_writer(self) -> None:
+        """Drain this worker's bounded stage-history queue before retirement."""
+        await self._worker.close_stage_writer()
 
     async def _report_task_failure(
         self,

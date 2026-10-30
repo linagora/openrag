@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from core.models.stage_progress import StageEventStatus, StageFailureEffect, StageTaskPhase
-from services.workers.stage_tracker import StageTracker
+from services.workers.stage_tracker import MAX_STAGE_EVENT_TAIL, StageTracker
 
 
 class _Clock:
@@ -98,6 +98,19 @@ def test_tracking_delivery_failure_is_captured_without_raising() -> None:
     tracker.finish_stage()
     assert calls == 3
     assert tracker.summary().known_loss is True
+
+
+def test_bounded_live_event_tail_does_not_mark_durable_history_truncated() -> None:
+    deliveries, deliver = _event_deliveries()
+    tracker = StageTracker("task-1", deliver=deliver)
+
+    for rank in range(MAX_STAGE_EVENT_TAIL // 2 + 1):
+        tracker.start_stage(f"stage-{rank}", rank)
+        tracker.finish_stage()
+
+    snapshot = tracker.snapshot()
+    assert len(snapshot.event_tail) == MAX_STAGE_EVENT_TAIL
+    assert snapshot.summary.history_truncated is False
 
 
 def test_invalid_monotonic_duration_is_left_unknown() -> None:

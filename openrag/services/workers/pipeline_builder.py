@@ -244,6 +244,7 @@ class IndexingPipeline:
                 row,
                 concrete_parser,
                 batch_context=batch_context,
+                stage_tracker=stage_tracker,
                 topic_tagger=topic_tagger,
                 max_topic_tags=config.max_topic_tags if config is not None else 7,
             )
@@ -263,7 +264,16 @@ class IndexingPipeline:
                 _safe_tracking_call(stage_tracker, "finish_stage", error=exc, degraded=degradable)
                 raise
             else:
-                _safe_tracking_call(stage_tracker, "finish_stage")
+                degraded_error = (row.get("degraded_stages") or {}).get(name)
+                if degraded_error is None:
+                    _safe_tracking_call(stage_tracker, "finish_stage")
+                else:
+                    _safe_tracking_call(
+                        stage_tracker,
+                        "finish_stage",
+                        error=RuntimeError(str(degraded_error)),
+                        degraded=degradable,
+                    )
             finally:
                 elapsed = time.perf_counter() - start
                 timings[name] = elapsed * 1000.0
@@ -486,6 +496,7 @@ class IndexingPipeline:
         row: MutableMapping[str, Any],
         processed: ProcessedDocument,
         *,
+        stage_tracker: Any | None = None,
         chunk_offset: int,
         indexed_at: datetime,
         context: BatchIndexingContext,
@@ -497,6 +508,7 @@ class IndexingPipeline:
         """
         return await self.run(
             row,
+            stage_tracker=stage_tracker,
             _processed=processed,
             _chunk_offset=chunk_offset,
             _indexed_at=indexed_at,

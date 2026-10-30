@@ -58,7 +58,6 @@ class StageTracker:
         self._tail: list[StageProgressEvent] = []
         self._expected_final_sequence: int | None = None
         self._known_loss = False
-        self._history_truncated = False
         self._elapsed_ms: int | None = None
         self._elapsed_sampled_at: datetime | None = None
         self._finished = False
@@ -154,7 +153,6 @@ class StageTracker:
             expected_final_sequence=self._expected_final_sequence,
             known_loss=self._known_loss,
             has_open_invocation=self._current_invocation_id is not None,
-            history_truncated=self._history_truncated,
         )
 
     def snapshot(self) -> StageProgressWorkerSnapshot:
@@ -210,7 +208,6 @@ class StageTracker:
         self._tail.append(event)
         if len(self._tail) > MAX_STAGE_EVENT_TAIL:
             self._tail.pop(0)
-            self._history_truncated = True
         self._revision += 1
         self._publish(event)
         return event
