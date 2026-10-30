@@ -13,6 +13,8 @@ from api.error_handlers import _STATUS_MAP, _status_for, register_error_handlers
 from core.utils.exceptions import (
     ConflictError,
     DocumentNotFoundError,
+    EmbeddingAPIError,
+    EmbeddingResponseError,
     InferenceConnectionError,
     InferenceError,
     InferenceTimeoutError,
@@ -21,6 +23,10 @@ from core.utils.exceptions import (
     PartitionNotFoundError,
     QuotaExceededError,
     ValidationError,
+    VDBCreateOrLoadCollectionError,
+    VDBDeleteError,
+    VDBInsertError,
+    VDBSearchError,
 )
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -368,3 +374,60 @@ def test_the_exception_keeps_the_providers_status() -> None:
 
     assert info.value.status_code == 401
     assert _status_for(info.value) == 502
+
+
+@pytest.mark.parametrize(
+    ("exc", "status", "level"),
+    [
+        # The caller's own error: part of normal operation.
+        (DocumentNotFoundError("missing doc"), 404, "INFO"),
+        (ConflictError("already in use"), 409, "INFO"),
+        (ValidationError("bad input"), 422, "INFO"),
+        (QuotaExceededError("too many files"), 429, "INFO"),
+        (InferenceError("bad base_url", code="LLM_OVERRIDE_REJECTED", status_code=400), 400, "INFO"),
+        # The caller's own endpoint refused the call, including its own key (401 -> 400).
+        (InferenceError("LLM error (404)", status_code=404, caller_shaped=True), 404, "INFO"),
+        (InferenceError("LLM error (401)", status_code=401, caller_shaped=True), 400, "INFO"),
+        # A provider refused OpenRag's call: its 4xx is passed through.
+        (InferenceError("LLM error (404): no such model", status_code=404), 404, "WARNING"),
+        (InferenceError("LLM error (400): context length", status_code=400), 400, "WARNING"),
+        (InferenceError("LLM error (429): rate limited", status_code=429), 429, "WARNING"),
+        (EmbeddingAPIError("embedder error (404): no such model", status_code=404), 404, "WARNING"),
+        # The backend failed, whatever the status sent.
+        (VDBSearchError("Milvus search failed"), 422, "ERROR"),
+        (VDBInsertError("Milvus insert failed"), 422, "ERROR"),
+        (VDBDeleteError("Milvus delete failed"), 422, "ERROR"),
+        (VDBCreateOrLoadCollectionError("Milvus load failed"), 422, "ERROR"),
+        (EmbeddingResponseError("malformed embeddings"), 422, "ERROR"),
+        (InferenceError("LLM error (502): bad gateway", status_code=502), 502, "ERROR"),
+        (InferenceTimeoutError("LLM timed out"), 504, "ERROR"),
+        # Remapped by ``_status_for``: a provider refusing OpenRag's key is a 502.
+        (InferenceError("LLM error (401): bad key", status_code=401), 502, "ERROR"),
+    ],
+    ids=lambda v: getattr(v, "code", None) if isinstance(v, OpenRAGError) else None,
+)
+def test_openrag_error_log_level(exc: OpenRAGError, status: int, level: str) -> None:
+    """ERROR means the server failed, so it stays alertable: a caller's 4xx
+    logs at INFO, a provider's own 4xx at WARNING, a backend fault at ERROR
+    even when it is sent with a 4xx."""
+    from loguru import logger
+
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/raise")
+    async def _raise() -> None:
+        raise exc
+
+    captured: list[tuple[str, int]] = []
+    handler_id = logger.add(
+        lambda m: captured.append((m.record["level"].name, m.record["extra"].get("status_code"))),
+        level="DEBUG",
+        filter=lambda r: r["message"] == "OpenRAGError",
+    )
+    try:
+        response = TestClient(app).get("/raise")
+    finally:
+        logger.remove(handler_id)
+    assert response.status_code == status
+    assert captured == [(level, status)]
