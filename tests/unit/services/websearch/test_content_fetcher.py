@@ -258,6 +258,17 @@ def test_fetch_verify_ssl_default_is_true():
     assert cfg.fetch_verify_ssl is True
 
 
+def test_websearch_query_budget_defaults_to_three_in_model_and_shipped_yaml():
+    import yaml
+    from core.config.retrieval import StaanWebSearchConfig
+
+    cfg = StaanWebSearchConfig()
+    conf = yaml.safe_load((Path(__file__).parents[4] / "conf" / "config.yaml").read_text())
+
+    assert cfg.max_queries == 3
+    assert conf["websearch"]["max_queries"] == 3
+
+
 def test_fetch_verify_ssl_is_true_in_the_shipped_yaml():
     """The *effective* value must be True, not just the Pydantic default.
 
