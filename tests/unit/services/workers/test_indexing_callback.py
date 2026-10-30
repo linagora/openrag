@@ -365,6 +365,23 @@ async def test_callback_token_is_redacted_from_logged_errors(monkeypatch: pytest
         mock_logger.warning.assert_called_once()
         assert "s3cret-token" not in mock_logger.warning.call_args[1]["error"]
         assert "REDACTED" in mock_logger.warning.call_args[1]["error"]
+        assert "ConnectError" in mock_logger.warning.call_args[1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_callback_error_with_empty_message_logs_the_exception_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """httpx.ReadTimeout("") has an empty str(); the log must still say what failed (#1300)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("")
+
+    _patch_async_client(monkeypatch, handler)
+
+    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
+        await send_indexing_callback("https://cozy.example.com/ai/index/status", "p", "f1", "success", {})
+
+        mock_logger.warning.assert_called_once()
+        assert "ReadTimeout" in mock_logger.warning.call_args[1]["error"]
 
 
 @pytest.mark.asyncio
