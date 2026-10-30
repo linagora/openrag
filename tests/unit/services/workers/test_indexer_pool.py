@@ -2214,6 +2214,22 @@ async def test_actor_does_not_start_without_registered_worker_ref(
 
 
 @pytest.mark.asyncio
+async def test_worker_polls_registration_without_fetching_its_own_ref(tmp_path) -> None:
+    """#1296: a worker that fetched its own task ref would make Ray print each failure as unhandled."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._task_state_manager.has_object_ref = SimpleNamespace(remote=AsyncMock(return_value=True))
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    actor._task_state_manager.has_object_ref.remote.assert_awaited_with("t")
+    actor._task_state_manager.get_object_ref.remote.assert_not_awaited()
+    assert worker.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_missing_worker_reference_records_a_canonical_reason(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

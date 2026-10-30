@@ -716,15 +716,21 @@ class IndexerWorkerActor:
         """Do not start indexing until cancellation can target this worker."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _WORKER_REF_REGISTRATION_TIMEOUT_SECONDS
+        # has_object_ref keeps this worker from borrowing its own task's ref
+        # (see TaskStateManager.has_object_ref); a TSM from an older release
+        # lacks it, and a real handle raises AttributeError for it then.
+        has_ref = getattr(getattr(self._task_state_manager, "has_object_ref", None), "remote", None)
+        method = "has_object_ref" if has_ref is not None else "get_object_ref"
+        poll = has_ref or self._task_state_manager.get_object_ref.remote
         while loop.time() < deadline:
             remaining = max(0.01, deadline - loop.time())
             object_ref = await retry_idempotent_ray_actor_method(
-                lambda: self._task_state_manager.get_object_ref.remote(task_id),
+                lambda: poll(task_id),
                 recovery_timeout=remaining,
-                task_description=f"get_object_ref({task_id}) before indexing",
+                task_description=f"{method}({task_id}) before indexing",
             )
             ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
-            if ref is not None:
+            if ref is not None and ref is not False:
                 return
             await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
 
