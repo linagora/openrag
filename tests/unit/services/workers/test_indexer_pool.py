@@ -1884,6 +1884,26 @@ async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_actor_logs_a_workspace_attachment_failure_after_indexing(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=[RuntimeError("ws1 down")])
+    actor._catalog_store.document_repo.mark_file_independently_indexed = AsyncMock(return_value=False)
+
+    with pytest.raises(RuntimeError, match="Cannot protect indexed file 'f'"):
+        await actor.process_file(
+            task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", workspace_ids=["ws1"]
+        )
+
+    actor._logger.bind.assert_called_with(file_id="f", partition="p", task_id="t")
+    error = actor._logger.bind.return_value.opt.return_value.error
+    error.assert_called_once()
+    assert error.call_args.args == ("Workspace attachment failed after indexing.",)
+    assert error.call_args.kwargs["error_reason"].startswith("RuntimeError: Cannot protect indexed file 'f'")
+
+
+@pytest.mark.asyncio
 async def test_actor_transfers_ownership_only_after_all_attachments_succeed(tmp_path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"x")
