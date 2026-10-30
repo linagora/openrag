@@ -394,6 +394,94 @@ def test_a_secret_override_that_disagrees_is_refused(tmp_path: Path, args: tuple
     assert "env.secrets.POSTGRES_RUN_MIGRATIONS is" in result.stderr
 
 
+_AUTO_CREATE_OFF = ("--set", "postgresProvisioning.autoCreateDatabase=false")
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("args", "source"),
+    [
+        pytest.param(("--set", "env.config.POSTGRES_AUTO_CREATE_DB=false"), "env.config", id="env-off-chart-on"),
+        pytest.param(
+            (*_AUTO_CREATE_OFF, "--set", "env.config.POSTGRES_AUTO_CREATE_DB=true"), "env.config", id="env-on-chart-off"
+        ),
+        # Blank or unset is true to the app.
+        pytest.param(
+            (*_AUTO_CREATE_OFF, "--set-string", "env.config.POSTGRES_AUTO_CREATE_DB="),
+            "env.config",
+            id="env-blank-chart-off",
+        ),
+        pytest.param(
+            (*_AUTO_CREATE_OFF, "--set", "env.config.POSTGRES_AUTO_CREATE_DB=null"),
+            "env.config",
+            id="env-removed-chart-off",
+        ),
+        pytest.param(
+            ("--set-string", "env.secrets.POSTGRES_AUTO_CREATE_DB=false"), "env.secrets", id="secret-off-chart-on"
+        ),
+        pytest.param(
+            (*_AUTO_CREATE_OFF, "--set-string", "env.secrets.POSTGRES_AUTO_CREATE_DB=true"),
+            "env.secrets",
+            id="secret-on-chart-off",
+        ),
+    ],
+)
+def test_an_auto_create_db_override_that_disagrees_is_refused(
+    tmp_path: Path, args: tuple[str, ...], source: str
+) -> None:
+    """An env.config or env.secrets POSTGRES_AUTO_CREATE_DB replaces the value
+    derived from autoCreateDatabase, which then has no effect (#1158)."""
+    result = _render(tmp_path, *args)
+
+    assert result.returncode != 0
+    assert f"{source}.POSTGRES_AUTO_CREATE_DB is" in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        pytest.param(
+            ("--set-string", "env.config.POSTGRES_AUTO_CREATE_DB=on"), "which the app rejects at startup", id="env-on"
+        ),
+        pytest.param(
+            ("--set-string", "postgresProvisioning.autoCreateDatabase=on"),
+            'autoCreateDatabase is "on"; set it to true or false',
+            id="setting-on",
+        ),
+    ],
+)
+def test_an_auto_create_db_value_the_app_rejects_is_refused(
+    tmp_path: Path, args: tuple[str, ...], message: str
+) -> None:
+    result = _render(tmp_path, *args)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        pytest.param((), "true", id="defaults"),
+        pytest.param(_AUTO_CREATE_OFF, "false", id="chart-off"),
+        pytest.param((*_AUTO_CREATE_OFF, "--set-string", "env.config.POSTGRES_AUTO_CREATE_DB=0"), "0", id="env-agrees"),
+        pytest.param(("--set-string", "env.secrets.POSTGRES_AUTO_CREATE_DB=yes"), "true", id="secret-agrees"),
+        # The chart does not render env.secrets then, so they cannot override.
+        pytest.param(
+            ("--set", "env.existingSecret=my-secret", "--set-string", "env.secrets.POSTGRES_AUTO_CREATE_DB=false"),
+            "true",
+            id="secrets-unused-with-existing-secret",
+        ),
+    ],
+)
+def test_an_auto_create_db_that_agrees_renders(tmp_path: Path, args: tuple[str, ...], expected: str) -> None:
+    documents = _documents(tmp_path, *args)
+
+    assert documents[("ConfigMap", "openrag-env")]["data"]["POSTGRES_AUTO_CREATE_DB"] == expected
+
+
 @requires_helm
 @pytest.mark.parametrize(
     "args",
