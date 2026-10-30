@@ -1191,6 +1191,9 @@ env:
     # "(Actor pid=N)" relay prefix is ANSI-colorized even on a pipe. Both off.
     RAY_DEDUP_LOGS: "0"
     RAY_COLOR_PREFIX: "0"
+    # tqdm progress bars are not JSON and each refresh becomes a log line.
+    # Any non-empty value disables them ("0" too): set "" to get them back.
+    TQDM_DISABLE: "1"
     # With ray.enabled=true the chart also sets RAY_LOG_TO_STDERR=1 (see
     # configmap-env.yaml): worker lines are then written to the Ray pods' own
     # stderr for the DaemonSet, instead of being relayed to the API driver —
