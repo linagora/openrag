@@ -43,6 +43,18 @@ spec:
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
       automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.openrag "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
+      {{- if .Values.openrag.runtimeClassName }}
+      runtimeClassName: {{ .Values.openrag.runtimeClassName }}
+      {{- end }}
+      {{- with .Values.openrag.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openrag.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openrag.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if or .Values.openrag.extraInitContainers .Values.ray.enabled }}
       initContainers:
         {{- with .Values.openrag.extraInitContainers }}
@@ -105,10 +117,28 @@ spec:
           livenessProbe:
             {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
-          {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
+          {{- $embeddedRay := eq (include "openrag-stack.embeddedRay" .) "true" }}
+          {{- /* The chart owns RAY_METRICS_EXPORT_PORT: the ray-metrics port and the
+             PodMonitor follow it, so a second entry would move the export away from
+             them. The chart reads the others from env.config to pick the Ray mode,
+             probes and migrations, so an API-only value would contradict them. */}}
+          {{- range .Values.openrag.extraEnv }}
+          {{- if and $embeddedRay (eq (toString .name) "RAY_METRICS_EXPORT_PORT") }}
+          {{- fail "openrag.extraEnv sets RAY_METRICS_EXPORT_PORT, which the chart pins for the embedded Ray: the ray-metrics port and the PodMonitor follow it. Remove it from openrag.extraEnv." }}
+          {{- end }}
+          {{- if has (toString .name) (list "RAY_ADDRESS" "ENABLE_RAY_SERVE" "POSTGRES_RUN_MIGRATIONS") }}
+          {{- fail (printf "openrag.extraEnv sets %s, which the chart reads from env.config to render the Ray mode, probes and migrations. Set it in env.config instead." .name) }}
+          {{- end }}
+          {{- end }}
+          {{- if or $embeddedRay .Values.openrag.extraEnv }}
           env:
+            {{- if $embeddedRay }}
             - name: RAY_METRICS_EXPORT_PORT
               value: {{ include "openrag-stack.rayMetricsPort" . | quote }}
+            {{- end }}
+            {{- with .Values.openrag.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           envFrom:
             - configMapRef:

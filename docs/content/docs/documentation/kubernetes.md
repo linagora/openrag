@@ -613,6 +613,32 @@ The Job is for an external PostgreSQL only. It runs before Helm creates any of t
 
 When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them, so the chart refuses to render unless you set `postgresProvisioning.externalMigrations: true` to say you run `python -m services.persistence.migrations.run` yourself. Set the app's side through `runMigrationsInApp` only: the chart also refuses an `env.config.POSTGRES_RUN_MIGRATIONS` or `env.secrets.POSTGRES_RUN_MIGRATIONS` that disagrees with it, since that entry would silently replace it. Do not put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an external secrets operator: the pods read the Secret after the ConfigMap, so its value wins, and the chart cannot read it to check it.
 
+## GPU sharing
+
+The API pod requests `nvidia.com/gpu: 1` by default (`openrag.resources`), for Marker. On a single-GPU node it shares the card with the embedder and the reranker. Pin it to that node with `openrag.nodeSelector`, `openrag.tolerations` or `openrag.affinity` (the reranker has `reranker.nodeSelector` only, so it cannot tolerate a taint), and pick one of two ways to share the card:
+
+- **Time-slicing, with a request.** Configure the NVIDIA device plugin to advertise each GPU as several `nvidia.com/gpu` replicas, and keep the request in every pod. The scheduler then counts the shares.
+- **A runtime class, without a request.** Set `openrag.runtimeClassName` (for example `nvidia`), remove `nvidia.com/gpu` from `openrag.resources.requests` and `openrag.resources.limits`, and expose the card through the container's environment:
+
+  ```yaml
+  openrag:
+    runtimeClassName: nvidia
+    resources:
+      requests:
+        nvidia.com/gpu: null
+      limits:
+        nvidia.com/gpu: null
+    extraEnv:
+      - name: NVIDIA_VISIBLE_DEVICES
+        value: all
+  ```
+
+  The scheduler no longer sees the GPU use, so the node selector is what keeps the pod on the GPU node.
+
+  This relies on the NVIDIA Container Toolkit honouring `NVIDIA_VISIBLE_DEVICES` in an unprivileged container. A node configured with `accept-nvidia-visible-devices-envvar-when-unprivileged = false` ignores it, and the container then starts without a GPU and with no error. Check that setting on your nodes, or use time-slicing.
+
+`openrag.extraEnv` holds Kubernetes `EnvVar` objects for the API container alone. They take precedence over the shared `env.config` ConfigMap. The chart refuses `RAY_METRICS_EXPORT_PORT` there, since it sets that one itself. It also refuses `RAY_ADDRESS`, `ENABLE_RAY_SERVE` and `POSTGRES_RUN_MIGRATIONS`: the chart reads them from `env.config` to render the Ray mode, probes and migrations, so set them there.
+
 ## GPU metrics
 
 The chart deploys no GPU exporter. GPU metrics come from the DCGM exporter that
