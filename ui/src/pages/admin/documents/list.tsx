@@ -34,6 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatDate } from "@/lib/utils";
+import { ApiError } from "@/lib/api/client";
 import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
@@ -68,6 +69,15 @@ export default function DocumentListPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  // Per-file outcome of the last upload, shown when some files failed.
+  const [uploadResults, setUploadResults] = useState<{ name: string; error?: string; note?: string }[]>([]);
+  // File ID generated for each selected file, kept so a retry resends the same
+  // ID and the API can recover a task it accepted but whose response was lost.
+  const fileIds = useRef(new Map<File, string>());
+  // Bumped each time the upload dialog closes. An upload still running when the
+  // dialog closes belongs to a closed session: its result must not restore
+  // files into a later dialog, which may now target another partition.
+  const uploadSession = useRef(0);
   const [fileSearch, setFileSearch] = useState("");
   const [indexedSince, setIndexedSince] = useState("");
   const [degradedStage, setDegradedStage] = useState<DegradedStage | typeof ALL_DEGRADED_STAGES>(
@@ -278,28 +288,54 @@ export default function DocumentListPage() {
     },
   });
 
+  const closeUpload = () => {
+    setUploadOpen(false);
+    uploadSession.current += 1;
+    setFiles([]);
+    setUploadResults([]);
+    fileIds.current.clear();
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
   // OpenRag indexes one file per request; multi-file upload is a client-side
   // loop, each file becoming its own indexing task (track in Jobs).
   const uploadMutation = useMutation({
     mutationFn: async () => {
       if (!files.length) throw new Error("No file selected");
+      const session = uploadSession.current;
       setUploading(true);
       let ok = 0;
-      const errors: string[] = [];
+      const results: { name: string; error?: string; note?: string }[] = [];
+      const failed: File[] = [];
       for (const f of files) {
+        let fileId = fileIds.current.get(f);
+        if (!fileId) {
+          fileId = newFileId();
+          fileIds.current.set(f, fileId);
+        }
         try {
-          await uploadFile(selected, newFileId(), f, {
+          await uploadFile(selected, fileId, f, {
             filename: f.name,
             ...(f.type ? { mimetype: f.type } : {}),
           });
           ok += 1;
+          results.push({ name: f.name });
         } catch (e) {
-          errors.push(`${f.name}: ${(e as Error).message}`);
+          // A retry resends the same file ID, so this conflict means an earlier
+          // attempt was accepted and is still indexing (its response was lost).
+          // Count it as queued instead of offering yet another retry.
+          if (e instanceof ApiError && e.code === "DOCUMENT_INDEXING_IN_PROGRESS") {
+            ok += 1;
+            results.push({ name: f.name, note: "already indexing" });
+            continue;
+          }
+          results.push({ name: f.name, error: (e as Error).message });
+          failed.push(f);
         }
       }
-      return { ok, errors };
+      return { ok, results, failed, session };
     },
-    onSuccess: ({ ok, errors }) => {
+    onSuccess: ({ ok, results, failed, session }) => {
       if (ok) {
         void invalidateJobsQueries(queryClient);
         toast.success(`${ok} file(s) queued for indexing.`, {
@@ -309,11 +345,23 @@ export default function DocumentListPage() {
           },
         });
       }
-      if (errors.length) toast.error(`${errors.length} upload(s) failed: ${errors[0]}`);
-      setUploadOpen(false);
-      setFiles([]);
-      if (fileRef.current) fileRef.current.value = "";
       queryClient.invalidateQueries({ queryKey: ["partition-files", selected] });
+      if (session !== uploadSession.current) {
+        // The dialog was closed while this upload ran: report, but leave the
+        // dialog state alone.
+        if (failed.length) toast.error(`${failed.length} upload(s) failed.`);
+        return;
+      }
+      if (fileRef.current) fileRef.current.value = "";
+      if (failed.length) {
+        // Keep the dialog open with only the failed files, so a retry does not
+        // resubmit files that were already accepted.
+        toast.error(`${failed.length} upload(s) failed. See the upload dialog for details.`);
+        setUploadResults(results);
+        setFiles(failed);
+        return;
+      }
+      closeUpload();
     },
     onError: (err: Error) => toast.error(`Upload failed: ${err.message}`),
     onSettled: () => setUploading(false),
@@ -485,7 +533,7 @@ export default function DocumentListPage() {
         description="Files indexed in a partition"
         actions={
           writable && selected ? (
-            <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
+            <Dialog open={uploadOpen} onOpenChange={(open) => (open ? setUploadOpen(true) : closeUpload())}>
               {uploadPausedReason ? (
                 <TooltipProvider>
                   <Tooltip>
@@ -522,29 +570,39 @@ export default function DocumentListPage() {
                     type="file"
                     multiple
                     ref={fileRef}
-                    onChange={(e) => setFiles(e.target.files ? Array.from(e.target.files) : [])}
+                    onChange={(e) => {
+                      setFiles(e.target.files ? Array.from(e.target.files) : []);
+                      setUploadResults([]);
+                      fileIds.current.clear();
+                    }}
                   />
                   {files.length > 0 && (
-                    <p className="text-sm text-muted-foreground">{files.length} file(s) selected</p>
+                    <p className="text-sm text-muted-foreground">
+                      {uploadResults.length
+                        ? `${files.length} failed file(s) ready to retry`
+                        : `${files.length} file(s) selected`}
+                    </p>
+                  )}
+                  {uploadResults.length > 0 && (
+                    <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">
+                      {uploadResults.map((r, i) => (
+                        <li key={i} className={r.error ? "text-destructive" : "text-muted-foreground"}>
+                          {r.name}: {r.error ?? r.note ?? "uploaded"}
+                        </li>
+                      ))}
+                    </ul>
                   )}
                   {uploadPausedReason && <p className="text-sm text-destructive">{uploadPausedReason}</p>}
                 </div>
                 <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setUploadOpen(false);
-                      setFiles([]);
-                      if (fileRef.current) fileRef.current.value = "";
-                    }}
-                  >
+                  <Button variant="outline" onClick={closeUpload}>
                     Cancel
                   </Button>
                   <Button
                     onClick={() => uploadMutation.mutate()}
                     disabled={!files.length || uploading || !!uploadPausedReason}
                   >
-                    {uploading ? "Uploading..." : "Upload"}
+                    {uploading ? "Uploading..." : uploadResults.length ? "Retry failed" : "Upload"}
                   </Button>
                 </DialogFooter>
               </DialogContent>
