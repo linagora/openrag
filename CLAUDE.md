@@ -203,6 +203,32 @@ Three caveats:
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
 
+### Temporal Queries
+
+Dates are handled from the user's wording, never from a request parameter. The query
+contextualizer (`openrag/prompts/templates/query_contextualizer_tmpl.txt`, rendered with the
+pre-computed `calendar_anchors`) emits per sub-query a `temporal_filters` list (Milvus predicates
+on `created_at`, e.g. "last week") and/or a `date_order` (`"newest"` / `"oldest"`, e.g. "the
+last meeting I had"). `Query.to_milvus_filter()` (`core/models/query.py`) renders the predicates;
+`order_chunks_by_date` (`core/retrieval/date_order.py`) applies the ordering on the
+relevance-ranked list, stable within a document and with undated chunks last. It runs in
+`RetrieverPipeline.retrieve_docs` (before a `top_k` cut), again after RRF in `get_relevant_docs`,
+and again after the cross-partition fusion in `RetrievalService` — RRF only knows ranks, so the
+order has to be re-applied after every fusion. `describe_source` (`core/prompts/chat_prompt_builder.py`)
+puts a `File: ... | Created: ... UTC` line under each `[Source N]` marker so the answering LLM can
+see the dates; the answer templates tell it to use that line for "when" questions.
+
+`created_at` is the only temporal field and is client-supplied at upload (`TEMPORAL_FIELDS` in
+`indexing_service.py`, a TIMESTAMPTZ column in Milvus); cozy-stack sends the Cozy file creation
+date, tmail the message's internal date. A chunk without it is neither filtered in nor sorted
+first. `_QUERY_JSON_HINT` (`query_service.py`) must keep `temporal_filters` / `date_order` open
+("per the rules above"): a literal `null` there is copied verbatim by the model.
+
+Known limits: `retriever.allow_filterless_fallback` (default `true`) retries without the filter
+when a period matches nothing, and the model is not told — it then summarizes out-of-period
+documents; and the ordering only sees the `retriever.top_k` most similar chunks, so "the last X"
+can miss a document that is recent but not similar enough to the rewritten query.
+
 ### Prometheus Metrics
 
 `GET /metrics` (`openrag/api/routers/admin/monitoring.py`) serves the default `prometheus_client` registry: HTTP counters/histogram recorded by `api/middleware/instrumentation.py`, plus the API-process side of the Tier-1 metrics (`openrag_ingest_tasks`, inference, tokens, circuit breakers). Anything recorded inside a Ray actor goes through `ray.util.metrics` instead and is exported by Ray's metrics agent, not `/metrics`; specs live in `core/observability/metric_specs.py`, and `tests/unit/core/observability/test_metric_emission.py` fails the build on a spec nothing writes. Full list and query rules: `docs/content/docs/documentation/metrics_reference.md`. The path is in `DEFAULT_BYPASS_PATHS` (no user token needed) and the route enforces its own `METRICS_TOKEN` (`server.metrics_token`, blank = unset) via `require_metrics_token`; admin tokens are deliberately not accepted there — one mechanism, no fallback. It **fails closed**: token unset and `METRICS_ALLOW_UNAUTHENTICATED` (`server.metrics_allow_unauthenticated`) false → 403 on every scrape, with a startup warning from `describe_metrics_access`. The opt-in exists because the API port is exactly what the Ingress / admin-ui proxy forwards (review on PR #914), so "no token" must never silently mean "open"; a configured token always wins over the opt-in. The admin UI's System > Metrics tab reads `GET /monitoring/metrics` (`admin_router`, `require_admin`, an API prefix) instead — same exposition, separate audience, so the scrape path never touches the Postgres token lookup and an admin never holds the scrape secret. The config is read through `load_config()` rather than the request container so a scrape keeps working while the container is degraded. Compose: the monitoring overlay writes `METRICS_TOKEN` into the Prometheus container via a `configs.content` entry (Compose ≥ 2.23.1) and fails fast without it; the admin-ui nginx returns 404 on `/metrics`. Helm: `openrag.metrics.*` (pod annotations + optional ServiceMonitor with `bearerTokenFromSecret`), `env.secrets.METRICS_TOKEN`, `env.config.METRICS_ALLOW_UNAUTHENTICATED`. Docs: `docs/content/docs/documentation/prometheus_metrics.md`.

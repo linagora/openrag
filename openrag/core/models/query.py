@@ -27,6 +27,12 @@ class RetrievalQuery(BaseModel):
     rerank: bool = True
 
 
+#: How the retrieved chunks are reordered by their document's ``created_at``.
+#: Set by the query contextualizer for "the latest X" / "the first X" requests,
+#: applied after relevance ranking (see ``core.retrieval.date_order``).
+DateOrder = Literal["newest", "oldest"]
+
+
 class TemporalPredicate(BaseModel):
     """A single date constraint on a document's creation date.
 
@@ -59,6 +65,14 @@ class Query(BaseModel):
     temporal_filters: list[TemporalPredicate] | None = Field(
         default=None,
         description="Date predicates on `created_at`, AND-combined.",
+    )
+    date_order: DateOrder | None = Field(
+        default=None,
+        description=(
+            'Reorder the retrieved chunks by document creation date: "newest" for '
+            '"the latest / last / most recent X", "oldest" for "the first / earliest X". '
+            "None keeps the relevance order."
+        ),
     )
 
     def to_milvus_filter(self) -> str | None:
@@ -95,7 +109,10 @@ class Query(BaseModel):
         return " and ".join(parts)
 
     def __str__(self) -> str:
-        return f"Query: {self.query}, Filter: {self.to_milvus_filter()}"
+        text = f"Query: {self.query}, Filter: {self.to_milvus_filter()}"
+        if self.date_order:
+            text += f", Order: {self.date_order}"
+        return text
 
 
 class SearchQueries(BaseModel):
@@ -110,6 +127,20 @@ class SearchQueries(BaseModel):
         default=True,
         description="Whether the user's request needs document retrieval.",
     )
+
+    @property
+    def date_order(self) -> DateOrder | None:
+        """The date ordering to apply to the fused result, if any sub-query asks for one.
+
+        Sub-queries are fused with RRF, which discards any per-list ordering, so
+        the ordering is re-applied on the fused list. When sub-queries disagree
+        the first one that asks for an order wins: "the last meeting and the
+        first one" is not a ranking a single list can express anyway.
+        """
+        for q in self.query_list:
+            if q.date_order:
+                return q.date_order
+        return None
 
     def __str__(self) -> str:
         return " --- ".join(str(q) for q in self.query_list)

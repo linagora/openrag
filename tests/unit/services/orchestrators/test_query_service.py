@@ -1472,6 +1472,7 @@ async def test_chat_trace_persists_exact_contextualized_query():
                         "value": "2026-01-01T00:00:00+00:00",
                     }
                 ],
+                "date_order": "newest",
             }
         ],
     }
@@ -1494,6 +1495,7 @@ async def test_chat_trace_persists_exact_contextualized_query():
         {
             "query": "exact generated legal query",
             "temporal_filters": [{"operator": ">=", "value": "2026-01-01T00:00:00+00:00"}],
+            "date_order": "newest",
         }
     ]
     assert trace["contextualization"]["intent"] == "other"
@@ -4108,3 +4110,56 @@ async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
     assert "Current date: Wednesday, September 16, 2026, 23:30:00" in system
     assert "- today 2026-09-16T00:00:00+00:00, tomorrow 2026-09-17T00:00:00+00:00" in system
     assert "- last week [2026-09-07, 2026-09-14)" in system
+
+
+# --------------------------------------------------------------------------- #
+# Temporal answers: the model sees each source's creation date
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_chat_context_carries_each_sources_file_and_creation_date():
+    """ "Summarize the last meeting I had" is only answerable if the model can
+    tell yesterday's notes from last year's: every dated source gets a
+    provenance line under its ``[Source N]`` marker; an undated one gets none."""
+    chunks = [
+        Chunk(
+            id="new",
+            text="notes of the 22nd",
+            metadata={"_id": "new", "filename": "Résumé.md", "created_at": "2026-09-22T14:51:30Z"},
+        ),
+        Chunk(id="bare", text="undated text", metadata={"_id": "bare"}),
+    ]
+    llm = FakeLLM(chat_responses=["answer [Sources: 1]"])
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
+    await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "summarize the last meeting"}]},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    system = llm.chat_calls[-1][0][0]["content"]
+    assert "[Source 1]\nFile: Résumé.md | Created: 2026-09-22 14:51 UTC\nnotes of the 22nd" in system
+    assert "[Source 2]\nundated text" in system
+
+
+@pytest.mark.asyncio
+async def test_generate_query_keeps_the_contextualizers_date_order():
+    payload = json.dumps(
+        {
+            "intent": "other",
+            "requires_retrieval": True,
+            "query_list": [{"query": "meeting notes", "temporal_filters": None, "date_order": "newest"}],
+        }
+    )
+    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    out = await svc.generate_query([{"role": "user", "content": "résume le dernier meeting que j'ai eu"}])
+    assert out.query_list[0].date_order == "newest"
+    assert out.date_order == "newest"
+
+
+def test_query_json_hint_leaves_the_temporal_fields_open():
+    """The hint is the last thing the model reads; a literal ``null`` there was
+    copied verbatim and the date rules never fired."""
+    assert '"temporal_filters": null' not in qs._QUERY_JSON_HINT
+    assert '"date_order"' in qs._QUERY_JSON_HINT

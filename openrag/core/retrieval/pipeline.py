@@ -28,6 +28,7 @@ from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
+from core.retrieval.date_order import order_chunks_by_date
 from core.retrieval.retriever import Retriever, has_csv_row_siblings, order_csv_continuations
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.trace import RetrievalTraceBuilder, merge_child_traces
@@ -375,6 +376,11 @@ class RetrieverPipeline:
 
                     _safe_trace(trace, "post_expansion", record_post_expansion)
 
+        # "The latest X": relevance decided which chunks made the list, the
+        # document date decides what the LLM reads first. Applied before the
+        # cut so a `top_k` keeps the newest documents, not the most similar.
+        chunks = order_chunks_by_date(chunks, query.date_order)
+
         # `reranker_top_k` is NOT applied here as a final cutoff — only
         # `top_k` (an explicit caller-supplied value, e.g. map-reduce's
         # max_total_documents) truncates. On the common no-`top_k` chat path
@@ -479,6 +485,10 @@ class RetrieverPipeline:
                 if isinstance(result, BaseException):
                     raise result
         fusion_kwargs: dict[str, Any] = {"k": self.rrf_k}
+        if search_queries.date_order:
+            # RRF only knows ranks, so a per-list date order does not survive
+            # it: re-apply it on the fused list, before the cut.
+            fusion_kwargs["reorder"] = lambda chunks: order_chunks_by_date(chunks, search_queries.date_order)
         if top_k is not None:
             fusion_kwargs["top_k"] = top_k
         if trace is not None:

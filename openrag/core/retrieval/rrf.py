@@ -38,6 +38,7 @@ def rrf_reranking(
     trace: RetrievalTraceBuilder | None = None,
     trace_stage: TraceStageName = "hybrid_fused",
     rank_scales: Sequence[float] | None = None,
+    reorder: Callable[[list[T]], list[T]] | None = None,
 ) -> list[T]:
     """Fuse multiple ranked lists into one via Reciprocal Rank Fusion.
 
@@ -56,6 +57,9 @@ def rrf_reranking(
                 would have. Weighting the score by ``n`` instead would not:
                 scores fall so slowly that the list's first ``(n - 1)(k + 1)``
                 items would all outrank another list's best.
+        reorder: Applied to the fused list before the ``top_k`` cut and the
+                trace, so a caller-imposed order (a document date, say) decides
+                what the cut keeps and the trace ranks match what is returned.
 
     Returns:
         A single ranked list, best first. Empty input -> empty list.
@@ -75,6 +79,8 @@ def rrf_reranking(
         return []
     if len(ranked_lists) == 1:
         result = list(ranked_lists[0])
+        if reorder is not None:
+            result = reorder(result)
         _record_single_list_trace(trace, result, key_fn, k, top_k, trace_stage)
         return result[:top_k] if top_k is not None else result
 
@@ -93,6 +99,8 @@ def rrf_reranking(
 
     ordered = sorted(fused.items(), key=lambda entry: entry[1][0], reverse=True)
     result = [item for _, (_, item) in ordered]
+    if reorder is not None:
+        result = reorder(result)
     _record_rrf_trace(trace, result, {key: score for key, (score, _) in fused.items()}, occurrences, top_k, trace_stage)
     return result[:top_k] if top_k is not None else result
 
