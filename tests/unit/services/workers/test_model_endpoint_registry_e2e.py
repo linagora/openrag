@@ -83,7 +83,13 @@ class _FakeVectorStore:
         return None
 
     async def upsert(
-        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+        self,
+        chunks: list[Chunk],
+        collection: str = "default",
+        *,
+        indexed_at=None,
+        vector_field=None,
+        protected_metadata=None,
     ) -> int:
         self.calls.append((chunks, collection))
         return len(chunks)

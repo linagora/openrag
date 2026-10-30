@@ -1,0 +1,499 @@
+# Lint, layer guard, unit, API, integration and UI tests in one workflow, so a
+# single `changes` job decides which of them a pull request needs.
+#
+# The organization shares 20 concurrent hosted runners between all its
+# repositories (#1277). A job that cannot be affected by a pull request's files
+# is skipped at the job level, never with a workflow-level `paths:` filter: a
+# skipped job reports success to the required checks, while a workflow that
+# never starts leaves them pending and blocks the merge. For the same reason
+# every dependent job runs unless `changes` explicitly reported "false", so a
+# failed `changes` job runs everything instead of skipping it.
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.areas.outputs.backend }}
+      unit: ${{ steps.areas.outputs.unit }}
+      ui: ${{ steps.areas.outputs.ui }}
+    steps:
+      # Pushes to main and develop run everything. On a pull request:
+      #   backend  anything outside ui/, docs/ and the top-level *.md files
+      #   unit     anything outside ui/ and the top-level *.md files, since
+      #            unit tests read pages and env files under docs/
+      #   ui       anything under ui/, or this file
+      - name: Find the areas this pull request changes
+        id: areas
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const areas = { backend: true, unit: true, ui: true };
+            if (context.eventName === 'pull_request') {
+              try {
+                const files = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                  per_page: 100,
+                });
+                // The API lists at most 3,000 files; past that, run everything.
+                if (files.length < 3000) {
+                  const paths = files.flatMap(({ filename, previous_filename }) =>
+                    [filename, previous_filename].filter(Boolean)
+                  );
+                  const isUi = (path) => path.startsWith('ui/');
+                  const isTopLevelMarkdown = (path) => !path.includes('/') && path.endsWith('.md');
+                  const isDocs = (path) => path.startsWith('docs/') || isTopLevelMarkdown(path);
+                  areas.backend = paths.some((path) => !isUi(path) && !isDocs(path));
+                  areas.unit = paths.some((path) => !isUi(path) && !isTopLevelMarkdown(path));
+                  areas.ui = paths.some((path) => isUi(path) || path === '.github/workflows/ci.yml');
+                }
+              } catch (error) {
+                core.warning(`Could not list the changed files, running every job: ${error.message}`);
+              }
+            }
+            for (const [area, changed] of Object.entries(areas)) {
+              core.setOutput(area, String(changed));
+              core.info(`${area}: ${changed}`);
+            }
+
+  lint:
+    # The required check is named "lint (3.12)", from the matrix this job
+    # had. A matrix job skipped by `if:` reports without its matrix suffix,
+    # which would leave that check pending, so the name is spelled out instead.
+    name: lint (3.12)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('**/pyproject.toml', '**/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Install dependencies with uv
+        run: |
+          uv sync --group lint
+
+      - name: Run Ruff linting
+        run: |
+          uv run ruff check openrag/ tests/ --output-format=github
+
+      - name: Check formatting
+        run: |
+          uv run ruff format --check openrag/ tests/
+
+  layer-import-guard:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run layer guard
+        run: python scripts/check_layer_imports.py
+
+  tests:
+    # The required check is named "tests (3.12)", from the matrix this job
+    # had. A matrix job skipped by `if:` reports without its matrix suffix,
+    # which would leave that check pending, so the name is spelled out instead.
+    name: tests (3.12)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.unit != 'false' }}
+    runs-on: ubuntu-latest
+    # The suite takes about 5 minutes. A hung test otherwise holds the runner
+    # for GitHub's 6-hour default before anyone hears about it.
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('**/pyproject.toml', '**/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Install dependencies with uv
+        run: |
+          uv sync
+
+      # promtool unit-tests the shipped alert rules (tests/unit/infra/
+      # alert_rules.promtool.yaml). Pinned to the version the Compose overlay
+      # runs, so CI checks the rules against the promtool that will evaluate
+      # them. Verified by checksum: this is a binary from outside the repo
+      # landing on PATH in a job that can read the workflow token.
+      - name: Install promtool
+        env:
+          PROMETHEUS_VERSION: "2.54.1"
+          PROMETHEUS_SHA256: "31715ef65e8a898d0f97c8c08c03b6b9afe485ac84e1698bcfec90fc6e62924f"
+        run: |
+          set -euo pipefail
+          archive="prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          curl -fsSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${archive}"
+          echo "${PROMETHEUS_SHA256}  ${archive}" | sha256sum --check --strict -
+          tar -xzf "${archive}" --strip-components=1 \
+            "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+          sudo install -m 0755 promtool /usr/local/bin/promtool
+          promtool --version
+
+      # Needed to render the chart's rule template in the next step.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      # The Compose copy of the alert rules is generated from the chart template;
+      # this renders it and fails if the checked-in file differs. Without it the
+      # two deployments quietly drift apart, which is the whole failure the
+      # generate-and-verify layout exists to prevent.
+      - name: Check the generated alert rules are up to date
+        run: |
+          uv run python scripts/gen_alert_rules.py --check
+
+      # The rendered chart tests need the sub-chart archives, which are
+      # git-ignored; without them those tests skip instead of running.
+      - name: Cache chart dependencies
+        id: chart-dependencies
+        uses: actions/cache@v4
+        with:
+          path: infra/charts/openrag-stack/charts/*.tgz
+          key: chart-dependencies-${{ hashFiles('infra/charts/openrag-stack/Chart.lock') }}
+
+      # `helm dependency build` fetches the versions pinned in Chart.lock, but
+      # only from repositories that have been added.
+      - name: Fetch chart dependencies
+        if: steps.chart-dependencies.outputs.cache-hit != 'true'
+        run: |
+          set -eo pipefail
+          chart=infra/charts/openrag-stack
+          sed -n 's/^ *repository: *//p' "$chart/Chart.lock" | grep '^https\?://' | sort -u | nl -w1 -s' ' |
+            while read -r n url; do helm repo add "dependency-$n" "$url"; done
+          helm dependency build --skip-refresh "$chart"
+
+      - name: Run tests
+        env:
+          # promtool is installed above, so a skipped alert-rule test now means
+          # something broke rather than "not available here". Without this the
+          # suite would go green while the rules went unchecked — the same
+          # failure mode as an alert rule that matches nothing.
+          REQUIRE_PROMTOOL: "1"
+        run: |
+          uv run pytest tests/unit/
+
+  api-tests:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@v1
+        with:
+          version: v2.34.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          pip install pytest httpx pytest-timeout
+
+      - name: Build and start services
+        working-directory: tests/integration/api/api_run
+        run: |
+          docker compose build
+          docker compose up -d
+
+          echo "Waiting for services to be ready..."
+
+          # Wait for mock-vllm
+          echo "Waiting for mock-vllm..."
+          if ! timeout 60 bash -c 'until curl -sf http://localhost:8000/health 2>/dev/null; do sleep 2; done'; then
+            echo "Mock VLLM failed to start"
+            docker compose logs mock-vllm
+            exit 1
+          fi
+
+          # Wait for OpenRAG API
+          echo "Waiting for OpenRAG API..."
+          # /ready runs dependency checks, unlike /health_check, so bound each
+          # request and the whole wait: a hung call must not run the job into
+          # its own timeout, which would cancel it before the diagnosis below.
+          ready_curl="curl --connect-timeout 3 --max-time 10"
+          poll_deadline=$((SECONDS + 900))
+          for i in {1..180}; do
+            if $ready_curl -sf http://localhost:8080/ready 2>/dev/null; then
+              echo "OpenRAG API ready after $i attempts"
+              break
+            fi
+            if (( SECONDS >= poll_deadline )); then
+              echo "Readiness polling timed out after 15 minutes"
+              break
+            fi
+            echo "Attempt $i/180 - waiting..."
+            sleep 5
+          done
+
+          # Final check
+          if ! $ready_curl -sf http://localhost:8080/ready; then
+            echo "OpenRAG API failed to start. /ready says:"
+            # The body names the failing dependency, or reports
+            # startup=unavailable when the container never initialised — the
+            # diagnosis this gate used to hide behind a 200 from /health_check.
+            $ready_curl -s http://localhost:8080/ready || true
+            echo
+            docker compose logs openrag
+            exit 1
+          fi
+
+          echo "All services ready!"
+
+      - name: Run API tests
+        env:
+          OPENRAG_API_URL: http://localhost:8080
+          AUTH_TOKEN: test-admin-token
+        run: |
+          cd tests/integration/api
+          OPENRAG_API_URL=http://localhost:8080 python3 -m pytest . -v --timeout=120 --tb=short
+
+      - name: Show logs on failure
+        if: failure()
+        working-directory: tests/integration/api/api_run
+        run: |
+          echo "=== OpenRAG Logs ==="
+          docker compose logs openrag --tail=100
+          echo "=== Mock VLLM Logs ==="
+          docker compose logs mock-vllm --tail=50
+          echo "=== Milvus Logs ==="
+          docker compose logs milvus --tail=50
+
+      - name: Cleanup
+        if: always()
+        working-directory: tests/integration/api/api_run
+        run: |
+          docker compose down -v
+
+  # The PostgreSQL repository tests and the Ray metrics export test, in one job:
+  # each is about a minute, most of it setup.
+  postgres-ray-integration:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: root_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U root"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('**/pyproject.toml', '**/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+      - run: uv sync
+      - name: Verify workspace file retention against PostgreSQL
+        env:
+          POSTGRES_TEST_ADMIN_DSN: postgresql://root:root_password@localhost:5432/postgres
+        run: >-
+          uv run pytest tests/integration/repos/test_workspace_repo.py
+          tests/integration/repos/test_workspace_deletion.py
+          tests/integration/repos/test_document_repo.py -v --tb=short
+      # Its own pytest process, so the test starts Ray itself instead of
+      # inheriting a session another test began.
+      - name: Verify worker metrics reach Ray's metrics endpoint
+        if: ${{ !cancelled() }}
+        run: uv run pytest tests/integration/test_ray_metrics_export.py -v --tb=short
+
+  milvus-integration:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@v1
+        with:
+          version: v2.34.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('**/pyproject.toml', '**/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Start Milvus stack
+        working-directory: tests/integration/repos
+        run: docker compose up -d --wait --wait-timeout 180
+
+      - name: Verify Milvus reachable from host
+        run: |
+          for i in {1..30}; do
+            if curl -sf http://localhost:9091/healthz 2>/dev/null; then
+              echo "Milvus healthy after $i attempts"
+              break
+            fi
+            echo "Attempt $i/30 - waiting..."
+            sleep 2
+          done
+          curl -sf http://localhost:9091/healthz
+
+      - name: Run integration tests
+        env:
+          OPENRAG_TEST_VDB_HOST: localhost
+          OPENRAG_TEST_VDB_PORT: "19530"
+        run: uv run pytest tests/integration/repos/ -m integration -v --tb=short
+
+      - name: Show logs on failure
+        if: failure()
+        working-directory: tests/integration/repos
+        run: |
+          echo "=== Milvus Logs ==="
+          docker compose logs milvus --tail=200
+          echo "=== etcd Logs ==="
+          docker compose logs etcd --tail=50
+          echo "=== minio Logs ==="
+          docker compose logs minio --tail=50
+
+      - name: Cleanup
+        if: always()
+        working-directory: tests/integration/repos
+        run: docker compose down -v
+
+  ui-tests:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ui != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: ui
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run vitest
+        # vite.config.ts sets passWithNoTests: true for local runs; in CI an empty
+        # test discovery means something broke, so make it a failure.
+        run: npm test -- --passWithNoTests=false

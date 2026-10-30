@@ -32,6 +32,7 @@
 [OpenRag](https://open-rag.ai/) supports a comprehensive range of file formats for seamless document ingestion:
 
 * **Text Files**: `txt`, `md`
+* **Tabular Data**: `csv` - Configurable delimiter-aware parsing with row-preserving, token-bounded table chunks
 * **Document Files**: `pdf`, `docx`, `doc`, `pptx` - Advanced PDF parsing with OCR support and Office document processing
 * **E-mail**: `eml` - Message body and headers, with attachments parsed through their own format's pipeline
 * **Audio Files**: `wav`, `mp3`, `flac`, `ogg`, `aac`, `wma` - Audio transcription and content extraction
@@ -118,7 +119,7 @@ For more details, [see this file](docs/features_in_details.md)
 
 
 ## 🚧 Coming Soon
-* **📂 Expanded Format Support**: Future updates will introduce compatibility with additional formats such as `csv`, `odt`, `html`, and other widely used open-source document types.
+* **📂 Expanded Format Support**: Future updates will introduce compatibility with additional formats such as `odt`, `html`, and other widely used open-source document types.
 * **🔄 Unified Markdown Conversion**: All files will continue to be converted to markdown using a consistent chunker. Format-specific chunkers (e.g., for CSV, HTML) are planned for enhanced processing.
 * **🤖 Advanced Features**: Upcoming releases will include Tool Calling, Agentic RAG, and MCP to elevate your RAG workflows.
 * **Enhanced Security**: Ensures data encryption both during transit and at rest.

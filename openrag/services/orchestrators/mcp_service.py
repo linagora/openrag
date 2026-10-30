@@ -688,8 +688,9 @@ class MCPService:
             for _ in range(_MAX_REDIRECTS + 1):
                 if not is_safe_url(current_url):
                     raise ValueError(f"redirect to a disallowed URL: {current_url!r}")
-                await self._assert_host_resolves_safely(urlparse(current_url).hostname or "")
-                async with client.stream("GET", current_url) as response:
+                request_url = httpx.URL(current_url)
+                await self._assert_host_resolves_safely(request_url.raw_host.decode("ascii"))
+                async with client.stream("GET", request_url) as response:
                     if response.is_redirect:
                         location = response.headers.get("location", "")
                         if not location:

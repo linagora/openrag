@@ -75,7 +75,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
 | `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
 | `PARSE_TIMEOUT` | `int` | `3600` | Outer wall-clock bound (in seconds) for a single file's parse stage, whichever loader runs it. Marker and Docling self-limit via their own timeouts, but `PyMuPDFLoader` has none — this bound stops a wedged parse from stalling indexing: the file fails and is reported instead. |
-| `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS` | `bool` | `false` | Development-only escape hatch for the upload `callback_url`. By default a callback targeting `localhost`, a private or link-local address is refused (SSRF guard on a caller-supplied URL). Set it to `true` only in a dev stack whose callback target is a local instance (e.g. `http://cozy.localhost:8080`). Non-`http(s)` schemes stay rejected either way. |
+| `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS` | `bool` | `false` | Development-only escape hatch for the upload `callback_url`. By default, literal localhost, private, link-local, and reserved addresses are refused. DNS hostnames are not resolved by this check. Set it to `true` only in a dev stack whose callback target is a local instance (e.g. `http://cozy.localhost:8080`). Non-`http(s)` schemes stay rejected either way. |
 
 :::caution
 `PyMuPDFLoader` (the default) is a lightweight PDF loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images. Set `PDFLOADER=MarkerLoader` when you need those.
@@ -307,6 +307,8 @@ The vector database stores embeddings and is configured using the following envi
 |`VDB_HYBRID_SEARCH`| `bool` | true |To activate hybrid search (semantic similarity + Keyword search)|
 | `VDB_ENABLE_INSERTION` | bool | true | Enable or disable vector database insertion. When disabled, documents are processed but not inserted into Milvus. Useful for testing. |
 | `VDB_TIMEOUT` | float | 120.0 | Per-request timeout (seconds) applied to the Milvus sync and async clients |
+| `VDB_JSON_MAX_LENGTH` | int | 65536 | Maximum JSON metadata size in bytes per row. Must match the Milvus server's `common.JSONMaxLength` |
+| `VDB_JSON_SAFETY_MARGIN_BYTES` | int | 1024 | Bytes reserved below the limit when shortening oversized rows. Must be positive and leave at least two bytes |
 
 These variables can be overridden when using an external vector database service.
 
@@ -433,6 +435,12 @@ Enable only where every API caller is already trusted with both.
 | `VLM_API_KEY` | str | _(unset)_ | API key for authenticating with the VLM service |
 | `VLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `VLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the VLM service |
+
+#### Language Detection
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory, not when the download fails. Without that access, every detection retries the download, which can block for about two minutes when the host doesn't answer, and then falls back to English. |
 
 ### RAG Pipeline Mode
 
@@ -567,8 +575,8 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 |----------|------|---------|-------------|
 | `RAY_POOL_SIZE` | `int` | 1 | Number of indexer worker actors in the pool. Total indexing capacity = `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER`. |
 | `RAY_MAX_TASKS_PER_WORKER` | `int` | 50 | Maximum number of files processed concurrently per indexer worker actor |
-| `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. In production, [comment out this line](https://github.com/linagora/openrag/blob/ee732ea8e080dcde0107d62d12703a7525f810cd/docker-compose.yaml#L21C1-L22C1) to avoid exposing the port, as it may introduce security vulnerabilities. |
-| `RAY_DASHBOARD_HOST` | `str` | `127.0.0.1` | Interface the **embedded** Ray dashboard binds to. Defaults to loopback because the Ray dashboard/job-submission API is **unauthenticated** ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). Set to `0.0.0.0` only when the dashboard port is firewalled or sits behind an authenticating proxy. Ignored when `RAY_ADDRESS` is set. |
+| `RAY_DASHBOARD_PORT` | `int` | 8265 | Host port the Compose overlay `ray-dashboard.docker-compose.yaml` publishes the embedded Ray dashboard on, on `127.0.0.1`; inside the container the dashboard listens on Ray's default, 8265. In a [Ray cluster](/openrag/documentation/deploy_ray_cluster/), it is also the head node's `--dashboard-port`. The base Compose file does not publish the dashboard. See [Ray dashboard](/openrag/installation/docker/#ray-dashboard). |
+| `RAY_DASHBOARD_HOST` | `str` | `127.0.0.1` | Interface the **embedded** Ray dashboard binds to. Defaults to loopback because the Ray dashboard/job-submission API is **unauthenticated** ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). Set to `0.0.0.0` only when the dashboard port is firewalled or sits behind an authenticating proxy. The Compose overlay `ray-dashboard.docker-compose.yaml` sets it to `0.0.0.0`, since a published port does not reach the container's loopback. Ignored when `RAY_ADDRESS` is set. |
 | `RAY_METRICS_EXPORT_PORT` | `int` | (unset) | Port the **embedded** Ray's metrics agent listens on. Unset, Ray picks a random port, so the metrics recorded in Ray actors (indexing, and the inference calls the indexing workers make) are exported but no scrape config can reach them. The Compose monitoring overlay sets it to `8091` and scrapes it; the Helm chart sets it to `8090` on the `openrag` pod when `ray.enabled=false`. Applies under `ENABLE_RAY_SERVE=true` too. Under embedded Ray Serve with `WITH_CHAINLIT_UI`, Chainlit listens on `CHAINLIT_PORT` (default `8090`), so keep the two different. Unauthenticated and bound to every interface: never publish it on the host. Ignored when `RAY_ADDRESS` is set. |
 | `RAY_ADDRESS` | `str` | (unset) | When set, attach to an **external** Ray cluster at this address (e.g. `ray://HEAD_IP:10001`) instead of starting an embedded cluster in-process. In this mode the app does not start a local dashboard — the head node owns it. See [Ray Cluster deployment](/openrag/documentation/deploy_ray_cluster/). |
 

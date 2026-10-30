@@ -255,5 +255,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Re-runs the image's `apk upgrade` on every build; see ui.Dockerfile.
+          build-args: |
+            APK_UPGRADE_KEY=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

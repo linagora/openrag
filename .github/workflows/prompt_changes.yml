@@ -6,11 +6,17 @@ on:
       - main
       - develop
       - 'release/**'
+    # `edited` also covers a change of base branch, which the check diffs against.
     types: [opened, synchronize, reopened, edited, labeled, unlabeled]
 
 permissions:
   contents: read
   pull-requests: read
+
+# A burst of label changes needs only the run for the last one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   require-prompt-label:

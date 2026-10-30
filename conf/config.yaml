@@ -42,6 +42,15 @@ semaphore:
   llm_semaphore: 10
   vlm_semaphore: 10
 
+# --- Language detection (fast-langdetect) ---
+# Env: LANGDETECT_MODEL
+# lite: bundled with the package, no network access needed; slightly less
+#   accurate than full on very short text (a query of a few words).
+# full / auto: download the larger model to /app/model_weights on first use.
+#   auto falls back to lite only on MemoryError, not when the download fails.
+language_detection:
+  model: lite
+
 # --- Embedder ---
 # Env: EMBEDDER_PROVIDER, EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY,
 #      MAX_MODEL_LEN, EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
@@ -57,7 +66,7 @@ embedder:
 
 # --- Vector Database (Milvus) ---
 # Env: VDB_HOST, VDB_PORT, VDB_CONNECTOR_NAME, VDB_COLLECTION_NAME, VDB_HYBRID_SEARCH,
-#      VDB_ENABLE_INSERTION, VDB_TIMEOUT
+#      VDB_ENABLE_INSERTION, VDB_TIMEOUT, VDB_JSON_MAX_LENGTH, VDB_JSON_SAFETY_MARGIN_BYTES
 vectordb:
   host: milvus
   port: 19530
@@ -66,6 +75,9 @@ vectordb:
   hybrid_search: true
   enable: true
   timeout: 120.0 # per-request timeout (s) for the Milvus sync/async clients
+  # Match Milvus's common.JSONMaxLength. Oversized rows are fitted below it.
+  json_max_length: 65536
+  json_safety_margin_bytes: 1024
   schema_version: 3 # Increment when the collection schema changes and a migration is required
 
 # --- Relational Database (PostgreSQL) ---
@@ -160,7 +172,10 @@ prompts:
 # --- Document loader ---
 loader:
   # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
-  #      CONTENT_DEDUPLICATION_ENABLED
+  #      CONTENT_DEDUPLICATION_ENABLED, CSV_BATCH_SIZE, CSV_DELIMITER
+  csv_batch_size: 10000
+  # Null enables delimiter sniffing. Set one character to force a delimiter.
+  csv_delimiter: null
   image_captioning: true
   image_captioning_url: true
   save_markdown: false
