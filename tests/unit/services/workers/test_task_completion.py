@@ -18,9 +18,12 @@ def _remote_mock(return_value: Any = None) -> MagicMock:
 def _stub_periodic_reconcile(request, monkeypatch):
     """Keep recover()'s background reconcile loop from dangling past each test.
 
-    Skipped for the test that exercises the real loop directly.
+    Skipped for the tests that exercise the real loop directly.
     """
-    if request.node.name == "test_periodic_reconcile_keeps_sweeping_until_cancelled":
+    if request.node.name in {
+        "test_periodic_reconcile_keeps_sweeping_until_cancelled",
+        "test_the_periodic_reconcile_sweeps_slots_too",
+    }:
         return
     from services.workers import task_completion
 
@@ -28,6 +31,41 @@ def _stub_periodic_reconcile(request, monkeypatch):
         return None
 
     monkeypatch.setattr(task_completion.TaskCompletionTracker, "_periodic_reconcile", _noop)
+
+
+class _FakeUserRepo:
+    """Records quota-slot releases instead of touching Postgres."""
+
+    def __init__(self) -> None:
+        self.released: list[str] = []
+        self.sweeps: list[dict[str, Any]] = []
+        self.release_error: BaseException | None = None
+
+    async def release_file_slot(self, reservation_id: str) -> bool:
+        if self.release_error is not None:
+            raise self.release_error
+        self.released.append(reservation_id)
+        return True
+
+    async def release_stale_file_slots(self, *, live_ids, settled_ids, created_before) -> int:
+        self.sweeps.append(
+            {"live_ids": sorted(live_ids), "settled_ids": sorted(settled_ids), "created_before": created_before}
+        )
+        return 0
+
+
+@pytest.fixture(autouse=True)
+def user_repo(monkeypatch) -> _FakeUserRepo:
+    """Keep every tracker in this module off a real catalog store for slot releases."""
+    from services.workers import task_completion
+
+    repo = _FakeUserRepo()
+
+    async def _user_repo(self):
+        return repo
+
+    monkeypatch.setattr(task_completion.TaskCompletionTracker, "_user_repo", _user_repo)
+    return repo
 
 
 def _task_state_manager(
@@ -59,6 +97,12 @@ def test_tracker_reports_error_reason_history_capability() -> None:
     from services.workers.task_completion import TaskCompletionTracker
 
     assert TaskCompletionTracker().supports_error_reason_history() is True
+
+
+def test_tracker_reports_file_slot_release_capability() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    assert TaskCompletionTracker().supports_file_slot_release() is True
 
 
 @pytest.mark.asyncio
@@ -959,3 +1003,167 @@ async def test_tracker_keeps_polling_an_orphaned_worker_past_a_failed_read(monke
 
     assert tsm.has_worker_settled.remote.await_count == 3
     tsm.set_details.remote.assert_awaited_once()
+
+
+# ── #664: the quota slot of a dispatched task ─────────────────────────
+
+
+def _cancelled_before_start() -> BaseException:
+    from ray.exceptions import TaskCancelledError
+
+    return TaskCancelledError()
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [None, RuntimeError("parser failed"), "cancelled", "actor-died"],
+    ids=["completed", "worker-failed", "cancelled-before-start", "worker-died"],
+)
+@pytest.mark.asyncio
+async def test_a_settled_task_gives_its_file_slot_back(user_repo, outcome) -> None:
+    """Every outcome reaches the release; one that wrote its file consumed the slot, so it is a no-op there.
+
+    ``cancelled`` is the case nothing inside the worker can cover: ``ray.cancel``
+    retires a task that never started, so only the ref settling says so.
+    """
+    from ray.exceptions import ActorDiedError
+    from services.workers.task_completion import TaskCompletionTracker
+
+    ref = asyncio.get_running_loop().create_future()
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = _settled_details()
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = TaskCompletionTracker()
+        watch = asyncio.create_task(tracker.track("task-1", {"ref": ref}))
+        await asyncio.sleep(0)
+        assert user_repo.released == []
+        if outcome is None:
+            ref.set_result({"stored_count": 1})
+        elif outcome == "cancelled":
+            ref.set_exception(_cancelled_before_start())
+        elif outcome == "actor-died":
+            ref.set_exception(ActorDiedError())
+        else:
+            ref.set_exception(outcome)
+        await watch
+
+    assert user_repo.released == ["task-1"]
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_an_orphaned_worker_keeps_its_slot_until_it_settles(user_repo, monkeypatch) -> None:
+    """OwnerDiedError: the worker may still write its file, so the slot waits for its lease."""
+    from services.workers import task_completion
+
+    monkeypatch.setattr(task_completion, "_ORPHANED_WORKER_POLL_SECONDS", 0)
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = _settled_details()
+    released_after: list[int] = []
+    tsm.has_worker_settled = _remote_mock()
+    tsm.has_worker_settled.remote.side_effect = [False, True]
+    original = user_repo.release_file_slot
+
+    async def release(reservation_id: str) -> bool:
+        released_after.append(tsm.has_worker_settled.remote.await_count)
+        return await original(reservation_id)
+
+    user_repo.release_file_slot = release
+
+    await _track_until_settled(tsm, _owner_died_error())
+
+    assert released_after == [2]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_slot_release_does_not_stop_the_settlement(user_repo) -> None:
+    user_repo.release_error = RuntimeError("postgres down")
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = _settled_details()
+
+    await _track_until_settled(tsm, RuntimeError("parser failed"))
+
+    tsm.set_details.remote.assert_awaited_once()
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_the_slot_sweep_keeps_live_tasks_and_releases_settled_ones(user_repo) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from services.workers import task_completion
+
+    tracker = task_completion.TaskCompletionTracker()
+    before = datetime.now(UTC)
+
+    await tracker.reconcile_file_slots(
+        {
+            "queued": {"state": "QUEUED"},
+            "running": {"state": "SERIALIZING"},
+            "registering": {"state": None},
+            "done": {"state": "COMPLETED"},
+            "failed": {"state": "FAILED"},
+            "cancelled": {"state": "CANCELLED"},
+        }
+    )
+
+    (sweep,) = user_repo.sweeps
+    assert sweep["live_ids"] == ["queued", "registering", "running"]
+    assert sweep["settled_ids"] == ["cancelled", "done", "failed"]
+    # Slots the actor does not know are spared for the grace window: they may
+    # belong to an upload that has not been queued yet.
+    grace = timedelta(seconds=task_completion._ORPHAN_GRACE_SECONDS)
+    assert before - grace - timedelta(seconds=5) < sweep["created_before"] <= datetime.now(UTC) - grace
+
+
+@pytest.mark.asyncio
+async def test_a_failed_slot_sweep_is_swallowed(user_repo) -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    async def boom(**_kwargs):
+        raise RuntimeError("postgres down")
+
+    user_repo.release_stale_file_slots = boom
+
+    await TaskCompletionTracker().reconcile_file_slots({"task-1": {"state": "FAILED"}})
+
+
+@pytest.mark.asyncio
+async def test_recover_sweeps_the_slots_a_restart_left_behind(user_repo) -> None:
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(
+        all_info={
+            "task-live": {"state": "QUEUED", "details": {}},
+            "task-done": {"state": "FAILED", "details": {"metadata": {"_openrag_job_finished_at": "x"}}},
+        }
+    )
+    tsm.get_object_ref.remote.return_value = {"ref": object()}
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker.recover()
+
+    (sweep,) = user_repo.sweeps
+    assert sweep["live_ids"] == ["task-live"]
+    assert sweep["settled_ids"] == ["task-done"]
+
+
+@pytest.mark.asyncio
+async def test_the_periodic_reconcile_sweeps_slots_too(user_repo) -> None:
+    repo = _FakeJobRepo()
+    tracker = _tracker_with_repo(repo)
+    tracker._task_state_manager = MagicMock()
+    tracker._call_task_state = AsyncMock(return_value={"task-live": {"state": "SERIALIZING"}})
+    sweeps_before_cancel: list[int] = []
+
+    async def reconcile_file_slots(all_info):
+        sweeps_before_cancel.append(len(all_info))
+        raise asyncio.CancelledError()
+
+    tracker.reconcile_file_slots = reconcile_file_slots
+
+    with pytest.raises(asyncio.CancelledError):
+        await tracker._periodic_reconcile(interval=0)
+
+    assert sweeps_before_cancel == [1]
+    assert repo.failed_calls[0]["active_ids"] == ["task-live"]

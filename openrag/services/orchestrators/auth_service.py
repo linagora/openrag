@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
-from core.models.user import OIDCSession, PartitionRole, User, UserPartition
+from core.models.user import FileSlotGrant, OIDCSession, PartitionRole, User, UserPartition
 from core.utils.exceptions import AuthError, OpenRAGError
 from core.utils.logging import get_logger, mask_email
 from services.auth import (
@@ -559,39 +559,59 @@ class AuthService:
             case _:
                 raise ValueError(f"Unknown authorization action: {action!r}")
 
-    @classmethod
-    def validate_file_quota(
-        cls,
-        user: Any,
-        *,
-        pending_task_count: int,
-        default_quota: int,
-    ) -> None:
-        """Pure quota check (the pending-task count is supplied by the caller).
+    # ── File quota (#664) ─────────────────────────────────────────────
 
-        Quota semantics (shared with ``check_user_file_quota``): admins
-        bypass; a per-user ``file_quota`` of ``None`` falls back to the
-        global default; a *resolved* quota ``< 0`` means unlimited. So a
-        negative global default only disables quotas for users without a
-        per-user override — an explicit per-user limit is always honored.
+    @classmethod
+    def has_unlimited_file_quota(cls, user: Any, *, default_quota: int) -> bool:
+        """Whether ``user`` is exempt from the file quota.
+
+        Quota semantics: admins bypass; a per-user ``file_quota`` of ``None``
+        falls back to the global default; a *resolved* quota ``< 0`` means
+        unlimited. So a negative global default only lifts the quota of users
+        without a per-user override; an explicit per-user limit always holds.
         """
         if cls._uget(user, "is_admin", False):
-            return
-
+            return True
         user_quota = cls._uget(user, "file_quota")
         if user_quota is None:
             user_quota = default_quota
-        if user_quota < 0:
-            return
+        return user_quota < 0
 
-        indexed_count = cls._uget(user, "file_count", 0) or 0
-        total = indexed_count + pending_task_count
-        if total >= user_quota:
+    async def reserve_file_slot(self, user_id: int, reservation_id: str, *, default_quota: int) -> FileSlotGrant:
+        """Take one file slot for an upload, or refuse it.
+
+        The check and the increment are one conditional UPDATE in the user
+        repo, so concurrent uploads can never take more slots than the quota
+        leaves (the read-then-check this replaces admitted every racer). The
+        in-memory pending-task count is not an input: a held slot is already
+        in ``users.file_count``.
+
+        Returns ``RESERVED`` (the caller now owns the slot and must see it
+        consumed or released) or ``UNLIMITED`` (nothing to own). Raises
+        ``FILE_QUOTA_EXCEEDED`` (403) when the quota is full.
+        """
+        grant = await self._user_repo.try_reserve_file_slot(user_id, reservation_id, default_quota=default_quota)
+        if grant is FileSlotGrant.DENIED:
             raise OpenRAGError(
-                f"File quota exceeded. You have {indexed_count} indexed files "
-                f"and {pending_task_count} pending tasks. Limit: {user_quota}",
+                "File quota exceeded. Delete a file or ask an administrator to raise your quota.",
                 code="FILE_QUOTA_EXCEEDED",
                 status_code=403,
+            )
+        return grant
+
+    async def release_file_slot(self, reservation_id: str) -> None:
+        """Give back a slot no file consumed. Idempotent, and never raises.
+
+        It runs on cleanup paths, where raising would replace the error the
+        caller needs. A lost release is retried by the completion tracker's
+        sweep, so it is logged rather than raised.
+        """
+        try:
+            await self._user_repo.release_file_slot(reservation_id)
+        except Exception as exc:
+            logger.bind(reservation_id=reservation_id).warning(
+                "Failed to release a file-quota reservation; the reconcile sweep will retry",
+                error=str(exc),
             )
 
     def sanitize_next_url(self, next_url: str | None) -> str:

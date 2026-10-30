@@ -618,6 +618,9 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(
         "require_existing_partition": False,
         "independently_indexed": independently_indexed,
         "content_sha256": None,
+        # A capped upload runs under its file-slot reservation's id, so the
+        # insert consumes that slot (#664).
+        "quota_reservation_id": "t-new",
     }
     assert repo.update_calls == []
 

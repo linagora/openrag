@@ -447,6 +447,70 @@ async def test_dispatch_indexing_registers_completion_with_detached_tracker() ->
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_runs_under_a_caller_supplied_task_id() -> None:
+    """A capped upload's task id is its file-slot reservation (#664): every
+    store keys the task by it, and the worker's catalog insert consumes it."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    pool = _pool_with_ref(ref)
+    tsm = _task_state_manager()
+    tracker = _completion_tracker()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=tracker,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "minted"
+        task_id = await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+            task_id="reservation-1",
+        )
+
+    assert task_id == "reservation-1"
+    assert tsm.set_queued_details_v2.remote.call_args.args[0] == "reservation-1"
+    assert pool.submit.remote.call_args.kwargs["task_id"] == "reservation-1"
+    tracker.track.remote.assert_called_once_with("reservation-1", {"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_copy_file_hands_its_reservation_to_the_catalog_insert() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.copy_file(
+        "file-1",
+        {"file_id": "copy-1", "partition": "tenant-b"},
+        "tenant-a",
+        user={"id": 7},
+        quota_reservation_id="reservation-1",
+    )
+
+    assert document_repo.add_file_to_partition.call_args.kwargs["quota_reservation_id"] == "reservation-1"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_rejects_content_already_claimed() -> None:
     from core.utils.exceptions import ConflictError
     from services.workers.dispatcher import WorkerDispatcher
@@ -1551,6 +1615,7 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
         content_sha256=None,
         indexed_at=copied_at,
         chunk_count=1,
+        quota_reservation_id=None,
     )
     vector_store.upsert_entities.assert_awaited_once()
     vector_store.insert_entities.assert_awaited_once()

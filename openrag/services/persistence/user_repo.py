@@ -34,12 +34,13 @@ import hashlib
 import os
 import secrets
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
 from core.config.auth import ADMIN_TOKEN_ENV_VAR, SeedUserConfig
 from core.config.secrets_guard import ALLOW_INSECURE_SECRETS_ENV_VAR, MIN_SECRET_LENGTH, is_known_default
-from core.models.user import ApiKey, PartitionRole, User, UserPartition
+from core.models.user import ApiKey, FileSlotGrant, PartitionRole, User, UserPartition
 from core.ports.user_repo import UserRepository
 from core.utils.logging import get_logger
 
@@ -273,6 +274,105 @@ class PgUserRepository(UserRepository):
 
     async def count_users(self) -> int:
         return await self.pool.fetchval("SELECT COUNT(*)::int FROM users")
+
+    # ── File-quota reservations (#664) ───────────────────────────────
+
+    async def try_reserve_file_slot(
+        self,
+        user_id: int,
+        reservation_id: str,
+        *,
+        default_quota: int,
+    ) -> FileSlotGrant:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # The check and the increment are one statement, so the row
+                # lock serialises concurrent admissions: each one re-reads the
+                # count the previous one left. ``COALESCE`` resolves a NULL
+                # per-user quota to the default before the sign test, so a
+                # negative default never lifts an explicit per-user limit.
+                taken = await conn.fetchval(
+                    """
+                    UPDATE users
+                       SET file_count = file_count + 1
+                     WHERE id = $1
+                       AND NOT is_admin
+                       AND COALESCE(file_quota, $2::int) >= 0
+                       AND file_count < COALESCE(file_quota, $2::int)
+                    RETURNING 1
+                    """,
+                    user_id,
+                    default_quota,
+                )
+                if taken:
+                    await conn.execute(
+                        "INSERT INTO file_quota_reservations (id, user_id) VALUES ($1, $2)",
+                        reservation_id,
+                        user_id,
+                    )
+                    return FileSlotGrant.RESERVED
+                unlimited = await conn.fetchval(
+                    "SELECT is_admin OR COALESCE(file_quota, $2::int) < 0 FROM users WHERE id = $1",
+                    user_id,
+                    default_quota,
+                )
+                return FileSlotGrant.UNLIMITED if unlimited else FileSlotGrant.DENIED
+
+    async def release_file_slot(self, reservation_id: str) -> bool:
+        # Deleting the row is what makes this one-shot: a concurrent consume or
+        # release of the same id finds nothing and leaves the count alone.
+        released = await self.pool.fetchval(
+            """
+            WITH released AS (
+                DELETE FROM file_quota_reservations WHERE id = $1 RETURNING user_id
+            )
+            UPDATE users
+               SET file_count = GREATEST(users.file_count - 1, 0)
+              FROM released
+             WHERE users.id = released.user_id
+            RETURNING 1
+            """,
+            reservation_id,
+        )
+        return bool(released)
+
+    async def release_stale_file_slots(
+        self,
+        *,
+        live_ids: list[str],
+        settled_ids: list[str],
+        created_before: datetime,
+    ) -> int:
+        return await self.pool.fetchval(
+            """
+            WITH released AS (
+                DELETE FROM file_quota_reservations
+                 WHERE id <> ALL($1::text[])
+                   AND (id = ANY($2::text[]) OR created_at < $3)
+                RETURNING user_id
+            ),
+            per_user AS (
+                SELECT user_id, COUNT(*)::int AS n FROM released GROUP BY user_id
+            ),
+            decremented AS (
+                UPDATE users
+                   SET file_count = GREATEST(users.file_count - per_user.n, 0)
+                  FROM per_user
+                 WHERE users.id = per_user.user_id
+                RETURNING 1
+            )
+            SELECT COUNT(*)::int FROM released
+            """,
+            list(live_ids),
+            list(settled_ids),
+            created_before,
+        )
+
+    async def count_file_slot_reservations(self, user_id: int) -> int:
+        return await self.pool.fetchval(
+            "SELECT COUNT(*)::int FROM file_quota_reservations WHERE user_id = $1",
+            user_id,
+        )
 
     # ── API keys (stub — table not yet shipped) ──────────────────────
 

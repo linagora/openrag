@@ -392,7 +392,18 @@ Per-user file quota enforcement tracked via the `file_count` and `file_quota` co
 - `users.file_count` is incremented/decremented in application code (in `PartitionFileManager`) — no SQL triggers
 - Decrements use `func.greatest(file_count - N, 0)` to prevent negative values from race conditions
 - `delete_partition` queries per-uploader counts before cascade delete, then bulk decrements
-- Quota check (`check_user_file_quota` in `openrag/api/dependencies/auth.py`) runs on upload, considering both indexed files and pending tasks
+
+**Reservations (#664):** `users.file_count` is the user's files **plus** the slots held by their uploads still in flight, one row each in `file_quota_reservations`. Every operation keeps that sum exact in one transaction, so the order they run in never matters:
+- **Reserve**: `check_user_file_quota` (`api/dependencies/auth.py`, on `add_file` and `copy_file`) calls `PgUserRepository.try_reserve_file_slot`: one conditional `UPDATE users ... WHERE file_count < quota` plus the row. A burst of uploads admits exactly the free slots. Admins and unlimited users reserve nothing. The in-memory pending-task count is not an input.
+- **Consume**: `add_file_to_partition(quota_reservation_id=...)` deletes the row instead of bumping the count. With no row (none taken, or already released) it bumps the count as it always did, so MCP tools and unlimited users are counted the same way.
+- **Release**: deletes the row and decrements in one statement, so a second release, or one racing the insert, is a no-op.
+
+Who releases:
+- **Before dispatch, the request.** The dependency yields a `FileSlotReservation`; its teardown releases unless the route called `hand_off_file_slot`. Covers the 409s, a rejected upload, an unknown workspace, a dispatch error, a cancelled request. The copy route never hands off: its insert consumes the slot and the teardown release is then a no-op.
+- **After dispatch, the completion tracker.** `add_file` runs the task under the reservation's id (`dispatch_indexing(task_id=...)`), the worker passes its task id to the insert, and `TaskCompletionTracker.track` releases by task id once the worker ref settles. That covers a failure, the duplicate-at-catalog race, a cancel seen by the worker, a `ray.cancel` that retires the task before `process_file` runs (no `finally` in the worker can see that one), and a dead worker. Do not add a release inside the worker: the tracker already covers it, and the insert decides consumption atomically.
+- **The sweep.** `TaskCompletionTracker.reconcile_file_slots` (on recovery and every reconcile pass) releases reservations whose task the task-state actor has settled, and ones it does not know once older than the orphan grace window. That covers a failed release, a tracker restart, and a restart that lost the actor and its workers.
+
+A slot released early (a long copy outliving the grace window, a task-state actor replaced mid-task) is safe: the insert then counts the file itself, so the count stays exact and the quota is only loose by that one file. `GET /users/info` subtracts held slots from `file_count`, so `file_count` stays the indexed files and `total_files` stays indexed plus pending; the admin user list shows the raw column.
 
 **Quota logic (`file_quota` column):**
 - `None` → use global default (`DEFAULT_FILE_QUOTA` env var, default `-1`)
@@ -405,7 +416,7 @@ Per-user file quota enforcement tracked via the `file_count` and `file_quota` co
 - `created_by` uses `ondelete="SET NULL"` so deleting a user doesn't cascade-delete their files
 - `Indexer.delete_file` and `MilvusDB.delete_file/delete_partition` don't need a `user_id` parameter — the uploader is looked up from `files.created_by`
 
-**Migration:** `openrag/services/persistence/migrations/alembic/versions/c224d4befe71_add_file_count_and_file_quota.py`
+**Migrations:** `openrag/services/persistence/migrations/alembic/versions/c224d4befe71_add_file_count_and_file_quota.py`, `a2b3c4d5e6f7_add_file_quota_reservations.py`
 
 ### Alembic Migration Idempotency
 
