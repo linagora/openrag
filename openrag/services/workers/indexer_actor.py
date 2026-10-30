@@ -11,7 +11,7 @@ from core.models.document import Document, DocumentType
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
-from services.workers.failure_reporting import submit_task_failure
+from services.workers.failure_reporting import log_task_failure, submit_task_failure
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
@@ -254,6 +254,9 @@ class IndexerWorker:
             # ask it again, and a cancellation must not fire an error callback.
             raise RuntimeError(f"Task {task_id} was cancelled before indexing started") from None
         except Exception as exc:
+            # Logged first so a failing cleanup below cannot swallow it.
+            error_reason = failure_reason_from_exception(exc)
+            log_task_failure(log, exc, error_reason)
             should_cleanup_vectors = row is not None and (
                 row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
             )
@@ -266,7 +269,6 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
-            error_reason = failure_reason_from_exception(exc)
             try:
                 was_failed = await retry_idempotent_ray_actor_method(
                     lambda: submit_task_failure(

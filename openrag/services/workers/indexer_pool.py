@@ -15,7 +15,7 @@ from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
-from services.workers.failure_reporting import submit_task_failure
+from services.workers.failure_reporting import log_task_failure, submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
@@ -583,39 +583,48 @@ class IndexerWorkerActor:
             finally:
                 self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
-            if workspace_ids and not replace and file_id:
-                results = await asyncio.gather(
-                    *(
-                        self._catalog_store.workspace_repo.add_files_to_workspace(partition, workspace_id, [file_id])
-                        for workspace_id in workspace_ids
-                    ),
-                    return_exceptions=True,
+            try:
+                if workspace_ids and not replace and file_id:
+                    results = await asyncio.gather(
+                        *(
+                            self._catalog_store.workspace_repo.add_files_to_workspace(
+                                partition, workspace_id, [file_id]
+                            )
+                            for workspace_id in workspace_ids
+                        ),
+                        return_exceptions=True,
+                    )
+                    cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
+                    if cancelled is not None:
+                        raise cancelled
+                    failures = [
+                        (workspace_id, result)
+                        for workspace_id, result in zip(workspace_ids, results, strict=True)
+                        if isinstance(result, Exception) or result
+                    ]
+                    if failures:
+                        protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
+                            file_id, partition
+                        )
+                        if not protected:
+                            raise RuntimeError(
+                                f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
+                            )
+                        for workspace_id, error in failures:
+                            self._logger.warning(
+                                f"Failed to attach indexed file to workspace '{workspace_id}'; "
+                                f"file retained independently: {error}"
+                            )
+                    else:
+                        await self._catalog_store.document_repo.finalize_file_workspace_ownership(
+                            file_id, partition, workspace_ids
+                        )
+            except Exception as exc:
+                # The file is already indexed and reported COMPLETED by the worker.
+                self._logger.bind(file_id=file_id, partition=partition, task_id=task_id).opt(exception=exc).error(
+                    "Workspace attachment failed after indexing.", error_reason=failure_reason_from_exception(exc)
                 )
-                cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
-                if cancelled is not None:
-                    raise cancelled
-                failures = [
-                    (workspace_id, result)
-                    for workspace_id, result in zip(workspace_ids, results, strict=True)
-                    if isinstance(result, Exception) or result
-                ]
-                if failures:
-                    protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
-                        file_id, partition
-                    )
-                    if not protected:
-                        raise RuntimeError(
-                            f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
-                        )
-                    for workspace_id, error in failures:
-                        self._logger.warning(
-                            f"Failed to attach indexed file to workspace '{workspace_id}'; "
-                            f"file retained independently: {error}"
-                        )
-                else:
-                    await self._catalog_store.document_repo.finalize_file_workspace_ownership(
-                        file_id, partition, workspace_ids
-                    )
+                raise
             return result
         except asyncio.CancelledError:
             # The lease stopped this worker because the task state stopped
@@ -675,13 +684,19 @@ class IndexerWorkerActor:
         callback_url: str | None,
         callback_token: str | None,
     ) -> None:
+        error_reason = failure_reason_from_exception(exc)
+        log_task_failure(
+            self._logger.bind(file_id=worker_metadata.get("file_id", ""), partition=partition, task_id=task_id),
+            exc,
+            error_reason,
+        )
         try:
             was_failed = await retry_idempotent_ray_actor_method(
                 lambda: submit_task_failure(
                     self._tsm,
                     task_id,
                     tb,
-                    failure_reason_from_exception(exc),
+                    error_reason,
                 ),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )

@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError, PipelineError
+from loguru import logger
 from ray.exceptions import ActorUnavailableError
 from services.workers.indexer_actor import IndexerWorker, _load_document
 from services.workers.pipeline_builder import (
@@ -510,6 +512,59 @@ async def test_process_file_zero_chunk_replacement_keeps_existing_catalog_and_ve
     assert repo.update_calls == []
     assert vector_store.deleted_ids == []
     assert vector_store.deleted_filters == []
+
+
+class _StoresNothingPipeline:
+    async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+        row["stored_count"] = 0
+        row["stage"] = "stored"
+        return row
+
+
+class _ExplodingPipeline:
+    async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pipeline", "expected_exc", "expected_level"),
+    [
+        # A 4xx OpenRAGError is a user/content outcome, not an operator alert.
+        (_StoresNothingPipeline(), NoIndexableContentError, "WARNING"),
+        (_ExplodingPipeline(), RuntimeError, "ERROR"),
+    ],
+    ids=["no-indexable-content-warns", "unexpected-error-errors"],
+)
+async def test_process_file_failure_logs_reason_with_task_context(
+    tmp_path: Path, pipeline: Any, expected_exc: type[Exception], expected_level: str
+) -> None:
+    """#1296: a failed indexing task must leave one log line carrying its reason."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=_fake_tsm())
+
+    records: list[Any] = []
+    sink = logger.add(lambda message: records.append(message.record), level="WARNING")
+    try:
+        with pytest.raises(expected_exc) as exc_info:
+            await worker.process_file(
+                task_id="t-log",
+                path=str(path),
+                metadata={"file_id": "f-log"},
+                partition="p-log",
+            )
+    finally:
+        logger.remove(sink)
+
+    reason = failure_reason_from_exception(exc_info.value)
+    failure_logs = [r for r in records if r["extra"].get("task_id") == "t-log"]
+    assert len(failure_logs) == 1, [r["message"] for r in records]
+    record = failure_logs[0]
+    assert record["level"].name == expected_level
+    assert record["extra"]["file_id"] == "f-log"
+    assert record["extra"]["partition"] == "p-log"
+    assert record["extra"]["error_reason"] == reason
 
 
 @pytest.mark.asyncio

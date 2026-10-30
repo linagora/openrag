@@ -1850,7 +1850,7 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         ),
     )
     actor._save_uploaded_files = save_uploaded_files
-    actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
+    actor._logger = MagicMock()
     actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=lambda *a: "ref"))
     actor._active_indexation_config = ContextVar("test_active_indexation_config", default=None)
     # These build the actor with __new__, so __init__ never runs. Captioning is
@@ -2208,6 +2208,9 @@ async def test_actor_does_not_start_without_registered_worker_ref(
     worker_ref_error = module._MISSING_WORKER_REF_ERROR
     actor._task_state_manager.set_failed_if_not_cancelled.remote.assert_awaited_once_with("t", worker_ref_error)
     assert worker.calls == 0
+    # #1296: the failure is logged with the task's context, not only recorded in the TSM.
+    actor._logger.bind.assert_called_once_with(file_id="f", partition="p", task_id="t")
+    actor._logger.bind.return_value.opt.return_value.error.assert_called_once()
 
 
 @pytest.mark.asyncio
