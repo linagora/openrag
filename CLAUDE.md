@@ -366,7 +366,9 @@ dispatcher and workers, since Ray only applies actor options when it creates the
 (this branch, independently) covers `TaskStateManager` bounding its in-memory retention and being
 replaced during bootstrap when an older actor lacks that support — that replacement changes the
 `TaskStateManager` actor id, which strands the dispatcher's and workers' cached handles to it unless
-the whole generation rolls together; v9 folds in both independent v8 lineages). Without the bump, new
+the whole generation rolls together; v9 folds in both independent v8 lineages; v14 is bumped for
+worker behavior, not a signature: workers log their failures and poll `has_object_ref`, and the
+`TaskStateManager` is replaced when it lacks that method, #1296). Without the bump, new
 replicas attach to the previous release's actors and every submit raises `TypeError`. Old generations
 are retired with `services/workers/retire_indexer_generation.py`.
 

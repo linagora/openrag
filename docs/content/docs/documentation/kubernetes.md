@@ -125,7 +125,8 @@ Some releases bump the indexer actor generation (`_INDEXER_ACTOR_PROTOCOL_VERSIO
 in `openrag/services/workers/indexer_pool.py`), and some of those also replace
 the shared `TaskStateManager` actor. 2.2.x runs `v7` and 2.3.x runs `v13`: the
 generations in between only ever existed on `develop`, so an upgrade from 2.2.x
-to 2.3.x moves `v7` to `v13` and replaces the `TaskStateManager`. This matters
+to 2.3.x moves `v7` to `v13` and replaces the `TaskStateManager`. The first
+release after 2.3.3 moves `v13` to `v14` and replaces it again. This matters
 only when OpenRAG pods share a Ray cluster: with `ray.enabled: true`, or with an
 external cluster set through `RAY_ADDRESS`. With `ray.enabled: false` (the
 default) each pod runs its own Ray and restarts with it.
