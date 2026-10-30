@@ -11,6 +11,8 @@ For every visible, nonempty worksheet, OpenRAG preserves:
 - workbook and worksheet names;
 - the detected table index, table count, boundaries, and stable table ID;
 - the selected column header row and column names;
+- flattened, source-backed merged column-header paths;
+- expanded values for vertically merged row-header cells;
 - physical Excel row numbers and cell ranges;
 - nonempty rows above the header as worksheet context;
 - stored scalar values, including numbers, booleans, dates, durations, and Unicode text;
@@ -18,7 +20,7 @@ For every visible, nonempty worksheet, OpenRAG preserves:
 
 Rows are emitted incrementally as bounded Markdown table batches. Chunk metadata keeps rows scoped by both worksheet and table ID, so sibling-row retrieval does not mix independent tables from the same or different sheets.
 
-Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a visible worksheet remain indexable because their visibility is presentation metadata rather than an access-control boundary.
+Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a visible worksheet are also excluded. Their counts are recorded in chunk metadata, and removing hidden columns does not change physical worksheet citations.
 
 ## Table detection
 
@@ -35,6 +37,23 @@ Every detected table is extracted and chunked independently. Its metadata includ
 - exact `table_header_range`, data-row numbers, and chunk `cell_range` citations.
 
 An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Detection and chunking are covered for at least ten tables in one worksheet and for multiple tables across multiple worksheets. The default safety limit permits at most 128 detected tables across a workbook.
+
+## Merged and hierarchical headers
+
+OpenRAG reconstructs hierarchy only when it is explicitly backed by merged-cell ranges in the workbook.
+
+For column headers, consecutive horizontal merged rows above the leaf header are flattened into unambiguous Markdown column names. For example:
+
+| Physical header levels | Indexed column name |
+| --- | --- |
+| `Person` → `Name` | `Person / Name` |
+| `Directory` → `Contact` → `Email` | `Directory / Contact / Email` |
+
+The original hierarchy remains available in `table_header_hierarchy`, and `table_header_hierarchy_rows` records its physical Excel rows. A lone merged cell spanning the complete table is treated as a title and retained as worksheet context. When a full-width parent is followed by smaller merged groups, however, it is retained as the top level of the hierarchy.
+
+For row headers, a vertically merged single-column value is repeated across the data rows covered by that merge. Nested merges therefore preserve paths such as `Europe / France` for every applicable row. The relevant columns and per-row paths are stored in `table_row_header_columns` and `table_row_header_paths`. Chunking keeps only the paths for the physical rows present in that chunk.
+
+Header reconstruction, value expansion, and metadata are scoped to the detected `table_id` and `sheet_name`. They cannot leak into a neighboring table or another worksheet, even when a workbook contains many independently detected tables.
 
 ## Header selection
 
@@ -66,6 +85,29 @@ A per-sheet value overrides the global row. `null` restores automatic selection 
 
 Blank header cells receive generated names such as `column_2`. Duplicate rendered names are made unique.
 
+### Headerless tables
+
+Headerless data is never guessed automatically. Supply a schema using the exact worksheet name:
+
+```yaml
+loader:
+  xlsx_sheet_headerless_schemas:
+    Raw data: [id, name, topic]
+```
+
+Every physical row, including the first, is then indexed as data. Metadata reports `table_header_source: configured_schema`, while `table_header_row` and `table_header_range` remain `null` so generated labels are not mistaken for source cells.
+
+For multiple headerless tables with different schemas in one worksheet, append the one-based detected table number:
+
+```yaml
+loader:
+  xlsx_sheet_headerless_schemas:
+    Raw data#1: [person_id, name]
+    Raw data#2: [office_id, city, service]
+```
+
+Schema width must match the visible columns in the detected table. Headerless schemas cannot be combined with a configured header row for the same worksheet. Table-specific schemas remain independent across worksheets and detected table regions.
+
 ## Formulas and numerical values
 
 Formula cells are indexed as a cached scalar paired with inert formula text, for example:
@@ -76,6 +118,39 @@ Formula cells are indexed as a cached scalar paired with inert formula text, for
 
 OpenRAG never executes workbook formulas or macros. When a formula has no cached value, its expression remains searchable and a warning is logged. Cached results may be absent or stale if the workbook was not recalculated and saved by Excel, LibreOffice, or another calculation engine after its inputs changed.
 
+The bounded OOXML preflight detects formulas before OpenPyXL opens the workbook. OpenRAG normally uses one read-only, `data_only=True` reader. It opens the second read-only formula reader only when at least one formula exists in a visible row and column of a visible worksheet. Formulas located exclusively in skipped worksheets, hidden rows, or hidden columns therefore do not add the cost of a second workbook reader.
+
+### Repeated formula patterns
+
+Repeated formulas in a calculated column are normalized relative to their target cells. For example, `C2 = A2+B2`, `C3 = A3+B3`, and subsequent filled-down formulas share the R1C1 pattern `=RC[-2]+RC[-1]`.
+
+When a contiguous group is more compact than repeating every expression, OpenRAG keeps the cached values in the Markdown cells and emits the formula once in chunk context. Physical columns are resolved to table headers so retrieval receives a semantic expression such as `total = quantity+unit_price`. Metadata retains the target range, normalized pattern, source columns, and physical rows:
+
+```json
+{
+  "formula_groups": [
+    {
+      "target_column": "C",
+      "target_header": "total",
+      "range": "C2:C1000",
+      "pattern": "=RC[-2]+RC[-1]",
+      "semantic_expression": "total = quantity+unit_price",
+      "source_columns": [
+        {"column": "A", "header": "quantity"},
+        {"column": "B", "header": "unit_price"}
+      ],
+      "start_row": 2,
+      "end_row": 1000,
+      "formula_count": 999
+    }
+  ]
+}
+```
+
+Formula groups are scoped to the detected table and parser batch. During Markdown chunking, a group is retained only on chunks containing rows and columns intersecting its target range. A different formula interrupts the group: that exceptional cell keeps its complete expression inline and is described individually in `formula_cells` with its target coordinate, normalized pattern, semantic expression, source columns, and cache availability.
+
+Absolute references remain absolute in the normalized pattern. Same-table A1 references are mapped to headers. Cross-sheet references, structured table references, named ranges, and dynamic references that cannot be resolved safely are preserved verbatim in `unresolved_references`; OpenRAG does not guess their meaning or execute them.
+
 Numeric values use the scalar representation returned by OpenPyXL. Excel display formatting such as currency symbols, percentage formatting, and visual rounding is not treated as stored data. If the displayed form is semantically important, store it explicitly in another cell.
 
 ## Configuration
@@ -85,6 +160,7 @@ loader:
   xlsx_batch_size: 10000
   xlsx_header_row: null
   xlsx_sheet_header_rows: {}
+  xlsx_sheet_headerless_schemas: {}
   xlsx_limits:
     max_batch_bytes: 2097152
     max_shared_strings: 250000
@@ -130,8 +206,9 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | --- | --- | --- |
 | Tables without a blank row or column boundary | Contiguous content is treated as one table | Add a fully blank separator row or column between independent tables |
 | Merged title above a single header row | The title is retained as table context and the following row becomes the header | No action is required when the title spans the detected table |
-| Merged or multi-row column headers | Labels and pre-header context are retained, but merged spans and hierarchy are not reconstructed | Provide one explicit column-header row |
-| Headerless worksheet | First nonempty row is retained and content remains searchable, but column semantics are not source-backed | Add a header row or configure a normalized export |
+| Merged column-header groups | Consecutive source-backed levels are flattened and retained as hierarchy metadata; arbitrary visual layouts without merged ranges remain ambiguous | Use actual merged ranges or a single explicit header row |
+| Merged row headers | Vertically merged single-column values are expanded through their covered data rows and recorded as per-row hierarchy metadata | No action is required for ordinary vertical row-header merges |
+| Headerless worksheet | Without configuration, the first nonempty row is conservatively treated as the header | Supply `xlsx_sheet_headerless_schemas` or add a header row |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
 | Password-protected or encrypted workbook | Rejected | Decrypt it before upload |
@@ -140,8 +217,8 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 
 ## Operational guidance
 
-- Separate independent tables with at least one fully blank row or column and include explicit column headers.
+- Separate independent tables with at least one fully blank row or column. Add explicit headers or configure a headerless schema.
 - Recalculate and save formula-heavy workbooks before uploading them.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
 - Use a fresh partition when comparing ingestion behavior across parser versions.
-- Treat hidden rows and columns as indexable content; remove sensitive data from the workbook rather than relying on Excel visibility settings.
+- Hidden rows and columns are excluded, but workbook visibility should still not be treated as a general authorization mechanism outside OpenRAG ingestion.

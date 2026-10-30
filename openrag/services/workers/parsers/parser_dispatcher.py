@@ -332,6 +332,7 @@ _BUILDERS: dict[str, Any] = {
         batch_size=d._config.loader.xlsx_batch_size,
         header_row=d._config.loader.xlsx_header_row,
         sheet_header_rows=d._config.loader.xlsx_sheet_header_rows,
+        sheet_headerless_schemas=d._config.loader.xlsx_sheet_headerless_schemas,
         limits=d._config.loader.xlsx_limits,
     ),
 }

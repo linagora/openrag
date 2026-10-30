@@ -53,6 +53,7 @@ def _config(
         xlsx_batch_size=512,
         xlsx_header_row=3,
         xlsx_sheet_header_rows={"People": 2},
+        xlsx_sheet_headerless_schemas={"Raw": ["id", "name"]},
         xlsx_limits={"max_batch_bytes": 1024},
     )
     vlm = SimpleNamespace(
@@ -127,6 +128,7 @@ def test_xlsx_builder_passes_streaming_configuration(monkeypatch: pytest.MonkeyP
         "batch_size": 512,
         "header_row": 3,
         "sheet_header_rows": {"People": 2},
+        "sheet_headerless_schemas": {"Raw": ["id", "name"]},
         "limits": {"max_batch_bytes": 1024},
     }
 

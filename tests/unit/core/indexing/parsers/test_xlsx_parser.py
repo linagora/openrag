@@ -195,6 +195,272 @@ def test_merged_table_titles_are_context_not_column_headers():
     assert [block.metadata["table_row_numbers"] for block in blocks] == [[3], [7]]
 
 
+def test_merged_column_header_groups_are_flattened_with_hierarchy_metadata():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Directory"
+    sheet.merge_cells("A1:B1")
+    sheet["A1"] = "Person"
+    sheet.merge_cells("C1:D1")
+    sheet["C1"] = "Contact"
+    sheet.append(["id", "name", "allowed", "email"])
+    sheet.append(["P-1", "Alice", True, "alice@example.org"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_columns"] == [
+        "Person / id",
+        "Person / name",
+        "Contact / allowed",
+        "Contact / email",
+    ]
+    assert block.metadata["table_header_hierarchy_rows"] == [1]
+    assert block.metadata["table_header_hierarchy"] == [
+        {"column": "Person / id", "path": ["Person", "id"]},
+        {"column": "Person / name", "path": ["Person", "name"]},
+        {"column": "Contact / allowed", "path": ["Contact", "allowed"]},
+        {"column": "Contact / email", "path": ["Contact", "email"]},
+    ]
+    assert block.metadata["table_header_row"] == 2
+    assert block.metadata["table_row_numbers"] == [3]
+    assert "| Person / id | Person / name | Contact / allowed | Contact / email |" in block.text
+
+
+def test_nested_merged_column_headers_select_leaf_row_and_preserve_full_paths():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Directory"
+    sheet.merge_cells("A1:D1")
+    sheet["A1"] = "Directory"
+    sheet.merge_cells("A2:B2")
+    sheet["A2"] = "Person"
+    sheet.merge_cells("C2:D2")
+    sheet["C2"] = "Contact"
+    sheet.append(["id", "name", "allowed", "email"])
+    sheet.append(["P-1", "Alice", True, "alice@example.org"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_header_row"] == 3
+    assert block.metadata["table_header_hierarchy_rows"] == [1, 2]
+    assert block.metadata["table_columns"] == [
+        "Directory / Person / id",
+        "Directory / Person / name",
+        "Directory / Contact / allowed",
+        "Directory / Contact / email",
+    ]
+    assert block.metadata["table_header_hierarchy"] == [
+        {"column": "Directory / Person / id", "path": ["Directory", "Person", "id"]},
+        {"column": "Directory / Person / name", "path": ["Directory", "Person", "name"]},
+        {
+            "column": "Directory / Contact / allowed",
+            "path": ["Directory", "Contact", "allowed"],
+        },
+        {
+            "column": "Directory / Contact / email",
+            "path": ["Directory", "Contact", "email"],
+        },
+    ]
+    assert block.metadata["table_row_numbers"] == [4]
+
+
+def test_merged_header_hierarchy_is_scoped_to_each_separated_table():
+    workbook = Workbook()
+    sheet = workbook.active
+    for top_row, prefix, record in ((1, "Person", "P-1"), (6, "Office", "O-1")):
+        sheet.merge_cells(start_row=top_row, start_column=1, end_row=top_row, end_column=2)
+        sheet.cell(top_row, 1, prefix)
+        sheet.merge_cells(start_row=top_row, start_column=3, end_row=top_row, end_column=4)
+        sheet.cell(top_row, 3, "Details")
+        sheet.cell(top_row + 1, 1, "id")
+        sheet.cell(top_row + 1, 2, "name")
+        sheet.cell(top_row + 1, 3, "status")
+        sheet.cell(top_row + 1, 4, "summary")
+        sheet.cell(top_row + 2, 1, record)
+        sheet.cell(top_row + 2, 2, prefix)
+        sheet.cell(top_row + 2, 3, "active")
+        sheet.cell(top_row + 2, 4, f"{prefix} summary")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert blocks[0].metadata["table_columns"][0] == "Person / id"
+    assert blocks[1].metadata["table_columns"][0] == "Office / id"
+    assert blocks[0].metadata["table_id"] == "sheet:0:table:0"
+    assert blocks[1].metadata["table_id"] == "sheet:0:table:1"
+    assert "Office / id" not in blocks[0].text
+    assert "Person / id" not in blocks[1].text
+
+
+def test_vertical_merged_row_headers_are_expanded_and_paths_follow_chunks():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["region", "country", "amount"])
+    sheet["A2"] = "Europe"
+    sheet["B2"] = "France"
+    sheet["C2"] = 10
+    sheet["B3"] = "Germany"
+    sheet["C3"] = 20
+    sheet.merge_cells("A2:A3")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser(batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert all("Europe" in block.text for block in blocks)
+    assert all(block.metadata["table_row_header_columns"] == ["region"] for block in blocks)
+    assert blocks[0].metadata["table_row_header_paths"] == {"2": ["Europe"]}
+    assert blocks[1].metadata["table_row_header_paths"] == {"3": ["Europe"]}
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunk_table(
+            MDElement(type="table", content=block.text, metadata=block.metadata),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+    ]
+    assert [chunk.metadata["table_row_header_paths"] for chunk in chunks] == [
+        {"2": ["Europe"]},
+        {"3": ["Europe"]},
+    ]
+
+
+def test_nested_vertical_merged_row_headers_preserve_hierarchical_paths():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["region", "country", "city", "amount"])
+    rows = [
+        ["Europe", "France", "Paris", 10],
+        [None, None, "Lyon", 20],
+        [None, "Germany", "Berlin", 30],
+        [None, None, "Hamburg", 40],
+    ]
+    for row in rows:
+        sheet.append(row)
+    sheet.merge_cells("A2:A5")
+    sheet.merge_cells("B2:B3")
+    sheet.merge_cells("B4:B5")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_row_header_columns"] == ["region", "country"]
+    assert block.metadata["table_row_header_paths"] == {
+        "2": ["Europe", "France"],
+        "3": ["Europe", "France"],
+        "4": ["Europe", "Germany"],
+        "5": ["Europe", "Germany"],
+    }
+    assert "| Europe | France | Paris | 10 |" in block.text
+    assert "| Europe | France | Lyon | 20 |" in block.text
+    assert "| Europe | Germany | Berlin | 30 |" in block.text
+    assert "| Europe | Germany | Hamburg | 40 |" in block.text
+
+
+def test_merged_row_header_expansion_is_scoped_to_separated_tables():
+    workbook = Workbook()
+    sheet = workbook.active
+    for header_row, region, amounts in ((1, "Europe", (10, 20)), (5, "Asia", (30, 40))):
+        sheet.cell(header_row, 1, "region")
+        sheet.cell(header_row, 2, "amount")
+        sheet.cell(header_row + 1, 1, region)
+        sheet.cell(header_row + 1, 2, amounts[0])
+        sheet.cell(header_row + 2, 2, amounts[1])
+        sheet.merge_cells(
+            start_row=header_row + 1,
+            start_column=1,
+            end_row=header_row + 2,
+            end_column=1,
+        )
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert blocks[0].metadata["table_row_header_paths"] == {"2": ["Europe"], "3": ["Europe"]}
+    assert blocks[1].metadata["table_row_header_paths"] == {"6": ["Asia"], "7": ["Asia"]}
+    assert "Asia" not in blocks[0].text
+    assert "Europe" not in blocks[1].text
+
+
+def test_headerless_schema_preserves_first_row_as_data():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Raw"
+    sheet.append(["HL-001", "Alice", "Accessibility"])
+    sheet.append(["HL-002", "René", "Search"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(
+        XlsxParser(sheet_headerless_schemas={"Raw": ["id", "name", "topic"]}).iter_batches(
+            Document(raw_bytes=output.getvalue())
+        )
+    )
+
+    assert block.metadata["table_columns"] == ["id", "name", "topic"]
+    assert block.metadata["table_header_row"] is None
+    assert block.metadata["table_header_range"] is None
+    assert block.metadata["table_header_source"] == "configured_schema"
+    assert block.metadata["table_row_numbers"] == [1, 2]
+    assert "HL-001" in block.text
+
+
+def test_table_specific_headerless_schemas_work_across_tables_and_sheets():
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "Raw"
+    first.append(["P-1", "Alice"])
+    first.append([])
+    first.append(["O-1", "Paris", "Support"])
+    second = workbook.create_sheet("Metrics")
+    second.append(["M-1", 42])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(
+        XlsxParser(
+            sheet_headerless_schemas={
+                "Raw#1": ["person_id", "name"],
+                "Raw#2": ["office_id", "city", "service"],
+                "Metrics": ["metric_id", "value"],
+            }
+        ).iter_batches(Document(raw_bytes=output.getvalue()))
+    )
+
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["person_id", "name"],
+        ["office_id", "city", "service"],
+        ["metric_id", "value"],
+    ]
+    assert [block.metadata["sheet_name"] for block in blocks] == ["Raw", "Raw", "Metrics"]
+    assert [block.metadata["table_id"] for block in blocks] == [
+        "sheet:0:table:0",
+        "sheet:0:table:1",
+        "sheet:1:table:0",
+    ]
+
+
 def test_detects_extracts_and_chunks_ten_tables_in_one_worksheet():
     from core.chunking.markdown_utils import MDElement, chunk_table
 
@@ -524,9 +790,126 @@ def test_cached_formula_values_are_returned_without_execution():
     )
     [block] = list(XlsxParser().iter_batches(doc))
     assert "| 2 [formula: =1+1] |" in block.text
-    assert block.metadata["formula_policy"] == "cached_values_and_formula_text"
+    assert block.metadata["formula_policy"] == "compact_groups_and_individual_formulas"
     assert block.metadata["sheet_formula_cells"] == 1
     assert block.metadata["sheet_missing_formula_values"] == 0
+
+
+def test_formulas_only_in_hidden_rows_or_columns_do_not_open_formula_reader(monkeypatch):
+    import openpyxl
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "value", "hidden helper"])
+    sheet.append(["visible", 1, "=B2*2"])
+    sheet.append(["hidden", "=1+1", None])
+    sheet.column_dimensions["C"].hidden = True
+    sheet.row_dimensions[3].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    original_load_workbook = openpyxl.load_workbook
+    data_only_calls = []
+
+    def tracking_load_workbook(*args, **kwargs):
+        data_only_calls.append(kwargs.get("data_only"))
+        return original_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", tracking_load_workbook)
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert data_only_calls == [True]
+    assert block.metadata["sheet_formula_cells"] == 0
+    assert block.metadata["sheet_missing_formula_values"] == 0
+    assert "formula:" not in block.text
+
+
+def test_visible_formula_opens_cached_value_and_formula_readers(monkeypatch):
+    import openpyxl
+
+    original_load_workbook = openpyxl.load_workbook
+    data_only_calls = []
+
+    def tracking_load_workbook(*args, **kwargs):
+        data_only_calls.append(kwargs.get("data_only"))
+        return original_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", tracking_load_workbook)
+
+    [block] = list(XlsxParser().iter_batches(_document([["formula"], ["=1+1"]])))
+
+    assert data_only_calls == [True, False]
+    assert block.metadata["sheet_formula_cells"] == 1
+    assert "[formula: =1+1; cached value unavailable]" in block.text
+
+
+@pytest.mark.parametrize(
+    ("formula", "pattern", "semantic", "sources", "unresolved"),
+    [
+        (
+            "=$A2+B$1+$C$3",
+            "=RC1+R1C[-1]+R3C3",
+            "total = quantity+unit_price+total",
+            [
+                {"column": "A", "header": "quantity"},
+                {"column": "B", "header": "unit_price"},
+                {"column": "C", "header": "total"},
+            ],
+            None,
+        ),
+        (
+            "='Rates Sheet'!$B$2*A2",
+            "='Rates Sheet'!R2C2*RC[-2]",
+            "total = 'Rates Sheet'!$B$2*quantity",
+            [{"column": "A", "header": "quantity"}],
+            ["'Rates Sheet'!$B$2"],
+        ),
+        (
+            "=Table1[Amount]*A2",
+            "=Table1[Amount]*RC[-2]",
+            "total = Table1[Amount]*quantity",
+            [{"column": "A", "header": "quantity"}],
+            ["Table1[Amount]"],
+        ),
+    ],
+)
+def test_formula_analysis_normalizes_references_without_guessing_unresolved_inputs(
+    formula, pattern, semantic, sources, unresolved
+):
+    analysis = module._analyze_formula(
+        formula,
+        target_row=2,
+        target_column=3,
+        sheet_name="Data",
+        visible_columns=[1, 2, 3],
+        headers=["quantity", "unit_price", "total"],
+    )
+
+    assert analysis["pattern"] == pattern
+    assert analysis["semantic_expression"] == semantic
+    assert analysis["source_columns"] == sources
+    assert analysis.get("unresolved_references") == unresolved
+
+
+def test_formula_analysis_bounds_dependency_metadata_for_broad_ranges():
+    headers = [f"field_{index}" for index in range(1, 72)]
+
+    analysis = module._analyze_formula(
+        "=SUM(A2:BR2)",
+        target_row=2,
+        target_column=71,
+        sheet_name="Data",
+        visible_columns=list(range(1, 72)),
+        headers=headers,
+    )
+
+    assert analysis["pattern"] == "=SUM(RC[-70]:RC[-1])"
+    assert analysis["semantic_expression"] == "field_71 = SUM(field_1:field_70)"
+    assert len(analysis["source_columns"]) == 64
+    assert analysis["source_column_count"] == 70
+    assert analysis["source_columns_truncated"] is True
 
 
 def test_formula_only_rows_remain_searchable_without_cached_results():
@@ -563,10 +946,144 @@ def test_formula_heavy_sheet_streams_cached_results_and_expressions_across_batch
 
     assert len(blocks) == 7
     assert [row for block in blocks for row in block.metadata["table_row_numbers"]] == list(range(2, 252))
-    assert "0.14285714285714285 [formula: =A2^2/7]" in blocks[0].text
-    assert "8928.57142857143 [formula: =A251^2/7]" in blocks[-1].text
+    assert "| 1 | 0.14285714285714285 |" in blocks[0].text
+    assert "| 250 | 8928.57142857143 |" in blocks[-1].text
+    assert "[formula:" not in blocks[0].text
+    assert blocks[0].metadata["formula_groups"] == [
+        {
+            "target_column": "B",
+            "target_header": "calculation",
+            "range": "B2:B38",
+            "pattern": "=RC[-1]^2/7",
+            "semantic_expression": "calculation = input^2/7",
+            "source_columns": [{"column": "A", "header": "input"}],
+            "start_row": 2,
+            "end_row": 38,
+            "formula_count": 37,
+        }
+    ]
+    assert "calculation = input^2/7" in blocks[0].text
     assert all(block.metadata["sheet_formula_cells"] == 250 for block in blocks)
     assert all(block.metadata["sheet_missing_formula_values"] == 0 for block in blocks)
+
+
+def test_repeated_formulas_are_compacted_with_semantic_dependencies_and_exceptions():
+    from xml.etree import ElementTree as ET
+
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    rows = [["quantity", "unit_price", "total"]]
+    for number in range(1, 26):
+        excel_row = number + 1
+        suffix = "+1" if excel_row == 13 else ""
+        rows.append([number, number * 10, f"=A{excel_row}+B{excel_row}{suffix}"])
+    doc = _document(rows)
+
+    def add_cached_results(xml):
+        root = ET.fromstring(xml)
+        for cell in root.findall(".//{*}c"):
+            formula = cell.find("{*}f")
+            if formula is None:
+                continue
+            row_number = int(cell.get("r")[1:])
+            number = row_number - 1
+            cell.find("{*}v").text = str(number + number * 10 + (1 if row_number == 13 else 0))
+        return ET.tostring(root, encoding="unicode")
+
+    [block] = list(XlsxParser().iter_batches(_edit_xml(doc, add_cached_results)))
+
+    assert block.metadata["formula_groups"] == [
+        {
+            "target_column": "C",
+            "target_header": "total",
+            "range": "C2:C12",
+            "pattern": "=RC[-2]+RC[-1]",
+            "semantic_expression": "total = quantity+unit_price",
+            "source_columns": [
+                {"column": "A", "header": "quantity"},
+                {"column": "B", "header": "unit_price"},
+            ],
+            "start_row": 2,
+            "end_row": 12,
+            "formula_count": 11,
+        },
+        {
+            "target_column": "C",
+            "target_header": "total",
+            "range": "C14:C26",
+            "pattern": "=RC[-2]+RC[-1]",
+            "semantic_expression": "total = quantity+unit_price",
+            "source_columns": [
+                {"column": "A", "header": "quantity"},
+                {"column": "B", "header": "unit_price"},
+            ],
+            "start_row": 14,
+            "end_row": 26,
+            "formula_count": 13,
+        },
+    ]
+    [exception] = block.metadata["formula_cells"]
+    assert exception["target"] == "C13"
+    assert exception["formula"] == "=A13+B13+1"
+    assert exception["pattern"] == "=RC[-2]+RC[-1]+1"
+    assert exception["semantic_expression"] == "total = quantity+unit_price+1"
+    assert "133 [formula: =A13+B13+1]" in block.text
+    assert "[formula: =A2+B2]" not in block.text
+    assert "C (total), C2:C12: total = quantity+unit_price" in block.text
+
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=90,
+        length_function=lambda text: len(text.split()),
+    )
+    assert len(chunks) > 1
+    for chunk in chunks:
+        chunk_rows = set(chunk.metadata["table_row_numbers"])
+        for group in chunk.metadata.get("formula_groups", []):
+            assert any(group["start_row"] <= row <= group["end_row"] for row in chunk_rows)
+            assert group["target_column"] == "C"
+        for cell in chunk.metadata.get("formula_cells", []):
+            assert cell["row"] in chunk_rows
+
+
+def test_formula_groups_remain_scoped_to_detected_tables_and_worksheets():
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "Operations"
+    second = workbook.create_sheet("Finance")
+    for sheet in (first, second):
+        sheet.append(["quantity", "price", "total"])
+        for row_number in range(2, 22):
+            sheet.append([row_number, row_number * 10, f"=A{row_number}+B{row_number}"])
+    first["E1"], first["F1"], first["G1"] = "hours", "rate", "cost"
+    for row_number in range(2, 22):
+        first.cell(row_number, 5, row_number)
+        first.cell(row_number, 6, row_number * 100)
+        first.cell(row_number, 7, f"=E{row_number}*F{row_number}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [(block.metadata["sheet_name"], block.metadata["table_id"]) for block in blocks] == [
+        ("Operations", "sheet:0:table:0"),
+        ("Operations", "sheet:0:table:1"),
+        ("Finance", "sheet:1:table:0"),
+    ]
+    assert [block.metadata["formula_groups"][0]["range"] for block in blocks] == [
+        "C2:C21",
+        "G2:G21",
+        "C2:C21",
+    ]
+    assert [block.metadata["formula_groups"][0]["semantic_expression"] for block in blocks] == [
+        "total = quantity+price",
+        "cost = hours*rate",
+        "total = quantity+price",
+    ]
+    assert "Worksheet: Operations" in blocks[0].text
+    assert "Worksheet: Operations" in blocks[1].text
+    assert "Worksheet: Finance" in blocks[2].text
 
 
 def test_preserves_precise_numbers_and_mathematical_symbols():
@@ -1050,6 +1567,48 @@ def test_loader_config_validates_sheet_rows():
     for invalid_row in (True, 0, "3", 1_048_577):
         with pytest.raises(ValidationError):
             LoaderConfig(xlsx_sheet_header_rows={"People": invalid_row})
+
+
+@pytest.mark.parametrize(
+    "schemas",
+    [
+        [],
+        {"": ["id"]},
+        {"Raw": []},
+        {"Raw": [""]},
+        {"Raw": [1]},
+        {1: ["id"]},
+    ],
+)
+def test_invalid_headerless_schema_configuration(schemas):
+    from core.utils.exceptions import ConfigError
+
+    with pytest.raises(ConfigError):
+        XlsxParser(sheet_headerless_schemas=schemas)
+
+
+def test_headerless_schema_rejects_conflicting_or_wrong_width_configuration():
+    from core.utils.exceptions import ConfigError
+
+    with pytest.raises(ConfigError, match="cannot be combined"):
+        XlsxParser(header_row=1, sheet_headerless_schemas={"Raw": ["id"]})
+    with pytest.raises(ConfigError, match="cannot be combined"):
+        XlsxParser(sheet_header_rows={"Raw": 1}, sheet_headerless_schemas={"Raw": ["id"]})
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Raw"
+    sheet.append(["A", "B"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    with pytest.raises(PipelineError, match="headerless schema has 1 columns, expected 2"):
+        list(
+            XlsxParser(sheet_headerless_schemas={"Raw": ["only_one"]}).iter_batches(
+                Document(raw_bytes=output.getvalue())
+            )
+        )
 
 
 @pytest.mark.parametrize("repeated", [False, True])

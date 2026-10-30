@@ -70,6 +70,7 @@ class SheetInfo:
     tables: tuple[TableRegion, ...]
     hidden_rows: frozenset[int]
     hidden_columns: frozenset[int]
+    merged_ranges: tuple[tuple[int, int, int, int], ...]
 
 
 def _column_runs(columns: set[int]):
@@ -132,6 +133,26 @@ def _merge_preambles(regions: list[TableRegion]) -> list[TableRegion]:
         TableRegion(index, region.start_row, region.end_row, region.start_column, region.end_column)
         for index, region in enumerate(merged)
     ]
+
+
+def _merged_header_depth(
+    region: TableRegion,
+    merged_ranges: list[tuple[int, int, int, int]],
+) -> int:
+    """Return consecutive horizontal merged header rows above the leaf header."""
+    expected_columns = set(range(region.start_column, region.end_column + 1))
+    depth = 0
+    for row_number in range(region.start_row, region.end_row):
+        covered_columns: set[int] = set()
+        for start_row, end_row, start_column, end_column in merged_ranges:
+            if start_row == end_row == row_number and end_column > start_column:
+                covered_columns.update(
+                    range(max(start_column, region.start_column), min(end_column, region.end_column) + 1)
+                )
+        if not expected_columns.issubset(covered_columns):
+            break
+        depth += 1
+    return depth
 
 
 def invalid(message: str):
@@ -305,7 +326,9 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 if path in worksheet_paths:
                     raise invalid("XLSX worksheet relationships contain a duplicate target")
                 worksheet_paths.add(path)
-                max_row = max_col = formulas = missing = 0
+                max_row = max_col = 0
+                visible_formula_columns: dict[int, int] = {}
+                missing_formula_columns: dict[int, int] = {}
                 previous_row = current_row = previous_col = 0
                 current_cell_column = 0
                 row_content_columns: set[int] = set()
@@ -369,10 +392,14 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                         if tag == "c":
                             value = element.find("{*}v")
                             formula = element.find("{*}f")
-                            if formula is not None:
-                                formulas += 1
+                            if formula is not None and current_row not in hidden_rows:
+                                visible_formula_columns[current_cell_column] = (
+                                    visible_formula_columns.get(current_cell_column, 0) + 1
+                                )
                                 if value is None or not value.text:
-                                    missing += 1
+                                    missing_formula_columns[current_cell_column] = (
+                                        missing_formula_columns.get(current_cell_column, 0) + 1
+                                    )
                             if sum(len(t.text or "") for t in element.iter()) > limits.max_cell_chars:
                                 raise limit("XLSX cell text exceeds the character limit")
                             if element.get("t") == "s":
@@ -422,27 +449,27 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                             element.clear()
                         stack.pop()
                 finish_band()
+                formulas = sum(
+                    count for column, count in visible_formula_columns.items() if column not in hidden_columns
+                )
+                missing = sum(
+                    count for column, count in missing_formula_columns.items() if column not in hidden_columns
+                )
                 regions = _merge_preambles(regions)
-                regions = [
-                    TableRegion(
-                        region.index,
-                        region.start_row,
-                        region.end_row,
-                        region.start_column,
-                        region.end_column,
-                        region.start_row + 1
-                        if region.start_row < region.end_row
-                        and any(
-                            start_row == end_row == region.start_row
-                            and start_column <= region.start_column
-                            and end_column >= region.end_column
-                            and end_column > start_column
-                            for start_row, end_row, start_column, end_column in merged_ranges
+                hinted_regions: list[TableRegion] = []
+                for region in regions:
+                    header_depth = _merged_header_depth(region, merged_ranges)
+                    hinted_regions.append(
+                        TableRegion(
+                            region.index,
+                            region.start_row,
+                            region.end_row,
+                            region.start_column,
+                            region.end_column,
+                            region.start_row + header_depth if header_depth else None,
                         )
-                        else None,
                     )
-                    for region in regions
-                ]
+                regions = hinted_regions
                 tables_seen += len(regions)
                 if tables_seen > limits.max_tables:
                     raise limit("XLSX table count exceeds the limit")
@@ -461,6 +488,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                         tuple(regions),
                         frozenset(hidden_rows),
                         frozenset(hidden_columns),
+                        tuple(merged_ranges),
                     )
                 )
             return infos
