@@ -625,11 +625,18 @@ class PgDocumentRepository(DocumentRepository):
         independently_indexed: bool = True,
         chunk_count: int | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        quota_reservation_id: str | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
         Creates the partition row on first use (legacy behaviour). Returns
         ``False`` if a row with the same (file_id, partition) already exists.
+
+        ``quota_reservation_id`` names the file slot the uploader reserved at
+        admission (#664). The insert consumes it in the same transaction, so
+        ``users.file_count`` is not bumped twice. With no such reservation
+        (none was taken, or it was already released) the count is bumped here
+        instead, so it keeps matching the files either way.
 
         ``indexed_at`` pins the indexation timestamp so it matches the Milvus
         chunks; when ``None`` the ``files.indexed_at`` server default applies.
@@ -719,10 +726,16 @@ class PgDocumentRepository(DocumentRepository):
                     *values,
                 )
                 if user_id is not None:
-                    await conn.execute(
-                        "UPDATE users SET file_count = file_count + 1 WHERE id = $1",
+                    consumed = quota_reservation_id is not None and await conn.fetchval(
+                        "DELETE FROM file_quota_reservations WHERE id = $1 AND user_id = $2 RETURNING 1",
+                        quota_reservation_id,
                         user_id,
                     )
+                    if not consumed:
+                        await conn.execute(
+                            "UPDATE users SET file_count = file_count + 1 WHERE id = $1",
+                            user_id,
+                        )
                 return True
 
     async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:

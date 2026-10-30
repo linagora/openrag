@@ -525,6 +525,25 @@ Index(
 )
 
 
+# One row per file slot a quota-capped upload holds before its file exists
+# (#664). Admission bumps ``users.file_count`` and inserts the row in one
+# transaction; the catalog insert deletes it instead of bumping the count, and
+# every path that gives the slot back deletes it and decrements the count in one
+# statement. So ``file_count`` is always the uploader's files plus their rows
+# here, and a release that finds no row is a no-op rather than a double count.
+#
+# ``id`` is the indexing task id for an upload, and a fresh id for a copy.
+# Deleting the user deletes their reservations, as it does their counter.
+file_quota_reservations = Table(
+    "file_quota_reservations",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Index("ix_file_quota_reservations_user_id", "user_id"),
+)
+
+
 oidc_sessions = Table(
     "oidc_sessions",
     metadata,
