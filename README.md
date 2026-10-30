@@ -33,7 +33,7 @@
 
 * **Text Files**: `txt`, `md`
 * **Tabular Data**: `csv` - Configurable delimiter-aware parsing with row-preserving, token-bounded table chunks
-* **Document Files**: `pdf`, `docx`, `doc`, `pptx` - Advanced PDF parsing with OCR support and Office document processing
+* **Document Files**: `pdf`, `docx`, `doc`, `pptx`, `odt`, `odp` - Advanced PDF parsing with OCR support and Office document processing
 * **E-mail**: `eml` - Message body and headers, with attachments parsed through their own format's pipeline
 * **Audio Files**: `wav`, `mp3`, `flac`, `ogg`, `aac`, `wma` - Audio transcription and content extraction
 * **Video Files**: `mp4`, `flv` - Speech transcription from the audio track
