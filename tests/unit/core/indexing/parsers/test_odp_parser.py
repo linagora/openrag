@@ -197,6 +197,19 @@ async def test_an_object_that_is_not_a_chart_leaves_nothing(odf_package):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["encrypted", "corrupt"])
+async def test_an_unreadable_chart_is_skipped(odf_package, damaged_zip_entry, how):
+    package = odf_package(
+        "odp",
+        f"<draw:page>{_frame('title', '<text:p>Évolution</text:p>')}{_CHART_FRAME}</draw:page>",
+        pictures={"Object 1/content.xml": _CHART_OBJECT.encode()},
+    )
+    processed = await _parse(damaged_zip_entry(package, "Object 1/content.xml", how))
+
+    assert processed.text_blocks[0].text == "# Évolution"
+
+
+@pytest.mark.asyncio
 async def test_charts_share_one_xml_budget(odf_package, monkeypatch):
     """Every frame may name the same object: what they read is budgeted."""
     import core.indexing.parsers.odf as odf

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import struct
 import zipfile
 from collections.abc import Callable
 
@@ -71,3 +72,29 @@ def build_odf(
 @pytest.fixture
 def odf_package() -> OdfFactory:
     return build_odf
+
+
+def damage_zip_entry(raw: bytes, name: str, how: str) -> bytes:
+    """*raw* with entry *name* flagged encrypted (``how="encrypted"``) or its
+    stored bytes overwritten (``how="corrupt"``), which breaks a deflate stream
+    and fails the CRC of a stored entry."""
+    data = bytearray(raw)
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        info = archive.getinfo(name)
+    local = info.header_offset
+    if how == "encrypted":
+        data[local + 6] |= 0x1
+        central = data.index(b"PK\x01\x02")
+        while data[central + 46 : central + 46 + len(name)] != name.encode():
+            central = data.index(b"PK\x01\x02", central + 1)
+        data[central + 8] |= 0x1
+    else:
+        name_len, extra_len = struct.unpack("<HH", data[local + 26 : local + 30])
+        start = local + 30 + name_len + extra_len
+        data[start : start + info.compress_size] = b"\xff" * info.compress_size
+    return bytes(data)
+
+
+@pytest.fixture
+def damaged_zip_entry() -> Callable[[bytes, str, str], bytes]:
+    return damage_zip_entry
