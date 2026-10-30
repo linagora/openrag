@@ -165,7 +165,9 @@ def _release_if_granted(name: str, semaphore_actor, acquire_task: asyncio.Task) 
     if acquire_task.cancelled() or acquire_task.exception() is not None:
         return
     incarnation = acquire_task.result()
-    logger.bind(semaphore=name).warning(
+    # Expected whenever a caller is cancelled mid-wait (e.g. a stage timing out
+    # its sibling tasks): the permit is handed back as designed.
+    logger.bind(semaphore=name).debug(
         "Releasing permit for a cancelled acquire on semaphore '{name}' - "
         "caller was cancelled while waiting, permit granted afterwards.",
         name=name,
