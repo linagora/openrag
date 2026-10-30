@@ -161,7 +161,6 @@ class LoaderConfig(ConfigMixin):
     csv_batch_size: int = Field(default=10_000, gt=0, strict=True)
     csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
     image_captioning: bool = True
-    image_captioning_url: bool = True
     save_markdown: bool = False
     # Keep the raw uploaded file in ``paths.data_dir`` after indexation. Default
     # ``True`` — the source-download route (``/static/{extract_id}``) serves these
