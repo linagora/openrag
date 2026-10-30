@@ -28,6 +28,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")
 
 _PREVIOUS_HEAD = "5e6d7c8b9a01"
 _STAGE_HISTORY_REVISION = "bcbdf503a6f1"
+_STAGE_TRACKING_BACKFILL_REVISION = "c4d8f2a6b901"
 
 
 def _alembic_config(database: str) -> Config:
@@ -499,3 +500,30 @@ async def test_migration_preserves_existing_jobs_without_inventing_history(legac
         )
         == 0
     )
+
+
+async def test_followup_migration_backfills_jobs_settled_after_stage_history_upgrade(legacy_jobs_db) -> None:
+    connection, cfg = legacy_jobs_db
+    await asyncio.to_thread(command.upgrade, cfg, _STAGE_HISTORY_REVISION)
+    await connection.execute(
+        """
+        INSERT INTO jobs (id, partition, status, stage_tracking_version)
+        VALUES
+            ('gap-complete', 'p', 'SERIALIZING', NULL),
+            ('gap-active', 'p', 'SERIALIZING', NULL),
+            ('tracked-complete', 'p', 'SERIALIZING', 1)
+        """
+    )
+    await connection.execute("UPDATE jobs SET status = 'COMPLETED' WHERE id = 'gap-complete'")
+    await connection.execute("UPDATE jobs SET status = 'COMPLETED' WHERE id = 'tracked-complete'")
+
+    await asyncio.to_thread(command.upgrade, cfg, _STAGE_TRACKING_BACKFILL_REVISION)
+
+    jobs = await connection.fetch("SELECT id, stage_tracking_version FROM jobs ORDER BY id")
+    assert [(row["id"], row["stage_tracking_version"]) for row in jobs] == [
+        ("gap-active", None),
+        ("gap-complete", 0),
+        ("legacy-active", None),
+        ("legacy-complete", 0),
+        ("tracked-complete", 1),
+    ]

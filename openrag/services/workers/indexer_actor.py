@@ -9,6 +9,7 @@ from typing import Any
 from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
 from core.models.document import Document, DocumentType
 from core.models.stage_progress import StageProgressWorkerSnapshot, StageTaskPhase
+from core.observability.ray_metrics import initialize_stage_writer_counters
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
@@ -71,6 +72,7 @@ class IndexerWorker:
         self._vector_store = vector_store
         self._collection = collection
         self._job_repo = job_repo
+        initialize_stage_writer_counters()
         self._stage_writer = StageEventWriter(job_repo, live_sink=stage_snapshot_sink) if job_repo is not None else None
 
     async def close_stage_writer(self) -> None:
@@ -173,6 +175,19 @@ class IndexerWorker:
         log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
         row: dict[str, Any] | None = None
         catalog_written = False
+        stage_tracker: StageTracker | None = None
+        stage_tracker_finalization_attempted = False
+
+        def finish_stage_tracker_once() -> None:
+            nonlocal stage_tracker_finalization_attempted
+            if stage_tracker is None or stage_tracker_finalization_attempted:
+                return
+            stage_tracker_finalization_attempted = True
+            if self._stage_writer is not None:
+                _finish_stage_tracker(self._stage_writer, stage_tracker)
+            else:
+                _safe_stage_tracker_call(stage_tracker, "finish_task")
+
         try:
             # Inside the try so a TaskStateManager outage here still reaches
             # the except block below and sends the error callback.
@@ -253,10 +268,7 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            if self._stage_writer is not None:
-                _finish_stage_tracker(self._stage_writer, stage_tracker)
-            else:
-                _safe_stage_tracker_call(stage_tracker, "finish_task")
+            finish_stage_tracker_once()
             completion_outcome = await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),
                 task_description=f"complete_with_degraded_stages({task_id})",
@@ -284,11 +296,7 @@ class IndexerWorker:
             # ask it again, and a cancellation must not fire an error callback.
             raise RuntimeError(f"Task {task_id} was cancelled before indexing started") from None
         except Exception as exc:
-            if "stage_tracker" in locals():
-                if self._stage_writer is not None:
-                    _finish_stage_tracker(self._stage_writer, stage_tracker)
-                else:
-                    _safe_stage_tracker_call(stage_tracker, "finish_task")
+            finish_stage_tracker_once()
             should_cleanup_vectors = row is not None and (
                 row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
             )
@@ -337,11 +345,7 @@ class IndexerWorker:
             # Ray cancellation raises BaseException and bypasses the ordinary
             # failure handler. Close the observed sequence without inventing an
             # end transition for an invocation that was interrupted.
-            if "stage_tracker" in locals():
-                if self._stage_writer is not None:
-                    _finish_stage_tracker(self._stage_writer, stage_tracker)
-                else:
-                    _safe_stage_tracker_call(stage_tracker, "finish_task")
+            finish_stage_tracker_once()
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See

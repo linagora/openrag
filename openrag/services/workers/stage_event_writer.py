@@ -26,6 +26,7 @@ from core.utils.logging import get_logger
 from services.workers.stage_tracker import StageTracker
 
 logger = get_logger()
+_MIN_STAGE_WRITE_TIMEOUT = 1.0
 
 
 class StageEventWriter:
@@ -46,7 +47,8 @@ class StageEventWriter:
         flush_interval: float = 0.05,
         write_timeout: float = 0.075,
         retry_delay: float = 0.025,
-        shutdown_timeout: float = 0.25,
+        terminal_retry_delay: float = 1.0,
+        shutdown_timeout: float = 6.0,
         sample_interval: float = 1.0,
         live_timeout: float = 0.075,
         live_retry_delay: float = 0.025,
@@ -66,6 +68,7 @@ class StageEventWriter:
         self._flush_interval = flush_interval
         self._write_timeout = write_timeout
         self._retry_delay = retry_delay
+        self._terminal_retry_delay = terminal_retry_delay
         self._shutdown_timeout = shutdown_timeout
         self._sample_interval = sample_interval
         self._live_timeout = live_timeout
@@ -283,7 +286,7 @@ class StageEventWriter:
             if previous is None and len(self._live_pending) >= self._queue_capacity:
                 evicted_task_id, _ = self._live_pending.popitem(last=False)
                 self._dropped_live_snapshots += 1
-                record_stage_live_snapshot_failure()
+                record_stage_event_drop("live_snapshot_overflow")
                 self._mark_snapshot_loss(evicted_task_id)
                 self._remember_incomplete(evicted_task_id)
             self._live_pending[task_id] = snapshot
@@ -345,33 +348,52 @@ class StageEventWriter:
         events: Sequence[StageProgressEvent],
         summaries: Sequence[StageProgressSummary],
     ) -> None:
+        # The repository performs work per event and per task summary. Keep each
+        # write bounded, allow one second for a single task, and scale larger
+        # batches in proportion to their size.
+        write_timeout = max(_MIN_STAGE_WRITE_TIMEOUT, self._write_timeout * max(1, len(events), len(summaries)))
         for attempt in range(2):
             started = time.perf_counter()
             try:
                 result = await asyncio.wait_for(
                     self._job_repo.write_stage_progress(events=events, summaries=summaries),
-                    timeout=self._write_timeout,
+                    timeout=write_timeout,
                 )
             except asyncio.CancelledError:
-                self._dropped_events += len(events)
-                record_stage_event_drop("shutdown", len(events))
-                for summary in summaries:
-                    self._mark_snapshot_loss(summary.task_id)
+                self._record_cancelled_batch_loss(events, summaries)
                 raise
             except Exception:  # noqa: BLE001 - repository failure cannot fail indexing
                 duration = time.perf_counter() - started
                 if attempt == 0:
                     self._write_retries += 1
                     record_stage_event_write("retry", duration)
-                    await asyncio.sleep(self._retry_delay)
+                    try:
+                        await asyncio.sleep(self._retry_delay)
+                    except asyncio.CancelledError:
+                        self._record_cancelled_batch_loss(events, summaries)
+                        raise
                     continue
                 self._write_failures += 1
                 self._dropped_events += len(events)
                 record_stage_event_write("failure", duration)
-                record_stage_event_drop("write_failed", len(events))
+                record_stage_event_drop("write_failed", len(events) or len(summaries))
+                terminal_retry_expiries = []
                 for summary in summaries:
                     self._mark_snapshot_loss(summary.task_id)
                     self._remember_incomplete(summary.task_id)
+                    terminal = self._terminal.get(summary.task_id)
+                    if self._closing or terminal is None:
+                        continue
+                    expires_at, snapshot = terminal
+                    final_summary = snapshot.summary
+                    if final_summary.attempt == summary.attempt and final_summary.expected_final_sequence is not None:
+                        self._put_latest_summary(final_summary)
+                        terminal_retry_expiries.append(expires_at)
+                if terminal_retry_expiries:
+                    remaining_ttl = min(terminal_retry_expiries) - self._monotonic()
+                    delay = min(self._terminal_retry_delay, max(0.0, remaining_ttl))
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                 logger.warning("Indexing stage history write failed after bounded retry")
                 return
 
@@ -403,12 +425,26 @@ class StageEventWriter:
                         expected is None or row.persisted_through_sequence >= expected
                     ):
                         self._pending_ack.pop(key, None)
+                for task_id in result.conflicted_task_ids:
+                    self._remember_incomplete(task_id)
                 for task_id in result.missing_parent_task_ids:
                     self._mark_snapshot_loss(task_id)
-                    self._dropped_events += sum(event.task_id == task_id for event in events)
-                    record_stage_event_drop("missing_parent", sum(event.task_id == task_id for event in events))
+                    dropped_events = sum(event.task_id == task_id for event in events)
+                    has_summary = any(summary.task_id == task_id for summary in summaries)
+                    self._dropped_events += dropped_events
+                    record_stage_event_drop("missing_parent", dropped_events or int(has_summary))
                     self._remember_incomplete(task_id)
             return
+
+    def _record_cancelled_batch_loss(
+        self,
+        events: Sequence[StageProgressEvent],
+        summaries: Sequence[StageProgressSummary],
+    ) -> None:
+        self._dropped_events += len(events)
+        record_stage_event_drop("shutdown", len(events) or len(summaries))
+        for summary in summaries:
+            self._mark_snapshot_loss(summary.task_id)
 
     def _mark_snapshot_loss(self, task_id: str) -> None:
         self._remember_incomplete(task_id)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1661,7 +1662,9 @@ async def test_process_file_stamps_started_at_when_the_task_leaves_the_queue(tmp
 
 
 @pytest.mark.asyncio
-async def test_process_file_persists_its_actual_pipeline_stage_events(tmp_path: Path) -> None:
+async def test_process_file_persists_its_actual_pipeline_stage_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class StageHistoryRepo:
         def __init__(self) -> None:
             self.jobs = []
@@ -1684,10 +1687,14 @@ async def test_process_file_persists_its_actual_pipeline_stage_events(tmp_path: 
         task_state_manager=_fake_tsm(),
         job_repo=repo,
     )
+    assert worker._stage_writer is not None
+    finish_task = MagicMock(wraps=worker._stage_writer.finish_task)
+    monkeypatch.setattr(worker._stage_writer, "finish_task", finish_task)
 
     await worker.process_file(task_id="tracked-task", path=str(path), metadata={"file_id": "f1"}, partition="p")
     await worker.close_stage_writer()
 
+    finish_task.assert_called_once()
     assert repo.jobs[0].stage_tracking_version == 1
     events = [event for batch, _ in repo.writes for event in batch]
     starts = [event.stage_id for event in events if event.status is StageEventStatus.STARTED]
@@ -1695,6 +1702,39 @@ async def test_process_file_persists_its_actual_pipeline_stage_events(tmp_path: 
     assert [event.sequence for event in events] == list(range(1, 9))
     summaries = [summary for _, batch in repo.writes for summary in batch]
     assert summaries[-1].expected_final_sequence == 8
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pipeline_still_finalizes_stage_tracker_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StageHistoryRepo:
+        async def upsert_job(self, job):
+            return job
+
+        async def write_stage_progress(self, *, events, summaries):
+            return StageProgressWriteResult()
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    pipeline = MagicMock()
+    pipeline.run = AsyncMock(side_effect=asyncio.CancelledError)
+    worker = IndexerWorker(
+        pipeline=pipeline,
+        task_state_manager=_fake_tsm(),
+        job_repo=StageHistoryRepo(),
+    )
+    assert worker._stage_writer is not None
+    finish_task = MagicMock(wraps=worker._stage_writer.finish_task)
+    monkeypatch.setattr(worker._stage_writer, "finish_task", finish_task)
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker.process_file(
+            task_id="cancelled-stage-tracker", path=str(path), metadata={"file_id": "f1"}, partition="p"
+        )
+
+    finish_task.assert_called_once()
+    await worker.close_stage_writer()
 
 
 @pytest.mark.asyncio
