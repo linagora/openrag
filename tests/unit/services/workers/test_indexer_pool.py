@@ -2968,6 +2968,37 @@ async def test_worker_lease_warns_that_an_older_task_state_manager_needs_a_ray_r
 
 
 @pytest.mark.asyncio
+async def test_failed_lease_renewal_log_names_the_exception_type() -> None:
+    """TimeoutError() has an empty str(); without its type the warning ends in a bare colon (#1300)."""
+    from services.workers.worker_lease import keep_worker_lease
+
+    logger = MagicMock()
+    task_state_manager = SimpleNamespace(
+        renew_worker_lease=SimpleNamespace(remote=_renewals([TimeoutError()], then=False))
+    )
+
+    await keep_worker_lease(
+        task_state_manager, "t", worker_task=MagicMock(), logger=logger, renew_interval=0.01, lease_ttl=5.0
+    )
+
+    failure = next(c.args[0] for c in logger.warning.call_args_list if "Failed to renew" in c.args[0])
+    assert "TimeoutError" in failure
+
+
+@pytest.mark.asyncio
+async def test_failed_lease_end_log_names_the_exception_type() -> None:
+    from services.workers.worker_lease import end_worker_lease
+
+    logger = MagicMock()
+    task_state_manager = SimpleNamespace(end_worker_lease=SimpleNamespace(remote=AsyncMock(side_effect=TimeoutError())))
+
+    await end_worker_lease(task_state_manager, "t", logger=logger, timeout=1.0)
+
+    logger.warning.assert_called_once()
+    assert "TimeoutError" in logger.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_actor_drops_a_task_whose_pickup_the_task_state_refuses(monkeypatch, tmp_path) -> None:
     """A queued orphan already settled by its worker actor's restart count must not index late."""
     import services.workers.worker_lease as worker_lease

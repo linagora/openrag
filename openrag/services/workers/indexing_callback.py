@@ -123,7 +123,7 @@ async def send_indexing_callback(
             response = await client.post(callback_url, json=payload, headers=headers)
             response.raise_for_status()
     except Exception as exc:
-        error_message = str(exc)
+        error_message = f"{type(exc).__name__}: {exc}"
         for secret in url_secrets:
             error_message = error_message.replace(secret, "REDACTED")
         if callback_token:

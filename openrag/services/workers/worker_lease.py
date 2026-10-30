@@ -125,7 +125,7 @@ async def keep_worker_lease(
                 asyncio.gather(remote(task_id)), timeout=min(interval, stop_at - sent_at)
             )
         except Exception as exc:  # noqa: BLE001 - one missed renewal must not fail the file
-            logger.warning(f"Failed to renew the worker lease of task {task_id}: {exc}")
+            logger.warning(f"Failed to renew the worker lease of task {task_id}: {type(exc).__name__}: {exc}")
             await asyncio.sleep(max(0.0, min(_LEASE_RETRY_SECONDS, interval, stop_at - loop.time())))
             continue
         answered = True
@@ -177,4 +177,4 @@ async def end_worker_lease(
             timeout=WORKER_LEASE_RENEW_INTERVAL_SECONDS if timeout is None else timeout,
         )
     except Exception as exc:  # noqa: BLE001 - the lease lapses on its own
-        logger.warning(f"Failed to end the worker lease of task {task_id}: {exc}")
+        logger.warning(f"Failed to end the worker lease of task {task_id}: {type(exc).__name__}: {exc}")
