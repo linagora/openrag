@@ -166,10 +166,27 @@ def _release_if_granted(name: str, semaphore_actor, acquire_task: asyncio.Task) 
         return
     incarnation = acquire_task.result()
     # Expected whenever a caller is cancelled mid-wait (e.g. a stage timing out
-    # its sibling tasks): the permit is handed back as designed.
+    # its sibling tasks): the permit is handed back as designed. Only a failed
+    # release, which may leak the permit, is worth a warning.
     logger.bind(semaphore=name).debug(
         "Releasing permit for a cancelled acquire on semaphore '{name}' - "
         "caller was cancelled while waiting, permit granted afterwards.",
         name=name,
     )
-    asyncio.ensure_future(_release(semaphore_actor, incarnation))
+    release_task = asyncio.ensure_future(_release(semaphore_actor, incarnation))
+    release_task.add_done_callback(functools.partial(_warn_if_release_failed, name))
+
+
+def _warn_if_release_failed(name: str, release_task: asyncio.Task) -> None:
+    if release_task.cancelled():
+        reason = "cancelled"
+    elif (exc := release_task.exception()) is not None:
+        reason = repr(exc)
+    else:
+        return
+    logger.bind(semaphore=name).warning(
+        "Failed to release permit for a cancelled acquire on semaphore '{name}' ({reason}) - "
+        "the permit may be leaked until the actor restarts.",
+        name=name,
+        reason=reason,
+    )
