@@ -1026,6 +1026,8 @@ openrag:
   # Environment variables for the API container alone (Kubernetes EnvVar
   # objects). They take precedence over the shared env.config ConfigMap the
   # container also reads. RAY_METRICS_EXPORT_PORT is refused: the chart sets it.
+  # So are RAY_ADDRESS, ENABLE_RAY_SERVE and POSTGRES_RUN_MIGRATIONS, which the
+  # chart reads from env.config: set those there.
   extraEnv: []
   # Size of the /dev/shm emptyDir volume. Ray's plasma object store and Python
   # multiprocessing both use /dev/shm for POSIX semaphores and shared memory.

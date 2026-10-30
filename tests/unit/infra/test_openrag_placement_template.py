@@ -161,6 +161,24 @@ def test_extra_env_cannot_move_the_embedded_ray_metrics_port(tmp_path: Path) -> 
 
 
 @requires_helm
+@pytest.mark.parametrize("name", ["RAY_ADDRESS", "ENABLE_RAY_SERVE", "POSTGRES_RUN_MIGRATIONS"])
+def test_extra_env_refuses_what_the_chart_reads_from_env_config(tmp_path: Path, name: str) -> None:
+    assert HELM is not None
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(yaml.safe_dump({"openrag": {"extraEnv": [{"name": name, "value": "x"}]}}), encoding="utf-8")
+    result = subprocess.run(
+        [HELM, "template", "test", str(_isolated_chart(tmp_path)), "--show-only", "templates/openrag.yaml"]
+        + ["-f", str(values_file)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert f"openrag.extraEnv sets {name}, which the chart reads from env.config" in result.stderr
+
+
+@requires_helm
 def test_extra_env_may_set_the_metrics_port_without_embedded_ray(tmp_path: Path) -> None:
     """Pointed at an external Ray, the chart sets no metrics port of its own."""
     spec = _pod_spec(

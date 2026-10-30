@@ -637,7 +637,7 @@ The API pod requests `nvidia.com/gpu: 1` by default (`openrag.resources`), for M
 
   This relies on the NVIDIA Container Toolkit honouring `NVIDIA_VISIBLE_DEVICES` in an unprivileged container. A node configured with `accept-nvidia-visible-devices-envvar-when-unprivileged = false` ignores it, and the container then starts without a GPU and with no error. Check that setting on your nodes, or use time-slicing.
 
-`openrag.extraEnv` holds Kubernetes `EnvVar` objects for the API container alone. They take precedence over the shared `env.config` ConfigMap. The chart refuses `RAY_METRICS_EXPORT_PORT` there, since it sets that one itself.
+`openrag.extraEnv` holds Kubernetes `EnvVar` objects for the API container alone. They take precedence over the shared `env.config` ConfigMap. The chart refuses `RAY_METRICS_EXPORT_PORT` there, since it sets that one itself. It also refuses `RAY_ADDRESS`, `ENABLE_RAY_SERVE` and `POSTGRES_RUN_MIGRATIONS`: the chart reads them from `env.config` to render the Ray mode, probes and migrations, so set them there.
 
 ## GPU metrics
 
