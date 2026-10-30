@@ -26,6 +26,7 @@ from __future__ import annotations
 import html
 import logging
 import zipfile
+import zlib
 from collections.abc import Iterator
 from io import BytesIO
 
@@ -155,7 +156,14 @@ def _read_xml(package: zipfile.ZipFile, name: str, required: bool):
     if info.file_size > _MAX_XML_BYTES:
         raise OdfError(f"{name} is {info.file_size} bytes, over the {_MAX_XML_BYTES} byte limit")
     try:
-        return etree.fromstring(package.read(name), parser=_xml_parser())
+        data = package.read(name)
+    except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError) as exc:
+        if required:
+            raise OdfError(f"cannot read {name}: {exc}") from exc
+        logger.warning("Ignoring unreadable ODF %s: %s", name, exc)
+        return None
+    try:
+        return etree.fromstring(data, parser=_xml_parser())
     except etree.XMLSyntaxError as exc:
         if required:
             raise OdfError(f"{name} is not well-formed XML: {exc}") from exc

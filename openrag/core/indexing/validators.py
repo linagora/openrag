@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import zipfile
+import zlib
 from collections.abc import Iterable
 from typing import IO, Any
 
@@ -385,7 +386,8 @@ def _validate_odf_package(extension: str, stream: IO[bytes]) -> None:
             bound = len(expected) + 64
             with package.open("mimetype") as entry:
                 declared = entry.read(bound + 1)
-    except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError) as exc:
+    # An encrypted entry raises RuntimeError, a corrupt deflate stream zlib.error.
+    except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError, RuntimeError, zlib.error) as exc:
         raise ValidationError(refused, status_code=415) from exc
     finally:
         stream.seek(position)

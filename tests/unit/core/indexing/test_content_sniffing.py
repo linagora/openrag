@@ -341,6 +341,19 @@ def test_the_mimetype_entry_is_read_with_a_bound():
         validate_ooxml_package("odt", io.BytesIO(buf.getvalue()))
 
 
+@pytest.mark.parametrize("how", ["encrypted", "corrupt"])
+def test_an_unreadable_mimetype_entry_is_refused(damaged_zip_entry, how):
+    """An encrypted entry raises RuntimeError and a broken deflate stream
+    zlib.error: both are a 415, not a 500."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+        archive.writestr("content.xml", "<x/>")
+    with pytest.raises(ValidationError) as excinfo:
+        validate_ooxml_package("odt", io.BytesIO(damaged_zip_entry(buf.getvalue(), "mimetype", how)))
+    assert excinfo.value.status_code == 415
+
+
 def test_an_opendocument_check_restores_the_stream_position(odf_package):
     good = io.BytesIO(odf_package("odt", ""))
     validate_ooxml_package("odt", good)
