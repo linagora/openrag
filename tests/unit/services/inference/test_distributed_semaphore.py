@@ -1,16 +1,22 @@
 import asyncio
 import contextlib
 import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import ray
+from loguru import logger
 
 # Prevent Ray from scanning the working directory (which may contain
 # permission-restricted folders like db/) and from packaging the whole repo.
 if not ray.is_initialized():
     ray.init(runtime_env={"working_dir": None}, ignore_reinit_error=True)
 
-from services.inference.distributed_semaphore import DistributedSemaphore, DistributedSemaphoreActor  # noqa: E402
+from services.inference.distributed_semaphore import (  # noqa: E402
+    DistributedSemaphore,
+    DistributedSemaphoreActor,
+    _release_if_granted,
+)
 
 
 class TestDistributedSemaphore:
@@ -247,3 +253,29 @@ class TestDistributedSemaphoreReleaseStarvation:
             for task in pending:
                 task.cancel()
             ray.kill(actor, no_restart=True)
+
+
+class TestReleaseIfGrantedLogLevel:
+    """Issue #1298: releasing a permit granted to a cancelled acquire is the
+    designed path, not a fault, so it must log at DEBUG rather than WARNING.
+    """
+
+    async def test_logs_release_at_debug_and_still_releases(self):
+        acquire_task = asyncio.get_running_loop().create_future()
+        acquire_task.set_result("incarnation-1")
+        semaphore_actor = MagicMock()
+        semaphore_actor.release.remote = AsyncMock()
+
+        records = []
+        sink_id = logger.add(lambda m: records.append(m.record), level="DEBUG")
+        try:
+            _release_if_granted("vlmSemaphore", semaphore_actor, acquire_task)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        finally:
+            logger.remove(sink_id)
+
+        levels = [r["level"].name for r in records if "Releasing permit" in r["message"]]
+        assert levels == ["DEBUG"]
+        assert not [r for r in records if r["level"].no >= logger.level("WARNING").no]
+        semaphore_actor.release.remote.assert_awaited_once_with("incarnation-1")
