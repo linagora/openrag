@@ -31,6 +31,7 @@ from core.utils.exceptions import (
     AuthError,
     ConflictError,
     EmbeddingError,
+    EmbeddingResponseError,
     InferenceError,
     InferenceTimeoutError,
     LLMParsingError,
@@ -40,6 +41,10 @@ from core.utils.exceptions import (
     ServiceUnavailableError,
     StorageError,
     ValidationError,
+    VDBCreateOrLoadCollectionError,
+    VDBDeleteError,
+    VDBInsertError,
+    VDBSearchError,
 )
 from core.utils.logging import get_logger
 from fastapi import FastAPI, Request
@@ -99,6 +104,37 @@ def _status_for(exc: BaseException) -> int:
     return 500
 
 
+# Sent with a 4xx, but the backend failed: still an ERROR.
+_SERVER_FAULTS_WITH_CLIENT_STATUS = (
+    VDBSearchError,
+    VDBInsertError,
+    VDBDeleteError,
+    VDBCreateOrLoadCollectionError,
+    EmbeddingResponseError,
+)
+
+
+def _log_level_for(exc: OpenRAGError, status_code: int) -> str:
+    """ERROR when the server failed, WARNING when a provider refused
+    OpenRag's call, INFO for the caller's own error.
+
+    A 4xx is normally the client's error and part of normal operation (a
+    file lookup before upload, a duplicate upload), so ERROR stays an
+    alertable "the server failed".
+    """
+    if status_code >= 500 or isinstance(exc, _SERVER_FAULTS_WITH_CLIENT_STATUS):
+        return "ERROR"
+    # The provider's own 4xx, passed through: it refused OpenRag's call, though
+    # a 400 can still come from a bad parameter the caller sent.
+    if (
+        isinstance(exc, _PROVIDER_ERRORS)
+        and not getattr(exc, "caller_shaped", False)
+        and exc.code != "LLM_OVERRIDE_REJECTED"
+    ):
+        return "WARNING"
+    return "INFO"
+
+
 def _get_request_id(request: Request) -> str | None:
     """Return the request id set by ``RequestIdMiddleware`` if any.
 
@@ -118,11 +154,8 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError) -> JSON
     the response correctly.
     """
     status_code = _status_for(exc)
-    # A 4xx is the client's error and part of normal operation (a file
-    # lookup before upload, a duplicate upload): ERROR is kept for 5xx so
-    # it still means "the server failed" and can be alerted on (#1295).
     logger.log(
-        "ERROR" if status_code >= 500 else "INFO",
+        _log_level_for(exc, status_code),
         "OpenRAGError",
         error_code=getattr(exc, "code", type(exc).__name__),
         status_code=status_code,
