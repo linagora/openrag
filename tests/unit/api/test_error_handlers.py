@@ -63,6 +63,10 @@ def app() -> FastAPI:
     async def _raise_inference_upstream() -> None:
         raise InferenceError("LLM error (502): bad gateway", status_code=502)
 
+    @app.get("/raise/inference_provider_401")
+    async def _raise_inference_provider_401() -> None:
+        raise InferenceError("LLM error (401): bad key", status_code=401)
+
     @app.get("/raise/unknown")
     async def _raise_unknown() -> None:
         raise RuntimeError("kaboom")
@@ -368,3 +372,36 @@ def test_the_exception_keeps_the_providers_status() -> None:
 
     assert info.value.status_code == 401
     assert _status_for(info.value) == 502
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "level"),
+    [
+        ("/raise/not_found", 404, "INFO"),
+        ("/raise/conflict", 409, "INFO"),
+        ("/raise/openrag", 418, "INFO"),
+        ("/raise/validation", 422, "INFO"),
+        ("/raise/quota", 429, "INFO"),
+        ("/raise/inference_upstream", 502, "ERROR"),
+        # Remapped by ``_status_for``: the level follows the status sent, not ``exc.status_code``.
+        ("/raise/inference_provider_401", 502, "ERROR"),
+        ("/raise/inference_timeout", 504, "ERROR"),
+    ],
+)
+def test_openrag_error_log_level_follows_status(client: TestClient, path: str, status: int, level: str) -> None:
+    """Expected 4xx are client errors, not server faults: only a 5xx may
+    log at ERROR, or the real failures drown in them (#1295)."""
+    from loguru import logger
+
+    captured: list[tuple[str, int]] = []
+    handler_id = logger.add(
+        lambda m: captured.append((m.record["level"].name, m.record["extra"].get("status_code"))),
+        level="DEBUG",
+        filter=lambda r: r["message"] == "OpenRAGError",
+    )
+    try:
+        response = client.get(path)
+    finally:
+        logger.remove(handler_id)
+    assert response.status_code == status
+    assert captured == [(level, status)]
