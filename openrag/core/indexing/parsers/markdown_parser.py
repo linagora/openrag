@@ -7,8 +7,8 @@ one :class:`ImageBlock` per image reference in the source:
   bytes stored on the block, and the raw payload replaced by a compact
   caption-compatible reference before chunking.
 - HTTP/HTTPS refs (``![alt](https://...)``) yield an :class:`ImageBlock`
-  with empty ``image_bytes`` and ``source_url`` set; a downstream fetch
-  stage can populate the bytes later. The :attr:`ImageBlock.image_url`
+  with empty ``image_bytes`` and ``source_url`` set; nothing fetches it, so
+  the caption stage leaves it uncaptioned. The :attr:`ImageBlock.image_url`
   property gives a uniform VLM-friendly URL in either case.
 
 Captioning is not done here — see :class:`ImageBlock` for the

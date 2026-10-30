@@ -116,3 +116,8 @@ def test_marker_timeout_rejects_zero_and_negative_values():
     for bad in (0, -1):
         with pytest.raises(ValidationError):
             LoaderConfig(marker_timeout=bad)
+
+
+def test_removed_image_captioning_url_key_is_ignored():
+    # Removed in #1294: configs that still set it must keep loading.
+    assert not hasattr(LoaderConfig(image_captioning_url=True), "image_captioning_url")

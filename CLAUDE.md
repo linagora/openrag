@@ -124,7 +124,7 @@ Each file type has a dedicated loader that converts to markdown:
 
 **Image handling approaches:**
 - PDF/DOCX/PPTX: Extract binary image data from file, pass to VLM directly
-- Markdown: Parse image URLs from text; HTTP URLs require `IMAGE_CAPTIONING_URL=true`
+- Markdown: data-URI images are decoded and captioned; remote (HTTP) image URLs are not fetched and stay as links, uncaptioned
 
 ### Source Citation Filtering
 
