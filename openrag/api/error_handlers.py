@@ -118,7 +118,11 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError) -> JSON
     the response correctly.
     """
     status_code = _status_for(exc)
-    logger.error(
+    # A 4xx is the client's error and part of normal operation (a file
+    # lookup before upload, a duplicate upload): ERROR is kept for 5xx so
+    # it still means "the server failed" and can be alerted on (#1295).
+    logger.log(
+        "ERROR" if status_code >= 500 else "INFO",
         "OpenRAGError",
         error_code=getattr(exc, "code", type(exc).__name__),
         status_code=status_code,
