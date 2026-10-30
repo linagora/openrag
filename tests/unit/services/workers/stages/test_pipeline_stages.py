@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import re
 from contextlib import asynccontextmanager
 
@@ -6,8 +7,9 @@ import pytest
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
+from core.indexing.parsers.markdown_parser import MarkdownParser
 from core.models.chunk import Chunk, ChunkType
-from core.models.document import Document, ImageBlock, ProcessedDocument, TextBlock
+from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
@@ -1031,3 +1033,39 @@ def test_resolve_language_counts_the_words_of_scripts_written_without_spaces(bun
         "with the totals in the last column."
     )
     assert resolve_language({"chunks": [Chunk(id="c1", text=f"{caption}\n\n{text}")]}) == language
+
+
+_TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+class _StrictBytesVLM(FakeVLM):
+    """Rejects empty bytes like the real VLM endpoint does (#1294)."""
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        if not image_bytes:
+            raise RuntimeError("VLM error (400): Failed to load image: cannot identify image file")
+        return await super().caption_image(image_bytes, prompt=prompt)
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_skips_remote_markdown_image_without_bytes():
+    remote_ref = "![logo](https://example.com/logo.png)"
+    encoded = base64.b64encode(_TINY_PNG).decode()
+    source = f"Intro ![chart](data:image/png;base64,{encoded}) middle {remote_ref} end"
+    processed = await MarkdownParser().parse(
+        Document(filename="readme.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+    row = {"processed_document": processed}
+    vlm = _StrictBytesVLM(["a chart"])
+
+    await caption_stage(row, vlm)
+
+    assert [image_bytes for image_bytes, _ in vlm.calls] == [_TINY_PNG]
+    assert row["stage"] == "captioned"
+    text = row["processed_document"].text_blocks[0].text
+    assert wrap_caption("a chart") in text
+    assert remote_ref in text
+    remote = next(image for image in row["processed_document"].images if image.source_url)
+    assert remote.caption is None
