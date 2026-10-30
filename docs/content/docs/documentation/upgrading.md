@@ -13,6 +13,15 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## 2.3.x to the first release after 2.3.3
+
+That release moves the indexer generation from `v13` to `v14` and replaces the
+shared `TaskStateManager` actor. On a shared Ray cluster (`ray.enabled: true`, or
+an external cluster) drain and retire the `v13` generation before the first new
+replica starts, as in
+[Upgrades that change the indexer generation](/openrag/documentation/kubernetes/#upgrades-that-change-the-indexer-generation).
+With Ray inside the OpenRAG pod or container, nothing extra is needed.
+
 ## 2.3.0 or 2.3.1 to a later 2.3.x
 
 The fence that holds a file while an orphaned indexing worker may still write to

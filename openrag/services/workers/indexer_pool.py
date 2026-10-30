@@ -67,7 +67,10 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # v13: TaskStateManager fences admission against a task already indexing the
 # same file and is replaced during bootstrap when it lacks that method; the
 # replacement changes the actor id the previous generation's handles point at.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v13"
+# v14: workers log their own failures and poll has_object_ref instead of
+# borrowing their task's ref; v13 workers would keep running without either.
+# The TaskStateManager is replaced when it lacks has_object_ref (#1296).
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v14"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
