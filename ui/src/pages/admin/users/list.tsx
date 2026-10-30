@@ -9,7 +9,6 @@ import type { UserResponse, UserWithToken } from "@/lib/api/users";
 import { getConfig } from "@/lib/api/system";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
-import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -26,6 +25,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
+import { DeleteUserAction } from "./delete-user-action";
 
 const EMPTY_USERS: UserResponse[] = [];
 
@@ -122,8 +122,9 @@ export default function UserListPage() {
 
   const deleteMut = useMutation({
     mutationFn: deleteUser,
-    onSuccess: () => {
+    onSuccess: (_, id) => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
+      queryClient.removeQueries({ queryKey: ["user", String(id)] });
       toast.success("User deleted");
     },
     onError: (e) => toast.error((e as Error).message),
@@ -194,9 +195,9 @@ export default function UserListPage() {
                 <Eye className="h-3.5 w-3.5" />
               </Link>
             </Button>
-            <ConfirmDialog
-              title="Delete user?"
-              description={`Permanently delete "${label}"? This removes them from all partitions and invalidates their token.`}
+            <DeleteUserAction
+              userId={row.original.id}
+              label={label}
               onConfirm={() => deleteMut.mutate(row.original.id)}
             >
               <Button
@@ -209,7 +210,7 @@ export default function UserListPage() {
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </Button>
-            </ConfirmDialog>
+            </DeleteUserAction>
           </div>
         );
       },
