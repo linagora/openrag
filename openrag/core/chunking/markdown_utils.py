@@ -250,13 +250,15 @@ def chunk_table(
 
 def _chunk_xlsx_table(table, element, chunk_size, length_function):
     """Reuse row splitting with escaped headers and exact sheet/column metadata."""
-    context = element.metadata.get("worksheet_context", "") + element.metadata.get("sheet_context", "")
-    if context:
-        if not table.endswith(context):
+    base_context = element.metadata.get("worksheet_context", "") + element.metadata.get("sheet_context", "")
+    formula_context = element.metadata.get("formula_context", "")
+    complete_context = base_context + formula_context
+    if complete_context:
+        if not table.endswith(complete_context):
             raise PipelineError("XLSX sheet context does not match table content")
-        table = table[: -len(context)]
+        table = table[: -len(complete_context)]
     table = clean_markdown_table_spacing(table)
-    context_tokens = length_function(context) if context else 0
+    context_tokens = length_function(complete_context) if complete_context else 0
     if context_tokens >= chunk_size:
         raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
     reserved_tokens = length_function("\n") + context_tokens
@@ -282,14 +284,7 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
         length_function=length_function,
     )
     for chunk in chunks:
-        chunk.content += context
         metadata = chunk.metadata
-        csv_effective_chunk_size = metadata.get("csv_effective_chunk_size")
-        allowed_size = (
-            csv_effective_chunk_size + reserved_tokens if csv_effective_chunk_size is not None else chunk_size
-        )
-        if length_function(chunk.content) > allowed_size:
-            raise PipelineError("XLSX chunk exceeds its token budget")
         positions = [column_positions[name] for name in metadata["table_columns"]]
         metadata["table_column_indices"] = [index + 1 for index in positions]
         metadata["table_columns"] = [original_columns[index] for index in positions]
@@ -316,6 +311,39 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
             if isinstance(worksheet_columns, list) and len(worksheet_columns) == len(original_columns)
             else [metadata.get("table_start_column", 1) + index for index in positions]
         )
+        selected_excel_columns = {column_name(index) for index in selected_worksheet_columns}
+        selected_groups = [
+            group
+            for group in metadata.get("formula_groups", [])
+            if group.get("target_column") in selected_excel_columns
+        ]
+        selected_cells = [
+            cell for cell in metadata.get("formula_cells", []) if cell.get("target_column") in selected_excel_columns
+        ]
+        if selected_groups:
+            metadata["formula_groups"] = selected_groups
+        else:
+            metadata.pop("formula_groups", None)
+        if selected_cells:
+            metadata["formula_cells"] = selected_cells
+        else:
+            metadata.pop("formula_cells", None)
+        chunk_formula_context = _xlsx_formula_context(selected_groups)
+        if chunk_formula_context:
+            metadata["formula_context"] = chunk_formula_context
+        else:
+            metadata.pop("formula_context", None)
+        chunk_context = base_context + chunk_formula_context
+        chunk.content += chunk_context
+        chunk_context_tokens = length_function(chunk_context) if chunk_context else 0
+        csv_effective_chunk_size = metadata.get("csv_effective_chunk_size")
+        allowed_size = (
+            csv_effective_chunk_size + length_function("\n") + chunk_context_tokens
+            if csv_effective_chunk_size is not None
+            else chunk_size
+        )
+        if length_function(chunk.content) > allowed_size:
+            raise PipelineError("XLSX chunk exceeds its token budget")
         metadata["cell_range"] = (
             f"{sheet}{column_name(min(selected_worksheet_columns))}{start}:"
             f"{column_name(max(selected_worksheet_columns))}{end}"
@@ -379,7 +407,53 @@ def _tabular_row_metadata(
         updated["csv_row_number"] = row_numbers[0]
         if metadata.get("tabular_format"):
             updated["table_row_number"] = row_numbers[0]
+    row_header_paths = metadata.get("table_row_header_paths")
+    if isinstance(row_header_paths, dict):
+        updated["table_row_header_paths"] = {
+            str(row_number): row_header_paths[str(row_number)]
+            for row_number in row_numbers
+            if str(row_number) in row_header_paths
+        }
+    formula_groups = metadata.get("formula_groups")
+    if isinstance(formula_groups, list):
+        selected_rows = set(row_numbers)
+        selected_groups = [
+            group
+            for group in formula_groups
+            if isinstance(group, dict)
+            and any(group.get("start_row", 0) <= row <= group.get("end_row", -1) for row in selected_rows)
+        ]
+        if selected_groups:
+            updated["formula_groups"] = selected_groups
+        else:
+            updated.pop("formula_groups", None)
+    formula_cells = metadata.get("formula_cells")
+    if isinstance(formula_cells, list):
+        selected_cells = [
+            cell for cell in formula_cells if isinstance(cell, dict) and cell.get("row") in set(row_numbers)
+        ]
+        if selected_cells:
+            updated["formula_cells"] = selected_cells
+        else:
+            updated.pop("formula_cells", None)
+    updated.pop("formula_context", None)
     return updated
+
+
+def _xlsx_formula_context(groups: list[dict]) -> str:
+    if not groups:
+        return ""
+
+    def single_line(value) -> str:
+        return str(value).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+    lines = ["Formula context (calculated columns):"]
+    for group in groups:
+        lines.append(
+            f"- {group['target_column']} ({single_line(group['target_header'])}), {group['range']}: "
+            f"{single_line(group['semantic_expression'])} [pattern: {single_line(group['pattern'])}]"
+        )
+    return "\n\n" + "\n".join(lines)
 
 
 def _tabular_label(table_element: MDElement) -> str:

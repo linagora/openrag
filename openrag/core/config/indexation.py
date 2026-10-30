@@ -170,6 +170,9 @@ class LoaderConfig(ConfigMixin):
     xlsx_sheet_header_rows: dict[
         Annotated[str, Field(min_length=1)], Annotated[int, Field(ge=1, le=1_048_576, strict=True)] | None
     ] = Field(default_factory=dict)
+    xlsx_sheet_headerless_schemas: dict[
+        Annotated[str, Field(min_length=1)], list[Annotated[str, Field(min_length=1)]]
+    ] = Field(default_factory=dict)
     xlsx_limits: dict[str, Annotated[int, Field(gt=0, strict=True)]] = Field(default_factory=dict)
     image_captioning: bool = True
     image_captioning_url: bool = True
