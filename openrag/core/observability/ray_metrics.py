@@ -48,6 +48,7 @@ that can be caught without a live Ray cluster.
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import UTC, datetime
 
@@ -59,6 +60,14 @@ from core.observability.metric_specs import (
     INGEST_LAST_PARSE_TIMESTAMP,
     INGEST_QUEUE_WAIT_SECONDS,
     INGEST_STAGE_DURATION_SECONDS,
+    INGEST_STAGE_EVENT_DROP_REASONS,
+    INGEST_STAGE_EVENT_DROPPED_TOTAL,
+    INGEST_STAGE_EVENT_QUEUE_SIZE,
+    INGEST_STAGE_EVENT_WRITE_RESULTS,
+    INGEST_STAGE_EVENT_WRITE_SECONDS,
+    INGEST_STAGE_EVENT_WRITE_TOTAL,
+    INGEST_STAGE_HISTORY_INCOMPLETE,
+    INGEST_STAGE_HISTORY_PENDING,
     INGEST_STATUS_VALUES,
     MetricSpec,
 )
@@ -84,6 +93,12 @@ _STAGE_DURATION = _histogram(INGEST_STAGE_DURATION_SECONDS)
 _QUEUE_WAIT = _histogram(INGEST_QUEUE_WAIT_SECONDS)
 _CLOCK_SKEW_TOTAL = _counter(INGEST_CLOCK_SKEW_TOTAL)
 _LAST_PARSE_TIMESTAMP = _gauge(INGEST_LAST_PARSE_TIMESTAMP)
+_STAGE_EVENT_QUEUE_SIZE = _gauge(INGEST_STAGE_EVENT_QUEUE_SIZE)
+_STAGE_EVENT_DROPPED_TOTAL = _counter(INGEST_STAGE_EVENT_DROPPED_TOTAL)
+_STAGE_EVENT_WRITE_TOTAL = _counter(INGEST_STAGE_EVENT_WRITE_TOTAL)
+_STAGE_EVENT_WRITE_SECONDS = _histogram(INGEST_STAGE_EVENT_WRITE_SECONDS)
+_STAGE_HISTORY_PENDING = _gauge(INGEST_STAGE_HISTORY_PENDING)
+_STAGE_HISTORY_INCOMPLETE = _gauge(INGEST_STAGE_HISTORY_INCOMPLETE)
 
 
 def initialize_ingest_counters() -> None:
@@ -100,6 +115,60 @@ def initialize_ingest_counters() -> None:
         start_counter_at_zero(_CLOCK_SKEW_TOTAL)
     except Exception as exc:  # noqa: BLE001 - metrics must never stop the actor starting
         report_once(INGEST_DOCUMENTS_TOTAL.name, exc)
+
+
+def initialize_stage_writer_counters() -> None:
+    """Expose zero-valued stage-writer counters in each indexer actor process."""
+    try:
+        for reason in INGEST_STAGE_EVENT_DROP_REASONS:
+            start_counter_at_zero(_STAGE_EVENT_DROPPED_TOTAL, {"reason": reason})
+        for result in INGEST_STAGE_EVENT_WRITE_RESULTS:
+            start_counter_at_zero(_STAGE_EVENT_WRITE_TOTAL, {"result": result})
+    except Exception as exc:  # noqa: BLE001 - metrics must never stop an actor starting
+        report_once(INGEST_STAGE_EVENT_DROPPED_TOTAL.name, exc)
+
+
+def set_stage_event_queue_size(size: int) -> None:
+    try:
+        _STAGE_EVENT_QUEUE_SIZE.set(max(0, int(size)))
+    except Exception as exc:  # noqa: BLE001 - metrics must never fail indexing
+        report_once(INGEST_STAGE_EVENT_QUEUE_SIZE.name, exc)
+
+
+def record_stage_event_drop(reason: str, count: int = 1) -> None:
+    selected = reason if reason in INGEST_STAGE_EVENT_DROP_REASONS else "shutdown"
+    try:
+        increment = int(count)
+        if increment <= 0:
+            return
+        _STAGE_EVENT_DROPPED_TOTAL.inc(increment, tags={"reason": selected})
+    except Exception as exc:  # noqa: BLE001 - metrics must never fail indexing
+        report_once(INGEST_STAGE_EVENT_DROPPED_TOTAL.name, exc)
+
+
+def record_stage_event_write(result: str, seconds: float) -> None:
+    selected = result if result in INGEST_STAGE_EVENT_WRITE_RESULTS else "failure"
+    try:
+        _STAGE_EVENT_WRITE_TOTAL.inc(1, tags={"result": selected})
+        if math.isfinite(seconds) and seconds >= 0:
+            _STAGE_EVENT_WRITE_SECONDS.observe(float(seconds))
+    except Exception as exc:  # noqa: BLE001 - metrics must never fail indexing
+        report_once(INGEST_STAGE_EVENT_WRITE_TOTAL.name, exc)
+
+
+def set_stage_history_counts(*, pending: int, incomplete: int) -> None:
+    try:
+        _STAGE_HISTORY_PENDING.set(max(0, int(pending)))
+        _STAGE_HISTORY_INCOMPLETE.set(max(0, int(incomplete)))
+    except Exception as exc:  # noqa: BLE001 - metrics must never fail indexing
+        report_once(INGEST_STAGE_HISTORY_PENDING.name, exc)
+
+
+def record_stage_live_snapshot_failure() -> None:
+    try:
+        _STAGE_EVENT_DROPPED_TOTAL.inc(1, tags={"reason": "live_snapshot_failed"})
+    except Exception as exc:  # noqa: BLE001 - metrics must never fail indexing
+        report_once(INGEST_STAGE_EVENT_DROPPED_TOTAL.name, exc)
 
 
 def record_document_terminal(status: str) -> None:
@@ -223,7 +292,13 @@ def seed_parse_watchdog(pool: str) -> None:
 __all__ = [
     "observe_queue_wait_from",
     "observe_stage_duration",
+    "initialize_stage_writer_counters",
     "record_document_terminal",
     "record_parse_completion",
+    "record_stage_event_drop",
+    "record_stage_event_write",
+    "record_stage_live_snapshot_failure",
     "seed_parse_watchdog",
+    "set_stage_event_queue_size",
+    "set_stage_history_counts",
 ]

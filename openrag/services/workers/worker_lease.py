@@ -14,6 +14,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from core.models.stage_progress import StageProgressWorkerSnapshot
 from services.workers.task_state import (
     _WORKER_LEASE_TTL_SECONDS,
     STALE_TASK_STATE_MANAGER_HINT,
@@ -75,6 +76,7 @@ async def keep_worker_lease(
     lease_ttl: float | None = None,
     started: asyncio.Event | None = None,
     is_working: Callable[[], bool] | None = None,
+    snapshot_provider: Callable[[], StageProgressWorkerSnapshot | None] | None = None,
 ) -> None:
     """Renew the task's lease until cancelled, starting the moment work begins.
 
@@ -93,7 +95,12 @@ async def keep_worker_lease(
     nothing. ``worker_task`` is left alone once ``is_working`` says the work is
     over, so a late answer cannot cut short the cleanup that follows it.
     """
-    remote = _remote_method(task_state_manager, "renew_worker_lease")
+    snapshot_remote = (
+        _remote_method(task_state_manager, "renew_worker_lease_with_stage_snapshot")
+        if snapshot_provider is not None
+        else None
+    )
+    remote = snapshot_remote or _remote_method(task_state_manager, "renew_worker_lease")
     if remote is None:
         logger.warning(f"Task {task_id} runs without a worker lease. {STALE_TASK_STATE_MANAGER_HINT}")
         if started is not None:
@@ -121,9 +128,15 @@ async def keep_worker_lease(
         try:
             # Awaited directly: the shared timeout helper ray.cancel()s the
             # call when this loop is cancelled, and a renewal needs no undo.
-            (renewed,) = await asyncio.wait_for(
-                asyncio.gather(remote(task_id)), timeout=min(interval, stop_at - sent_at)
-            )
+            if snapshot_remote is not None and snapshot_provider is not None:
+                try:
+                    stage_snapshot = snapshot_provider()
+                except Exception:  # noqa: BLE001 - snapshot fallback cannot break worker liveness
+                    stage_snapshot = None
+                renewal = remote(task_id, stage_snapshot)
+            else:
+                renewal = remote(task_id)
+            (renewed,) = await asyncio.wait_for(asyncio.gather(renewal), timeout=min(interval, stop_at - sent_at))
         except Exception as exc:  # noqa: BLE001 - one missed renewal must not fail the file
             logger.warning(f"Failed to renew the worker lease of task {task_id}: {exc}")
             await asyncio.sleep(max(0.0, min(_LEASE_RETRY_SECONDS, interval, stop_at - loop.time())))

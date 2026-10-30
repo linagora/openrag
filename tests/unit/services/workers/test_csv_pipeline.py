@@ -13,9 +13,11 @@ from core.config.indexation import LoaderConfig
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType
+from core.models.stage_progress import StageEventStatus, StageFailureEffect
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
 from services.workers.pipeline_builder import IndexingPipeline, PipelineTimeouts
+from services.workers.stage_tracker import StageTracker
 from services.workers.stages import _common as common_module
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
@@ -350,6 +352,8 @@ async def test_contextualization_is_skipped_and_recorded_as_degraded(setup_pipel
 
 async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipeline):
     pipeline, row, events = setup_pipeline
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
 
     async def tag_after_storing(messages):
         assert len(pipeline.vector_store.calls) == 3
@@ -364,7 +368,7 @@ async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipe
         topic_tagger_prompt="custom prompt",
         indexation_config={"enable_topic_tagging": True, "max_topic_tags": 2},
     )
-    await pipeline.run(row)
+    await pipeline.run(row, stage_tracker=tracker)
     llm.chat.assert_awaited_once()
     messages = llm.chat.call_args.args[0]
     assert messages[0]["content"] == "custom prompt"
@@ -373,6 +377,8 @@ async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipe
     assert "Alice" in messages[1]["content"] and "Eve" in messages[1]["content"]
     assert row["topic_tags"] == ["Customers", "Contacts"]
     assert events == ["parse", "embed", "store"] * 3
+    topic_events = [event for event in observed if event is not None and event.stage_id == "topic_tag"]
+    assert [event.status for event in topic_events] == [StageEventStatus.STARTED, StageEventStatus.COMPLETED]
     assert row["stage"] == "stored"
     assert "chunks" not in row
 
@@ -405,6 +411,8 @@ async def test_csv_does_not_tag_failed_or_empty_file(setup_pipeline, failed_csv)
 @pytest.mark.parametrize("failure", ["bad_response", "stage_error", "timeout"])
 async def test_csv_tag_failure_preserves_successful_indexing(setup_pipeline, failure):
     pipeline, row, _ = setup_pipeline
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
     if failure == "bad_response":
         llm = SimpleNamespace(chat=AsyncMock(return_value="not JSON"))
         tagger = TopicTagger(llm, "topics")
@@ -413,12 +421,15 @@ async def test_csv_tag_failure_preserves_successful_indexing(setup_pipeline, fai
     pipeline = replace(pipeline, topic_tagger=tagger)
     if failure == "timeout":
         pipeline = replace(pipeline, timeouts=PipelineTimeouts(topic_tag=0))
-    await pipeline.run(row)
+    await pipeline.run(row, stage_tracker=tracker)
     assert row["stage"] == "stored"
     assert row["stored_count"] > 0
     assert row["topic_tags"] == []
     assert "topic_tag" in row["degraded_stages"]
     assert pipeline.vector_store.deleted_filters == []
+    topic_events = [event for event in observed if event is not None and event.stage_id == "topic_tag"]
+    assert [event.status for event in topic_events] == [StageEventStatus.STARTED, StageEventStatus.FAILED]
+    assert topic_events[-1].failure_effect is StageFailureEffect.CONTINUED_DEGRADED
 
 
 async def test_disabled_csv_tagging_never_calls_tagger(setup_pipeline):
@@ -432,6 +443,8 @@ async def test_disabled_csv_tagging_never_calls_tagger(setup_pipeline):
 
 async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline):
     pipeline, row, _ = setup_pipeline
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
     started = asyncio.Event()
 
     async def wait_forever(*args, **kwargs):
@@ -439,7 +452,7 @@ async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline)
         await asyncio.Event().wait()
 
     pipeline = replace(pipeline, topic_tagger=SimpleNamespace(tag=wait_forever))
-    task = asyncio.create_task(pipeline.run(row))
+    task = asyncio.create_task(pipeline.run(row, stage_tracker=tracker))
     await asyncio.wait_for(started.wait(), 5)
     assert len(pipeline.vector_store.calls) == 3
     task.cancel()
@@ -447,6 +460,8 @@ async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline)
         await task
     assert len(pipeline.vector_store.deleted_filters) == 1
     assert "topic_tags" not in row and "chunks" not in row
+    topic_events = [event for event in observed if event is not None and event.stage_id == "topic_tag"]
+    assert [event.status for event in topic_events] == [StageEventStatus.STARTED, StageEventStatus.CANCELLED]
 
 
 async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline):

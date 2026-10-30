@@ -137,6 +137,17 @@ INGEST_STAGE_BUCKETS: tuple[float, ...] = (0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 
 #: tens of minutes during a backfill. Buckets are coarse and reach two hours so
 #: "the backlog is growing" stays visible instead of saturating ``+Inf``.
 INGEST_QUEUE_WAIT_BUCKETS: tuple[float, ...] = (1.0, 5.0, 15.0, 60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0)
+INGEST_STAGE_EVENT_WRITE_BUCKETS: tuple[float, ...] = (0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.2, 0.5, 1.0)
+INGEST_STAGE_EVENT_DROP_REASONS: tuple[str, ...] = (
+    "queue_full",
+    "summary_overflow",
+    "write_failed",
+    "missing_parent",
+    "shutdown",
+    "live_snapshot_overflow",
+    "live_snapshot_failed",
+)
+INGEST_STAGE_EVENT_WRITE_RESULTS: tuple[str, ...] = ("success", "retry", "failure")
 
 #: Inference calls: an embed is tens of milliseconds, a long-context chat
 #: completion is tens of seconds. The 120 s tail sits above the client timeouts
@@ -257,6 +268,49 @@ INGEST_CLOCK_SKEW_TOTAL = MetricSpec(
     labels=(),
 )
 
+INGEST_STAGE_EVENT_QUEUE_SIZE = MetricSpec(
+    name="openrag_ingest_stage_event_queue_size",
+    description="Current number of unsent indexing stage transition events per worker actor",
+    kind="gauge",
+    labels=(),
+)
+
+INGEST_STAGE_EVENT_DROPPED_TOTAL = MetricSpec(
+    name="openrag_ingest_stage_event_dropped_total",
+    description="Indexing stage history observations dropped by bounded writer reason",
+    kind="counter",
+    labels=("reason",),
+)
+
+INGEST_STAGE_EVENT_WRITE_TOTAL = MetricSpec(
+    name="openrag_ingest_stage_event_write_total",
+    description="Stage history persistence attempts by outcome",
+    kind="counter",
+    labels=("result",),
+)
+
+INGEST_STAGE_EVENT_WRITE_SECONDS = MetricSpec(
+    name="openrag_ingest_stage_event_write_seconds",
+    description="Time spent in one bounded stage history persistence attempt",
+    kind="histogram",
+    labels=(),
+    buckets=INGEST_STAGE_EVENT_WRITE_BUCKETS,
+)
+
+INGEST_STAGE_HISTORY_PENDING = MetricSpec(
+    name="openrag_ingest_stage_history_pending",
+    description="Task histories with a live summary awaiting delivery or acknowledgement per worker actor",
+    kind="gauge",
+    labels=(),
+)
+
+INGEST_STAGE_HISTORY_INCOMPLETE = MetricSpec(
+    name="openrag_ingest_stage_history_incomplete",
+    description="Surviving task histories known to have lost or conflicting stage observations per worker actor",
+    kind="gauge",
+    labels=(),
+)
+
 
 # ---------------------------------------------------------------------------
 # Tier 1 — produced in the API process (exported via prometheus_client)
@@ -331,6 +385,12 @@ ALL_SPECS: tuple[MetricSpec, ...] = (
     INGEST_QUEUE_WAIT_SECONDS,
     INGEST_LAST_PARSE_TIMESTAMP,
     INGEST_CLOCK_SKEW_TOTAL,
+    INGEST_STAGE_EVENT_QUEUE_SIZE,
+    INGEST_STAGE_EVENT_DROPPED_TOTAL,
+    INGEST_STAGE_EVENT_WRITE_TOTAL,
+    INGEST_STAGE_EVENT_WRITE_SECONDS,
+    INGEST_STAGE_HISTORY_PENDING,
+    INGEST_STAGE_HISTORY_INCOMPLETE,
     INGEST_TASKS,
     INFERENCE_REQUESTS_TOTAL,
     INFERENCE_DURATION_SECONDS,
@@ -351,6 +411,15 @@ __all__ = [
     "INGEST_LAST_PARSE_TIMESTAMP",
     "INGEST_QUEUE_WAIT_SECONDS",
     "INGEST_STAGE_DURATION_SECONDS",
+    "INGEST_STAGE_EVENT_DROP_REASONS",
+    "INGEST_STAGE_EVENT_DROPPED_TOTAL",
+    "INGEST_STAGE_EVENT_QUEUE_SIZE",
+    "INGEST_STAGE_EVENT_WRITE_RESULTS",
+    "INGEST_STAGE_EVENT_WRITE_SECONDS",
+    "INGEST_STAGE_EVENT_WRITE_TOTAL",
+    "INGEST_STAGE_EVENT_WRITE_BUCKETS",
+    "INGEST_STAGE_HISTORY_INCOMPLETE",
+    "INGEST_STAGE_HISTORY_PENDING",
     "INGEST_STATUS_VALUES",
     "INGEST_TASKS",
     "INGEST_TASK_STATE_VALUES",

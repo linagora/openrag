@@ -17,6 +17,7 @@ from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType, ProcessedDocument
+from core.observability.metric_specs import STAGE_VALUES
 from core.observability.ray_metrics import observe_stage_duration
 from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
 from core.utils.logging import get_logger
@@ -103,6 +104,16 @@ def _accepts_embedder_window(factory: Callable[..., Any]) -> bool:
     return len(positional) >= 2
 
 
+def _safe_tracking_call(tracker: Any, method: str, *args: Any, **kwargs: Any) -> None:
+    """Keep optional observability failures outside the indexing outcome."""
+    if tracker is None:
+        return
+    try:
+        getattr(tracker, method)(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - stage tracking cannot fail indexing
+        logger.warning("Indexing stage progress update failed", operation=method)
+
+
 @dataclass(slots=True, frozen=True)
 class IndexingPipeline:
     """Sequential indexing pipeline assembled from worker stage functions."""
@@ -148,6 +159,7 @@ class IndexingPipeline:
         self,
         row: MutableMapping[str, Any],
         *,
+        stage_tracker: Any | None = None,
         _processed: ProcessedDocument | None = None,
         _chunk_offset: int = 0,
         _indexed_at: datetime | None = None,
@@ -232,16 +244,36 @@ class IndexingPipeline:
                 row,
                 concrete_parser,
                 batch_context=batch_context,
+                stage_tracker=stage_tracker,
                 topic_tagger=topic_tagger,
                 max_topic_tags=config.max_topic_tags if config is not None else 7,
             )
 
         timings: dict[str, float] = {}
 
-        async def _timed(name: str, coro: Any) -> None:
+        async def _timed(name: str, coro: Any, *, degradable: bool = False) -> None:
             start = time.perf_counter()
+            stage_rank = STAGE_VALUES.index(name)
+            _safe_tracking_call(stage_tracker, "start_stage", name, stage_rank)
             try:
                 await coro
+            except asyncio.CancelledError:
+                _safe_tracking_call(stage_tracker, "finish_stage", cancelled=True)
+                raise
+            except Exception as exc:
+                _safe_tracking_call(stage_tracker, "finish_stage", error=exc, degraded=degradable)
+                raise
+            else:
+                degraded_error = (row.get("degraded_stages") or {}).get(name)
+                if degraded_error is None:
+                    _safe_tracking_call(stage_tracker, "finish_stage")
+                else:
+                    _safe_tracking_call(
+                        stage_tracker,
+                        "finish_stage",
+                        error=RuntimeError(str(degraded_error)),
+                        degraded=degradable,
+                    )
             finally:
                 elapsed = time.perf_counter() - start
                 timings[name] = elapsed * 1000.0
@@ -274,7 +306,7 @@ class IndexingPipeline:
             so the next stage runs on the un-enriched value.
             """
             try:
-                await _timed(name, coro)
+                await _timed(name, coro, degradable=True)
             except Exception as exc:  # noqa: BLE001 - enrichment must not fail the file
                 row.setdefault("degraded_stages", {})[name] = str(exc)
                 logger.bind(
@@ -464,6 +496,7 @@ class IndexingPipeline:
         row: MutableMapping[str, Any],
         processed: ProcessedDocument,
         *,
+        stage_tracker: Any | None = None,
         chunk_offset: int,
         indexed_at: datetime,
         context: BatchIndexingContext,
@@ -475,6 +508,7 @@ class IndexingPipeline:
         """
         return await self.run(
             row,
+            stage_tracker=stage_tracker,
             _processed=processed,
             _chunk_offset=chunk_offset,
             _indexed_at=indexed_at,
