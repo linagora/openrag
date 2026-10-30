@@ -26,8 +26,8 @@ def test_production_contextualizer_template_renders_for_prompt_evaluation():
 
     assert "{calendar_anchors}" not in rendered
     assert "Calendar anchors (use verbatim, do not recompute)" in rendered
-    assert "Independent comparisons" in rendered
-    assert "Return no more than 8 sub-queries total" in rendered
+    assert "For comparisons of up to 8 items" in rendered
+    assert "Never exceed 8 queries" in rendered
     assert rendered.index("Runtime calendar context") > rendered.index("Examples:")
 
 
@@ -35,13 +35,12 @@ def test_contextualizer_splits_comparisons_and_coarsens_long_trends():
     template_path = Path(__file__).parents[3] / "openrag/prompts/templates/query_contextualizer_tmpl.txt"
     rendered = evaluator.format_prompt(template_path.read_text(), "Compare method A and method B")
 
-    assert "Independent comparisons" in rendered
-    assert "emit exactly one sub-query per item when there are at most 8 items" in rendered
-    assert "Carry every shared criterion into each item-focused query" in rendered
-    assert "Do not combine both sides into one query" in rendered
-    assert "split the comparison into one query per criterion" in rendered
+    assert "For comparisons of up to 8 items, make one query per item" in rendered
+    assert "Carry every shared criterion into each query" in rendered
+    assert "omit the other items" in rendered
+    assert "do not split by criterion" in rendered
     assert "group adjacent months into quarters" in rendered
-    assert "Cover every part of the range without gaps or dropped later periods" in rendered
+    assert "cover the entire range without gaps or omissions" in rendered
     assert "How did monthly rail delays change from January through December 2024?" in rendered
     assert "Rail delays from October through December 2024" in rendered
 
@@ -50,15 +49,22 @@ def test_comparison_examples_keep_each_query_focused_on_one_item():
     template_path = Path(__file__).parents[3] / "openrag/prompts/templates/query_contextualizer_tmpl.txt"
     rendered = evaluator.format_prompt(template_path.read_text(), "Compare method A and method B")
     comparison_examples = rendered.split("# Temporal filters", maxsplit=1)[0]
-    comparison_outputs = "\n".join(line for line in comparison_examples.splitlines() if line.startswith('{"intent"'))
+    outputs = [json.loads(line) for line in comparison_examples.splitlines() if line.startswith('{"intent"')]
+    comparison = next(output for output in outputs if len(output["query_list"]) == 3)
 
-    assert "compared with" not in comparison_outputs.casefold()
-    assert "PBiGaBP framework soft interference cancellation" in comparison_outputs
-    assert "Tensor decomposition approach in hybrid RIS systems and how it handles interference" in comparison_outputs
-    assert "SpecVQGAN generates audio and its audio generation quality" in comparison_outputs
-    assert "DiffFoley generates audio and its audio generation quality" in comparison_outputs
-    assert "Payload capacity and refueling time for electric delivery vans" in comparison_outputs
-    assert "Payload capacity and refueling time for hydrogen fuel-cell vans" in comparison_outputs
+    for query, item, other_items in zip(
+        comparison["query_list"],
+        ("proposed ConvMLP method", "SpecVQGAN", "DiffFoley"),
+        (
+            ("SpecVQGAN", "DiffFoley"),
+            ("proposed ConvMLP method", "DiffFoley"),
+            ("proposed ConvMLP method", "SpecVQGAN"),
+        ),
+    ):
+        text = query["query"].casefold()
+        assert item.casefold() in text
+        assert "audio generation quality" in text
+        assert all(other.casefold() not in text for other in other_items)
 
 
 def test_issue_751_practical_comparison_case_expects_independent_queries():

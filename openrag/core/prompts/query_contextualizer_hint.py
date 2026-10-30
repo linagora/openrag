@@ -3,21 +3,16 @@
 from core.models.query import MAX_QUERY_SUBQUERIES
 
 QUERY_CONTEXTUALIZER_JSON_HINT = (
-    "\n\nClassify the complete latest user message conservatively. Retrieval is the default. "
-    "Only a message consisting exclusively of a greeting or salutation, gratitude, farewell, or a question about "
-    "the assistant's capabilities may skip retrieval. A factual, informational, analytical, ambiguous, or mixed "
-    "message must require retrieval, even when it has no question mark or also contains a social phrase. "
-    "A brief acknowledgement after a social, wellbeing, or feedback question remains gratitude and may skip "
-    "retrieval. It requires retrieval only when it accepts factual, informational, analytical, or document-backed "
-    "continuation from the assistant's previous turn. "
-    "Respond ONLY with one of these JSON forms: "
-    '{"intent": "greeting", "requires_retrieval": false, "query_list": []} for an exclusively casual message '
-    "(using gratitude, farewell, or capability instead of greeting when appropriate), or "
-    '{"intent": "other", "requires_retrieval": true, '
-    '"query_list": [{"query": "<search query>", "temporal_filters": null}]} for everything else. '
-    f"For retrieval, query_list may contain one or more distinct sub-queries, up to {MAX_QUERY_SUBQUERIES}, "
-    "when the contextualizer rules require a split. "
-    "If uncertain, use intent other and require retrieval."
+    "\n\nClassify the full latest user message. Retrieve for factual, informational, analytical, mixed, or uncertain "
+    "content, even without a question mark or alongside a social phrase. Skip retrieval only for an exclusively "
+    "social greeting, thanks, farewell, or capability question. A brief acknowledgement stays social unless it "
+    "accepts a prior offer of factual or document-backed continuation; replies to social, wellbeing, or feedback "
+    "questions stay social. Return only SearchQueries JSON: "
+    '{"intent":"other","requires_retrieval":true,"query_list":[{"query":"...","temporal_filters":null}]}. '
+    'For an exclusively social message, use its matching intent ("greeting", "gratitude", "farewell", or '
+    '"capability"), false, and an empty list. '
+    f"query_list may contain one or more distinct sub-queries, up to {MAX_QUERY_SUBQUERIES}, when the template "
+    "rules require a split. If uncertain, retrieve."
 )
 
 QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION = (
@@ -41,19 +36,14 @@ def contextualizer_budget_hint(output_tokens: int) -> str:
     # This is a planning bound, not a tokenizer-independent fit guarantee.
     query_budget = max(1, min(MAX_QUERY_SUBQUERIES, output_tokens // 128))
     small_budget = (
-        " With this small budget, prefer ONE combined query naming ALL requested items and criteria "
-        "when their date filters are identical. Only split when different date constraints require it. "
-        "For example, comparing A, B, C, D, E, F, G and H must name all eight in the combined query; "
-        "returning queries for only A, B, C and D is invalid. Keep the complete date interval. "
+        " At this budget, combine items with identical date filters; split only for different date constraints. "
+        "Keep every item and the complete date interval."
         if output_tokens <= 512
         else ""
     )
     return (
-        f"\n\nThe complete JSON must fit within {output_tokens} output tokens. "
-        f"For this budget, emit at most {query_budget} sub-queries. This budget takes precedence over "
-        "the one-query-per-item comparison rule: group items when necessary. "
-        "The query cap is a maximum, not a target. Use concise query strings and compact JSON. "
-        "For a small budget, group related facets or adjacent periods into fewer queries while retaining "
-        "every item and shared criterion and all temporal filters. Do not repeat optional field names "
-        "whose defaults already apply (intent other, requires_retrieval true, field created_at)." + small_budget
+        f"\n\nFit the complete JSON within {output_tokens} output tokens and emit at most {query_budget} sub-queries. "
+        "This budget takes precedence over one-query-per-item comparisons when needed. Group related items or "
+        "adjacent periods while retaining every item, shared criterion, and date filter. Use concise queries and "
+        "omit default fields (intent other, requires_retrieval true, field created_at)." + small_budget
     )

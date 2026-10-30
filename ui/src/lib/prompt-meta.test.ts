@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
   PROMPT_GROUPS,
@@ -60,16 +61,27 @@ describe("validatePlaceholders", () => {
 
   it("accepts every placeholder the API allows for the query contextualizer", () => {
     const v = validatePlaceholders(
-      "{current_date}\n{calendar_anchors}\nLanguage: {query_language}\nMaximum: {max_query_subqueries}",
+      "{current_date}\n{calendar_anchors}\nLanguage: {query_language}",
       "query_contextualizer",
     );
     expect(v.unknown).toEqual([]);
     expect(v.missing).toEqual([]);
   });
 
+  it("rejects a query cap placeholder the API does not accept", () => {
+    expect(validatePlaceholders("{max_query_subqueries}", "query_contextualizer").unknown).toEqual([
+      "max_query_subqueries",
+    ]);
+  });
+
   it("accepts the bundled query contextualizer template", () => {
-    const templatePath = resolve(process.cwd(), "../openrag/prompts/templates/query_contextualizer_tmpl.txt");
-    const template = readFileSync(templatePath, "utf8");
+    const template = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../../openrag/prompts/templates/query_contextualizer_tmpl.txt",
+      ),
+      "utf8",
+    );
 
     const v = validatePlaceholders(template, "query_contextualizer");
 
@@ -80,7 +92,7 @@ describe("validatePlaceholders", () => {
         .filter((segment) => segment.varName === "max_query_subqueries")
         .map((segment) => segment.value),
     ).toEqual([]);
-    expect(template).toContain("Return no more than 8 sub-queries total");
+    expect(template).toContain("Never exceed 8 queries");
   });
 
   it("accepts any literal text for verbatim prompt types", () => {

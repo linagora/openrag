@@ -45,8 +45,9 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from core.config.retrieval import DEFAULT_WEBSEARCH_MAX_QUERIES
 from core.models.preset import resolve_partition_chat_llm
-from core.models.query import MAX_QUERY_SUBQUERIES, Query, SearchQueries
+from core.models.query import Query, SearchQueries
 from core.models.retrieval_trace import (
     ContextualizationTrace,
     ContextualizedSubqueryTrace,
@@ -552,7 +553,6 @@ class QueryService:
         current_date = now.strftime("%A, %B %d, %Y, %H:%M:%S")
         prompt = contextualizer.content.format(
             query_language=detect_language(last_user),
-            max_query_subqueries=MAX_QUERY_SUBQUERIES,
             current_date=current_date,
             # Pre-computed week/month/year ranges: the model must not do the
             # calendar arithmetic itself (see core.prompts.calendar_anchors).
@@ -579,12 +579,18 @@ class QueryService:
         for attempt in (1, 2):
             try:
                 resp = await llm.chat(llm_messages, **params)
-                if resp["choices"][0].get("finish_reason") == "length":
-                    raise ValueError("Contextualizer response truncated")
+                finish_reason = resp["choices"][0].get("finish_reason")
                 content = resp["choices"][0]["message"]["content"]
-                queries = SearchQueries.model_validate_json(_json_slice(content))
+                try:
+                    queries = SearchQueries.model_validate_json(_json_slice(content))
+                except (PydanticValidationError, ValueError) as exc:
+                    if finish_reason == "length":
+                        raise ValueError("Contextualizer response truncated") from exc
+                    raise
+                fallback_used = False
                 if queries.requires_retrieval and not queries.query_list:
                     queries.query_list = [Query(query=last_user)]
+                    fallback_used = True
                 self._record_contextualization(
                     trace,
                     queries,
@@ -592,6 +598,7 @@ class QueryService:
                     duration_seconds=time.perf_counter() - started,
                     llm=llm,
                     prompt=contextualizer,
+                    fallback_used=fallback_used,
                 )
                 return queries
             except Exception as exc:
@@ -1098,7 +1105,7 @@ class QueryService:
 
     async def _search_web(self, queries: SearchQueries):
         texts = list(dict.fromkeys(q.query.strip() for q in queries.query_list if q.query.strip()))
-        budget = getattr(getattr(self._config, "websearch", None), "max_queries", 1)
+        budget = getattr(getattr(self._config, "websearch", None), "max_queries", DEFAULT_WEBSEARCH_MAX_QUERIES)
         # Preserve contextualized facets when combining them to respect the provider budget.
         groups = [texts[i::budget] for i in range(min(budget, len(texts)))]
         return await asyncio.gather(*(self._web.search("; ".join(group)) for group in groups))

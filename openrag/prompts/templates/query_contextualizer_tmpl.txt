@@ -1,19 +1,8 @@
-Produce a JSON object listing sub-queries derived from the user's last message.
-
-Output shape (return this JSON object, nothing else):
-{{"intent": <"greeting"|"gratitude"|"farewell"|"capability"|"other">, "requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
-
 Language for `query` field: {query_language}
 Timestamps: UTC (`+00:00`). Week starts Monday.
 
-# Intent and retrieval rules
-- Retrieval is the default. If there is any uncertainty, use `intent: "other"`, set `requires_retrieval: true`, and return a search query.
-- Use `intent: "greeting"`, `"gratitude"`, `"farewell"`, or `"capability"` only when the complete latest user message consists exclusively of that social intent. For those messages, set `requires_retrieval: false` and return an empty `query_list`.
-- Greetings and salutations include brief wellbeing exchanges. Capability means a question about what the assistant can do. Understand common wording variations and obvious typing mistakes conservatively.
-- Gratitude also covers brief acknowledgements and positive reactions with no request attached, in any language: "ok", "okay", "cool", "great", "nice", "perfect", "got it", "d'accord", "super", "parfait", "👍". These are not greetings and not uncertain: use `intent: "gratitude"`.
-- Exception: only when such a reply accepts an offer or answers a question from the assistant's previous turn that requests factual, informational, analytical, or document-backed continuation (for example "ok" after "Would you like the dosage details?") is it a request. Use `intent: "other"`, set `requires_retrieval: true`, and rewrite the accepted request as the query. Replies to social, wellbeing, or feedback questions remain gratitude and skip retrieval.
-- Use `intent: "other"` and set `requires_retrieval: true` for any factual, document-backed, informational, analytical, or mixed request. A social phrase combined with such a request still requires retrieval.
-- A factual claim or scientific statement also requires retrieval, even without a question mark or an explicit request to verify it. Treat it as a request to find evidence, not as casual conversation.
+# Intent and output format
+Follow the appended JSON hint for intent classification and the required output shape.
 
 # Rewrite rules (`query` field)
 - Rewrite the last `user:` line as one standalone descriptive sentence.
@@ -22,31 +11,16 @@ Timestamps: UTC (`+00:00`). Week starts Monday.
 - Do not answer. Only reformulate.
 
 # Sub-queries — when to split
-Emit MULTIPLE sub-queries ONLY when the question covers independent aspects that benefit from separate retrieval:
-- Distinct time periods — "sales in Q1 and Q2" → one per quarter.
-- Separate facts about independently documented entities — "Sales figures for Product A and Product B" → one per entity. For comparisons, keep the shared criterion in every entity-focused query.
-- Unrelated dimensions — "sales in US and in Europe" → one per region.
-- Exclusions — "last year except March" → one per remaining range.
-- Evolution / trend over a bounded range — preserve the full range and choose periods that produce no more than 8 queries. Split by month when that fits; otherwise group adjacent months into quarters, then use years or larger contiguous periods if needed. Cover every part of the range without gaps or dropped later periods. For example, a 12-month range can use four quarterly queries. Open-ended trend questions ("how has X evolved recently") stay as one.
-- Independent comparisons — for comparisons between different entities, practical options, methods, or concepts, emit exactly one sub-query per item when there are at most 8 items, even when the user asks for a side-by-side comparison on several shared criteria. Carry every shared criterion into each item-focused query. Keep each query centered on exactly one item; do not mention the other compared items in that query. Do not combine both sides into one query or split the comparison into one query per criterion.
-- Exception: for comparisons involving more than 8 items, group related items into at most 8 queries; retain every item and shared criterion. The cap and complete coverage take precedence over the one-item rule. If the supplied output-token budget cannot fit separate queries with their temporal filters, apply the same grouping exception even with 8 or fewer items.
-- Keep one query for a joint effect, interaction, combined design, or causal relationship when that relationship itself is the information need. Do not add separate queries about each factor alongside the combined query. Do not split synonyms, paraphrases, or multiple components whose combined effect is the single information need.
-- Return no more than 8 sub-queries total. If a question contains more independent facets, group related facets while keeping each query focused on one retrievable information need.
-Otherwise emit ONE sub-query. Do not split for synonyms or rephrasings of the same question.
+Split only for independent retrieval needs:
+- Separate periods, independently documented entities, unrelated dimensions, or ranges left by exclusions into one query per part.
+- Bounded trends must cover the entire range without gaps or omissions in no more than 8 contiguous periods. Use months when possible; otherwise group adjacent months into quarters, years, or larger periods. Keep open-ended trends as one query.
+- For comparisons of up to 8 items, make one query per item. Carry every shared criterion into each query, omit the other items, and do not split by criterion.
+- For more than 8 items, or when the output-token budget cannot fit separate queries with temporal filters, group related items into at most 8 queries while preserving every item and criterion.
+- If a joint effect, interaction, combined design, or causal relation is itself the need, keep one query and do not add factor-only queries. Do not split synonyms or paraphrases.
+- Never exceed 8 queries; group excess facets by retrievable need.
+Otherwise emit one query.
 
 Examples:
-User: "How do retrieval-augmented generation and fine-tuning differ in the mechanisms they use to adapt language models?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"How retrieval-augmented generation adapts language models, including its mechanism and trade-offs","temporal_filters":null}},{{"query":"How fine-tuning adapts language models, including its mechanism and trade-offs","temporal_filters":null}}]}}
-
-User: "How does the PBiGaBP framework's soft interference cancellation process differ from the tensor decomposition approach used in hybrid RIS systems?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"PBiGaBP framework soft interference cancellation process and how it handles interference","temporal_filters":null}},{{"query":"Tensor decomposition approach in hybrid RIS systems and how it handles interference","temporal_filters":null}}]}}
-
-User: "How do sodium-ion batteries and lithium-ion batteries compare in cycle life and cold-weather performance?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Cycle life and cold-weather performance of sodium-ion batteries","temporal_filters":null}},{{"query":"Cycle life and cold-weather performance of lithium-ion batteries","temporal_filters":null}}]}}
-
-User: "Compare electric delivery vans and hydrogen fuel-cell vans in payload capacity and refueling time."
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Payload capacity and refueling time for electric delivery vans","temporal_filters":null}},{{"query":"Payload capacity and refueling time for hydrogen fuel-cell vans","temporal_filters":null}}]}}
-
 User: "How did monthly rail delays change from January through December 2024?"
 {{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Rail delays from January through March 2024","temporal_filters":null}},{{"query":"Rail delays from April through June 2024","temporal_filters":null}},{{"query":"Rail delays from July through September 2024","temporal_filters":null}},{{"query":"Rail delays from October through December 2024","temporal_filters":null}}]}}
 

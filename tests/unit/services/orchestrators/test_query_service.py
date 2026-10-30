@@ -10,6 +10,7 @@ here). Retrieval is faked; the real ``format_context`` /
 from __future__ import annotations
 
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -527,12 +528,10 @@ async def test_contextualizer_prompt_allows_bounded_conceptual_splits():
     await svc.generate_query([{"role": "user", "content": "How do method A and method B compare in quality?"}])
 
     contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
-    assert "Separate facts about independently documented entities" in contextualizer_prompt
-    assert "Independent comparisons" in contextualizer_prompt
-    assert "practical options, methods, or concepts" in contextualizer_prompt
-    assert "emit exactly one sub-query per item when there are at most 8 items" in contextualizer_prompt
-    assert "Do not combine both sides into one query" in contextualizer_prompt
-    assert "Return no more than 8 sub-queries total" in contextualizer_prompt
+    assert "independently documented entities" in contextualizer_prompt
+    assert "For comparisons of up to 8 items, make one query per item" in contextualizer_prompt
+    assert "omit the other items" in contextualizer_prompt
+    assert "Never exceed 8 queries" in contextualizer_prompt
     assert contextualizer_prompt.index("Runtime calendar context") > contextualizer_prompt.index("Examples:")
     assert "query_list may contain one or more distinct sub-queries, up to 8" in contextualizer_prompt
 
@@ -591,7 +590,7 @@ async def test_contextualizer_prompt_distinguishes_social_acknowledgement_from_f
     )
 
     contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
-    assert "Replies to social, wellbeing, or feedback questions remain gratitude" in contextualizer_prompt
+    assert "replies to social, wellbeing, or feedback questions stay social" in contextualizer_prompt
     assert (
         'assistant: Was that helpful?\nuser: ok\n{"intent":"gratitude","requires_retrieval":false,"query_list":[]}'
     ) in contextualizer_prompt
@@ -625,7 +624,7 @@ async def test_query_hint_preserves_acknowledgement_rules_with_a_stored_contextu
     assert "Stored contextualizer for en on " in contextualizer_prompt
     assert "Calendar anchors (use verbatim, do not recompute)" not in contextualizer_prompt
     assert "social, wellbeing, or feedback question" in contextualizer_prompt
-    assert "factual, informational, analytical, or document-backed continuation" in contextualizer_prompt
+    assert "prior offer of factual or document-backed continuation" in contextualizer_prompt
 
 
 @pytest.mark.asyncio
@@ -1621,6 +1620,34 @@ async def test_chat_trace_records_contextualizer_parse_fallback():
     assert context["subqueries"][0]["query"] == "Original legal question?"
     assert context["error"]["kind"] == "ValidationError"
     assert context["error"]["message"] == "redacted"
+
+
+@pytest.mark.asyncio
+async def test_chat_trace_records_empty_retrieval_query_list_as_fallback():
+    original = "Find the policy about remote work"
+    llm = FakeLLM(
+        chat_responses=[
+            json.dumps({"requires_retrieval": True, "query_list": []}),
+            "answer",
+        ]
+    )
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": original}],
+            "metadata": {"include_retrieval_trace": True},
+        },
+        prepare_sources=lambda _docs, _web: [],
+        model_name="m",
+    )
+
+    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == original
+    context = out["extra"]["retrieval_trace"]["contextualization"]
+    assert context["fallback_used"] is True
+    assert context["subqueries"][0]["query"] == original
 
 
 @pytest.mark.asyncio
@@ -4253,6 +4280,25 @@ async def test_truncated_contextualizer_retries_compactly_with_same_512_budget()
 
 
 @pytest.mark.asyncio
+async def test_complete_json_with_length_finish_reason_is_kept_without_retry():
+    payload = json.dumps(
+        {
+            "query_list": [
+                {"query": "A cost"},
+                {"query": "B cost"},
+            ]
+        }
+    )
+    llm = FakeLLM(chat_responses=[{"content": payload + "\n" * 50, "finish_reason": "length"}])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    result = await svc.generate_query([{"role": "user", "content": "Compare A and B"}])
+
+    assert [query.query for query in result.query_list] == ["A cost", "B cost"]
+    assert len(llm.chat_calls) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("budget", [1, 2, 8])
 async def test_web_query_budget_preserves_all_facets(budget):
     from core.models.query import Query, SearchQueries
@@ -4266,10 +4312,26 @@ async def test_web_query_budget_preserves_all_facets(budget):
     assert all(f"facet {i}" in " ".join(web.calls) for i in range(8))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True], ids=["missing-config", "model-default"])
+async def test_default_web_query_budget_keeps_three_facets_separate(configured):
+    from core.config.retrieval import StaanWebSearchConfig
+    from core.models.query import Query, SearchQueries
+
+    web = FakeWeb()
+    svc = _svc(web=web)
+    svc._config.websearch = StaanWebSearchConfig() if configured else None
+    queries = SearchQueries(query_list=[Query(query=f"facet {name}") for name in ("A", "B", "C")])
+
+    await svc._gather_rag_and_web(queries, ["p"], 5, None)
+
+    assert web.calls == ["facet A", "facet B", "facet C"]
+
+
 def test_bundled_comparison_rule_groups_more_than_eight_items():
     template = _disk_prompt_service()._disk_seed("query_contextualizer")
     assert "more than 8 items" in template
-    assert "retain every item and shared criterion" in template
+    assert "preserving every item and criterion" in template
 
 
 @pytest.mark.asyncio
@@ -4287,6 +4349,7 @@ async def test_web_only_budget_deduplicates_and_combines_contextualized_queries(
         chat_responses=[json.dumps({"query_list": [{"query": q} for q in ["aspect A", "aspect A", "aspect B"]]})]
     )
     svc = _svc(llm=llm, web=web, mode="ChatBotRag")
+    svc._config.websearch = SimpleNamespace(max_queries=1)
     await svc._prepare_chat(
         None, {"messages": [{"role": "user", "content": "compare them"}], "metadata": {"websearch": True}}
     )
@@ -4300,7 +4363,9 @@ def test_refreshed_template_formats_with_current_renderer_arguments():
     anchors = "Calendar anchors (use verbatim, do not recompute)\n- last week [2026-09-07, 2026-09-14)"
     rendered = template.format(query_language="en", current_date="2026-10-13", calendar_anchors=anchors)
     assert anchors in rendered
-    assert f"Return no more than {MAX_QUERY_SUBQUERIES} sub-queries total" in rendered
+    assert f"Never exceed {MAX_QUERY_SUBQUERIES} queries" in rendered
+    limits = re.findall(r"Never exceed (\d+) queries", template)
+    assert limits == [str(MAX_QUERY_SUBQUERIES)]
 
 
 def test_512_output_budget_limits_initial_fanout_before_truncation():
