@@ -533,6 +533,21 @@ def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
     return datetime.now(UTC) >= created + timedelta(seconds=_CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS)
 
 
+def _read_ref_when_settled(object_ref: Any) -> None:
+    """Have Ray read a registered worker ref once its task settles.
+
+    Holding the ref makes this actor a borrower of the task's result. A failed
+    result dropped unread (eviction, a refused registration) makes Ray print
+    the failure again as an ``Unhandled error`` without its file or task
+    (#1296). Reading it on receipt covers every way the ref is dropped. Ray
+    keeps the future's callback alive until the task settles, and an unread
+    ``concurrent.futures.Future`` exception warns nothing.
+    """
+    ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+    if isinstance(ref, ray.ObjectRef):
+        ref.future()
+
+
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
     def __init__(self, worker_lease_ttl_seconds: float = _WORKER_LEASE_TTL_SECONDS) -> None:
@@ -545,6 +560,7 @@ class TaskStateManager:
         now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
+            _read_ref_when_settled(info.object_ref)
             info.worker_lease_expires_at = now + worker_lease_ttl_seconds
             if info.state not in TERMINAL_TASK_STATES:
                 continue
@@ -1169,6 +1185,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
+        _read_ref_when_settled(object_ref)
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None:
@@ -1289,6 +1306,21 @@ class TaskStateManager:
         with self.lock:
             info = self.tasks.get(task_id)
             return info.object_ref if info else None
+
+    @ray.method(concurrency_group="get")
+    async def has_object_ref(self, task_id: str) -> bool:
+        """Whether a worker ref is registered, without shipping the ref itself.
+
+        The worker polls this before it starts. Fetched with ``get_object_ref``,
+        its own task's ref would be borrowed and dropped unread, and Ray would
+        print every failure of that task as an ``Unhandled error`` (#1296).
+        """
+        with self.lock:
+            info = self.tasks.get(task_id)
+            ref = info.object_ref if info else None
+        if isinstance(ref, dict):
+            ref = ref.get("ref")
+        return ref is not None
 
     @ray.method(concurrency_group="get")
     async def get_matching_active_task_refs(
