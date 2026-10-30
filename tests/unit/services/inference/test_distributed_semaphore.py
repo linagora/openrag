@@ -257,7 +257,7 @@ class TestDistributedSemaphoreReleaseStarvation:
 
 class TestReleaseIfGrantedLogLevel:
     """Issue #1298: releasing a permit granted to a cancelled acquire is the
-    designed path, not a fault, so it must log at DEBUG rather than WARNING.
+    designed path and logs at DEBUG; only a failed release warns.
     """
 
     async def test_logs_release_at_debug_and_still_releases(self):
@@ -279,3 +279,22 @@ class TestReleaseIfGrantedLogLevel:
         assert levels == ["DEBUG"]
         assert not [r for r in records if r["level"].no >= logger.level("WARNING").no]
         semaphore_actor.release.remote.assert_awaited_once_with("incarnation-1")
+
+    async def test_failed_release_still_warns(self):
+        acquire_task = asyncio.get_running_loop().create_future()
+        acquire_task.set_result("incarnation-1")
+        semaphore_actor = MagicMock()
+        semaphore_actor.release.remote = AsyncMock(side_effect=ray.exceptions.RayActorError())
+
+        records = []
+        sink_id = logger.add(lambda m: records.append(m.record), level="WARNING")
+        try:
+            _release_if_granted("vlmSemaphore", semaphore_actor, acquire_task)
+            for _ in range(3):
+                await asyncio.sleep(0)
+        finally:
+            logger.remove(sink_id)
+
+        failures = [r for r in records if "Failed to release permit" in r["message"]]
+        assert [r["level"].name for r in failures] == ["WARNING"]
+        assert "RayActorError" in failures[0]["extra"]["reason"]
