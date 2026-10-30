@@ -7,10 +7,12 @@ from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from core.models.stage_progress import StageEventStatus, StageFailureEffect
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.utils.exceptions import ConfigError, InferenceError, NoIndexableContentError, PipelineError
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stages import _common as common_module
+from services.workers.stage_tracker import StageTracker
 from services.workers.stages import caption as caption_module
 
 
@@ -164,6 +166,85 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     assert row["stored_count"] == 1
     assert row["chunks"][0].embedding == [1.0, 0.0]
     assert "token" not in row
+
+
+@pytest.mark.asyncio
+async def test_pipeline_stage_timeline_contains_only_stages_that_are_entered() -> None:
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        vector_store=FakeVectorStore(),
+    )
+    observed = []
+    tracker = StageTracker("task-optional-stage", deliver=lambda event, summary, tail: observed.append(event) or True)
+
+    await pipeline.run({"document": document, "partition": "tenant-a"}, stage_tracker=tracker)
+
+    events = [event for event in observed if event is not None]
+    assert [event.stage_id for event in events if event.status is StageEventStatus.STARTED] == [
+        "parse",
+        "chunk",
+        "embed",
+        "store",
+    ]
+    assert all(event.status in {StageEventStatus.STARTED, StageEventStatus.COMPLETED} for event in events)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_tracking_error_does_not_replace_stage_failure() -> None:
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    original = RuntimeError("chunking failed")
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([], error=original),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        vector_store=FakeVectorStore(),
+    )
+
+    class BrokenTracker:
+        def start_stage(self, *_args, **_kwargs):
+            raise RuntimeError("tracking failed")
+
+        def finish_stage(self, *_args, **_kwargs):
+            raise RuntimeError("tracking failed")
+
+    with pytest.raises(RuntimeError, match="chunking failed") as exc_info:
+        await pipeline.run({"document": document, "partition": "tenant-a"}, stage_tracker=BrokenTracker())
+
+    assert exc_info.value is original
+
+
+@pytest.mark.asyncio
+async def test_degraded_contextualization_is_failed_in_history_then_embedding_continues() -> None:
+    class BrokenContextualizer(FakeContextualizer):
+        async def contextualize(self, *_args, **_kwargs):
+            raise RuntimeError("context service unavailable")
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        vector_store=FakeVectorStore(),
+        contextualizer=BrokenContextualizer(),
+    )
+    observed = []
+    tracker = StageTracker("task-degraded", deliver=lambda event, summary, tail: observed.append(event) or True)
+
+    result = await pipeline.run({"document": document, "partition": "tenant-a"}, stage_tracker=tracker)
+
+    assert result["stored_count"] == 1
+    events = [event for event in observed if event is not None]
+    contextualize_failure = next(
+        event for event in events if event.stage_id == "contextualize" and event.status is StageEventStatus.FAILED
+    )
+    assert contextualize_failure.failure_effect is StageFailureEffect.CONTINUED_DEGRADED
+    assert any(event.stage_id == "embed" and event.status is StageEventStatus.STARTED for event in events)
 
 
 def _save_markdown_pipeline(save_markdown: bool, data_dir, processed: ProcessedDocument | None = None):
