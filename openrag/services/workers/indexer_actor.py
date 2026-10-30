@@ -256,6 +256,7 @@ class IndexerWorker:
             if self._document_repo is not None:
                 wrote_catalog = await _write_catalog_record(
                     doc_repo=self._document_repo,
+                    task_id=task_id,
                     metadata=metadata,
                     partition=partition,
                     user=user,
@@ -415,6 +416,7 @@ async def _write_catalog_record(
     *,
     doc_repo: Any,
     metadata: dict[str, Any],
+    task_id: str | None = None,
     partition: str,
     user: dict[str, Any] | None,
     replace: bool,
@@ -431,6 +433,10 @@ async def _write_catalog_record(
     With ``embedder_fingerprint``, the repo first checks that the partition's
     embedder is still the config the vectors were built with, and refuses the
     file otherwise (#958); the caller's failure path then removes its vectors.
+
+    A new file consumes the file slot reserved under ``task_id``: a
+    quota-capped upload runs under its reservation's id (#664). Any other task
+    holds no slot, and the insert counts the file instead.
     """
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
@@ -464,6 +470,7 @@ async def _write_catalog_record(
         # Stay protected until the outer worker has completed every attachment.
         independently_indexed=True,
         content_sha256=metadata.get("content_sha256"),
+        quota_reservation_id=task_id,
         **config_kwargs,
     )
 

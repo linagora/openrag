@@ -151,8 +151,16 @@ class UserService:
             if user_quota < 0:
                 user_quota = float("inf")
 
-        file_count = user.get("file_count", 0)
-        pending_count = await self._job_service.get_user_pending_task_count(user.get("id"))
+        # ``users.file_count`` also holds the slots of uploads still in flight
+        # (#664), which ``pending_files`` already reports. Take them out so
+        # ``file_count`` stays the indexed files. Only a capped user can hold
+        # a slot, so an unlimited one skips the read.
+        file_count = user.get("file_count", 0) or 0
+        user_id = user.get("id")
+        if user_quota != float("inf") and user_id is not None:
+            held = await self._user_repo.count_file_slot_reservations(user_id)
+            file_count = max(file_count - held, 0)
+        pending_count = await self._job_service.get_user_pending_task_count(user_id)
         total = file_count + pending_count
 
         return {
