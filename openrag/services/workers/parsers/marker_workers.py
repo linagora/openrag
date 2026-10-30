@@ -693,8 +693,15 @@ class MarkerLoader(BasePooledParser):
         async with document.as_temporary_file() as path:
             markdown, images = await self._dispatch(str(path))
 
-        pages = self._split_pages(markdown)
-        image_blocks = self._build_image_blocks(images)
+        # PNG-encoding every figure of a large PDF takes seconds of pure CPU; on
+        # the loop it starves the lease renewals of every other file on this worker.
+        # A timeout or cancel cannot interrupt the thread; the event tells it to stop.
+        cancelled = threading.Event()
+        try:
+            pages, image_blocks = await asyncio.to_thread(self._postprocess, markdown, images, cancelled)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
         text_blocks = [TextBlock(text=text, page_number=page) for page, text in pages]
 
         return ProcessedDocument(
@@ -706,6 +713,11 @@ class MarkerLoader(BasePooledParser):
         )
 
     # ----- helpers -----
+
+    def _postprocess(
+        self, markdown: str, images: dict, cancelled: threading.Event
+    ) -> tuple[list[tuple[int, str]], list[ImageBlock]]:
+        return self._split_pages(markdown), self._build_image_blocks(images, cancelled)
 
     async def _convert_pdf(self, file_path: str):
         pool = self._pool()
@@ -747,7 +759,7 @@ class MarkerLoader(BasePooledParser):
             raise
 
     @staticmethod
-    def _build_image_blocks(images: dict) -> list[ImageBlock]:
+    def _build_image_blocks(images: dict, cancelled: threading.Event | None = None) -> list[ImageBlock]:
         """Convert Marker's ``{key: PIL_image}`` dict into ``ImageBlock``s.
 
         Each block records the ``![](key)`` markdown ref in
@@ -756,9 +768,14 @@ class MarkerLoader(BasePooledParser):
         number is parsed from Marker's key format
         (``_page_{N}_Picture_{i}.{ext}``) and stored 1-indexed to match
         the ``[PAGE_N]`` markers in the post-processed markdown.
+
+        ``cancelled`` is checked before each image: once set, the caller has
+        gone and the result is discarded, so encoding stops early.
         """
         blocks: list[ImageBlock] = []
         for key, pil_image in images.items():
+            if cancelled is not None and cancelled.is_set():
+                break
             try:
                 png_bytes = pil_to_png_bytes(pil_image)
             except Exception as exc:
