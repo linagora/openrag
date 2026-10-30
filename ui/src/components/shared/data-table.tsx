@@ -53,10 +53,12 @@ type DataTableSelectionProps =
 
 type DataTableProps<TData, TValue> = BaseDataTableProps<TData, TValue> & DataTableSelectionProps;
 
+export const DEFAULT_PAGE_SIZE = 20;
+
 export function DataTable<TData, TValue>({
   columns,
   data,
-  pageSize = 10,
+  pageSize = DEFAULT_PAGE_SIZE,
   emptyMessage = "No results.",
   initialSorting = [],
   pageResetKey,

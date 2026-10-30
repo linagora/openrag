@@ -7,18 +7,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { PartitionCombobox } from "@/components/shared/partition-combobox";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { formatDate, cn } from "@/lib/utils";
 import { getFileDetail, listFileChunks, type PartitionChunk } from "@/lib/api/documents";
 import {
@@ -359,18 +353,13 @@ export default function DocumentDetailPage() {
                 <div className="space-y-3">
                   <p className="text-sm font-medium">Copy to partition</p>
                   <div className="flex gap-2">
-                    <Select value={copyTarget} onValueChange={setCopyTarget}>
-                      <SelectTrigger className="flex-1">
-                        <SelectValue placeholder="Select partition" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {copyTargets.map((p) => (
-                          <SelectItem key={p.partition} value={p.partition}>
-                            {p.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <PartitionCombobox
+                      partitions={copyTargets}
+                      value={copyTarget}
+                      onValueChange={setCopyTarget}
+                      className="flex-1 min-w-0"
+                      aria-label="Copy to partition"
+                    />
                     <Button
                       variant="outline"
                       onClick={() => copyMutation.mutate()}
