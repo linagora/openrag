@@ -371,8 +371,13 @@ def _compact_formula_batch(
     sheet_name: str,
     visible_columns: list[int],
     headers: list[str],
+    group_repeated: bool = True,
 ) -> tuple[list[list[str]], list[dict[str, Any]], list[dict[str, Any]], str]:
-    """Group repeated relative formulas and retain isolated expressions inline."""
+    """Group repeated relative formulas and retain isolated expressions inline.
+
+    ``group_repeated=False`` is the bounded fallback used when generalized
+    context would make an otherwise valid parser batch exceed its byte limit.
+    """
     records: list[dict[str, Any]] = []
     for row_number, row in zip(row_numbers, rows, strict=True):
         for position, value in enumerate(row):
@@ -414,7 +419,7 @@ def _compact_formula_batch(
         )
         grouped_records.setdefault(key, []).append(record)
 
-    candidates: list[tuple[dict[str, Any], list[dict[str, Any]], int]] = []
+    candidates: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
     for matching in grouped_records.values():
         matching.sort(key=lambda record: record["row"])
         segments: list[list[dict[str, Any]]] = []
@@ -443,15 +448,11 @@ def _compact_formula_batch(
             if first.get("source_columns_truncated"):
                 group["source_column_count"] = first["source_column_count"]
                 group["source_columns_truncated"] = True
-            context_size = len(_formula_context([group]).encode("utf-8"))
-            inline_size = sum(len(f" [formula: {record['formula']}]".encode()) for record in segment)
-            if context_size < inline_size:
-                candidates.append((group, segment, inline_size - context_size))
+            candidates.append((group, segment))
 
-    heading_size = len(b"\n\nFormula context (calculated columns):")
-    accepted = candidates if sum(saving for _, _, saving in candidates) > heading_size else []
-    formula_groups = [group for group, _, _ in accepted]
-    grouped_targets = {record["target"] for _, segment, _ in accepted for record in segment}
+    accepted = candidates if group_repeated else []
+    formula_groups = [group for group, _ in accepted]
+    grouped_targets = {record["target"] for _, segment in accepted for record in segment}
     individual_cells = [
         {key: value for key, value in record.items() if key != "position"}
         for record in records
@@ -874,19 +875,30 @@ class XlsxParser(TabularBatchParser):
                 row_header_paths: dict[str, list[str]] = {}
 
                 def block():
-                    rendered_rows, formula_groups, formula_cells, formula_context = _compact_formula_batch(
-                        batch_rows,
-                        row_numbers,
-                        sheet_name=sheet.name,
-                        visible_columns=visible_columns,
-                        headers=header_values,
-                    )
-                    lines = [*header_lines, *(markdown_row(row) for row in rendered_rows)]
-                    block_bytes = len(
-                        ("\n".join(lines) + worksheet_context + sheet_context + formula_context).encode("utf-8")
-                    )
+                    def render(group_repeated: bool):
+                        rendered_rows, formula_groups, formula_cells, formula_context = _compact_formula_batch(
+                            batch_rows,
+                            row_numbers,
+                            sheet_name=sheet.name,
+                            visible_columns=visible_columns,
+                            headers=header_values,
+                            group_repeated=group_repeated,
+                        )
+                        lines = [*header_lines, *(markdown_row(row) for row in rendered_rows)]
+                        block_bytes = len(
+                            ("\n".join(lines) + worksheet_context + sheet_context + formula_context).encode("utf-8")
+                        )
+                        return lines, formula_groups, formula_cells, formula_context, block_bytes
+
+                    lines, formula_groups, formula_cells, formula_context, block_bytes = render(True)
                     if block_bytes > self.limits.max_batch_bytes:
-                        raise limit("XLSX formula context exceeds the batch byte limit")
+                        # Generalized formula context is normally smaller than
+                        # repeated inline expressions, but short runs can add
+                        # overhead. Preserve ingestion and formula information
+                        # by reverting this bounded batch to individual cells.
+                        lines, formula_groups, formula_cells, formula_context, block_bytes = render(False)
+                    if block_bytes > self.limits.max_batch_bytes:
+                        raise limit("XLSX batch exceeds the batch byte limit")
                     return self._block(
                         document,
                         sheet,

@@ -124,7 +124,7 @@ The bounded OOXML preflight detects formulas before OpenPyXL opens the workbook.
 
 Repeated formulas in a calculated column are normalized relative to their target cells. For example, `C2 = A2+B2`, `C3 = A3+B3`, and subsequent filled-down formulas share the R1C1 pattern `=RC[-2]+RC[-1]`.
 
-When a contiguous group is more compact than repeating every expression, OpenRAG keeps the cached values in the Markdown cells and emits the formula once in chunk context. Physical columns are resolved to table headers so retrieval receives a semantic expression such as `total = quantity+unit_price`. Metadata retains the target range, normalized pattern, source columns, and physical rows:
+Every contiguous run of at least two cells sharing the same normalized formula is generalized consistently. OpenRAG keeps the cached values in the Markdown cells and emits the formula once in chunk context, even for short runs. Physical columns are resolved to table headers so retrieval receives a semantic expression such as `total = quantity+unit_price`. Metadata retains the target range, normalized pattern, source columns, and physical rows:
 
 ```json
 {
@@ -148,6 +148,8 @@ When a contiguous group is more compact than repeating every expression, OpenRAG
 ```
 
 Formula groups are scoped to the detected table and parser batch. During Markdown chunking, a group is retained only on chunks containing rows and columns intersecting its target range. A different formula interrupts the group: that exceptional cell keeps its complete expression inline and is described individually in `formula_cells` with its target coordinate, normalized pattern, semantic expression, source columns, and cache availability.
+
+The parser still enforces the configured batch byte limit. In the unusual case where adding generalized context would make an otherwise valid batch exceed that limit, formulas in that batch remain attached to their individual cells instead of failing workbook ingestion.
 
 Absolute references remain absolute in the normalized pattern. Same-table A1 references are mapped to headers. Cross-sheet references, structured table references, named ranges, and dynamic references that cannot be resolved safely are preserved verbatim in `unresolved_references`; OpenRAG does not guess their meaning or execute them.
 

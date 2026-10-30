@@ -795,6 +795,58 @@ def test_cached_formula_values_are_returned_without_execution():
     assert block.metadata["sheet_missing_formula_values"] == 0
 
 
+def test_short_repeated_formula_runs_always_get_generalized_context():
+    doc = _document(
+        [
+            ["input", "total"],
+            [1, "=A2+1"],
+            [2, "=A3+1"],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert block.metadata["formula_groups"] == [
+        {
+            "target_column": "B",
+            "target_header": "total",
+            "range": "B2:B3",
+            "pattern": "=RC[-1]+1",
+            "semantic_expression": "total = input+1",
+            "source_columns": [{"column": "A", "header": "input"}],
+            "start_row": 2,
+            "end_row": 3,
+            "formula_count": 2,
+        }
+    ]
+    assert "B (total), B2:B3: total = input+1" in block.text
+    assert "[formula:" not in block.text
+
+
+def test_formula_group_context_falls_back_to_inline_when_batch_budget_is_exhausted(monkeypatch):
+    original_formula_context = module._formula_context
+
+    def oversized_formula_context(groups):
+        context = original_formula_context(groups)
+        return context + ("x" * 1_000 if groups else "")
+
+    monkeypatch.setattr(module, "_formula_context", oversized_formula_context)
+    doc = _document(
+        [
+            ["input", "total"],
+            [1, "=A2+1"],
+            [2, "=A3+1"],
+        ]
+    )
+
+    [block] = list(XlsxParser(limits=XlsxLimits(max_batch_bytes=300)).iter_batches(doc))
+
+    assert "formula_groups" not in block.metadata
+    assert len(block.metadata["formula_cells"]) == 2
+    assert "[formula: =A2+1; cached value unavailable]" in block.text
+    assert "[formula: =A3+1; cached value unavailable]" in block.text
+
+
 def test_formulas_only_in_hidden_rows_or_columns_do_not_open_formula_reader(monkeypatch):
     import openpyxl
 
