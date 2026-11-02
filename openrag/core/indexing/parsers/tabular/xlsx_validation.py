@@ -14,6 +14,7 @@ from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring, iterparse
 
 MAIN_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+TABLE_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"
 CELL_REF = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
 CELL_RANGE = re.compile(r"([A-Z]+)([1-9][0-9]*):([A-Z]+)([1-9][0-9]*)\Z")
 STREAMED_XML_PARTS = {"xl/sharedStrings.xml"}
@@ -88,8 +89,12 @@ def _column_runs(columns: set[int]):
         yield start, previous
 
 
-def _merge_preambles(regions: list[TableRegion]) -> list[TableRegion]:
+def _merge_preambles(
+    regions: list[TableRegion],
+    barriers: list[TableRegion] | None = None,
+) -> list[TableRegion]:
     """Attach obvious title bands and isolated rows to their surrounding table."""
+    barriers = barriers or []
     merged: list[TableRegion] = []
     for region in regions:
         if merged:
@@ -100,10 +105,17 @@ def _merge_preambles(regions: list[TableRegion]) -> list[TableRegion]:
             region_width = region.end_column - region.start_column + 1
             is_preamble = previous_height == 1 or previous_width < region_width
             same_columns = previous.start_column == region.start_column and previous.end_column == region.end_column
+            has_barrier = any(
+                barrier.start_row <= region.start_row
+                and previous.end_row <= barrier.end_row
+                and barrier.start_column <= region.end_column
+                and previous.start_column <= barrier.end_column
+                for barrier in barriers
+            )
             # A lone band after a table cannot itself contain both a header and
             # data. Preserve the established behavior of treating it as a row
             # in the preceding table, even when a blank spacer separates it.
-            if region_height == 1 and region.start_row - previous.end_row <= 32 and same_columns:
+            if not has_barrier and region_height == 1 and region.start_row - previous.end_row <= 32 and same_columns:
                 merged[-1] = TableRegion(
                     previous.index,
                     previous.start_row,
@@ -113,7 +125,8 @@ def _merge_preambles(regions: list[TableRegion]) -> list[TableRegion]:
                 )
                 continue
             if (
-                previous.end_row < region.start_row - 1
+                not has_barrier
+                and previous.end_row < region.start_row - 1
                 and region.start_row - previous.end_row <= 32
                 and region_height >= 2
                 and region.start_column <= previous.start_column
@@ -177,6 +190,143 @@ def _content_type(types, part_name: str) -> str | None:
         ),
         None,
     )
+
+
+def _related_part_path(source_path: str, target: str) -> str:
+    """Resolve an internal OPC relationship without allowing package traversal."""
+    path = posixpath.normpath(
+        target.lstrip("/") if target.startswith("/") else posixpath.join(posixpath.dirname(source_path), target)
+    )
+    if not path.startswith("xl/"):
+        raise invalid("XLSX relationship has an invalid target")
+    return path
+
+
+def _worksheet_table_regions(archive, types, worksheet_path: str, names: set[str], limits: XlsxLimits):
+    """Return authoritative Excel Table rectangles keyed by worksheet relationship id."""
+    rels_path = posixpath.join(
+        posixpath.dirname(worksheet_path),
+        "_rels",
+        posixpath.basename(worksheet_path) + ".rels",
+    )
+    if rels_path not in names:
+        return {}
+    if archive.getinfo(rels_path).file_size > limits.max_metadata_bytes:
+        raise limit("XLSX metadata exceeds the memory limit")
+    relationships = fromstring(archive.read(rels_path))
+    table_regions: dict[str, TableRegion] = {}
+    for relationship in relationships:
+        if not relationship.get("Type", "").endswith("/table"):
+            continue
+        rel_id = relationship.get("Id")
+        if not rel_id or rel_id in table_regions:
+            raise invalid("XLSX table relationships have missing or duplicate identifiers")
+        if relationship.get("TargetMode") == "External":
+            raise invalid("External table relationships are unsupported")
+        table_path = _related_part_path(worksheet_path, relationship.get("Target", ""))
+        if table_path not in names or _content_type(types, "/" + table_path) != TABLE_TYPE:
+            raise invalid("XLSX table relationship has an invalid target")
+        if archive.getinfo(table_path).file_size > limits.max_metadata_bytes:
+            raise limit("XLSX metadata exceeds the memory limit")
+        table = fromstring(archive.read(table_path))
+        match = CELL_RANGE.fullmatch(table.get("ref", ""))
+        if match is None:
+            raise invalid("XLSX table has an invalid range")
+
+        def column_number(label: str) -> int:
+            number = 0
+            for char in label:
+                number = number * 26 + ord(char) - 64
+            return number
+
+        start_column = column_number(match[1])
+        start_row = int(match[2])
+        end_column = column_number(match[3])
+        end_row = int(match[4])
+        if (
+            start_row > end_row
+            or start_column > end_column
+            or end_row > limits.max_rows
+            or end_column > limits.max_columns
+        ):
+            raise invalid("XLSX table has an invalid range")
+        try:
+            header_row_count = int(table.get("headerRowCount", "1"))
+        except ValueError as exc:
+            raise invalid("XLSX table has an invalid header row count") from exc
+        if header_row_count not in {0, 1}:
+            raise invalid("XLSX table has an invalid header row count")
+        region = TableRegion(
+            len(table_regions),
+            start_row,
+            end_row,
+            start_column,
+            end_column,
+            start_row if header_row_count else None,
+        )
+        for existing in table_regions.values():
+            overlaps = not (
+                region.end_row < existing.start_row
+                or existing.end_row < region.start_row
+                or region.end_column < existing.start_column
+                or existing.end_column < region.start_column
+            )
+            if overlaps:
+                raise invalid("XLSX tables contain overlapping ranges")
+        table_regions[rel_id] = region
+        if len(table_regions) > limits.max_tables:
+            raise limit("XLSX table count exceeds the limit")
+    return table_regions
+
+
+def _combine_regions(
+    inferred: list[TableRegion],
+    explicit: list[TableRegion],
+    merged_ranges: list[tuple[int, int, int, int]],
+) -> list[TableRegion]:
+    """Combine source-defined Excel Tables with independently inferred regions."""
+    remaining = list(inferred)
+    expanded: list[TableRegion] = []
+    for table in explicit:
+        title = next(
+            (
+                region
+                for region in remaining
+                if region.end_row < table.start_row
+                and table.start_row - region.end_row <= 32
+                and region.start_row == region.end_row
+                and any(
+                    start_row == end_row == region.start_row
+                    and start_column == table.start_column
+                    and end_column == table.end_column
+                    for start_row, end_row, start_column, end_column in merged_ranges
+                )
+            ),
+            None,
+        )
+        if title is not None:
+            remaining.remove(title)
+            table = TableRegion(
+                table.index,
+                title.start_row,
+                table.end_row,
+                table.start_column,
+                table.end_column,
+                table.header_row_hint,
+            )
+        expanded.append(table)
+    combined = sorted(expanded + remaining, key=lambda region: (region.start_row, region.start_column))
+    return [
+        TableRegion(
+            index,
+            region.start_row,
+            region.end_row,
+            region.start_column,
+            region.end_column,
+            region.header_row_hint,
+        )
+        for index, region in enumerate(combined)
+    ]
 
 
 def _shared_string_count(archive, types, limits):
@@ -326,6 +476,18 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 if path in worksheet_paths:
                     raise invalid("XLSX worksheet relationships contain a duplicate target")
                 worksheet_paths.add(path)
+                table_relationships = _worksheet_table_regions(archive, types, path, names, limits)
+                explicit_regions = list(table_relationships.values())
+                table_part_ids: list[str] = []
+                table_events: list[tuple[int, int, TableRegion]] = []
+                for region in explicit_regions:
+                    table_events.append((region.start_row, 1, region))
+                    table_events.append((region.end_row + 1, -1, region))
+                table_events.sort(key=lambda event: (event[0], event[1]))
+                table_event_index = 0
+                active_tables: set[TableRegion] = set()
+                active_column_starts: list[int] = []
+                active_column_ends: list[int] = []
                 max_row = max_col = 0
                 visible_formula_columns: dict[int, int] = {}
                 missing_formula_columns: dict[int, int] = {}
@@ -338,6 +500,35 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 merged_ranges: list[tuple[int, int, int, int]] = []
                 hidden_rows: set[int] = set()
                 hidden_columns: set[int] = set()
+
+                def advance_explicit_tables(row_number: int):
+                    nonlocal table_event_index, active_column_starts, active_column_ends
+                    changed = False
+                    while table_event_index < len(table_events) and table_events[table_event_index][0] <= row_number:
+                        _, operation, region = table_events[table_event_index]
+                        if operation == 1:
+                            active_tables.add(region)
+                        else:
+                            active_tables.discard(region)
+                        table_event_index += 1
+                        changed = True
+                    if changed:
+                        intervals = sorted((region.start_column, region.end_column) for region in active_tables)
+                        active_column_starts = [start for start, _ in intervals]
+                        active_column_ends = [end for _, end in intervals]
+
+                def is_in_explicit_table(column: int) -> bool:
+                    # At most max_tables intervals exist. Binary search avoids
+                    # multiplying large worksheet cell counts by that bound.
+                    low, high = 0, len(active_column_starts)
+                    while low < high:
+                        middle = (low + high) // 2
+                        if active_column_starts[middle] <= column:
+                            low = middle + 1
+                        else:
+                            high = middle
+                    interval = low - 1
+                    return interval >= 0 and column <= active_column_ends[interval]
 
                 def finish_band():
                     nonlocal band_start, band_end, band_columns
@@ -360,6 +551,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                                 if current_row > limits.max_rows:
                                     raise limit("XLSX row coordinate exceeds the row limit")
                                 previous_row, previous_col = current_row, 0
+                                advance_explicit_tables(current_row)
                                 row_content_columns = set()
                                 if element.get("hidden", "0").lower() in {"1", "true"}:
                                     hidden_rows.add(current_row)
@@ -407,7 +599,9 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                                 if not 0 <= string_index < shared_count:
                                     raise invalid("XLSX cell references a missing shared string")
                             inline_text = any(node.text for node in element.iter() if node.tag.endswith("}t"))
-                            if formula is not None or (value is not None and value.text is not None) or inline_text:
+                            if (
+                                formula is not None or (value is not None and value.text is not None) or inline_text
+                            ) and not is_in_explicit_table(current_cell_column):
                                 row_content_columns.add(current_cell_column)
                         if tag == "row":
                             if row_content_columns:
@@ -443,22 +637,33 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                             ):
                                 raise invalid("XLSX merged cell has an invalid range")
                             merged_ranges.append((start_row, end_row, start_column, end_column))
+                        if tag == "tablePart":
+                            rel_id = next((value for key, value in element.attrib.items() if key.endswith("}id")), None)
+                            if not rel_id:
+                                raise invalid("XLSX table part is missing a relationship identifier")
+                            table_part_ids.append(rel_id)
                         if tag in {"c", "row"} or len(stack) <= 2:
                             if len(stack) > 1:
                                 stack[-2].remove(element)
                             element.clear()
                         stack.pop()
                 finish_band()
+                if len(set(table_part_ids)) != len(table_part_ids) or set(table_part_ids) != set(table_relationships):
+                    raise invalid("XLSX table parts do not match their relationships")
                 formulas = sum(
                     count for column, count in visible_formula_columns.items() if column not in hidden_columns
                 )
                 missing = sum(
                     count for column, count in missing_formula_columns.items() if column not in hidden_columns
                 )
-                regions = _merge_preambles(regions)
+                regions = _combine_regions(
+                    _merge_preambles(regions, explicit_regions),
+                    explicit_regions,
+                    merged_ranges,
+                )
                 hinted_regions: list[TableRegion] = []
                 for region in regions:
-                    header_depth = _merged_header_depth(region, merged_ranges)
+                    header_depth = _merged_header_depth(region, merged_ranges) if region.header_row_hint is None else 0
                     hinted_regions.append(
                         TableRegion(
                             region.index,
@@ -466,7 +671,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                             region.end_row,
                             region.start_column,
                             region.end_column,
-                            region.start_row + header_depth if header_depth else None,
+                            region.header_row_hint or (region.start_row + header_depth if header_depth else None),
                         )
                     )
                 regions = hinted_regions
