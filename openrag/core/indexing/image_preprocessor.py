@@ -192,10 +192,14 @@ def find_http_images(text: str) -> list[tuple[str, str]]:
     images: list[tuple[str, str]] = []
     pos = 0
     close = -1
+    line_end = -1
     while (start := text.find("![", pos)) != -1:
-        line_end = text.find("\n", start)
-        if line_end == -1:
-            line_end = len(text)
+        # Several images can share a line: its end is looked up once, not
+        # from each of them, or a long line would be rescanned per image.
+        if start > line_end:
+            line_end = text.find("\n", start)
+            if line_end == -1:
+                line_end = len(text)
         pos = line_end
         candidate = start + 2
         while (target := _HTTP_IMAGE_TARGET_PATTERN.search(text, candidate, line_end)) is not None:

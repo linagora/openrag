@@ -348,6 +348,16 @@ class TestNormalizeDataUriImages:
         assert text == source
         assert blocks == []
 
+    def test_a_line_of_data_uri_links_and_images_is_scanned_in_linear_time(self):
+        source = "[l](data:image/x) ![i](data:image/x) " * 20_000
+
+        started = time.perf_counter()
+        text, blocks = normalize_data_uri_images(source)
+
+        assert time.perf_counter() - started < 0.5
+        assert "data:image" not in text.lower()
+        assert blocks == []
+
     def test_targets_that_run_to_the_end_of_the_text_are_scanned_in_linear_time(self):
         # Each target swallows the next `(…)` group and never meets its `)`, so
         # every image used to rescan the rest of the text.
@@ -501,6 +511,16 @@ class TestFindHttpImages:
 
         assert time.perf_counter() - started < 0.5
         assert images == []
+
+    def test_is_linear_on_a_line_of_images(self):
+        # Every image of a line used to look for the end of that line again.
+        source = "![a](https://h.test/c.png)" * 100_000
+
+        started = time.perf_counter()
+        images = find_http_images(source)
+
+        assert time.perf_counter() - started < 0.5
+        assert images == [("a", "https://h.test/c.png")] * 100_000
 
 
 def test_min_image_pixels_constant():
