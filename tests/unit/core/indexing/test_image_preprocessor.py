@@ -13,6 +13,7 @@ from core.indexing.image_preprocessor import (
     decode_data_uri,
     ensure_png_compatible_mode,
     extract_data_uri_image_blocks,
+    find_http_images,
     mime_from_data_uri,
     normalize_data_uri_images,
     pil_to_png_bytes,
@@ -327,6 +328,38 @@ class TestNormalizeDataUriImages:
         assert "data:image" not in text.lower()
         assert blocks == []
 
+    @pytest.mark.parametrize(
+        "unit",
+        [
+            "![ab cd",  # one line, no `]`
+            ")[Image]![x",  # one line, `]` present but never `](`
+            "![ x [\n",  # short lines, no `]` anywhere
+            "[a ",  # link labels with no `]`
+        ],
+    )
+    def test_unclosed_brackets_are_scanned_in_linear_time(self, unit):
+        # Every `![` or `[` used to rescan the text after it: 80 KB took seconds.
+        source = unit * (200_000 // len(unit))
+
+        started = time.perf_counter()
+        text, blocks = normalize_data_uri_images(source)
+
+        assert time.perf_counter() - started < 0.5
+        assert text == source
+        assert blocks == []
+
+    def test_targets_that_run_to_the_end_of_the_text_are_scanned_in_linear_time(self):
+        # Each target swallows the next `(…)` group and never meets its `)`, so
+        # every image used to rescan the rest of the text.
+        source = "](![)]]:<https://a](data:image/" * 6_500
+
+        started = time.perf_counter()
+        text, blocks = normalize_data_uri_images(source)
+
+        assert time.perf_counter() - started < 0.5
+        assert "data:image" not in text.lower()
+        assert blocks == []
+
     def test_residual_scrubber_handles_case_and_line_wrapping(self):
         wrapped = base64.encodebytes(b"image payload" * 8).decode()
         source = f'before <img src="DATA:IMAGE/PNG;BASE64,{wrapped}"> after'
@@ -425,6 +458,49 @@ class TestNormalizeDataUriImages:
         assert "data:image" not in text
         assert len(blocks) == 1
         assert text.endswith("two")
+
+
+class TestFindHttpImages:
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("![chart](https://h.test/c.png)", [("chart", "https://h.test/c.png")]),
+            ("![a [b] c](http://h.test/c.png)", [("a [b] c", "http://h.test/c.png")]),
+            # The alt text runs past a target that is not http(s).
+            ("![a](rel.png) b](https://h.test/c.png)", [("a](rel.png) b", "https://h.test/c.png")]),
+            # A title stays in the URL, and the URL runs to its `)` across lines.
+            ('![a](https://h.test/c.png "t")', [("a", 'https://h.test/c.png "t"')]),
+            ("![a](https://h.test/\nc.png)", [("a", "https://h.test/\nc.png")]),
+            # The alt text does not cross a line.
+            ("![a\n](https://h.test/c.png)", []),
+            ("![a](https://)", []),
+            (
+                "![a](https://h.test/c.png) ![b](https://h.test/d.png)",
+                [("a", "https://h.test/c.png"), ("b", "https://h.test/d.png")],
+            ),
+        ],
+    )
+    def test_matches(self, source, expected):
+        assert find_http_images(source) == expected
+
+    @pytest.mark.parametrize(
+        "unit",
+        [
+            # `](https://` never closed by `)`: each `![` used to reach every
+            # later one, and run to the end of the text from each.
+            "* ]](https://a.test/p.png ./rel.png* * * * ![x",
+            # `![` followed by a non-http `](`: each alt text ran to the line's end.
+            "* * <u](rel/p.png)* * * * * * ![",
+        ],
+    )
+    def test_is_linear(self, unit):
+        source = unit * (200_000 // len(unit))
+
+        started = time.perf_counter()
+        images = find_http_images(source)
+
+        assert time.perf_counter() - started < 0.5
+        assert images == []
 
 
 def test_min_image_pixels_constant():

@@ -17,7 +17,7 @@ parser→caption contract.
 
 from __future__ import annotations
 
-from core.indexing.image_preprocessor import HTTP_IMAGE_PATTERN, normalize_data_uri_images
+from core.indexing.image_preprocessor import find_http_images, normalize_data_uri_images
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from ..text_preprocessor import decode_bytes
@@ -61,7 +61,7 @@ class MarkdownParser(DocumentParser):
         if not text:
             return []
         blocks: list[ImageBlock] = []
-        for alt, url in HTTP_IMAGE_PATTERN.findall(text):
+        for alt, url in find_http_images(text):
             blocks.append(
                 ImageBlock(
                     source_url=url,

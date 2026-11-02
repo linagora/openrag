@@ -15,6 +15,7 @@ migrated.
 from __future__ import annotations
 
 import base64
+import bisect
 import hashlib
 import re
 from io import BytesIO
@@ -28,14 +29,19 @@ logger = get_logger()
 # Markdown image-reference patterns (compile once; shared regex objects)
 # ---------------------------------------------------------------------------
 
-HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
-DATA_URI_IMAGE_PATTERN = re.compile(
-    r"""!\[((?:\\[^\r\n]|(?!\]\()[^\\\r\n])*)\]\("""
-    r"""(<?data:image/(?:[^()"']|"[^"\r\n]*"|'[^'\r\n]*'|\([^\)\r\n]*\))*)\)""",
-    re.IGNORECASE,
-)
-DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(<?data:image/[^)]*\)", re.IGNORECASE)
-DATA_URI_REFERENCE_IMAGE_PATTERN = re.compile(r"!\[([^]]*)\](?:\[([^]]*)\]|(?!\())")
+# Image references and data-URI links are found by the scanners below, not by
+# one regex searched over the whole text: a search retries the pattern at every
+# ``![`` or ``[``, and each try rescans the same alt text or label, so a crafted
+# upload made those searches quadratic, and the HTTP one cubic. The scanners
+# match one reference at a time with the patterns below and, when it fails,
+# resume where its alt text or label ended: every opening bracket in between
+# reaches that same end and fails the same way. Each pattern has a single way
+# to match, so its runs are possessive.
+_HTTP_IMAGE_TARGET_PATTERN = re.compile(r"\]\(https?://")
+_DATA_URI_IMAGE_ALT_PATTERN = re.compile(r"(?:\\[^\r\n]|(?!\]\()[^\\\r\n])*+")
+_DATA_URI_IMAGE_TARGET_PREFIX_PATTERN = re.compile(r"\]\(<?data:image/", re.IGNORECASE)
+_DATA_URI_LINK_PREFIX_PATTERN = re.compile(r"\[([^]]*+)\]\(<?data:image/", re.IGNORECASE)
+_DATA_URI_REFERENCE_IMAGE_PATTERN = re.compile(r"!\[([^]]*+)\](?:\[([^]]*+)\]|(?!\())")
 DATA_URI_REFERENCE_DEFINITION_PATTERN = re.compile(
     r"^[ \t]{0,3}\[([^]\r\n]+)\]:[ \t]*"
     r"(<?data:image/[^\r\n]*(?:(?<!=)\r?\n[ \t]*[A-Za-z0-9+/]+={0,2})*)$",
@@ -174,6 +180,166 @@ def _residual_data_uri_end(text: str, start: int, prefix_end: int) -> int:
     return end
 
 
+def find_http_images(text: str) -> list[tuple[str, str]]:
+    """Return ``(alt, url)`` for every ``![alt](http(s)://url)`` in ``text``.
+
+    The alt text runs to the first ``](http://`` or ``](https://`` on its line
+    that is followed by a non-empty URL and a ``)``; the URL runs to that
+    ``)``, across lines. When no such target follows an ``![`` on its line,
+    none follows any later ``![`` of that line either, so the scan moves to
+    the next line.
+    """
+    images: list[tuple[str, str]] = []
+    pos = 0
+    close = -1
+    while (start := text.find("![", pos)) != -1:
+        line_end = text.find("\n", start)
+        if line_end == -1:
+            line_end = len(text)
+        pos = line_end
+        candidate = start + 2
+        while (target := _HTTP_IMAGE_TARGET_PATTERN.search(text, candidate, line_end)) is not None:
+            url_start = target.end()
+            # Targets are tried in text order, so the ``)`` found for an earlier
+            # one still closes this one unless it comes before it.
+            if close < url_start:
+                close = text.find(")", url_start)
+                if close == -1:
+                    return images
+            if close > url_start:
+                images.append((text[start + 2 : target.start()], text[target.start() + 2 : close]))
+                pos = close + 1
+                break
+            candidate = target.start() + 1
+    return images
+
+
+class _DataUriTargetEnds:
+    """Find where a data-URI image target ends, scanning each position once.
+
+    After ``data:image/`` a target is a run of items up to a ``)``: a character
+    other than ``(``, ``)``, ``"`` and ``'`` (line breaks included), or a
+    ``"…"``, ``'…'`` or ``(…)`` group closed before the end of its line. It
+    fails at a group left open on its line, or at the end of the text. Where a
+    scan goes from a position depends only on that position, so the outcome
+    found from each delimiter is kept for every later target that reaches it:
+    otherwise targets that run to the end of the text without a ``)`` would
+    each rescan the rest of it.
+    """
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._delimiters = [match.start() for match in re.finditer(r"""[()"']""", text)]
+        self._positions = {char: [i for i in self._delimiters if text[i] == char] for char in "\"')"}
+        self._line_breaks = [match.start() for match in re.finditer(r"[\r\n]", text)]
+        self._outcomes: dict[int, int] = {}
+
+    def _next(self, positions: list[int], pos: int) -> int:
+        index = bisect.bisect_left(positions, pos)
+        return positions[index] if index < len(positions) else len(self._text)
+
+    def end(self, pos: int) -> int:
+        """Return the index of the ``)`` closing the target items at ``pos``, or -1."""
+        visited: list[int] = []
+        while True:
+            delimiter = self._next(self._delimiters, pos)
+            if delimiter in self._outcomes:
+                outcome = self._outcomes[delimiter]
+                break
+            if delimiter == len(self._text):
+                outcome = -1
+                break
+            visited.append(delimiter)
+            char = self._text[delimiter]
+            if char == ")":
+                outcome = delimiter
+                break
+            closing = self._next(self._positions[")" if char == "(" else char], delimiter + 1)
+            if closing >= self._next(self._line_breaks, delimiter + 1):
+                outcome = -1
+                break
+            pos = closing + 1
+        for delimiter in visited:
+            self._outcomes[delimiter] = outcome
+        return outcome
+
+
+def _find_inline_data_uri_images(text: str) -> list[tuple[int, int, str, str]]:
+    """Return ``(start, end, alt, target)`` for every ``![alt](data:image/...)``."""
+    images: list[tuple[int, int, str, str]] = []
+    target_ends: _DataUriTargetEnds | None = None
+    pos = 0
+    while (start := text.find("![", pos)) != -1:
+        alt_end = _DATA_URI_IMAGE_ALT_PATTERN.match(text, start + 2).end()
+        prefix = _DATA_URI_IMAGE_TARGET_PREFIX_PATTERN.match(text, alt_end)
+        if prefix is None:
+            pos = alt_end
+            continue
+        if target_ends is None:
+            target_ends = _DataUriTargetEnds(text)
+        close = target_ends.end(prefix.end())
+        if close == -1:
+            pos = alt_end
+            continue
+        images.append((start, close + 1, text[start + 2 : alt_end], text[alt_end + 2 : close]))
+        pos = close + 1
+    return images
+
+
+def _find_reference_images(text: str) -> list[re.Match[str]]:
+    """Return a match for every ``![alt][label]``, ``![alt][]`` or ``![alt]``."""
+    images: list[re.Match[str]] = []
+    pos = 0
+    while (start := text.find("![", pos)) != -1:
+        match = _DATA_URI_REFERENCE_IMAGE_PATTERN.match(text, start)
+        if match is not None:
+            images.append(match)
+            pos = match.end()
+            continue
+        alt_end = text.find("]", start + 2)
+        if alt_end == -1:
+            break
+        pos = alt_end + 1
+    return images
+
+
+def _find_data_uri_links(text: str) -> list[tuple[int, int, str]]:
+    """Return ``(start, end, label)`` for every ``[label](data:image/...)`` link."""
+    links: list[tuple[int, int, str]] = []
+    pos = 0
+    close = -1
+    while (start := text.find("[", pos)) != -1:
+        if start > 0 and text[start - 1] == "!":
+            pos = start + 1
+            continue
+        prefix = _DATA_URI_LINK_PREFIX_PATTERN.match(text, start)
+        if prefix is None:
+            label_end = text.find("]", start + 1)
+            if label_end == -1:
+                break
+            pos = label_end + 1
+            continue
+        if close < prefix.end():
+            close = text.find(")", prefix.end())
+            if close == -1:
+                break
+        links.append((start, close + 1, prefix.group(1)))
+        pos = close + 1
+    return links
+
+
+def _replace_spans(text: str, spans: list[tuple[int, int, str]]) -> str:
+    """Replace ordered, non-overlapping ``(start, end, replacement)`` spans."""
+    parts: list[str] = []
+    cursor = 0
+    for start, end, replacement in spans:
+        parts.append(text[cursor:start])
+        parts.append(replacement)
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def _scrub_unterminated_parenthesized_data_uris(text: str) -> tuple[str, int]:
     """Remove unterminated parenthesized data URIs before Markdown regexes run."""
     parts: list[str] = []
@@ -241,8 +407,7 @@ def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[An
     from core.models.document import ImageBlock
 
     blocks: list[Any] = []
-    for match in DATA_URI_IMAGE_PATTERN.finditer(text):
-        alt, target = match.groups()
+    for start, end, alt, target in _find_inline_data_uri_images(text):
         data_uri = _data_uri_from_markdown_target(target)
         if data_uri is None:
             continue
@@ -254,7 +419,7 @@ def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[An
                 image_bytes=payload,
                 page_number=page_number,
                 mime_type=mime_from_data_uri(data_uri),
-                metadata={"markdown_ref": match.group(0), "alt": alt},
+                metadata={"markdown_ref": text[start:end], "alt": alt},
             )
         )
     return blocks
@@ -350,10 +515,19 @@ def normalize_data_uri_images(
         target = reference_targets.get(_normalize_reference_label(label or alt))
         return match.group(0) if target is None else replace_target(alt, target)
 
-    sanitized = DATA_URI_IMAGE_PATTERN.sub(lambda match: replace_target(*match.groups()), text)
-    sanitized = DATA_URI_REFERENCE_IMAGE_PATTERN.sub(replace_reference, sanitized)
+    sanitized = _replace_spans(
+        text,
+        [(start, end, replace_target(alt, target)) for start, end, alt, target in _find_inline_data_uri_images(text)],
+    )
+    sanitized = _replace_spans(
+        sanitized,
+        [(match.start(), match.end(), replace_reference(match)) for match in _find_reference_images(sanitized)],
+    )
     sanitized = DATA_URI_REFERENCE_DEFINITION_PATTERN.sub("", sanitized)
-    sanitized = DATA_URI_LINK_PATTERN.sub(lambda match: match.group(1).strip() or "[Link]", sanitized)
+    sanitized = _replace_spans(
+        sanitized,
+        [(start, end, label.strip() or "[Link]") for start, end, label in _find_data_uri_links(sanitized)],
+    )
     sanitized, residual_scrubbed = _scrub_residual_data_uris(sanitized)
     if skipped:
         logger.bind(skipped=skipped, matched=matched).warning(

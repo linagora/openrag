@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import time
 
 import pytest
 from core.indexing.parsers.markdown_parser import MarkdownParser
@@ -126,3 +127,18 @@ async def test_captioning_does_not_replace_a_preexisting_similar_reference():
     text = row["processed_document"].text_blocks[0].text
     assert existing in text
     assert "Generated caption" in text
+
+
+@pytest.mark.asyncio
+async def test_markdown_parser_scans_unclosed_image_syntax_in_linear_time():
+    # Each `![` used to reach every later unclosed `](https://`: 50 KB took seconds.
+    source = "* ]](https://a.test/p.png ./rel.png* * * * ![x" * 4_500
+
+    started = time.perf_counter()
+    processed = await MarkdownParser().parse(
+        Document(filename="report.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+
+    assert time.perf_counter() - started < 0.5
+    assert processed.text_blocks[0].text == source.strip()
+    assert processed.images == []
