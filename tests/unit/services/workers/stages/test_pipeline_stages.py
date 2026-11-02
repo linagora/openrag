@@ -228,6 +228,33 @@ async def test_caption_stage_appends_standalone_image_captions():
 
 
 @pytest.mark.asyncio
+async def test_caption_stage_replaces_docling_refs_on_their_own_page():
+    """Docling-shaped blocks (#1313): the ref of a picture now occurs in the
+    page text of its own page, so the caption substitutes in place instead of
+    being appended at the end of the document."""
+    markdown_ref = "![](docling_img_0)"
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[
+            TextBlock(text=f"Page one text {markdown_ref} continues", page_number=1),
+            TextBlock(text="Page two body", page_number=2),
+        ],
+        images=[ImageBlock(image_bytes=b"img", page_number=1, metadata={"markdown_ref": markdown_ref})],
+    )
+    row = {"processed_document": processed}
+
+    await caption_stage(row, FakeVLM(["a revenue chart"]))
+
+    blocks = row["processed_document"].text_blocks
+    assert blocks == [
+        TextBlock(text=f"Page one text {wrap_caption('a revenue chart')} continues", page_number=1),
+        TextBlock(text="Page two body", page_number=2),
+    ]
+    # nothing was appended: the captioned text block count is unchanged
+    assert len(blocks) == 2
+
+
+@pytest.mark.asyncio
 async def test_caption_stage_squeezes_table_padding():
     # A degenerate table caption repeats padded rows up to its token budget;
     # the padding is dropped before the caption reaches chunking and storage.
