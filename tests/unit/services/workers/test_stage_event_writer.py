@@ -54,6 +54,12 @@ class _Repo:
         return None
 
 
+class _PostgresError(RuntimeError):
+    def __init__(self, sqlstate: str) -> None:
+        super().__init__(f"PostgreSQL error {sqlstate}")
+        self.sqlstate = sqlstate
+
+
 @pytest.mark.asyncio
 async def test_writer_bounds_event_queue_and_marks_known_drop() -> None:
     repo = _Repo()
@@ -101,6 +107,138 @@ async def test_writer_drops_failed_batch_on_shutdown_without_raising() -> None:
     assert len(repo.calls) == 2
     assert writer.write_failures == 1
     assert writer.dropped_events == 1
+
+
+@pytest.mark.parametrize("sqlstate", ["22003", "23514"])
+@pytest.mark.asyncio
+async def test_permanent_data_error_drops_batch_and_marks_history_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlstate: str,
+) -> None:
+    repo = _Repo(error=_PostgresError(sqlstate))
+    writer = StageEventWriter(repo, retry_delay=0)
+    drops = []
+    monkeypatch.setattr(
+        stage_event_writer_module,
+        "record_stage_event_drop",
+        lambda reason, count=1: drops.append((reason, count)),
+    )
+    event = _transition("permanent-error", 1)
+    summary = _summary("permanent-error", 1)
+    writer._pending_ack[(event.task_id, event.attempt)] = None
+
+    handled = await writer._write_batch([event], [summary])
+
+    assert handled is True
+    assert len(repo.calls) == 1
+    assert writer.write_failures == 1
+    assert writer.write_retries == 0
+    assert writer.dropped_events == 1
+    assert writer._pending_ack == {}
+    assert event.task_id in writer._known_incomplete
+    assert drops == [("write_failed", 1)]
+    assert writer.pending_summaries[event.task_id].known_loss is True
+
+    repo.error = None
+    await writer._write_batch([], [writer._summaries.pop(event.task_id)])
+
+    assert len(repo.calls) == 2
+    assert repo.calls[1][1][0].known_loss is True
+    assert writer.pending_summaries == {}
+
+
+@pytest.mark.asyncio
+async def test_partial_permanent_failure_drops_only_affected_task() -> None:
+    class PartialFailureRepo:
+        async def write_stage_progress(self, *, events, summaries):
+            return StageProgressWriteResult(
+                coverage=[StageProgressCoverage(task_id="valid-task", attempt=1, persisted_through_sequence=1)],
+                permanent_failed_task_ids=["invalid-task"],
+            )
+
+    writer = StageEventWriter(PartialFailureRepo())
+    invalid_event = _transition("invalid-task", 1)
+    valid_event = _transition("valid-task", 1)
+    writer._pending_ack[("invalid-task", 1)] = None
+    writer._pending_ack[("valid-task", 1)] = None
+
+    await writer._write_batch(
+        [invalid_event, valid_event],
+        [_summary("invalid-task", 1), _summary("valid-task", 1)],
+    )
+
+    assert writer.dropped_events == 1
+    assert writer.write_failures == 1
+    assert ("invalid-task", 1) not in writer._pending_ack
+    assert "invalid-task" in writer._known_incomplete
+    assert "valid-task" not in writer._known_incomplete
+    assert writer._acknowledged[("valid-task", 1)] == 1
+    assert writer.pending_summaries["invalid-task"].known_loss is True
+    assert "valid-task" not in writer.pending_summaries
+
+
+@pytest.mark.asyncio
+async def test_permanent_loss_marker_failure_does_not_requeue_summary() -> None:
+    repo = _Repo(error=_PostgresError("23514"))
+    writer = StageEventWriter(repo, retry_delay=0)
+
+    handled = await writer._write_batch([], [_summary("unwritable-marker").model_copy(update={"known_loss": True})])
+
+    assert handled is True
+    assert len(repo.calls) == 1
+    assert writer.write_failures == 1
+    assert writer.write_retries == 0
+    assert writer.dropped_events == 0
+    assert "unwritable-marker" in writer._known_incomplete
+    assert writer.pending_summaries == {}
+
+
+@pytest.mark.asyncio
+async def test_permanent_summary_failure_queues_one_sanitized_loss_marker() -> None:
+    repo = _Repo(error=_PostgresError("22001"))
+    writer = StageEventWriter(repo, retry_delay=0)
+    invalid_summary = _summary("summary-data-error", 3).model_copy(update={"current_stage_id": "x" * 65})
+
+    handled = await writer._write_batch([], [invalid_summary])
+
+    assert handled is True
+    assert len(repo.calls) == 1
+    loss_marker = writer.pending_summaries["summary-data-error"]
+    assert loss_marker.known_loss is True
+    assert loss_marker.latest_sequence == 3
+    assert loss_marker.current_stage_id is None
+    assert loss_marker.phase is StageTaskPhase.PREPARING
+
+    await writer._write_batch([], [writer._summaries.pop("summary-data-error")])
+
+    assert len(repo.calls) == 2
+    assert writer.pending_summaries == {}
+    assert writer.write_retries == 0
+
+
+@pytest.mark.asyncio
+async def test_transaction_error_is_retried_without_dropping_batch() -> None:
+    class RecoveringRepo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def write_stage_progress(self, *, events, summaries):
+            self.calls += 1
+            if self.calls == 1:
+                raise _PostgresError("40001")
+            return StageProgressWriteResult()
+
+    repo = RecoveringRepo()
+    writer = StageEventWriter(repo, retry_delay=0, retry_max_delay=0)
+
+    handled = await writer._write_batch([_transition("retryable-error", 1)], [_summary("retryable-error", 1)])
+
+    assert handled is True
+    assert repo.calls == 2
+    assert writer.write_failures == 0
+    assert writer.write_retries == 1
+    assert writer.dropped_events == 0
+    assert "retryable-error" not in writer._known_incomplete
 
 
 @pytest.mark.asyncio

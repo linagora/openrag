@@ -14,6 +14,7 @@ from core.models.stage_progress import (
     StageProgressSummary,
     StageProgressWorkerSnapshot,
     StageProgressWriteResult,
+    StageTaskPhase,
 )
 from core.observability.ray_metrics import (
     record_stage_event_drop,
@@ -27,6 +28,15 @@ from services.workers.stage_tracker import StageTracker
 
 logger = get_logger()
 _MIN_STAGE_WRITE_TIMEOUT = 1.0
+_PERMANENT_POSTGRES_ERROR_CLASSES = frozenset({"22", "23"})
+_MAX_POSTGRES_INTEGER = 2**31 - 1
+_MAX_POSTGRES_BIGINT = 2**63 - 1
+
+
+def _is_permanent_write_error(error: Exception) -> bool:
+    """Return whether Postgres rejected the batch for invalid data or a constraint."""
+    sqlstate = getattr(error, "sqlstate", None)
+    return isinstance(sqlstate, str) and sqlstate[:2] in _PERMANENT_POSTGRES_ERROR_CLASSES
 
 
 class StageEventWriter:
@@ -34,9 +44,9 @@ class StageEventWriter:
 
     ``publish`` is synchronous and uses only ``put_nowait``-style operations.
     PostgreSQL and TaskStateManager calls happen in background tasks with
-    explicit deadlines. Failed PostgreSQL batches are retained in the bounded
-    queues and retried with capped backoff until they succeed or the queue is
-    drained, overflows, or the worker shuts down.
+    explicit deadlines. Transient PostgreSQL failures are retained in bounded
+    queues and retried with capped backoff. Permanent data or constraint errors
+    are dropped and recorded as incomplete history.
     """
 
     def __init__(
@@ -374,8 +384,24 @@ class StageEventWriter:
             except asyncio.CancelledError:
                 self._record_cancelled_batch_loss(events, summaries)
                 raise
-            except Exception:  # noqa: BLE001 - repository failure cannot fail indexing
+            except Exception as exc:  # noqa: BLE001 - repository failure cannot fail indexing
                 duration = time.perf_counter() - started
+                if _is_permanent_write_error(exc):
+                    self._write_failures += 1
+                    record_stage_event_write("failure", duration)
+                    self._drop_permanently_failed_tasks(
+                        {event.task_id for event in events} | {summary.task_id for summary in summaries},
+                        events,
+                        summaries,
+                    )
+                    self._refresh_metrics()
+                    logger.warning(
+                        "Indexing stage history batch was rejected permanently; marked its history incomplete",
+                        sqlstate=getattr(exc, "sqlstate", None),
+                    )
+                    # The batch was dropped and accounted for; do not back off
+                    # or requeue it as though the database might recover.
+                    return True
                 if attempt == 0:
                     self._write_retries += 1
                     record_stage_event_write("retry", duration)
@@ -396,7 +422,8 @@ class StageEventWriter:
                     logger.warning("Indexing stage history write failed; retained batch for retry")
                 return False
 
-            record_stage_event_write("success", time.perf_counter() - started)
+            duration = time.perf_counter() - started
+            record_stage_event_write("success", duration)
             self._next_retry_delay = min(self._retry_delay, self._retry_max_delay)
             if isinstance(result, StageProgressWriteResult):
                 for row in result.coverage:
@@ -427,6 +454,15 @@ class StageEventWriter:
                         self._pending_ack.pop(key, None)
                 for task_id in result.conflicted_task_ids:
                     self._remember_incomplete(task_id)
+                if result.permanent_failed_task_ids:
+                    failed_task_ids = set(result.permanent_failed_task_ids)
+                    self._write_failures += len(failed_task_ids)
+                    record_stage_event_write("failure", duration)
+                    self._drop_permanently_failed_tasks(failed_task_ids, events, summaries)
+                    logger.warning(
+                        "Indexing stage history writes were rejected for some tasks; marked their history incomplete",
+                        task_count=len(failed_task_ids),
+                    )
                 for task_id in result.missing_parent_task_ids:
                     self._mark_snapshot_loss(task_id)
                     dropped_events = sum(event.task_id == task_id for event in events)
@@ -437,6 +473,51 @@ class StageEventWriter:
             return True
 
         return False
+
+    def _drop_permanently_failed_tasks(
+        self,
+        task_ids: set[str],
+        events: Sequence[StageProgressEvent],
+        summaries: Sequence[StageProgressSummary],
+    ) -> None:
+        batch_task_ids = {event.task_id for event in events} | {summary.task_id for summary in summaries}
+        for task_id in sorted(task_ids & batch_task_ids):
+            task_events = [event for event in events if event.task_id == task_id]
+            task_summaries = [summary for summary in summaries if summary.task_id == task_id]
+            was_loss_marker = bool(task_summaries) and all(summary.known_loss for summary in task_summaries)
+            self._drop_failed_batch(task_events, task_summaries, reason="write_failed")
+            if not task_events and was_loss_marker:
+                continue
+
+            candidates = list(task_summaries)
+            pending = self._summaries.get(task_id)
+            if pending is not None:
+                candidates.append(pending)
+            snapshot = self.snapshot_for_task(task_id)
+            if snapshot is not None:
+                candidates.append(snapshot.summary)
+            if not candidates:
+                continue
+
+            summary = max(candidates, key=_summary_order)
+            if task_events:
+                next_revision = min(summary.snapshot_revision + 1, _MAX_POSTGRES_BIGINT)
+                loss_summary = summary.model_copy(update={"known_loss": True, "snapshot_revision": next_revision})
+            else:
+                # A summary-only batch may itself contain out-of-range or
+                # schema-incompatible fields. Preserve its bounded counters,
+                # but drop optional state so the durable loss marker can land.
+                loss_summary = StageProgressSummary(
+                    task_id=summary.task_id,
+                    attempt=min(max(summary.attempt, 1), _MAX_POSTGRES_INTEGER),
+                    latest_sequence=min(max(summary.latest_sequence, 0), _MAX_POSTGRES_BIGINT),
+                    snapshot_revision=min(max(summary.snapshot_revision, 0), _MAX_POSTGRES_BIGINT),
+                    phase=StageTaskPhase.PREPARING,
+                    known_loss=True,
+                )
+            # The summary contains no failed event row. Persisting this marker
+            # makes the dropped history visible to readers after a task ends.
+            self._put_latest_summary(loss_summary)
 
     def _requeue_failed_batch(
         self,
@@ -475,6 +556,10 @@ class StageEventWriter:
         if events:
             self._dropped_events += len(events)
         record_stage_event_drop(reason, len(events) or len(summaries))
+        affected_attempts = {(event.task_id, event.attempt) for event in events}
+        affected_attempts.update((summary.task_id, summary.attempt) for summary in summaries)
+        for key in affected_attempts:
+            self._pending_ack.pop(key, None)
         for task_id in {event.task_id for event in events} | {summary.task_id for summary in summaries}:
             self._mark_snapshot_loss(task_id)
             self._remember_incomplete(task_id)
