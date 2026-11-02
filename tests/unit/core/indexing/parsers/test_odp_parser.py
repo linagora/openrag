@@ -48,8 +48,8 @@ async def test_one_block_per_slide_with_title_body_and_notes(odf_package):
 
     assert processed.page_count == 2
     assert [(block.page_number, block.text) for block in processed.text_blocks] == [
-        (1, "# Introduction\n- Contexte\n- Objectifs\n\n### Notes:\nRappeler le calendrier."),
-        (2, "# Conclusion\nMerci"),
+        (1, "# Introduction\n\n- Contexte\n- Objectifs\n\n### Notes:\nRappeler le calendrier."),
+        (2, "# Conclusion\n\nMerci"),
     ]
 
 
@@ -102,7 +102,7 @@ async def test_custom_shapes_groups_and_tables_keep_their_text(odf_package):
     )
 
     text = processed.text_blocks[0].text
-    assert text.startswith("Dans une forme\nDans un groupe\n")
+    assert text.startswith("Dans une forme\n\nDans un groupe\n\n")
     assert "| 10 | 20 |" in text
 
 
@@ -118,7 +118,7 @@ async def test_pictures_carry_their_slide_number(odf_package, encoded_image):
         )
     )
 
-    assert processed.text_blocks[1].text == "# Deux\n![](odp-image-0)\n![](odp-image-1)"
+    assert processed.text_blocks[1].text == "# Deux\n\n![](odp-image-0)\n\n![](odp-image-1)"
     assert [(image.page_number, image.metadata["markdown_ref"]) for image in processed.images] == [
         (2, "![](odp-image-0)"),
         (2, "![](odp-image-1)"),
@@ -174,7 +174,7 @@ async def test_a_chart_becomes_its_title_and_data_table(odf_package):
     )
 
     text = processed.text_blocks[0].text
-    assert text.startswith("# Évolution\n### Chart: Ventes\n\n")
+    assert text.startswith("# Évolution\n\n### Chart: Ventes\n\n")
     assert "| T1 | 10 |" in text
     assert processed.images == []
 
@@ -210,11 +210,24 @@ async def test_an_unreadable_chart_is_skipped(odf_package, damaged_zip_entry, ho
 
 
 @pytest.mark.asyncio
-async def test_charts_share_one_xml_budget(odf_package, monkeypatch):
-    """Every frame may name the same object: what they read is budgeted."""
+async def test_frames_naming_one_chart_each_get_its_table(odf_package):
+    processed = await _parse(
+        odf_package(
+            "odp",
+            f"<draw:page>{_CHART_FRAME * 3}</draw:page>",
+            pictures={"Object 1/content.xml": _CHART_OBJECT.encode()},
+        )
+    )
+
+    assert processed.text_blocks[0].text.count("### Chart: Ventes") == 3
+
+
+@pytest.mark.asyncio
+async def test_what_charts_add_is_bounded(odf_package, monkeypatch):
+    """Every frame may name the same large table: a small file must not multiply it."""
     import core.indexing.parsers.odf as odf
 
-    monkeypatch.setattr(odf, "_MAX_OBJECT_XML_BYTES", 2 * len(_CHART_OBJECT))
+    monkeypatch.setattr(odf, "_MAX_CHART_ELEMENTS", 40)
     processed = await _parse(
         odf_package(
             "odp",
@@ -223,7 +236,38 @@ async def test_charts_share_one_xml_budget(odf_package, monkeypatch):
         )
     )
 
-    assert processed.text_blocks[0].text.count("### Chart: Ventes") == 2
+    assert processed.text_blocks[0].text.count("### Chart: Ventes") < 5
+
+
+@pytest.mark.asyncio
+async def test_a_title_written_as_a_list_header_is_kept(odf_package):
+    title = "<text:list><text:list-header><text:p>Agenda</text:p></text:list-header></text:list>"
+    processed = await _parse(odf_package("odp", f"<draw:page>{_frame('title', title)}</draw:page>"))
+
+    assert processed.text_blocks[0].text == "# Agenda"
+
+
+@pytest.mark.asyncio
+async def test_a_slide_with_no_title_does_not_take_its_name_for_one(odf_package):
+    processed = await _parse(
+        odf_package("odp", f'<draw:page draw:name="page4">{_frame("outline", "<text:p>Corps</text:p>")}</draw:page>')
+    )
+
+    assert processed.text_blocks[0].text == "Corps"
+
+
+@pytest.mark.asyncio
+async def test_notes_holding_a_list_are_kept(odf_package):
+    notes = (
+        '<presentation:notes><draw:page-thumbnail/><draw:frame presentation:class="notes"><draw:text-box>'
+        "<text:list><text:list-item><text:p>Point oral</text:p></text:list-item></text:list>"
+        "</draw:text-box></draw:frame></presentation:notes>"
+    )
+    processed = await _parse(
+        odf_package("odp", f"<draw:page>{_frame('title', '<text:p>T</text:p>')}{notes}</draw:page>")
+    )
+
+    assert processed.text_blocks[0].text == "# T\n\n### Notes:\nPoint oral"
 
 
 # ---------------------------------------------------------------------------
@@ -239,11 +283,11 @@ async def test_a_libreoffice_deck():
 
     assert processed.page_count == 6
     assert [(block.page_number, block.text) for block in processed.text_blocks] == [
-        (1, "# Bilan 2026\nDirection des finances\n\n### Notes:\nRemercier l'équipe."),
-        (2, "# Objectifs\n- Réduire les coûts\n  - Énergie\n- Améliorer le service"),
-        (3, "# Chiffres clés\n| Ville | Budget |\n| --- | --- |\n| Paris | 1 200 |\n| Lyon | 640 |"),
-        (4, "![](odp-image-0)\nPhoto du chantier\n\n### Notes:\nMontrer la photo."),
-        (5, "# Évolution\n### Chart: Ventes\n\n|  | Ventes |\n| --- | --- |\n| T1 | 10 |\n| T2 | 20 |"),
+        (1, "# Bilan 2026\n\nDirection des finances\n\n### Notes:\nRemercier l'équipe."),
+        (2, "# Objectifs\n\n- Réduire les coûts\n\n- - Énergie\n\n- Améliorer le service"),
+        (3, "# Chiffres clés\n\n| Ville | Budget |\n| --- | --- |\n| Paris | 1 200 |\n| Lyon | 640 |"),
+        (4, "![](odp-image-0)\n\nPhoto du chantier\n\n### Notes:\nMontrer la photo."),
+        (5, "# Évolution\n\n### Chart: Ventes\n\n|  | Ventes |\n| --- | --- |\n| T1 | 10 |\n| T2 | 20 |"),
     ]
     # The table's preview picture is not mistaken for a picture of the slide.
     assert [(image.page_number, image.metadata["markdown_ref"]) for image in processed.images] == [
