@@ -238,6 +238,10 @@ class TestExtractAndStripSourcesBlock:
             pytest.param("Sources: 1" + "*" * 20_000 + "x", id="number-marks"),
             pytest.param("Sources:" + "\n" * 20_000 + "x", id="label-newlines"),
             pytest.param("[Sources: " + "**1**, " * 4_000 + "x", id="emphasized-numbers"),
+            pytest.param(" " * 20_000 + "x", id="spaces"),
+            pytest.param("\t" * 20_000 + "x", id="tabs"),
+            pytest.param(" \t" * 10_000 + "[Source 1x", id="blanks-before-marker"),
+            pytest.param("[Sources: 1]" * 4_000, id="chained-tags"),
         ],
     )
     def test_long_runs_of_marks_are_linear(self, text):
@@ -245,6 +249,27 @@ class TestExtractAndStripSourcesBlock:
         start = time.perf_counter()
         extract_and_strip_sources_block(text)
         assert time.perf_counter() - start < 1.0
+
+    @pytest.mark.parametrize(
+        ("text", "expected_clean", "expected_citations"),
+        [
+            ("Paris is in France. [Sources: 1, 3][Source 1]", "Paris is in France.", {1, 3}),
+            ("`[Sources: none]`[Sources: 1, 3]`[Sources: none]`", "", {1, 3}),
+            ("[Sources: 1, 3]`[Sources: none]``", "", {1, 3}),
+            ("[Sources: 1, 3][Source 1][Source 1][Source 1]", "", {1, 3}),
+        ],
+    )
+    def test_tag_exposed_by_stripping_another_is_stripped(self, text, expected_clean, expected_citations):
+        """Removing a marker or [Sources: none] puts the tag before it at the end of its line."""
+        clean, citations = extract_and_strip_sources_block(text)
+        assert (clean, citations) == (expected_clean, expected_citations)
+        assert extract_and_strip_sources_block(clean)[0] == clean
+
+    def test_chain_longer_than_the_round_cap_keeps_its_first_tags(self):
+        """Each round strips the last tag of a chain; the cap bounds the work, not the result's tidiness."""
+        clean, citations = extract_and_strip_sources_block("Answer [Sources: 1]" + "[Sources: 2]" * 10)
+        assert clean == "Answer [Sources: 1]" + "[Sources: 2]" * 6
+        assert citations == {2}
 
     def test_sources_numbers_case_insensitive(self):
         text = "Answer text\n[sources: 1, 3]"
@@ -1021,3 +1046,62 @@ class TestStreamWithManySources:
         assert content.startswith("This is the answer body.")
         assert content.endswith("This is the answer body.")
         assert _parse_finish_sources(result) == sources
+
+
+def _content_deltas(sse_lines: list[str]) -> list[str]:
+    deltas = []
+    for line in sse_lines:
+        if line.startswith("data: {"):
+            content = json.loads(line[len("data: ") :])["choices"][0]["delta"].get("content")
+            if content:
+                deltas.append(content)
+    return deltas
+
+
+def _chunked(text: str, size: int) -> list[str]:
+    return [_make_chunk(text[i : i + size]) for i in range(0, len(text), size)] + [_make_finish(), DONE_LINE]
+
+
+class TestStreamOfLongAnswers:
+    """Answers several times the lookahead long, where only the end of the answer is re-stripped."""
+
+    SOURCES = [{"file": "a.pdf"}, {"file": "b.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_long_answer_matches_non_streaming_strip(self):
+        answer = "Paris is the capital [Source 1]. Lyon is the third city [Source 2].\n" * 60 + "[Sources: 1, 2]"
+        result = await _collect(stream_with_source_filtering(_fake_stream(_chunked(answer, 7)), self.SOURCES, "m"))
+        assert _collect_content(result) == extract_and_strip_sources_block(answer)[0]
+        assert _parse_finish_sources(result) == self.SOURCES[:2]
+
+    @pytest.mark.asyncio
+    async def test_tag_exposed_by_a_marker_is_stripped_from_the_stream(self):
+        answer = "The answer, at length. " * 40 + "[Sources: 1, 3][Source 1]"
+        result = await _collect(stream_with_source_filtering(_fake_stream(_chunked(answer, 4)), self.SOURCES, "m"))
+        assert _collect_content(result) == ("The answer, at length. " * 40).rstrip()
+        assert _parse_finish_sources(result) == [self.SOURCES[0], self.SOURCES[2]]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param("Москва — столица России. " * 200, id="cyrillic"),
+            pytest.param("北京是中国的首都。" * 500, id="cjk"),
+            pytest.param("القاهرة هي عاصمة مصر. " * 200, id="arabic"),
+        ],
+    )
+    async def test_answer_in_another_script_streams_incrementally(self, body):
+        """Without an ASCII letter to cut at, the answer used to arrive in bursts of an eighth of its length."""
+        result = await _collect(stream_with_source_filtering(_fake_stream(_chunked(body, 5)), self.SOURCES, "m"))
+        deltas = _content_deltas(result)
+        assert "".join(deltas) == body.rstrip()
+        # Every delta before the final flush carries about one upstream chunk.
+        assert max(len(delta) for delta in deltas[:-1]) <= 10
+
+
+@pytest.mark.asyncio
+async def test_blank_run_taken_by_a_later_marker_is_not_emitted():
+    """An inline marker is stripped with the blanks before it, so they wait until the marker is settled."""
+    lines = [_make_chunk(" " * 72), _make_chunk("[Source 1, "), _make_chunk("3]See above."), _make_finish(), DONE_LINE]
+    result = await _collect(stream_with_source_filtering(_fake_stream(lines), [{"file": "a.pdf"}] * 3, "m"))
+    assert _collect_content(result) == "See above."
