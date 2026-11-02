@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -154,8 +155,31 @@ class TestRewritePlaceholdersAndBuildBlocks:
         new_md, blocks = DocxParser._rewrite_placeholders_and_build_blocks(md, embedded)
 
         assert _image_ref(0) in new_md
-        # The extra placeholder is dropped — the regex match collapses to "".
+        # The extra placeholder is dropped — it collapses to "".
         assert "data:image" not in new_md
+        assert len(blocks) == 1
+
+    def test_typed_placeholder_text_is_scanned_in_linear_time(self):
+        # Text typed into the document reaches the Markdown as is: every `![`
+        # used to rescan its line, and every `](data:image/` the rest of it.
+        typed = "![](data:image/" * 15_000
+        started = time.perf_counter()
+        new_md, blocks = DocxParser._rewrite_placeholders_and_build_blocks(
+            "![](data:image/png;base64...)" + typed, [_png_bytes()]
+        )
+
+        assert time.perf_counter() - started < 0.5
+        assert new_md == _image_ref(0) + typed
+        assert len(blocks) == 1
+
+    def test_a_line_of_placeholders_is_scanned_in_linear_time(self):
+        started = time.perf_counter()
+        new_md, blocks = DocxParser._rewrite_placeholders_and_build_blocks(
+            "![](data:image/png;base64...)" * 100_000, [_png_bytes()]
+        )
+
+        assert time.perf_counter() - started < 0.5
+        assert new_md == _image_ref(0)
         assert len(blocks) == 1
 
     def test_no_placeholders_passthrough(self):

@@ -180,16 +180,25 @@ def _residual_data_uri_end(text: str, start: int, prefix_end: int) -> int:
     return end
 
 
-def find_http_images(text: str) -> list[tuple[str, str]]:
-    """Return ``(alt, url)`` for every ``![alt](http(s)://url)`` in ``text``.
+def find_inline_images(
+    text: str,
+    target_pattern: re.Pattern[str],
+    *,
+    allow_empty_rest: bool = False,
+) -> list[tuple[int, int, int]]:
+    """Return ``(start, target_start, end)`` for every ``![alt](target…)`` in ``text``.
 
-    The alt text runs to the first ``](http://`` or ``](https://`` on its line
-    that is followed by a non-empty URL and a ``)``; the URL runs to that
-    ``)``, across lines. When no such target follows an ``![`` on its line,
-    none follows any later ``![`` of that line either, so the scan moves to
-    the next line.
+    This is the scan for ``!\\[(.*?)\\](target[^)]+)\\)``, with ``[^)]*`` when
+    ``allow_empty_rest``. ``target_pattern`` matches the ``](`` that closes
+    the alt text and the start of the URL that must follow. The alt text runs
+    to the first target on its line that is followed by the rest of a URL
+    (non-empty unless ``allow_empty_rest``) and a ``)``; the URL runs to that
+    ``)``, across lines, and ``end`` is past it. When no such target follows
+    an ``![`` on its line, none follows any later ``![`` of that line either,
+    so the scan moves to the next line.
     """
-    images: list[tuple[str, str]] = []
+    min_rest = 0 if allow_empty_rest else 1
+    images: list[tuple[int, int, int]] = []
     pos = 0
     close = -1
     line_end = -1
@@ -202,20 +211,32 @@ def find_http_images(text: str) -> list[tuple[str, str]]:
                 line_end = len(text)
         pos = line_end
         candidate = start + 2
-        while (target := _HTTP_IMAGE_TARGET_PATTERN.search(text, candidate, line_end)) is not None:
-            url_start = target.end()
+        while (target := target_pattern.search(text, candidate, line_end)) is not None:
+            rest_start = target.end()
             # Targets are tried in text order, so the ``)`` found for an earlier
             # one still closes this one unless it comes before it.
-            if close < url_start:
-                close = text.find(")", url_start)
+            if close < rest_start:
+                close = text.find(")", rest_start)
                 if close == -1:
                     return images
-            if close > url_start:
-                images.append((text[start + 2 : target.start()], text[target.start() + 2 : close]))
+            if close - rest_start >= min_rest:
+                images.append((start, target.start(), close + 1))
                 pos = close + 1
                 break
             candidate = target.start() + 1
     return images
+
+
+def find_http_images(text: str) -> list[tuple[str, str]]:
+    """Return ``(alt, url)`` for every ``![alt](http(s)://url)`` in ``text``.
+
+    The alt text runs to the first ``](http://`` or ``](https://`` on its line
+    that is followed by a non-empty URL and a ``)`` (see ``find_inline_images``).
+    """
+    return [
+        (text[start + 2 : target_start], text[target_start + 2 : end - 1])
+        for start, target_start, end in find_inline_images(text, _HTTP_IMAGE_TARGET_PATTERN)
+    ]
 
 
 class _DataUriTargetEnds:
