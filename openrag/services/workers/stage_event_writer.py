@@ -76,6 +76,7 @@ class StageEventWriter:
         self._job_repo = job_repo
         self._live_sink = live_sink
         self._queue_capacity = queue_capacity
+        self._max_batch_size = batch_size
         self._batch_size = batch_size
         self._flush_interval = flush_interval
         self._write_timeout = write_timeout
@@ -418,6 +419,8 @@ class StageEventWriter:
                 else:
                     self._write_retries += 1
                     record_stage_event_write("retry", duration)
+                    if isinstance(exc, TimeoutError):
+                        self._reduce_batch_size_after_timeout(events, summaries)
                     self._requeue_failed_batch(events, summaries)
                     logger.warning("Indexing stage history write failed; retained batch for retry")
                 return False
@@ -425,6 +428,8 @@ class StageEventWriter:
             duration = time.perf_counter() - started
             record_stage_event_write("success", duration)
             self._next_retry_delay = min(self._retry_delay, self._retry_max_delay)
+            if self._batch_size < self._max_batch_size:
+                self._batch_size += 1
             if isinstance(result, StageProgressWriteResult):
                 for row in result.coverage:
                     key = (row.task_id, row.attempt)
@@ -497,10 +502,27 @@ class StageEventWriter:
             if snapshot is not None:
                 candidates.append(snapshot.summary)
             if not candidates:
+                if not task_events:
+                    continue
+                # A finished task's terminal snapshot can expire while its
+                # event backlog is still being drained. Keep a minimal durable
+                # loss marker for that event attempt even after the snapshot
+                # has been evicted. Zero counters keep the marker older than
+                # any persisted projection, so the repository only applies the
+                # known-loss bit instead of replacing the stage state.
+                latest_event = max(task_events, key=lambda event: (event.attempt, event.sequence))
+                self._put_latest_summary(
+                    StageProgressSummary(
+                        task_id=task_id,
+                        attempt=latest_event.attempt,
+                        phase=StageTaskPhase.PREPARING,
+                        known_loss=True,
+                    )
+                )
                 continue
 
             summary = max(candidates, key=_summary_order)
-            if task_events:
+            if task_events and not task_summaries:
                 next_revision = min(summary.snapshot_revision + 1, _MAX_POSTGRES_BIGINT)
                 loss_summary = summary.model_copy(update={"known_loss": True, "snapshot_revision": next_revision})
             else:
@@ -518,6 +540,17 @@ class StageEventWriter:
             # The summary contains no failed event row. Persisting this marker
             # makes the dropped history visible to readers after a task ends.
             self._put_latest_summary(loss_summary)
+
+    def _reduce_batch_size_after_timeout(
+        self,
+        events: Sequence[StageProgressEvent],
+        summaries: Sequence[StageProgressSummary],
+    ) -> None:
+        """Halve an over-deadline batch before retrying it ahead of newer events."""
+        failed_batch_size = max(len(events), len(summaries))
+        if failed_batch_size <= 1 or self._batch_size <= 1:
+            return
+        self._batch_size = max(1, min(self._batch_size // 2, failed_batch_size // 2))
 
     def _requeue_failed_batch(
         self,
