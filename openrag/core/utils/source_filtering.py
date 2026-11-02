@@ -75,6 +75,19 @@ def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
     return preview
 
 
+# No source index has more digits than this, and int() refuses a string of more
+# than 4,300 digits, which a model can still write.
+_MAX_CITATION_DIGITS = 9
+
+
+def _citation_index(digits: str) -> int:
+    """The 1-based source index ``digits`` cites, or 0, which matches no source, if too long to be one."""
+    significant = digits.lstrip("0")
+    if len(significant) > _MAX_CITATION_DIGITS:
+        return 0
+    return int(significant or "0")
+
+
 def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tuple[str, set[int], bool]:
     """Strip source tags and return citations found."""
     cited: set[int] = set()
@@ -87,7 +100,7 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
             # the regexes accept spaces, newlines and marks as well as commas
             # ([Sources: **1** **3**]), and a tag stripped with its numbers
             # unread would fall back to citing every source.
-            cited.update(int(n) for n in re.findall(r"\d+", match.group(1)))
+            cited.update(_citation_index(n) for n in re.findall(r"\d+", match.group(1)))
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)

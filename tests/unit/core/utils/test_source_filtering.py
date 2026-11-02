@@ -246,6 +246,24 @@ class TestExtractAndStripSourcesBlock:
         extract_and_strip_sources_block(text)
         assert time.perf_counter() - start < 1.0
 
+    @pytest.mark.parametrize(
+        ("tag", "expected"),
+        [
+            pytest.param("[Sources: " + "1" * 5_000 + "]", [], id="only-overlong"),
+            pytest.param("[Sources: 2, " + "9" * 5_000 + "]", [{"file": "b.pdf"}], id="overlong-beside-valid"),
+            pytest.param("[Sources: " + "0" * 5_000 + "3]", [{"file": "c.pdf"}], id="leading-zeros"),
+        ],
+    )
+    def test_number_too_long_to_be_an_index_cites_no_source(self, tag, expected):
+        """int() refuses over 4,300 digits: such a number used to fail the request."""
+        clean, citations = extract_and_strip_sources_block("Answer\n" + tag)
+        assert clean == "Answer"
+        assert citations is not None
+        assert (
+            filter_sources_by_citations([{"file": "a.pdf"}, {"file": "b.pdf"}, {"file": "c.pdf"}], citations)
+            == expected
+        )
+
     def test_sources_numbers_case_insensitive(self):
         text = "Answer text\n[sources: 1, 3]"
         clean, citations = extract_and_strip_sources_block(text)
@@ -1021,3 +1039,12 @@ class TestStreamWithManySources:
         assert content.startswith("This is the answer body.")
         assert content.endswith("This is the answer body.")
         assert _parse_finish_sources(result) == sources
+
+
+@pytest.mark.asyncio
+async def test_stream_with_a_number_too_long_to_be_an_index_cites_no_source():
+    """The streamed answer and its finish chunk survive a citation int() refuses to read."""
+    lines = [_make_chunk("The answer."), _make_chunk("\n[Sources: 1, " + "7" * 5_000 + "]"), _make_finish(), DONE_LINE]
+    result = await _collect(stream_with_source_filtering(_fake_stream(lines), [{"file": "a.pdf"}], "test-model"))
+    assert _collect_content(result) == "The answer."
+    assert _parse_finish_sources(result) == [{"file": "a.pdf"}]
