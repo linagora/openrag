@@ -152,6 +152,13 @@ class TestSplitMdElements:
         assert len(images) == 1
         assert images[0].page_number == 3
 
+    def test_marker_too_long_to_be_a_page_stays_text(self):
+        # int() refuses more than 4,300 digits: such a marker used to fail the file.
+        marker = "[PAGE_" + "1" * 5_000 + "]"
+        elems = split_md_elements(f"Intro.\n{marker}\nMore.")
+        assert [e.type for e in elems] == ["text"]
+        assert marker in elems[0].content
+
 
 class TestGetChunkPageNumber:
     def test_no_markers_returns_previous_page(self):
@@ -169,6 +176,10 @@ class TestGetChunkPageNumber:
     def test_marker_in_middle(self):
         result = get_chunk_page_number("Start on page 1.[PAGE_1]End on page 2.", previous_chunk_ending_page=1)
         assert result == {"start_page": 1, "end_page": 2}
+
+    def test_marker_too_long_to_be_a_page_is_not_a_marker(self):
+        result = get_chunk_page_number("[PAGE_" + "1" * 5_000 + "]Content.", previous_chunk_ending_page=4)
+        assert result == {"start_page": 4, "end_page": 4}
 
 
 class TestChunkTable:

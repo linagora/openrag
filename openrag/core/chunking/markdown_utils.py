@@ -40,7 +40,10 @@ TABLE_RE = re.compile(
 IMAGE_RE = re.compile(r"(<image_description>(.*?)</image_description>)", re.DOTALL)
 
 # `[PAGE_N]` page-boundary markers — content BEFORE [PAGE_N] is on page N.
-PAGE_RE = re.compile(r"\[PAGE_(\d+)\]")
+# N is read with int(), which refuses more than 4,300 digits: the marker can
+# also come from the document's own text, so a number no page count reaches
+# leaves it plain text.
+PAGE_RE = re.compile(r"\[PAGE_(\d{1,9})\]")
 
 
 ElementType = Literal["text", "table", "image"]
