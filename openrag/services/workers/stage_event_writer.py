@@ -34,7 +34,9 @@ class StageEventWriter:
 
     ``publish`` is synchronous and uses only ``put_nowait``-style operations.
     PostgreSQL and TaskStateManager calls happen in background tasks with
-    explicit deadlines and one retry.
+    explicit deadlines. Failed PostgreSQL batches are retained in the bounded
+    queues and retried with capped backoff until they succeed or the queue is
+    drained, overflows, or the worker shuts down.
     """
 
     def __init__(
@@ -47,7 +49,7 @@ class StageEventWriter:
         flush_interval: float = 0.05,
         write_timeout: float = 0.075,
         retry_delay: float = 0.025,
-        terminal_retry_delay: float = 1.0,
+        retry_max_delay: float = 1.0,
         shutdown_timeout: float = 6.0,
         sample_interval: float = 1.0,
         live_timeout: float = 0.075,
@@ -68,7 +70,8 @@ class StageEventWriter:
         self._flush_interval = flush_interval
         self._write_timeout = write_timeout
         self._retry_delay = retry_delay
-        self._terminal_retry_delay = terminal_retry_delay
+        self._retry_max_delay = max(retry_delay, retry_max_delay)
+        self._next_retry_delay = min(retry_delay, self._retry_max_delay)
         self._shutdown_timeout = shutdown_timeout
         self._sample_interval = sample_interval
         self._live_timeout = live_timeout
@@ -229,8 +232,11 @@ class StageEventWriter:
                 for task in pending:
                     task.add_done_callback(_consume_task_result)
         if self._events:
-            self._dropped_events += len(self._events)
-            record_stage_event_drop("shutdown", len(self._events))
+            pending_events = tuple(self._events)
+            self._dropped_events += len(pending_events)
+            record_stage_event_drop("shutdown", len(pending_events))
+            for task_id in {event.task_id for event in pending_events}:
+                self._mark_snapshot_loss(task_id)
             self._events.clear()
             set_stage_event_queue_size(0)
         if self._summaries:
@@ -337,7 +343,13 @@ class StageEventWriter:
                 if len(summaries) == self._batch_size:
                     break
             if events or summaries:
-                await self._write_batch(events, summaries)
+                succeeded = await self._write_batch(events, summaries)
+                if not succeeded:
+                    if self._closing:
+                        return
+                    delay = self._next_retry_delay
+                    self._next_retry_delay = min(self._retry_max_delay, max(self._retry_delay, delay * 2))
+                    await asyncio.sleep(delay)
             self._refresh_metrics()
             self._expire_terminal()
             if self._closing and not self._events and not self._summaries:
@@ -347,7 +359,7 @@ class StageEventWriter:
         self,
         events: Sequence[StageProgressEvent],
         summaries: Sequence[StageProgressSummary],
-    ) -> None:
+    ) -> bool:
         # The repository performs work per event and per task summary. Keep each
         # write bounded, allow one second for a single task, and scale larger
         # batches in proportion to their size.
@@ -374,30 +386,18 @@ class StageEventWriter:
                         raise
                     continue
                 self._write_failures += 1
-                self._dropped_events += len(events)
                 record_stage_event_write("failure", duration)
-                record_stage_event_drop("write_failed", len(events) or len(summaries))
-                terminal_retry_expiries = []
-                for summary in summaries:
-                    self._mark_snapshot_loss(summary.task_id)
-                    self._remember_incomplete(summary.task_id)
-                    terminal = self._terminal.get(summary.task_id)
-                    if self._closing or terminal is None:
-                        continue
-                    expires_at, snapshot = terminal
-                    final_summary = snapshot.summary
-                    if final_summary.attempt == summary.attempt and final_summary.expected_final_sequence is not None:
-                        self._put_latest_summary(final_summary)
-                        terminal_retry_expiries.append(expires_at)
-                if terminal_retry_expiries:
-                    remaining_ttl = min(terminal_retry_expiries) - self._monotonic()
-                    delay = min(self._terminal_retry_delay, max(0.0, remaining_ttl))
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                logger.warning("Indexing stage history write failed after bounded retry")
-                return
+                if self._closing:
+                    self._drop_failed_batch(events, summaries, reason="shutdown")
+                else:
+                    self._write_retries += 1
+                    record_stage_event_write("retry", duration)
+                    self._requeue_failed_batch(events, summaries)
+                    logger.warning("Indexing stage history write failed; retained batch for retry")
+                return False
 
             record_stage_event_write("success", time.perf_counter() - started)
+            self._next_retry_delay = min(self._retry_delay, self._retry_max_delay)
             if isinstance(result, StageProgressWriteResult):
                 for row in result.coverage:
                     key = (row.task_id, row.attempt)
@@ -434,7 +434,50 @@ class StageEventWriter:
                     self._dropped_events += dropped_events
                     record_stage_event_drop("missing_parent", dropped_events or int(has_summary))
                     self._remember_incomplete(task_id)
-            return
+            return True
+
+        return False
+
+    def _requeue_failed_batch(
+        self,
+        events: Sequence[StageProgressEvent],
+        summaries: Sequence[StageProgressSummary],
+    ) -> None:
+        # Events popped for an in-flight batch no longer occupy queue slots.
+        # Put them ahead of newer transitions so retries preserve task order.
+        queued_events = [*events, *self._events]
+        retained_events = queued_events[: self._queue_capacity]
+        dropped_events = queued_events[self._queue_capacity :]
+        self._events = deque(retained_events)
+        set_stage_event_queue_size(len(self._events))
+        dropped_task_ids = {event.task_id for event in dropped_events}
+        if dropped_events:
+            self._dropped_events += len(dropped_events)
+            record_stage_event_drop("queue_full", len(dropped_events))
+            for task_id in dropped_task_ids:
+                self._mark_snapshot_loss(task_id)
+
+        for summary in summaries:
+            if summary.task_id in dropped_task_ids and not summary.known_loss:
+                summary = summary.model_copy(
+                    update={"known_loss": True, "snapshot_revision": summary.snapshot_revision + 1}
+                )
+            self._put_latest_summary(summary)
+        self._event_ready.set()
+
+    def _drop_failed_batch(
+        self,
+        events: Sequence[StageProgressEvent],
+        summaries: Sequence[StageProgressSummary],
+        *,
+        reason: str,
+    ) -> None:
+        if events:
+            self._dropped_events += len(events)
+        record_stage_event_drop(reason, len(events) or len(summaries))
+        for task_id in {event.task_id for event in events} | {summary.task_id for summary in summaries}:
+            self._mark_snapshot_loss(task_id)
+            self._remember_incomplete(task_id)
 
     def _record_cancelled_batch_loss(
         self,
@@ -443,8 +486,8 @@ class StageEventWriter:
     ) -> None:
         self._dropped_events += len(events)
         record_stage_event_drop("shutdown", len(events) or len(summaries))
-        for summary in summaries:
-            self._mark_snapshot_loss(summary.task_id)
+        for task_id in {event.task_id for event in events} | {summary.task_id for summary in summaries}:
+            self._mark_snapshot_loss(task_id)
 
     def _mark_snapshot_loss(self, task_id: str) -> None:
         self._remember_incomplete(task_id)

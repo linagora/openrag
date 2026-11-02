@@ -91,7 +91,7 @@ async def test_writer_batches_transition_events_and_keeps_latest_summary() -> No
 
 
 @pytest.mark.asyncio
-async def test_writer_retries_once_then_drops_without_raising() -> None:
+async def test_writer_drops_failed_batch_on_shutdown_without_raising() -> None:
     repo = _Repo(error=RuntimeError("database unavailable"))
     writer = StageEventWriter(repo, flush_interval=10, retry_delay=0.001)
     writer.publish(_transition("task-1", 1), _summary("task-1", 1), ())
@@ -101,6 +101,49 @@ async def test_writer_retries_once_then_drops_without_raising() -> None:
     assert len(repo.calls) == 2
     assert writer.write_failures == 1
     assert writer.dropped_events == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_is_retried_after_repository_recovers() -> None:
+    class RecoveringRepo:
+        def __init__(self) -> None:
+            self.calls = []
+            self.persisted_events = []
+            self.persisted_summaries = []
+            self.recovered = asyncio.Event()
+
+        async def write_stage_progress(self, *, events, summaries):
+            self.calls.append((list(events), list(summaries)))
+            if len(self.calls) <= 2:
+                raise RuntimeError("database temporarily unavailable")
+            self.persisted_events.extend(events)
+            self.persisted_summaries.extend(summaries)
+            self.recovered.set()
+            return StageProgressWriteResult(
+                coverage=[
+                    StageProgressCoverage(
+                        task_id=summary.task_id,
+                        attempt=summary.attempt,
+                        persisted_through_sequence=summary.latest_sequence,
+                    )
+                    for summary in summaries
+                ]
+            )
+
+    repo = RecoveringRepo()
+    writer = StageEventWriter(repo, retry_delay=0, retry_max_delay=0, flush_interval=10)
+    event = _transition("task-1", 1)
+    writer.publish(event, _summary("task-1", 1), ())
+
+    await asyncio.wait_for(repo.recovered.wait(), timeout=1.0)
+    await writer.close()
+
+    assert len(repo.calls) == 3
+    assert [[event.sequence for event in events] for events, _ in repo.calls] == [[1], [1], [1]]
+    assert repo.persisted_events == [event]
+    assert repo.persisted_summaries[-1].known_loss is False
+    assert writer.dropped_events == 0
+    assert writer.write_retries == 2
 
 
 @pytest.mark.asyncio
@@ -140,7 +183,7 @@ async def test_writer_gives_single_task_a_one_second_deadline(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_writer_counts_summary_only_write_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_summary_only_write_failure_is_retained_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _Repo(error=RuntimeError("database unavailable"))
     writer = StageEventWriter(repo, retry_delay=0.001)
     drops = []
@@ -152,11 +195,26 @@ async def test_writer_counts_summary_only_write_loss(monkeypatch: pytest.MonkeyP
 
     await writer._write_batch([], [_summary("summary-only")])
 
-    assert drops == [("write_failed", 1)]
+    assert writer.pending_summaries["summary-only"].known_loss is False
+    assert drops == []
 
 
 @pytest.mark.asyncio
-async def test_failed_terminal_summary_is_retried_with_known_loss_after_recovery() -> None:
+async def test_failed_batch_requeues_older_events_and_marks_overflow_loss() -> None:
+    writer = StageEventWriter(_Repo(error=RuntimeError("database unavailable")), queue_capacity=1, retry_delay=0)
+    writer._events.append(_transition("newer-task", 1))
+    writer._summaries["newer-task"] = _summary("newer-task", 1)
+
+    await writer._write_batch([_transition("older-task", 1)], [_summary("older-task", 1)])
+
+    assert [event.task_id for event in writer._events] == ["older-task"]
+    assert writer.dropped_events == 1
+    assert "newer-task" in writer._known_incomplete
+    assert writer.pending_summaries["older-task"].known_loss is False
+
+
+@pytest.mark.asyncio
+async def test_failed_terminal_summary_is_retried_after_recovery() -> None:
     task_id = "terminal-retry"
 
     class RecoveringRepo:
@@ -181,7 +239,7 @@ async def test_failed_terminal_summary_is_retried_with_known_loss_after_recovery
             )
 
     repo = RecoveringRepo()
-    writer = StageEventWriter(repo, retry_delay=0, terminal_retry_delay=0)
+    writer = StageEventWriter(repo, retry_delay=0, retry_max_delay=0)
     key = (task_id, 1)
     summary = _summary(task_id, 2).model_copy(update={"expected_final_sequence": 2})
     writer._terminal[task_id] = (
@@ -193,10 +251,10 @@ async def test_failed_terminal_summary_is_retried_with_known_loss_after_recovery
     await writer._write_batch([], [summary])
 
     retry_summary = writer.pending_summaries[task_id]
-    assert retry_summary.known_loss is True
+    assert retry_summary.known_loss is False
     await writer._write_batch([], [writer._summaries.pop(task_id)])
 
-    assert repo.persisted_summaries[-1].known_loss is True
+    assert repo.persisted_summaries[-1].known_loss is False
     assert key not in writer._pending_ack
 
 
