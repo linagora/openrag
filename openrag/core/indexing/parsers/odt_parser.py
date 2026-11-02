@@ -1,6 +1,6 @@
 """ODT (OpenDocument text) ``DocumentParser`` implementation.
 
-Reads ``content.xml`` directly (see :mod:`.odf`) and emits one Markdown
+Converts through ``xberg`` (see :mod:`.odf`) and emits one Markdown
 :class:`TextBlock`, like the DOCX parser: headings, paragraphs, lists and
 tables. Embedded pictures become ``![](odt-image-N)`` refs, each with a
 matching :class:`ImageBlock`.
@@ -19,7 +19,7 @@ import logging
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from .document_parser import DocumentParser
-from .odf import OdfConverter, OdfError, open_odf
+from .odf import OdfError, read_odf, text_markdown
 from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
@@ -55,9 +55,7 @@ class OdtParser(DocumentParser):
     @staticmethod
     def _convert(path: str) -> tuple[str, list[ImageBlock]]:
         try:
-            with open_odf(path) as package:
-                converter = OdfConverter(package, image_prefix="odt-image")
-                return converter.text_markdown(), converter.images
+            return text_markdown(read_odf(path, "odt"), image_prefix="odt-image")
         except OdfError as exc:
             logger.warning("Failed to read ODT: %s", exc)
             return "", []

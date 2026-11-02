@@ -1,6 +1,6 @@
 """ODP (OpenDocument presentation) ``DocumentParser`` implementation.
 
-Reads ``content.xml`` directly (see :mod:`.odf`) and emits one
+Converts through ``xberg`` (see :mod:`.odf`) and emits one
 :class:`TextBlock` per slide (1-indexed ``page_number``), like the PPTX
 parser: the title shape → ``#`` heading, then text boxes, tables and
 pictures in document order, with speaker notes appended as ``### Notes:``.
@@ -21,7 +21,7 @@ import logging
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from .document_parser import DocumentParser
-from .odf import OdfConverter, OdfError, open_odf
+from .odf import OdfError, read_odf, slides_markdown
 from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
@@ -56,10 +56,7 @@ class OdpParser(DocumentParser):
     @staticmethod
     def _convert(path: str) -> tuple[int, list[tuple[int, str]], list[ImageBlock]]:
         try:
-            with open_odf(path) as package:
-                converter = OdfConverter(package, image_prefix="odp-image")
-                slides = list(converter.slides())
-                return converter.slide_count(), slides, converter.images
+            return slides_markdown(read_odf(path, "odp"), image_prefix="odp-image")
         except OdfError as exc:
             logger.warning("Failed to read ODP: %s", exc)
             return 0, [], []
