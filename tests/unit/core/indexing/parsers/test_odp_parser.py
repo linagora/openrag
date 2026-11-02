@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -131,6 +133,55 @@ async def test_a_text_document_is_not_read_as_a_presentation(odf_package):
 
     assert processed.text_blocks == []
     assert processed.page_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("shape", "node"),
+    [("custom-shape", "<!-- commentaire -->"), ("rect", "<?instruction x?>")],
+)
+async def test_a_shape_holding_a_non_element_node_keeps_its_text(odf_package, shape, node):
+    processed = await _parse(
+        odf_package(
+            "odp",
+            f"<draw:page><draw:{shape}>{node}<text:p>Dans une forme</text:p></draw:{shape}></draw:page>",
+        )
+    )
+
+    assert "Dans une forme" in processed.text_blocks[0].text
+
+
+@pytest.mark.asyncio
+async def test_an_entity_reference_indexes_as_nothing(odf_package):
+    """xberg refuses the entity, so it is the file that is lost, not the indexing task."""
+    processed = await _parse(
+        odf_package(
+            "odp",
+            "<draw:page><draw:ellipse>&entite;<text:p>Dans une forme</text:p></draw:ellipse></draw:page>",
+            doctype='<!DOCTYPE x [<!ENTITY entite "v">]>',
+        )
+    )
+
+    assert processed.text_blocks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root", ["text:s", "text:list-header"])
+async def test_content_xml_that_is_not_a_document_indexes_as_nothing(root):
+    """The patches assume elements have parents: these fail on the root, without failing the task."""
+    namespaces = (
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+        'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"'
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as package:
+        package.writestr("mimetype", "application/vnd.oasis.opendocument.presentation")
+        package.writestr("content.xml", f"<{root} {namespaces}/>")
+        package.writestr("META-INF/manifest.xml", "<manifest/>")
+
+    processed = await _parse(buf.getvalue())
+
+    assert processed.text_blocks == []
 
 
 @pytest.mark.asyncio
