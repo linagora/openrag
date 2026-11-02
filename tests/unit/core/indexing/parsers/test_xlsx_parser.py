@@ -10,6 +10,7 @@ from core.indexing.parsers.tabular.xlsx_validation import MAIN_TYPE
 from core.models.document import Document, DocumentType
 from core.utils.exceptions import NoIndexableContentError, PipelineError
 from openpyxl import Workbook
+from openpyxl.worksheet.table import Table
 
 
 def _workbook_bytes() -> bytes:
@@ -143,6 +144,175 @@ def test_detects_and_extracts_each_table_region_with_exact_coordinates():
         "sheet:0:table:1",
         "sheet:0:table:2",
     ]
+
+
+def test_excel_table_ranges_separate_horizontally_touching_tables():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Touching"
+    rows = [
+        ["person_id", "name", "office_id", "city"],
+        ["P-1", "Alice", "O-1", "Paris"],
+        ["P-2", "Bob", "O-2", "Lyon"],
+    ]
+    for row in rows:
+        sheet.append(row)
+    sheet.add_table(Table(displayName="PeopleTable", ref="A1:B3"))
+    sheet.add_table(Table(displayName="OfficesTable", ref="C1:D3"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_range"] for block in blocks] == [
+        "'Touching'!A1:B3",
+        "'Touching'!C1:D3",
+    ]
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["person_id", "name"],
+        ["office_id", "city"],
+    ]
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[2, 3], [2, 3]]
+    assert all(block.metadata["worksheet_table_count"] == 2 for block in blocks)
+
+
+def test_excel_table_ranges_separate_vertically_touching_tables():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["person_id", "name"])
+    sheet.append(["P-1", "Alice"])
+    sheet.append(["P-2", "Bob"])
+    sheet.append(["office_id", "city"])
+    sheet.append(["O-1", "Paris"])
+    sheet.append(["O-2", "Lyon"])
+    sheet.add_table(Table(displayName="PeopleVertical", ref="A1:B3"))
+    sheet.add_table(Table(displayName="OfficesVertical", ref="A4:B6"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_range"] for block in blocks] == ["'Sheet'!A1:B3", "'Sheet'!A4:B6"]
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["person_id", "name"],
+        ["office_id", "city"],
+    ]
+
+
+def test_excel_table_boundary_does_not_discard_adjacent_unstructured_content():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["person_id", "name", "office_id", "city"])
+    sheet.append(["P-1", "Alice", "O-1", "Paris"])
+    sheet.append(["P-2", "Bob", "O-2", "Lyon"])
+    sheet.add_table(Table(displayName="DefinedPeople", ref="A1:B3"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_range"] for block in blocks] == ["'Sheet'!A1:B3", "'Sheet'!C1:D3"]
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["person_id", "name"],
+        ["office_id", "city"],
+    ]
+
+
+def test_merged_title_stays_with_its_explicit_table_and_not_a_later_region():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.merge_cells("A1:B1")
+    sheet["A1"] = "People title"
+    sheet.append(["person_id", "name"])
+    sheet.append(["P-1", "Alice"])
+    sheet.append(["P-2", "Bob"])
+    sheet.append([])
+    sheet.append(["office_id", "city"])
+    sheet.append(["O-1", "Paris"])
+    sheet.append(["O-2", "Lyon"])
+    sheet.add_table(Table(displayName="TitledPeople", ref="A2:B4"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_range"] for block in blocks] == ["'Sheet'!A2:B4", "'Sheet'!A6:B8"]
+    assert blocks[0].metadata["table_region_range"] == "'Sheet'!A1:B4"
+    assert blocks[0].metadata["table_header_range"] == "'Sheet'!A2:B2"
+    assert blocks[0].metadata["sheet_context"].endswith("Row 1: People title")
+    assert "People title" not in blocks[1].text
+
+
+def test_plain_contiguous_cells_are_not_split_without_source_boundaries():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["person_id", "name", "office_id", "city"])
+    sheet.append(["P-1", "Alice", "O-1", "Paris"])
+    sheet.append(["P-2", "Bob", "O-2", "Lyon"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_range"] == "'Sheet'!A1:D3"
+    assert block.metadata["table_columns"] == ["person_id", "name", "office_id", "city"]
+
+
+def test_touching_excel_tables_keep_formula_groups_scoped_to_their_own_headers():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["quantity", "price", "total", "hours", "rate", "cost"])
+    for row_number in range(2, 5):
+        sheet.append([row_number, 10, f"=A{row_number}*B{row_number}", row_number, 20, f"=D{row_number}*E{row_number}"])
+    sheet.add_table(Table(displayName="SalesTable", ref="A1:C4"))
+    sheet.add_table(Table(displayName="LabourTable", ref="D1:F4"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["quantity", "price", "total"],
+        ["hours", "rate", "cost"],
+    ]
+    assert [block.metadata["formula_groups"][0]["range"] for block in blocks] == ["C2:C4", "F2:F4"]
+    assert [block.metadata["formula_groups"][0]["semantic_expression"] for block in blocks] == [
+        "total = quantity*price",
+        "cost = hours*rate",
+    ]
+
+
+def test_rejects_overlapping_excel_table_definitions_before_reader_opens(monkeypatch):
+    from xml.etree import ElementTree as ET
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["person_id", "name", "office_id", "city"])
+    sheet.append(["P-1", "Alice", "O-1", "Paris"])
+    sheet.add_table(Table(displayName="PeopleOverlap", ref="A1:B2"))
+    sheet.add_table(Table(displayName="OfficesOverlap", ref="C1:D2"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(raw_bytes=output.getvalue())
+
+    def overlap_second_table(xml):
+        root = ET.fromstring(xml)
+        root.set("ref", "B1:D2")
+        return ET.tostring(root, encoding="unicode")
+
+    document = _edit_xml(document, overlap_second_table, target="xl/tables/table2.xml")
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="overlapping ranges") as error:
+        list(XlsxParser().iter_batches(document))
+    assert error.value.code == "INVALID_XLSX"
 
 
 def test_chunked_offset_table_keeps_absolute_worksheet_citations():

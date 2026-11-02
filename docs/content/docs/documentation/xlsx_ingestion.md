@@ -24,7 +24,7 @@ Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a
 
 ## Table detection
 
-OpenRAG detects independent table regions from content-bearing cells during its bounded OOXML preflight. A fully blank row or column separates tables, so tables may be stacked vertically, placed side by side, or start away from `A1`, such as at `L30`.
+OpenRAG detects independent table regions from content-bearing cells during its bounded OOXML preflight. A fully blank row or column separates ordinary cell ranges. Source-defined Excel Tables are also treated as authoritative regions, so two Excel Tables remain independent even when their populated areas touch horizontally or vertically. Tables may therefore be stacked, placed side by side, or start away from `A1`, such as at `L30`.
 
 Every detected table is extracted and chunked independently. Its metadata includes:
 
@@ -206,7 +206,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 
 | Workbook case | Current behavior | Recommended action |
 | --- | --- | --- |
-| Tables without a blank row or column boundary | Contiguous content is treated as one table | Add a fully blank separator row or column between independent tables |
+| Touching ranges without explicit Excel Table definitions | Their shared populated area is inherently ambiguous and is treated as one table | Define each range as an Excel Table, or add a fully blank separator row or column. Touching Excel Tables are extracted independently |
 | Merged title above a single header row | The title is retained as table context and the following row becomes the header | No action is required when the title spans the detected table |
 | Merged column-header groups | Consecutive source-backed levels are flattened and retained as hierarchy metadata; arbitrary visual layouts without merged ranges remain ambiguous | Use actual merged ranges or a single explicit header row |
 | Merged row headers | Vertically merged single-column values are expanded through their covered data rows and recorded as per-row hierarchy metadata | No action is required for ordinary vertical row-header merges |
@@ -219,7 +219,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 
 ## Operational guidance
 
-- Separate independent tables with at least one fully blank row or column. Add explicit headers or configure a headerless schema.
+- Define independent ranges as Excel Tables when they touch. Otherwise, separate them with at least one fully blank row or column. Add explicit headers or configure a headerless schema.
 - Recalculate and save formula-heavy workbooks before uploading them.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
 - Use a fresh partition when comparing ingestion behavior across parser versions.
