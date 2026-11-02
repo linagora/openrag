@@ -5,7 +5,7 @@ title: Milvus Migrations
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 # Milvus Upgrade
-OpenRAG now uses Milvus **3.0.2** with PyMilvus **3.0.1**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
+OpenRAG now uses Milvus **3.0.5** with PyMilvus **3.0.2**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
 
 Fresh installations need no manual ownership step. The Compose stack initializes empty bind mounts and named volumes before the server starts. If existing files are not already owned by the Milvus 3 user, startup stops with a migration error instead of risking a partially writable deployment. The procedure below remains mandatory for existing data in either storage mode because all files created by Milvus 2.6 must be transferred to the Milvus 3 user.
 
@@ -151,6 +151,27 @@ kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}'
 # Expected Milvus image: milvusdb/milvus:v3.0.2
 ```
+
+### Upgrade from Milvus 3.0.2 to 3.0.5
+
+The tested 3.0.2-to-3.0.5 upgrade required no Milvus data migration. The rehearsal covered one copied data volume with `MQ_TYPE=default`; custom message-queue configurations need separate validation. Keep the existing etcd, MinIO, volumes, and message-queue type. Before upgrading, stop writes and take a verified backup of Milvus, etcd, and MinIO. Do not rerun the OpenRAG collection migration solely because the Milvus image changes; apply it separately only if the collection schema is behind the running OpenRAG version.
+
+> **RLS compatibility gate:** Milvus 3.0.5 [removes server-side row-level security enforcement](https://github.com/milvus-io/milvus/pull/54353). If your deployment relies on Milvus RLS to restrict row visibility or writes, do not upgrade until an equivalent authorization control is in place and validated. OpenRAG does not enable RLS by default.
+>
+> **Pulsar compatibility:** This procedure was tested with `MQ_TYPE=default`. If your deployment uses Pulsar, review its producer access mode before upgrading; Milvus 3.0.3 [changed the default to `exclusive`](https://github.com/milvus-io/milvus/releases/tag/v3.0.3). Custom Pulsar configurations are outside this validated path.
+
+With Docker Compose, pull and recreate Milvus while leaving its dependencies and storage in place:
+
+```bash
+docker compose pull milvus milvus-init
+docker compose up -d milvus
+docker compose ps milvus
+docker compose logs --tail 100 milvus
+docker inspect "$(docker compose ps -q milvus)" --format '{{.Config.Image}}'
+# Expected: milvusdb/milvus:v3.0.5
+```
+
+Wait for `/healthz` to report healthy and confirm the expected image before restarting OpenRAG. For Helm, set `milvus.image.all.tag` to `v3.0.5`, upgrade the release, and confirm every Milvus workload is ready and uses that image.
 
 ### Legacy path: upgrade Milvus 2.5.x to 2.6.11
 
