@@ -175,6 +175,11 @@ def test_excel_table_ranges_separate_horizontally_touching_tables():
     ]
     assert [block.metadata["table_row_numbers"] for block in blocks] == [[2, 3], [2, 3]]
     assert all(block.metadata["worksheet_table_count"] == 2 for block in blocks)
+    assert all(block.metadata["table_header_source"] == "structural_hint" for block in blocks)
+    assert all(block.metadata["table_header_detection_status"] == "confident" for block in blocks)
+    assert all(
+        block.metadata["table_header_detection"]["reason"] == "validated_table_or_merged_header" for block in blocks
+    )
 
 
 def test_excel_table_ranges_separate_vertically_touching_tables():
@@ -591,6 +596,14 @@ def test_headerless_schema_preserves_first_row_as_data():
     assert block.metadata["table_header_row"] is None
     assert block.metadata["table_header_range"] is None
     assert block.metadata["table_header_source"] == "configured_schema"
+    assert block.metadata["table_header_detection"] == {
+        "mode": "configured_schema",
+        "status": "explicit",
+        "selected_row": None,
+        "candidate_rows": [],
+        "reason": "configured_headerless_schema",
+        "note": "A configured schema is used; every physical row remains table data.",
+    }
     assert block.metadata["table_row_numbers"] == [1, 2]
     assert "HL-001" in block.text
 
@@ -1868,6 +1881,60 @@ def test_auto_header_skips_multiple_narrow_preamble_rows():
     assert block.metadata["table_row_numbers"] == [5]
     assert block.metadata["sheet_context_row_numbers"] == [1, 2]
     assert block.metadata["table_columns"] == ["id", "service", "region", "policy"]
+    assert block.metadata["table_header_source"] == "automatic"
+    assert block.metadata["table_header_detection_status"] == "confident"
+    assert block.metadata["table_header_detection"]["reason"] == "separated_wider_text_row"
+
+
+def test_auto_header_reports_ambiguous_equal_width_text_rows_without_dropping_data():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    document = _document([["code", "label"], ["A-1", "First"], ["A-2", "Second"]])
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_row_numbers"] == [2, 3]
+    assert block.metadata["table_header_source"] == "automatic"
+    assert block.metadata["table_header_detection_status"] == "ambiguous"
+    assert block.metadata["table_header_detection"]["candidate_rows"] == [1, 2]
+    assert block.metadata["table_header_detection"]["reason"] == "first_nonempty_row_retained"
+    assert "A-1" in block.text
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=8,
+        length_function=lambda text: len(text.split()),
+    )
+    assert chunks
+    assert all(chunk.metadata["table_header_detection_status"] == "ambiguous" for chunk in chunks)
+    assert all(chunk.metadata["table_header_detection"]["selected_row"] == 1 for chunk in chunks)
+
+
+def test_auto_header_reports_confidence_when_text_labels_are_followed_by_typed_data():
+    document = _document([["id", "amount", "active"], ["R-1", 42, True], ["R-2", 7, False]])
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_header_detection"] == {
+        "mode": "automatic",
+        "status": "confident",
+        "selected_row": 1,
+        "candidate_rows": [1],
+        "reason": "text_header_followed_by_typed_data",
+        "note": "A textual first row followed by typed data was selected as the header.",
+    }
+
+
+def test_configured_header_row_is_reported_as_explicit():
+    document = _document([["Report title"], ["id", "name"], ["R-1", "Alice"]])
+
+    [block] = list(XlsxParser(header_row=2).iter_batches(document))
+
+    assert block.metadata["table_header_source"] == "configured_row"
+    assert block.metadata["table_header_detection_status"] == "explicit"
+    assert block.metadata["table_header_detection"]["selected_row"] == 2
+    assert block.metadata["table_header_detection"]["reason"] == "configured_header_row"
 
 
 def test_auto_header_preserves_single_column_and_explicit_title():
@@ -1885,26 +1952,41 @@ def test_auto_header_preserves_single_column_and_explicit_title():
 
 def test_auto_header_scan_is_bounded_and_replays_all_rows():
     rows = iter([["title"]] + [[""]] * 31 + [["id", "name"], ["1", "Alice"]])
-    selected, replay = module._detect_header(rows, 1024)
+    selected, replay, detection = module._detect_header(rows, 1024)
     assert selected == 1
+    assert detection["status"] == "ambiguous"
     assert len(list(replay)) == 34
     rows = iter([["title"], ["id", "name"], ["1", "Alice"]])
-    selected, replay = module._detect_header(rows, 1)
+    selected, replay, detection = module._detect_header(rows, 1)
     assert selected == 1
+    assert detection["reason"] == "first_nonempty_row_retained"
     assert list(replay) == [["title"], ["id", "name"], ["1", "Alice"]]
 
 
 def test_auto_header_keeps_ambiguous_header_and_does_not_skip_numeric_data():
     original = [["name", "name"], [1, 2], [3, 4]]
-    selected, replay = module._detect_header(iter(original), 1024)
+    selected, replay, detection = module._detect_header(iter(original), 1024)
     assert selected == 1
+    assert detection == {
+        "mode": "automatic",
+        "status": "ambiguous",
+        "selected_row": 1,
+        "candidate_rows": [1],
+        "reason": "first_nonempty_row_retained",
+        "note": (
+            "The first nonempty row was retained conservatively because no structural evidence identified "
+            "a safer header row. Configure a header row or schema when this is not intended."
+        ),
+    }
     assert list(replay) == original
 
 
 def test_auto_header_keeps_equal_width_text_rows_ambiguous():
     original = [["code", "label"], ["A-1", "First"], ["A-2", "Second"]]
-    selected, replay = module._detect_header(iter(original), 1024)
+    selected, replay, detection = module._detect_header(iter(original), 1024)
     assert selected == 1
+    assert detection["status"] == "ambiguous"
+    assert detection["candidate_rows"] == [1, 2]
     assert list(replay) == original
 
 

@@ -61,6 +61,10 @@ Header selection runs independently for each detected table.
 
 By default, OpenRAG performs a bounded scan of the first 32 physical rows in each detected region. It may select a later textual row when a blank row clearly separates a title or preamble from a wider table. A merged title spanning the table also selects the following row as the header. Other ambiguous layouts keep the first nonempty row to avoid silently discarding a data record.
 
+Every emitted table block reports how its header was selected. `table_header_source` distinguishes `automatic`, `configured_row`, `configured_schema`, and `structural_hint`. The structured `table_header_detection` metadata contains the status (`explicit`, `confident`, or `ambiguous`), selected row, bounded candidate-row list, machine-readable reason, and explanatory note. `table_header_detection_status` duplicates the status for simple filtering. Ambiguous automatic detection also emits one warning per table, while keeping the conservative first-row behavior unchanged.
+
+An automatic result is marked confident only when the bounded scan finds strong structural evidence, such as a wider textual header after a blank separator, or unique textual labels followed by typed data. Equal-width all-text layouts remain ambiguous because values alone cannot prove which row is the header. For deterministic ingestion, configure the header row or a headerless schema rather than relying on a guess.
+
 For deterministic exports, configure a physical Excel row number:
 
 ```yaml

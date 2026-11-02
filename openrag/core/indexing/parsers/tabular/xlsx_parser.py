@@ -90,6 +90,7 @@ def _detect_header(rows, byte_limit, start_row=1):
         if any(_cell_text(v).strip() for v in row)
     ]
     selected = None
+    promoted = False
     if nonempty:
         selected = nonempty[0][0]
         for index, (number, raw, values) in enumerate(nonempty[1:], 1):
@@ -123,8 +124,70 @@ def _detect_header(rows, byte_limit, start_row=1):
             following = nonempty[index + 1][2]
             if all(column < len(following) and following[column] for column in occupied):
                 selected = number
+                promoted = True
                 break
-    return selected, chain(buffered, rows)
+    candidates = []
+    for index, (number, raw, values) in enumerate(nonempty[:-1]):
+        occupied = [column for column, value in enumerate(values) if value]
+        if not occupied or not all(
+            isinstance(value.cached if isinstance(value, _FormulaValue) else value, str)
+            for value in raw
+            if (value.cached if isinstance(value, _FormulaValue) else value) is not None
+        ):
+            continue
+        following = nonempty[index + 1][2]
+        if all(column < len(following) and following[column] for column in occupied):
+            candidates.append(number)
+
+    if selected is None:
+        detection = {
+            "mode": "automatic",
+            "status": "not_found",
+            "selected_row": None,
+            "candidate_rows": [],
+            "reason": "no_nonempty_row",
+            "note": "No nonempty row was available for automatic header detection.",
+        }
+    elif promoted:
+        detection = {
+            "mode": "automatic",
+            "status": "confident",
+            "selected_row": selected,
+            "candidate_rows": list(dict.fromkeys([nonempty[0][0], *candidates, selected])),
+            "reason": "separated_wider_text_row",
+            "note": "A wider textual row after a blank separator was selected as the header.",
+        }
+    else:
+        first_number, first_raw, first_values = nonempty[0]
+        occupied = [column for column, value in enumerate(first_values) if value]
+        following_raw = nonempty[1][1] if len(nonempty) > 1 else []
+        typed_following = bool(occupied) and any(
+            column < len(following_raw)
+            and (value := following_raw[column]) is not None
+            and not isinstance(value.cached if isinstance(value, _FormulaValue) else value, str)
+            for column in occupied
+        )
+        textual_first = bool(occupied) and all(
+            isinstance(value.cached if isinstance(value, _FormulaValue) else value, str)
+            for value in first_raw
+            if (value.cached if isinstance(value, _FormulaValue) else value) is not None
+        )
+        unique_first = len({first_values[column] for column in occupied}) == len(occupied)
+        confident = textual_first and unique_first and typed_following
+        detection = {
+            "mode": "automatic",
+            "status": "confident" if confident else "ambiguous",
+            "selected_row": selected,
+            "candidate_rows": list(dict.fromkeys([first_number, *candidates])),
+            "reason": "text_header_followed_by_typed_data" if confident else "first_nonempty_row_retained",
+            "note": (
+                "A textual first row followed by typed data was selected as the header."
+                if confident
+                else "The first nonempty row was retained conservatively because no structural evidence "
+                "identified a safer header row. Configure a header row or schema when this is not intended."
+            ),
+        }
+    return selected, chain(buffered, rows), detection
 
 
 def _column_name(number: int) -> str:
@@ -776,6 +839,7 @@ class XlsxParser(TabularBatchParser):
                 header_hierarchy: list[dict[str, Any]] = []
                 header_hierarchy_rows: list[int] = []
                 header_source = "worksheet"
+                header_detection: dict[str, Any]
                 if headerless_schema is not None:
                     if len(headerless_schema) != visible_column_count:
                         raise PipelineError(
@@ -788,6 +852,14 @@ class XlsxParser(TabularBatchParser):
                     header_row = None
                     data_row_start = table.start_row
                     header_source = "configured_schema"
+                    header_detection = {
+                        "mode": "configured_schema",
+                        "status": "explicit",
+                        "selected_row": None,
+                        "candidate_rows": [],
+                        "reason": "configured_headerless_schema",
+                        "note": "A configured schema is used; every physical row remains table data.",
+                    }
                 else:
                     selected_header_row = (
                         configured_header_row
@@ -795,12 +867,39 @@ class XlsxParser(TabularBatchParser):
                         and table.start_row <= configured_header_row <= table.end_row
                         else None
                     )
+                    if selected_header_row is not None:
+                        header_source = "configured_row"
+                        header_detection = {
+                            "mode": "configured",
+                            "status": "explicit",
+                            "selected_row": selected_header_row,
+                            "candidate_rows": [selected_header_row],
+                            "reason": "configured_header_row",
+                            "note": "The configured physical row was used as the header.",
+                        }
                     if configured_header_row is None and table.header_row_hint is not None:
                         selected_header_row = table.header_row_hint
+                        header_source = "structural_hint"
+                        header_detection = {
+                            "mode": "structural",
+                            "status": "confident",
+                            "selected_row": selected_header_row,
+                            "candidate_rows": [selected_header_row],
+                            "reason": "validated_table_or_merged_header",
+                            "note": "Validated workbook structure identified the header row.",
+                        }
                     if selected_header_row is None:
-                        selected_header_row, row_iterator = _detect_header(
+                        selected_header_row, row_iterator, header_detection = _detect_header(
                             row_iterator, self.limits.max_batch_bytes, table.start_row
                         )
+                        header_source = "automatic"
+                        if header_detection["status"] == "ambiguous":
+                            logger.bind(
+                                sheet_name=sheet.name,
+                                table_index=table.index,
+                                selected_row=selected_header_row,
+                                candidate_rows=header_detection["candidate_rows"],
+                            ).warning("XLSX automatic header detection is ambiguous; retained the first nonempty row")
                     header_values = None
                     header_row = table.start_row
                     for physical_row, values in enumerate(row_iterator, start=table.start_row):
@@ -912,6 +1011,7 @@ class XlsxParser(TabularBatchParser):
                         sheet_context,
                         preamble_rows,
                         header_source,
+                        header_detection,
                         header_hierarchy,
                         header_hierarchy_rows,
                         [header_values[index] for index in row_header_positions],
@@ -973,6 +1073,7 @@ class XlsxParser(TabularBatchParser):
         sheet_context,
         preamble_rows,
         header_source,
+        header_detection,
         header_hierarchy,
         header_hierarchy_rows,
         row_header_columns,
@@ -999,6 +1100,8 @@ class XlsxParser(TabularBatchParser):
             "table_columns": list(headers),
             "table_header_row": header_row,
             "table_header_source": header_source,
+            "table_header_detection": dict(header_detection),
+            "table_header_detection_status": header_detection["status"],
             "table_start_row": header_row if header_row is not None else table.start_row,
             "table_end_row": table.end_row,
             "table_start_column": visible_columns[0],
