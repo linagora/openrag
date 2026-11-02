@@ -134,7 +134,8 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
             _detach(list_element)
     # A shape's text is dropped unless it sits in a frame's text box.
     for shape in list(root.iter(f"{_DRAW}custom-shape", f"{_DRAW}rect", f"{_DRAW}ellipse", f"{_DRAW}polygon")):
-        text = [child for child in shape if child.tag.startswith(_TEXT)]
+        # A comment's tag is a function, not a string.
+        text = [child for child in shape if isinstance(child.tag, str) and child.tag.startswith(_TEXT)]
         if not text:
             continue
         box = etree.SubElement(shape, f"{_DRAW}text-box")
@@ -242,7 +243,8 @@ def _patched(raw: bytes) -> bytes:
                         continue
                     target.writestr(info.filename, data, compress_type=info.compress_type)
             return out.getvalue()
-    except (KeyError, zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, etree.XMLSyntaxError) as exc:
+    # Patching is best effort, on untrusted XML of any shape: xberg can still read the original.
+    except Exception as exc:
         logger.debug("Not patching ODF package: %s", exc)
         return raw
 
