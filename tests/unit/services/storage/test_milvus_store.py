@@ -3056,6 +3056,18 @@ class TestWriteVectors:
         assert not any("large integers" in record["message"] for record in records)
         store._client.get_server_version.assert_called_once_with(timeout=5.0, detail=True)
 
+    async def test_failed_server_version_probe_is_not_cached(self, store: MilvusVectorStore) -> None:
+        store._client.get_server_version.side_effect = [
+            RuntimeError("temporary timeout"),
+            {"version": "3.0-20261030-af15c80751"},
+        ]
+
+        assert await store._server_preserves_dynamic_int64() is False
+        assert store._server_version_checked is False
+        assert await store._server_preserves_dynamic_int64() is True
+        assert store._server_version_checked is True
+        assert store._client.get_server_version.call_count == 2
+
     async def test_a_failed_write_logs_no_rounding(self, store: MilvusVectorStore) -> None:
         from loguru import logger as _logger
 

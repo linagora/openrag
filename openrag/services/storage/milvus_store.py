@@ -2494,12 +2494,14 @@ class MilvusVectorStore(VectorStore):
                             detail=True,
                         )
                     except Exception:
-                        response = None
+                        return False
                     if isinstance(response, Mapping):
                         version = response.get("version")
                     else:
                         version = response
-                    self._server_version = version if isinstance(version, str) else None
+                    if not isinstance(version, str):
+                        return False
+                    self._server_version = version
                     self._server_version_checked = True
         return _milvus_preserves_dynamic_int64(self._server_version)
 
