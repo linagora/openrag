@@ -250,6 +250,7 @@ class IndexerWorkerActor:
             job_repo=self._catalog_store.job_repo,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
+            stage_writer_max_active_tasks=cfg.ray.indexer.max_tasks_per_worker,
         )
         # When False (e.g. Twake, which keeps its own copy), the raw upload is
         # purged from ``paths.data_dir`` once indexing settles. Enforced at this

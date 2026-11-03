@@ -256,6 +256,70 @@ async def test_summary_queue_overflow_persists_loss_marker_for_evicted_task() ->
     assert writer.pending_summaries == {}
 
 
+def test_summary_marker_capacity_keeps_existing_loss_markers() -> None:
+    writer = StageEventWriter(_Repo(), queue_capacity=1)
+    first_summary = _summary("first-summary", 1)
+    second_summary = _summary("second-summary", 1)
+    deferred_summary = _summary("deferred-summary", 1)
+
+    assert writer._put_latest_summary(first_summary) is True
+    assert writer._put_latest_summary(second_summary) is True
+    assert writer._summary_overflow_markers[first_summary.task_id].known_loss is True
+
+    assert writer._put_latest_summary(deferred_summary) is False
+
+    assert first_summary.task_id in writer._summary_overflow_markers
+    assert second_summary.task_id in writer._summaries
+    assert deferred_summary.task_id not in writer.pending_summaries
+    assert deferred_summary.task_id in writer._known_incomplete
+
+
+def test_summary_capacity_reserves_room_for_pending_event_loss_markers() -> None:
+    writer = StageEventWriter(_Repo(), queue_capacity=1, max_active_tasks=1)
+    writer._events.append(_transition("event-may-need-loss-marker", 1))
+
+    assert writer._summary_capacity_saturated() is True
+
+
+def test_summary_capacity_scales_for_worker_concurrency() -> None:
+    writer = StageEventWriter(_Repo(), queue_capacity=1, max_active_tasks=3)
+
+    assert writer._queue_capacity == 3
+    assert writer._summary_capacity_limit == 3
+
+
+@pytest.mark.asyncio
+async def test_new_indexing_work_waits_until_summary_capacity_recovers() -> None:
+    class RecordingRepo(_Repo):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wrote_batch = asyncio.Event()
+
+        async def write_stage_progress(self, *, events, summaries):
+            await super().write_stage_progress(events=events, summaries=summaries)
+            self.wrote_batch.set()
+            return StageProgressWriteResult()
+
+    repo = RecordingRepo()
+    writer = StageEventWriter(
+        repo,
+        queue_capacity=1,
+        batch_size=1,
+        flush_interval=10,
+        max_active_tasks=1,
+    )
+    writer._put_latest_summary(_summary("pending-summary", 1))
+
+    waiting_task = asyncio.create_task(writer.wait_for_summary_capacity())
+    await asyncio.sleep(0)
+    assert not waiting_task.done()
+
+    writer._writer_task = asyncio.create_task(writer._run_writer())
+    await asyncio.wait_for(repo.wrote_batch.wait(), timeout=0.1)
+    await asyncio.wait_for(waiting_task, timeout=0.1)
+    await writer.close()
+
+
 @pytest.mark.asyncio
 async def test_permanent_mixed_batch_queues_a_sanitized_loss_marker() -> None:
     class RejectInvalidSummaryRepo:

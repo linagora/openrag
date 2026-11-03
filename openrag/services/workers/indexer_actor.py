@@ -64,6 +64,7 @@ class IndexerWorker:
         collection: str = "default",
         job_repo: Any = None,
         stage_snapshot_sink: Any = None,
+        stage_writer_max_active_tasks: int = 1,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -73,7 +74,15 @@ class IndexerWorker:
         self._collection = collection
         self._job_repo = job_repo
         initialize_stage_writer_counters()
-        self._stage_writer = StageEventWriter(job_repo, live_sink=stage_snapshot_sink) if job_repo is not None else None
+        self._stage_writer = (
+            StageEventWriter(
+                job_repo,
+                live_sink=stage_snapshot_sink,
+                max_active_tasks=stage_writer_max_active_tasks,
+            )
+            if job_repo is not None
+            else None
+        )
 
     async def close_stage_writer(self) -> None:
         if self._stage_writer is not None:
@@ -189,6 +198,8 @@ class IndexerWorker:
                 _safe_stage_tracker_call(stage_tracker, "finish_task")
 
         try:
+            if self._stage_writer is not None:
+                await self._stage_writer.wait_for_summary_capacity()
             # Inside the try so a TaskStateManager outage here still reaches
             # the except block below and sends the error callback.
             accepted = await retry_idempotent_ray_actor_method(

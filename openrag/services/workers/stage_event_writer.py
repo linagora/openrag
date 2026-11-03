@@ -69,15 +69,23 @@ class StageEventWriter:
         max_live_calls: int = 8,
         terminal_capacity: int = 32,
         terminal_ttl: float = 30.0,
+        max_active_tasks: int = 1,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if queue_capacity < 1 or not 1 <= batch_size <= 32:
             raise ValueError("invalid stage event writer queue or batch limit")
         if not 1 <= max_live_calls <= 8 or terminal_capacity < 1:
             raise ValueError("invalid stage event writer live or terminal limit")
+        if max_active_tasks < 1:
+            raise ValueError("stage event writer active task limit must be positive")
+        # Keep enough bounded summary slots for every task already running.
+        # This also keeps valid higher-concurrency worker configurations from
+        # failing actor startup when the default queue is smaller than that cap.
+        queue_capacity = max(queue_capacity, max_active_tasks)
         self._job_repo = job_repo
         self._live_sink = live_sink
         self._queue_capacity = queue_capacity
+        self._summary_capacity_limit = 2 * queue_capacity - max_active_tasks
         self._max_batch_size = batch_size
         self._batch_size = batch_size
         self._flush_interval = flush_interval
@@ -97,6 +105,10 @@ class StageEventWriter:
         self._events: deque[StageProgressEvent] = deque()
         self._summaries: OrderedDict[str, StageProgressSummary] = OrderedDict()
         self._summary_overflow_markers: OrderedDict[str, StageProgressSummary] = OrderedDict()
+        self._inflight_event_task_ids: set[str] = set()
+        self._inflight_summary_task_ids: set[str] = set()
+        self._summary_capacity_ready = asyncio.Event()
+        self._summary_capacity_ready.set()
         self._live_pending: OrderedDict[str, StageProgressWorkerSnapshot] = OrderedDict()
         self._trackers: dict[str, StageTracker] = {}
         self._terminal: OrderedDict[str, tuple[float, StageProgressWorkerSnapshot]] = OrderedDict()
@@ -170,6 +182,35 @@ class StageEventWriter:
         self._trackers[tracker.task_id] = tracker
         self._ensure_started()
 
+    async def wait_for_summary_capacity(self) -> None:
+        """Pause new indexing work while bounded summary buffers approach capacity.
+
+        Reserve one slot per active worker task. Existing tasks can finish and
+        publish their final summaries without evicting a loss marker; new tasks
+        resume once the writer drains enough summaries.
+        """
+        while True:
+            if self._closing or not self._summary_capacity_saturated():
+                return
+            self._summary_capacity_ready.clear()
+            if self._closing or not self._summary_capacity_saturated():
+                continue
+            await self._summary_capacity_ready.wait()
+
+    def _summary_capacity_saturated(self) -> bool:
+        pending_task_ids = set(self._summaries)
+        pending_task_ids.update(self._summary_overflow_markers)
+        pending_task_ids.update(event.task_id for event in self._events)
+        pending_task_ids.update(self._inflight_event_task_ids)
+        pending_task_ids.update(self._inflight_summary_task_ids)
+        return len(pending_task_ids) >= self._summary_capacity_limit
+
+    def _refresh_summary_capacity(self) -> None:
+        if self._closing or not self._summary_capacity_saturated():
+            self._summary_capacity_ready.set()
+        else:
+            self._summary_capacity_ready.clear()
+
     def snapshot_for_task(self, task_id: str) -> StageProgressWorkerSnapshot | None:
         tracker = self._trackers.get(task_id)
         if tracker is not None:
@@ -208,7 +249,16 @@ class StageEventWriter:
 
         if summary.latest_sequence > self._acknowledged.get((summary.task_id, summary.attempt), 0):
             self._track_pending_ack((summary.task_id, summary.attempt))
-        self._put_latest_summary(summary)
+        summary_accepted = self._put_latest_summary(summary)
+        if not summary_accepted:
+            accepted = False
+            if not summary.known_loss:
+                summary = summary.model_copy(
+                    update={
+                        "known_loss": True,
+                        "snapshot_revision": min(summary.snapshot_revision + 1, _MAX_POSTGRES_BIGINT),
+                    }
+                )
         self._put_live_snapshot(summary, event_tail)
         self._refresh_metrics()
         return accepted
@@ -249,6 +299,7 @@ class StageEventWriter:
         self._closing = True
         self._event_ready.set()
         self._live_ready.set()
+        self._summary_capacity_ready.set()
         tasks = [task for task in (self._writer_task, self._live_task, self._sampler_task) if task is not None]
         if tasks:
             _, pending = await asyncio.wait(tasks, timeout=self._shutdown_timeout)
@@ -319,7 +370,7 @@ class StageEventWriter:
             self._sampler_task = loop.create_task(self._run_sampler(), name="stage-elapsed-sampler")
         return True
 
-    def _put_latest_summary(self, summary: StageProgressSummary) -> None:
+    def _put_latest_summary(self, summary: StageProgressSummary) -> bool:
         previous = self._summaries.get(summary.task_id)
         overflow_marker = self._summary_overflow_markers.get(summary.task_id)
         if overflow_marker is not None and (
@@ -334,6 +385,25 @@ class StageEventWriter:
                         "snapshot_revision": max(summary.snapshot_revision, previous.snapshot_revision),
                     }
                 )
+            will_remove_overflow_marker = overflow_marker is not None and _summary_order(summary) >= _summary_order(
+                overflow_marker
+            )
+            if (
+                summary.task_id not in self._summaries
+                and len(self._summaries) >= self._queue_capacity
+                and len(self._summary_overflow_markers) >= self._queue_capacity
+                and not will_remove_overflow_marker
+            ):
+                # Keep every queued loss marker. Production callers pass
+                # through the admission gate, which reserves room for active
+                # trackers; this defers only callers that bypass that gate.
+                self._dropped_summaries += 1
+                record_stage_event_drop("summary_overflow")
+                self._mark_snapshot_loss(summary.task_id)
+                self._remember_incomplete(summary.task_id)
+                self._event_ready.set()
+                self._refresh_summary_capacity()
+                return False
             self._summary_overflow_markers.pop(summary.task_id, None)
             if summary.task_id not in self._summaries and len(self._summaries) >= self._queue_capacity:
                 evicted_task_id, evicted_summary = self._summaries.popitem(last=False)
@@ -341,12 +411,34 @@ class StageEventWriter:
                 record_stage_event_drop("summary_overflow")
                 self._mark_snapshot_loss(evicted_task_id)
                 self._remember_incomplete(evicted_task_id)
-                self._queue_summary_overflow_marker(evicted_summary)
+                if not self._queue_summary_overflow_marker(evicted_summary):
+                    # Defensive fallback for callers that bypass the admission
+                    # gate: restore the evicted summary and defer this update.
+                    restored = evicted_summary.model_copy(
+                        update={
+                            "known_loss": True,
+                            "snapshot_revision": min(
+                                evicted_summary.snapshot_revision + int(not evicted_summary.known_loss),
+                                _MAX_POSTGRES_BIGINT,
+                            ),
+                        }
+                    )
+                    self._summaries[evicted_task_id] = restored
+                    self._summaries.move_to_end(evicted_task_id)
+                    self._dropped_summaries += 1
+                    record_stage_event_drop("summary_overflow")
+                    self._mark_snapshot_loss(summary.task_id)
+                    self._remember_incomplete(summary.task_id)
+                    self._event_ready.set()
+                    self._refresh_summary_capacity()
+                    return False
             self._summaries[summary.task_id] = summary
             self._summaries.move_to_end(summary.task_id)
         self._event_ready.set()
+        self._refresh_summary_capacity()
+        return True
 
-    def _queue_summary_overflow_marker(self, summary: StageProgressSummary) -> None:
+    def _queue_summary_overflow_marker(self, summary: StageProgressSummary) -> bool:
         task_id = summary.task_id
         candidates = [summary]
         previous = self._summary_overflow_markers.get(task_id)
@@ -364,14 +456,12 @@ class StageEventWriter:
                 }
             )
         if previous is None and len(self._summary_overflow_markers) >= self._queue_capacity:
-            evicted_task_id, _ = self._summary_overflow_markers.popitem(last=False)
-            self._dropped_summaries += 1
-            record_stage_event_drop("summary_overflow")
-            self._mark_snapshot_loss(evicted_task_id)
-            self._remember_incomplete(evicted_task_id)
+            return False
         self._summary_overflow_markers[task_id] = latest
         self._summary_overflow_markers.move_to_end(task_id)
         self._event_ready.set()
+        self._refresh_summary_capacity()
+        return True
 
     def _put_live_snapshot(
         self,
@@ -436,6 +526,8 @@ class StageEventWriter:
 
             events = [self._events.popleft() for _ in range(min(self._batch_size, len(self._events)))]
             set_stage_event_queue_size(len(self._events))
+            inflight_event_task_ids = {event.task_id for event in events}
+            self._inflight_event_task_ids.update(inflight_event_task_ids)
             task_ids = {event.task_id for event in events}
             summaries_by_task: OrderedDict[str, StageProgressSummary] = OrderedDict()
             for queue in (self._summary_overflow_markers, self._summaries):
@@ -453,14 +545,21 @@ class StageEventWriter:
                     if len(summaries_by_task) == self._batch_size:
                         break
             summaries = list(summaries_by_task.values())
-            if events or summaries:
-                succeeded = await self._write_batch(events, summaries)
-                if not succeeded:
-                    if self._closing:
-                        return
-                    delay = self._next_retry_delay
-                    self._next_retry_delay = min(self._retry_max_delay, max(self._retry_delay, delay * 2))
-                    await asyncio.sleep(delay)
+            self._inflight_summary_task_ids.update(summaries_by_task)
+            self._refresh_summary_capacity()
+            try:
+                if events or summaries:
+                    succeeded = await self._write_batch(events, summaries)
+                    if not succeeded:
+                        if self._closing:
+                            return
+                        delay = self._next_retry_delay
+                        self._next_retry_delay = min(self._retry_max_delay, max(self._retry_delay, delay * 2))
+                        await asyncio.sleep(delay)
+            finally:
+                self._inflight_event_task_ids.difference_update(inflight_event_task_ids)
+                self._inflight_summary_task_ids.difference_update(summaries_by_task)
+                self._refresh_summary_capacity()
             self._refresh_metrics()
             self._expire_terminal()
             if self._closing and not self._events and not self._summaries and not self._summary_overflow_markers:
@@ -891,6 +990,7 @@ class StageEventWriter:
                     record_stage_live_snapshot_failure()
 
     def _refresh_metrics(self) -> None:
+        self._refresh_summary_capacity()
         pending = set(self._pending_ack)
         pending.update((event.task_id, event.attempt) for event in self._events)
         pending.update((summary.task_id, summary.attempt) for summary in self._summaries.values())
