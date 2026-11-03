@@ -412,3 +412,43 @@ def test_no_header_when_the_document_has_no_name():
     chunk = _splitter().chunk(doc, partition="p")[0]
     assert chunk.text == "Some prose here."
     assert chunk.header is None
+
+
+def test_header_tokens_come_out_of_the_chunk_size_budget():
+    # The header is embedded with the chunk: left out of the budget, a CHUNK_SIZE
+    # close to the embedder's window pushes the chunk's tail past what gets embedded.
+    prose = " ".join(f"word{i}." for i in range(200))
+    table = "| Col | Val |\n|-----|-----|\n" + "\n".join(f"| Group{i} | {' '.join(['x'] * 5)} |" for i in range(20))
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=f"{prose}\n\n{table}", page_number=1)],
+        metadata={"filename": "a report with a long name.pdf"},
+    )
+    splitter = RecursiveSplitter(chunk_size=60, chunk_overlap_rate=0.2, length_function=_word_tokens)
+    chunks = splitter.chunk(doc, partition="p")
+    assert {ChunkType.TEXT, ChunkType.TABLE} <= {c.chunk_type for c in chunks}
+    assert max(c.token_count for c in chunks) <= 60
+
+
+def test_a_table_that_only_fits_without_the_header_is_split():
+    table = "| Col | Val |\n|-----|-----|\n" + "\n".join(f"| Group{i} | {' '.join(['x'] * 30)} |" for i in range(4))
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=table, page_number=1)],
+        metadata={"filename": "a report with a long name.pdf"},
+    )
+    size = _word_tokens(table) + 1
+    splitter = RecursiveSplitter(chunk_size=size, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    chunks = splitter.chunk(doc, partition="p")
+    assert max(c.token_count for c in chunks) <= size
+
+
+def test_a_filename_longer_than_the_chunk_size_still_indexes():
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="alpha beta gamma delta.", page_number=1)],
+        metadata={"filename": " ".join(["long"] * 30) + ".pdf"},
+    )
+    splitter = RecursiveSplitter(chunk_size=10, chunk_overlap_rate=0.2, length_function=_word_tokens)
+    joined = " ".join(c.content for c in splitter.chunk(doc, partition="p"))
+    assert "alpha" in joined and "delta" in joined
