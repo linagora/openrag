@@ -40,6 +40,9 @@ _EXTENSION_TYPES: dict[str, DocumentType] = {
     "txt": DocumentType.TEXT,
     "csv": DocumentType.CSV,
     "xlsx": DocumentType.XLSX,
+    # Macro-enabled OOXML workbooks use the same safe, read-only tabular
+    # parser.  The parser never retains or executes VBA.
+    "xlsm": DocumentType.XLSX,
     "md": DocumentType.MARKDOWN,
     "html": DocumentType.HTML,
     "htm": DocumentType.HTML,

@@ -60,6 +60,7 @@ _EML_ATTACHMENT_TYPES: dict[str, DocumentType] = {
     "eml": DocumentType.EML,
     "docx": DocumentType.DOCX,
     "xlsx": DocumentType.XLSX,
+    "xlsm": DocumentType.XLSX,
     "doc": DocumentType.DOC,
     "pptx": DocumentType.PPTX,
     "pdf": DocumentType.PDF,

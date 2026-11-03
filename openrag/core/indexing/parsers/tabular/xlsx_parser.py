@@ -880,7 +880,10 @@ def _column_header_hierarchy(
 def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
     from openpyxl import load_workbook
 
-    workbook = load_workbook(source, read_only=True, data_only=True, keep_links=False)
+    # OpenPyXL parses cells only here: disabling VBA retention makes the safety
+    # boundary explicit for .xlsm inputs.  Macros are never executed by
+    # OpenPyXL and are never written back out by this ingestion path.
+    workbook = load_workbook(source, read_only=True, data_only=True, keep_links=False, keep_vba=False)
     needs_formulas = any(info.formula_cells for info in infos if not info.hidden and info.columns)
     formula_source_manager = _document_source(document) if needs_formulas else nullcontext(None)
     formula_workbook = None
@@ -888,7 +891,13 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
         with formula_source_manager as formula_source:
             try:
                 formula_workbook = (
-                    load_workbook(formula_source, read_only=True, data_only=False, keep_links=False)
+                    load_workbook(
+                        formula_source,
+                        read_only=True,
+                        data_only=False,
+                        keep_links=False,
+                        keep_vba=False,
+                    )
                     if formula_source is not None
                     else None
                 )
@@ -989,7 +998,7 @@ class XlsxParser(TabularBatchParser):
             raise ConfigError(f"Invalid XLSX limits: {exc}") from exc
 
     def supported_types(self) -> list[str]:
-        return ["xlsx"]
+        return ["xlsx", "xlsm"]
 
     async def parse(self, document: Document) -> ProcessedDocument:
         return await asyncio.to_thread(self._parse, document)
@@ -998,7 +1007,11 @@ class XlsxParser(TabularBatchParser):
         from openpyxl.utils.exceptions import InvalidFileException
 
         with _document_source(document) as source:
-            infos = validate_ooxml(source, self.limits)
+            infos = validate_ooxml(
+                source,
+                self.limits,
+                allow_macros=Document.type_extension(document.filename, document.metadata.get("mimetype")) == "xlsm",
+            )
             # Validate overrides before opening a backend or emitting any batches.
             by_name = {info.name: info for info in infos}
             if self.header_row is not None:

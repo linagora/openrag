@@ -6,7 +6,7 @@ from io import BytesIO
 import pytest
 from core.indexing.parsers.tabular import xlsx_parser as module
 from core.indexing.parsers.tabular.xlsx_parser import XlsxLimits, XlsxParser
-from core.indexing.parsers.tabular.xlsx_validation import MAIN_TYPE
+from core.indexing.parsers.tabular.xlsx_validation import MACRO_MAIN_TYPE, MAIN_TYPE
 from core.models.document import Document, DocumentType
 from core.utils.exceptions import NoIndexableContentError, PipelineError
 from openpyxl import Workbook
@@ -914,6 +914,43 @@ def _replace_part(document, target, data):
     return document.model_copy(update={"raw_bytes": output.getvalue()})
 
 
+def _macro_enabled_document(document, *, filename="sample.xlsm"):
+    """Turn a normal workbook into a minimal macro-enabled OOXML package.
+
+    The project payload is deliberately inert test data.  It proves that the
+    parser accepts the macro workbook route while never retaining or executing
+    its VBA project.
+    """
+    import zipfile
+
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "[Content_Types].xml":
+                data = data.replace(MAIN_TYPE.encode(), MACRO_MAIN_TYPE.encode())
+            dest.writestr(name, data)
+        dest.writestr("xl/vbaProject.bin", b"inert test VBA payload")
+    return document.model_copy(update={"filename": filename, "raw_bytes": output.getvalue()})
+
+
+def _marked_as_encrypted(document):
+    """Mark ZIP headers encrypted without needing an encryption implementation."""
+    payload = bytearray(document.raw_bytes)
+    start = 0
+    while (offset := payload.find(b"PK\x03\x04", start)) >= 0:
+        payload[offset + 6] |= 1
+        start = offset + 4
+    start = 0
+    while (offset := payload.find(b"PK\x01\x02", start)) >= 0:
+        payload[offset + 8] |= 1
+        start = offset + 4
+    return document.model_copy(update={"raw_bytes": bytes(payload)})
+
+
 def _transcode_xml_parts(document, xml_encoding):
     """Rewrite OOXML text parts with an explicit encoding and BOM."""
     import codecs
@@ -959,6 +996,46 @@ def test_accepts_workbook_content_type_declared_as_default():
 
     assert block.metadata["table_row_numbers"] == [2]
     assert "Alice" in block.text
+
+
+def test_indexes_xlsm_cells_without_retaining_or_executing_macros(monkeypatch):
+    document = _macro_enabled_document(_document([["name"], ["Alice"]]))
+
+    import openpyxl
+
+    original_load_workbook = openpyxl.load_workbook
+    calls = []
+
+    def tracking_load_workbook(*args, **kwargs):
+        calls.append(kwargs.get("keep_vba"))
+        return original_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", tracking_load_workbook)
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert "Alice" in block.text
+    assert "inert test VBA payload" not in block.text
+    assert calls == [False]
+
+
+def test_rejects_macro_payload_disguised_as_xlsx():
+    document = _macro_enabled_document(_document([["name"], ["Alice"]]), filename="sample.xlsx")
+
+    with pytest.raises(PipelineError, match="must use the .xlsm extension") as error:
+        list(XlsxParser().iter_batches(document))
+
+    assert error.value.code == "INVALID_XLSX"
+
+
+def test_rejects_encrypted_xlsx_archives_before_openpyxl_runs(monkeypatch):
+    document = _marked_as_encrypted(_document([["name"], ["Alice"]]))
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("encrypted workbook reached OpenPyXL"))
+
+    with pytest.raises(PipelineError, match="Encrypted XLSX archives are unsupported") as error:
+        list(XlsxParser().iter_batches(document))
+
+    assert error.value.code == "INVALID_XLSX"
 
 
 def test_renders_numbers_dates_unicode_and_blank_columns():

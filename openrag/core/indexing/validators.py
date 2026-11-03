@@ -197,6 +197,7 @@ _OOXML_MAIN_PARTS: dict[str, str] = {
     "docx": "word/document.xml",
     "pptx": "ppt/presentation.xml",
     "xlsx": "xl/workbook.xml",
+    "xlsm": "xl/workbook.xml",
 }
 
 #: Parts every OPC package carries whatever its flavour: the content-type map
@@ -285,7 +286,7 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
 
 
 def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
-    """Reject a ``.docx``/``.pptx``/``.xlsx`` upload that is not a real OOXML package.
+    """Reject an Office OOXML upload that is not a real package of its type.
 
     ``filetype`` cannot settle this, and was verified failing both ways: its
     matcher looks for an entry *named* ``word/`` or ``ppt/`` among the first few

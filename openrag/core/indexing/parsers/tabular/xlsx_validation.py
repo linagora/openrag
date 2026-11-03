@@ -14,6 +14,7 @@ from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring, iterparse
 
 MAIN_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+MACRO_MAIN_TYPE = "application/vnd.ms-excel.sheet.macroEnabled.main+xml"
 TABLE_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"
 CELL_REF = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
 CELL_RANGE = re.compile(r"([A-Z]+)([1-9][0-9]*):([A-Z]+)([1-9][0-9]*)\Z")
@@ -386,7 +387,7 @@ def _is_eager_xml_part(name: str, streamed_parts: set[str]) -> bool:
     return name.endswith((".xml", ".rels")) and name not in streamed_parts
 
 
-def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
+def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) -> list[SheetInfo]:
     """Inspect actual cells, not untrusted dimension/count declarations.
 
     Retain at most one XML row. This is an intentional extra sequential read:
@@ -420,8 +421,6 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                     raise limit("XLSX archive exceeds the extraction limit")
                 if entry.file_size / max(1, entry.compress_size) > limits.max_compression_ratio:
                     raise limit("XLSX archive exceeds the compression-ratio limit")
-                if name.lower().endswith("vbaproject.bin"):
-                    raise invalid("Macro-enabled workbooks are not accepted as XLSX")
                 if name == "xl/sharedStrings.xml" and entry.file_size > limits.max_shared_strings_bytes:
                     raise limit("XLSX shared strings exceed the memory limit")
 
@@ -431,8 +430,17 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 return fromstring(archive.read(name))
 
             types = xml("[Content_Types].xml")
-            if _content_type(types, "/xl/workbook.xml") != MAIN_TYPE:
+            workbook_type = _content_type(types, "/xl/workbook.xml")
+            has_vba_project = any(name.lower().endswith("vbaproject.bin") for name in names)
+            if workbook_type == MACRO_MAIN_TYPE:
+                if not allow_macros:
+                    raise invalid("Macro-enabled workbooks must use the .xlsm extension")
+            elif workbook_type != MAIN_TYPE:
                 raise invalid("OOXML package is not an XLSX workbook")
+            elif has_vba_project:
+                # A macro project hidden in a file presented as .xlsx is not
+                # a plain workbook.  Require the explicit .xlsm route below.
+                raise invalid("Macro-enabled workbooks must use the .xlsm extension")
             streamed_parts = _streamed_xml_parts(types)
             eager_entries = [entry for entry in entries if _is_eager_xml_part(entry.filename, streamed_parts)]
             eager_metadata_bytes = sum(entry.file_size for entry in eager_entries)

@@ -1,6 +1,6 @@
 # XLSX ingestion
 
-OpenRAG indexes `.xlsx` workbooks as structured tabular content. It uses OpenPyXL in read-only mode and sends every detected table in each visible worksheet through the same bounded indexing pipeline used for CSV data.
+OpenRAG indexes `.xlsx` and `.xlsm` workbooks as structured tabular content. It uses OpenPyXL in read-only mode and sends every detected table in each visible worksheet through the same bounded indexing pipeline used for CSV data.
 
 The parser is designed for retrieval, not spreadsheet execution: it preserves stored values, formulas, worksheet context, and physical row references, but it does not recalculate formulas or reproduce Excel's visual layout.
 
@@ -225,7 +225,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_cell_chars` | Characters in one cell | 32,767 |
 | `max_batch_bytes` | Rendered batch size | 2 MiB |
 
-An upload whose bytes do not match its `.xlsx` extension is rejected with HTTP status 415 before indexing starts. A structurally invalid workbook that reaches the parser fails with `INVALID_XLSX` and status 422. Resource-limit failures use `XLSX_LIMIT_EXCEEDED` and status 413. Failed ingestion is cleaned up so partially indexed content is not left searchable.
+An upload whose bytes do not match its `.xlsx` or `.xlsm` extension is rejected with HTTP status 415 before indexing starts. A structurally invalid workbook that reaches the parser fails with `INVALID_XLSX` and status 422. Resource-limit failures use `XLSX_LIMIT_EXCEEDED` and status 413. Failed ingestion is cleaned up so partially indexed content is not left searchable.
 
 The validation scan is intentional. It checks actual cells rather than trusting worksheet dimension declarations and prevents sparse coordinates, compressed archives, large shared-string tables, or eager metadata from causing uncontrolled parser work. These limits constrain accepted input; they are not an exact process-memory ceiling.
 
@@ -245,13 +245,15 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
 | Password-protected or encrypted workbook | Rejected | Decrypt it before upload |
-| `.xls`, `.xlsb`, `.ods`, and macro-enabled workbooks | Unsupported by the XLSX route | Convert to a plain `.xlsx` workbook or use a dedicated parser |
+| `.xlsm` macro-enabled workbook | Tabular cells, cached values, and formula text are indexed; VBA is neither retained nor executed | Upload it directly when the workbook's tabular content is needed |
+| `.xls`, `.xlsb`, or `.ods` | Unsupported by the XLSX route | Convert to a plain `.xlsx`/`.xlsm` workbook or use a dedicated parser |
 | Exact aggregation across very large tables or several workbooks | Semantic retrieval may not return every row needed for a calculation | Use an analytical query pipeline for exact full-dataset computation |
 
 ## Operational guidance
 
 - Define independent ranges as Excel Tables when they touch. Otherwise, separate them with at least one fully blank row or column. Add explicit headers or configure a headerless schema.
 - Recalculate and save formula-heavy workbooks before uploading them.
+- Macros are never executed during ingestion. `.xlsm` support reads only its OOXML worksheet data with VBA retention disabled.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
 - Use a fresh partition when comparing ingestion behavior across parser versions.
 - Hidden rows and columns are excluded, but workbook visibility should still not be treated as a general authorization mechanism outside OpenRAG ingestion.
