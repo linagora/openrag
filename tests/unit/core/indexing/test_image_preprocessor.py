@@ -4,23 +4,36 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import random
+import re
 import time
 
 import pytest
 from core.indexing.image_preprocessor import (
     MIN_IMAGE_PIXELS,
     UPLOADED_IMAGE_FORMATS,
+    _existing_embedded_targets,
+    _find_data_uri_links,
+    _find_inline_data_uri_images,
+    _find_reference_images,
     decode_data_uri,
     ensure_png_compatible_mode,
     extract_data_uri_image_blocks,
     find_http_images,
+    find_inline_images,
     mime_from_data_uri,
     normalize_data_uri_images,
     pil_to_png_bytes,
 )
+from core.indexing.parsers.docx_parser import _MARKITDOWN_IMAGE_TARGET
 from core.models.document import _EXTENSION_TYPES, DocumentType
 from PIL import Image
 from services.workers.parsers.parser_dispatcher import _EML_ATTACHMENT_TYPES
+
+# Linear-time tests size their input so the scan they guard against takes a
+# minute or more, and allow this much: many times what the linear scan takes,
+# so a busy runner does not fail them.
+LINEAR_TIME_LIMIT = 5.0
 
 
 class TestEnsurePngCompatibleMode:
@@ -329,44 +342,49 @@ class TestNormalizeDataUriImages:
         assert blocks == []
 
     @pytest.mark.parametrize(
-        "unit",
+        ("unit", "count"),
         [
-            "![ab cd",  # one line, no `]`
-            ")[Image]![x",  # one line, `]` present but never `](`
-            "![ x [\n",  # short lines, no `]` anywhere
-            "[a ",  # link labels with no `]`
+            ("![ab cd", 150_000),  # one line, no `]`
+            (")[Image]![x", 60_000),  # one line, `]` present but never `](`
+            ("![ x [\n", 120_000),  # short lines, no `]` anywhere
+            ("[a ", 300_000),  # link labels with no `]`
+            ("(openrag-embedded-image-a", 250_000),  # placeholder targets with no `)`
         ],
     )
-    def test_unclosed_brackets_are_scanned_in_linear_time(self, unit):
-        # Every `![` or `[` used to rescan the text after it: 80 KB took seconds.
-        source = unit * (200_000 // len(unit))
+    def test_unclosed_brackets_are_scanned_in_linear_time(self, unit, count):
+        # Every `![`, `[` or `(openrag-embedded-image-` used to rescan the text
+        # after it: each of these took five minutes or more.
+        source = unit * count
 
         started = time.perf_counter()
         text, blocks = normalize_data_uri_images(source)
 
-        assert time.perf_counter() - started < 0.5
+        assert time.perf_counter() - started < LINEAR_TIME_LIMIT
         assert text == source
         assert blocks == []
 
     def test_a_line_of_data_uri_links_and_images_is_scanned_in_linear_time(self):
-        source = "[l](data:image/x) ![i](data:image/x) " * 20_000
+        # Indexing the text's delimiters once per image instead of once in all
+        # would take about six minutes here.
+        source = "[l](data:image/x) ![i](data:image/x) " * 25_000
 
         started = time.perf_counter()
         text, blocks = normalize_data_uri_images(source)
 
-        assert time.perf_counter() - started < 0.5
+        assert time.perf_counter() - started < LINEAR_TIME_LIMIT
         assert "data:image" not in text.lower()
         assert blocks == []
 
     def test_targets_that_run_to_the_end_of_the_text_are_scanned_in_linear_time(self):
         # Each target swallows the next `(…)` group and never meets its `)`, so
-        # every image used to rescan the rest of the text.
-        source = "](![)]]:<https://a](data:image/" * 6_500
+        # every image used to rescan the rest of the text: about six minutes
+        # here, as without the outcomes the scanner keeps per delimiter.
+        source = "](![)]]:<https://a](data:image/" * 40_000
 
         started = time.perf_counter()
         text, blocks = normalize_data_uri_images(source)
 
-        assert time.perf_counter() - started < 0.5
+        assert time.perf_counter() - started < LINEAR_TIME_LIMIT
         assert "data:image" not in text.lower()
         assert blocks == []
 
@@ -494,33 +512,94 @@ class TestFindHttpImages:
         assert find_http_images(source) == expected
 
     @pytest.mark.parametrize(
-        "unit",
+        ("unit", "count"),
         [
             # `](https://` never closed by `)`: each `![` used to reach every
             # later one, and run to the end of the text from each.
-            "* ]](https://a.test/p.png ./rel.png* * * * ![x",
+            ("* ]](https://a.test/p.png ./rel.png* * * * ![x", 4_250),
             # `![` followed by a non-http `](`: each alt text ran to the line's end.
-            "* * <u](rel/p.png)* * * * * * ![",
+            ("* * <u](rel/p.png)* * * * * * ![", 70_000),
         ],
     )
-    def test_is_linear(self, unit):
-        source = unit * (200_000 // len(unit))
+    def test_is_linear(self, unit, count):
+        source = unit * count
 
         started = time.perf_counter()
         images = find_http_images(source)
 
-        assert time.perf_counter() - started < 0.5
+        assert time.perf_counter() - started < LINEAR_TIME_LIMIT
         assert images == []
 
     def test_is_linear_on_a_line_of_images(self):
-        # Every image of a line used to look for the end of that line again.
-        source = "![a](https://h.test/c.png)" * 100_000
+        # Every image of a line used to look for the end of that line again:
+        # over a minute here.
+        source = "![a](https://h.test/c.png)" * 700_000
 
         started = time.perf_counter()
         images = find_http_images(source)
 
-        assert time.perf_counter() - started < 0.5
-        assert images == [("a", "https://h.test/c.png")] * 100_000
+        assert time.perf_counter() - started < LINEAR_TIME_LIMIT
+        assert images == [("a", "https://h.test/c.png")] * 700_000
+
+
+class TestScannersMatchTheRegexesTheyReplace:
+    """Each scanner returns what the regex it replaced found, on random Markdown.
+
+    The regexes are the ones the scanners replaced, kept here as the reference
+    for the scanners' output; they are too slow on crafted input to be used.
+    """
+
+    HTTP_IMAGE = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
+    DATA_URI_IMAGE = re.compile(
+        r"""!\[((?:\\[^\r\n]|(?!\]\()[^\\\r\n])*)\]\("""
+        r"""(<?data:image/(?:[^()"']|"[^"\r\n]*"|'[^'\r\n]*'|\([^\)\r\n]*\))*)\)""",
+        re.IGNORECASE,
+    )
+    DATA_URI_LINK = re.compile(r"(?<!!)\[([^]]*)\]\(<?data:image/[^)]*\)", re.IGNORECASE)
+    REFERENCE_IMAGE = re.compile(r"!\[([^]]*)\](?:\[([^]]*)\]|(?!\())")
+    EMBEDDED_TARGET = re.compile(r"\(openrag-embedded-image-[^)]+\)")
+    DOCX_IMAGE = re.compile(r"!\[.*?\]\(data:image/[^)]*\)")
+
+    # Pieces of the syntax the scanners read, so short documents combine them often.
+    TOKENS = [
+        "![", "[", "]", "(", ")", "<", ">", "!", "\\", "\n", "\r", " ", "a", "=", '"', "'",
+        "](", "](data:image/", "](<DATA:Image/", "](https://", "](http://", "data:image/",
+        "x.png", ";base64,QQ==", "(openrag-embedded-image-", "(\r", '"\r', "'\n",
+    ]  # fmt: skip
+
+    @pytest.fixture(scope="class")
+    def documents(self):
+        rng = random.Random(1319)
+        return ["".join(rng.choices(self.TOKENS, k=rng.randint(1, 14))) for _ in range(25_000)]
+
+    def test_inline_data_uri_images(self, documents):
+        for text in documents:
+            expected = [(m.start(), m.end(), m.group(1), m.group(2)) for m in self.DATA_URI_IMAGE.finditer(text)]
+            assert _find_inline_data_uri_images(text) == expected, text
+
+    def test_reference_images(self, documents):
+        for text in documents:
+            expected = [(m.span(), m.groups()) for m in self.REFERENCE_IMAGE.finditer(text)]
+            assert [(m.span(), m.groups()) for m in _find_reference_images(text)] == expected, text
+
+    def test_data_uri_links(self, documents):
+        for text in documents:
+            expected = [(m.start(), m.end(), m.group(1)) for m in self.DATA_URI_LINK.finditer(text)]
+            assert _find_data_uri_links(text) == expected, text
+
+    def test_http_images(self, documents):
+        for text in documents:
+            assert find_http_images(text) == self.HTTP_IMAGE.findall(text), text
+
+    def test_docx_images(self, documents):
+        for text in documents:
+            expected = [m.span() for m in self.DOCX_IMAGE.finditer(text)]
+            found = find_inline_images(text, _MARKITDOWN_IMAGE_TARGET, allow_empty_rest=True)
+            assert [(start, end) for start, _, end in found] == expected, text
+
+    def test_existing_embedded_targets(self, documents):
+        for text in documents:
+            assert _existing_embedded_targets(text) == set(self.EMBEDDED_TARGET.findall(text)), text
 
 
 def test_min_image_pixels_constant():

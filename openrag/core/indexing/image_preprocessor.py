@@ -66,6 +66,7 @@ MAX_EMBEDDED_IMAGES = 50
 MAX_EMBEDDED_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_EMBEDDED_TOTAL_BYTES = 100 * 1024 * 1024
 _URI_DELIMITERS = frozenset("\"'<>()[]{}")
+_EMBEDDED_TARGET_PREFIX = "(openrag-embedded-image-"
 
 #: Raster formats Pillow may decode from uploaded content: the image types an
 #: upload can be (``core.models.document``). Pictures embedded in Office
@@ -353,6 +354,24 @@ def _find_data_uri_links(text: str) -> list[tuple[int, int, str]]:
     return links
 
 
+def _existing_embedded_targets(text: str) -> set[str]:
+    """Return every ``(openrag-embedded-image-…)`` target already in ``text``.
+
+    This is ``re.findall(r"\\(openrag-embedded-image-[^)]+\\)", text)``, which
+    ran from each unclosed prefix to the end of the text.
+    """
+    targets: set[str] = set()
+    pos = 0
+    while (start := text.find(_EMBEDDED_TARGET_PREFIX, pos)) != -1:
+        close = text.find(")", start + len(_EMBEDDED_TARGET_PREFIX))
+        if close == -1:
+            break
+        if close > start + len(_EMBEDDED_TARGET_PREFIX):
+            targets.add(text[start : close + 1])
+        pos = close + 1
+    return targets
+
+
 def _replace_spans(text: str, spans: list[tuple[int, int, str]]) -> str:
     """Replace ordered, non-overlapping ``(start, end, replacement)`` spans."""
     parts: list[str] = []
@@ -366,7 +385,7 @@ def _replace_spans(text: str, spans: list[tuple[int, int, str]]) -> str:
 
 
 def _scrub_unterminated_parenthesized_data_uris(text: str) -> tuple[str, int]:
-    """Remove unterminated parenthesized data URIs before Markdown regexes run."""
+    """Remove unterminated parenthesized data URIs before the Markdown scanners run."""
     parts: list[str] = []
     cursor = 0
     search_from = 0
@@ -478,7 +497,7 @@ def normalize_data_uri_images(
     matched = 0
     skipped = 0
     total_bytes = 0
-    existing_targets = set(re.findall(r"\(openrag-embedded-image-[^)]+\)", text))
+    existing_targets = _existing_embedded_targets(text)
     generated_targets: set[str] = set()
 
     def replace_target(alt: str, target: str) -> str:

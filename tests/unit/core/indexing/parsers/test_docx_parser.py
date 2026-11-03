@@ -13,6 +13,11 @@ from core.indexing.parsers.docx_parser import DocxParser, _image_ref
 from core.models.document import Document, DocumentType
 from PIL import Image
 
+# Linear-time tests size their input so the scan they guard against takes a
+# minute or more, and allow this much: many times what the linear scan takes,
+# so a busy runner does not fail them.
+LINEAR_TIME_LIMIT = 5.0
+
 
 def _png_bytes(color: str = "red") -> bytes:
     img = Image.new("RGBA", (10, 10), color)
@@ -161,24 +166,29 @@ class TestRewritePlaceholdersAndBuildBlocks:
 
     def test_typed_placeholder_text_is_scanned_in_linear_time(self):
         # Text typed into the document reaches the Markdown as is: every `![`
-        # used to rescan its line, and every `](data:image/` the rest of it.
+        # used to rescan its line, and every `](data:image/` the rest of it,
+        # which would take about an hour here.
         typed = "![](data:image/" * 15_000
-        started = time.perf_counter()
-        new_md, blocks = DocxParser._rewrite_placeholders_and_build_blocks(
-            "![](data:image/png;base64...)" + typed, [_png_bytes()]
-        )
+        markdown = "![](data:image/png;base64...)" + typed
+        embedded = [_png_bytes()]
 
-        assert time.perf_counter() - started < 0.5
+        started = time.perf_counter()
+        new_md, blocks = DocxParser._rewrite_placeholders_and_build_blocks(markdown, embedded)
+
+        assert time.perf_counter() - started < LINEAR_TIME_LIMIT
         assert new_md == _image_ref(0) + typed
         assert len(blocks) == 1
 
     def test_a_line_of_placeholders_is_scanned_in_linear_time(self):
-        started = time.perf_counter()
-        new_md, blocks = DocxParser._rewrite_placeholders_and_build_blocks(
-            "![](data:image/png;base64...)" * 100_000, [_png_bytes()]
-        )
+        # Looking for the end of the line from every placeholder of it would
+        # take over a minute here.
+        markdown = "![](data:image/png;base64...)" * 700_000
+        embedded = [_png_bytes()]
 
-        assert time.perf_counter() - started < 0.5
+        started = time.perf_counter()
+        new_md, blocks = DocxParser._rewrite_placeholders_and_build_blocks(markdown, embedded)
+
+        assert time.perf_counter() - started < LINEAR_TIME_LIMIT
         assert new_md == _image_ref(0)
         assert len(blocks) == 1
 

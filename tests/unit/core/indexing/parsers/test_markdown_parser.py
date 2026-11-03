@@ -8,6 +8,11 @@ from core.indexing.parsers.markdown_parser import MarkdownParser
 from core.models.document import Document, DocumentType
 from services.workers.stages.caption import caption_stage
 
+# Linear-time tests size their input so the scan they guard against takes a
+# minute or more, and allow this much: many times what the linear scan takes,
+# so a busy runner does not fail them.
+LINEAR_TIME_LIMIT = 5.0
+
 
 @pytest.mark.asyncio
 async def test_markdown_parser_sanitizes_embedded_image_when_captioning_is_not_run():
@@ -131,7 +136,8 @@ async def test_captioning_does_not_replace_a_preexisting_similar_reference():
 
 @pytest.mark.asyncio
 async def test_markdown_parser_scans_unclosed_image_syntax_in_linear_time():
-    # Each `![` used to reach every later unclosed `](https://`: 50 KB took seconds.
+    # Each `![` used to reach every later unclosed `](https://`: 50 KB took
+    # seconds, and these 210 KB would take hours.
     source = "* ]](https://a.test/p.png ./rel.png* * * * ![x" * 4_500
 
     started = time.perf_counter()
@@ -139,6 +145,6 @@ async def test_markdown_parser_scans_unclosed_image_syntax_in_linear_time():
         Document(filename="report.md", content_type=DocumentType.MARKDOWN, text=source)
     )
 
-    assert time.perf_counter() - started < 0.5
+    assert time.perf_counter() - started < LINEAR_TIME_LIMIT
     assert processed.text_blocks[0].text == source.strip()
     assert processed.images == []
