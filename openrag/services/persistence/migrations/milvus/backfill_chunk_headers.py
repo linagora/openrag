@@ -49,6 +49,11 @@ _FILENAME_LINE = re.compile(r"^\* filename: .*\n\n\[CHUNK_START\]", re.MULTILINE
 # What Milvus returns for a row it refuses: a deleted chunk, or one now too long.
 _ROW_REFUSED_CODE = 1100
 
+# 1100 is Milvus's generic invalid-parameter code, so it can also mean the collection
+# refuses every write. Stop at this many refusals with nothing written, rather than
+# trying each chunk of the collection.
+_MAX_REFUSED_WITH_NOTHING_WRITTEN = DEFAULT_BATCH_SIZE
+
 _OUTPUT_FIELDS = ["text", "file_id", "$meta"]
 _SAMPLE_SIZE = 3
 _PROGRESS_EVERY_PAGES = 50
@@ -159,7 +164,7 @@ def run(
     """Add the filename to the chunks of *partitions* (all when None), or remove it with *revert*."""
     stats: Counter = Counter()
     rounded: dict[str, set[str]] = {}
-    filter_expr = f"partition in {json.dumps(partitions)}" if partitions else ""
+    filter_expr = f"partition in {json.dumps(partitions, ensure_ascii=False)}" if partitions else ""
 
     for number, page in enumerate(_pages(client, collection_name, filter_expr, batch_size), start=1):
         stats["scanned"] += len(page)
@@ -191,6 +196,11 @@ def run(
             refused = _write(client, collection_name, entities)
             stats["refused"] += refused
             stats["changed"] += len(entities) - refused
+            if not stats["changed"] and stats["refused"] >= _MAX_REFUSED_WITH_NOTHING_WRITTEN:
+                raise RuntimeError(
+                    f"Milvus refused all {stats['refused']} chunks tried so far, so it may be refusing every write. "
+                    "Stopping: see the warnings above."
+                )
         if number % _PROGRESS_EVERY_PAGES == 0:
             logger.info(f"  {stats['scanned']} chunk(s) scanned, {stats['changed']} changed")
 
@@ -249,7 +259,10 @@ def main() -> None:
         f"{stats['refused']} refused by Milvus."
     )
     if stats["refused"]:
-        logger.error("Some chunks were refused: see the warnings above. Run this again to retry them.")
+        logger.error(
+            "Some chunks were refused: see the warnings above. Running this again retries them, "
+            "but a chunk too long to take the header is refused every time and needs re-indexing."
+        )
         sys.exit(1)
 
 

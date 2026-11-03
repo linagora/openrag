@@ -181,6 +181,26 @@ def test_an_outage_stops_the_run_instead_of_splitting_the_batch():
     assert client.iterators[0].closed
 
 
+def test_stops_when_milvus_refuses_every_chunk():
+    count = backfill._MAX_REFUSED_WITH_NOTHING_WRITTEN
+    client = _FakeClient([_row(i) for i in range(1, count * 3)], refuse=tuple(range(1, count * 3)))
+
+    with pytest.raises(RuntimeError, match="refused all"):
+        _run(client, batch_size=count)
+
+    assert client.upsert_calls == 2 * count - 1
+
+
+def test_refusals_do_not_stop_the_run_once_a_chunk_was_written():
+    count = backfill._MAX_REFUSED_WITH_NOTHING_WRITTEN
+    client = _FakeClient([_row(i) for i in range(1, count + 2)], refuse=tuple(range(2, count + 2)))
+
+    stats = _run(client, batch_size=count + 1)
+
+    assert stats["changed"] == 1
+    assert stats["refused"] == count
+
+
 def test_dry_run_writes_nothing():
     client = _FakeClient([_row()])
 
@@ -198,6 +218,14 @@ def test_partition_filter():
     _run(client)
 
     assert client.filters == ['partition in ["a", "b\\"c"]', ""]
+
+
+def test_partition_filter_keeps_non_ascii_raw():
+    client = _FakeClient([])
+
+    _run(client, partitions=["team📁"])
+
+    assert client.filters == ['partition in ["team📁"]']
 
 
 def test_reads_page_by_page():
