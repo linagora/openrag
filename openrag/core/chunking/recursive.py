@@ -87,6 +87,26 @@ def strip_placeholder_markers(content: str) -> str:
 # (MCP index_url) has no such limit.
 _MAX_HEADER_FILENAME_CHARS = 255
 
+
+def source_header(filename: str, chunk_size: int, length_function: Callable[[str], int]) -> str | None:
+    """``[Source: <filename>]``, using at most half of *chunk_size*.
+
+    The body keeps the other half: each chunk costs an embedding and maybe an
+    LLM call, so a name must not be able to cut a document into thousands of
+    pieces, nor push a chunk past *chunk_size*. A longer name is shortened,
+    and a *chunk_size* with no room for one gets no header.
+    """
+    name = filename[:_MAX_HEADER_FILENAME_CHARS]
+    limit = chunk_size // 2
+    while name:
+        header = f"[Source: {name}]"
+        tokens = length_function(f"{header}\n\n")
+        if tokens <= limit:
+            return header
+        name = name[: min(len(name) - 1, len(name) * limit // tokens)]
+    return None
+
+
 # Tables/images smaller than this token count are inlined with surrounding
 # text rather than emitted as standalone chunks.
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
@@ -194,7 +214,9 @@ class BaseChunker(ChunkingStrategy):
         # model gets: a name left in metadata cannot be found by a query like
         # "what is report.pdf about?". No page here, unlike structured_section:
         # this chunker's text chunks can carry the wrong page (#1204).
-        header = self._source_header(str(metadata.get("filename") or metadata.get("source") or ""))
+        header = source_header(
+            str(metadata.get("filename") or metadata.get("source") or ""), self.chunk_size, self.length_function
+        )
         # The header is embedded with the chunk, so it comes out of the budget.
         body_size = self.chunk_size - self.length_function(f"{header}\n\n") if header else self.chunk_size
         md_chunks = self._get_chunks(content=content.strip(), metadata=metadata, body_size=body_size)
@@ -226,24 +248,6 @@ class BaseChunker(ChunkingStrategy):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _source_header(self, filename: str) -> str | None:
-        """``[Source: <filename>]``, using at most half of ``chunk_size``.
-
-        The body keeps the other half: each chunk costs an embedding and maybe an
-        LLM call, so a name must not be able to cut a document into thousands of
-        pieces, nor push a chunk past ``chunk_size``. A longer name is shortened,
-        and a ``chunk_size`` with no room for one gets no header.
-        """
-        name = filename[:_MAX_HEADER_FILENAME_CHARS]
-        limit = self.chunk_size // 2
-        while name:
-            header = f"[Source: {name}]"
-            tokens = self.length_function(f"{header}\n\n")
-            if tokens <= limit:
-                return header
-            name = name[: min(len(name) - 1, len(name) * limit // tokens)]
-        return None
-
     @staticmethod
     def _content_from(document: ProcessedDocument) -> str:
         """Reconstruct chunkable markdown from a ProcessedDocument.
