@@ -452,3 +452,18 @@ def test_a_filename_longer_than_the_chunk_size_still_indexes():
     splitter = RecursiveSplitter(chunk_size=10, chunk_overlap_rate=0.2, length_function=_word_tokens)
     joined = " ".join(c.content for c in splitter.chunk(doc, partition="p"))
     assert "alpha" in joined and "delta" in joined
+
+
+def test_a_long_filename_cannot_multiply_the_chunks():
+    # Each chunk costs an embedding and, with contextualization on, an LLM call,
+    # so the name of an upload must not decide how much of that a file gets.
+    def count(filename: str) -> int:
+        doc = ProcessedDocument(
+            document_id="d1",
+            text_blocks=[TextBlock(text=" ".join(f"Sentence{i} here." for i in range(600)), page_number=1)],
+            metadata={"filename": filename},
+        )
+        splitter = RecursiveSplitter(chunk_size=100, chunk_overlap_rate=0.2, length_function=_word_tokens)
+        return len(splitter.chunk(doc, partition="p"))
+
+    assert count(" ".join(["long"] * 500)) <= 2 * count("short.pdf")

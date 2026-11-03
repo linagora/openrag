@@ -192,9 +192,12 @@ class BaseChunker(ChunkingStrategy):
         filename = str(metadata.get("filename") or metadata.get("source") or "")
         header = f"[Source: {filename}]" if filename else None
         # The header is embedded with the chunk, so it comes out of the budget.
-        # Floored at 1, as in structured_section: a filename longer than
-        # chunk_size must not make the splitter fail.
-        body_size = max(1, self.chunk_size - self.length_function(f"{header}\n\n")) if header else self.chunk_size
+        # Floored at half: each chunk costs an embedding and maybe an LLM call,
+        # so an upload's name must not be able to cut a document into thousands
+        # of pieces. A name that long goes over chunk_size instead.
+        body_size = self.chunk_size
+        if header:
+            body_size = max(self.chunk_size // 2, self.chunk_size - self.length_function(f"{header}\n\n"), 1)
         md_chunks = self._get_chunks(content=content.strip(), metadata=metadata, body_size=body_size)
 
         chunks: list[Chunk] = []
