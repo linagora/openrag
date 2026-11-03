@@ -62,11 +62,11 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
-## OpenRAG 2.3.4 on Kubernetes: a larger venv volume
+## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
 
 With `ray.enabled: true`, the Ray head installs the Python dependencies into the
 `<fullname>-venv` volume when it first starts. They take about 7 GB, which left
-little room in the former 10Gi default. From OpenRAG 2.3.4, that default is
+little room in the former 10Gi default. From OpenRAG 2.3.5, that default is
 20Gi, and an install that fails stops the Ray head's `init-venv-sync` init
 container instead of being marked complete.
 
