@@ -282,7 +282,13 @@ class TestReleaseIfGrantedLogLevel:
 
     @pytest.mark.parametrize(
         ("error", "reason"),
-        [(ray.exceptions.RayActorError(), "RayActorError"), (asyncio.CancelledError(), "cancelled")],
+        [
+            (
+                ray.exceptions.RayActorError(error_msg="The actor died: worker PID 42 exited"),
+                "RayActorError: The actor died: worker PID 42 exited",
+            ),
+            (asyncio.CancelledError(), "cancelled"),
+        ],
     )
     async def test_failed_release_still_warns(self, error, reason):
         acquire_task = asyncio.get_running_loop().create_future()
@@ -301,4 +307,4 @@ class TestReleaseIfGrantedLogLevel:
 
         failures = [r for r in records if "Failed to release permit" in r["message"]]
         assert [r["level"].name for r in failures] == ["WARNING"]
-        assert reason in failures[0]["extra"]["reason"]
+        assert failures[0]["extra"]["reason"] == reason

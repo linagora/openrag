@@ -181,7 +181,7 @@ def _warn_if_release_failed(name: str, release_task: asyncio.Task) -> None:
     if release_task.cancelled():
         reason = "cancelled"
     elif (exc := release_task.exception()) is not None:
-        reason = repr(exc)
+        reason = f"{type(exc).__name__}: {exc}"
     else:
         return
     logger.bind(semaphore=name).warning(
