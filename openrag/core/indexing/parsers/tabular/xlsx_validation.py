@@ -151,8 +151,15 @@ def _merge_preambles(
 def _merged_header_depth(
     region: TableRegion,
     merged_ranges: list[tuple[int, int, int, int]],
+    populated_rows: set[int],
 ) -> int:
-    """Return consecutive horizontal merged header rows above the leaf header."""
+    """Return merged header rows only when their leaf row contains cells.
+
+    A worksheet title can be a merged cell immediately followed by a blank
+    spacer and a regular table.  The blank spacer is not a header row, so it
+    must not become a structural header hint merely because the title spans the
+    table's columns.
+    """
     expected_columns = set(range(region.start_column, region.end_column + 1))
     depth = 0
     for row_number in range(region.start_row, region.end_row):
@@ -165,7 +172,7 @@ def _merged_header_depth(
         if not expected_columns.issubset(covered_columns):
             break
         depth += 1
-    return depth
+    return depth if region.start_row + depth in populated_rows else 0
 
 
 def invalid(message: str):
@@ -494,6 +501,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 previous_row = current_row = previous_col = 0
                 current_cell_column = 0
                 row_content_columns: set[int] = set()
+                populated_rows: set[int] = set()
                 band_start = band_end = None
                 band_columns: set[int] = set()
                 regions: list[TableRegion] = []
@@ -605,6 +613,7 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                                 row_content_columns.add(current_cell_column)
                         if tag == "row":
                             if row_content_columns:
+                                populated_rows.add(current_row)
                                 if band_start is None:
                                     band_start = current_row
                                 elif current_row > band_end + 1:
@@ -663,7 +672,11 @@ def validate_ooxml(source, limits: XlsxLimits) -> list[SheetInfo]:
                 )
                 hinted_regions: list[TableRegion] = []
                 for region in regions:
-                    header_depth = _merged_header_depth(region, merged_ranges) if region.header_row_hint is None else 0
+                    header_depth = (
+                        _merged_header_depth(region, merged_ranges, populated_rows)
+                        if region.header_row_hint is None
+                        else 0
+                    )
                     hinted_regions.append(
                         TableRegion(
                             region.index,
