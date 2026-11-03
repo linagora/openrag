@@ -781,6 +781,29 @@ def test_blank_cells_inside_a_table_do_not_split_its_region():
     assert block.metadata["table_row_numbers"] == [2, 3]
 
 
+def test_distant_single_row_with_matching_columns_is_not_lost():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sparse Records"
+    sheet.append(["record_id", "name", "topic", "summary"])
+    sheet.append(["SP-001", "Near record", "Accessibility", "Record near the top."])
+    sheet.append(["SP-002", "Second record", "Healthcare", "Another ordinary record."])
+    sheet.cell(1000, 1, "SP-999")
+    sheet.cell(1000, 2, "Distant Needle")
+    sheet.cell(1000, 3, "Medical access")
+    sheet.cell(1000, 4, "Distant physical row.")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["worksheet_table_count"] == 1
+    assert block.metadata["table_range"] == "'Sparse Records'!A1:D1000"
+    assert block.metadata["table_row_numbers"] == [2, 3, 1000]
+    assert "SP-999" in block.text
+
+
 def test_style_only_cells_do_not_create_false_table_regions():
     workbook = Workbook()
     sheet = workbook.active

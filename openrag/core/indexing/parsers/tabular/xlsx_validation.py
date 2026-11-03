@@ -113,9 +113,11 @@ def _merge_preambles(
                 for barrier in barriers
             )
             # A lone band after a table cannot itself contain both a header and
-            # data. Preserve the established behavior of treating it as a row
-            # in the preceding table, even when a blank spacer separates it.
-            if not has_barrier and region_height == 1 and region.start_row - previous.end_row <= 32 and same_columns:
+            # data. When it has the same columns, preserve it as a sparse
+            # continuation of the preceding table even across a large blank
+            # gap; otherwise it would be treated as a header-only table and
+            # silently emit no row.
+            if not has_barrier and region_height == 1 and same_columns:
                 merged[-1] = TableRegion(
                     previous.index,
                     previous.start_row,
