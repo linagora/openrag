@@ -343,7 +343,10 @@ async def stream_with_source_filtering(
         extra_payload.update(extra_fields)
     if not saw_done:
         extra_payload["truncated"] = True
-        logger.warning(
+        # A provider's own 4xx comes before any content, so an exception this far
+        # in means the provider or the transport failed.
+        logger.log(
+            "ERROR" if stream_error is not None else "WARNING",
             "Answer truncated: upstream stream ended without [DONE] "
             "(reason={reason}, model={model}, delivered_chars={chars}, sources={sources})",
             reason=f"upstream error: {stream_error}" if stream_error is not None else "connection closed",

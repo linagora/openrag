@@ -919,6 +919,32 @@ class TestStreamClosedWithoutDone:
             logger.remove(sink_id)
         assert not any("Answer truncated" in r for r in records)
 
+    @pytest.mark.asyncio
+    async def test_truncation_level_follows_the_cause(self):
+        # An exception after the first chunk means the provider or the transport
+        # failed. A stream that just ends without [DONE] raised nothing, so it
+        # stays a warning.
+        from loguru import logger
+
+        async def truncation_levels(stream) -> list[str]:
+            levels: list[str] = []
+            sink_id = logger.add(
+                lambda m: levels.append(m.record["level"].name),
+                level="WARNING",
+                filter=lambda r: "Answer truncated" in r["message"],
+            )
+            try:
+                await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
+            finally:
+                logger.remove(sink_id)
+            return levels
+
+        dropped = _stream_then_raise([_make_chunk("Partial answer.")], RuntimeError("connection reset"))
+        assert await truncation_levels(dropped) == ["ERROR"]
+
+        closed = _fake_stream([_make_chunk("Partial answer."), _make_finish()])
+        assert await truncation_levels(closed) == ["WARNING"]
+
 
 def _parse_finish_extra(sse_lines: list[str]) -> dict:
     for line in reversed(sse_lines):

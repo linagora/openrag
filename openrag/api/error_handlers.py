@@ -114,15 +114,16 @@ _SERVER_FAULTS_WITH_CLIENT_STATUS = (
 )
 
 
-def _log_level_for(exc: OpenRAGError, status_code: int) -> str:
+def log_level_for(exc: OpenRAGError) -> str:
     """ERROR when the server failed, WARNING when a provider refused
     OpenRag's call, INFO for the caller's own error.
 
     A 4xx is normally the client's error and part of normal operation (a
     file lookup before upload, a duplicate upload), so ERROR stays an
-    alertable "the server failed".
+    alertable "the server failed". The status is the one ``exc`` maps to, so
+    this also holds in a stream, whose response is already a 200 by then.
     """
-    if status_code >= 500 or isinstance(exc, _SERVER_FAULTS_WITH_CLIENT_STATUS):
+    if _status_for(exc) >= 500 or isinstance(exc, _SERVER_FAULTS_WITH_CLIENT_STATUS):
         return "ERROR"
     # The provider's own 4xx, passed through: it refused OpenRag's call, though
     # a 400 can still come from a bad parameter the caller sent.
@@ -155,7 +156,7 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError) -> JSON
     """
     status_code = _status_for(exc)
     logger.log(
-        _log_level_for(exc, status_code),
+        log_level_for(exc),
         "OpenRAGError",
         error_code=getattr(exc, "code", type(exc).__name__),
         status_code=status_code,
