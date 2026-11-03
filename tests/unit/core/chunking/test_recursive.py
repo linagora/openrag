@@ -487,3 +487,29 @@ def test_a_name_from_a_url_cannot_fill_the_embedder_window():
 
 def test_the_longest_name_an_upload_can_have_is_kept_whole():
     assert _header_for("a" * 251 + ".pdf") == f"[Source: {'a' * 251}.pdf]"
+
+
+def test_a_long_name_is_shortened_so_the_chunk_stays_within_chunk_size():
+    # Past chunk_size the tail of a chunk can fall outside what gets embedded. The
+    # name gives way, not the body: its first words are what a question would match.
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=" ".join(f"Sentence{i} here." for i in range(300)), page_number=1)],
+        metadata={"filename": " ".join(f"w{i}" for i in range(80))},
+    )
+    splitter = RecursiveSplitter(chunk_size=60, chunk_overlap_rate=0.2, length_function=_word_tokens)
+    chunks = splitter.chunk(doc, partition="p")
+    assert max(c.token_count for c in chunks) <= 60
+    assert all(c.text.startswith("[Source: w0 w1 ") for c in chunks)
+
+
+def test_a_chunk_size_too_small_for_any_name_drops_the_header():
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="alpha beta", page_number=1)],
+        metadata={"filename": "report.pdf"},
+    )
+    splitter = RecursiveSplitter(chunk_size=2, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    chunk = splitter.chunk(doc, partition="p")[0]
+    assert chunk.header is None
+    assert chunk.text == "alpha beta"
