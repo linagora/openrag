@@ -115,6 +115,9 @@ def _without_header(
     """Undo ``_with_header``. Chunkers store the body in ``content``, so a chunk whose
     ``content`` is the text after the header wasn't changed by this script."""
     text = row.get("text") or ""
+    # Every chunk this script changed has a ``header``: the line it added, or an upload's value.
+    if not row.get("header"):
+        return None
     for header in (row.get("header"), header_for(row)):
         prefix = f"{header}\n\n"
         if not header or not text.startswith(prefix) or _is_body(row.get("content"), text[len(prefix) :]):

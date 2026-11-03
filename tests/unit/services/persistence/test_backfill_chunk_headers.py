@@ -335,3 +335,12 @@ def test_revert_leaves_headers_a_chunker_wrote(header, content):
 
     assert client.written == []
     assert stats["unchanged"] == 1
+
+
+def test_revert_leaves_a_document_that_starts_with_its_own_source_line():
+    client = _FakeClient([_row(text="[Source: report.pdf]\n\nbody")])
+
+    stats = _run(client, revert=True)
+
+    assert client.written == []
+    assert stats["unchanged"] == 1
