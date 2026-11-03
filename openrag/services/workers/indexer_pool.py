@@ -78,7 +78,10 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # replicas accept those uploads, while a v16 worker reused by name does not know
 # the extension: detect_content_type falls back to TEXT and decode_bytes decodes
 # the ZIP without raising, so the binary would be indexed as text.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v17"
+# v18: folds in an independent v15 lineage (#1296): workers log their own
+# failures and poll has_object_ref instead of borrowing their task's ref, and
+# the TaskStateManager is replaced when it lacks has_object_ref.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v18"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
