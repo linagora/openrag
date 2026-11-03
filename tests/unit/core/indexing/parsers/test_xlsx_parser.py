@@ -370,6 +370,27 @@ def test_merged_table_titles_are_context_not_column_headers():
     assert [block.metadata["table_row_numbers"] for block in blocks] == [[3], [7]]
 
 
+def test_merged_title_and_blank_spacer_do_not_select_the_blank_row_as_header():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Regional Report"
+    sheet.merge_cells("A1:E1")
+    sheet["A1"] = "Regional access programme — quarterly export"
+    sheet.append([])
+    sheet.append(["record_id", "service_name", "region", "contact_policy", "summary"])
+    sheet.append(["REG-001", "Screen-reader help desk", "Île-de-France", "Contact allowed", "Summary"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_header_row"] == 3
+    assert block.metadata["table_columns"] == ["record_id", "service_name", "region", "contact_policy", "summary"]
+    assert block.metadata["table_row_numbers"] == [4]
+    assert block.metadata["table_header_source"] == "automatic"
+
+
 def test_merged_column_header_groups_are_flattened_with_hierarchy_metadata():
     workbook = Workbook()
     sheet = workbook.active
