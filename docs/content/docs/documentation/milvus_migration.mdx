@@ -450,6 +450,37 @@ To fully remove the fields you would need to recreate the collection from scratc
 
 ---
 
+## Add the filename to chunks already indexed
+
+Some chunks indexed with `recursive_splitter` don't contain their filename, so a question like "what is report.pdf about?" can't find them. This script adds the filename to those chunks, without re-indexing anything.
+
+Run it once, after upgrading to the release that adds the filename to new chunks. Start with a dry run to see what would change:
+
+```bash
+# See what would change
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run --no-dev python services/persistence/migrations/milvus/backfill_chunk_headers.py --dry-run
+
+# Apply
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run --no-dev python services/persistence/migrations/milvus/backfill_chunk_headers.py
+```
+
+On a CPU host, use `docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu`. On Kubernetes, use `kubectl exec -n "$NS" "$POD" -- uv run --no-dev --no-sync python`, followed by the same script path.
+
+Good to know:
+
+- Chunks that already have their filename are skipped, so you can safely run it again. So are `structured_section` chunks with `prepend_heading_path` turned off.
+- The script changes each chunk's text and its `header` and `token_count` fields. Vectors aren't recomputed, because a question naming a file is a keyword search, so this only helps with hybrid search on (`VDB_HYBRID_SEARCH`, the default).
+- OpenRAG can keep running, but don't run the script during an embedder swap.
+- Add `--partition <name>` to limit it to one partition. If a name has no chunks, the script stops before changing anything.
+- A long filename is shortened the same way as on new chunks. A `header` or `content` value from upload metadata stays as it is.
+- If a chunk can't be updated, the script logs it, carries on and exits with status 1. Running it again retries those chunks, but a chunk too long to take the filename is refused every time and needs re-indexing.
+- If Milvus itself fails, or refuses the first 200 chunks it tries with none written, the script stops. Once that's fixed, run it again to carry on.
+- `--revert` removes what the script added, but integers above 2^53 in a chunk's metadata stay rounded. The script warns about those when it runs.
+
+---
+
 ## Adding a New Migration Script
 
 Migration scripts live in `openrag/services/persistence/migrations/milvus/`. The runner discovers them automatically — no registration step required.
