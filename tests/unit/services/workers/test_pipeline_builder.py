@@ -1837,12 +1837,21 @@ async def test_one_failed_image_keeps_the_other_captions():
     """#1293: one failed image used to fail the stage and drop every caption."""
     pipeline, document = _image_pipeline(vlm=OneFailingVLM())
 
+    observed = []
+    tracker = StageTracker("task-caption", deliver=lambda event, summary, tail: observed.append(event) or True)
+
     row = _row(document)
-    await pipeline.run(row)
+    await pipeline.run(row, stage_tracker=tracker)
 
     assert row["stage"] == "stored"
     assert [image.caption for image in row["processed_document"].images].count("caption") == 5
     assert row["degraded_stages"]["caption"].startswith("1/6 image(s) failed captioning")
+    failure = next(
+        event
+        for event in observed
+        if event is not None and event.stage_id == "caption" and event.status is StageEventStatus.FAILED
+    )
+    assert failure.failure_effect is StageFailureEffect.CONTINUED_DEGRADED
 
 
 @pytest.mark.asyncio
