@@ -364,7 +364,9 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
     """Reuse row splitting with escaped headers and exact sheet/column metadata."""
     base_context = element.metadata.get("worksheet_context", "") + element.metadata.get("sheet_context", "")
     formula_context = element.metadata.get("formula_context", "")
-    complete_context = base_context + formula_context
+    number_format_context = element.metadata.get("number_format_context", "")
+    include_number_format_context = bool(number_format_context)
+    complete_context = number_format_context + base_context + formula_context
     if complete_context:
         if not table.endswith(complete_context):
             raise PipelineError("XLSX sheet context does not match table content")
@@ -432,6 +434,11 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
         selected_cells = [
             cell for cell in metadata.get("formula_cells", []) if cell.get("target_column") in selected_excel_columns
         ]
+        selected_number_formats = [
+            group
+            for group in metadata.get("number_format_groups", [])
+            if group.get("target_column") in selected_excel_columns
+        ]
         if selected_groups:
             metadata["formula_groups"] = selected_groups
         else:
@@ -440,12 +447,23 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
             metadata["formula_cells"] = selected_cells
         else:
             metadata.pop("formula_cells", None)
+        if selected_number_formats:
+            metadata["number_format_groups"] = selected_number_formats
+        else:
+            metadata.pop("number_format_groups", None)
         chunk_formula_context = _xlsx_formula_context(selected_groups)
         if chunk_formula_context:
             metadata["formula_context"] = chunk_formula_context
         else:
             metadata.pop("formula_context", None)
-        chunk_context = base_context + chunk_formula_context
+        chunk_number_format_context = (
+            _xlsx_number_format_context(selected_number_formats) if include_number_format_context else ""
+        )
+        if chunk_number_format_context:
+            metadata["number_format_context"] = chunk_number_format_context
+        else:
+            metadata.pop("number_format_context", None)
+        chunk_context = chunk_number_format_context + base_context + chunk_formula_context
         chunk.content += chunk_context
         chunk_context_tokens = length_function(chunk_context) if chunk_context else 0
         csv_effective_chunk_size = metadata.get("csv_effective_chunk_size")
@@ -548,7 +566,29 @@ def _tabular_row_metadata(
             updated["formula_cells"] = selected_cells
         else:
             updated.pop("formula_cells", None)
+    number_format_groups = metadata.get("number_format_groups")
+    if isinstance(number_format_groups, list):
+        selected_rows = set(row_numbers)
+
+        def intersects(group: dict) -> bool:
+            ranges = group.get("row_ranges")
+            if isinstance(ranges, list) and not group.get("row_ranges_truncated"):
+                return any(
+                    isinstance(item, dict)
+                    and any(item.get("start_row", 0) <= row <= item.get("end_row", -1) for row in selected_rows)
+                    for item in ranges
+                )
+            return any(group.get("start_row", 0) <= row <= group.get("end_row", -1) for row in selected_rows)
+
+        selected_number_formats = [
+            group for group in number_format_groups if isinstance(group, dict) and intersects(group)
+        ]
+        if selected_number_formats:
+            updated["number_format_groups"] = selected_number_formats
+        else:
+            updated.pop("number_format_groups", None)
     updated.pop("formula_context", None)
+    updated.pop("number_format_context", None)
     return updated
 
 
@@ -564,6 +604,28 @@ def _xlsx_formula_context(groups: list[dict]) -> str:
         lines.append(
             f"- {group['target_column']} ({single_line(group['target_header'])}), {group['range']}: "
             f"{single_line(group['semantic_expression'])} [pattern: {single_line(group['pattern'])}]"
+        )
+    return "\n\n" + "\n".join(lines)
+
+
+def _xlsx_number_format_context(groups: list[dict]) -> str:
+    if not groups:
+        return ""
+
+    def single_line(value) -> str:
+        return str(value).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+    lines = ["Display format context (raw values remain indexed):"]
+    for group in groups:
+        location = (
+            group["range"]
+            if len(group.get("row_ranges", [])) == 1
+            else f"{group['cell_count']} cells in {group['range']}"
+        )
+        lines.append(
+            f"- {group['target_column']} ({single_line(group['target_header'])}), {location}: "
+            f"{group['kind']} format {single_line(group['format_code'])}; example raw "
+            f"{single_line(group['example_raw'])} -> display {single_line(group['display_example'])}"
         )
     return "\n\n" + "\n".join(lines)
 
