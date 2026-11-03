@@ -60,7 +60,7 @@ Do not skip this migration when upgrading an existing deployment:
 ### Upgrade from Milvus 2.6.x to 3.0.2
 
 :::note[Milvus 3.0.2 is an intermediate step]
-This procedure uses the OpenRAG [v2.3.3 Compose and Helm configuration](https://github.com/linagora/openrag/tree/v2.3.3), which pins Milvus to v3.0.2. The current release configuration pins Milvus to v3.0.5. Complete this 2.6-to-3.0.2 migration with the v2.3.3 configuration, then follow the 3.0.2-to-3.0.5 procedure below.
+This procedure uses the OpenRAG [v2.3.3 Compose and Helm configuration](https://github.com/linagora/openrag/tree/v2.3.3), which pins Milvus to v3.0.2. Complete this 2.6-to-3.0.2 migration with the v2.3.3 configuration. Before following the 3.0.2-to-3.0.5 procedure below, switch to the target OpenRAG release's Compose files or Helm values, which pin Milvus to v3.0.5.
 :::
 
 Milvus 2.6 containers ran as root, so existing bind-mounted files and Docker named-volume contents are commonly owned by `root:root`. Milvus 3 runs as UID/GID `999:999` and cannot start until it owns the directory mounted at `/var/lib/milvus`.
