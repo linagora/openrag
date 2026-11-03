@@ -429,9 +429,9 @@ all three to `v2.3.0`, or remove them to take the chart's default. The 2.3.0
 chart's readiness probe calls `/ready`, which 2.2.x images do not serve: a 2.2.x
 image under the new chart never becomes Ready, and the rollout stops.
 
-If your values contain `milvus.image.all.tag` (older releases may set it to
-`v3.0.2`), remove the override. The current chart defaults to Milvus v3.0.5; a
-copied tag takes precedence and keeps the server on that pinned image.
+If your values contain `milvus.image.all.tag`, remove the override. The 2.3.0
+chart defaults to Milvus v3.0.2; a copied image tag takes precedence over that
+default.
 
 #### vLLM engine overrides
 

@@ -175,6 +175,10 @@ RRF_K = 100
 #: ``__init__`` and raises :class:`VDBConnectionError` before the probe runs.
 _SCHEMA_PROBE_TIMEOUT = 5.0
 
+# Avoid serial five-second version probes when a Milvus server's management
+# endpoint is temporarily unavailable. Retry after this short cooldown.
+_SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS = 30.0
+
 #: How long :meth:`MilvusVectorStore.make_searchable` waits for a flushed field
 #: to answer, and how often it asks.
 _SEARCHABLE_TIMEOUT = 120.0
@@ -627,6 +631,7 @@ class MilvusVectorStore(VectorStore):
         self._search_schema_checked = False
         self._server_version_checked = False
         self._server_version: str | None = None
+        self._server_version_probe_failed_at: float | None = None
         self._server_version_lock = asyncio.Lock()
         # Serializes adding and dropping dense fields.
         self._vector_field_lock = asyncio.Lock()
@@ -2483,26 +2488,39 @@ class MilvusVectorStore(VectorStore):
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
     async def _server_preserves_dynamic_int64(self) -> bool:
-        """Probe and cache Milvus's version before deciding whether to warn."""
+        """Probe Milvus's version; briefly cache failures to avoid serial retries."""
+        if self._server_version_checked:
+            return _milvus_preserves_dynamic_int64(self._server_version)
+        failed_at = self._server_version_probe_failed_at
+        if failed_at is not None and time.monotonic() - failed_at < _SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS:
+            return False
+
         if not self._server_version_checked:
             async with self._server_version_lock:
-                if not self._server_version_checked:
-                    try:
-                        response = await asyncio.to_thread(
-                            self._client.get_server_version,
-                            timeout=_SCHEMA_PROBE_TIMEOUT,
-                            detail=True,
-                        )
-                    except Exception:
-                        return False
-                    if isinstance(response, Mapping):
-                        version = response.get("version")
-                    else:
-                        version = response
-                    if not isinstance(version, str):
-                        return False
-                    self._server_version = version
-                    self._server_version_checked = True
+                if self._server_version_checked:
+                    return _milvus_preserves_dynamic_int64(self._server_version)
+                failed_at = self._server_version_probe_failed_at
+                if failed_at is not None and time.monotonic() - failed_at < _SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS:
+                    return False
+                try:
+                    response = await asyncio.to_thread(
+                        self._client.get_server_version,
+                        timeout=_SCHEMA_PROBE_TIMEOUT,
+                        detail=True,
+                    )
+                except Exception:
+                    self._server_version_probe_failed_at = time.monotonic()
+                    return False
+                if isinstance(response, Mapping):
+                    version = response.get("version")
+                else:
+                    version = response
+                if not isinstance(version, str):
+                    self._server_version_probe_failed_at = time.monotonic()
+                    return False
+                self._server_version = version
+                self._server_version_checked = True
+                self._server_version_probe_failed_at = None
         return _milvus_preserves_dynamic_int64(self._server_version)
 
     async def insert_entities(

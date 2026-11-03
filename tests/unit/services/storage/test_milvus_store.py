@@ -3056,16 +3056,54 @@ class TestWriteVectors:
         assert not any("large integers" in record["message"] for record in records)
         store._client.get_server_version.assert_called_once_with(timeout=5.0, detail=True)
 
-    async def test_failed_server_version_probe_is_not_cached(self, store: MilvusVectorStore) -> None:
+    async def test_failed_server_version_probe_is_cached_until_retry_window_expires(
+        self, store: MilvusVectorStore
+    ) -> None:
         store._client.get_server_version.side_effect = [
             RuntimeError("temporary timeout"),
             {"version": "3.0-20261030-af15c80751"},
         ]
 
-        assert await store._server_preserves_dynamic_int64() is False
+        results = await asyncio.gather(
+            store._server_preserves_dynamic_int64(),
+            store._server_preserves_dynamic_int64(),
+            store._server_preserves_dynamic_int64(),
+        )
+
+        assert results == [False, False, False]
         assert store._server_version_checked is False
+        assert store._client.get_server_version.call_count == 1
+
+        store._server_version_probe_failed_at = (
+            milvus_store_module.time.monotonic() - milvus_store_module._SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS - 1
+        )
         assert await store._server_preserves_dynamic_int64() is True
         assert store._server_version_checked is True
+        assert store._client.get_server_version.call_count == 2
+
+    async def test_write_vectors_retries_after_a_failed_version_probe(
+        self, store: MilvusVectorStore, monkeypatch
+    ) -> None:
+        from loguru import logger as _logger
+
+        monkeypatch.setattr(milvus_store_module, "_SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS", 0.0)
+        store._client.get_server_version.side_effect = [
+            RuntimeError("temporary timeout"),
+            {"version": "3.0-20261030-af15c80751"},
+        ]
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+        records: list[dict] = []
+        sink = _logger.add(lambda message: records.append(message.record), level="WARNING")
+        try:
+            for _ in range(2):
+                _section_ids(store, [{"_id": 11, "file_id": "f1", "ext_id": 2**53 + 1}])
+                assert await store.write_vectors("vector_bge_m3", {"11": [0.1]}) == 1
+        finally:
+            _logger.remove(sink)
+
+        rounding_warnings = [record for record in records if "large integers" in record["message"]]
+        assert len(rounding_warnings) == 1
+        assert rounding_warnings[0]["extra"]["server_version"] == "unknown"
         assert store._client.get_server_version.call_count == 2
 
     async def test_a_failed_write_logs_no_rounding(self, store: MilvusVectorStore) -> None:
