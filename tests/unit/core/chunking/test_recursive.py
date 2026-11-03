@@ -364,3 +364,152 @@ def test_symbol_only_caption_is_not_treated_as_a_placeholder():
 
     assert not is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n©\n\n</image_description>")
     assert is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n   \n\n</image_description>")
+
+
+def _splitter() -> RecursiveSplitter:
+    return RecursiveSplitter(chunk_size=20, chunk_overlap_rate=0.0, length_function=_word_tokens)
+
+
+def test_every_chunk_type_carries_the_filename_in_its_text():
+    # BM25 and the embedder read ``text``, and ``text`` is all the answering
+    # model gets, so a filename left in metadata cannot be found by a query
+    # like "what is report.pdf about?".
+    table = "| Col | Val |\n|-----|-----|\n" + "\n".join(f"| Group{i} | {' '.join(['x'] * 50)} |" for i in range(6))
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=f"Some prose here.\n\n{table}\n\nMore prose.", page_number=1)],
+        metadata={"filename": "report.pdf"},
+    )
+    chunks = _splitter().chunk(doc, partition="p")
+    assert {ChunkType.TEXT, ChunkType.TABLE} <= {c.chunk_type for c in chunks}
+    for c in chunks:
+        assert c.text.startswith("[Source: report.pdf]\n\n")
+
+
+def test_header_and_content_are_stored_apart_from_the_text():
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="Some prose here.", page_number=1)],
+        metadata={"filename": "report.pdf"},
+    )
+    chunk = _splitter().chunk(doc, partition="p")[0]
+    assert chunk.header == "[Source: report.pdf]"
+    assert chunk.content == "Some prose here."
+    assert chunk.token_count == _word_tokens(chunk.text)
+
+
+def test_header_falls_back_to_source_when_there_is_no_filename():
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="Some prose here.", page_number=1)],
+        metadata={"source": "notes.md"},
+    )
+    assert _splitter().chunk(doc, partition="p")[0].text == "[Source: notes.md]\n\nSome prose here."
+
+
+def test_no_header_when_the_document_has_no_name():
+    doc = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="Some prose here.", page_number=1)])
+    chunk = _splitter().chunk(doc, partition="p")[0]
+    assert chunk.text == "Some prose here."
+    assert chunk.header is None
+
+
+def test_header_tokens_come_out_of_the_chunk_size_budget():
+    # The header is embedded with the chunk: left out of the budget, a CHUNK_SIZE
+    # close to the embedder's window pushes the chunk's tail past what gets embedded.
+    prose = " ".join(f"word{i}." for i in range(200))
+    table = "| Col | Val |\n|-----|-----|\n" + "\n".join(f"| Group{i} | {' '.join(['x'] * 5)} |" for i in range(20))
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=f"{prose}\n\n{table}", page_number=1)],
+        metadata={"filename": "a report with a long name.pdf"},
+    )
+    splitter = RecursiveSplitter(chunk_size=60, chunk_overlap_rate=0.2, length_function=_word_tokens)
+    chunks = splitter.chunk(doc, partition="p")
+    assert {ChunkType.TEXT, ChunkType.TABLE} <= {c.chunk_type for c in chunks}
+    assert max(c.token_count for c in chunks) <= 60
+
+
+def test_a_table_that_only_fits_without_the_header_is_split():
+    table = "| Col | Val |\n|-----|-----|\n" + "\n".join(f"| Group{i} | {' '.join(['x'] * 30)} |" for i in range(4))
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=table, page_number=1)],
+        metadata={"filename": "a report with a long name.pdf"},
+    )
+    size = _word_tokens(table) + 1
+    splitter = RecursiveSplitter(chunk_size=size, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    chunks = splitter.chunk(doc, partition="p")
+    assert max(c.token_count for c in chunks) <= size
+
+
+def test_a_filename_longer_than_the_chunk_size_still_indexes():
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="alpha beta gamma delta.", page_number=1)],
+        metadata={"filename": " ".join(["long"] * 30) + ".pdf"},
+    )
+    splitter = RecursiveSplitter(chunk_size=10, chunk_overlap_rate=0.2, length_function=_word_tokens)
+    joined = " ".join(c.content for c in splitter.chunk(doc, partition="p"))
+    assert "alpha" in joined and "delta" in joined
+
+
+def test_a_long_filename_cannot_multiply_the_chunks():
+    # Each chunk costs an embedding and, with contextualization on, an LLM call,
+    # so the name of an upload must not decide how much of that a file gets.
+    def count(filename: str) -> int:
+        doc = ProcessedDocument(
+            document_id="d1",
+            text_blocks=[TextBlock(text=" ".join(f"Sentence{i} here." for i in range(600)), page_number=1)],
+            metadata={"filename": filename},
+        )
+        splitter = RecursiveSplitter(chunk_size=100, chunk_overlap_rate=0.2, length_function=_word_tokens)
+        return len(splitter.chunk(doc, partition="p"))
+
+    assert count(" ".join(["long"] * 500)) <= 2 * count("short.pdf")
+
+
+def _header_for(filename: str) -> str | None:
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="Some prose here.", page_number=1)],
+        metadata={"filename": filename},
+    )
+    return _splitter().chunk(doc, partition="p")[0].header
+
+
+def test_a_name_from_a_url_cannot_fill_the_embedder_window():
+    # MCP index_url takes the name from the URL and never saves under it, so the
+    # filesystem's limit does not apply. Repeated on every chunk, an unbounded
+    # name would leave no room for the body in what gets embedded.
+    assert _header_for("a" * 5000) == f"[Source: {'a' * 255}]"
+
+
+def test_the_longest_name_an_upload_can_have_is_kept_whole():
+    assert _header_for("a" * 251 + ".pdf") == f"[Source: {'a' * 251}.pdf]"
+
+
+def test_a_long_name_is_shortened_so_the_chunk_stays_within_chunk_size():
+    # Past chunk_size the tail of a chunk can fall outside what gets embedded. The
+    # name gives way, not the body: its first words are what a question would match.
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=" ".join(f"Sentence{i} here." for i in range(300)), page_number=1)],
+        metadata={"filename": " ".join(f"w{i}" for i in range(80))},
+    )
+    splitter = RecursiveSplitter(chunk_size=60, chunk_overlap_rate=0.2, length_function=_word_tokens)
+    chunks = splitter.chunk(doc, partition="p")
+    assert max(c.token_count for c in chunks) <= 60
+    assert all(c.text.startswith("[Source: w0 w1 ") for c in chunks)
+
+
+def test_a_chunk_size_too_small_for_any_name_drops_the_header():
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="alpha beta", page_number=1)],
+        metadata={"filename": "report.pdf"},
+    )
+    splitter = RecursiveSplitter(chunk_size=2, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    chunk = splitter.chunk(doc, partition="p")[0]
+    assert chunk.header is None
+    assert chunk.text == "alpha beta"

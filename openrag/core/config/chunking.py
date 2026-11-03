@@ -17,7 +17,7 @@ class ChunkerConfig(ConfigMixin):
     # structure (headings, leaf markers) and prepends the heading path, so a
     # chunk stays self-describing for retrieval instead of being an arbitrary
     # character-window cut. ``recursive_splitter`` remains available for
-    # unstructured prose and for reproducing earlier releases' chunking.
+    # unstructured prose.
     name: str = "structured_section"
     contextual_retrieval: bool = True
     contextualization_timeout: int = 120
