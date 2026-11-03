@@ -186,21 +186,36 @@ class BaseChunker(ChunkingStrategy):
         metadata = self._chunk_metadata_base(document, partition)
         md_chunks = self._get_chunks(content=content.strip(), metadata=metadata)
 
-        return [
-            Chunk(
-                document_id=metadata.get("file_id", ""),
-                text=md_chunks_meta["page_content"],
-                chunk_index=i,
-                chunk_type=ChunkType(md_chunks_meta["chunk_type"]),
-                metadata={k: v for k, v in md_chunks_meta.items() if k not in ("page_content", "chunk_type", "page")},
-                partition=partition,
-                page_number=md_chunks_meta.get("page"),
-                # The embedder-window checks read the stored count instead of
-                # re-tokenising every chunk on the event loop.
-                token_count=self.length_function(md_chunks_meta["page_content"]),
+        # BM25 and the embedder read ``text``, and ``text`` is all the answering
+        # model gets: a name left in metadata cannot be found by a query like
+        # "what is report.pdf about?". No page here, unlike structured_section:
+        # this chunker's text chunks can carry the wrong page (#1204).
+        filename = str(metadata.get("filename") or metadata.get("source") or "")
+        header = f"[Source: {filename}]" if filename else None
+
+        chunks: list[Chunk] = []
+        for i, md_chunks_meta in enumerate(md_chunks):
+            body = md_chunks_meta["page_content"]
+            text = f"{header}\n\n{body}" if header else body
+            chunks.append(
+                Chunk(
+                    document_id=metadata.get("file_id", ""),
+                    text=text,
+                    chunk_index=i,
+                    chunk_type=ChunkType(md_chunks_meta["chunk_type"]),
+                    metadata={
+                        k: v for k, v in md_chunks_meta.items() if k not in ("page_content", "chunk_type", "page")
+                    },
+                    partition=partition,
+                    page_number=md_chunks_meta.get("page"),
+                    # The embedder-window checks read the stored count instead of
+                    # re-tokenising every chunk on the event loop.
+                    token_count=self.length_function(text),
+                    header=header,
+                    content=body if header else None,
+                )
             )
-            for i, md_chunks_meta in enumerate(md_chunks)
-        ]
+        return chunks
 
     # ------------------------------------------------------------------
     # Helpers

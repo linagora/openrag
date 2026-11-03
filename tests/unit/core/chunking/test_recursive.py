@@ -364,3 +364,51 @@ def test_symbol_only_caption_is_not_treated_as_a_placeholder():
 
     assert not is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n©\n\n</image_description>")
     assert is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n   \n\n</image_description>")
+
+
+def _splitter() -> RecursiveSplitter:
+    return RecursiveSplitter(chunk_size=20, chunk_overlap_rate=0.0, length_function=_word_tokens)
+
+
+def test_every_chunk_type_carries_the_filename_in_its_text():
+    # BM25 and the embedder read ``text``, and ``text`` is all the answering
+    # model gets, so a filename left in metadata cannot be found by a query
+    # like "what is report.pdf about?".
+    table = "| Col | Val |\n|-----|-----|\n" + "\n".join(f"| Group{i} | {' '.join(['x'] * 50)} |" for i in range(6))
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=f"Some prose here.\n\n{table}\n\nMore prose.", page_number=1)],
+        metadata={"filename": "report.pdf"},
+    )
+    chunks = _splitter().chunk(doc, partition="p")
+    assert {ChunkType.TEXT, ChunkType.TABLE} <= {c.chunk_type for c in chunks}
+    for c in chunks:
+        assert c.text.startswith("[Source: report.pdf]\n\n")
+
+
+def test_header_and_content_are_stored_apart_from_the_text():
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="Some prose here.", page_number=1)],
+        metadata={"filename": "report.pdf"},
+    )
+    chunk = _splitter().chunk(doc, partition="p")[0]
+    assert chunk.header == "[Source: report.pdf]"
+    assert chunk.content == "Some prose here."
+    assert chunk.token_count == _word_tokens(chunk.text)
+
+
+def test_header_falls_back_to_source_when_there_is_no_filename():
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="Some prose here.", page_number=1)],
+        metadata={"source": "notes.md"},
+    )
+    assert _splitter().chunk(doc, partition="p")[0].text == "[Source: notes.md]\n\nSome prose here."
+
+
+def test_no_header_when_the_document_has_no_name():
+    doc = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="Some prose here.", page_number=1)])
+    chunk = _splitter().chunk(doc, partition="p")[0]
+    assert chunk.text == "Some prose here."
+    assert chunk.header is None
