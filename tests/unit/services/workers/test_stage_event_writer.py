@@ -104,9 +104,11 @@ async def test_writer_drops_failed_batch_on_shutdown_without_raising() -> None:
 
     await writer.close()
 
-    assert len(repo.calls) == 2
+    assert len(repo.calls) == 3
     assert writer.write_failures == 1
     assert writer.dropped_events == 1
+    assert repo.calls[2][0] == []
+    assert repo.calls[2][1][0].known_loss is True
 
 
 @pytest.mark.parametrize("sqlstate", ["22003", "23514"])
@@ -209,11 +211,49 @@ async def test_permanent_summary_failure_queues_one_sanitized_loss_marker() -> N
     assert loss_marker.current_stage_id is None
     assert loss_marker.phase is StageTaskPhase.PREPARING
 
+    repo.error = None
     await writer._write_batch([], [writer._summaries.pop("summary-data-error")])
 
     assert len(repo.calls) == 2
+    persisted_marker = repo.calls[1][1][0]
+    assert persisted_marker.known_loss is True
+    assert persisted_marker.current_stage_id is None
     assert writer.pending_summaries == {}
     assert writer.write_retries == 0
+
+
+@pytest.mark.asyncio
+async def test_summary_queue_overflow_persists_loss_marker_for_evicted_task() -> None:
+    class RecordingRepo(_Repo):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wrote_batch = asyncio.Event()
+
+        async def write_stage_progress(self, *, events, summaries):
+            await super().write_stage_progress(events=events, summaries=summaries)
+            self.wrote_batch.set()
+            return StageProgressWriteResult()
+
+    repo = RecordingRepo()
+    writer = StageEventWriter(repo, queue_capacity=1, shutdown_timeout=0.1)
+    evicted_summary = _summary("evicted-summary", 5).model_copy(update={"attempt": 2})
+    writer._put_latest_summary(evicted_summary)
+    writer._put_latest_summary(_summary("incoming-summary", 1))
+
+    marker = writer.pending_summaries["evicted-summary"]
+    assert marker.known_loss is True
+    assert marker.attempt == evicted_summary.attempt
+    assert marker.latest_sequence == evicted_summary.latest_sequence
+    assert len(writer._summaries) == 1
+    assert len(writer._summary_overflow_markers) == 1
+
+    writer._writer_task = asyncio.create_task(writer._run_writer())
+    await asyncio.wait_for(repo.wrote_batch.wait(), timeout=0.1)
+    await writer.close()
+
+    persisted_summaries = [summary for _, batch in repo.calls for summary in batch]
+    assert marker in persisted_summaries
+    assert writer.pending_summaries == {}
 
 
 @pytest.mark.asyncio
@@ -393,6 +433,51 @@ async def test_repeated_timeout_splits_batch_before_retrying_older_events() -> N
 
 
 @pytest.mark.asyncio
+async def test_single_event_timeout_is_dropped_after_bounded_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StuckEventRepo:
+        def __init__(self) -> None:
+            self.calls = []
+            self.newer_event_persisted = asyncio.Event()
+
+        async def write_stage_progress(self, *, events, summaries):
+            self.calls.append((list(events), list(summaries)))
+            if any(event.task_id == "stuck-event" for event in events):
+                await asyncio.Event().wait()
+            if any(event.task_id == "newer-event" for event in events):
+                self.newer_event_persisted.set()
+            return StageProgressWriteResult()
+
+    repo = StuckEventRepo()
+    monkeypatch.setattr(stage_event_writer_module, "_MIN_STAGE_WRITE_TIMEOUT", 0.001)
+    writer = StageEventWriter(
+        repo,
+        batch_size=1,
+        queue_capacity=4,
+        retry_delay=0,
+        retry_max_delay=0,
+        flush_interval=10,
+    )
+    stuck_event = _transition("stuck-event", 1)
+    writer._events.extend([stuck_event, _transition("newer-event", 1)])
+    writer._event_ready.set()
+    writer._writer_task = asyncio.create_task(writer._run_writer())
+
+    await asyncio.wait_for(repo.newer_event_persisted.wait(), timeout=1.0)
+    await writer.close()
+
+    stuck_writes = [events for events, _ in repo.calls if any(event.task_id == "stuck-event" for event in events)]
+    assert len(stuck_writes) == 6
+    assert writer.dropped_events == 1
+    assert "stuck-event" in writer._known_incomplete
+    assert any(
+        summary.task_id == "stuck-event" and summary.known_loss
+        for events, summaries in repo.calls
+        if any(event.task_id == "newer-event" for event in events)
+        for summary in summaries
+    )
+
+
+@pytest.mark.asyncio
 async def test_writer_scales_write_deadline_with_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _Repo()
     writer = StageEventWriter(repo, batch_size=32, write_timeout=0.075)
@@ -447,16 +532,25 @@ async def test_summary_only_write_failure_is_retained_for_retry(monkeypatch: pyt
 
 @pytest.mark.asyncio
 async def test_failed_batch_requeues_older_events_and_marks_overflow_loss() -> None:
-    writer = StageEventWriter(_Repo(error=RuntimeError("database unavailable")), queue_capacity=1, retry_delay=0)
-    writer._events.append(_transition("newer-task", 1))
-    writer._summaries["newer-task"] = _summary("newer-task", 1)
+    repo = _Repo(error=RuntimeError("database unavailable"))
+    writer = StageEventWriter(repo, queue_capacity=2, retry_delay=0)
+    writer._events.extend([_transition("retained-task", 1), _transition("newer-task", 1)])
 
     await writer._write_batch([_transition("older-task", 1)], [_summary("older-task", 1)])
 
-    assert [event.task_id for event in writer._events] == ["older-task"]
+    assert [event.task_id for event in writer._events] == ["older-task", "retained-task"]
     assert writer.dropped_events == 1
     assert "newer-task" in writer._known_incomplete
+    assert writer.pending_summaries["newer-task"].known_loss is True
     assert writer.pending_summaries["older-task"].known_loss is False
+    assert writer.pending_summaries["newer-task"].latest_sequence == 0
+    assert writer.pending_summaries["newer-task"].snapshot_revision == 0
+
+    repo.error = None
+    await writer._write_batch([], [writer._summaries.pop("newer-task")])
+
+    assert repo.calls[-1][1][0].task_id == "newer-task"
+    assert repo.calls[-1][1][0].known_loss is True
 
 
 @pytest.mark.asyncio
@@ -570,6 +664,75 @@ async def test_writer_marks_batch_lost_when_cancelled_during_retry_delay(
     assert tracker.summary().known_loss is True
     assert "task-1" in writer._known_incomplete
     assert drops == [("shutdown", 1)]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_persists_loss_marker_for_cancelled_event_only_batch() -> None:
+    class CancelledWriteRepo:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.calls = []
+
+        async def write_stage_progress(self, *, events, summaries):
+            self.calls.append((list(events), list(summaries)))
+            if events:
+                self.started.set()
+                await asyncio.Event().wait()
+            return StageProgressWriteResult()
+
+    repo = CancelledWriteRepo()
+    writer = StageEventWriter(repo, flush_interval=10, shutdown_timeout=0.01)
+    event = _transition("cancelled-event-only", 1).model_copy(update={"attempt": 2})
+    writer._events.append(event)
+    writer._event_ready.set()
+    writer._writer_task = asyncio.create_task(writer._run_writer())
+
+    await asyncio.wait_for(repo.started.wait(), timeout=0.1)
+    started = asyncio.get_running_loop().time()
+    await writer.close()
+
+    assert asyncio.get_running_loop().time() - started < 0.1
+    assert len(repo.calls) == 2
+    assert repo.calls[1][0] == []
+    (loss_marker,) = repo.calls[1][1]
+    assert loss_marker.task_id == event.task_id
+    assert loss_marker.attempt == event.attempt
+    assert loss_marker.known_loss is True
+    assert loss_marker.latest_sequence == 0
+    assert loss_marker.snapshot_revision == 0
+    assert loss_marker.current_stage_id is None
+    assert writer.pending_summaries == {}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retries_cancelled_loss_marker_before_returning() -> None:
+    class CancelledMarkerRepo:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.calls = []
+
+        async def write_stage_progress(self, *, events, summaries):
+            self.calls.append((list(events), list(summaries)))
+            if len(self.calls) == 1:
+                self.started.set()
+                await asyncio.Event().wait()
+            return StageProgressWriteResult()
+
+    repo = CancelledMarkerRepo()
+    writer = StageEventWriter(repo, flush_interval=10, shutdown_timeout=0.01)
+    marker = _summary("cancelled-loss-marker", 1).model_copy(update={"known_loss": True})
+    writer._put_latest_summary(marker)
+    writer._writer_task = asyncio.create_task(writer._run_writer())
+
+    await asyncio.wait_for(repo.started.wait(), timeout=0.1)
+    await writer.close()
+
+    assert len(repo.calls) == 2
+    assert repo.calls[1][0] == []
+    (persisted_marker,) = repo.calls[1][1]
+    assert persisted_marker.task_id == marker.task_id
+    assert persisted_marker.known_loss is True
+    assert writer.pending_summaries == {}
 
 
 @pytest.mark.asyncio

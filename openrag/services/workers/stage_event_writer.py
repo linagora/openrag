@@ -8,6 +8,7 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Callable, Sequence
 from typing import Any
+from uuid import UUID
 
 from core.models.stage_progress import (
     StageProgressEvent,
@@ -31,6 +32,7 @@ _MIN_STAGE_WRITE_TIMEOUT = 1.0
 _PERMANENT_POSTGRES_ERROR_CLASSES = frozenset({"22", "23"})
 _MAX_POSTGRES_INTEGER = 2**31 - 1
 _MAX_POSTGRES_BIGINT = 2**63 - 1
+_MAX_SINGLE_EVENT_TIMEOUTS = 3
 
 
 def _is_permanent_write_error(error: Exception) -> bool:
@@ -94,6 +96,7 @@ class StageEventWriter:
 
         self._events: deque[StageProgressEvent] = deque()
         self._summaries: OrderedDict[str, StageProgressSummary] = OrderedDict()
+        self._summary_overflow_markers: OrderedDict[str, StageProgressSummary] = OrderedDict()
         self._live_pending: OrderedDict[str, StageProgressWorkerSnapshot] = OrderedDict()
         self._trackers: dict[str, StageTracker] = {}
         self._terminal: OrderedDict[str, tuple[float, StageProgressWorkerSnapshot]] = OrderedDict()
@@ -113,6 +116,7 @@ class StageEventWriter:
         self._unacknowledged_terminal_evictions = 0
         self._pending_ack: OrderedDict[tuple[str, int], None] = OrderedDict()
         self._known_incomplete: OrderedDict[str, None] = OrderedDict()
+        self._single_event_timeouts: dict[UUID, int] = {}
 
     @property
     def queued_event_count(self) -> int:
@@ -120,7 +124,19 @@ class StageEventWriter:
 
     @property
     def pending_summaries(self) -> dict[str, StageProgressSummary]:
-        return dict(self._summaries)
+        pending = dict(self._summaries)
+        for task_id, marker in self._summary_overflow_markers.items():
+            summary = pending.get(task_id)
+            if summary is None or _summary_order(marker) > _summary_order(summary):
+                pending[task_id] = marker
+            elif not summary.known_loss:
+                pending[task_id] = summary.model_copy(
+                    update={
+                        "known_loss": True,
+                        "snapshot_revision": max(summary.snapshot_revision, marker.snapshot_revision),
+                    }
+                )
+        return pending
 
     @property
     def dropped_events(self) -> int:
@@ -242,19 +258,53 @@ class StageEventWriter:
                 _, pending = await asyncio.wait(pending, timeout=0.01)
                 for task in pending:
                     task.add_done_callback(_consume_task_result)
-        if self._events:
-            pending_events = tuple(self._events)
-            self._dropped_events += len(pending_events)
-            record_stage_event_drop("shutdown", len(pending_events))
-            for task_id in {event.task_id for event in pending_events}:
-                self._mark_snapshot_loss(task_id)
-            self._events.clear()
-            set_stage_event_queue_size(0)
-        if self._summaries:
-            for summary in self._summaries.values():
-                self._mark_snapshot_loss(summary.task_id)
-            self._summaries.clear()
+        pending_events = tuple(self._events)
+        pending_summaries = tuple(self.pending_summaries.values())
+        self._events.clear()
+        set_stage_event_queue_size(0)
+        event_task_ids = {event.task_id for event in pending_events}
+        if event_task_ids:
+            self._drop_permanently_failed_tasks(
+                event_task_ids,
+                pending_events,
+                pending_summaries,
+                reason="shutdown",
+            )
+        summary_only = [summary for summary in pending_summaries if summary.task_id not in event_task_ids]
+        if summary_only:
+            self._drop_permanently_failed_tasks(
+                {summary.task_id for summary in summary_only},
+                [],
+                summary_only,
+                reason="shutdown",
+            )
+        await self._flush_shutdown_loss_markers()
         self._refresh_metrics()
+
+    async def _flush_shutdown_loss_markers(self) -> None:
+        markers = [summary for summary in self.pending_summaries.values() if summary.known_loss]
+        if not markers:
+            return
+        try:
+            await asyncio.wait_for(
+                self._persist_shutdown_loss_markers(markers),
+                timeout=min(_MIN_STAGE_WRITE_TIMEOUT, self._shutdown_timeout),
+            )
+        except Exception:  # noqa: BLE001 - shutdown persistence is best-effort and bounded
+            logger.warning("Unable to persist all indexing stage history loss markers during shutdown")
+
+    async def _persist_shutdown_loss_markers(self, markers: Sequence[StageProgressSummary]) -> None:
+        for offset in range(0, len(markers), self._max_batch_size):
+            batch = markers[offset : offset + self._max_batch_size]
+            result = await self._job_repo.write_stage_progress(events=[], summaries=batch)
+            failed_task_ids: set[str] = set()
+            if isinstance(result, StageProgressWriteResult):
+                failed_task_ids.update(result.permanent_failed_task_ids)
+                failed_task_ids.update(result.missing_parent_task_ids)
+            for summary in batch:
+                if summary.task_id not in failed_task_ids:
+                    self._summaries.pop(summary.task_id, None)
+                    self._summary_overflow_markers.pop(summary.task_id, None)
 
     def _ensure_started(self) -> bool:
         if self._writer_task is not None:
@@ -271,15 +321,56 @@ class StageEventWriter:
 
     def _put_latest_summary(self, summary: StageProgressSummary) -> None:
         previous = self._summaries.get(summary.task_id)
+        overflow_marker = self._summary_overflow_markers.get(summary.task_id)
+        if overflow_marker is not None and (
+            previous is None or _summary_order(overflow_marker) > _summary_order(previous)
+        ):
+            previous = overflow_marker
         if previous is None or _summary_order(summary) >= _summary_order(previous):
-            if previous is None and len(self._summaries) >= self._queue_capacity:
-                evicted_task_id, _ = self._summaries.popitem(last=False)
+            if previous is not None and previous.known_loss and not summary.known_loss:
+                summary = summary.model_copy(
+                    update={
+                        "known_loss": True,
+                        "snapshot_revision": max(summary.snapshot_revision, previous.snapshot_revision),
+                    }
+                )
+            self._summary_overflow_markers.pop(summary.task_id, None)
+            if summary.task_id not in self._summaries and len(self._summaries) >= self._queue_capacity:
+                evicted_task_id, evicted_summary = self._summaries.popitem(last=False)
                 self._dropped_summaries += 1
                 record_stage_event_drop("summary_overflow")
                 self._mark_snapshot_loss(evicted_task_id)
                 self._remember_incomplete(evicted_task_id)
+                self._queue_summary_overflow_marker(evicted_summary)
             self._summaries[summary.task_id] = summary
             self._summaries.move_to_end(summary.task_id)
+        self._event_ready.set()
+
+    def _queue_summary_overflow_marker(self, summary: StageProgressSummary) -> None:
+        task_id = summary.task_id
+        candidates = [summary]
+        previous = self._summary_overflow_markers.get(task_id)
+        if previous is not None:
+            candidates.append(previous)
+        snapshot = self.snapshot_for_task(task_id)
+        if snapshot is not None:
+            candidates.append(snapshot.summary)
+        latest = max(candidates, key=_summary_order)
+        if not latest.known_loss:
+            latest = latest.model_copy(
+                update={
+                    "known_loss": True,
+                    "snapshot_revision": min(latest.snapshot_revision + 1, _MAX_POSTGRES_BIGINT),
+                }
+            )
+        if previous is None and len(self._summary_overflow_markers) >= self._queue_capacity:
+            evicted_task_id, _ = self._summary_overflow_markers.popitem(last=False)
+            self._dropped_summaries += 1
+            record_stage_event_drop("summary_overflow")
+            self._mark_snapshot_loss(evicted_task_id)
+            self._remember_incomplete(evicted_task_id)
+        self._summary_overflow_markers[task_id] = latest
+        self._summary_overflow_markers.move_to_end(task_id)
         self._event_ready.set()
 
     def _put_live_snapshot(
@@ -334,7 +425,7 @@ class StageEventWriter:
 
     async def _run_writer(self) -> None:
         while True:
-            if not self._events and not self._summaries:
+            if not self._events and not self._summaries and not self._summary_overflow_markers:
                 if self._closing:
                     return
                 self._event_ready.clear()
@@ -346,13 +437,22 @@ class StageEventWriter:
             events = [self._events.popleft() for _ in range(min(self._batch_size, len(self._events)))]
             set_stage_event_queue_size(len(self._events))
             task_ids = {event.task_id for event in events}
-            summaries: list[StageProgressSummary] = []
-            for task_id in tuple(self._summaries):
-                if task_id in task_ids or len(summaries) < self._batch_size:
-                    summaries.append(self._summaries.pop(task_id))
-                    task_ids.add(task_id)
-                if len(summaries) == self._batch_size:
+            summaries_by_task: OrderedDict[str, StageProgressSummary] = OrderedDict()
+            for queue in (self._summary_overflow_markers, self._summaries):
+                if len(summaries_by_task) == self._batch_size:
                     break
+                for task_id in tuple(queue):
+                    if task_id in task_ids or len(summaries_by_task) < self._batch_size:
+                        summary = queue.pop(task_id)
+                        previous = summaries_by_task.get(task_id)
+                        if previous is None or _summary_order(summary) >= _summary_order(previous):
+                            if previous is not None and previous.known_loss and not summary.known_loss:
+                                summary = summary.model_copy(update={"known_loss": True})
+                            summaries_by_task[task_id] = summary
+                        task_ids.add(task_id)
+                    if len(summaries_by_task) == self._batch_size:
+                        break
+            summaries = list(summaries_by_task.values())
             if events or summaries:
                 succeeded = await self._write_batch(events, summaries)
                 if not succeeded:
@@ -363,7 +463,7 @@ class StageEventWriter:
                     await asyncio.sleep(delay)
             self._refresh_metrics()
             self._expire_terminal()
-            if self._closing and not self._events and not self._summaries:
+            if self._closing and not self._events and not self._summaries and not self._summary_overflow_markers:
                 return
 
     async def _write_batch(
@@ -414,8 +514,37 @@ class StageEventWriter:
                     continue
                 self._write_failures += 1
                 record_stage_event_write("failure", duration)
+                if isinstance(exc, TimeoutError) and len(events) == 1:
+                    event = events[0]
+                    timeout_count = self._single_event_timeouts.get(event.event_id, 0) + 1
+                    self._single_event_timeouts[event.event_id] = timeout_count
+                    if timeout_count >= _MAX_SINGLE_EVENT_TIMEOUTS:
+                        task_summaries = [summary for summary in summaries if summary.task_id == event.task_id]
+                        for summary in summaries:
+                            if summary.task_id != event.task_id:
+                                self._put_latest_summary(summary)
+                        self._drop_permanently_failed_tasks(
+                            {event.task_id},
+                            events,
+                            task_summaries,
+                            reason="write_timeout",
+                        )
+                        logger.warning(
+                            "Indexing stage event exceeded its retry limit; marked its history incomplete",
+                            task_id=event.task_id,
+                        )
+                        self._refresh_metrics()
+                        return True
+                else:
+                    for event in events:
+                        self._single_event_timeouts.pop(event.event_id, None)
                 if self._closing:
-                    self._drop_failed_batch(events, summaries, reason="shutdown")
+                    self._drop_permanently_failed_tasks(
+                        {event.task_id for event in events} | {summary.task_id for summary in summaries},
+                        events,
+                        summaries,
+                        reason="shutdown",
+                    )
                 else:
                     self._write_retries += 1
                     record_stage_event_write("retry", duration)
@@ -427,6 +556,8 @@ class StageEventWriter:
 
             duration = time.perf_counter() - started
             record_stage_event_write("success", duration)
+            for event in events:
+                self._single_event_timeouts.pop(event.event_id, None)
             self._next_retry_delay = min(self._retry_delay, self._retry_max_delay)
             if self._batch_size < self._max_batch_size:
                 self._batch_size += 1
@@ -484,20 +615,25 @@ class StageEventWriter:
         task_ids: set[str],
         events: Sequence[StageProgressEvent],
         summaries: Sequence[StageProgressSummary],
+        *,
+        reason: str = "write_failed",
     ) -> None:
         batch_task_ids = {event.task_id for event in events} | {summary.task_id for summary in summaries}
         for task_id in sorted(task_ids & batch_task_ids):
             task_events = [event for event in events if event.task_id == task_id]
             task_summaries = [summary for summary in summaries if summary.task_id == task_id]
             was_loss_marker = bool(task_summaries) and all(summary.known_loss for summary in task_summaries)
-            self._drop_failed_batch(task_events, task_summaries, reason="write_failed")
-            if not task_events and was_loss_marker:
+            self._drop_failed_batch(task_events, task_summaries, reason=reason)
+            if not task_events and was_loss_marker and reason == "write_failed":
                 continue
 
             candidates = list(task_summaries)
             pending = self._summaries.get(task_id)
             if pending is not None:
                 candidates.append(pending)
+            overflow_marker = self._summary_overflow_markers.get(task_id)
+            if overflow_marker is not None:
+                candidates.append(overflow_marker)
             snapshot = self.snapshot_for_task(task_id)
             if snapshot is not None:
                 candidates.append(snapshot.summary)
@@ -525,6 +661,16 @@ class StageEventWriter:
             if task_events and not task_summaries:
                 next_revision = min(summary.snapshot_revision + 1, _MAX_POSTGRES_BIGINT)
                 loss_summary = summary.model_copy(update={"known_loss": True, "snapshot_revision": next_revision})
+            elif reason != "write_failed":
+                loss_summary = summary.model_copy(
+                    update={
+                        "known_loss": True,
+                        "snapshot_revision": min(
+                            summary.snapshot_revision + int(not summary.known_loss),
+                            _MAX_POSTGRES_BIGINT,
+                        ),
+                    }
+                )
             else:
                 # A summary-only batch may itself contain out-of-range or
                 # schema-incompatible fields. Preserve its bounded counters,
@@ -569,15 +715,61 @@ class StageEventWriter:
             self._dropped_events += len(dropped_events)
             record_stage_event_drop("queue_full", len(dropped_events))
             for task_id in dropped_task_ids:
-                self._mark_snapshot_loss(task_id)
+                self._queue_loss_marker_for_events(
+                    task_id,
+                    [event for event in dropped_events if event.task_id == task_id],
+                    summaries,
+                )
+            for event in dropped_events:
+                self._single_event_timeouts.pop(event.event_id, None)
 
         for summary in summaries:
             if summary.task_id in dropped_task_ids and not summary.known_loss:
                 summary = summary.model_copy(
-                    update={"known_loss": True, "snapshot_revision": summary.snapshot_revision + 1}
+                    update={
+                        "known_loss": True,
+                        "snapshot_revision": min(summary.snapshot_revision + 1, _MAX_POSTGRES_BIGINT),
+                    }
                 )
             self._put_latest_summary(summary)
         self._event_ready.set()
+
+    def _queue_loss_marker_for_events(
+        self,
+        task_id: str,
+        events: Sequence[StageProgressEvent],
+        summaries: Sequence[StageProgressSummary] = (),
+    ) -> None:
+        self._mark_snapshot_loss(task_id)
+        latest_event = max(events, key=lambda event: (event.attempt, event.sequence))
+        candidates = [summary for summary in summaries if summary.task_id == task_id]
+        pending = self._summaries.get(task_id)
+        if pending is not None:
+            candidates.append(pending)
+        overflow_marker = self._summary_overflow_markers.get(task_id)
+        if overflow_marker is not None:
+            candidates.append(overflow_marker)
+        snapshot = self.snapshot_for_task(task_id)
+        if snapshot is not None:
+            candidates.append(snapshot.summary)
+        summary = max(candidates, key=_summary_order) if candidates else None
+        if summary is None or summary.attempt < latest_event.attempt:
+            loss_marker = StageProgressSummary(
+                task_id=task_id,
+                attempt=latest_event.attempt,
+                phase=StageTaskPhase.PREPARING,
+                known_loss=True,
+            )
+        elif summary.known_loss:
+            loss_marker = summary
+        else:
+            loss_marker = summary.model_copy(
+                update={
+                    "known_loss": True,
+                    "snapshot_revision": min(summary.snapshot_revision + 1, _MAX_POSTGRES_BIGINT),
+                }
+            )
+        self._put_latest_summary(loss_marker)
 
     def _drop_failed_batch(
         self,
@@ -588,6 +780,8 @@ class StageEventWriter:
     ) -> None:
         if events:
             self._dropped_events += len(events)
+            for event in events:
+                self._single_event_timeouts.pop(event.event_id, None)
         record_stage_event_drop(reason, len(events) or len(summaries))
         affected_attempts = {(event.task_id, event.attempt) for event in events}
         affected_attempts.update((summary.task_id, summary.attempt) for summary in summaries)
@@ -602,18 +796,24 @@ class StageEventWriter:
         events: Sequence[StageProgressEvent],
         summaries: Sequence[StageProgressSummary],
     ) -> None:
-        self._dropped_events += len(events)
-        record_stage_event_drop("shutdown", len(events) or len(summaries))
-        for task_id in {event.task_id for event in events} | {summary.task_id for summary in summaries}:
-            self._mark_snapshot_loss(task_id)
+        self._drop_permanently_failed_tasks(
+            {event.task_id for event in events} | {summary.task_id for summary in summaries},
+            events,
+            summaries,
+            reason="shutdown",
+        )
 
     def _mark_snapshot_loss(self, task_id: str) -> None:
         self._remember_incomplete(task_id)
-        summary = self._summaries.get(task_id)
-        if summary is not None and not summary.known_loss:
-            self._summaries[task_id] = summary.model_copy(
-                update={"known_loss": True, "snapshot_revision": summary.snapshot_revision + 1}
-            )
+        for summaries in (self._summaries, self._summary_overflow_markers):
+            summary = summaries.get(task_id)
+            if summary is not None and not summary.known_loss:
+                summaries[task_id] = summary.model_copy(
+                    update={
+                        "known_loss": True,
+                        "snapshot_revision": min(summary.snapshot_revision + 1, _MAX_POSTGRES_BIGINT),
+                    }
+                )
         for tracker in (self._trackers.get(task_id),):
             if tracker is not None:
                 tracker.mark_loss()
@@ -622,7 +822,10 @@ class StageEventWriter:
             expires_at, snapshot = terminal
             if not snapshot.summary.known_loss:
                 summary = snapshot.summary.model_copy(
-                    update={"known_loss": True, "snapshot_revision": snapshot.summary.snapshot_revision + 1}
+                    update={
+                        "known_loss": True,
+                        "snapshot_revision": min(snapshot.summary.snapshot_revision + 1, _MAX_POSTGRES_BIGINT),
+                    }
                 )
                 snapshot = snapshot.model_copy(update={"summary": summary})
                 self._terminal[task_id] = (expires_at, snapshot)
@@ -691,6 +894,7 @@ class StageEventWriter:
         pending = set(self._pending_ack)
         pending.update((event.task_id, event.attempt) for event in self._events)
         pending.update((summary.task_id, summary.attempt) for summary in self._summaries.values())
+        pending.update((summary.task_id, summary.attempt) for summary in self._summary_overflow_markers.values())
         set_stage_history_counts(pending=len(pending), incomplete=len(self._known_incomplete))
 
     def _remember_incomplete(self, task_id: str) -> None:

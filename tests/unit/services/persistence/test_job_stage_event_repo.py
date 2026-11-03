@@ -143,9 +143,21 @@ async def test_permanent_task_error_does_not_roll_back_other_task_writes(monkeyp
         async def __aexit__(self, *_args):
             return False
 
+    class _Transaction:
+        async def __aenter__(self):
+            self.inserted_count = len(inserted_tasks)
+            self.summary_count = len(persisted_summaries)
+            return self
+
+        async def __aexit__(self, exc_type, *_args):
+            if exc_type is not None:
+                del inserted_tasks[self.inserted_count :]
+                del persisted_summaries[self.summary_count :]
+            return False
+
     class _Connection:
         def transaction(self):
-            return _Context()
+            return _Transaction()
 
         async def fetchrow(self, _query: str, *args: object):
             return {"id": args[0]}
@@ -164,11 +176,11 @@ async def test_permanent_task_error_does_not_roll_back_other_task_writes(monkeyp
         def acquire(self):
             return _ContextWithValue(_Connection())
 
-    def event_for(task_id: str) -> StageProgressEvent:
+    def event_for(task_id: str, sequence: int = 1) -> StageProgressEvent:
         return StageProgressEvent(
             task_id=task_id,
             attempt=1,
-            sequence=1,
+            sequence=sequence,
             invocation_id=uuid4(),
             stage_id="parse",
             status=StageEventStatus.STARTED,
@@ -179,7 +191,7 @@ async def test_permanent_task_error_does_not_roll_back_other_task_writes(monkeyp
         return StageProgressSummary(task_id=task_id)
 
     async def insert_event(_connection, event):
-        if event.task_id == "invalid-task":
+        if event.task_id == "invalid-task" and event.sequence == 2:
             raise asyncpg.NumericValueOutOfRangeError("duration is outside BIGINT range")
         inserted_tasks.append(event.task_id)
         return False
@@ -200,7 +212,7 @@ async def test_permanent_task_error_does_not_roll_back_other_task_writes(monkeyp
     repo = PgJobRepository(lambda: _Pool())
 
     result = await repo.write_stage_progress(
-        events=[event_for("invalid-task"), event_for("valid-task")],
+        events=[event_for("invalid-task", 1), event_for("invalid-task", 2), event_for("valid-task")],
         summaries=[summary_for("invalid-task"), summary_for("valid-task")],
     )
 
