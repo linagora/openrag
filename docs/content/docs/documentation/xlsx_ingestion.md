@@ -24,7 +24,7 @@ Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a
 
 ## Table detection
 
-OpenRAG detects independent table regions from content-bearing cells during its bounded OOXML preflight. A fully blank row or column separates ordinary cell ranges. Source-defined Excel Tables are also treated as authoritative regions, so two Excel Tables remain independent even when their populated areas touch horizontally or vertically. Tables may therefore be stacked, placed side by side, or start away from `A1`, such as at `L30`.
+OpenRAG detects independent table regions from content-bearing cells during its bounded OOXML preflight. A fully blank row or column separates ordinary cell ranges. A single later row with the same column span as a preceding table is retained as a sparse continuation rather than being lost as a header-only table. Source-defined Excel Tables are also treated as authoritative regions, so two Excel Tables remain independent even when their populated areas touch horizontally or vertically. Tables may therefore be stacked, placed side by side, or start away from `A1`, such as at `L30`.
 
 Every detected table is extracted and chunked independently. Its metadata includes:
 
