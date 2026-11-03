@@ -5,10 +5,12 @@ The fake client applies a partial upsert like Milvus: named fields change, other
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from core.chunking.recursive import source_header
 from core.prompts.contextualization_builder import wrap_chunk_with_context
 from pymilvus import MilvusException
 from services.persistence.migrations.milvus import backfill_chunk_headers as backfill
@@ -57,12 +59,15 @@ class _FakeClient:
             self.written.append(entity)
             self.rows[entity["_id"]].update(entity)
 
+    def query(self, collection_name, filter, output_fields, limit):
+        return [row for row in self.rows.values() if f'partition == "{row.get("partition")}"' == filter][:limit]
+
     def flush(self, collection_name):
         self.flushed += 1
 
 
 def _run(client: _FakeClient, **kwargs: Any):
-    return backfill.run(client, "c", length_function=_words, **kwargs)
+    return backfill.run(client, "c", length_function=_words, chunk_size=512, **kwargs)
 
 
 def _row(chunk_id: int = 1, **fields: Any) -> dict[str, Any]:
@@ -92,10 +97,15 @@ def test_adds_the_header_to_text_and_nothing_else():
 @pytest.mark.parametrize(
     "fields",
     [
-        pytest.param({"header": "[Source: report.pdf | Page: 3]"}, id="already-has-a-header"),
+        pytest.param(
+            {"header": "[Source: report.pdf | Page: 3]", "text": "[Source: report.pdf | Page: 3]\n\nbody"},
+            id="already-has-a-header",
+        ),
         pytest.param({"text": wrap_chunk_with_context("body", "report.pdf", "a context")}, id="contextualized"),
         pytest.param({"text": wrap_chunk_with_context("body", "report.pdf")}, id="contextualization-failed"),
         pytest.param({"content": "alpha beta"}, id="prepend-heading-path-off"),
+        pytest.param({"content": "alpha"}, id="prepend-heading-path-off-content-cut-short"),
+        pytest.param({"content": "alpha beta gamma"}, id="prepend-heading-path-off-text-cut-short"),
     ],
 )
 def test_leaves_chunks_that_already_name_their_file(fields):
@@ -128,6 +138,43 @@ def test_a_chunk_without_a_filename_is_counted_not_guessed():
 
     assert client.written == []
     assert stats["no_filename"] == 1
+
+
+@pytest.mark.parametrize(
+    ("fields", "kept"),
+    [
+        pytest.param({"header": "Q3 report"}, {"header": "Q3 report"}, id="header"),
+        pytest.param({"content": "a summary"}, {"content": "a summary", "header": None}, id="content"),
+    ],
+)
+def test_upload_metadata_named_like_a_chunk_field_does_not_block_the_header(fields, kept):
+    original = _row(token_count=2, **fields)
+    client = _FakeClient([original])
+
+    assert _run(client)["changed"] == 1
+    assert client.rows[1]["text"] == "[Source: report.pdf]\n\nalpha beta"
+    assert client.rows[1].get("content") == fields.get("content")
+    assert client.rows[1]["header"] == fields.get("header", "[Source: report.pdf]")
+    assert _run(client)["changed"] == 0
+
+    assert _run(client, revert=True)["changed"] == 1
+    assert client.rows[1]["text"] == original["text"]
+    assert client.rows[1]["token_count"] == original["token_count"]
+    assert {key: client.rows[1].get(key) for key in kept} == kept
+
+
+def test_a_long_filename_is_shortened_as_on_new_chunks():
+    name = "x" * 1000
+    client = _FakeClient([_row(filename=name)])
+
+    _run(client)
+
+    header = client.written[0]["header"]
+    assert header == source_header(name, 512, _words)
+    assert len(header) < len(name)
+    assert _run(client)["changed"] == 0
+    assert _run(client, revert=True)["changed"] == 1
+    assert client.rows[1]["text"] == "alpha beta"
 
 
 def test_running_it_again_changes_nothing():
@@ -228,6 +275,25 @@ def test_partition_filter_keeps_non_ascii_raw():
     assert client.filters == ['partition in ["team📁"]']
 
 
+def test_an_unknown_partition_stops_before_anything_is_written(monkeypatch):
+    client = _FakeClient([_row(partition="known")])
+    client.has_collection = lambda name: True
+    monkeypatch.setattr("sys.argv", ["backfill", "--partition", "known", "--partition", "typo"])
+    monkeypatch.setattr(backfill, "MilvusClient", lambda uri: client)
+    monkeypatch.setattr(backfill, "get_num_tokens", lambda: _words)
+    config = SimpleNamespace(
+        vectordb=SimpleNamespace(host="h", port=1, collection_name="c"), chunker=SimpleNamespace(chunk_size=512)
+    )
+    monkeypatch.setattr(backfill, "load_config", lambda: config)
+
+    with pytest.raises(SystemExit) as exit_info:
+        backfill.main()
+
+    assert exit_info.value.code == 1
+    assert client.iterators == []
+    assert client.upsert_calls == 0
+
+
 def test_reads_page_by_page():
     client = _FakeClient([_row(i) for i in range(1, 6)])
 
@@ -254,9 +320,16 @@ def test_revert_restores_what_it_changed():
     assert _run(client)["changed"] == 1
 
 
-def test_revert_leaves_headers_a_chunker_wrote():
-    text = "[Source: report.pdf | Page: 3]\n\nbody"
-    client = _FakeClient([_row(text=text, header="[Source: report.pdf | Page: 3]", content="body")])
+@pytest.mark.parametrize(
+    ("header", "content"),
+    [
+        pytest.param("[Source: report.pdf | Page: 3]", "body", id="structured-section"),
+        pytest.param("[Source: report.pdf]", "body", id="recursive-splitter"),
+        pytest.param("[Source: report.pdf]", "bo", id="content-cut-short"),
+    ],
+)
+def test_revert_leaves_headers_a_chunker_wrote(header, content):
+    client = _FakeClient([_row(text=f"{header}\n\nbody", header=header, content=content)])
 
     stats = _run(client, revert=True)
 

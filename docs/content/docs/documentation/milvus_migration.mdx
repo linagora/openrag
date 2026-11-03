@@ -473,7 +473,8 @@ Good to know:
 - Chunks that already have their filename are skipped, so you can safely run it again. So are `structured_section` chunks with `prepend_heading_path` turned off.
 - The script changes each chunk's text and its `header` and `token_count` fields. Vectors aren't recomputed, because a question naming a file is a keyword search.
 - OpenRAG can keep running, but don't run the script during an embedder swap.
-- Add `--partition <name>` to limit it to one partition.
+- Add `--partition <name>` to limit it to one partition. If a name has no chunks, the script stops before changing anything.
+- A long filename is shortened the same way as on new chunks. A `header` or `content` value from upload metadata stays as it is.
 - If a chunk can't be updated, the script logs it, carries on and exits with status 1. Running it again retries those chunks, but a chunk too long to take the filename is refused every time and needs re-indexing.
 - If Milvus itself fails, or refuses the first 200 chunks it tries with none written, the script stops. Once that's fixed, run it again to carry on.
 - `--revert` removes what the script added.

@@ -29,8 +29,10 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator
+from functools import lru_cache
 from typing import Any
 
+from core.chunking.recursive import source_header
 from core.config import load_config
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens
@@ -59,13 +61,24 @@ _SAMPLE_SIZE = 3
 _PROGRESS_EVERY_PAGES = 50
 
 
-def _needs_filename(row: dict[str, Any]) -> bool:
-    # ``--revert`` leaves any chunk with ``content`` alone, so don't add what it
-    # couldn't remove. This only leaves out structured_section chunks with
-    # ``prepend_heading_path`` off.
-    if row.get("header") or row.get("content") is not None:
+def _is_body(content: Any, body: str) -> bool:
+    """Whether *content* is the chunk's body, as a chunker stored it. Storing a row too
+    big for Milvus cuts either one short, so one being the start of the other counts."""
+    return isinstance(content, str) and (body.startswith(content) or content.startswith(body))
+
+
+def _needs_filename(row: dict[str, Any], header_for: Callable[[dict[str, Any]], str | None]) -> bool:
+    text = row.get("text") or ""
+    header = row.get("header")
+    # Upload metadata can use the names ``header`` and ``content`` too, so they only
+    # count when they match the text. ``content`` matching all of it is structured_section
+    # with ``prepend_heading_path`` off, which was asked not to carry a preamble.
+    if (header and text.startswith(f"{header}\n\n")) or _is_body(row.get("content"), text):
         return False
-    return not _FILENAME_LINE.search(row.get("text") or "")
+    own_header = header_for(row)
+    if own_header and text.startswith(f"{own_header}\n\n"):
+        return False
+    return not _FILENAME_LINE.search(text)
 
 
 def _folded_section_ids(row: dict[str, Any]) -> dict[str, int]:
@@ -86,32 +99,33 @@ def _rounded_keys(row: dict[str, Any]) -> set[str]:
     }
 
 
-def _with_header(row: dict[str, Any], length_function: Callable[[str], int]) -> dict[str, Any]:
-    # The line recursive_splitter writes on new chunks. No page: it can be wrong on these chunks.
-    header = f"[Source: {row['filename']}]"
-    entity = {
-        "_id": row["_id"],
-        "text": f"{header}\n\n{row.get('text') or ''}",
-        "header": header,
-        **_folded_section_ids(row),
-    }
+def _with_header(row: dict[str, Any], header: str, length_function: Callable[[str], int]) -> dict[str, Any]:
+    entity = {"_id": row["_id"], "text": f"{header}\n\n{row.get('text') or ''}", **_folded_section_ids(row)}
+    # A ``header`` already here came from upload metadata, so it stays.
+    if not row.get("header"):
+        entity["header"] = header
     if isinstance(row.get("token_count"), int):
         entity["token_count"] = length_function(entity["text"])
     return entity
 
 
-def _without_header(row: dict[str, Any], length_function: Callable[[str], int]) -> dict[str, Any] | None:
-    """Undo ``_with_header``. Chunkers store ``content`` with their header, so a header
-    without it came from this script."""
-    header = row.get("header")
-    prefix = f"{header}\n\n"
+def _without_header(
+    row: dict[str, Any], header_for: Callable[[dict[str, Any]], str | None], length_function: Callable[[str], int]
+) -> dict[str, Any] | None:
+    """Undo ``_with_header``. Chunkers store the body in ``content``, so a chunk whose
+    ``content`` is the text after the header wasn't changed by this script."""
     text = row.get("text") or ""
-    if not header or row.get("content") is not None or not text.startswith(prefix):
-        return None
-    entity = {"_id": row["_id"], "text": text[len(prefix) :], "header": None, **_folded_section_ids(row)}
-    if isinstance(row.get("token_count"), int):
-        entity["token_count"] = length_function(entity["text"])
-    return entity
+    for header in (row.get("header"), header_for(row)):
+        prefix = f"{header}\n\n"
+        if not header or not text.startswith(prefix) or _is_body(row.get("content"), text[len(prefix) :]):
+            continue
+        entity = {"_id": row["_id"], "text": text[len(prefix) :], **_folded_section_ids(row)}
+        if row.get("header") == header:
+            entity["header"] = None
+        if isinstance(row.get("token_count"), int):
+            entity["token_count"] = length_function(entity["text"])
+        return entity
+    return None
 
 
 def _pages(client: MilvusClient, collection_name: str, filter_expr: str, batch_size: int) -> Iterator[list[dict]]:
@@ -151,11 +165,25 @@ def _write(client: MilvusClient, collection_name: str, entities: list[dict[str, 
     return _write(client, collection_name, entities[:middle]) + _write(client, collection_name, entities[middle:])
 
 
+def _unknown_partitions(client: MilvusClient, collection_name: str, partitions: list[str]) -> list[str]:
+    return [
+        partition
+        for partition in partitions
+        if not client.query(
+            collection_name=collection_name,
+            filter=f"partition == {json.dumps(partition, ensure_ascii=False)}",
+            output_fields=["_id"],
+            limit=1,
+        )
+    ]
+
+
 def run(
     client: MilvusClient,
     collection_name: str,
     *,
     length_function: Callable[[str], int],
+    chunk_size: int,
     partitions: list[str] | None = None,
     revert: bool = False,
     dry_run: bool = False,
@@ -163,6 +191,12 @@ def run(
 ) -> Counter:
     """Add the filename to the chunks of *partitions* (all when None), or remove it with *revert*."""
     stats: Counter = Counter()
+    # The same header as new chunks. Most chunks of a file share a name, so count its tokens once.
+    header_of_name = lru_cache(maxsize=1024)(lambda name: source_header(name, chunk_size, length_function))
+
+    def header_for(row: dict[str, Any]) -> str | None:
+        return header_of_name(str(row["filename"])) if row.get("filename") else None
+
     rounded: dict[str, set[str]] = {}
     filter_expr = f"partition in {json.dumps(partitions, ensure_ascii=False)}" if partitions else ""
 
@@ -171,18 +205,18 @@ def run(
         entities: list[dict[str, Any]] = []
         for row in page:
             if revert:
-                entity = _without_header(row, length_function)
+                entity = _without_header(row, header_for, length_function)
                 if entity is None:
                     stats["unchanged"] += 1
                     continue
-            elif not _needs_filename(row):
+            elif not _needs_filename(row, header_for):
                 stats["unchanged"] += 1
                 continue
-            elif not row.get("filename"):
+            elif not (header := header_for(row)):
                 stats["no_filename"] += 1
                 continue
             else:
-                entity = _with_header(row, length_function)
+                entity = _with_header(row, header, length_function)
             entities.append(entity)
             keys = _rounded_keys(row)
             if keys:
@@ -244,10 +278,16 @@ def main() -> None:
         logger.error(f"Collection '{collection_name}' does not exist. Aborting.")
         sys.exit(1)
 
+    unknown = _unknown_partitions(client, collection_name, args.partition or [])
+    if unknown:
+        logger.error(f"No chunks found in partition(s) {unknown}. Nothing was changed. Aborting.")
+        sys.exit(1)
+
     stats = run(
         client,
         collection_name,
         length_function=get_num_tokens(),
+        chunk_size=cfg.chunker.chunk_size,
         partitions=args.partition,
         revert=args.revert,
         dry_run=args.dry_run,
