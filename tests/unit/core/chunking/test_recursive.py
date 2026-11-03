@@ -467,3 +467,23 @@ def test_a_long_filename_cannot_multiply_the_chunks():
         return len(splitter.chunk(doc, partition="p"))
 
     assert count(" ".join(["long"] * 500)) <= 2 * count("short.pdf")
+
+
+def _header_for(filename: str) -> str | None:
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="Some prose here.", page_number=1)],
+        metadata={"filename": filename},
+    )
+    return _splitter().chunk(doc, partition="p")[0].header
+
+
+def test_a_name_from_a_url_cannot_fill_the_embedder_window():
+    # MCP index_url takes the name from the URL and never saves under it, so the
+    # filesystem's limit does not apply. Repeated on every chunk, an unbounded
+    # name would leave no room for the body in what gets embedded.
+    assert _header_for("a" * 5000) == f"[Source: {'a' * 255}]"
+
+
+def test_the_longest_name_an_upload_can_have_is_kept_whole():
+    assert _header_for("a" * 251 + ".pdf") == f"[Source: {'a' * 251}.pdf]"

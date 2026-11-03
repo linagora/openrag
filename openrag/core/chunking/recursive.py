@@ -82,6 +82,11 @@ def strip_placeholder_markers(content: str) -> str:
     return _COLLAPSE_BLANK_RE.sub("\n\n", _IMAGE_PLACEHOLDER_RE.sub("", content)).strip()
 
 
+# Longest filename put in a chunk's header. An upload is saved under its name, so
+# the filesystem already stops it at 255 bytes; a name taken from a URL (MCP
+# index_url) has no such limit, and the header is repeated on every chunk.
+_MAX_HEADER_FILENAME_CHARS = 255
+
 # Tables/images smaller than this token count are inlined with surrounding
 # text rather than emitted as standalone chunks.
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
@@ -190,7 +195,7 @@ class BaseChunker(ChunkingStrategy):
         # "what is report.pdf about?". No page here, unlike structured_section:
         # this chunker's text chunks can carry the wrong page (#1204).
         filename = str(metadata.get("filename") or metadata.get("source") or "")
-        header = f"[Source: {filename}]" if filename else None
+        header = f"[Source: {filename[:_MAX_HEADER_FILENAME_CHARS]}]" if filename else None
         # The header is embedded with the chunk, so it comes out of the budget.
         # Floored at half: each chunk costs an embedding and maybe an LLM call,
         # so an upload's name must not be able to cut a document into thousands
