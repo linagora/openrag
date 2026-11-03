@@ -21,6 +21,7 @@ from core.indexing.validators import (
     CONTENT_SNIFF_BYTES,
     _ooxml_main_part_by_content,
     validate_content_matches_extension,
+    validate_file_format,
     validate_ooxml_package,
 )
 from core.utils.exceptions import ValidationError
@@ -199,6 +200,22 @@ def test_documents_from_a_real_producer_are_accepted():
     validate_ooxml_package("docx", io.BytesIO(_real_docx()))
     validate_ooxml_package("pptx", io.BytesIO(_real_pptx()))
     validate_ooxml_package("xlsx", io.BytesIO(_real_xlsx()))
+    validate_ooxml_package("xlsm", io.BytesIO(_real_xlsx()))
+
+
+@pytest.mark.parametrize("extension", ["xls", "xlsb", "ods"])
+def test_legacy_spreadsheet_formats_remain_rejected_by_the_xlsx_route(extension):
+    with pytest.raises(ValidationError) as error:
+        validate_file_format(
+            f"workbook.{extension}",
+            accepted_formats={"xlsx", "xlsm"},
+            accepted_mimetypes={
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel.sheet.macroEnabled.12",
+            },
+        )
+
+    assert error.value.status_code == 415
 
 
 def test_a_package_that_writes_the_content_type_map_last_is_accepted():

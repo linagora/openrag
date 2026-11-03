@@ -88,6 +88,7 @@ class FileLoadersConfig(ConfigMixin):
     docx: str = "DocxLoader"
     pptx: str = "PPTXLoader"
     xlsx: str = "XlsxParser"
+    xlsm: str = "XlsxParser"
     doc: str = "DocLoader"
     png: str = "ImageLoader"
     jpeg: str = "ImageLoader"
@@ -131,6 +132,10 @@ class MimetypesConfig(ConfigMixin):
     application_xlsx: str = Field(
         default=".xlsx",
         alias="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    application_xlsm: str = Field(
+        default=".xlsm",
+        alias="application/vnd.ms-excel.sheet.macroEnabled.12",
     )
     application_msword: str = Field(default=".doc", alias="application/msword")
     image_png: str = Field(default=".png", alias="image/png")

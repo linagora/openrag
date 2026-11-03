@@ -88,6 +88,7 @@ class _FakeParser:
         ("a.doc", DocumentType.DOC, "doc"),
         ("a.pptx", DocumentType.PPTX, "pptx"),
         ("a.xlsx", DocumentType.XLSX, "xlsx"),
+        ("a.xlsm", DocumentType.XLSX, "xlsx"),
         ("a.eml", DocumentType.EML, "eml"),
         ("a.png", DocumentType.IMAGE, "image"),
         ("a.svg", DocumentType.IMAGE, "image"),
