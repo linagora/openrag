@@ -267,14 +267,14 @@ class TestEndToEnd:
     async def test_full_upsert_preserves_existing_auto_id(self, dense_only_store: MilvusVectorStore) -> None:
         # initialize() loads the collection, as required for full AutoID upserts.
         await dense_only_store.initialize(_EMBEDDING_DIM, _FIELD)
-        await dense_only_store.upsert([_chunk("before", "p1", 0.1)], vector_field=_FIELD)
+        await dense_only_store.upsert([_chunk("before", "p1", 0.1, external_id=2**60)], vector_field=_FIELD)
 
         before = await dense_only_store.query_chunks_by_filter(
             dense_only_store._collection_name, {"partition": "p1"}, output_fields=["*"]
         )
         assert len(before) == 1
 
-        entity = {field: before[0][field] for field in ("_id", "text", "partition", "file_id", _FIELD)}
+        entity = {field: before[0][field] for field in ("_id", "text", "partition", "file_id", "external_id", _FIELD)}
         entity["text"] = "after"
         await dense_only_store.upsert_entities([entity])
 
@@ -284,6 +284,7 @@ class TestEndToEnd:
         assert len(after) == 1
         assert after[0]["_id"] == before[0]["_id"]
         assert after[0]["text"] == "after"
+        assert after[0]["external_id"] == before[0]["external_id"]
         assert after[0][_FIELD] == before[0][_FIELD]
 
     @pytest.mark.asyncio

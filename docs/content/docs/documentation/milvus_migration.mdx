@@ -60,7 +60,8 @@ Do not skip this migration when upgrading an existing deployment:
 ### Upgrade from Milvus 2.6.x to 3.0.2
 
 :::note[Milvus 3.0.2 is an intermediate step]
-This procedure uses the OpenRAG [v2.3.3 Compose and Helm configuration](https://github.com/linagora/openrag/tree/v2.3.3), which pins Milvus to v3.0.2. Complete this 2.6-to-3.0.2 migration with the v2.3.3 configuration. Before following the 3.0.2-to-3.0.5 procedure below, switch to the target OpenRAG release's Compose files or Helm values, which pin Milvus to v3.0.5.
+This procedure uses the OpenRAG [v2.3.3 Compose and Helm configuration](https://github.com/linagora/openrag/tree/v2.3.3), which pins Milvus to v3.0.2. Complete this 2.6-to-3.0.2 migration with the v2.3.3 configuration.
+Before following the 3.0.2-to-3.0.5 procedure below, switch to the target OpenRAG release's Compose files or Helm values. Remove any existing `milvus.image.all.tag` override from Helm values so the chart can use its v3.0.5 default.
 :::
 
 Milvus 2.6 containers ran as root, so existing bind-mounted files and Docker named-volume contents are commonly owned by `root:root`. Milvus 3 runs as UID/GID `999:999` and cannot start until it owns the directory mounted at `/var/lib/milvus`.
@@ -139,7 +140,7 @@ docker compose up -d
 
 The bundled Helm chart now installs the Milvus 3-compatible chart and image. Before upgrading an existing release, stop writes and back up the MinIO and etcd volumes, together with any standalone or log volume enabled through custom values.
 
-OpenRAG uses milvus-helm chart 5.0.27, whose default image is v3.0.1, and sets the image to v3.0.2. Resources rendered by that chart therefore keep the label `app.kubernetes.io/version: "3.0.1"`. This label describes the chart's default application version, not the running server; verify the container image as shown below.
+OpenRAG v2.3.3 uses milvus-helm chart 5.0.27, whose default image is v3.0.1, and sets the image to v3.0.2. Resources rendered by that chart therefore keep the label `app.kubernetes.io/version: "3.0.1"`. This label describes the chart's default application version, not the running server; verify the container image as shown below.
 
 Milvus 3 runs with GID `999`. The chart sets `fsGroup: 999` with the `Always` policy so Kubernetes recursively makes supported mounted volumes writable before Milvus starts. The first startup can therefore take longer when a volume contains many files.
 
@@ -175,7 +176,9 @@ docker inspect "$(docker compose ps -q milvus)" --format '{{.Config.Image}}'
 # Expected: milvusdb/milvus:v3.0.5
 ```
 
-Wait for `/healthz` to report healthy and confirm the expected image before restarting OpenRAG. For Helm, set `milvus.image.all.tag` to `v3.0.5`, upgrade the release, and confirm every Milvus workload is ready and uses that image.
+Wait for `/healthz` to report healthy and confirm the expected image before restarting OpenRAG.
+
+For Helm, remove any `milvus.image.all.tag` override and upgrade the release; chart 5.0.33 defaults to `v3.0.5`. The bundled PostgreSQL chart change recreates the database pod, and the MinIO configuration change rolls its pod. Schedule a maintenance window for the database outage, then confirm PostgreSQL, MinIO, and every Milvus workload are ready before resuming writes. An external PostgreSQL database is not restarted.
 
 ### Legacy path: upgrade Milvus 2.5.x to 2.6.11
 

@@ -173,6 +173,8 @@ def test_milvus_image_matches_helm_version_in_every_stack() -> None:
     locked_milvus = next(dependency for dependency in lock["dependencies"] if dependency["name"] == "milvus")
 
     assert milvus_dependency["version"] == locked_milvus["version"] == "5.0.33"
+    values = _load_yaml(CHART_DIR / "values.yaml")
+    assert values["milvus"].get("image", {}).get("all", {}).get("tag") is None
     expected = "milvusdb/milvus:v3.0.5"
 
     compose_files = (
