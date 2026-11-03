@@ -80,6 +80,14 @@ already marked complete, and the pods start on it. To install it again, delete
 `/app/.venv/.ready` in the Ray head and restart the Ray head pod, then the Ray
 workers and the OpenRAG pod.
 
+## OpenRAG 2.3.4: Milvus 3.0.5
+
+The tested upgrade from Milvus 3.0.2 to 3.0.5 needs no Milvus data migration
+with the default message queue. Stop writes and take a verified backup first.
+Milvus 3.0.5 removes server-side row-level security (RLS); if you rely on RLS,
+hold the upgrade until an equivalent authorization control is in place and
+validated. Follow the [Milvus 3.0.2 to 3.0.5 upgrade procedure](/openrag/documentation/milvus_migration/#upgrade-from-milvus-302-to-305).
+
 ## OpenRAG 2.3.3 on Docker Compose: the Ray dashboard is not published
 
 From OpenRAG 2.3.3, Docker Compose no longer maps port 8265. With the default

@@ -167,8 +167,13 @@ def test_minio_image_is_digest_pinned_in_every_stack() -> None:
 
 
 def test_milvus_image_matches_helm_version_in_every_stack() -> None:
-    values = _load_yaml(CHART_DIR / "values.yaml")
-    expected = f"milvusdb/milvus:{values['milvus']['image']['all']['tag']}"
+    chart = _load_yaml(CHART_DIR / "Chart.yaml")
+    lock = _load_yaml(CHART_DIR / "Chart.lock")
+    milvus_dependency = next(dependency for dependency in chart["dependencies"] if dependency["name"] == "milvus")
+    locked_milvus = next(dependency for dependency in lock["dependencies"] if dependency["name"] == "milvus")
+
+    assert milvus_dependency["version"] == locked_milvus["version"] == "5.0.33"
+    expected = "milvusdb/milvus:v3.0.5"
 
     compose_files = (
         COMPOSE_DIR / "milvus" / "milvus.yaml",

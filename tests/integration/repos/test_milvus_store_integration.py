@@ -287,6 +287,37 @@ class TestEndToEnd:
         assert after[0][_FIELD] == before[0][_FIELD]
 
     @pytest.mark.asyncio
+    async def test_partial_upsert_preserves_large_metadata_integers(self, dense_only_store: MilvusVectorStore) -> None:
+        from loguru import logger as _logger
+
+        await dense_only_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await dense_only_store.upsert(
+            [_chunk("large integer metadata", "p1", 0.1, external_id=2**60, nested={"ids": [2**60 + 1]})],
+            vector_field=_FIELD,
+        )
+
+        before = await dense_only_store.query_chunks_by_filter(
+            dense_only_store._collection_name, {"partition": "p1"}, output_fields=["*"]
+        )
+        assert len(before) == 1
+        warnings: list[dict] = []
+        sink = _logger.add(lambda message: warnings.append(message.record), level="WARNING")
+        try:
+            await dense_only_store.write_vectors(_FIELD, {str(before[0]["_id"]): _embedding(0.2)})
+        finally:
+            _logger.remove(sink)
+
+        after = await dense_only_store.query_chunks_by_filter(
+            dense_only_store._collection_name, {"partition": "p1"}, output_fields=["*"]
+        )
+        assert len(after) == 1
+        assert after[0]["_id"] == before[0]["_id"]
+        assert after[0]["external_id"] == 2**60
+        assert after[0]["nested"] == {"ids": [2**60 + 1]}
+        assert dense_only_store._server_version == "3.0-20261030-af15c80751"
+        assert not any("large integers" in record["message"] for record in warnings)
+
+    @pytest.mark.asyncio
     async def test_search_before_collection_creation_returns_no_results(self, hybrid_store: MilvusVectorStore) -> None:
         hits = await hybrid_store.search(
             _embedding(0.1),
