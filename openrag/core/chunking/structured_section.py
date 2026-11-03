@@ -43,6 +43,7 @@ from typing import Any
 from core.chunking.markdown_utils import (
     PAGE_RE,
     MDElement,
+    attach_captions,
     chunk_table,
     split_md_elements,
 )
@@ -204,6 +205,7 @@ class _Unit:
     chunk_type: ChunkType = ChunkType.TEXT
     atomic: bool = False  # table / image — never merged into prose, never split by us
     metadata: dict[str, Any] = field(default_factory=dict)
+    caption: str = ""  # leads ``text``; repeated on every piece of a split table
 
     @property
     def start_page(self) -> int | None:
@@ -519,7 +521,13 @@ class StructuredSectionChunker(BaseChunker):
             buf_len = 0
             buf_has_body = False
 
-        for element in split_md_elements(content):
+        # A placeholder image takes no caption: one beside it stays in the text
+        # instead of moving onto a neighbouring block it does not label.
+        elements = attach_captions(
+            split_md_elements(content),
+            takes_caption=lambda e: e.type != "image" or not is_placeholder_image(e.content),
+        )
+        for element in elements:
             if element.type in ("table", "image"):
                 # Non-informative images (the captioner's "[Image Placeholder]")
                 # are dropped, matching the recursive chunker — otherwise every
@@ -633,6 +641,7 @@ class StructuredSectionChunker(BaseChunker):
             chunk_type=ctype,
             atomic=True,
             metadata=dict(element.metadata or {}),
+            caption=element.caption,
         )
 
     def _heading(self, line: str) -> tuple[int, str] | None:
@@ -747,20 +756,24 @@ class StructuredSectionChunker(BaseChunker):
             # then replayed instead of the column header, leaving every
             # continuation piece a wall of unlabelled numbers. Split the table
             # alone and re-attach the heading to the first piece, which is the
-            # one it introduces.
+            # one it introduces. A caption labels the whole table, so it goes
+            # back on every piece and counts against each piece's budget.
             lead, table_text = _split_leading_headings(unit.text)
+            caption = f"{unit.caption}\n\n" if unit.caption else ""
             element = MDElement(
                 type="table",
-                content=table_text,
+                content=table_text.removeprefix(caption),
                 page_number=unit.start_page,
                 metadata=unit.metadata,
             )
-            subs = chunk_table(element, chunk_size=emax, length_function=self.length_function)
+            subs = chunk_table(
+                element, chunk_size=emax - self.length_function(caption), length_function=self.length_function
+            )
             pieces = [
                 _Unit(
                     heading_path=list(unit.heading_path),
-                    text=s.content.strip(),
-                    tokens=self.length_function(s.content),
+                    text=f"{caption}{s.content.strip()}",
+                    tokens=self.length_function(f"{caption}{s.content}"),
                     pages={s.page_number} if s.page_number else set(unit.pages),
                     chunk_type=ChunkType.TABLE,
                     atomic=True,
