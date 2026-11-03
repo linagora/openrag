@@ -157,7 +157,34 @@ The parser still enforces the configured batch byte limit. In the unusual case w
 
 Absolute references remain absolute in the normalized pattern. Same-table A1 references are mapped to headers. Cross-sheet references, structured table references, named ranges, and dynamic references that cannot be resolved safely are preserved verbatim in `unresolved_references`; OpenRAG does not guess their meaning or execute them.
 
-Numeric values use the scalar representation returned by OpenPyXL. Excel display formatting such as currency symbols, percentage formatting, and visual rounding is not treated as stored data. If the displayed form is semantically important, store it explicitly in another cell.
+### Safe number and date display metadata
+
+Numeric cells keep the raw scalar returned by OpenPyXL, so formatting never changes the value used for retrieval or calculation. OpenRAG also preserves a bounded, non-executable subset of display semantics for recognizable percentages, currencies, grouped or rounded numbers, scientific notation, dates, times, and durations. Repeated formats are grouped by physical column and parser batch rather than copied into every cell.
+
+For example, a raw value of `0.08125` with the Excel format `0.00%` remains `0.08125` in the Markdown table. Its metadata and chunk context describe the percentage display and provide the deterministic example `0.08125 -> 8.13%`. Metadata records the physical column, table header, affected row ranges, safe format code, display kind, decimal precision, grouping flag, raw example, and display example:
+
+```json
+{
+  "number_format_groups": [
+    {
+      "target_column": "D",
+      "target_header": "discount_rate",
+      "range": "D2:D1000",
+      "kind": "percentage",
+      "format_code": "0.00%",
+      "decimal_places": 2,
+      "uses_grouping": false,
+      "example_raw": "0.08125",
+      "display_example": "8.13%",
+      "start_row": 2,
+      "end_row": 1000,
+      "cell_count": 999
+    }
+  ]
+}
+```
+
+During Markdown chunking, display groups are retained only when their physical rows and columns intersect the chunk. Context always states that raw values remain indexed. Complex conditional or colored formats, quoted custom units, text substitution, and format codes over the safety bound are retained only as workbook styling and are not interpreted or exposed as trusted display meaning. For locale-qualified currency formats, only an allowlisted currency symbol is retained; the locale directive itself is discarded and is never treated as instructions or semantic content. At most 64 distinct safe format groups and 32 disjoint row ranges per group are described in one parser batch; truncation is explicit in metadata. Supplemental human-readable display context is omitted before it can make an otherwise valid batch exceed the byte limit.
 
 ## Configuration
 

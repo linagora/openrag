@@ -2309,3 +2309,117 @@ def test_hidden_unused_columns_beyond_parser_limit_do_not_reject_workbook():
     assert block.metadata["table_columns"] == ["id"]
     assert block.metadata["table_row_numbers"] == [2]
     assert block.metadata["hidden_columns_skipped"] == 4095
+
+
+def test_preserves_safe_number_formats_as_compact_context_without_replacing_raw_values():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Formatted"
+    sheet.append(["amount", "rate", "rounded", "measured", "reported_on"])
+    sheet.append([1234.5, 0.08125, 12.345, 0.000012345, date(2026, 11, 3)])
+    sheet["A2"].number_format = "$#,##0.00"
+    sheet["B2"].number_format = "0.00%"
+    sheet["C2"].number_format = "0.0"
+    sheet["D2"].number_format = "0.00E+00"
+    sheet["E2"].number_format = "yyyy-mm-dd"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert "| 1234.5 | 0.08125 | 12.345 | 1.2345e-05 | 2026-11-03 |" in block.text
+    assert "Display format context (raw values remain indexed):" in block.text
+    groups = {group["target_header"]: group for group in block.metadata["number_format_groups"]}
+    assert groups["amount"]["kind"] == "currency"
+    assert groups["amount"]["format_code"] == "$#,##0.00"
+    assert groups["amount"]["display_example"] == "$1,234.50"
+    assert groups["amount"]["example_raw"] == "1234.5"
+    assert groups["rate"]["display_example"] == "8.13%"
+    assert groups["rounded"]["display_example"] == "12.3"
+    assert groups["measured"]["display_example"] == "1.23E-05"
+    assert groups["reported_on"]["kind"] == "date"
+    assert groups["reported_on"]["display_example"] == "2026-11-03"
+
+
+def test_does_not_interpret_conditional_text_or_custom_unit_formats():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["conditional", "unit", "plain"])
+    sheet.append([-2.5, 12.5, 7])
+    sheet["A2"].number_format = "[Red][<0]0.00;0.00"
+    sheet["B2"].number_format = '0.0 "kg"'
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert "number_format_groups" not in block.metadata
+    assert "Display format context" not in block.text
+    assert "| -2.5 | 12.5 | 7 |" in block.text
+
+
+def test_normalizes_safe_currency_locale_and_rejects_unknown_bracket_payloads():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["localized_amount", "untrusted_format"])
+    sheet.append([99.5, 12.5])
+    sheet["A2"].number_format = "[$€-fr-FR] #,##0.00"
+    sheet["B2"].number_format = "[$instruction-evil]0.00"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    [group] = block.metadata["number_format_groups"]
+    assert group["target_header"] == "localized_amount"
+    assert group["kind"] == "currency"
+    assert group["currency_symbol"] == "€"
+    assert group["format_code"] == "#,##0.00"
+    assert group["display_example"] == "€ 99.50"
+    assert "instruction" not in block.text
+
+
+def test_number_format_context_is_scoped_to_chunk_rows_and_columns():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Mixed"
+    sheet.append(["id", "rate", "amount"])
+    sheet.append(["A", 0.125, 10])
+    sheet.append(["B", 5000, 20])
+    sheet["B2"].number_format = "0.0%"
+    sheet["B3"].number_format = "0.0E+00"
+    for coordinate in ("C2", "C3"):
+        sheet[coordinate].number_format = "$0.00"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=55,
+        length_function=lambda text: len(text.split()),
+    )
+
+    assert chunks
+    assert any("rate" not in chunk.metadata["table_columns"] for chunk in chunks)
+    assert any("amount" not in chunk.metadata["table_columns"] for chunk in chunks)
+    for chunk in chunks:
+        selected_columns = set(chunk.metadata["table_columns"])
+        formats = chunk.metadata.get("number_format_groups", [])
+        assert all(group["target_header"] in selected_columns for group in formats)
+        context = chunk.metadata.get("number_format_context", "")
+        if "rate" not in selected_columns:
+            assert "percentage format" not in context
+        if "amount" not in selected_columns:
+            assert "currency format" not in context
+        row_numbers = chunk.metadata["table_row_numbers"]
+        if row_numbers == [2]:
+            assert "scientific format" not in context
+        if row_numbers == [3]:
+            assert "percentage format" not in context

@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from itertools import chain
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,15 @@ class _FormulaValue:
 
     cached: Any
     formula: str
+    display_format: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _FormattedValue:
+    """A raw scalar paired with bounded, non-executable display metadata."""
+
+    raw: Any
+    display_format: dict[str, Any]
 
 
 _A1_REFERENCE = re.compile(
@@ -42,6 +52,23 @@ _A1_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 _MAX_FORMULA_SOURCE_COLUMNS = 64
+_MAX_NUMBER_FORMAT_GROUPS = 64
+_MAX_NUMBER_FORMAT_RANGES = 32
+_MAX_NUMBER_FORMAT_CODE_LENGTH = 128
+
+
+def _raw_cell_value(value: Any) -> Any:
+    if isinstance(value, _FormulaValue):
+        return value.cached
+    if isinstance(value, _FormattedValue):
+        return value.raw
+    return value
+
+
+def _cell_display_format(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, (_FormulaValue, _FormattedValue)):
+        return value.display_format
+    return None
 
 
 def _rendered_header_key(value: str) -> str:
@@ -111,9 +138,7 @@ def _detect_header(rows, byte_limit, start_row=1):
             if (
                 len(set(labels)) < 2
                 or not all(
-                    isinstance(value.cached if isinstance(value, _FormulaValue) else value, str)
-                    for value in raw
-                    if (value.cached if isinstance(value, _FormulaValue) else value) is not None
+                    isinstance(_raw_cell_value(value), str) for value in raw if _raw_cell_value(value) is not None
                 )
                 or not (wider_than_preamble or repeated_value_preamble)
                 or not separated_from_preamble
@@ -130,9 +155,7 @@ def _detect_header(rows, byte_limit, start_row=1):
     for index, (number, raw, values) in enumerate(nonempty[:-1]):
         occupied = [column for column, value in enumerate(values) if value]
         if not occupied or not all(
-            isinstance(value.cached if isinstance(value, _FormulaValue) else value, str)
-            for value in raw
-            if (value.cached if isinstance(value, _FormulaValue) else value) is not None
+            isinstance(_raw_cell_value(value), str) for value in raw if _raw_cell_value(value) is not None
         ):
             continue
         following = nonempty[index + 1][2]
@@ -164,13 +187,11 @@ def _detect_header(rows, byte_limit, start_row=1):
         typed_following = bool(occupied) and any(
             column < len(following_raw)
             and (value := following_raw[column]) is not None
-            and not isinstance(value.cached if isinstance(value, _FormulaValue) else value, str)
+            and not isinstance(_raw_cell_value(value), str)
             for column in occupied
         )
         textual_first = bool(occupied) and all(
-            isinstance(value.cached if isinstance(value, _FormulaValue) else value, str)
-            for value in first_raw
-            if (value.cached if isinstance(value, _FormulaValue) else value) is not None
+            isinstance(_raw_cell_value(value), str) for value in first_raw if _raw_cell_value(value) is not None
         )
         unique_first = len({first_values[column] for column in occupied}) == len(occupied)
         confident = textual_first and unique_first and typed_following
@@ -346,9 +367,166 @@ def _worksheet_context(sheet_name: str) -> str:
     return f"\n\nWorksheet: {safe_name}"
 
 
+def _safe_number_format(value: Any, format_code: Any) -> dict[str, Any] | None:
+    """Describe a small, deterministic subset of Excel display formats.
+
+    Format codes are data, never templates to execute. Complex custom,
+    conditional, colored, text, and locale-dependent formats are deliberately
+    left uninterpreted so retrieval cannot mistake an approximation for the
+    exact Excel rendering.
+    """
+    if value is None or isinstance(value, (bool, str)) or not isinstance(format_code, str):
+        return None
+    code = format_code.strip()
+    if (
+        not code
+        or code.lower() == "general"
+        or len(code) > _MAX_NUMBER_FORMAT_CODE_LENGTH
+        or any(ord(character) < 32 for character in code)
+        or "@" in code
+        or '"' in code
+        or ";" in code
+    ):
+        return None
+
+    if isinstance(value, (datetime, date, time, timedelta)):
+        date_code = re.sub(r"\\.|_.|\*.", "", code)
+        date_brackets = re.findall(r"\[([^]]+)]", date_code)
+        if any(token.lower() not in {"h", "m", "s"} for token in date_brackets):
+            return None
+        date_code = re.sub(r"\[[^]]+]", "", date_code)
+        if not date_code or re.fullmatch(r"[ymdhsapAMP/ .,:+-]+", date_code) is None:
+            return None
+    if isinstance(value, datetime):
+        kind = "date" if value.time() == time() else "datetime"
+        return {"kind": kind, "format_code": code, "display_example": _cached_cell_text(value)}
+    if isinstance(value, date):
+        return {"kind": "date", "format_code": code, "display_example": value.isoformat()}
+    if isinstance(value, time):
+        return {"kind": "time", "format_code": code, "display_example": value.isoformat()}
+    if isinstance(value, timedelta):
+        return {"kind": "duration", "format_code": code, "display_example": str(value)}
+    if not isinstance(value, (int, float, Decimal)):
+        return None
+
+    section = code
+    bracket_tokens = re.findall(r"\[([^]]+)]", section)
+    if any(not token.startswith("$") for token in bracket_tokens):
+        return None
+    currency_symbol = None
+    for token in bracket_tokens:
+        symbol, separator, locale = token[1:].partition("-")
+        if symbol and symbol not in "$€£¥₹₩":
+            return None
+        if separator and (not locale or len(locale) > 16 or re.fullmatch(r"[A-Za-z0-9-]+", locale) is None):
+            return None
+        if symbol:
+            currency_symbol = symbol
+            break
+    without_brackets = re.sub(r"\[[^]]+]", "", section)
+    if currency_symbol is None:
+        currency_symbol = next((symbol for symbol in "$€£¥₹₩" if symbol in without_brackets), None)
+
+    simplified = re.sub(r"\[[^]]+]", "", section)
+    simplified = re.sub(r"\\.|_.|\*.", "", simplified)
+    allowed = set("0#,.%Ee+- $€£¥₹₩")
+    if (
+        not simplified
+        or any(character not in allowed for character in simplified)
+        or "?" in simplified
+        or simplified.count("%") > 1
+        or simplified.rstrip("% ").endswith(",")
+    ):
+        return None
+    canonical = simplified
+    for symbol in "$€£¥₹₩":
+        canonical = canonical.replace(symbol, "")
+    canonical = canonical.replace(" ", "")
+    if re.fullmatch(r"[#0]+(?:,[#0]{3})*(?:\.0+)?(?:[Ee][+-]?0+)?%?", canonical) is None:
+        return None
+    decimal_match = re.search(r"\.(0+)", canonical)
+    if decimal_match and any(character != "0" for character in decimal_match.group(1)):
+        return None
+    decimal_places = len(decimal_match.group(1)) if decimal_match else 0
+    if decimal_places > 12:
+        return None
+    uses_grouping = "," in canonical.split(".", 1)[0]
+    is_percentage = "%" in canonical
+    scientific_match = re.search(r"[Ee][+-]?(0+)", canonical)
+    is_scientific = scientific_match is not None
+    if not any(character in simplified for character in "0#?"):
+        return None
+
+    try:
+        displayed_value = Decimal(str(value)) * (100 if is_percentage else 1)
+        with localcontext() as context:
+            context.rounding = ROUND_HALF_UP
+            if is_scientific:
+                assert scientific_match is not None
+                display = f"{displayed_value:.{decimal_places}E}"
+                exponent_width = len(scientific_match.group(1))
+                mantissa, exponent = display.split("E", 1)
+                sign = exponent[0] if exponent[0] in "+-" else "+"
+                digits = exponent[1:] if exponent[0] in "+-" else exponent
+                display = f"{mantissa}E{sign}{digits.zfill(exponent_width)}"
+            else:
+                display = format(displayed_value, f"{',' if uses_grouping else ''}.{decimal_places}f")
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    currency_position = None
+    if currency_symbol:
+        symbol_position = section.find(currency_symbol)
+        if symbol_position < 0 and bracket_tokens:
+            symbol_position = section.find("[")
+        placeholder_position = min(position for position in (section.find("0"), section.find("#")) if position >= 0)
+        currency_position = "prefix" if symbol_position < placeholder_position else "suffix"
+        if currency_position == "prefix":
+            separator = (
+                " " if any(character.isspace() for character in section[symbol_position:placeholder_position]) else ""
+            )
+            display = f"{currency_symbol}{separator}{display}"
+        else:
+            separator = (
+                " " if any(character.isspace() for character in section[placeholder_position:symbol_position]) else ""
+            )
+            display = f"{display}{separator}{currency_symbol}"
+    if is_percentage:
+        display += "%"
+    kind = (
+        "percentage"
+        if is_percentage
+        else "currency"
+        if currency_symbol
+        else "scientific"
+        if is_scientific
+        else "number"
+    )
+    result = {
+        "kind": kind,
+        "format_code": simplified.strip() if bracket_tokens else code,
+        "decimal_places": decimal_places,
+        "uses_grouping": uses_grouping,
+        "display_example": display,
+    }
+    if currency_symbol:
+        result["currency_symbol"] = currency_symbol
+        result["currency_position"] = currency_position
+    return result
+
+
+def _formatted_value(cell) -> Any:
+    value = cell.value
+    display_format = _safe_number_format(value, getattr(cell, "number_format", None))
+    return _FormattedValue(value, display_format) if display_format else value
+
+
+def _value_rows(cell_rows):
+    for cells in cell_rows:
+        yield tuple(_formatted_value(cell) if cell is not None else None for cell in cells)
+
+
 def _cached_cell_text(value: Any) -> str:
-    if isinstance(value, _FormulaValue):
-        value = value.cached
+    value = _raw_cell_value(value)
     if value is None:
         return ""
     elif isinstance(value, bool):
@@ -406,7 +584,9 @@ def _rows_with_formulas(value_rows, formula_rows):
     """Merge cached values with formula text while both readers stream."""
     for values, formula_cells in zip(value_rows, formula_rows, strict=True):
         yield tuple(
-            _FormulaValue(value, formula) if (formula := _formula_text(cell)) is not None else value
+            _FormulaValue(_raw_cell_value(value), formula, _cell_display_format(value))
+            if (formula := _formula_text(cell)) is not None
+            else value
             for value, cell in zip(values, formula_cells, strict=True)
         )
 
@@ -536,6 +716,78 @@ def _compact_formula_batch(
     return rendered_rows, formula_groups, individual_cells, context
 
 
+def _row_ranges(row_numbers: list[int]) -> list[dict[str, int]]:
+    ranges: list[dict[str, int]] = []
+    for row in sorted(set(row_numbers)):
+        if not ranges or row != ranges[-1]["end_row"] + 1:
+            ranges.append({"start_row": row, "end_row": row})
+        else:
+            ranges[-1]["end_row"] = row
+    return ranges
+
+
+def _compact_number_formats(
+    rows: list[tuple[Any, ...]],
+    row_numbers: list[int],
+    *,
+    visible_columns: list[int],
+    headers: list[str],
+) -> tuple[list[dict[str, Any]], str, bool]:
+    """Group safe display semantics without replacing indexed raw scalars."""
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row_number, row in zip(row_numbers, rows, strict=True):
+        for position, value in enumerate(row):
+            display_format = _cell_display_format(value)
+            if not display_format:
+                continue
+            signature = tuple(sorted((key, item) for key, item in display_format.items() if key != "display_example"))
+            target_column = _column_name(visible_columns[position])
+            key = (target_column, headers[position], signature)
+            group = grouped.setdefault(
+                key,
+                {
+                    "target_column": target_column,
+                    "target_header": headers[position],
+                    **display_format,
+                    "rows": [],
+                    "example_raw": _cached_cell_text(value),
+                },
+            )
+            group["rows"].append(row_number)
+
+    truncated = len(grouped) > _MAX_NUMBER_FORMAT_GROUPS
+    result: list[dict[str, Any]] = []
+    for group in list(grouped.values())[:_MAX_NUMBER_FORMAT_GROUPS]:
+        rows_for_group = group.pop("rows")
+        ranges = _row_ranges(rows_for_group)
+        group.update(
+            start_row=rows_for_group[0],
+            end_row=rows_for_group[-1],
+            cell_count=len(rows_for_group),
+            range=(f"{group['target_column']}{rows_for_group[0]}:{group['target_column']}{rows_for_group[-1]}"),
+            row_ranges=ranges[:_MAX_NUMBER_FORMAT_RANGES],
+        )
+        if len(ranges) > _MAX_NUMBER_FORMAT_RANGES:
+            group["row_ranges_truncated"] = True
+        result.append(group)
+
+    if not result:
+        return [], "", truncated
+    lines = ["Display format context (raw values remain indexed):"]
+    for group in result:
+        location = (
+            group["range"] if len(group["row_ranges"]) == 1 else f"{group['cell_count']} cells in {group['range']}"
+        )
+        lines.append(
+            f"- {group['target_column']} ({_single_line(group['target_header'])}), {location}: "
+            f"{group['kind']} format {_single_line(group['format_code'])}; example raw "
+            f"{_single_line(group['example_raw'])} -> display {_single_line(group['display_example'])}"
+        )
+    if truncated:
+        lines.append(f"- Additional safe display formats omitted after {_MAX_NUMBER_FORMAT_GROUPS} groups.")
+    return result, "\n\n" + "\n".join(lines), truncated
+
+
 def _visible_rows(rows, table: TableRegion, info: SheetInfo):
     """Mask hidden cells and expand source-backed vertical row-header merges."""
     visible_columns = [
@@ -567,7 +819,8 @@ def _visible_rows(rows, table: TableRegion, info: SheetInfo):
             projected[column_positions[column]] = value
         for column, end_row in merge_starts.get(row_number, []):
             value = projected[column_positions[column]]
-            if value is not None:
+            source_value = getattr(value, "value", value)
+            if _raw_cell_value(source_value) is not None:
                 active_merges[column] = (end_row, value)
         yield tuple(projected)
 
@@ -652,10 +905,10 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                                 max_row=table.end_row,
                                 min_col=table.start_column,
                                 max_col=table.end_column,
-                                values_only=True,
+                                values_only=False,
                             )
                         ) as rows:
-                            visible_rows = _visible_rows(rows, table, info)
+                            visible_rows = _value_rows(_visible_rows(rows, table, info))
                             if not info.formula_cells:
                                 yield info, table, visible_rows
                                 continue
@@ -974,7 +1227,7 @@ class XlsxParser(TabularBatchParser):
                 row_header_paths: dict[str, list[str]] = {}
 
                 def block():
-                    def render(group_repeated: bool):
+                    def render(group_repeated: bool, include_display_context: bool = True):
                         rendered_rows, formula_groups, formula_cells, formula_context = _compact_formula_batch(
                             batch_rows,
                             row_numbers,
@@ -983,19 +1236,70 @@ class XlsxParser(TabularBatchParser):
                             headers=header_values,
                             group_repeated=group_repeated,
                         )
+                        number_format_groups, display_context, number_formats_truncated = _compact_number_formats(
+                            batch_rows,
+                            row_numbers,
+                            visible_columns=visible_columns,
+                            headers=header_values,
+                        )
+                        if not include_display_context:
+                            display_context = ""
                         lines = [*header_lines, *(markdown_row(row) for row in rendered_rows)]
                         block_bytes = len(
-                            ("\n".join(lines) + worksheet_context + sheet_context + formula_context).encode("utf-8")
+                            (
+                                "\n".join(lines) + display_context + worksheet_context + sheet_context + formula_context
+                            ).encode("utf-8")
                         )
-                        return lines, formula_groups, formula_cells, formula_context, block_bytes
+                        return (
+                            lines,
+                            formula_groups,
+                            formula_cells,
+                            formula_context,
+                            number_format_groups,
+                            display_context,
+                            number_formats_truncated,
+                            block_bytes,
+                        )
 
-                    lines, formula_groups, formula_cells, formula_context, block_bytes = render(True)
+                    (
+                        lines,
+                        formula_groups,
+                        formula_cells,
+                        formula_context,
+                        number_format_groups,
+                        display_context,
+                        number_formats_truncated,
+                        block_bytes,
+                    ) = render(True)
                     if block_bytes > self.limits.max_batch_bytes:
                         # Generalized formula context is normally smaller than
                         # repeated inline expressions, but short runs can add
                         # overhead. Preserve ingestion and formula information
                         # by reverting this bounded batch to individual cells.
-                        lines, formula_groups, formula_cells, formula_context, block_bytes = render(False)
+                        (
+                            lines,
+                            formula_groups,
+                            formula_cells,
+                            formula_context,
+                            number_format_groups,
+                            display_context,
+                            number_formats_truncated,
+                            block_bytes,
+                        ) = render(False)
+                    if block_bytes > self.limits.max_batch_bytes and display_context:
+                        # Display hints are supplemental. Keep their structured
+                        # metadata, but never reject a valid batch solely because
+                        # the human-readable examples exceed the byte budget.
+                        (
+                            lines,
+                            formula_groups,
+                            formula_cells,
+                            formula_context,
+                            number_format_groups,
+                            display_context,
+                            number_formats_truncated,
+                            block_bytes,
+                        ) = render(False, include_display_context=False)
                     if block_bytes > self.limits.max_batch_bytes:
                         raise limit("XLSX batch exceeds the batch byte limit")
                     return self._block(
@@ -1019,6 +1323,9 @@ class XlsxParser(TabularBatchParser):
                         formula_groups,
                         formula_cells,
                         formula_context,
+                        number_format_groups,
+                        display_context,
+                        number_formats_truncated,
                     )
 
                 for physical_row, values in enumerate(row_iterator, start=data_row_start):
@@ -1081,6 +1388,9 @@ class XlsxParser(TabularBatchParser):
         formula_groups,
         formula_cells,
         formula_context,
+        number_format_groups,
+        display_context,
+        number_formats_truncated,
     ):
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
         visible_columns = [
@@ -1153,10 +1463,16 @@ class XlsxParser(TabularBatchParser):
             metadata["formula_cells"] = list(formula_cells)
         if formula_context:
             metadata["formula_context"] = formula_context
+        if number_format_groups:
+            metadata["number_format_groups"] = list(number_format_groups)
+        if display_context:
+            metadata["number_format_context"] = display_context
+        if number_formats_truncated:
+            metadata["number_format_groups_truncated"] = True
         if sheet_context:
             metadata.update(sheet_context=sheet_context, sheet_context_row_numbers=list(preamble_rows))
         return TextBlock(
-            text="\n".join(lines) + worksheet_context + sheet_context + formula_context,
+            text="\n".join(lines) + display_context + worksheet_context + sheet_context + formula_context,
             block_type="table",
             metadata=metadata,
         )
