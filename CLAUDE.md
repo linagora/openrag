@@ -435,7 +435,7 @@ All tests live in a separate `tests/` tree (zero test files inside the `openrag/
 **Running integration tests locally with act:**
 ```bash
 # Run API tests using GitHub Actions locally
-act -j api-tests -W .github/workflows/api_tests.yml --bind
+act -j api-tests -W .github/workflows/ci.yml --bind
 ```
 
 **Mock VLLM for CI:** `tests/api_tests/api_run/mock_vllm.py` provides fake embeddings and completions endpoints (streaming and non-streaming) for testing without a real LLM. Pydantic request models use `ConfigDict(extra="allow")` to accept vendor-specific fields like `extra_body`.

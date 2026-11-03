@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 from core.indexing.topic_tags import TopicTagSample
 from core.models.document import ProcessedDocument
+from core.observability.metric_specs import STAGE_VALUES
 from core.observability.ray_metrics import observe_stage_duration, record_parse_completion, seed_parse_watchdog
 from core.utils.logging import get_logger
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials
@@ -31,7 +32,18 @@ async def _next_batch(batches):
         raise
 
 
-async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=None, max_topic_tags=7):
+def _safe_tracking_call(tracker, method: str, *args, **kwargs) -> None:
+    if tracker is None:
+        return
+    try:
+        getattr(tracker, method)(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - stage tracking cannot fail indexing
+        logger.warning("Indexing stage progress update failed", operation=method)
+
+
+async def run_csv_batches(
+    pipeline, row, parser, *, batch_context, stage_tracker=None, topic_tagger=None, max_topic_tags=7
+):
     document = row["document"]
     # A task-specific marker lets failure cleanup delete only this attempt.
     if not row.get("task_id"):
@@ -60,16 +72,26 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
             while True:
                 child = None
                 row["stage"] = "parsing"
-                if remaining_parse_time is not None and remaining_parse_time <= 0:
-                    raise TimeoutError("CSV parsing exceeded the file's parse time budget")
-                start = time.perf_counter()
+                _safe_tracking_call(stage_tracker, "start_stage", "parse", STAGE_VALUES.index("parse"))
                 try:
-                    batch = await run_with_optional_timeout(lambda: _next_batch(batches), remaining_parse_time)
-                finally:
-                    elapsed = time.perf_counter() - start
-                    observe_stage_duration("parse", elapsed)
-                    if remaining_parse_time is not None:
-                        remaining_parse_time -= elapsed
+                    if remaining_parse_time is not None and remaining_parse_time <= 0:
+                        raise TimeoutError("CSV parsing exceeded the file's parse time budget")
+                    start = time.perf_counter()
+                    try:
+                        batch = await run_with_optional_timeout(lambda: _next_batch(batches), remaining_parse_time)
+                    finally:
+                        elapsed = time.perf_counter() - start
+                        observe_stage_duration("parse", elapsed)
+                        if remaining_parse_time is not None:
+                            remaining_parse_time -= elapsed
+                except asyncio.CancelledError:
+                    _safe_tracking_call(stage_tracker, "finish_stage", cancelled=True)
+                    raise
+                except Exception as exc:
+                    _safe_tracking_call(stage_tracker, "finish_stage", error=exc)
+                    raise
+                else:
+                    _safe_tracking_call(stage_tracker, "finish_stage")
 
                 if batch is None:
                     record_parse_completion("csv")
@@ -98,6 +120,7 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
                 await pipeline.run_processed_batch(
                     child,
                     processed,
+                    stage_tracker=stage_tracker,
                     chunk_offset=chunk_offset,
                     indexed_at=indexed_at,
                     context=batch_context,
@@ -127,6 +150,7 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
             # here. Never retain the batches or their embedding vectors.
             row["chunks"] = topic_sample.chunks
             row["stage"] = "topic_tagging"
+            _safe_tracking_call(stage_tracker, "start_stage", "topic_tag", STAGE_VALUES.index("topic_tag"))
             start = time.perf_counter()
             try:
                 await topic_tag_stage(
@@ -135,12 +159,27 @@ async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=
                     max_tags=max_topic_tags,
                     timeout=pipeline.timeouts.topic_tag,
                 )
+            except asyncio.CancelledError:
+                _safe_tracking_call(stage_tracker, "finish_stage", cancelled=True)
+                raise
             except Exception as exc:
+                _safe_tracking_call(stage_tracker, "finish_stage", error=exc, degraded=True)
                 # Match the existing optional-enrichment behavior. Cancellation
                 # still propagates and triggers this attempt's vector cleanup.
                 row["topic_tags"] = []
                 row.setdefault("degraded_stages", {})["topic_tag"] = str(exc)
                 logger.warning(f"CSV topic tagging failed; indexing the file without tags: {exc}")
+            else:
+                degraded_error = (row.get("degraded_stages") or {}).get("topic_tag")
+                if degraded_error is None:
+                    _safe_tracking_call(stage_tracker, "finish_stage")
+                else:
+                    _safe_tracking_call(
+                        stage_tracker,
+                        "finish_stage",
+                        error=RuntimeError(str(degraded_error)),
+                        degraded=True,
+                    )
             finally:
                 row.pop("chunks", None)
                 observe_stage_duration("topic_tag", time.perf_counter() - start)
