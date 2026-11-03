@@ -1,0 +1,257 @@
+"""
+Add the filename to chunks already indexed
+==========================================
+Some chunks don't contain their filename, so a question like "what is report.pdf
+about?" can't find them. This script adds a ``[Source: <filename>]`` line at the
+start of those chunks.
+
+Nothing is re-parsed or re-embedded. Milvus updates BM25 from the new text, and a
+question naming a file is a keyword search, so that is enough.
+
+Chunks that already name their file are skipped, so it is safe to run again. Don't
+run it during an embedder swap, which rewrites the same rows.
+
+This is a data fix, so it isn't a numbered migration: those force every deployment
+to run them.
+
+Usage (from infra/compose, with DC and SVC set as in the upgrade guide):
+
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+        uv run --no-dev python services/persistence/migrations/milvus/backfill_chunk_headers.py --dry-run
+
+``--dry-run`` writes nothing, ``--partition <name>`` limits it to one partition
+(repeatable), and ``--revert`` removes what it added.
+"""
+
+import argparse
+import json
+import re
+import sys
+from collections import Counter
+from collections.abc import Callable, Iterator
+from typing import Any
+
+from core.config import load_config
+from core.utils.logging import get_logger
+from core.utils.text import get_num_tokens
+from pymilvus import MilvusClient, MilvusException
+from services.storage.milvus_store import MAX_SECTION_ID, SECTION_ID_KEYS, _changed_by_float64
+
+logger = get_logger()
+
+# A row can reach about 130 KB, so a page stays well below Milvus's message limit.
+DEFAULT_BATCH_SIZE = 200
+
+# What contextualization writes, the same in every release so far. Matching the whole
+# form means a body that merely quotes "* filename: " still gets the header.
+_FILENAME_LINE = re.compile(r"^\* filename: .*\n\n\[CHUNK_START\]", re.MULTILINE)
+
+# What Milvus returns for a row it refuses: a deleted chunk, or one now too long.
+_ROW_REFUSED_CODE = 1100
+
+_OUTPUT_FIELDS = ["text", "file_id", "$meta"]
+_SAMPLE_SIZE = 3
+_PROGRESS_EVERY_PAGES = 50
+
+
+def _needs_filename(row: dict[str, Any]) -> bool:
+    # ``--revert`` leaves any chunk with ``content`` alone, so don't add what it
+    # couldn't remove. This only leaves out structured_section chunks with
+    # ``prepend_heading_path`` off.
+    if row.get("header") or row.get("content") is not None:
+        return False
+    return not _FILENAME_LINE.search(row.get("text") or "")
+
+
+def _folded_section_ids(row: dict[str, Any]) -> dict[str, int]:
+    """Milvus would round these IDs, so fold them as ``write_vectors`` does. Chunks
+    keep their neighbours."""
+    return {
+        key: row[key] & MAX_SECTION_ID
+        for key in SECTION_ID_KEYS
+        if isinstance(row.get(key), int) and not 0 <= row[key] <= MAX_SECTION_ID
+    }
+
+
+def _rounded_keys(row: dict[str, Any]) -> set[str]:
+    return {
+        key
+        for key, value in row.items()
+        if key not in ("_id", "file_id", *SECTION_ID_KEYS) and _changed_by_float64(value)
+    }
+
+
+def _with_header(row: dict[str, Any], length_function: Callable[[str], int]) -> dict[str, Any]:
+    # The line recursive_splitter writes on new chunks. No page: it can be wrong on these chunks.
+    header = f"[Source: {row['filename']}]"
+    entity = {
+        "_id": row["_id"],
+        "text": f"{header}\n\n{row.get('text') or ''}",
+        "header": header,
+        **_folded_section_ids(row),
+    }
+    if isinstance(row.get("token_count"), int):
+        entity["token_count"] = length_function(entity["text"])
+    return entity
+
+
+def _without_header(row: dict[str, Any], length_function: Callable[[str], int]) -> dict[str, Any] | None:
+    """Undo ``_with_header``. Chunkers store ``content`` with their header, so a header
+    without it came from this script."""
+    header = row.get("header")
+    prefix = f"{header}\n\n"
+    text = row.get("text") or ""
+    if not header or row.get("content") is not None or not text.startswith(prefix):
+        return None
+    entity = {"_id": row["_id"], "text": text[len(prefix) :], "header": None, **_folded_section_ids(row)}
+    if isinstance(row.get("token_count"), int):
+        entity["token_count"] = length_function(entity["text"])
+    return entity
+
+
+def _pages(client: MilvusClient, collection_name: str, filter_expr: str, batch_size: int) -> Iterator[list[dict]]:
+    iterator = client.query_iterator(
+        collection_name=collection_name,
+        filter=filter_expr,
+        batch_size=batch_size,
+        output_fields=_OUTPUT_FIELDS,
+    )
+    try:
+        while True:
+            page = iterator.next()
+            if not page:
+                return
+            yield page
+    finally:
+        iterator.close()
+
+
+def _write(client: MilvusClient, collection_name: str, entities: list[dict[str, Any]]) -> int:
+    """Upsert *entities* and return how many Milvus refused.
+
+    One refused row fails its whole batch, so split the batch to save the good rows.
+    Any other error, such as an outage, stops the run: splitting would only repeat
+    it, with each call retrying for minutes. The run can be started again.
+    """
+    try:
+        client.upsert(collection_name=collection_name, data=entities, partial_update=True)
+        return 0
+    except MilvusException as exc:
+        if exc.code != _ROW_REFUSED_CODE:
+            raise
+        if len(entities) == 1:
+            logger.bind(chunk_id=entities[0]["_id"]).warning(f"Chunk left as it was: {exc}")
+            return 1
+    middle = len(entities) // 2
+    return _write(client, collection_name, entities[:middle]) + _write(client, collection_name, entities[middle:])
+
+
+def run(
+    client: MilvusClient,
+    collection_name: str,
+    *,
+    length_function: Callable[[str], int],
+    partitions: list[str] | None = None,
+    revert: bool = False,
+    dry_run: bool = False,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> Counter:
+    """Add the filename to the chunks of *partitions* (all when None), or remove it with *revert*."""
+    stats: Counter = Counter()
+    rounded: dict[str, set[str]] = {}
+    filter_expr = f"partition in {json.dumps(partitions)}" if partitions else ""
+
+    for number, page in enumerate(_pages(client, collection_name, filter_expr, batch_size), start=1):
+        stats["scanned"] += len(page)
+        entities: list[dict[str, Any]] = []
+        for row in page:
+            if revert:
+                entity = _without_header(row, length_function)
+                if entity is None:
+                    stats["unchanged"] += 1
+                    continue
+            elif not _needs_filename(row):
+                stats["unchanged"] += 1
+                continue
+            elif not row.get("filename"):
+                stats["no_filename"] += 1
+                continue
+            else:
+                entity = _with_header(row, length_function)
+            entities.append(entity)
+            keys = _rounded_keys(row)
+            if keys:
+                rounded.setdefault(str(row.get("file_id")), set()).update(keys)
+
+        if dry_run:
+            for entity in entities[: max(0, _SAMPLE_SIZE - stats["changed"])]:
+                logger.info(f"  chunk {entity['_id']} would start with: {entity['text'][:100]!r}")
+            stats["changed"] += len(entities)
+        elif entities:
+            refused = _write(client, collection_name, entities)
+            stats["refused"] += refused
+            stats["changed"] += len(entities) - refused
+        if number % _PROGRESS_EVERY_PAGES == 0:
+            logger.info(f"  {stats['scanned']} chunk(s) scanned, {stats['changed']} changed")
+
+    if rounded:
+        logger.bind(rounded={file_id: sorted(keys) for file_id, keys in rounded.items()}).warning(
+            "Rewriting these files' chunks rounds integers beyond ±2**53 in their metadata. "
+            "PostgreSQL keeps the exact values."
+        )
+    if not dry_run and stats["changed"]:
+        client.flush(collection_name)
+    return stats
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Add the filename to chunks already indexed.")
+    parser.add_argument("--dry-run", action="store_true", help="Inspect only, make no changes")
+    parser.add_argument("--revert", action="store_true", help="Remove what this script added")
+    parser.add_argument(
+        "--partition",
+        action="append",
+        default=None,
+        help="Only this partition; repeat for several (default: all partitions)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Chunks read and written at a time (default: {DEFAULT_BATCH_SIZE})",
+    )
+    args = parser.parse_args()
+    if args.batch_size < 1:
+        parser.error(f"--batch-size must be at least 1, got {args.batch_size}.")
+
+    cfg = load_config()
+    uri = f"http://{cfg.vectordb.host}:{cfg.vectordb.port}"
+    collection_name = cfg.vectordb.collection_name
+
+    logger.info(f"Connecting to Milvus at {uri}, collection='{collection_name}'")
+    client = MilvusClient(uri=uri)
+    if not client.has_collection(collection_name):
+        logger.error(f"Collection '{collection_name}' does not exist. Aborting.")
+        sys.exit(1)
+
+    stats = run(
+        client,
+        collection_name,
+        length_function=get_num_tokens(),
+        partitions=args.partition,
+        revert=args.revert,
+        dry_run=args.dry_run,
+        batch_size=args.batch_size,
+    )
+    logger.info(
+        f"{'Would change' if args.dry_run else 'Changed'} {stats['changed']} of {stats['scanned']} chunk(s): "
+        f"{stats['unchanged']} needed nothing, {stats['no_filename']} have no filename, "
+        f"{stats['refused']} refused by Milvus."
+    )
+    if stats["refused"]:
+        logger.error("Some chunks were refused: see the warnings above. Run this again to retry them.")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
