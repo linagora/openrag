@@ -329,7 +329,8 @@ persistence:
     modelWeights: { size: 50Gi }
     data: { size: 20Gi }
     hydraConfig: { size: 10Mi }
-    venv: { size: 10Gi }
+    # The dependency set (torch with its CUDA libraries) takes about 7 GB installed.
+    venv: { size: 20Gi }
 
 # === Shared security defaults ===
 # Pod Security Standards "restricted" baseline, merged into each workload's
