@@ -15,7 +15,7 @@ from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
-from services.workers.failure_reporting import log_task_failure, submit_task_failure
+from services.workers.failure_reporting import log_interrupted_failure, log_task_failure, submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
@@ -529,6 +529,14 @@ class IndexerWorkerActor:
                 is_working=lambda: working,
             )
         )
+
+        def stop_lease_interrupting() -> None:
+            # A failure being reported must not be stopped by the lease: the
+            # handler below would report the lost lease as a second failure, log
+            # and notify again, and overwrite the recorded reason.
+            nonlocal working
+            working = False
+
         try:
             try:
                 # A pickup the task state refuses (a task cancelled or abandoned
@@ -559,6 +567,7 @@ class IndexerWorkerActor:
             except Exception as exc:
                 # Not BaseException: a cancellation here must not notify or be
                 # reported as failed (same rule as set_failed_if_not_cancelled).
+                stop_lease_interrupting()
                 await self._report_task_failure(
                     task_id,
                     exc,
@@ -585,6 +594,7 @@ class IndexerWorkerActor:
                     callback_token=callback_token,
                     require_existing_partition=require_existing_partition,
                     resolved_prompts=resolved_prompts,
+                    on_failure_report=stop_lease_interrupting,
                 )
             finally:
                 self._active_indexation_config.reset(token)
@@ -708,11 +718,7 @@ class IndexerWorkerActor:
         callback_token: str | None,
     ) -> None:
         error_reason = failure_reason_from_exception(exc)
-        log_task_failure(
-            self._logger.bind(file_id=worker_metadata.get("file_id", ""), partition=partition, task_id=task_id),
-            exc,
-            error_reason,
-        )
+        log = self._logger.bind(file_id=worker_metadata.get("file_id", ""), partition=partition, task_id=task_id)
         try:
             was_failed = await retry_idempotent_ray_actor_method(
                 lambda: submit_task_failure(
@@ -723,9 +729,13 @@ class IndexerWorkerActor:
                 ),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
+        except asyncio.CancelledError:
+            log_interrupted_failure(log, exc, error_reason)
+            raise
         except Exception:
             was_failed = True
         if was_failed:
+            log_task_failure(log, exc, error_reason)
             await send_indexing_callback(
                 callback_url,
                 partition,

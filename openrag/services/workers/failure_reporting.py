@@ -36,3 +36,12 @@ def log_task_failure(log: Any, exc: BaseException, error_reason: str) -> None:
         log.warning("File indexing failed.", error_reason=error_reason)
     else:
         log.opt(exception=exc).error("File indexing failed.", error_reason=error_reason)
+
+
+def log_interrupted_failure(log: Any, exc: BaseException, error_reason: str) -> None:
+    """Keep the reason of a failure whose report a cancellation interrupted.
+
+    Not a "File indexing failed." line: the task ends cancelled, or the worker
+    actor reports the lost lease as this task's one failure.
+    """
+    log.opt(exception=exc).warning("Indexing error interrupted by a cancellation.", error_reason=error_reason)
