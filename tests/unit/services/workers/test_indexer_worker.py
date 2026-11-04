@@ -1682,18 +1682,27 @@ async def test_process_file_persists_its_actual_pipeline_stage_events(
     path.write_bytes(b"content")
     processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
     repo = StageHistoryRepo()
+    tsm = _fake_tsm()
     worker = IndexerWorker(
         pipeline=_make_pipeline(processed, [Chunk(id="c1", text="content", partition="p")]),
-        task_state_manager=_fake_tsm(),
+        task_state_manager=tsm,
         job_repo=repo,
     )
     assert worker._stage_writer is not None
+    wait_for_summary_capacity = AsyncMock()
+    monkeypatch.setattr(worker._stage_writer, "wait_for_summary_capacity", wait_for_summary_capacity)
+
+    async def assert_capacity_checked_before_start(*_args: Any) -> None:
+        assert wait_for_summary_capacity.await_count == 1
+
+    tsm.set_state.remote.side_effect = assert_capacity_checked_before_start
     finish_task = MagicMock(wraps=worker._stage_writer.finish_task)
     monkeypatch.setattr(worker._stage_writer, "finish_task", finish_task)
 
     await worker.process_file(task_id="tracked-task", path=str(path), metadata={"file_id": "f1"}, partition="p")
     await worker.close_stage_writer()
 
+    wait_for_summary_capacity.assert_awaited_once_with()
     finish_task.assert_called_once()
     assert repo.jobs[0].stage_tracking_version == 1
     events = [event for batch, _ in repo.writes for event in batch]

@@ -5,7 +5,7 @@ title: Milvus Migrations
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 # Milvus Upgrade
-OpenRAG now uses Milvus **3.0.2** with PyMilvus **3.0.1**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
+OpenRAG now uses Milvus **3.0.5** with PyMilvus **3.0.2**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
 
 Fresh installations need no manual ownership step. The Compose stack initializes empty bind mounts and named volumes before the server starts. If existing files are not already owned by the Milvus 3 user, startup stops with a migration error instead of risking a partially writable deployment. The procedure below remains mandatory for existing data in either storage mode because all files created by Milvus 2.6 must be transferred to the Milvus 3 user.
 
@@ -58,6 +58,11 @@ Do not skip this migration when upgrading an existing deployment:
 > For the full official reference, see the [Milvus upgrade guide](https://milvus.io/docs/upgrade_milvus_standalone-docker.md#Upgrade-process).
 
 ### Upgrade from Milvus 2.6.x to 3.0.2
+
+:::note[Milvus 3.0.2 is an intermediate step]
+This procedure uses the OpenRAG [v2.3.3 Compose and Helm configuration](https://github.com/linagora/openrag/tree/v2.3.3), which pins Milvus to v3.0.2. Complete this 2.6-to-3.0.2 migration with the v2.3.3 configuration.
+Before following the 3.0.2-to-3.0.5 procedure below, switch to the target OpenRAG release's Compose files or Helm values. Remove any existing `milvus.image.all.tag` override from Helm values so the chart can use its v3.0.5 default.
+:::
 
 Milvus 2.6 containers ran as root, so existing bind-mounted files and Docker named-volume contents are commonly owned by `root:root`. Milvus 3 runs as UID/GID `999:999` and cannot start until it owns the directory mounted at `/var/lib/milvus`.
 
@@ -135,7 +140,7 @@ docker compose up -d
 
 The bundled Helm chart now installs the Milvus 3-compatible chart and image. Before upgrading an existing release, stop writes and back up the MinIO and etcd volumes, together with any standalone or log volume enabled through custom values.
 
-OpenRAG uses milvus-helm chart 5.0.27, whose default image is v3.0.1, and sets the image to v3.0.2. Resources rendered by that chart therefore keep the label `app.kubernetes.io/version: "3.0.1"`. This label describes the chart's default application version, not the running server; verify the container image as shown below.
+OpenRAG v2.3.3 uses milvus-helm chart 5.0.27, whose default image is v3.0.1, and sets the image to v3.0.2. Resources rendered by that chart therefore keep the label `app.kubernetes.io/version: "3.0.1"`. This label describes the chart's default application version, not the running server; verify the container image as shown below.
 
 Milvus 3 runs with GID `999`. The chart sets `fsGroup: 999` with the `Always` policy so Kubernetes recursively makes supported mounted volumes writable before Milvus starts. The first startup can therefore take longer when a volume contains many files.
 
@@ -151,6 +156,39 @@ kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}'
 # Expected Milvus image: milvusdb/milvus:v3.0.2
 ```
+
+### Upgrade from Milvus 3.0.2 to 3.0.5
+
+The tested 3.0.2-to-3.0.5 upgrade required no Milvus data migration. The rehearsal covered one copied data volume with `MQ_TYPE=default`; custom message-queue configurations need separate validation. Keep the existing etcd, MinIO, volumes, and message-queue type. Before upgrading, stop writes and take a verified backup of Milvus, etcd, and MinIO. Do not rerun the OpenRAG collection migration solely because the Milvus image changes; apply it separately only if the collection schema is behind the running OpenRAG version.
+
+> **RLS compatibility gate:** Milvus 3.0.5 [removes server-side row-level security enforcement](https://github.com/milvus-io/milvus/pull/54353). If your deployment relies on Milvus RLS to restrict row visibility or writes, do not upgrade until an equivalent authorization control is in place and validated. OpenRAG does not enable RLS by default.
+>
+> **Pulsar compatibility:** This procedure was tested with `MQ_TYPE=default`. If your deployment uses Pulsar, review its producer access mode before upgrading; Milvus 3.0.3 [changed the default to `exclusive`](https://github.com/milvus-io/milvus/releases/tag/v3.0.3). Custom Pulsar configurations are outside this validated path.
+
+With Docker Compose, pull and recreate Milvus while leaving its dependencies and storage in place:
+
+```bash
+docker compose pull milvus milvus-init
+docker compose up -d milvus
+docker compose ps milvus
+docker compose logs --tail 100 milvus
+docker inspect "$(docker compose ps -q milvus)" --format '{{.Config.Image}}'
+# Expected: milvusdb/milvus:v3.0.5
+```
+
+Wait for `/healthz` to report healthy and confirm the expected image before restarting OpenRAG.
+
+The OpenRAG 2.3.4 chart defaults to Milvus `v3.0.2`; chart 5.0.33 defaults to `v3.0.5`. Check the release's saved overrides with `helm get values`, along with any values files or `--set` options for the upgrade. If none explicitly sets `milvus.image.all.tag` and your Helm client supports it, use `--reset-then-reuse-values` to apply the new chart defaults and reuse the release's saved settings (Helm 3.14.4 supports this option). Do not use `--reuse-values` by itself: it can preserve the old chart default even when no image tag appears in saved overrides. If your client lacks this option or an explicit override pins `v3.0.2`, use `--reset-values` with a values file based on the new chart, carrying forward required custom settings but omitting that pin. See the [Helm upgrade value options](https://helm.sh/docs/v3/helm/helm_upgrade/).
+
+After upgrading, confirm that all five Milvus workloads use `milvusdb/milvus:v3.0.5` and are ready:
+
+```bash
+kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}'
+# Expected: all five Milvus workloads use milvusdb/milvus:v3.0.5
+```
+
+The bundled PostgreSQL pod may be recreated when the resolved PostgreSQL sub-chart version changes. It was recreated when upgrading from the v2.3.4 chart's locked 18.10.0 dependency and from published chart 0.7.10's 18.12.16 dependency; it was not recreated from published chart 0.7.11, which already uses 18.12.17. MinIO rolls during the upgrade. Plan for a possible brief PostgreSQL outage, then confirm PostgreSQL, MinIO, and every Milvus workload are ready before resuming writes. An external PostgreSQL database is not restarted.
 
 ### Legacy path: upgrade Milvus 2.5.x to 2.6.11
 
@@ -278,7 +316,7 @@ It reads PostgreSQL as well as Milvus, to know which embedder each partition use
 - **Stop OpenRAG first**, or at least all traffic to it, as the [Kubernetes upgrade](/openrag/documentation/upgrading/#5-migrate-the-milvus-collection) does: until the collection reaches version 3, OpenRAG cannot index into it, but deleting a file still reaches Milvus. After copying, the migration counts the rows again. If the count moved, something was writing: it stops before dropping `vector`, and you run it again once the writes have stopped.
 - **A failed run can be run again.** Until its last step drops `vector`, the original vectors stay in place. By then it has already added the per-embedder fields and rewritten each chunk's metadata, with the rounding described below. Once `vector` is dropped, `--downgrade --target 2` copies the vectors back into it; see [Rollback](#rollback) for when that is possible. If a run failed after dropping `vector` but before stamping version 3, run the migration again: it only stamps the version.
 - **Rows of a partition PostgreSQL does not know** are already unreachable from OpenRAG, and lose their vector.
-- **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. Section IDs (`section_id`, `prev_section_id`, `next_section_id`) are the exception: the copy folds them below 2^53 first, which keeps each chunk linked to its neighbours. PostgreSQL keeps each file's original upload metadata.
+- **Integers above 2^53** in a chunk's metadata can be rounded by Milvus 3.0.2 and older or unverified builds when the copy rewrites dynamic fields through floating-point numbers. The tested Milvus 3.0.5 build preserves these integers exactly. Section IDs (`section_id`, `prev_section_id`, `next_section_id`) are still deliberately folded below 2^53 before the copy, keeping each chunk linked to its neighbours across server versions. PostgreSQL keeps each file's original upload metadata.
 - **Development builds from 22 September 2026 (#994) until #1096 merged on 28 September** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
 :::
 
@@ -419,7 +457,7 @@ Pass the version you are going back to: `--target 2` undoes version 3 only, for 
 
 What a downgrade can undo depends on the migration:
 
-- **Version 3 → 2** copies each partition's vectors from its embedder's field back into `vector`, then drops the per-embedder fields. It is possible only while every field in use has the same dimension, every partition holding files still resolves through PostgreSQL to an embedder field (no embedder deleted, no default changed since the upgrade), and the collection has fewer than 10 vector fields, since `vector` is added back. PostgreSQL must be at a revision that still has the embedder fields, so run it before downgrading the PostgreSQL schema. It does not restore the chunk metadata the upgrade rewrote: integers above 2^53 stay rounded and section IDs stay folded. Only restoring a Milvus backup taken before the upgrade recovers the original metadata.
+- **Version 3 → 2** copies each partition's vectors from its embedder's field back into `vector`, then drops the per-embedder fields. It is possible only while every field in use has the same dimension, every partition holding files still resolves through PostgreSQL to an embedder field (no embedder deleted, no default changed since the upgrade), and the collection has fewer than 10 vector fields, since `vector` is added back. PostgreSQL must be at a revision that still has the embedder fields, so run it before downgrading the PostgreSQL schema. It does not restore the metadata changes made by the migration: older or unverified Milvus builds may have rounded large integers, and section IDs stay folded. Only restoring a Milvus backup taken before the upgrade recovers the original metadata.
 - **Version 2 → 1** swaps the `<collection>_v1_backup` collection back into place and sets the version stamp to 1. The version-2 collection is kept aside as `<collection>_v2_rolled_back` rather than dropped, so nothing is lost — but this is a point-in-time rollback: **rows indexed after the upgrade exist only in the collection set aside**.
 
   The rollback needs that backup collection. If it is gone, the downgrade fails rather than reporting a rollback it did not perform, and there are three ways forward:
