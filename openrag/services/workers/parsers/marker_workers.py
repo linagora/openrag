@@ -658,7 +658,10 @@ class MarkerLoader(BasePooledParser):
     """
 
     PAGE_SEP = "[PAGE_SEP]"
-    _PAGE_MARKER_RE = re.compile(r"\{(\d+)\}" + re.escape(PAGE_SEP))
+    # The page is read with int(), which refuses more than 4,300 digits, and the
+    # PDF's own text can contain ``{N}[PAGE_SEP]``: a number no page count reaches
+    # leaves it plain text, as ``PAGE_RE`` does for ``[PAGE_N]``.
+    _PAGE_MARKER_RE = re.compile(r"\{(\d{1,9})\}" + re.escape(PAGE_SEP))
 
     def __init__(self) -> None:
         self.config = load_config()

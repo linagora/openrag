@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 from core.chunking.markdown_utils import (
+    PAGE_RE,
     MDElement,
     _split_to_budget,
     attach_captions,
@@ -159,6 +160,12 @@ class TestSplitMdElements:
         elems = split_md_elements(f"Intro.\n{marker}\nMore.")
         assert [e.type for e in elems] == ["text"]
         assert marker in elems[0].content
+
+    def test_a_page_has_at_most_nine_digits(self):
+        # Ten digits is past any page count; above 2**63 the page would not
+        # even fit the integer Milvus stores.
+        assert PAGE_RE.fullmatch("[PAGE_999999999]")
+        assert PAGE_RE.search("[PAGE_1000000000]") is None
 
 
 TABLE = "| A | B |\n|---|---|\n| 1 | 2 |"
