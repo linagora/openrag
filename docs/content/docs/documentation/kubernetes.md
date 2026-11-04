@@ -123,9 +123,9 @@ that apply on every upgrade.
 
 Some releases bump the indexer actor generation (`_INDEXER_ACTOR_PROTOCOL_VERSION`
 in `openrag/services/workers/indexer_pool.py`), and some of those also replace
-the shared `TaskStateManager` actor. 2.2.x runs `v7` and 2.3.0 to 2.3.3 run `v13`: the
+the shared `TaskStateManager` actor. 2.2.x runs `v7` and 2.3.0 to 2.3.4 run `v13`: the
 generations in between only ever existed on `develop`, so an upgrade from 2.2.x
-to 2.3.x moves `v7` to `v13` and replaces the `TaskStateManager`. 2.3.4 moves
+to 2.3.x moves `v7` to `v13` and replaces the `TaskStateManager`. 2.3.5 moves
 `v13` to `v15` and replaces it again. This matters
 only when OpenRAG pods share a Ray cluster: with `ray.enabled: true`, or with an
 external cluster set through `RAY_ADDRESS`. With `ray.enabled: false` (the
@@ -215,7 +215,7 @@ incomplete. See
 A fix that lives in the Ray actors reaches a shared Ray cluster only when those
 actors are recreated, and a release that keeps the generation does not recreate
 them. The fence that holds a file while an orphaned indexing worker may still
-write to it is such a fix: an upgrade from 2.3.0 or 2.3.1 to 2.3.2 or 2.3.3 keeps `v13`, so the
+write to it is such a fix: an upgrade from 2.3.0 or 2.3.1 to 2.3.2, 2.3.3 or 2.3.4 keeps `v13`, so the
 `TaskStateManager` and the indexer actors from the old release keep running, and
 an orphaned task can still release its file while its worker runs. The API then
 logs a warning that the running Ray actors predate the fence.
