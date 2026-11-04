@@ -11,6 +11,8 @@ import { cn } from "@/lib/utils";
 const POPOVER_CHROME_HEIGHT = 50;
 const ROW_HEIGHT = 32;
 const LIST_MAX_HEIGHT = 300;
+// Below this there's too little room under the trigger for a usable list.
+const MIN_POPOVER_HEIGHT = 180;
 
 interface PartitionComboboxProps {
   partitions: readonly Pick<PartitionResponse, "partition" | "name">[];
@@ -29,16 +31,19 @@ export function PartitionCombobox({
   "aria-label": ariaLabel,
 }: PartitionComboboxProps) {
   const [open, setOpen] = useState(false);
+  const [side, setSide] = useState<"top" | "bottom">("bottom");
   const triggerRef = useRef<HTMLButtonElement>(null);
   const sorted = useMemo(() => [...partitions].sort((a, b) => a.name.localeCompare(b.name)), [partitions]);
   const selected = partitions.find((p) => p.partition === value);
 
   const handleOpenChange = (next: boolean) => {
-    // The list never flips above, so make room under the trigger before it opens.
     const trigger = triggerRef.current;
-    const popoverHeight = POPOVER_CHROME_HEIGHT + Math.min(LIST_MAX_HEIGHT, partitions.length * ROW_HEIGHT);
-    if (next && trigger && window.innerHeight - trigger.getBoundingClientRect().bottom < popoverHeight) {
-      trigger.scrollIntoView({ block: "center" });
+    if (next && trigger) {
+      const roomBelow = () => window.innerHeight - trigger.getBoundingClientRect().bottom;
+      const popoverHeight = POPOVER_CHROME_HEIGHT + Math.min(LIST_MAX_HEIGHT, partitions.length * ROW_HEIGHT);
+      if (roomBelow() < popoverHeight) trigger.scrollIntoView({ block: "center" });
+      // Scrolling can't help at the end of a page, so only then open above.
+      setSide(roomBelow() < Math.min(popoverHeight, MIN_POPOVER_HEIGHT) ? "top" : "bottom");
     }
     setOpen(next);
   };
@@ -67,17 +72,17 @@ export function PartitionCombobox({
           <ChevronDownIcon className="size-4 opacity-50" />
         </Button>
       </PopoverTrigger>
-      {/* Always below the trigger: a long list flipped above it covers the page header.
+      {/* Side is chosen on open: automatic flipping would put long lists over the page header.
           Disabling collisions also disables shifting, so size to the space that's left. */}
       <PopoverContent
-        side="bottom"
+        side={side}
         align="start"
         avoidCollisions={false}
         className="w-(--radix-popover-trigger-width) min-w-[min(18rem,var(--radix-popover-content-available-width))] p-0"
       >
         <Command defaultValue={value}>
           <CommandInput placeholder="Search partitions..." />
-          <CommandList className="max-h-[min(300px,max(3rem,calc(var(--radix-popover-content-available-height)-3rem)))]">
+          <CommandList className="max-h-[min(300px,calc(var(--radix-popover-content-available-height)-38px))]">
             <CommandEmpty>No partition found.</CommandEmpty>
             <CommandGroup>
               {sorted.map((p) => (
