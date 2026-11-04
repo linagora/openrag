@@ -217,6 +217,9 @@ class ConnectionManager:
         # %(here)s, so this resolves to services/persistence/migrations/alembic/.
         cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
         cfg.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
+        # The app's logging is already configured: env.py must not replace it
+        # with alembic.ini's (see its ``configure_logger`` check).
+        cfg.attributes["configure_logger"] = False
         logger.info(f"Running Alembic migrations against {self._dsn_log}")
         try:
             command.upgrade(cfg, "head")

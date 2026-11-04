@@ -19,9 +19,11 @@ rag_config = load_config()
 # access to the values within the .ini file in use.
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
+# Configure logging from alembic.ini only when Alembic runs on its own (the
+# ``alembic`` CLI). Run from the app, fileConfig() would replace the app's root
+# handler and level, and disable the loggers already created, for the rest of
+# the process.
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
     fileConfig(config.config_file_name)
 
 # When the caller (typically ``ConnectionManager.run_migrations``) already
