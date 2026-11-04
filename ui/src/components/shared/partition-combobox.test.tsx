@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { PartitionCombobox } from "./partition-combobox";
@@ -47,15 +47,37 @@ describe("PartitionCombobox", () => {
     expect(trigger.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
   });
 
-  it("does not scroll when the list already fits below the trigger", async () => {
-    render(<PartitionCombobox partitions={partitions} value="zeta" onValueChange={vi.fn()} aria-label="Partition" />);
+  it.each([
+    [3, 145, true],
+    [3, 146, false],
+    [20, 349, true],
+    [20, 350, false],
+  ])("with %i partitions and %ipx free, scrolling the trigger is %s", async (count, free, scrolls) => {
+    const rows = Array.from({ length: count }, (_, i) => ({ partition: `p${i}`, name: `p${i}` }));
+    render(<PartitionCombobox partitions={rows} value="p0" onValueChange={vi.fn()} aria-label="Partition" />);
     const trigger = screen.getByRole("combobox", { name: "Partition" });
-    trigger.getBoundingClientRect = () => ({ bottom: window.innerHeight - 300 }) as DOMRect;
+    trigger.getBoundingClientRect = () => ({ bottom: window.innerHeight - free }) as DOMRect;
     trigger.scrollIntoView = vi.fn();
 
     await userEvent.click(trigger);
 
-    expect(trigger.scrollIntoView).not.toHaveBeenCalled();
+    expect(vi.mocked(trigger.scrollIntoView).mock.calls.length > 0).toBe(scrolls);
+  });
+
+  it.each([
+    [50, 50, "top"],
+    [50, 200, "bottom"],
+  ])("with %ipx free before and %ipx after scrolling, opens on the %s", async (before, after, side) => {
+    render(<PartitionCombobox partitions={partitions} value="zeta" onValueChange={vi.fn()} aria-label="Partition" />);
+    const trigger = screen.getByRole("combobox", { name: "Partition" });
+    trigger.getBoundingClientRect = () => ({ bottom: window.innerHeight - before }) as DOMRect;
+    trigger.scrollIntoView = () => {
+      trigger.getBoundingClientRect = () => ({ bottom: window.innerHeight - after }) as DOMRect;
+    };
+
+    await userEvent.click(trigger);
+
+    await waitFor(() => expect(document.querySelector("[data-slot=popover-content]")?.getAttribute("data-side")).toBe(side));
   });
 
   it("does not match a query whose letters only line up across a repeated name", async () => {
@@ -74,13 +96,14 @@ describe("PartitionCombobox", () => {
     expect(screen.queryByRole("option")).toBeNull();
   });
 
-  it("opens with the arrow keys", async () => {
+  it.each(["ArrowDown", "ArrowUp"])("opens with %s and focuses the search input", async (key) => {
     render(<PartitionCombobox partitions={partitions} value="zeta" onValueChange={vi.fn()} aria-label="Partition" />);
 
     screen.getByRole("combobox", { name: "Partition" }).focus();
-    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.keyboard(`{${key}}`);
 
     expect(screen.getAllByRole("option")).toHaveLength(3);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByPlaceholderText("Search partitions...")));
   });
 
   it("does not report a change when the current partition is picked again", async () => {
