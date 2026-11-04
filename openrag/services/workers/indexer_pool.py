@@ -67,7 +67,9 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # v13: TaskStateManager fences admission against a task already indexing the
 # same file and is replaced during bootstrap when it lacks that method; the
 # replacement changes the actor id the previous generation's handles point at.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v13"
+# v14: workers emit stage history and stamp its tracking version; old detached
+# workers are reused by name and would keep settling jobs without that history.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v14"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -248,6 +250,7 @@ class IndexerWorkerActor:
             job_repo=self._catalog_store.job_repo,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
+            stage_writer_max_active_tasks=cfg.ray.indexer.max_tasks_per_worker,
         )
         # When False (e.g. Twake, which keeps its own copy), the raw upload is
         # purged from ``paths.data_dir`` once indexing settles. Enforced at this
@@ -663,6 +666,10 @@ class IndexerWorkerActor:
                 worker_lease.cancel()
                 await asyncio.gather(worker_lease, return_exceptions=True)
                 await end_worker_lease(self._task_state_manager, task_id, logger=self._logger)
+
+    async def close_stage_writer(self) -> None:
+        """Drain this worker's bounded stage-history queue before retirement."""
+        await self._worker.close_stage_writer()
 
     async def _report_task_failure(
         self,
@@ -1407,8 +1414,8 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
                 # leave it half-initialised (which would later raise a stray
                 # KeyError on the missing key, misread as an unresolvable LLM).
                 system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "chunk_contextualizer")
-                # Built directly from config to avoid importing
-                # services.inference.runtime, which eagerly constructs a LangDetector.
+                # Built from ``cfg``: runtime.get_llm_semaphore() would read the
+                # global config instead of the one this factory was given.
                 llm_semaphore = DistributedSemaphore(
                     name="llmSemaphore", max_concurrent_ops=cfg.semaphore.llm_semaphore
                 )

@@ -10,6 +10,7 @@ from api.middleware.rate_limit import RateLimitMiddleware
 from api.middleware.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
 from api.middleware.request_timeout import RequestTimeoutMiddleware
 from api.middleware.security_headers import SecurityHeadersMiddleware
+from api.middleware.urlencoded_body_limit import UrlencodedBodyLimitMiddleware
 
 __all__ = [
     "AuthMiddleware",
@@ -19,4 +20,5 @@ __all__ = [
     "REQUEST_ID_HEADER",
     "RequestTimeoutMiddleware",
     "SecurityHeadersMiddleware",
+    "UrlencodedBodyLimitMiddleware",
 ]

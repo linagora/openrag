@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from .base import ConfigMixin
 
@@ -23,7 +23,16 @@ class VectorDBConfig(ConfigMixin):
     enable: bool = True
     # Per-request timeout (s) applied to the Milvus sync and async clients.
     timeout: float = Field(default=120.0, gt=0)
+    # Match the server's common.JSONMaxLength; reserve headroom when fitting.
+    json_max_length: int = Field(default=65_536, ge=3, strict=True)
+    json_safety_margin_bytes: int = Field(default=1_024, gt=0, strict=True)
     schema_version: int = 3
+
+    @model_validator(mode="after")
+    def _validate_json_budget(self) -> Self:
+        if self.json_max_length - self.json_safety_margin_bytes < 2:
+            raise ValueError("json_safety_margin_bytes must leave at least 2 bytes beneath json_max_length")
+        return self
 
 
 # ---------------------------------------------------------------------------
