@@ -60,7 +60,13 @@ class MockVectorStore(VectorStore):
         self.written_vectors: dict[str, dict[str, list[float] | None]] = {}
 
     async def upsert(
-        self, chunks: list[Any], collection: str = "default", *, indexed_at=None, vector_field=None
+        self,
+        chunks: list[Any],
+        collection: str = "default",
+        *,
+        indexed_at=None,
+        vector_field=None,
+        protected_metadata=None,
     ) -> int:
         store = self.collections.setdefault(collection, {})
         for chunk in chunks:
