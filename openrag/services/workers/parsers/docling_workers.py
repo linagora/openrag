@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from typing import Any
 
 import ray
 import torch
@@ -36,6 +37,14 @@ from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
 logger = get_logger()
 
+# The token ``export_to_markdown`` prints for every picture whose bytes it does
+# not inline (its ``image_placeholder`` default in docling-core). OpenRAG never
+# ships the picture bytes inside the markdown either; the caption stage instead
+# substitutes these occurrences with the ``markdown_ref`` of the ``ImageBlock``
+# built from the very same picture, which keeps every caption anchored where
+# its figure was.
+_IMAGE_PLACEHOLDER = "<!-- image -->"
+
 
 def _docling_num_gpus(config) -> float:
     """Return Docling's Ray GPU reservation, falling back to CUDA detection.
@@ -54,6 +63,42 @@ def _docling_num_gpus(config) -> float:
     except Exception as exc:
         logger.warning("Failed to query Ray cluster GPU resources; falling back to CUDA check", error=str(exc))
         return requested_gpus if torch.cuda.is_available() else 0
+
+
+def _swap_image_placeholders(text: str, slots: list[str | None]) -> str:
+    """Replace the k-th ``<!-- image -->`` with the k-th ref, in document order.
+
+    Docling's exporter prints one ``_IMAGE_PLACEHOLDER`` occurrence per picture
+    it walked (``document.pictures`` is appended to in the same traversal order
+    the exporter emits elements in), so the k-th occurrence of a page and the
+    k-th picture of that page correspond one-to-one. Matching by position is
+    what keeps a multi-image page ordered: ``str.replace`` would have stamped
+    the same ref onto every placeholder.
+
+    ``slots`` holds one entry per picture of that page, in traversal order —
+    the picture's ref when it encoded, ``None`` when it did not. Mismatches
+    degrade safely instead of ever misassigning:
+
+    - a ``None`` slot (picture failed to encode or render) keeps its own
+      placeholder retired — the token is inert, and no ref points at a
+      nonexistent ``ImageBlock``; later images still land at their own
+      occurrence because the slot list stays aligned with the pictures;
+    - more occurrences than slots (a picture the exporter rendered some other
+      way, a picture with no page to export on): the surplus occurrences are
+      left as-is;
+    - more slots than occurrences (e.g. a chart exported as a table instead
+      of a picture): the surplus pictures get no inline position, and the
+      caption stage appends their captions with their own page number.
+    """
+    parts = text.split(_IMAGE_PLACEHOLDER)
+    if len(parts) == 1:
+        return text  # nothing to substitute
+    out = [parts[0]]
+    for position, part in enumerate(parts[1:]):
+        ref = slots[position] if position < len(slots) else None
+        out.append(ref if ref is not None else _IMAGE_PLACEHOLDER)
+        out.append(part)
+    return "".join(out)
 
 
 @ray.remote
@@ -137,7 +182,11 @@ class DoclingLoader(BasePooledParser):
     Materialises ``Document.raw_bytes`` to a temporary file, dispatches to the
     named ``DoclingPool`` actor, and converts the ``ConversionResult`` into a
     ``ProcessedDocument`` with one ``TextBlock`` per page and one ``ImageBlock``
-    per picture.  Image captioning is left to the downstream caption stage.
+    per picture.  Image captioning is left to the downstream caption stage:
+    each page's exported ``<!-- image -->`` placeholders are swapped for the
+    refs of that page's picture blocks in document order, and each block keeps
+    its picture's original page (``prov[0].page_no``), so the stage can land
+    every caption where the figure was.
     """
 
     def __init__(self) -> None:
@@ -197,10 +246,60 @@ class DoclingLoader(BasePooledParser):
     ) -> tuple[list[TextBlock], list[ImageBlock]]:
         """Build the text and image blocks off the loop.
 
+        One walk over ``result.document.pictures`` produces both the image
+        blocks and the per-page ref slots the text stage substitutes with:
+        the k-th slot of a page is that page's k-th picture in traversal
+        order — the same order the exporter prints ``<!-- image -->`` in —
+        holding that picture's ref when it encoded and ``None`` when it did
+        not. A failing picture therefore keeps its own placeholder position
+        instead of shifting every later caption one figure early (#1313).
+
         ``cancelled`` is checked before each page and each picture: once set,
         the caller has gone and the result is discarded, so the work stops early.
         """
-        return self._build_text_blocks(result, cancelled), self._build_image_blocks(result, cancelled)
+        blocks: list[ImageBlock] = []
+        slots_by_page: dict[int, list[str | None]] = {}
+        for idx, picture in enumerate(result.document.pictures):
+            if cancelled.is_set():
+                break
+            provenance = getattr(picture, "prov", None) or []
+            # Docling indexes pages from 1, like OpenRAG's TextBlock/Marker blocks.
+            page_no: int | None = provenance[0].page_no if provenance else None
+            png_bytes = self._encode_picture(picture, idx)
+            ref: str | None = None
+            if png_bytes is not None:
+                ref = f"![](docling_img_{idx})"
+                blocks.append(
+                    ImageBlock(
+                        image_bytes=png_bytes,
+                        page_number=page_no,
+                        mime_type="image/png",
+                        metadata={"markdown_ref": ref},
+                    )
+                )
+            if page_no is not None:
+                slots_by_page.setdefault(page_no, []).append(ref)
+        return self._build_text_blocks(result, slots_by_page, cancelled), blocks
+
+    @staticmethod
+    def _encode_picture(picture: Any, idx: int) -> bytes | None:
+        """PNG bytes for a Docling picture, or ``None`` when it cannot render.
+
+        A picture without a rendered blob (a degraded parse, a chart exported
+        as a table) stays silent — the caller reserves ``None`` for its slot —
+        while an encode error is logged like before. Keeping both outcomes in
+        one helper is what lets ``_postprocess`` reserve the picture's slot
+        either way, so a failure never shifts later images onto earlier
+        placeholders.
+        """
+        try:
+            pil_image = picture.image.pil_image
+            if pil_image is None:
+                return None
+            return pil_to_png_bytes(pil_image)
+        except Exception as exc:
+            logger.warning(f"Failed to encode Docling picture {idx}: {exc}")
+            return None
 
     async def _dispatch(self, file_path: str) -> ConversionResult:
         pool = self._pool()
@@ -211,38 +310,49 @@ class DoclingLoader(BasePooledParser):
         )
 
     @staticmethod
-    def _build_text_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[TextBlock]:
+    def _build_text_blocks(
+        result: ConversionResult,
+        slots_by_page: dict[int, list[str | None]] | None = None,
+        cancelled: threading.Event | None = None,
+    ) -> list[TextBlock]:
+        """One ``TextBlock`` per page, with image placeholders swapped for refs.
+
+        ``export_to_markdown`` prints ``<!-- image -->`` for every picture on
+        the page. Left untouched, those occurrences are searched for by the
+        caption stage in vain — Docling pictures are not exported with usable
+        inline refs — so every caption used to be appended at the end of the
+        document, detached from its figure and attributed to the last page
+        (#1313). The k-th occurrence of a page is swapped for the k-th slot of
+        that page (``slots_by_page``, in document order — see ``_postprocess``),
+        which is the ref of the block built from the k-th picture of that page;
+        the caption stage then substitutes the wrapped caption for the ref,
+        landing where the figure was.
+
+        The substitution only fires on exact alignment: the page's placeholder
+        occurrences must match its slot count. Any other number means the
+        positional model does not hold for that page — empty provenance on a
+        picture, a chart exported as a table, a placeholder without a picture —
+        and swapping positions could assign a caption to the wrong figure, so
+        the page's placeholders are left untouched instead. Captions then fall
+        back to the append path — with their own (now correct) page number,
+        never a wrong one.
+        """
         blocks: list[TextBlock] = []
         n_pages = len(result.pages)
+        slots_by_page = slots_by_page or {}
         for i in range(1, n_pages + 1):
             if cancelled is not None and cancelled.is_set():
                 break
             text = result.document.export_to_markdown(page_no=i).strip()
-            blocks.append(TextBlock(text=text, page_number=i))
-        return blocks
-
-    @staticmethod
-    def _build_image_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[ImageBlock]:
-        blocks: list[ImageBlock] = []
-        for idx, picture in enumerate(result.document.pictures):
-            if cancelled is not None and cancelled.is_set():
-                break
-            try:
-                pil_image = picture.image.pil_image
-                if pil_image is None:
-                    continue
-                png_bytes = pil_to_png_bytes(pil_image)
-            except Exception as exc:
-                logger.warning(f"Failed to encode Docling picture {idx}: {exc}")
-                continue
-            ref = f"![](docling_img_{idx})"
-            blocks.append(
-                ImageBlock(
-                    image_bytes=png_bytes,
-                    mime_type="image/png",
-                    metadata={"markdown_ref": ref},
+            slots = slots_by_page.get(i, [])
+            if text != "" and text.count(_IMAGE_PLACEHOLDER) == len(slots):
+                text = _swap_image_placeholders(text, slots)
+            elif text.count(_IMAGE_PLACEHOLDER) and slots:
+                logger.bind(page=i).debug(
+                    f"Page {i}: {text.count(_IMAGE_PLACEHOLDER)} image placeholders "
+                    f"vs {len(slots)} picture slots — leaving placeholders in place"
                 )
-            )
+            blocks.append(TextBlock(text=text, page_number=i))
         return blocks
 
 
