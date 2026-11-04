@@ -19,11 +19,11 @@ rag_config = load_config()
 # access to the values within the .ini file in use.
 config = context.config
 
-# Configure logging from alembic.ini only when Alembic runs on its own (the
-# ``alembic`` CLI). Run from the app, fileConfig() would replace the app's root
-# handler and level, and disable the loggers already created, for the rest of
-# the process.
-if config.config_file_name is not None and config.attributes.get("configure_logger", True):
+# alembic.ini configures logging only for the ``alembic`` command, the one caller
+# that sets ``cmd_opts``. A program that runs the migrations (the app at startup,
+# the migration Job) keeps its own logging: fileConfig() would replace its root
+# handler and level, and disable the loggers it already created.
+if config.config_file_name is not None and config.cmd_opts is not None:
     fileConfig(config.config_file_name)
 
 # When the caller (typically ``ConnectionManager.run_migrations``) already
