@@ -47,6 +47,42 @@ describe("PartitionCombobox", () => {
     expect(trigger.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
   });
 
+  it("does not scroll when the list already fits below the trigger", async () => {
+    render(<PartitionCombobox partitions={partitions} value="zeta" onValueChange={vi.fn()} aria-label="Partition" />);
+    const trigger = screen.getByRole("combobox", { name: "Partition" });
+    trigger.getBoundingClientRect = () => ({ bottom: window.innerHeight - 300 }) as DOMRect;
+    trigger.scrollIntoView = vi.fn();
+
+    await userEvent.click(trigger);
+
+    expect(trigger.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("does not match a query whose letters only line up across a repeated name", async () => {
+    render(
+      <PartitionCombobox
+        partitions={[{ partition: "hr.twake.linagora.com", name: "hr.twake.linagora.com" }]}
+        value=""
+        onValueChange={vi.fn()}
+        aria-label="Partition"
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("combobox", { name: "Partition" }));
+    await userEvent.type(screen.getByPlaceholderText("Search partitions..."), "nah");
+
+    expect(screen.queryByRole("option")).toBeNull();
+  });
+
+  it("opens with the arrow keys", async () => {
+    render(<PartitionCombobox partitions={partitions} value="zeta" onValueChange={vi.fn()} aria-label="Partition" />);
+
+    screen.getByRole("combobox", { name: "Partition" }).focus();
+    await userEvent.keyboard("{ArrowDown}");
+
+    expect(screen.getAllByRole("option")).toHaveLength(3);
+  });
+
   it("does not report a change when the current partition is picked again", async () => {
     const onValueChange = vi.fn();
     render(<PartitionCombobox partitions={partitions} value="zeta" onValueChange={onValueChange} aria-label="Partition" />);

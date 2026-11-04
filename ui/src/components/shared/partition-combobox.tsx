@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -7,8 +7,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import type { PartitionResponse } from "@/lib/api/partitions";
 import { cn } from "@/lib/utils";
 
-// Popover height: search input plus the list's 300px cap.
-const POPOVER_HEIGHT = 350;
+// Popover height around the rows: search input, group padding, border and offset.
+const POPOVER_CHROME_HEIGHT = 50;
+const ROW_HEIGHT = 32;
+const LIST_MAX_HEIGHT = 300;
 
 interface PartitionComboboxProps {
   partitions: readonly Pick<PartitionResponse, "partition" | "name">[];
@@ -34,10 +36,19 @@ export function PartitionCombobox({
   const handleOpenChange = (next: boolean) => {
     // The list never flips above, so make room under the trigger before it opens.
     const trigger = triggerRef.current;
-    if (next && trigger && window.innerHeight - trigger.getBoundingClientRect().bottom < POPOVER_HEIGHT) {
+    const popoverHeight = POPOVER_CHROME_HEIGHT + Math.min(LIST_MAX_HEIGHT, partitions.length * ROW_HEIGHT);
+    if (next && trigger && window.innerHeight - trigger.getBoundingClientRect().bottom < popoverHeight) {
       trigger.scrollIntoView({ block: "center" });
     }
     setOpen(next);
+  };
+
+  // A Select opens on the arrow keys; PopoverTrigger only handles Enter and Space.
+  const handleTriggerKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault();
+      handleOpenChange(true);
+    }
   };
 
   return (
@@ -49,29 +60,30 @@ export function PartitionCombobox({
           role="combobox"
           aria-expanded={open}
           aria-label={ariaLabel}
+          onKeyDown={handleTriggerKeyDown}
           className={cn("justify-between font-normal", className)}
         >
           <span className={cn("truncate", !selected && "text-muted-foreground")}>{selected?.name ?? "Select partition"}</span>
           <ChevronDownIcon className="size-4 opacity-50" />
         </Button>
       </PopoverTrigger>
-      {/* Always below the trigger: a long list flipped above it covers the page header. */}
+      {/* Always below the trigger: a long list flipped above it covers the page header.
+          Disabling collisions also disables shifting, so size to the space that's left. */}
       <PopoverContent
         side="bottom"
         align="start"
         avoidCollisions={false}
-        className="w-(--radix-popover-trigger-width) min-w-72 p-0"
+        className="w-(--radix-popover-trigger-width) min-w-[min(18rem,var(--radix-popover-content-available-width))] p-0"
       >
         <Command defaultValue={value}>
           <CommandInput placeholder="Search partitions..." />
-          <CommandList className="max-h-[min(300px,max(8rem,calc(var(--radix-popover-content-available-height)-3rem)))]">
+          <CommandList className="max-h-[min(300px,max(3rem,calc(var(--radix-popover-content-available-height)-3rem)))]">
             <CommandEmpty>No partition found.</CommandEmpty>
             <CommandGroup>
               {sorted.map((p) => (
                 <CommandItem
                   key={p.partition}
                   value={p.partition}
-                  keywords={[p.name]}
                   onSelect={() => {
                     // Like a Select: picking the current partition is not a change.
                     if (p.partition !== value) onValueChange(p.partition);
