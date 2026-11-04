@@ -214,7 +214,7 @@ last meeting I had"). `Query.to_milvus_filter()` (`core/models/query.py`) render
 relevance-ranked list, stable within a document and with undated chunks last. It runs in
 `RetrieverPipeline.retrieve_docs` (before a `top_k` cut), again after RRF in `get_relevant_docs`,
 and again after the cross-partition fusion in `RetrievalService` — RRF only knows ranks, so the
-order has to be re-applied after every fusion, unless the sub-queries' orders differ. `describe_source` (`core/prompts/chat_prompt_builder.py`)
+order has to be re-applied after every fusion, and sub-queries with different orders are interleaved instead. `describe_source` (`core/prompts/chat_prompt_builder.py`)
 puts a `File: ... | Created: ... UTC` line under each `[Source N]` marker so the answering LLM can
 see the dates; the answer templates tell it to use that line for "when" questions.
 

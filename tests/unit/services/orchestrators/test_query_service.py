@@ -19,6 +19,7 @@ import services.orchestrators.query_service as qs
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
+from core.models.query import Query, SearchQueries
 from core.models.retrieval_trace import TraceCandidate
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
@@ -4179,3 +4180,24 @@ async def test_map_reduce_without_early_stop_reaches_relevant_chunks_after_an_ir
     assert await service()._map_reduce("q", docs) == []
     kept = await service()._map_reduce("q", docs, early_stop=False)
     assert [doc.page_content for doc in kept] == ["older but relevant"]
+
+
+@pytest.mark.parametrize(("date_order", "early_stop"), [("newest", False), (None, True)])
+@pytest.mark.asyncio
+async def test_prepare_chat_turns_off_map_reduce_early_stop_under_a_date_order(date_order, early_stop):
+    svc = _svc(retrieval=FakeRetrieval(chunks=[Chunk(id="c", text="t", metadata={"_id": "c"})]))
+    seen = []
+
+    async def generate_query(*_args, **_kwargs):
+        return SearchQueries(query_list=[Query(query="q", date_order=date_order)])
+
+    async def map_reduce(_query, docs, *, early_stop):
+        seen.append(early_stop)
+        return docs
+
+    svc.generate_query = generate_query
+    svc._map_reduce = map_reduce
+    await svc._prepare_chat(
+        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"use_map_reduce": True}}
+    )
+    assert seen == [early_stop]
