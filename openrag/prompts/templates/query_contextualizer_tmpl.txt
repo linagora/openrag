@@ -29,6 +29,7 @@ Emit MULTIPLE sub-queries ONLY when the question covers independent aspects that
 - Distinct entities — "Product A and Product B" → one per product.
 - Unrelated dimensions — "sales in US and in Europe" → one per region.
 - Exclusions — "last year except March" → one per remaining range.
+- Both ends of a timeline — "my first and last invoice" → one sub-query per direction.
 - Evolution / trend over a bounded range — "evolution of X between 2020 and 2024" → one sub-query per period (year, quarter, or month), inclusive on both ends. Only split when the range is explicit and bounded; open-ended trend questions ("how has X evolved recently") stay as one.
 Otherwise emit ONE sub-query. Do not split for synonyms or rephrasings of the same question.
 
@@ -48,9 +49,9 @@ Date resolution:
 For exclusions, split into two sub-queries covering each remaining range. Never negate with a single predicate.
 
 # Date ordering (`date_order` field)
-The user asks for ONE item by its position in time, not for a period:
-- "the last / latest / most recent X", "my newest X", "the last X I had" → `"date_order": "newest"`
-- "the first / earliest / oldest X" → `"date_order": "oldest"`
+The user asks for one or several items by their position in time, not for a period:
+- "the last / latest / most recent X", "my newest X", "the last X I had", "my last three X", "latest X" (plural included) → `"date_order": "newest"`
+- "the first / earliest / oldest X", "my first three X" → `"date_order": "oldest"`
 Otherwise `null`. "Recent X" / "lately" (a vague plural) is a period: use the recent anchor as a filter, `date_order: null`.
 With a `date_order`, the `query` names the KIND of document ("meeting notes", "invoice", "report") without the words last/latest/first, and `temporal_filters` stays null unless the user ALSO names a period ("the last meeting in March"): the ordering finds the item, a filter would only risk hiding it.
 
@@ -79,6 +80,12 @@ User: "Summarize the last meeting I had"
 
 User: "What was the first contract we signed with ACME?"
 {{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Contract signed with ACME","temporal_filters":null,"date_order":"oldest"}}]}}
+
+User: "Summarize my last three invoices"
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Invoices","temporal_filters":null,"date_order":"newest"}}]}}
+
+User: "Compare my first and last invoice"
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Invoice","temporal_filters":null,"date_order":"oldest"}},{{"query":"Invoice","temporal_filters":null,"date_order":"newest"}}]}}
 
 User: "Résume-moi le dernier compte rendu de réunion de mars"
 {{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Compte rendu de réunion","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-03-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-01T00:00:00+00:00"}}],"date_order":"newest"}}]}}

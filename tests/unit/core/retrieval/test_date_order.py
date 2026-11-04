@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from core.models.chunk import Chunk
-from core.retrieval.date_order import chunk_created_at, order_chunks_by_date
+from core.models.retrieval_result import ScoredChunk
+from core.retrieval.date_order import chunk_created_at, drop_below_relevance_floor, order_chunks_by_date
 
 
 def _chunk(cid: str, created_at=None) -> Chunk:
@@ -68,3 +69,26 @@ def test_offsets_are_compared_as_instants_not_as_strings():
     string sorts after it."""
     chunks = [_chunk("paris", "2026-09-22T16:00:00+02:00"), _chunk("utc", "2026-09-22T15:00:00Z")]
     assert _ids(order_chunks_by_date(chunks, "newest")) == ["utc", "paris"]
+
+
+def _scored(cid: str, score: float) -> ScoredChunk:
+    return ScoredChunk(id=cid, text=cid, rerank_score=score)
+
+
+def test_relevance_floor_drops_chunks_far_below_the_best_match():
+    chunks = [_scored("best", 0.9), _scored("at-floor", 0.45), _scored("noise", 0.44)]
+    assert _ids(drop_below_relevance_floor(chunks)) == ["best", "at-floor"]
+
+
+def test_relevance_floor_keeps_close_scores_however_few_the_chunks():
+    """Two meetings scoring alike are both candidates for "the last meeting"."""
+    chunks = [_scored("older", 0.81), _scored("newer", 0.80)]
+    assert _ids(drop_below_relevance_floor(chunks)) == ["older", "newer"]
+
+
+def test_relevance_floor_is_the_identity_when_scores_cannot_be_compared():
+    unscored = [_chunk("a"), _chunk("b")]
+    assert drop_below_relevance_floor(unscored) is unscored
+    logits = [_scored("a", -1.0), _scored("b", -9.0)]
+    assert drop_below_relevance_floor(logits) is logits
+    assert drop_below_relevance_floor([]) == []

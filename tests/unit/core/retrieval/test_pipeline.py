@@ -745,3 +745,79 @@ async def test_get_relevant_docs_without_order_keeps_the_rrf_ranking():
     sq = SearchQueries(query_list=[Query(query="a"), Query(query="b")])
     out = await p.get_relevant_docs(partition=["p1"], search_queries=sq)
     assert [c.id for c in out] == ["old", "new"]
+
+
+class _ScoresById:
+    """Reranker scoring each chunk from a table, best first."""
+
+    def __init__(self, scores: dict[str, float]) -> None:
+        self.scores = scores
+
+    async def rerank(self, query, documents, top_k=None):
+        by_score = [(i, self.scores[doc.removeprefix("text-")]) for i, doc in enumerate(documents)]
+        return sorted(by_score, key=lambda item: item[1], reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_a_newer_but_barely_related_chunk_does_not_outrank_the_document_the_user_means():
+    r = FakeRetriever()
+    r.results_queue = [[_dated("invoice", "2026-09-22T00:00:00Z"), _dated("meeting", "2026-09-04T00:00:00Z")]]
+    p = RetrieverPipeline(retriever=r, reranker=_ScoresById({"meeting": 0.9, "invoice": 0.1}))
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    out = await p.retrieve_docs(
+        partition=["p1"], query=Query(query="meeting", date_order="newest"), top_k=1, trace=trace
+    )
+    assert [c.id for c in out] == ["meeting"]
+    reasons = {c.id: c.removal_reason.code for c in trace.stages["post_rerank"].candidates if c.removal_reason}
+    assert reasons == {"invoice": "date_relevance_floor"}
+
+
+@pytest.mark.asyncio
+async def test_the_relevance_floor_only_applies_under_a_date_order():
+    r = FakeRetriever()
+    r.results_queue = [[_dated("meeting", None), _dated("invoice", None)]]
+    p = RetrieverPipeline(retriever=r, reranker=_ScoresById({"meeting": 0.9, "invoice": 0.1}))
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="meeting"))
+    assert [c.id for c in out] == ["meeting", "invoice"]
+
+
+@pytest.mark.parametrize("expansion_finds_chunks", [True, False])
+@pytest.mark.asyncio
+async def test_the_date_order_sees_candidates_beyond_the_expansion_seeds(expansion_finds_chunks):
+    """Whether expansion found a related chunk must not decide if a newer
+    document ranked below the seed limit survives."""
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [[_dated("seed", "2026-09-04T00:00:00Z"), _dated("newer", "2026-09-22T00:00:00Z")]]
+    r.expand_result = (
+        [_dated("seed", "2026-09-04T00:00:00Z"), _dated("related", "2026-09-04T00:00:00Z")]
+        if expansion_finds_chunks
+        else None
+    )
+    p = RetrieverPipeline(retriever=r, reranker_top_k=1)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="q", date_order="newest"))
+    assert out[0].id == "newer"
+    assert ("related" in [c.id for c in out]) is expansion_finds_chunks
+
+
+@pytest.mark.asyncio
+async def test_expansion_without_a_date_order_still_replaces_the_candidates():
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [_chunks("seed", "below-limit")]
+    r.expand_result = _chunks("seed", "related")
+    p = RetrieverPipeline(retriever=r, reranker_top_k=1)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="q"))
+    assert [c.id for c in out] == ["seed", "related"]
+
+
+@pytest.mark.asyncio
+async def test_sub_queries_with_opposite_orders_both_survive_the_cut():
+    """ "My first and last invoice": sorting the fused list one way would cut the
+    other end of the timeline."""
+    r = FakeRetriever()
+    newest_first = [_dated("nov", "2026-11-01T00:00:00Z"), _dated("oct", "2026-10-01T00:00:00Z")]
+    oldest_first = [_dated("jan", "2026-01-01T00:00:00Z"), _dated("feb", "2026-02-01T00:00:00Z")]
+    r.results_queue = [newest_first, oldest_first]
+    p = RetrieverPipeline(retriever=r)
+    sq = SearchQueries(query_list=[Query(query="a", date_order="newest"), Query(query="b", date_order="oldest")])
+    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq, top_k=2)
+    assert {c.id for c in out} == {"nov", "jan"}

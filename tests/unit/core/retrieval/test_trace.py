@@ -470,6 +470,7 @@ def test_trace_errors_are_safe_and_unvisited_stages_are_explicit():
         "reranker_top_n",
         "expansion_top_n",
         "final_top_n",
+        "date_relevance_floor",
         "duplicate",
         "partition_filter",
         "workspace_filter",

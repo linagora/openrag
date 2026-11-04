@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from core.models.query import DateOrder
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 REDACTED_ERROR_MESSAGE = "redacted"
@@ -47,6 +48,7 @@ RemovalReasonCode = Literal[
     "reranker_top_n",
     "expansion_top_n",
     "final_top_n",
+    "date_relevance_floor",
     "duplicate",
     "partition_filter",
     "workspace_filter",
@@ -157,7 +159,7 @@ class ContextualizedSubqueryTrace(_TraceModel):
 
     query: str
     temporal_filters: list[TemporalFilterTrace] = Field(default_factory=list)
-    date_order: Literal["newest", "oldest"] | None = None
+    date_order: DateOrder | None = None
 
 
 class PromptTrace(_TraceModel):

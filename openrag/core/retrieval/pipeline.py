@@ -28,7 +28,7 @@ from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
-from core.retrieval.date_order import order_chunks_by_date
+from core.retrieval.date_order import drop_below_relevance_floor, order_chunks_by_date
 from core.retrieval.retriever import Retriever, has_csv_row_siblings, order_csv_continuations
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.trace import RetrievalTraceBuilder, merge_child_traces
@@ -63,6 +63,32 @@ def _with_removal_reasons(
         else candidate
         for candidate in candidates
     ]
+
+
+def _mark_stage_removals(
+    trace: RetrievalTraceBuilder | None,
+    stage_name: str,
+    removed_ids: set[str],
+    code: str,
+    explanation: str,
+) -> None:
+    """Record on an already recorded stage why *removed_ids* went no further."""
+    if trace is None or not removed_ids:
+        return
+
+    def record() -> None:
+        stage = trace.stages.get(stage_name)
+        if stage is None or stage.status != "complete":
+            return
+        trace.record_stage(
+            stage_name,
+            status=stage.status,
+            candidates=_with_removal_reasons(list(stage.candidates), removed_ids, code, explanation),
+            candidate_count=stage.candidate_count,
+            duration_seconds=stage.duration_seconds,
+        )
+
+    _safe_trace(trace, stage_name, record)
 
 
 async def _rerank_chunks(reranker: Reranker, query: str, chunks: list[Chunk]) -> list[Chunk]:
@@ -261,7 +287,9 @@ class RetrieverPipeline:
             selected = chunks[:limit]
             if not self.expansion_enabled:
                 selected = [chunk for chunk in selected if has_csv_row_siblings([chunk])]
-            preserve_ranked_candidates = has_csv_row_siblings(selected)
+            # A date order needs every ranked candidate: replacing them with the
+            # seeds would discard a newer document ranked just below the seed limit.
+            preserve_ranked_candidates = has_csv_row_siblings(selected) or bool(query.date_order)
             expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in selected}
             head = copy.deepcopy(selected)
             expanded = await self.retriever.expand_search_results(
@@ -271,8 +299,9 @@ class RetrieverPipeline:
                 expansion_applied = True
                 if preserve_ranked_candidates:
                     # Automatic CSV sibling expansion supplements the ranked
-                    # list at the seed's position. Regular document expansion
-                    # keeps develop's replacement behavior.
+                    # list at the seed's position, and so does expansion under a
+                    # date order. Regular document expansion keeps develop's
+                    # replacement behavior.
                     ranked_candidate_ids = {str(_chunk_key(chunk)) for chunk in chunks}
                     expanded_chunks = order_csv_continuations(
                         [
@@ -376,10 +405,27 @@ class RetrieverPipeline:
 
                     _safe_trace(trace, "post_expansion", record_post_expansion)
 
+        if expansion_applied:
+            stage_name = "post_expansion"
+        elif self.reranker_enabled:
+            stage_name = "post_rerank"
+        else:
+            stage_name = "pre_rerank"
+
         # "The latest X": relevance decided which chunks made the list, the
         # document date decides what the LLM reads first. Applied before the
-        # cut so a `top_k` keeps the newest documents, not the most similar.
-        chunks = order_chunks_by_date(chunks, query.date_order)
+        # cut so a `top_k` keeps the newest relevant documents, not the most
+        # similar ones nor a newer document on another subject.
+        if query.date_order:
+            relevant = drop_below_relevance_floor(chunks)
+            _mark_stage_removals(
+                trace,
+                stage_name,
+                {str(_chunk_key(chunk)) for chunk in chunks} - {str(_chunk_key(chunk)) for chunk in relevant},
+                "date_relevance_floor",
+                "Scored too far below the best match to be considered by a date order.",
+            )
+            chunks = order_chunks_by_date(relevant, query.date_order)
 
         # `reranker_top_k` is NOT applied here as a final cutoff — only
         # `top_k` (an explicit caller-supplied value, e.g. map-reduce's
@@ -389,37 +435,13 @@ class RetrieverPipeline:
         # should not assume is bounded by it. Tracked separately:
         # https://github.com/linagora/openrag/issues/851
         if top_k is not None:
-            removed_ids = {str(_chunk_key(chunk)) for chunk in chunks[top_k:]}
-            if expansion_applied:
-                stage_name = "post_expansion"
-            elif self.reranker_enabled:
-                stage_name = "post_rerank"
-            else:
-                stage_name = "pre_rerank"
-            if removed_ids and trace is not None:
-
-                def record_final_cutoff() -> None:
-                    stage = trace.stages.get(stage_name)
-                    if stage is None or stage.status != "complete":
-                        return
-                    trace.record_stage(
-                        stage_name,
-                        status=stage.status,
-                        candidates=_with_removal_reasons(
-                            list(stage.candidates),
-                            removed_ids,
-                            "final_top_n",
-                            "Excluded by the final public result cutoff.",
-                        ),
-                        candidate_count=stage.candidate_count,
-                        duration_seconds=stage.duration_seconds,
-                    )
-
-                _safe_trace(
-                    trace,
-                    stage_name,
-                    record_final_cutoff,
-                )
+            _mark_stage_removals(
+                trace,
+                stage_name,
+                {str(_chunk_key(chunk)) for chunk in chunks[top_k:]},
+                "final_top_n",
+                "Excluded by the final public result cutoff.",
+            )
             chunks = chunks[:top_k]
         chunks = order_csv_continuations(chunks)
         _safe_trace(
