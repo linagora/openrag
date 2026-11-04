@@ -606,7 +606,8 @@ async def add_partition_user(
 - Does not delete the user account itself
 
 **Response:**
-Returns 204 No Content on successful removal.
+Returns 204 No Content on successful removal, or 409 Conflict (`LAST_PARTITION_OWNER`)
+when the user is the partition's last owner.
 """,
 )
 async def remove_partition_user(
@@ -638,7 +639,8 @@ async def remove_partition_user(
 - `viewer`: Read-only access
 
 **Response:**
-Returns 200 OK on successful update.
+Returns 200 OK on successful update, or 409 Conflict (`LAST_PARTITION_OWNER`)
+when it would demote the partition's last owner.
 """,
 )
 async def update_partition_user_role(

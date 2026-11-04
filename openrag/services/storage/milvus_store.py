@@ -137,9 +137,9 @@ _DENSE_VECTOR_TYPES = frozenset(
 #: Milvus caps a collection at ten vector fields, ``sparse`` included.
 MAX_VECTOR_FIELDS = 10
 
-#: Largest section ID. Section IDs live in the dynamic JSON field, where a
-#: Milvus partial upsert rewrites every number as a float64, and a float64
-#: rounds integers above 2**53 — so do JavaScript clients.
+#: Largest section ID. Keep section IDs below float64's exact-integer limit so
+#: older Milvus 3.0 builds can round-trip them without breaking neighbour
+#: links. OpenRAG keeps this folding on newer builds too, so IDs stay stable.
 MAX_SECTION_ID = 2**53 - 1
 SECTION_ID_KEYS = ("prev_section_id", "section_id", "next_section_id")
 
@@ -188,6 +188,10 @@ def _stored_schema_version(desc: dict[str, Any]) -> int:
     except (ValueError, TypeError):
         return 0
 
+
+# Avoid serial five-second version probes when a Milvus server's management
+# endpoint is temporarily unavailable. Retry after this short cooldown.
+_SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS = 30.0
 
 #: How long :meth:`MilvusVectorStore.make_searchable` waits for a flushed field
 #: to answer, and how often it asks.
@@ -256,12 +260,32 @@ def _scalar_output_fields(description: dict[str, Any]) -> list[str]:
     return fields
 
 
-def _changed_by_float64(value: Any) -> bool:
-    """Whether a Milvus partial upsert changes *value*, or an integer in it at any depth.
+_MILVUS_EXACT_DYNAMIC_INT64_BUILDS = frozenset({"3.0-20261030-af15c80751"})
 
-    Milvus turns each number into a float64 and writes it back in its shortest
-    decimal form, so even 2**60, which a float64 holds exactly, comes back as
-    1152921504606847000.
+
+def _milvus_preserves_dynamic_int64(server_version: Any) -> bool:
+    """Whether this Milvus server build preserves large dynamic-field integers.
+
+    Milvus 3.0.5's tested build reports a date-based version string. Accept
+    normal semantic versions from 3.0.5 onward too; unrecognized build strings
+    remain conservative because intermediate or vendor builds are unverified.
+    """
+    if isinstance(server_version, Mapping):
+        server_version = server_version.get("version")
+    if not isinstance(server_version, str):
+        return False
+    if server_version in _MILVUS_EXACT_DYNAMIC_INT64_BUILDS:
+        return True
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", server_version)
+    return bool(match and tuple(map(int, match.groups())) >= (3, 0, 5))
+
+
+def _changed_by_float64(value: Any) -> bool:
+    """Whether *value*, or an integer nested in it, would change via float64.
+
+    This models the dynamic-field round trip measured on Milvus 3.0.2. Milvus
+    3.0.5 preserves these integers; callers use this only for older or
+    unverified server builds.
     """
     if isinstance(value, bool):
         return False
@@ -620,6 +644,10 @@ class MilvusVectorStore(VectorStore):
         self._load_lock = asyncio.Lock()
         self._search_schema_checked = False
         self._health_schema_confirmed = False
+        self._server_version_checked = False
+        self._server_version: str | None = None
+        self._server_version_probe_failed_at: float | None = None
+        self._server_version_lock = asyncio.Lock()
         # Serializes adding and dropping dense fields.
         self._vector_field_lock = asyncio.Lock()
         # Dense fields this process added and has not flushed a write into yet.
@@ -2398,16 +2426,16 @@ class MilvusVectorStore(VectorStore):
         concurrently fails the write instead of leaving a row holding only a
         vector (all verified on Milvus 3.0.1).
 
-        It does rewrite every number in the dynamic field as a float64, so an
-        integer beyond ±2**53 in a chunk's metadata comes back rounded, nested
-        ones too, even when the upsert passes the exact value back (verified
-        on Milvus 3.0.2). Section IDs above :data:`MAX_SECTION_ID` are written
-        back folded into their low 53 bits, as Milvus migration 3 does, which
-        keeps chunks linked to their neighbours. Any other integer the write
-        changes is logged as a warning, with its file and keys: Postgres keeps
-        each file's exact upload metadata, and search results now differ from
-        it. A full-row upsert would keep the numbers but reassign ``_id``, which
-        the collection auto-generates.
+        Milvus 3.0.2 rewrites dynamic-field numbers through float64, which can
+        round integers beyond ±2**53, including nested values. The tested
+        Milvus 3.0.5 build preserves them. On older or unverified builds, this
+        method warns when the 3.0.2 conversion would change a value. Section
+        IDs above :data:`MAX_SECTION_ID` remain deliberately folded so chunk
+        neighbour links are stable across server versions.
+
+        A partial upsert changes only the requested vector field and preserves
+        the other row fields. Full-row upserts can also preserve the existing
+        auto-generated ``_id`` on Milvus 3.0.5, but require sending the full row.
 
         Once Storage V3 is enabled, Milvus can generate a field from a function
         and backfill existing rows itself (``add_function_field``). Today that
@@ -2438,6 +2466,8 @@ class MilvusVectorStore(VectorStore):
                 }
                 if keys:
                     rounded.setdefault(str(row.get("file_id")), set()).update(keys)
+            if rounded and await self._server_preserves_dynamic_int64():
+                rounded.clear()
             result = await self._async_client.upsert(
                 collection_name=self._collection_name,
                 data=list(entities.values()),
@@ -2455,12 +2485,52 @@ class MilvusVectorStore(VectorStore):
             ) from e
 
         if rounded:
-            logger.bind(field=field, rounded={file_id: sorted(keys) for file_id, keys in rounded.items()}).warning(
-                "Milvus rounded integers beyond ±2**53 in these files' chunk metadata; "
-                "search results now show the rounded values, Postgres keeps the exact ones"
+            logger.bind(
+                field=field,
+                server_version=self._server_version or "unknown",
+                rounded={file_id: sorted(keys) for file_id, keys in rounded.items()},
+            ).warning(
+                "Milvus server version is older than 3.0.5 or unverified; large integers in these files' "
+                "chunk metadata may be rounded by partial upsert. Postgres keeps each file's exact upload metadata."
             )
         await self._flush_new_fields([field])
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
+    async def _server_preserves_dynamic_int64(self) -> bool:
+        """Probe Milvus's version; briefly cache failures to avoid serial retries."""
+        if self._server_version_checked:
+            return _milvus_preserves_dynamic_int64(self._server_version)
+        failed_at = self._server_version_probe_failed_at
+        if failed_at is not None and time.monotonic() - failed_at < _SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS:
+            return False
+
+        if not self._server_version_checked:
+            async with self._server_version_lock:
+                if self._server_version_checked:
+                    return _milvus_preserves_dynamic_int64(self._server_version)
+                failed_at = self._server_version_probe_failed_at
+                if failed_at is not None and time.monotonic() - failed_at < _SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS:
+                    return False
+                try:
+                    response = await asyncio.to_thread(
+                        self._client.get_server_version,
+                        timeout=_SCHEMA_PROBE_TIMEOUT,
+                        detail=True,
+                    )
+                except Exception:
+                    self._server_version_probe_failed_at = time.monotonic()
+                    return False
+                if isinstance(response, Mapping):
+                    version = response.get("version")
+                else:
+                    version = response
+                if not isinstance(version, str):
+                    self._server_version_probe_failed_at = time.monotonic()
+                    return False
+                self._server_version = version
+                self._server_version_checked = True
+                self._server_version_probe_failed_at = None
+        return _milvus_preserves_dynamic_int64(self._server_version)
 
     async def insert_entities(
         self,

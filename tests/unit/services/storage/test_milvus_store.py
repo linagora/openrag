@@ -45,6 +45,7 @@ from services.storage.milvus_store import (
     SCHEMA_VERSION_PROPERTY_KEY,
     MilvusVectorStore,
     _changed_by_float64,
+    _milvus_preserves_dynamic_int64,
     analyzer_params,
 )
 
@@ -644,9 +645,8 @@ class TestChunkOrderMetadata:
         assert ids_a.isdisjoint(ids_b)
 
     @pytest.mark.parametrize("draw", ["lowest", "highest"])
-    def test_ids_stay_exact_as_float64(self, monkeypatch: pytest.MonkeyPatch, draw: str) -> None:
-        """A Milvus partial upsert stores the dynamic field's numbers as float64,
-        which rounds integers above 2**53 until neighbouring chunks share one ID."""
+    def test_section_ids_stay_below_float64_rounding_limit(self, monkeypatch: pytest.MonkeyPatch, draw: str) -> None:
+        """Keep section IDs safe on older Milvus builds that round dynamic numbers."""
         import services.storage.milvus_store as store_mod
 
         monkeypatch.setattr(store_mod.secrets, "randbelow", lambda k: 0 if draw == "lowest" else k - 1)
@@ -2940,7 +2940,7 @@ class TestNewFieldIsMadeSearchable:
 @pytest.mark.parametrize(
     ("value", "changed"),
     [
-        # Measured on Milvus 3.0.2: inserted, partially upserted, read back.
+        # Measured on Milvus 3.0.2; these values are at risk on older or unverified builds.
         (2**53, False),
         (2**53 + 1, True),
         (2**53 + 2, False),
@@ -2959,8 +2959,26 @@ class TestNewFieldIsMadeSearchable:
         ({"ids": [1, 2**53 + 1]}, True),
     ],
 )
-def test_changed_by_float64_matches_what_milvus_writes_back(value, changed: bool) -> None:
+def test_changed_by_float64_identifies_values_at_risk_on_legacy_milvus(value, changed: bool) -> None:
     assert _changed_by_float64(value) is changed
+
+
+@pytest.mark.parametrize(
+    ("server_version", "preserves"),
+    [
+        ({"version": "3.0-20261030-af15c80751"}, True),
+        ("3.0.5", True),
+        ("v3.0.6", True),
+        ("3.0.4", False),
+        ("3.0-20261029-unverified", False),
+        (None, False),
+        (object(), False),
+    ],
+)
+def test_milvus_preserves_dynamic_int64_only_for_verified_or_supported_versions(
+    server_version, preserves: bool
+) -> None:
+    assert _milvus_preserves_dynamic_int64(server_version) is preserves
 
 
 class TestWriteVectors:
@@ -2978,6 +2996,7 @@ class TestWriteVectors:
             data=[{"_id": 11, "vector_bge_m3": [0.1, 0.2]}, {"_id": 12, "vector_bge_m3": None}],
             partial_update=True,
         )
+        store._client.get_server_version.assert_not_called()
 
     async def test_section_ids_above_2_53_are_folded_and_stay_linked(self, store: MilvusVectorStore) -> None:
         big = 1_800_000_000_000_000_000
@@ -3040,6 +3059,76 @@ class TestWriteVectors:
         (record,) = records
         assert record["extra"]["rounded"] == {"f1": ["ext_id", "shortest", "tags"]}
         assert record["extra"]["field"] == "vector_bge_m3"
+        assert record["extra"]["server_version"] == "unknown"
+
+    async def test_verified_milvus_305_build_does_not_log_large_integer_rounding(
+        self, store: MilvusVectorStore
+    ) -> None:
+        from loguru import logger as _logger
+
+        records: list[dict] = []
+        sink = _logger.add(lambda message: records.append(message.record), level="WARNING")
+        try:
+            store._client.get_server_version.return_value = {"version": "3.0-20261030-af15c80751"}
+            _section_ids(store, [{"_id": 11, "file_id": "f1", "ext_id": 2**53 + 1}])
+            store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+            assert await store.write_vectors("vector_bge_m3", {"11": [0.1]}) == 1
+        finally:
+            _logger.remove(sink)
+
+        assert not any("large integers" in record["message"] for record in records)
+        store._client.get_server_version.assert_called_once_with(timeout=5.0, detail=True)
+
+    async def test_failed_server_version_probe_is_cached_until_retry_window_expires(
+        self, store: MilvusVectorStore
+    ) -> None:
+        store._client.get_server_version.side_effect = [
+            RuntimeError("temporary timeout"),
+            {"version": "3.0-20261030-af15c80751"},
+        ]
+
+        results = await asyncio.gather(
+            store._server_preserves_dynamic_int64(),
+            store._server_preserves_dynamic_int64(),
+            store._server_preserves_dynamic_int64(),
+        )
+
+        assert results == [False, False, False]
+        assert store._server_version_checked is False
+        assert store._client.get_server_version.call_count == 1
+
+        store._server_version_probe_failed_at = (
+            milvus_store_module.time.monotonic() - milvus_store_module._SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS - 1
+        )
+        assert await store._server_preserves_dynamic_int64() is True
+        assert store._server_version_checked is True
+        assert store._client.get_server_version.call_count == 2
+
+    async def test_write_vectors_retries_after_a_failed_version_probe(
+        self, store: MilvusVectorStore, monkeypatch
+    ) -> None:
+        from loguru import logger as _logger
+
+        monkeypatch.setattr(milvus_store_module, "_SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS", 0.0)
+        store._client.get_server_version.side_effect = [
+            RuntimeError("temporary timeout"),
+            {"version": "3.0-20261030-af15c80751"},
+        ]
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+        records: list[dict] = []
+        sink = _logger.add(lambda message: records.append(message.record), level="WARNING")
+        try:
+            for _ in range(2):
+                _section_ids(store, [{"_id": 11, "file_id": "f1", "ext_id": 2**53 + 1}])
+                assert await store.write_vectors("vector_bge_m3", {"11": [0.1]}) == 1
+        finally:
+            _logger.remove(sink)
+
+        rounding_warnings = [record for record in records if "large integers" in record["message"]]
+        assert len(rounding_warnings) == 1
+        assert rounding_warnings[0]["extra"]["server_version"] == "unknown"
+        assert store._client.get_server_version.call_count == 2
 
     async def test_a_failed_write_logs_no_rounding(self, store: MilvusVectorStore) -> None:
         from loguru import logger as _logger
