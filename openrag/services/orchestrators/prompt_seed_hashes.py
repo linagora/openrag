@@ -31,17 +31,17 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
         "8a3b0fc89b47a189b8e696f9383ad1f1f5023759b1ab3e01636c9455694c0b4e",  # v2.2.2
         "d7b5f06862e57587c6bc2965af4a70dcc5327dfccae8172c32ab02623878f6f6",  # v2.3.0-v2.3.1
         "2a950346e27dd815fd42af0849caf0065f615c3bef4bff6d61d1621b39fcd066",  # v2.3.2
-        "6dd246ecb0cd47cfe8ccb707e015dbcf3b70882592088b37e3a9f12e5954516e",  # current (date_order)
+        "9fd25f2c4c108a6bf32eb25c3c94bd3ead3c95bc5335c82afce5472daadc8a36",  # current (date_order)
     ),
     "spoken_style_answer": (
         "36d3df218283f91de2ca62693afcdd9b844ba5645fba929a98c7b7ddd0d320b1",  # v2.1.0-v2.1.1
         "1d99bca86e8dce884ac1a50d0071577eafe26b383d568225aa7f9b7ee4a02c67",  # v2.2.0-v2.3.2
-        "7e41dbf317ce16225bbfe8f956dc603ccfcaaac3d1db3d9e43ca6ff828adf960",  # current (provenance line)
+        "10309647424a44f2d4b060916d85928dd7f83598ca2b95a23e03e9d6405a487e",  # current (provenance line)
     ),
     "sys_prompt": (
         "b5faacb19c176961965882bdf2f30c6dec7973de26c26c7bf18dd8f9088c07a7",  # v2.1.0-v2.1.1
         "3f0e6c8d2e385eda15715c83f54d701cfe83fe4ffddc2cbfd6ba398ac1c599dd",  # v2.2.0-v2.3.2
-        "0397520b38f16c80daf49e1236f34edf1096f48f5d6bf850f1cbe506e43e3075",  # current (provenance line)
+        "799ef78f5b6ed46b55ceff287edf3d989c3d1754efb9a1ef03e8e3f23fdd1ace",  # current (provenance line)
     ),
     "asr_transcription": (
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # v2.2.0-v2.3.2 and current

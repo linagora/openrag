@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from core.models.query import Query, TemporalPredicate
 
 
@@ -57,12 +58,17 @@ def test_date_order_defaults_to_none_and_accepts_both_directions():
     assert Query(query="q", date_order="oldest").date_order == "oldest"
 
 
-def test_date_order_rejects_other_values():
-    import pytest
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        Query(query="q", date_order="latest")
+@pytest.mark.parametrize("value", ["latest", "none", "", "null", 1])
+def test_unknown_date_order_is_ignored_and_keeps_the_rest_of_the_query(value):
+    """The LLM's JSON isn't schema-enforced: one made-up value must not fail the
+    whole response and lose its valid temporal filters."""
+    query = Query(
+        query="q",
+        temporal_filters=[TemporalPredicate(operator=">=", value="2026-01-01")],
+        date_order=value,
+    )
+    assert query.date_order is None
+    assert query.to_milvus_filter() is not None
 
 
 def test_date_order_does_not_leak_into_the_milvus_filter():
@@ -80,17 +86,19 @@ def test_date_order_parses_from_the_contextualizer_json_and_may_be_omitted():
     assert [q.date_order for q in parsed.query_list] == ["newest", None]
 
 
-def test_search_queries_date_order_is_the_first_sub_query_that_asks_for_one():
+def test_search_queries_date_order_requires_every_sub_query_to_share_it():
     from core.models.query import SearchQueries
 
-    assert SearchQueries(query_list=[Query(query="a"), Query(query="b")]).date_order is None
-    assert SearchQueries(query_list=[Query(query="a"), Query(query="b", date_order="oldest")]).date_order == "oldest"
-    assert (
-        SearchQueries(
-            query_list=[Query(query="a", date_order="newest"), Query(query="b", date_order="oldest")]
-        ).date_order
-        == "newest"
-    )
+    def order(*orders):
+        return SearchQueries(query_list=[Query(query="q", date_order=o) for o in orders]).date_order
+
+    assert order() is None
+    assert order(None, None) is None
+    assert order("newest") == "newest"
+    assert order("oldest", "oldest") == "oldest"
+    # "my first and last invoice" / "Product A sales and my latest meeting"
+    assert order("newest", "oldest") is None
+    assert order(None, "oldest") is None
 
 
 def test_str_mentions_the_order_only_when_set():
