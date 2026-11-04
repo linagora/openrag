@@ -29,14 +29,20 @@ def mask_email(email: str | None) -> str:
     return f"{masked_local}@{domain}"
 
 
-def truncate_client_addr(client_addr: str) -> str:
+def truncate_client_addr(client_addr: object) -> str:
     """Reduce uvicorn's ``host:port`` client address to its network.
 
     IPv4 keeps its /24 (``203.0.113.42:51234`` -> ``203.0.113.0``) and IPv6
     its /48; the port is dropped. That is enough to spot a misbehaving network
     without the log identifying one subscriber. An empty address stays empty;
-    anything that is not an IP address becomes ``-``.
+    anything that is not an IP address becomes ``-``. A ``(host, port)``
+    tuple, as some WebSocket implementations pass it, is read the same way, and
+    an IPv4-mapped IPv6 address is truncated as the IPv4 address it carries.
     """
+    if isinstance(client_addr, tuple) and client_addr:
+        client_addr = f"{client_addr[0]}:0"
+    if not isinstance(client_addr, str):
+        return "-"
     if not client_addr:
         return client_addr
     # uvicorn always appends ``:port`` (``"%s:%d" % scope["client"]``), so the
@@ -46,6 +52,8 @@ def truncate_client_addr(client_addr: str) -> str:
             address = ipaddress.ip_address(candidate.strip("[]"))
         except ValueError:
             continue
+        if address.version == 6 and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
         prefix = 24 if address.version == 4 else 48
         return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False).network_address)
     return "-"
@@ -87,9 +95,12 @@ class AccessLogMinimiser(logging.Filter):
         if not (isinstance(record.msg, str) and record.msg.startswith('%s - "') and isinstance(args, tuple) and args):
             return True
         client_addr, *rest = args
-        if not self.personal_data and isinstance(client_addr, str):
+        if not self.personal_data:
             client_addr = truncate_client_addr(client_addr)
-        rest = [_strip_query_string(arg) if isinstance(arg, str) and arg.startswith("/") else arg for arg in rest]
+        # Every string argument but the client is the method, the request
+        # target or the HTTP version; only a target has a ``?``, and it may be
+        # absolute (``http://host/search?text=…``) rather than start with ``/``.
+        rest = [_strip_query_string(arg) if isinstance(arg, str) else arg for arg in rest]
         record.args = (client_addr, *rest)
         return True
 

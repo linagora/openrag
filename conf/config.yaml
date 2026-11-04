@@ -134,6 +134,9 @@ map_reduce:
 verbose:
   level: INFO
   format: text
+  # Off: request lines keep only the client's /24 (IPv4) or /48 (IPv6) network,
+  # never the query string. On: full client addresses (LOG_PERSONAL_DATA).
+  personal_data: false
 
 # --- Server ---
 # Env: PREFERRED_URL_SCHEME, ASSISTANT_NAME

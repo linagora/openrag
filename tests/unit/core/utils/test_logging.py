@@ -465,6 +465,10 @@ def _log_request(client_addr: str, path: str) -> None:
         ("[2001:db8::1]:80", "2001:db8::"),
         ("", ""),
         ("testclient:50000", "-"),
+        # IPv4-mapped IPv6 keeps the /24 of the IPv4 address it carries.
+        ("::ffff:203.0.113.42:5678", "203.0.113.0"),
+        # Some WebSocket implementations pass a (host, port) tuple.
+        (("203.0.113.42", 0), "203.0.113.0"),
     ],
 )
 def test_truncate_client_addr_keeps_only_the_network(client_addr, expected):
@@ -521,6 +525,18 @@ def test_websocket_handshake_lines_on_uvicorn_error_are_minimised(capsys):
         )
         payload = json.loads(capsys.readouterr().err)
         assert payload["msg"] == '203.0.113.0 - "WebSocket /ws/socket.io/?[REDACTED]" [accepted]'
+    finally:
+        _restore_default_logger()
+
+
+def test_an_absolute_request_target_loses_its_query_too(capsys):
+    """A hand-crafted ``GET http://host/search?text=…`` does not start with ``/``."""
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json"))
+    try:
+        get_logger(config)
+        _log_request("203.0.113.42:51234", "http%3A//h/search?text=Jeanne%20Dupont")
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["msg"] == '203.0.113.0 - "GET http%3A//h/search?[REDACTED] HTTP/1.1" 200'
     finally:
         _restore_default_logger()
 
