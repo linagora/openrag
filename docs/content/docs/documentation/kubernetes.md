@@ -125,7 +125,7 @@ Some releases bump the indexer actor generation (`_INDEXER_ACTOR_PROTOCOL_VERSIO
 in `openrag/services/workers/indexer_pool.py`), and some of those also replace
 the shared `TaskStateManager` actor. 2.2.x runs `v7` and 2.3.0 to 2.3.4 run `v13`: the
 generations in between only ever existed on `develop`, so an upgrade from 2.2.x
-to 2.3.x moves `v7` to `v13` and replaces the `TaskStateManager`. 2.3.5 moves
+to one of those moves `v7` to `v13` and replaces the `TaskStateManager`. 2.3.5 moves
 `v13` to `v15` and replaces it again. This matters
 only when OpenRAG pods share a Ray cluster: with `ray.enabled: true`, or with an
 external cluster set through `RAY_ADDRESS`. With `ray.enabled: false` (the
@@ -180,7 +180,7 @@ restarts the Ray cluster and removes the old generation with it.
 On an **external Ray cluster**, which nothing in the chart restarts, retire the
 old generation once traffic to the old release has stopped and before the new
 release starts. Retire the generation of the release you are leaving, which is
-`v7` for 2.2.x. To check it, read it from that release's tag, or list the
+`v7` for 2.2.x and `v13` for 2.3.0 to 2.3.4. To check it, read it from that release's tag, or list the
 indexer dispatchers alive on the cluster (each is named
 `IndexerPoolDispatcher-<generation>`):
 
@@ -192,7 +192,7 @@ PYTHONPATH=openrag uv run python -c "import ray; ray.init(address='${RAY_ADDRESS
   if a['name'].startswith('IndexerPoolDispatcher')))"
 ```
 
-Then retire it, for 2.2.x:
+Then retire it, for 2.2.x (from 2.3.0 to 2.3.4, pass `--generation v13`):
 
 ```bash
 PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
