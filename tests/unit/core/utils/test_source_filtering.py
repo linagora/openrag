@@ -235,6 +235,7 @@ class TestExtractAndStripSourcesBlock:
             pytest.param("*_`" * 7_000 + "x", id="mixed-marks"),
             pytest.param("[" + "*" * 20_000 + "x", id="bracket-marks"),
             pytest.param("Sources: none" + "*" * 20_000 + "x", id="none-marks"),
+            pytest.param("Sources: 1" + " " * 20_000 + "x", id="no-break-spaces"),
             pytest.param("Sources: 1" + "*" * 20_000 + "x", id="number-marks"),
             pytest.param("Sources:" + "\n" * 20_000 + "x", id="label-newlines"),
             pytest.param("[Sources: " + "**1**, " * 4_000 + "x", id="emphasized-numbers"),
@@ -257,6 +258,9 @@ class TestExtractAndStripSourcesBlock:
             ("`[Sources: none]`[Sources: 1, 3]`[Sources: none]`", "", {1, 3}),
             ("[Sources: 1, 3]`[Sources: none]``", "", {1, 3}),
             ("[Sources: 1, 3][Source 1][Source 1][Source 1]", "", {1, 3}),
+            # A no-break space ends the line like any other: the final rstrip()
+            # used to expose this tag, left in the answer.
+            ("Paris. **Sources:** 1 [Sources: ][Source 2", "Paris.", {1, 2}),
         ],
     )
     def test_tag_exposed_by_stripping_another_is_stripped(self, text, expected_clean, expected_citations):

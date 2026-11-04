@@ -33,7 +33,9 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 # The label up to its colon, with marks allowed before and after each bracket
 # and around "Sources".
 _SOURCES_LABEL = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+:\s*+[*_`]*+\[?[ \t]*+"
-_SOURCES_TAG_TAIL = r"[.*_` \t\r]*+(?=\n|$)"
+# Any whitespace but a newline may end the line, as the final rstrip() removes
+# all of it: a no-break space after a tag must not hide the tag from the strip.
+_SOURCES_TAG_TAIL = r"(?:[.*_`]|[^\S\n])*+(?=\n|$)"
 # The closing bracket may sit on the next line ([Sources: 1, 3,\n]); without
 # one, the tag ends on its own line.
 _SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
