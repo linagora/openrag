@@ -274,8 +274,10 @@ async def stream_with_source_filtering(
     # Stripping all of `pending` at every delta would be quadratic in the answer
     # length. Only `tail`, its end, is stripped: what is cut off its front (at a
     # `_fold_point`, once emitted) is counted in `folded_len`. Where there is
-    # nowhere to cut, `tail` is stripped again only once it has grown by an
-    # eighth, which keeps the total linear.
+    # nowhere to cut, or the text before the cut is not emitted yet, `tail` is
+    # stripped again only once it has grown by an eighth, which keeps the total
+    # linear. Each delta still strips a tail a few lookaheads long, and the
+    # lookahead grows with the number of sources, so the cost per delta does too.
     tail = ""
     folded_len = 0
     stripped_len = 0

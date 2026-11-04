@@ -265,6 +265,20 @@ class TestExtractAndStripSourcesBlock:
         assert (clean, citations) == (expected_clean, expected_citations)
         assert extract_and_strip_sources_block(clean)[0] == clean
 
+    @pytest.mark.parametrize(
+        ("text", "expected_citations"),
+        [
+            # Stripping the last tag leaves `[Source 1` at the end, which is
+            # stripped too: its number used to be dropped unread ({2}).
+            ("Answer [Source 1[Source 2]", {1, 2}),
+            # Same, after an empty tag: the answer used to report no citation
+            # at all (None), so every source was kept.
+            ("Answer [Source 1[Sources: ]", {1}),
+        ],
+    )
+    def test_a_tag_exposed_by_stripping_counts_its_citations(self, text, expected_citations):
+        assert extract_and_strip_sources_block(text) == ("Answer", expected_citations)
+
     def test_chain_longer_than_the_round_cap_keeps_its_first_tags(self):
         """Each round strips the last tag of a chain; the cap bounds the work, not the result's tidiness."""
         clean, citations = extract_and_strip_sources_block("Answer [Sources: 1]" + "[Sources: 2]" * 10)
@@ -1066,6 +1080,34 @@ class TestStreamOfLongAnswers:
     """Answers several times the lookahead long, where only the end of the answer is re-stripped."""
 
     SOURCES = [{"file": "a.pdf"}, {"file": "b.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param("Paris is the capital of France. " * 625, id="prose"),
+            # No character outside a tag's alphabet, so there is nowhere to cut:
+            # the tail is only re-stripped as it grows.
+            pytest.param("sources none " * 1_540, id="nowhere-to-cut"),
+        ],
+    )
+    async def test_streaming_a_long_answer_is_linear(self, body):
+        """Re-stripping the whole answer at every delta took about 14 s at this size."""
+        start = time.perf_counter()
+        result = await _collect(stream_with_source_filtering(_fake_stream(_chunked(body, 4)), self.SOURCES, "m"))
+        assert time.perf_counter() - start < 3.0
+        assert _collect_content(result) == body.rstrip()
+
+    @pytest.mark.asyncio
+    async def test_long_answer_without_the_citation_protocol_is_streamed_as_is(self):
+        answer = "Paris is the capital [Source 1]. " * 60 + "[Sources: 1]"
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream(_chunked(answer, 7)), self.SOURCES, "m", citation_protocol_active=False
+            )
+        )
+        assert _collect_content(result) == answer
+        assert _parse_finish_sources(result) == self.SOURCES
 
     @pytest.mark.asyncio
     async def test_long_answer_matches_non_streaming_strip(self):
