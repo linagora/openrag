@@ -1906,9 +1906,7 @@ def test_sheet_headers_override_global_and_allow_automatic_selection():
 
 def test_sheet_header_override_does_not_validate_the_global_row_for_that_sheet():
     blocks = list(
-        XlsxParser(header_row=1, sheet_header_rows={"People": 2}).iter_batches(
-            Document(raw_bytes=_workbook_bytes())
-        )
+        XlsxParser(header_row=1, sheet_header_rows={"People": 2}).iter_batches(Document(raw_bytes=_workbook_bytes()))
     )
 
     people = next(block for block in blocks if block.metadata["sheet_name"] == "People")
