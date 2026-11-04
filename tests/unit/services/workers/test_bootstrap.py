@@ -302,6 +302,81 @@ def test_task_state_manager_without_admission_fence_is_replaced(monkeypatch):
     kill.assert_called_once_with(legacy, no_restart=True)
 
 
+def test_task_state_manager_recreated_by_an_older_process_is_replaced_too(monkeypatch):
+    first_legacy = SimpleNamespace()
+    second_legacy = SimpleNamespace()
+    replacement = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
+        set_queued_details_v2=SimpleNamespace(),
+    )
+    get_or_create = Mock(side_effect=[first_legacy, second_legacy, replacement])
+    kill = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_state_manager() is replacement
+
+    assert [call.args[0] for call in kill.call_args_list] == [first_legacy, second_legacy]
+
+
+def test_task_state_manager_recreated_before_the_lookup_is_replaced_too(monkeypatch):
+    """The lookup, not only the recreation, can return a legacy actor an older process made."""
+    import time
+
+    now = iter(range(0, 1000, 5))
+    monkeypatch.setattr(time, "monotonic", lambda: next(now))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    first_legacy = SimpleNamespace()
+    second_legacy = SimpleNamespace()
+    replacement = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
+        set_queued_details_v2=SimpleNamespace(),
+        has_object_ref=SimpleNamespace(),
+    )
+    kill = Mock()
+
+    def get_actor(*_args, **_kwargs):
+        # The older process's actor stays registered until someone kills it.
+        if any(call.args[0] is second_legacy for call in kill.call_args_list):
+            raise ValueError("actor removed")
+        return second_legacy
+
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", Mock(side_effect=[first_legacy, replacement]))
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get_actor", get_actor)
+
+    assert bootstrap.get_task_state_manager() is replacement
+
+    assert [call.args[0] for call in kill.call_args_list] == [first_legacy, second_legacy]
+
+
+def test_task_state_manager_replacement_gives_up_after_one_deadline(monkeypatch):
+    """Older processes recreating the actor each time must not restart the 30 s budget."""
+    import time
+
+    now = iter(range(0, 1000, 5))
+    monkeypatch.setattr(time, "monotonic", lambda: next(now))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", Mock(side_effect=lambda *_a, **_k: SimpleNamespace()))
+    monkeypatch.setattr(ray, "kill", Mock())
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    with pytest.raises(RuntimeError, match="Timed out replacing legacy TaskStateManager"):
+        bootstrap.get_task_state_manager()
+
+
 def test_task_completion_tracker_is_detached_and_starts_recovery(monkeypatch):
     calls = []
     tracker = Mock()

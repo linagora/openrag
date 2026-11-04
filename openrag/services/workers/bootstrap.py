@@ -100,9 +100,13 @@ def get_task_state_manager():
         try:
             current = ray.get_actor("TaskStateManager", namespace="openrag")
         except ValueError:
-            return create_or_get()
+            current = create_or_get()
         if _supports_task_state_recovery(current):
             return current
+        # Either the actor killed above, not gone yet, or one a process still on
+        # an older release recreated first, which either path can return. Killing
+        # a dead actor again is a no-op.
+        ray.kill(current, no_restart=True)
         sleep(0.05)
     raise RuntimeError("Timed out replacing legacy TaskStateManager")
 
