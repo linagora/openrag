@@ -44,8 +44,8 @@ logger = get_logger()
 # A row can reach about 130 KB, so a page stays well below Milvus's message limit.
 DEFAULT_BATCH_SIZE = 200
 
-# What contextualization writes, the same in every release so far. Matching the whole
-# form means a body that merely quotes "* filename: " still gets the header.
+# What contextualization wrote up to v2.3.4. Matching the whole form means a body that
+# merely quotes "* filename: " still gets the header.
 _FILENAME_LINE = re.compile(r"^\* filename: .*\n\n\[CHUNK_START\]", re.MULTILINE)
 
 # What Milvus returns for a row it refuses: a deleted chunk, or one now too long.
@@ -67,9 +67,17 @@ def _is_body(content: Any, body: str) -> bool:
     return isinstance(content, str) and (body.startswith(content) or content.startswith(body))
 
 
+def _is_enveloped(content: Any, text: str) -> bool:
+    """Whether *text* is contextualization wrapped around *content*, the chunker's text.
+    That text is whatever the chunker chose, header or not, so there is nothing to add."""
+    return isinstance(content, str) and f"[CHUNK_START]\n\n{content}" in text
+
+
 def _needs_filename(row: dict[str, Any], header_for: Callable[[dict[str, Any]], str | None]) -> bool:
     text = row.get("text") or ""
     header = row.get("header")
+    if _is_enveloped(row.get("content"), text):
+        return False
     # Upload metadata can use the names ``header`` and ``content`` too, so they only
     # count when they match the text. ``content`` matching all of it is structured_section
     # with ``prepend_heading_path`` off, which was asked not to carry a preamble.

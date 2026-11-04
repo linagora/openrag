@@ -101,8 +101,38 @@ def test_adds_the_header_to_text_and_nothing_else():
             {"header": "[Source: report.pdf | Page: 3]", "text": "[Source: report.pdf | Page: 3]\n\nbody"},
             id="already-has-a-header",
         ),
-        pytest.param({"text": wrap_chunk_with_context("body", "report.pdf", "a context")}, id="contextualized"),
-        pytest.param({"text": wrap_chunk_with_context("body", "report.pdf")}, id="contextualization-failed"),
+        pytest.param(
+            {"text": "[CONTEXT]\n\na context\n\n* filename: report.pdf\n\n[CHUNK_START]\n\nbody\n\n[CHUNK_END]"},
+            id="contextualized-by-an-earlier-release",
+        ),
+        pytest.param(
+            {"text": "* filename: report.pdf\n\n[CHUNK_START]\n\nbody\n\n[CHUNK_END]"},
+            id="contextualization-failed-in-an-earlier-release",
+        ),
+        pytest.param(
+            {
+                "header": "[Source: report.pdf]",
+                "content": "[Source: report.pdf]\n\nbody",
+                "text": wrap_chunk_with_context("[Source: report.pdf]\n\nbody", "a context"),
+            },
+            id="contextualized",
+        ),
+        pytest.param(
+            {
+                "header": "[Source: report.pdf | Page: 3]",
+                "content": "[Source: report.pdf | Page: 3]\n\nbody",
+                "text": wrap_chunk_with_context("[Source: report.pdf | Page: 3]\n\nbody"),
+            },
+            id="contextualization-failed",
+        ),
+        pytest.param(
+            {"content": "body", "text": wrap_chunk_with_context("body", "a context")},
+            id="contextualized-with-prepend-heading-path-off",
+        ),
+        pytest.param(
+            {"content": "[Source: report.pdf]\n\nbo", "text": wrap_chunk_with_context("[Source: report.pdf]\n\nbody")},
+            id="contextualized-content-cut-short",
+        ),
         pytest.param({"content": "alpha beta"}, id="prepend-heading-path-off"),
         pytest.param({"content": "alpha"}, id="prepend-heading-path-off-content-cut-short"),
         pytest.param({"content": "alpha beta gamma"}, id="prepend-heading-path-off-text-cut-short"),
@@ -330,6 +360,18 @@ def test_revert_restores_what_it_changed():
 )
 def test_revert_leaves_headers_a_chunker_wrote(header, content):
     client = _FakeClient([_row(text=f"{header}\n\nbody", header=header, content=content)])
+
+    stats = _run(client, revert=True)
+
+    assert client.written == []
+    assert stats["unchanged"] == 1
+
+
+def test_revert_leaves_a_contextualized_chunk():
+    body = "[Source: report.pdf]\n\nbody"
+    client = _FakeClient(
+        [_row(text=wrap_chunk_with_context(body, "a context"), header="[Source: report.pdf]", content=body)]
+    )
 
     stats = _run(client, revert=True)
 

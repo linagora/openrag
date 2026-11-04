@@ -37,7 +37,7 @@ from services.workers.stages.topic_tag import topic_tag_stage
 logger = get_logger()
 
 #: Tokens a later stage may prepend to a chunk before it is embedded — the
-#: ``[CONTEXT]`` block plus the ``[CHUNK_START]``/filename envelope, measured at
+#: ``[CONTEXT]`` block plus the ``[CHUNK_START]`` envelope, measured at
 #: ~56 tokens on the marker corpus. Generously over-estimated: it only decides
 #: how close to the limit a chunk must be to be worth re-tokenising.
 _ENVELOPE_HEADROOM_TOKENS = 512
