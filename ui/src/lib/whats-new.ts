@@ -63,11 +63,7 @@ export const NEW_SINCE: Readonly<Record<string, string>> = {
   // gate: each anchors on a whole registry line, which starts with the quoted
   // key and nothing else — see FEATURE_TAG.md.
   //   "models.reranker": "UNRELEASED",
-  "chunking.structured_section": "v2.2.0",
   "partitions.embedder_swap": "2.3.2",
-  "models.stt": "v2.2.0",
-  "models.stt.moss_speaker_aware": "v2.2.0",
-  "prompts.asr_transcription": "v2.2.0",
 };
 
 type Version = { major: number; minor: number };

@@ -203,7 +203,10 @@ PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
 It stops the old generation from accepting work, waits for the files it accepted
 to settle, then removes its actors. If the timeout expires, it leaves them running
 and accepting work again: do not start the new release then. Find out what is
-still indexing, and run the command again. See
+still indexing, and run the command again. After jobs settle, a separate
+stage-history writer timeout is best-effort; the idle generation is still
+removed if a writer does not respond, and its remaining history may be
+incomplete. See
 [Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
 
 ### Upgrades that keep the generation
