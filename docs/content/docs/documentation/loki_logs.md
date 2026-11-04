@@ -44,7 +44,10 @@ first, before the prefix regex, as a belt-and-braces. The overlay and the
 chart also set `TQDM_DISABLE=1`: tqdm progress bars (embedding, captioning,
 Marker's OCR and layout) are not JSON, and every refresh, plus the bare
 newlines tqdm writes to move between stacked bars, becomes its own log line.
-Some lines are not JSON
+With `ray.enabled=true`, KubeRay does not recreate Ray pods when the chart
+changes, even for a new image tag, so the pods already running keep their bars
+until you [delete them](/openrag/documentation/upgrading/#4-upgrade-the-release),
+head included, at a time when no indexing is running. Some lines are not JSON
 (the startup banner, Ray's own startup messages); they are shipped as-is with
 no `level` label.
 
