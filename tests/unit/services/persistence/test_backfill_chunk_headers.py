@@ -344,3 +344,43 @@ def test_revert_leaves_a_document_that_starts_with_its_own_source_line():
 
     assert client.written == []
     assert stats["unchanged"] == 1
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param("Introduction", id="plain-text"),
+        pytest.param("[Source: other.pdf]", id="source-line-naming-another-file"),
+        pytest.param(5, id="not-a-string"),
+    ],
+)
+def test_revert_leaves_an_upload_header_that_starts_the_text(header):
+    client = _FakeClient([_row(text=f"{header}\n\nbody", header=header)])
+
+    stats = _run(client, revert=True)
+
+    assert client.written == []
+    assert stats["unchanged"] == 1
+
+
+def test_revert_keeps_an_upload_header_and_removes_only_the_line_it_added():
+    original = _row(text="Introduction\n\nbody", header="Note")
+    client = _FakeClient([original])
+    _run(client)
+
+    _run(client, revert=True)
+
+    assert client.rows[1]["text"] == original["text"]
+    assert client.rows[1]["header"] == "Note"
+
+
+def test_revert_recognizes_a_line_shortened_under_another_chunk_size():
+    long_name = "report " * 200 + ".pdf"
+    header = source_header(long_name, 50, _words)
+    assert header != source_header(long_name, 512, _words)
+    client = _FakeClient([_row(text=f"{header}\n\nbody", header=header, filename=long_name)])
+
+    _run(client, revert=True)
+
+    assert client.rows[1]["text"] == "body"
+    assert client.rows[1]["header"] is None

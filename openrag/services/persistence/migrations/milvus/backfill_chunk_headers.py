@@ -109,6 +109,15 @@ def _with_header(row: dict[str, Any], header: str, length_function: Callable[[st
     return entity
 
 
+def _is_added_line(header: Any, row: dict[str, Any]) -> bool:
+    """Whether *header* is a line ``_with_header`` writes: ``[Source: <name>]``, with the
+    chunk's filename, maybe shortened. Anything else that starts the text is the
+    document's own, even when an upload's ``header`` has the same value."""
+    if not isinstance(header, str) or not header.startswith("[Source: ") or not header.endswith("]"):
+        return False
+    return str(row.get("filename") or "").startswith(header[len("[Source: ") : -1])
+
+
 def _without_header(
     row: dict[str, Any], header_for: Callable[[dict[str, Any]], str | None], length_function: Callable[[str], int]
 ) -> dict[str, Any] | None:
@@ -120,7 +129,11 @@ def _without_header(
         return None
     for header in (row.get("header"), header_for(row)):
         prefix = f"{header}\n\n"
-        if not header or not text.startswith(prefix) or _is_body(row.get("content"), text[len(prefix) :]):
+        if (
+            not _is_added_line(header, row)
+            or not text.startswith(prefix)
+            or _is_body(row.get("content"), text[len(prefix) :])
+        ):
             continue
         entity = {"_id": row["_id"], "text": text[len(prefix) :], **_folded_section_ids(row)}
         if row.get("header") == header:
