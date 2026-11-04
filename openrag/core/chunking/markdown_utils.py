@@ -434,13 +434,8 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
     # The shared splitter may split a wide table by columns. Reserve only the
     # formula/display context that can accompany one resulting column group,
     # rather than rejecting the table because all groups combined are large.
-    supplemental_tokens = max(
-        (length_function(supplemental_context(candidate)) for candidate in chunks),
-        default=0,
-    )
-    if separator_tokens + base_context_tokens + supplemental_tokens >= chunk_size:
-        raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
-    if supplemental_tokens:
+    supplemental_tokens = max((length_function(supplemental_context(candidate)) for candidate in chunks), default=0)
+    if supplemental_tokens and separator_tokens + base_context_tokens + supplemental_tokens < chunk_size:
         chunks = _chunk_csv_table(
             table,
             table_element=safe_element,
@@ -484,7 +479,16 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
         selected_cells = [
             cell
             for cell in metadata.get("formula_cells", [])
-            if cell.get("truncated") or cell.get("target_column") in selected_excel_columns
+            if isinstance(cell, dict)
+            and (
+                _formula_truncation_marker_matches(
+                    cell,
+                    metadata["table_row_numbers"],
+                    selected_excel_columns,
+                )
+                if cell.get("truncated")
+                else cell.get("target_column") in selected_excel_columns
+            )
         ]
         selected_number_formats = [
             group
@@ -533,6 +537,25 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
         # The bounding range can span blank rows/unselected columns. Exact
         # membership is table_row_numbers plus table_column_indices.
     return chunks
+
+
+def _formula_truncation_marker_matches(marker, row_numbers, selected_columns=None):
+    """Return whether a truncated-formula marker belongs to a chunk."""
+    if not marker.get("truncated"):
+        return False
+    ranges = marker.get("omitted_row_ranges", [])
+    row_matches = any(
+        row_range.get("start_row", 0) <= row <= row_range.get("end_row", -1)
+        for row_range in ranges
+        if isinstance(row_range, dict)
+        for row in row_numbers
+    )
+    if not row_matches:
+        return False
+    if selected_columns is None:
+        return True
+    omitted_columns = marker.get("omitted_target_columns", [])
+    return bool(set(omitted_columns) & set(selected_columns))
 
 
 def _table_cells(row: str) -> list[str]:
@@ -614,7 +637,12 @@ def _tabular_row_metadata(
         selected_cells = [
             cell
             for cell in formula_cells
-            if isinstance(cell, dict) and (cell.get("truncated") or cell.get("row") in set(row_numbers))
+            if isinstance(cell, dict)
+            and (
+                _formula_truncation_marker_matches(cell, row_numbers)
+                if cell.get("truncated")
+                else cell.get("row") in set(row_numbers)
+            )
         ]
         if selected_cells:
             updated["formula_cells"] = selected_cells

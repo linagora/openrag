@@ -292,15 +292,15 @@ class EmlParser(DocumentParser):
                 if not batch.text:
                     continue
                 encoded = batch.text.encode("utf-8")
-                if len(encoded) > remaining:
-                    rendered.append(encoded[:remaining].decode("utf-8", errors="ignore"))
+                separator_bytes = len(b"\n\n") if rendered else 0
+                available = remaining - separator_bytes
+                if len(encoded) > available:
+                    if available > 0:
+                        rendered.append(encoded[:available].decode("utf-8", errors="ignore"))
                     truncated = True
                     break
                 rendered.append(batch.text)
-                remaining -= len(encoded)
-                if remaining == 0:
-                    truncated = True
-                    break
+                remaining -= separator_bytes + len(encoded)
         if truncated:
             rendered.append("[attachment content truncated at the safe text limit]")
         return "\n\n".join(rendered)

@@ -86,7 +86,21 @@ def test_eml_streams_tabular_attachment_without_calling_parse(monkeypatch):
 
     assert parser.parse_called is False
     assert parser.closed is True
-    assert rendered == "first\n\nsecon\n\n[attachment content truncated at the safe text limit]"
+    assert rendered == "first\n\nsec\n\n[attachment content truncated at the safe text limit]"
+
+
+def test_eml_tabular_attachment_at_exact_limit_is_not_marked_truncated(monkeypatch):
+    class StreamingParser:
+        def iter_batches(self, _document):
+            yield TextBlock(text="first")
+            yield TextBlock(text="three")
+
+    monkeypatch.setattr(module, "_MAX_EML_ATTACHMENT_TEXT_BYTES", 12)
+
+    rendered = EmlParser._render_tabular_attachment(StreamingParser(), Document(filename="table.xlsx"))
+
+    assert rendered == "first\n\nthree"
+    assert "truncated" not in rendered
 
 
 @pytest.mark.asyncio

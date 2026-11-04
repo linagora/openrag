@@ -6,7 +6,7 @@ from io import BytesIO
 import pytest
 from core.indexing.parsers.tabular import xlsx_parser as module
 from core.indexing.parsers.tabular.xlsx_parser import XlsxLimits, XlsxParser
-from core.indexing.parsers.tabular.xlsx_validation import MACRO_MAIN_TYPE, MAIN_TYPE
+from core.indexing.parsers.tabular.xlsx_validation import MACRO_MAIN_TYPE, MAIN_TYPE, TableRegion, _merged_header_depth
 from core.models.document import Document, DocumentType
 from core.utils.exceptions import NoIndexableContentError, PipelineError
 from openpyxl import Workbook
@@ -1285,6 +1285,21 @@ def test_formula_analysis_does_not_map_another_table_to_local_headers():
     assert analysis["unresolved_references"] == ["A2", "A20"]
 
 
+def test_formula_analysis_maps_only_visible_columns_in_a_same_table_range():
+    analysis = module._analyze_formula(
+        "=SUM(A12:C12)",
+        target_row=13,
+        target_column=2,
+        sheet_name="Data",
+        visible_columns=[2],
+        headers=["included"],
+        table_start_row=10,
+        table_end_row=15,
+    )
+
+    assert analysis["source_columns"] == [{"column": "B", "header": "included"}]
+
+
 def test_formula_individual_metadata_is_bounded_with_a_truncation_marker():
     rows = [["input", "result"]]
     rows.extend([number, f"=A{number + 1}+{number}"] for number in range(1, 20))
@@ -1293,7 +1308,12 @@ def test_formula_individual_metadata_is_bounded_with_a_truncation_marker():
 
     formula_cells = block.metadata["formula_cells"]
     assert len(formula_cells) == 17
-    assert formula_cells[-1] == {"truncated": True, "omitted_count": 3}
+    assert formula_cells[-1] == {
+        "truncated": True,
+        "omitted_count": 3,
+        "omitted_row_ranges": [{"start_row": 18, "end_row": 20}],
+        "omitted_target_columns": ["B"],
+    }
 
 
 def test_formula_only_rows_remain_searchable_without_cached_results():
@@ -1928,6 +1948,25 @@ def test_merged_range_limit_rejects_workbooks_before_openpyxl_reads_them():
         list(XlsxParser(limits=XlsxLimits(max_merged_ranges=1)).iter_batches(Document(raw_bytes=output.getvalue())))
 
 
+def test_merged_range_limit_is_shared_across_worksheets():
+    workbook = Workbook()
+    workbook.active.merge_cells("A1:B1")
+    workbook.create_sheet("Second").merge_cells("A1:B1")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    with pytest.raises(PipelineError, match="merged-cell count exceeds"):
+        list(XlsxParser(limits=XlsxLimits(max_merged_ranges=1)).iter_batches(Document(raw_bytes=output.getvalue())))
+
+
+def test_hidden_merged_header_leaf_falls_back_to_automatic_detection():
+    region = TableRegion(0, 1, 4, 1, 2)
+
+    assert _merged_header_depth(region, {1: [(1, 2)]}, {2}, {2}) == 0
+    assert _merged_header_depth(region, {1: [(1, 2)]}, {2}, set()) == 1
+
+
 @pytest.mark.parametrize("overrides", [{"people": 2}, {"Hidden": 1}, {"People": 99}])
 def test_sheet_override_validation_precedes_backend_and_emission(overrides, monkeypatch):
     parser = XlsxParser(sheet_header_rows=overrides)
@@ -2003,6 +2042,12 @@ def test_headerless_schema_rejects_conflicting_or_wrong_width_configuration():
     with pytest.raises(ConfigError, match="cannot be combined"):
         XlsxParser(sheet_header_rows={"Raw": 1}, sheet_headerless_schemas={"Raw": ["id"]})
 
+    parser = XlsxParser(
+        header_row=1,
+        sheet_header_rows={"Raw": None},
+        sheet_headerless_schemas={"Raw": ["id", "name"]},
+    )
+
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Raw"
@@ -2017,6 +2062,9 @@ def test_headerless_schema_rejects_conflicting_or_wrong_width_configuration():
                 Document(raw_bytes=output.getvalue())
             )
         )
+
+    [block] = list(parser.iter_batches(Document(raw_bytes=output.getvalue())))
+    assert block.metadata["table_columns"] == ["id", "name"]
 
 
 @pytest.mark.parametrize("repeated", [False, True])

@@ -27,6 +27,18 @@ def _mock_length(text: str) -> int:
     return len(text) // 4
 
 
+def test_formula_truncation_marker_is_scoped_to_omitted_rows_and_columns():
+    marker = {
+        "truncated": True,
+        "omitted_row_ranges": [{"start_row": 18, "end_row": 20}],
+        "omitted_target_columns": ["B"],
+    }
+
+    assert markdown_utils._formula_truncation_marker_matches(marker, [18], {"B"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [17], {"B"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [18], {"C"})
+
+
 class TestSplitMdElements:
     def test_simple_text_only(self):
         md = "This is a simple paragraph.\n\nAnother paragraph here."
