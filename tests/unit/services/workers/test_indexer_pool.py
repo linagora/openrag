@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
-from core.utils.exceptions import ConfigError, NotFoundError
+from core.utils.exceptions import ConfigError, NoIndexableContentError, NotFoundError, ValidationError
 
 
 class _NativeChunker:
@@ -2532,6 +2532,126 @@ async def test_preflight_failure_captures_reason_with_new_task_state_actor(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transition", "reported"),
+    [
+        (AsyncMock(return_value=True), True),
+        (AsyncMock(side_effect=RuntimeError("tsm down")), True),
+        (AsyncMock(return_value=False), False),
+    ],
+    ids=["accepted", "task-state-unreachable", "already-cancelled"],
+)
+async def test_preflight_failure_logs_only_when_the_task_really_failed(
+    tmp_path, monkeypatch, transition, reported
+) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._ensure_catalog = AsyncMock(side_effect=RuntimeError("postgres down"))
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=transition))
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(
+            task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", callback_url="https://cb"
+        )
+
+    opt = actor._logger.bind.return_value.opt
+    assert opt.return_value.error.call_count == callback.await_count == int(reported)
+    if reported:
+        assert str(opt.call_args.kwargs["exception"]) == "postgres down"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [NoIndexableContentError("empty"), ValidationError("invalid")], ids=repr)
+async def test_preflight_file_outcome_warns_once_without_a_traceback(tmp_path, error) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._ensure_catalog = AsyncMock(side_effect=error)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)))
+
+    with pytest.raises(type(error)):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    bound = actor._logger.bind.return_value
+    bound.warning.assert_called_once()
+    assert bound.warning.call_args.args == ("File indexing failed.",)
+    bound.opt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_logs_before_the_callback_a_cancellation_can_interrupt(tmp_path, monkeypatch) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    monkeypatch.setattr(module, "send_indexing_callback", AsyncMock(side_effect=asyncio.CancelledError()))
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._ensure_catalog = AsyncMock(side_effect=RuntimeError("postgres down"))
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)))
+
+    with pytest.raises(asyncio.CancelledError):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    actor._logger.bind.return_value.opt.return_value.error.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_keeps_its_reason_when_a_cancellation_interrupts_the_report(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    monkeypatch.setattr("services.workers.ray_utils.ray.cancel", lambda *_a, **_k: None)
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._ensure_catalog = AsyncMock(side_effect=RuntimeError("postgres down"))
+    actor._tsm = SimpleNamespace(
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(side_effect=asyncio.CancelledError()))
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    opt = actor._logger.bind.return_value.opt
+    assert str(opt.call_args.kwargs["exception"]) == "postgres down"
+    opt.return_value.warning.assert_called_once()
+    assert opt.return_value.warning.call_args.args == ("Indexing error interrupted by a cancellation.",)
+    opt.return_value.error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lease_lost_during_a_preflight_report_logs_one_failure_and_keeps_the_reason(
+    tmp_path, monkeypatch
+) -> None:
+    """The lost lease is the task's one failure line; the error it interrupted stays in the logs."""
+    import services.workers.indexer_pool as module
+    from services.workers.worker_lease import WorkerLeaseLostError
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    monkeypatch.setattr(module, "worker_lease_loss", lambda _lease: WorkerLeaseLostError("lease lost"))
+    monkeypatch.setattr("services.workers.ray_utils.ray.cancel", lambda *_a, **_k: None)
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._ensure_catalog = AsyncMock(side_effect=RuntimeError("postgres down"))
+    actor._tsm = SimpleNamespace(
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(side_effect=[asyncio.CancelledError(), True]))
+    )
+
+    with pytest.raises(WorkerLeaseLostError):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    opt = actor._logger.bind.return_value.opt
+    assert [str(call.kwargs["exception"]) for call in opt.call_args_list] == ["postgres down", "lease lost"]
+    assert opt.return_value.warning.call_args.args == ("Indexing error interrupted by a cancellation.",)
+    opt.return_value.error.assert_called_once()
+    assert opt.return_value.error.call_args.args == ("File indexing failed.",)
+
+
+@pytest.mark.asyncio
 async def test_preflight_failure_without_callback_url_still_sets_failed(tmp_path, monkeypatch) -> None:
     import services.workers.indexer_pool as module
 
@@ -2757,6 +2877,58 @@ async def test_actor_keeps_processing_when_a_lease_renewal_fails(monkeypatch, tm
     worker.release.set()
 
     assert await processing == {"stored_count": 1, "stage": "stored"}
+
+
+@pytest.mark.asyncio
+async def test_lease_lost_during_a_preflight_callback_reports_the_failure_once(monkeypatch, tmp_path) -> None:
+    """A second report would log and notify again, and overwrite the reason with the lease loss."""
+    import services.workers.indexer_pool as module
+
+    _lease_timing(monkeypatch, interval=0.01, ttl=0.05)
+
+    async def slow_callback(*_a, **_k) -> None:
+        await asyncio.sleep(0.2)
+
+    callback = AsyncMock(side_effect=slow_callback)
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._ensure_catalog = AsyncMock(side_effect=RuntimeError("postgres down"))
+    set_failed = AsyncMock(return_value=True)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed))
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(
+        remote=_renewals([True], then=RuntimeError("task state unavailable"))
+    )
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+
+    assert callback.await_count == set_failed.await_count == 1
+    assert "postgres down" in set_failed.await_args.args[1]
+    actor._logger.bind.return_value.opt.return_value.error.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_lease_lost_while_the_worker_reports_its_failure_reports_it_once(monkeypatch, tmp_path) -> None:
+    """The inner worker reports its own failures: from then on the lease must leave it alone."""
+    _lease_timing(monkeypatch, interval=0.01, ttl=0.05)
+
+    class _ReportingWorker(_RecordingWorker):
+        async def process_file(self, **kwargs) -> dict:
+            kwargs["on_failure_report"]()
+            await asyncio.sleep(0.2)
+            raise RuntimeError("parser exploded")
+
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_ReportingWorker())
+    set_failed = AsyncMock(return_value=True)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed))
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(
+        remote=_renewals([True], then=RuntimeError("task state unavailable"))
+    )
+
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+
+    set_failed.assert_not_awaited()
 
 
 @pytest.mark.asyncio
