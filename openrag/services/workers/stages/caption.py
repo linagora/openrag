@@ -219,7 +219,11 @@ async def _caption_document(
         asyncio.Semaphore(max_concurrency) if max_concurrency is not None and max_concurrency > 0 else nullcontext()
     )
 
-    async def caption_one(image: ImageBlock) -> str:
+    async def caption_one(image: ImageBlock) -> str | None:
+        if not image.image_bytes:
+            # A remote markdown image (only ``source_url``) is never fetched:
+            # it stays uncaptioned and its link stays in the text (#1294).
+            return None
         # Bound the fan-out cluster-wide so every indexer actor shares one VLM budget.
         async with limiter, get_vlm_semaphore():
             return await vlm.caption_image(image.image_bytes, prompt=prompt)
@@ -244,6 +248,9 @@ async def _caption_document(
     text_blocks = list(processed_document.text_blocks)
     captioned_images: list[ImageBlock] = []
     for image, raw_caption in zip(images, captions, strict=True):
+        if raw_caption is None:
+            captioned_images.append(image)
+            continue
         caption = squeeze_padding(raw_caption)
         wrapped = wrap_caption(caption)
         captioned_images.append(image.model_copy(update={"caption": caption}))
