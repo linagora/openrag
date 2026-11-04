@@ -19,6 +19,7 @@ from services.workers.task_state import (
     STALE_REFLESS_TASK_ERROR,
     STALE_TASK_STATE_MANAGER_HINT,
     SUBMITTED_TASK_WITHOUT_REF,
+    read_ref_when_settled,
 )
 
 logger = get_logger()
@@ -121,18 +122,24 @@ async def _get_matching_active_task_refs(
     remote = _remote_actor_method(task_state_manager, "get_matching_active_task_refs_v2")
     suffix = " final" if final else ""
     if remote is not None:
-        return await call_ray_actor_method_with_timeout(
+        matches = await call_ray_actor_method_with_timeout(
             submit=lambda: remote(partition=partition, file_id=file_id),
             timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
             task_description=f"get_matching_active_task_refs_v2({partition}, {file_id}){suffix}",
         )
-    return await _get_matching_active_task_refs_legacy(
-        task_state_manager,
-        deadline=deadline,
-        partition=partition,
-        file_id=file_id,
-        final=final,
-    )
+    else:
+        matches = await _get_matching_active_task_refs_legacy(
+            task_state_manager,
+            deadline=deadline,
+            partition=partition,
+            file_id=file_id,
+            final=final,
+        )
+    # Fetching the refs made this process borrow them, and a count drops them
+    # unread, on a replica that may not be the one that submitted the task.
+    for match in matches.values():
+        read_ref_when_settled(match)
+    return matches
 
 
 async def _get_matching_active_task_refs_legacy(

@@ -575,10 +575,10 @@ def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
     return datetime.now(UTC) >= created + timedelta(seconds=_CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS)
 
 
-def _read_ref_when_settled(object_ref: Any) -> None:
+def read_ref_when_settled(object_ref: Any) -> None:
     """Have Ray read a registered worker ref once its task settles.
 
-    Holding the ref makes this actor a borrower of the task's result. A failed
+    Holding the ref makes this process a borrower of the task's result. A failed
     result dropped unread (eviction, a refused registration) makes Ray print
     the failure again as an ``Unhandled error`` without its file or task
     (#1296). Reading it on receipt covers every way the ref is dropped. Ray
@@ -604,7 +604,7 @@ class TaskStateManager:
         now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
-            _read_ref_when_settled(info.object_ref)
+            read_ref_when_settled(info.object_ref)
             info.worker_lease_expires_at = now + worker_lease_ttl_seconds
             if info.state not in TERMINAL_TASK_STATES:
                 continue
@@ -1232,7 +1232,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
-        _read_ref_when_settled(object_ref)
+        read_ref_when_settled(object_ref)
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None:
