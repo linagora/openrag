@@ -62,11 +62,11 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
-## OpenRAG 2.3.4 on Kubernetes: a larger venv volume
+## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
 
 With `ray.enabled: true`, the Ray head installs the Python dependencies into the
 `<fullname>-venv` volume when it first starts. They take about 7 GB, which left
-little room in the former 10Gi default. From OpenRAG 2.3.4, that default is
+little room in the former 10Gi default. From OpenRAG 2.3.5, that default is
 20Gi, and an install that fails stops the Ray head's `init-venv-sync` init
 container instead of being marked complete.
 
@@ -87,6 +87,23 @@ with the default message queue. Stop writes and take a verified backup first.
 Milvus 3.0.5 removes server-side row-level security (RLS); if you rely on RLS,
 hold the upgrade until an equivalent authorization control is in place and
 validated. Follow the [Milvus 3.0.2 to 3.0.5 upgrade procedure](/openrag/documentation/milvus_migration/#upgrade-from-milvus-302-to-305).
+
+## OpenRAG 2.3.5: how new chunks name their file
+
+Two changes to chunks indexed after the upgrade. Chunks already indexed don't change.
+
+- Contextualized chunks no longer have a `* filename:` line. The chunker's `[Source: ...]` header now names the file once, using the sanitized filename.
+- `structured_section` no longer has a `prepend_heading_path` option. A preset that still sets it to `false` keeps loading and ignores it, so its new chunks get a header, which leaves less room for each chunk's body and can move chunk boundaries.
+
+## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
+
+From OpenRAG 2.3.4, `recursive_splitter` puts the filename at the start of every
+chunk, so a question like "what is report.pdf about?" can find it. This only
+reaches files indexed after the upgrade. If you use `recursive_splitter`, or used
+it before, run the script that
+[adds the filename to chunks already indexed](/openrag/documentation/milvus_migration/#add-the-filename-to-chunks-already-indexed)
+once after upgrading. It re-indexes nothing. Nothing changes for
+`structured_section`, the default.
 
 ## OpenRAG 2.3.3 on Docker Compose: the Ray dashboard is not published
 
