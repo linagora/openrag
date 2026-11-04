@@ -32,6 +32,7 @@ from api.dependencies.files import (
     validate_metadata,
 )
 from core.models.catalog import TERMINAL_TASK_STATES
+from core.models.stage_progress import StageProgressEventCursor
 from core.utils.error_summary import summarize_task_error
 from core.utils.exceptions import ConflictError, OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
@@ -43,6 +44,7 @@ from fastapi import (
     Depends,
     Form,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -111,7 +113,10 @@ async def _point_conflict_at_running_task(
     if not existing_task_id:
         return
     try:
-        task_details = await job_service.get_task_details(existing_task_id)
+        task_details = await job_service.get_task_details(
+            existing_task_id,
+            require_owner_identity=not bool(user and user.get("is_admin", False)),
+        )
     except Exception as lookup_error:  # noqa: BLE001 - the 409 stands without the link
         logger.warning(
             "Could not read the running task's owner for a 409 link.",
@@ -632,6 +637,36 @@ async def get_task_status(
         )
 
     return JSONResponse(status_code=status.HTTP_200_OK, content=content)
+
+
+@router.get(
+    "/task/{task_id}/stages",
+    description="Read a bounded, per-file indexing-stage history page.",
+)
+async def get_task_stage_progress(
+    task_id: str,
+    before_attempt: int | None = Query(default=None, ge=1, le=2_147_483_647),
+    before_sequence: int | None = Query(default=None, ge=1, le=9_223_372_036_854_775_807),
+    limit: int = Query(default=100, ge=1, le=200),
+    task_details=Depends(require_task_owner),
+    job_service=Depends(get_job_service),
+):
+    # Keep this route under the same task-owner policy as status and errors.
+    # The dependency must finish before any stage event or failure evidence is read.
+    if (before_attempt is None) != (before_sequence is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="before_attempt and before_sequence must be supplied together",
+        )
+    cursor = (
+        StageProgressEventCursor(attempt=before_attempt, sequence=before_sequence)
+        if before_attempt is not None and before_sequence is not None
+        else None
+    )
+    progress = await job_service.get_task_stage_progress(task_id, before=cursor, limit=limit)
+    if progress is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Task '{task_id}' not found.")
+    return JSONResponse(status_code=status.HTTP_200_OK, content=progress)
 
 
 @router.get(

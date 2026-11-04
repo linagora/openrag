@@ -42,6 +42,27 @@ class JobRepository(ABC):
     ) -> list[IndexationJob]: ...
 
     @abstractmethod
+    async def list_jobs_by_stage_order(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+        exclude_task_ids: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> list[IndexationJob]:
+        """Return one globally stage-ordered task page without loading history."""
+
+    @abstractmethod
+    async def get_job_list_metadata(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+    ) -> tuple[int, dict[str, int]]:
+        """Return the matching durable count and per-partition counts."""
+
+    @abstractmethod
     async def count_jobs(self) -> dict[str, int]:
         """Return durable task counts grouped by status."""
 

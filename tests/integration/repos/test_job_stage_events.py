@@ -128,6 +128,39 @@ def _summary(task_id: str, *, attempt: int = 1, final_sequence: int = 2, revisio
     )
 
 
+async def test_list_jobs_by_stage_order_uses_persisted_position_scores(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_ids = {
+        "lower": f"stage-order-{uuid4()}",
+        "highest": f"stage-order-{uuid4()}",
+        "middle": f"stage-order-{uuid4()}",
+    }
+    scores = {"lower": 120, "highest": 920, "middle": 510}
+    for name, task_id in task_ids.items():
+        await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="stage-order"))
+        await repo.write_stage_progress(
+            events=[],
+            summaries=[
+                StageProgressSummary(
+                    task_id=task_id,
+                    latest_sequence=0,
+                    snapshot_revision=1,
+                    phase=StageTaskPhase.FINALIZING,
+                    position_score=scores[name],
+                )
+            ],
+        )
+
+    jobs = await repo.list_jobs_by_stage_order(
+        statuses=[DocumentStatus.SERIALIZING.value],
+        exclude_task_ids=[],
+        offset=0,
+        limit=len(task_ids),
+    )
+
+    assert [job.id for job in jobs] == [task_ids["highest"], task_ids["middle"], task_ids["lower"]]
+
+
 async def test_stage_event_delivery_is_idempotent_and_reports_conflicting_outcomes(postgres_store) -> None:
     repo = postgres_store.job_repo
     task_id = f"stage-history-{uuid4()}"

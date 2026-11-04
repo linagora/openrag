@@ -27,6 +27,7 @@ from core.models.stage_progress import (
     StageProgressSummary,
     StageProgressWriteResult,
 )
+from core.observability.metric_specs import STAGE_VALUES
 from core.ports.job_repo import JobRepository
 
 _COLUMNS = (
@@ -172,6 +173,80 @@ class PgJobRepository(JobRepository):
             max(1, limit) if limit is not None else None,
         )
         return [self._row_to_job(row) for row in rows]
+
+    async def list_jobs_by_stage_order(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+        exclude_task_ids: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> list[IndexationJob]:
+        """Page durable tasks in the same order used by the jobs UI."""
+        rows = await self.pool.fetch(
+            """
+            SELECT jobs.* FROM jobs
+            LEFT JOIN job_stage_state AS stage_progress
+              ON stage_progress.task_id = jobs.id AND stage_progress.has_summary
+            WHERE ($1::text[] IS NULL OR jobs.status = ANY($1::text[]))
+              AND ($2::int IS NULL OR jobs.user_id = $2)
+              AND jobs.id <> ALL($3::text[])
+            ORDER BY
+                CASE
+                    WHEN jobs.status = 'SERIALIZING' AND (
+                        stage_progress.current_stage_id = ANY($6::text[])
+                        OR (
+                            stage_progress.phase = ANY($7::text[])
+                            AND stage_progress.position_score > 0
+                        )
+                    ) THEN 0
+                    WHEN jobs.status = 'SERIALIZING' THEN 1
+                    WHEN jobs.status = 'QUEUED' THEN 2
+                    ELSE 3
+                END,
+                CASE
+                    WHEN jobs.status = 'SERIALIZING' AND (
+                        stage_progress.current_stage_id = ANY($6::text[])
+                        OR (
+                            stage_progress.phase = ANY($7::text[])
+                            AND stage_progress.position_score > 0
+                        )
+                    ) THEN stage_progress.position_score
+                    ELSE 0
+                END DESC,
+                jobs.created_at ASC,
+                jobs.id ASC
+            OFFSET $4 LIMIT $5
+            """,
+            statuses,
+            user_id,
+            exclude_task_ids or [],
+            max(0, offset),
+            max(1, limit),
+            list(STAGE_VALUES),
+            ["between_stages", "finalizing"],
+        )
+        return [self._row_to_job(row) for row in rows]
+
+    async def get_job_list_metadata(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+    ) -> tuple[int, dict[str, int]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT partition, COUNT(*)::int AS count FROM jobs
+            WHERE ($1::text[] IS NULL OR status = ANY($1::text[]))
+              AND ($2::int IS NULL OR user_id = $2)
+            GROUP BY partition
+            """,
+            statuses,
+            user_id,
+        )
+        partition_counts = {row["partition"]: int(row["count"]) for row in rows}
+        return sum(partition_counts.values()), partition_counts
 
     async def count_jobs(self) -> dict[str, int]:
         rows = await self.pool.fetch("SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status")

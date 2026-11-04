@@ -257,6 +257,48 @@ async def test_list_jobs_filters_by_status_and_user():
 
 
 @pytest.mark.asyncio
+async def test_list_jobs_by_stage_order_returns_a_bounded_filtered_page():
+    pool = _FakePool(fetch=[_row(status="SERIALIZING")])
+    repo = _repo(pool)
+
+    jobs = await repo.list_jobs_by_stage_order(
+        statuses=["SERIALIZING"],
+        user_id=7,
+        exclude_task_ids=["actor-task"],
+        offset=24,
+        limit=12,
+    )
+
+    query, params = pool.calls[0]
+    assert "LEFT JOIN job_stage_state" in query
+    assert "stage_progress.position_score" in query
+    assert "jobs.id <> ALL($3::text[])" in query
+    assert "OFFSET $4 LIMIT $5" in query
+    assert params[:5] == (["SERIALIZING"], 7, ["actor-task"], 24, 12)
+    assert params[5] == ["parse", "caption", "chunk", "contextualize", "topic_tag", "embed", "store"]
+    assert params[6] == ["between_stages", "finalizing"]
+    assert [job.id for job in jobs] == ["task-1"]
+
+
+@pytest.mark.asyncio
+async def test_get_job_list_metadata_counts_matching_jobs_by_partition():
+    pool = _FakePool(
+        fetch=[
+            {"partition": "tenant-a", "count": 3},
+            {"partition": "tenant-b", "count": 2},
+        ]
+    )
+    repo = _repo(pool)
+
+    metadata = await repo.get_job_list_metadata(statuses=["FAILED"], user_id=7)
+
+    query, params = pool.calls[0]
+    assert "GROUP BY partition" in query
+    assert params == (["FAILED"], 7)
+    assert metadata == (5, {"tenant-a": 3, "tenant-b": 2})
+
+
+@pytest.mark.asyncio
 async def test_get_jobs_returns_rows_for_known_task_ids():
     pool = _FakePool(fetch=[_row(), _row(id="task-2")])
     repo = _repo(pool)
