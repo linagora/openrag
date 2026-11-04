@@ -543,6 +543,7 @@ there too.
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
 | `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and `openai` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
+| `LOG_FULL_CLIENT_IP` | `bool` | `false` | uvicorn's request lines (`uvicorn.access`, and WebSocket handshakes on `uvicorn.error`) keep only the client's network — `/24` for IPv4, `/48` for IPv6, no port — and replace any query string with `?[REDACTED]`, since it can carry a user's search text or an OIDC authorization code. `true` keeps full client addresses (query strings stay redacted), for deployments that need them for security investigations. |
 
 #### Text format
 ```bash title="Logging message in the terminal..."

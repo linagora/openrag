@@ -58,3 +58,24 @@ def test_log_format_is_case_insensitive(monkeypatch, tmp_path):
     settings = load_config(config_path=tmp_path)
 
     assert settings.verbose.format == "json"
+
+
+def test_log_level_and_client_ip_default_to_the_minimal_settings(monkeypatch, tmp_path):
+    """A config without a ``verbose`` block logs at INFO with truncated client IPs."""
+    _write_minimal_config(tmp_path)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.delenv("LOG_FULL_CLIENT_IP", raising=False)
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.verbose.level == "INFO"
+    assert settings.verbose.full_client_ip is False
+
+
+def test_log_full_client_ip_from_env(monkeypatch, tmp_path):
+    _write_minimal_config(tmp_path)
+    monkeypatch.setenv("LOG_FULL_CLIENT_IP", "true")
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.verbose.full_client_ip is True
