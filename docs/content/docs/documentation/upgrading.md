@@ -88,6 +88,16 @@ Milvus 3.0.5 removes server-side row-level security (RLS); if you rely on RLS,
 hold the upgrade until an equivalent authorization control is in place and
 validated. Follow the [Milvus 3.0.2 to 3.0.5 upgrade procedure](/openrag/documentation/milvus_migration/#upgrade-from-milvus-302-to-305).
 
+## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
+
+From OpenRAG 2.3.4, `recursive_splitter` puts the filename at the start of every
+chunk, so a question like "what is report.pdf about?" can find it. This only
+reaches files indexed after the upgrade. If you use `recursive_splitter`, or used
+it before, run the script that
+[adds the filename to chunks already indexed](/openrag/documentation/milvus_migration/#add-the-filename-to-chunks-already-indexed)
+once after upgrading. It re-indexes nothing. Nothing changes for
+`structured_section`, the default.
+
 ## OpenRAG 2.3.3 on Docker Compose: the Ray dashboard is not published
 
 From OpenRAG 2.3.3, Docker Compose no longer maps port 8265. With the default
