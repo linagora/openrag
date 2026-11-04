@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import re
+import unicodedata
 from collections.abc import Callable
 
 from core.utils.logging import get_logger
@@ -82,7 +83,9 @@ _MAX_CITATION_DIGITS = 9
 
 def _citation_index(digits: str) -> int:
     """The 1-based source index ``digits`` cites, or 0, which matches no source, if too long to be one."""
-    significant = digits.lstrip("0")
+    # ``\d`` matches every Unicode decimal digit, and int() reads them all, so a
+    # zero is any digit whose value is 0, not only the ASCII one.
+    significant = "".join(str(unicodedata.decimal(c)) for c in digits).lstrip("0")
     if len(significant) > _MAX_CITATION_DIGITS:
         return 0
     return int(significant or "0")

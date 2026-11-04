@@ -252,6 +252,9 @@ class TestExtractAndStripSourcesBlock:
             pytest.param("[Sources: " + "1" * 5_000 + "]", [], id="only-overlong"),
             pytest.param("[Sources: 2, " + "9" * 5_000 + "]", [{"file": "b.pdf"}], id="overlong-beside-valid"),
             pytest.param("[Sources: " + "0" * 5_000 + "3]", [{"file": "c.pdf"}], id="leading-zeros"),
+            # \d and int() take any Unicode digit, so its zeros lead the number too.
+            pytest.param("[Sources: " + "٠" * 10 + "٣]", [{"file": "c.pdf"}], id="arabic-indic-zeros"),
+            pytest.param("[Sources: " + "０" * 5_000 + "３]", [{"file": "c.pdf"}], id="fullwidth-zeros"),
         ],
     )
     def test_number_too_long_to_be_an_index_cites_no_source(self, tag, expected):
@@ -263,6 +266,20 @@ class TestExtractAndStripSourcesBlock:
             filter_sources_by_citations([{"file": "a.pdf"}, {"file": "b.pdf"}, {"file": "c.pdf"}], citations)
             == expected
         )
+
+    @pytest.mark.parametrize(
+        ("number", "index"),
+        [
+            pytest.param("9" * 9, 999_999_999, id="nine-digits-is-an-index"),
+            pytest.param("1" + "0" * 9, 0, id="ten-digits-is-not"),
+            pytest.param("0" * 20 + "9" * 9, 999_999_999, id="leading-zeros-do-not-count"),
+            pytest.param("000", 0, id="only-zeros"),
+            pytest.param("１２", 12, id="fullwidth"),
+        ],
+    )
+    def test_a_citation_keeps_up_to_nine_significant_digits(self, number, index):
+        _, citations = extract_and_strip_sources_block(f"Answer\n[Sources: {number}]")
+        assert citations == {index}
 
     def test_sources_numbers_case_insensitive(self):
         text = "Answer text\n[sources: 1, 3]"
