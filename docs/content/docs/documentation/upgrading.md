@@ -80,6 +80,14 @@ already marked complete, and the pods start on it. To install it again, delete
 `/app/.venv/.ready` in the Ray head and restart the Ray head pod, then the Ray
 workers and the OpenRAG pod.
 
+## OpenRAG 2.3.5: Milvus 3.0.5
+
+The tested upgrade from Milvus 3.0.2 to 3.0.5 needs no Milvus data migration
+with the default message queue. Stop writes and take a verified backup first.
+Milvus 3.0.5 removes server-side row-level security (RLS); if you rely on RLS,
+hold the upgrade until an equivalent authorization control is in place and
+validated. Follow the [Milvus 3.0.2 to 3.0.5 upgrade procedure](/openrag/documentation/milvus_migration/#upgrade-from-milvus-302-to-305).
+
 ## OpenRAG 2.3.3 on Docker Compose: the Ray dashboard is not published
 
 From OpenRAG 2.3.3, Docker Compose no longer maps port 8265. With the default
@@ -421,10 +429,9 @@ all three to `v2.3.0`, or remove them to take the chart's default. The 2.3.0
 chart's readiness probe calls `/ready`, which 2.2.x images do not serve: a 2.2.x
 image under the new chart never becomes Ready, and the rollout stops.
 
-If your values pin `milvus.image.all.tag`, set it to `v3.0.2` or remove the
-override. Charts 0.6.4 and 0.6.5 pinned it to `v3.0.1`. If you keep that pin, the
-migration runs on v3.0.1, which cannot compact the segments the migration
-creates.
+If your values contain `milvus.image.all.tag`, remove the override. The 2.3.0
+chart defaults to Milvus v3.0.2; a copied image tag takes precedence over that
+default.
 
 #### vLLM engine overrides
 
@@ -698,9 +705,10 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded, except section
-  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
-  neighbours. PostgreSQL keeps each file's original upload metadata.
+- On Milvus 3.0.2 and older or unverified builds, copying a chunk's metadata can
+  round integers above 2^53; the tested Milvus 3.0.5 build preserves them. The
+  copy folds section IDs below 2^53 so each chunk stays linked to its neighbours.
+  PostgreSQL keeps each file's original upload metadata.
 
 Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
@@ -1015,9 +1023,10 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded, except section
-  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
-  neighbours. PostgreSQL keeps each file's original upload metadata.
+- On Milvus 3.0.2 and older or unverified builds, copying a chunk's metadata can
+  round integers above 2^53; the tested Milvus 3.0.5 build preserves them. The
+  copy folds section IDs below 2^53 so each chunk stays linked to its neighbours.
+  PostgreSQL keeps each file's original upload metadata.
 
 Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
