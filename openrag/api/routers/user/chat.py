@@ -27,6 +27,7 @@ from api.dependencies.llm import (
     truncate,
 )
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
+from api.error_handlers import log_level_for
 from api.routers.user.source_links import build_document_source_link
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from core.config import load_config
@@ -630,7 +631,7 @@ async def openai_chat_completion(
                 log.info("Client disconnected during streaming")
                 return
             except OpenRAGError as e:
-                log.warning("OpenRAG error during streaming", code=e.code, error=e.message)
+                log.log(log_level_for(e), "OpenRAG error during streaming", code=e.code, error=e.message)
                 yield _make_sse_error(e.message, e.code)
             except Exception as e:
                 # Unexpected (non-OpenRAGError) failure: attach the traceback so the
