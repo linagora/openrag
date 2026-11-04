@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 _MAX_POSTGRES_INTEGER = 2**31 - 1
 _MIN_POSTGRES_INTEGER = -(2**31)
+_MAX_POSTGRES_BIGINT = 2**63 - 1
 
 
 class StageEventStatus(str, Enum):
@@ -41,13 +42,13 @@ class StageProgressEvent(BaseModel):
     event_id: UUID = Field(default_factory=uuid4)
     task_id: str = Field(min_length=1, max_length=256)
     attempt: int = Field(ge=1, le=_MAX_POSTGRES_INTEGER)
-    sequence: int = Field(ge=1)
+    sequence: int = Field(ge=1, le=_MAX_POSTGRES_BIGINT)
     invocation_id: UUID
     stage_id: str = Field(min_length=1, max_length=64)
     stage_rank: int | None = Field(default=None, ge=0, le=_MAX_POSTGRES_INTEGER)
     status: StageEventStatus
     occurred_at: datetime
-    duration_ms: int | None = Field(default=None, ge=0)
+    duration_ms: int | None = Field(default=None, ge=0, le=_MAX_POSTGRES_BIGINT)
     failure_effect: StageFailureEffect | None = None
 
     @field_validator("occurred_at")
@@ -73,8 +74,8 @@ class StageProgressSummary(BaseModel):
 
     task_id: str = Field(min_length=1, max_length=256)
     attempt: int = Field(default=1, ge=1, le=_MAX_POSTGRES_INTEGER)
-    latest_sequence: int = Field(default=0, ge=0)
-    snapshot_revision: int = Field(default=0, ge=0)
+    latest_sequence: int = Field(default=0, ge=0, le=_MAX_POSTGRES_BIGINT)
+    snapshot_revision: int = Field(default=0, ge=0, le=_MAX_POSTGRES_BIGINT)
     tracking_version: Literal[1] = 1
     phase: StageTaskPhase = StageTaskPhase.PREPARING
     current_stage_id: str | None = Field(default=None, max_length=64)
@@ -83,7 +84,7 @@ class StageProgressSummary(BaseModel):
     stage_started_at: datetime | None = None
     current_invocation_id: UUID | None = None
     interrupted_invocation_id: UUID | None = None
-    expected_final_sequence: int | None = Field(default=None, ge=0)
+    expected_final_sequence: int | None = Field(default=None, ge=0, le=_MAX_POSTGRES_BIGINT)
     known_loss: bool = False
     has_open_invocation: bool = False
     history_truncated: bool = False
@@ -115,19 +116,19 @@ class StageProgressSummary(BaseModel):
 class DurableStageProgress(StageProgressSummary):
     """Persisted projection, including writer-owned coverage evidence."""
 
-    persisted_through_sequence: int = Field(default=0, ge=0)
+    persisted_through_sequence: int = Field(default=0, ge=0, le=_MAX_POSTGRES_BIGINT)
     known_conflict: bool = False
 
 
 class StageProgressCoverage(BaseModel):
     task_id: str
     attempt: int = Field(ge=1, le=_MAX_POSTGRES_INTEGER)
-    persisted_through_sequence: int = Field(ge=0)
+    persisted_through_sequence: int = Field(ge=0, le=_MAX_POSTGRES_BIGINT)
 
 
 class StageProgressEventCursor(BaseModel):
     attempt: int = Field(ge=1, le=_MAX_POSTGRES_INTEGER)
-    sequence: int = Field(ge=1)
+    sequence: int = Field(ge=1, le=_MAX_POSTGRES_BIGINT)
 
 
 class StageProgressEventPage(BaseModel):
@@ -142,6 +143,7 @@ class StageProgressWriteResult(BaseModel):
     coverage: list[StageProgressCoverage] = Field(default_factory=list)
     missing_parent_task_ids: list[str] = Field(default_factory=list)
     conflicted_task_ids: list[str] = Field(default_factory=list)
+    permanent_failed_task_ids: list[str] = Field(default_factory=list)
 
 
 class StageProgressWorkerSnapshot(BaseModel):

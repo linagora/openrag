@@ -226,6 +226,7 @@ class PgJobRepository(JobRepository):
         coverage: list[StageProgressCoverage] = []
         missing_parent_task_ids: list[str] = []
         conflicted_task_ids: set[str] = set()
+        permanent_failed_task_ids: list[str] = []
         async with self.pool.acquire() as connection:
             async with connection.transaction():
                 for task_id in task_ids:
@@ -239,6 +240,15 @@ class PgJobRepository(JobRepository):
                             "UPDATE jobs SET stage_tracking_version = 1 WHERE id = $1 AND stage_tracking_version IS DISTINCT FROM 1",
                             task_id,
                         )
+                    except asyncpg.ForeignKeyViolationError:
+                        # A missing parent may be an expired job or a job write
+                        # that never succeeded. Never resurrect it here.
+                        missing_parent_task_ids.append(task_id)
+                        coverage = [item for item in coverage if item.task_id != task_id]
+                        continue
+                    try:
+                        # Keep each task isolated by its own savepoint. A bad
+                        # event must not roll back valid tasks in this batch.
                         async with connection.transaction():
                             for event in sorted(
                                 events_by_task.get(task_id, []), key=lambda item: (item.attempt, item.sequence)
@@ -294,9 +304,16 @@ class PgJobRepository(JobRepository):
                                     )
                                 )
                     except asyncpg.ForeignKeyViolationError:
-                        # A missing parent may be an expired job or a job write
-                        # that never succeeded. Never resurrect it here.
+                        # The savepoint rolls back this task only; continue the
+                        # outer transaction so unrelated task writes commit.
                         missing_parent_task_ids.append(task_id)
+                        coverage = [item for item in coverage if item.task_id != task_id]
+                        continue
+                    except (asyncpg.DataError, asyncpg.IntegrityConstraintViolationError):
+                        # Data and constraint failures cannot recover on retry.
+                        # The failed task is reported to the writer, while its
+                        # sibling tasks remain eligible to commit.
+                        permanent_failed_task_ids.append(task_id)
                         coverage = [item for item in coverage if item.task_id != task_id]
                         continue
                     if task_conflicted_attempts:
@@ -306,6 +323,7 @@ class PgJobRepository(JobRepository):
             coverage=coverage,
             missing_parent_task_ids=missing_parent_task_ids,
             conflicted_task_ids=sorted(conflicted_task_ids),
+            permanent_failed_task_ids=permanent_failed_task_ids,
         )
 
     async def get_stage_progress_summaries(self, task_ids: list[str]) -> dict[str, DurableStageProgress]:
@@ -623,6 +641,19 @@ async def _upsert_stage_summary(
         summary.has_open_invocation,
         summary.history_truncated,
     )
+    if summary.known_loss:
+        # A loss-only marker must survive even when its snapshot is no newer
+        # than the durable row. Keep this update separate so stale marker
+        # fields cannot overwrite a newer projection.
+        await connection.execute(
+            """
+            UPDATE job_stage_state
+            SET known_loss = true, updated_at = now()
+            WHERE task_id = $1 AND attempt = $2 AND NOT known_loss
+            """,
+            summary.task_id,
+            summary.attempt,
+        )
 
 
 __all__ = ["PgJobRepository"]
