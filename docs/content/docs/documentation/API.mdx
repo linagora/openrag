@@ -181,10 +181,9 @@ wording by the query contextualizer (no request parameter):
 * **Period filters** — "last week", "in March 2026", "since January": the retrieval is
   restricted to documents whose `created_at` falls in the period (Milvus predicates).
 * **Date ordering** — "the last meeting I had", "my latest invoice", "the first contract
-  with ACME": chunks scoring far below the best match are dropped, and the rest are reordered
-  by `created_at` (newest or oldest first) before the context budget is applied, so the
-  document the user means is the first one the model reads. Chunks without a `created_at`
-  are placed last.
+  with ACME": the relevance-ranked chunks are reordered by `created_at` (newest or oldest
+  first) before the context budget is applied, so the document the user means is the
+  first one the model reads. Chunks without a `created_at` are placed last.
 * **Provenance line** — every source block in the prompt carries a
   `File: <filename> | Created: <date> UTC` line under its `[Source N]` marker, so the
   model can name the date it relied on and tell documents apart.

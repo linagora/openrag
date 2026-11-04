@@ -728,11 +728,7 @@ class QueryService:
                 return False, ""
 
     async def _map_reduce(self, query: str, docs: list, *, early_stop: bool = True) -> list:
-        """LLM relevancy filter + summarisation, batched with early stop.
-
-        The early stop reads an irrelevant batch as "the rest is worse", which
-        only holds for a relevance-ranked list: pass ``early_stop=False`` otherwise.
-        """
+        """LLM relevancy filter + summarisation, batched with early stop."""
 
         async def _batch(chunks: list, summaries: list) -> bool:
             outputs = await asyncio.gather(*[self._infer_relevancy(query, c) for c in chunks])
@@ -948,9 +944,7 @@ class QueryService:
                 **({"resolved_plan": resolved_retrieval_plan} if resolved_retrieval_plan is not None else {}),
             )
         else:
-            web_results = _dedupe_web(
-                await asyncio.gather(*[self._web.search(_web_query(q)) for q in queries.query_list])
-            )
+            web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
             chunks = []
 
         if trace is not None and partition is not None and metadata.get("compare_original_query") is True:
@@ -1009,6 +1003,7 @@ class QueryService:
                 raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
 
         if use_map_reduce and docs:
+            # The early stop assumes a relevance-ranked list, which a date order isn't.
             docs = await self._map_reduce(
                 " ".join(q.query for q in queries.query_list),
                 docs,
@@ -1118,7 +1113,7 @@ class QueryService:
             **trace_kwargs,
             **({"resolved_plan": resolved_plan} if resolved_plan is not None else {}),
         )
-        web = asyncio.gather(*[self._web.search(_web_query(q)) for q in queries.query_list])
+        web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
         chunks, web_lists = await asyncio.gather(rag, web)
         return chunks, web_lists
 
@@ -1866,17 +1861,6 @@ def _latest_user_query(messages: list[dict]) -> str:
             content = message.get("content")
             return content if isinstance(content, str) else ""
     return ""
-
-
-def _web_query(query: Query) -> str:
-    """The web search text for *query*.
-
-    The contextualizer moves "the latest X" out of the query text into
-    ``date_order``, which web results can't be sorted by: the provider's only way
-    to know is the wording.
-    """
-    qualifier = {"newest": "latest", "oldest": "first"}.get(query.date_order or "")
-    return f"{qualifier} {query.query}" if qualifier else query.query
 
 
 def _summary_doc(chunk, summary: str):

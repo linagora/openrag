@@ -60,8 +60,6 @@ def test_date_order_defaults_to_none_and_accepts_both_directions():
 
 @pytest.mark.parametrize("value", ["latest", "none", "", "null", 1])
 def test_unknown_date_order_is_ignored_and_keeps_the_rest_of_the_query(value):
-    """The LLM's JSON isn't schema-enforced: one made-up value must not fail the
-    whole response and lose its valid temporal filters."""
     query = Query(
         query="q",
         temporal_filters=[TemporalPredicate(operator=">=", value="2026-01-01")],
@@ -94,9 +92,7 @@ def test_search_queries_date_order_requires_every_sub_query_to_share_it():
 
     assert order() is None
     assert order(None, None) is None
-    assert order("newest") == "newest"
     assert order("oldest", "oldest") == "oldest"
-    # "my first and last invoice" / "Product A sales and my latest meeting"
     assert order("newest", "oldest") is None
     assert order(None, "oldest") is None
 

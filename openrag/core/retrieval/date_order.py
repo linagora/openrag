@@ -12,51 +12,44 @@ The sort is stable: chunks of one document share a ``created_at`` and therefore
 keep their relevance order relative to each other, and chunks without a date
 (files indexed before the client sent ``created_at``) keep theirs at the tail —
 an unknown date is never mistaken for the newest or the oldest.
-
-A date only decides between documents that are about the right thing, so
-``drop_below_relevance_floor`` removes the chunks the reranker scored far below
-the best match before a pipeline sorts its list.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 from core.models.chunk import Chunk
 from core.models.query import DateOrder
-from core.utils.dates import parse_datetime
 
 #: Chunk metadata key carrying the document's creation date (the one temporal
 #: field the indexer accepts, see ``indexing_service.TEMPORAL_FIELDS``).
 CREATED_AT_KEY = "created_at"
-
-#: A chunk scoring under this share of the best rerank score is not a candidate
-#: for "the last X". A ratio rather than an absolute value because the score's
-#: scale depends on the reranker provider.
-RELEVANCE_FLOOR_RATIO = 0.5
 
 
 def chunk_created_at(chunk: Chunk) -> datetime | None:
     """The chunk's document creation date, or ``None`` when absent or unparseable.
 
     Milvus returns the TIMESTAMPTZ column as an ISO 8601 string; a chunk built
-    elsewhere may carry a ``datetime`` already.
+    elsewhere may carry a ``datetime`` already. A naive value is read as UTC,
+    matching the upload-time normalisation in ``extract_temporal_fields``.
     """
-    return parse_datetime(chunk.metadata.get(CREATED_AT_KEY))
+    return _parse_datetime(chunk.metadata.get(CREATED_AT_KEY))
 
 
-def drop_below_relevance_floor(chunks: list[Chunk]) -> list[Chunk]:
-    """``chunks`` without those scoring under ``RELEVANCE_FLOOR_RATIO`` of the best.
-
-    Without it, a newer but barely related document outranks the one the user
-    means, whatever its score. Identity when nothing can be compared: no reranker
-    ran, or the best score isn't positive (a ratio means nothing on raw logits).
-    """
-    scores = [score for chunk in chunks if (score := getattr(chunk, "rerank_score", None)) is not None]
-    if not scores or max(scores) <= 0:
-        return chunks
-    floor = max(scores) * RELEVANCE_FLOOR_RATIO
-    return [chunk for chunk in chunks if (getattr(chunk, "rerank_score", None) or 0) >= floor]
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def order_chunks_by_date(chunks: list[Chunk], order: DateOrder | None) -> list[Chunk]:
@@ -84,10 +77,4 @@ def order_chunks_by_date(chunks: list[Chunk], order: DateOrder | None) -> list[C
     return [chunk for _, _, chunk in dated] + undated
 
 
-__all__ = [
-    "CREATED_AT_KEY",
-    "RELEVANCE_FLOOR_RATIO",
-    "chunk_created_at",
-    "drop_below_relevance_floor",
-    "order_chunks_by_date",
-]
+__all__ = ["CREATED_AT_KEY", "chunk_created_at", "order_chunks_by_date"]

@@ -78,15 +78,8 @@ class Query(BaseModel):
     @field_validator("date_order", mode="before")
     @classmethod
     def _ignore_unknown_date_order(cls, value: Any) -> Any:
-        """Drop a value the LLM made up rather than failing the whole query list.
-
-        The contextualizer's JSON isn't schema-enforced, and a validation error
-        would also lose the response's valid sub-queries and temporal filters.
-        """
-        if value is None or value in ("newest", "oldest"):
-            return value
-        logger.warning("Ignoring unknown date_order from the contextualizer: %r", value)
-        return None
+        # LLM output isn't schema-enforced: a bad value mustn't fail the whole response.
+        return value if value in ("newest", "oldest") else None
 
     def to_milvus_filter(self) -> str | None:
         """Render the AND-combined predicates as a Milvus filter expression.
@@ -143,13 +136,10 @@ class SearchQueries(BaseModel):
 
     @property
     def date_order(self) -> DateOrder | None:
-        """The date ordering to apply to the fused result, if all sub-queries share one.
+        """The date ordering to re-apply after RRF fusion, if all sub-queries share one.
 
-        Sub-queries are fused with RRF, which discards any per-list ordering, so
-        a shared ordering is re-applied on the fused list. Otherwise ("my first
-        and last invoice", "Product A sales and my latest meeting") one order
-        would push a sub-query's results past the cut: each list keeps its own
-        order and RRF gives the top of each a place in the fused list.
+        Otherwise ("my first and last invoice") one order would push a sub-query's
+        results past the cut, so each list keeps its own order and RRF fuses them.
         """
         orders = {q.date_order for q in self.query_list}
         return orders.pop() if len(orders) == 1 else None

@@ -211,15 +211,10 @@ pre-computed `calendar_anchors`) emits per sub-query a `temporal_filters` list (
 on `created_at`, e.g. "last week") and/or a `date_order` (`"newest"` / `"oldest"`, e.g. "the
 last meeting I had"). `Query.to_milvus_filter()` (`core/models/query.py`) renders the predicates;
 `order_chunks_by_date` (`core/retrieval/date_order.py`) applies the ordering on the
-relevance-ranked list, stable within a document and with undated chunks last; `retrieve_docs` first
-drops chunks under half the best rerank score (`drop_below_relevance_floor`), so a newer document on
-another subject can't take the place of the one the user means. It runs in
+relevance-ranked list, stable within a document and with undated chunks last. It runs in
 `RetrieverPipeline.retrieve_docs` (before a `top_k` cut), again after RRF in `get_relevant_docs`,
 and again after the cross-partition fusion in `RetrievalService` — RRF only knows ranks, so the
-order has to be re-applied after every fusion. Sub-queries that don't all share one order ("my first
-and last invoice") aren't re-sorted: each list keeps its own order and RRF fuses them. Under a date
-order, expansion adds to the ranked candidates instead of replacing them, and map-reduce doesn't stop
-early, since its stop assumes a relevance-ranked list. `describe_source` (`core/prompts/chat_prompt_builder.py`)
+order has to be re-applied after every fusion, unless the sub-queries' orders differ. `describe_source` (`core/prompts/chat_prompt_builder.py`)
 puts a `File: ... | Created: ... UTC` line under each `[Source N]` marker so the answering LLM can
 see the dates; the answer templates tell it to use that line for "when" questions.
 
@@ -231,10 +226,8 @@ first. `_QUERY_JSON_HINT` (`query_service.py`) must keep `temporal_filters` / `d
 
 Known limits: `retriever.allow_filterless_fallback` (default `true`) retries without the filter
 when a period matches nothing, and the model is not told — it then summarizes out-of-period
-documents; the ordering only sees the `retriever.top_k` most similar chunks, so "the last X"
-can miss a document that is recent but not similar enough to the rewritten query; the relevance floor
-needs rerank scores, so it doesn't apply with the reranker disabled; and web results can't be sorted by
-date, so `_web_query` only puts the recency back in the search text.
+documents; and the ordering only sees the `retriever.top_k` most similar chunks, so "the last X"
+can miss a document that is recent but not similar enough to the rewritten query.
 
 ### Prometheus Metrics
 
