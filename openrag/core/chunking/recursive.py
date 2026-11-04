@@ -39,6 +39,8 @@ _IMAGE_BLOCK_TAG_RE = re.compile(r"</?image_description>", re.IGNORECASE)
 _IMAGE_PLACEHOLDER_RE = re.compile(re.escape(_IMAGE_PLACEHOLDER_MARKER), re.IGNORECASE)
 # Removing a marker leaves the blank lines that surrounded it.
 _COLLAPSE_BLANK_RE = re.compile(r"\n{3,}")
+# Page markers closing a run of prose, with nothing after them to label.
+_TRAILING_PAGE_MARKERS_RE = re.compile(r"(?:\[PAGE_\d+\]\s*)+$")
 
 
 def is_placeholder_image(content: str) -> bool:
@@ -262,15 +264,24 @@ class BaseChunker(ChunkingStrategy):
         emit the marker for the *outgoing* page just before content from a
         new page begins, and we also prepend a marker for the first block if
         it doesn't start on page 1.
+
+        Blocks are put in page order, keeping their relative order within a
+        page: the caption stage appends a caption it has no position for after
+        the last page, and the chunk list follows this order. A document with
+        an unpaged block has nothing to sort on and keeps the order it came in.
         """
         if not document.text_blocks:
             return ""
         if len(document.text_blocks) == 1 and document.text_blocks[0].page_number in (None, 1):
             return document.text_blocks[0].text
 
+        blocks = document.text_blocks
+        if all(block.page_number is not None for block in blocks):
+            blocks = sorted(blocks, key=lambda block: block.page_number)
+
         parts: list[str] = []
         last_page: int | None = None
-        for index, block in enumerate(document.text_blocks):
+        for index, block in enumerate(blocks):
             if block.page_number is not None:
                 # Emit `[PAGE_{block.page_number - 1}]` immediately *before*
                 # this block's text so downstream resolution lands on
@@ -358,25 +369,26 @@ class BaseChunker(ChunkingStrategy):
         """
         body_size = self.chunk_size if body_size is None else body_size
         elements = self._prepare_md_elements(content=content)
+        # A document can flush hundreds of times, so its splitter is built once.
+        split = self.split_text if body_size == self.chunk_size else self._build_text_splitter(body_size).split_text
 
+        # Each chunk dict spreads `metadata` first, so reserved per-chunk keys
+        # win over arbitrary `metadata` values — a stray "chunk_type" / "page" /
+        # "page_content" in the document's metadata would otherwise clobber the
+        # resolved value (and crash `chunk()` when ChunkType(...) is fed an
+        # out-of-enum string). Same defensive pattern as `_chunk_metadata_base`.
         chunks: list[dict[str, Any]] = []
         buffer: list[str] = []  # dewrapped inline pieces awaiting the next flush
         prev_page = 1
-
-        # Reserved per-chunk keys must win over arbitrary `metadata` values —
-        # a stray "chunk_type" / "page" / "page_content" in the document's
-        # metadata would otherwise clobber the resolved value (and crash
-        # `chunk()` when ChunkType(...) is fed an out-of-enum string). Same
-        # defensive pattern as `_chunk_metadata_base`.
 
         def flush_text() -> None:
             """Sanitize and split the buffered prose, emitting its chunks."""
             nonlocal prev_page
             if not buffer:
                 return
-            # Reflow PDF line-wraps within each piece, then join them as
-            # paragraphs (blank line) so the splitter cuts on paragraph/
-            # sentence boundaries rather than mid-sentence line-wraps (#579).
+            # Join the reflowed pieces as paragraphs (blank line) so the splitter
+            # cuts on paragraph/sentence boundaries rather than mid-sentence
+            # line-wraps (#579).
             combined_texts = "\n\n".join(buffer)
             buffer.clear()
             sanitized = sanitize_text(
@@ -387,15 +399,13 @@ class BaseChunker(ChunkingStrategy):
                 max_consecutive_newlines=2,
                 normalize_unicode=True,
             )
-            # A page that opens on a standalone table/image can leave page
-            # markers in the buffer (#353 review): where it holds only them,
-            # or where a piece splits off carrying nothing more, emitting it
-            # produced a text chunk of just the marker. The check must be per
-            # split piece, not per buffer — prose in the buffer does not stop
-            # one of its pieces from being marker-only. `prev_page` advances
-            # for every piece before one is skipped, so page attribution is
-            # untouched by the drop.
-            for text_chunk in self.split_text(sanitized, body_size):
+            # Markers closing the buffer label nothing: the element that follows
+            # sets `prev_page` itself. Left in, one could split off with the
+            # replayed overlap, as a chunk with no new content.
+            sanitized = _TRAILING_PAGE_MARKERS_RE.sub("", sanitized)
+            # A piece between two pages can still hold nothing but markers. It
+            # is dropped per piece, after `prev_page` has advanced through it.
+            for text_chunk in split(sanitized):
                 page_info = get_chunk_page_number(chunk_str=text_chunk, previous_chunk_ending_page=prev_page)
                 prev_page = page_info["end_page"]
                 if not PAGE_RE.sub("", text_chunk).strip():
@@ -438,7 +448,6 @@ class BaseChunker(ChunkingStrategy):
                     }
                     for subtable in subtables
                 )
-                prev_page = subtables[-1].page_number or prev_page
             else:
                 # MDElement.type is the source-markdown literal ("image"/"table");
                 # ChunkType uses "image_caption" for image blocks.
@@ -451,12 +460,9 @@ class BaseChunker(ChunkingStrategy):
                         "chunk_type": ct,
                     }
                 )
-                prev_page = element.page_number or prev_page
+            prev_page = element.page_number or prev_page
 
         flush_text()
-
-        if not chunks:
-            return []
         return chunks
 
 

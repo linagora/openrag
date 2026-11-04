@@ -429,8 +429,7 @@ def test_recursive_splitter_preserves_source_order_around_standalone_image():
 def test_recursive_splitter_order_and_pages_hold_across_page_flushes():
     """#353: with the final page-sort gone, buffered text flushed between
     standalone elements must still resolve its pages correctly — a markerless
-    run following a table inherits the table's end page, and source order is
-    preserved even when it disagrees with page order."""
+    run following a table inherits the table's end page."""
     splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
     doc = ProcessedDocument(
         document_id="d1",
@@ -547,10 +546,8 @@ def test_consecutive_standalone_pages_emit_no_marker_only_text_chunks():
 
 def test_page_break_isolating_a_trailing_marker_emits_no_marker_only_text_chunk():
     """Prose that fills ``chunk_size`` just before a page break makes the
-    splitter emit ``[PAGE_N]`` as a piece of its own: the guard that checked
-    the whole flushed buffer froze ``has_prose`` at ``True`` and let that
-    marker-only text chunk through. The check must happen per split piece —
-    the page state still advances for every piece before one is skipped."""
+    splitter emit ``[PAGE_N]`` as a piece of its own. No text chunk may hold
+    only markers, and the page state still advances through the dropped piece."""
     prose = " ".join(f"word{i}" for i in range(40))  # 40 tokens, fills chunk_size
     splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
     doc = ProcessedDocument(
@@ -565,9 +562,7 @@ def test_page_break_isolating_a_trailing_marker_emits_no_marker_only_text_chunk(
 
     assert chunks, "expected chunks to be produced"
     assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
-    # No text chunk may hold nothing but page markers. This is what the
-    # buffer-level guard missed: the marker piece split off a prose-bearing
-    # buffer still only carries the marker.
+    # No text chunk may hold nothing but page markers.
     text_chunks = [c for c in chunks if c.chunk_type == ChunkType.TEXT]
     assert text_chunks
     for c in text_chunks:
@@ -582,8 +577,7 @@ def test_page_break_isolating_a_trailing_marker_emits_no_marker_only_text_chunk(
     assert table_chunks
     assert prose_chunks[0].chunk_index < table_chunks[0].chunk_index
     assert all(c.page_number == 2 for c in table_chunks)
-    # The outro's page resolves through the untouched prev_page chain — the
-    # skipped marker piece must not have rewound or lost the page state.
+    # The dropped marker piece must not have rewound or lost the page state.
     outro_chunks = [c for c in text_chunks if "Outro paragraph two." in c.text]
     assert len(outro_chunks) == 1
     assert outro_chunks[0].page_number == 3
@@ -758,3 +752,81 @@ def test_named_file_keeps_reading_order_within_the_header_budget():
     assert set(kinds) == {"intro", "table", "outro"}
     assert all(c.text.startswith("[Source: a report with a long name.pdf]\n\n") for c in chunks)
     assert max(c.token_count for c in chunks) <= 40
+
+
+def test_standalone_element_opening_a_page_adds_no_overlap_only_chunk():
+    # The marker closing page 1 used to split off with the replayed overlap: a
+    # chunk with nothing new in it, which the marker-only check cannot catch.
+    paragraphs = "\n\n".join(f"p{i} a b c" for i in range(10))
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.2, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=paragraphs, page_number=1),
+            TextBlock(text=_standalone_table(), page_number=2),
+            TextBlock(text="Outro paragraph two.", page_number=3),
+        ],
+    )
+    text_chunks = [c for c in splitter.chunk(doc, partition="p1") if c.chunk_type == ChunkType.TEXT]
+
+    assert [c.page_number for c in text_chunks] == [1, 3]
+    assert "p0 a b c" in text_chunks[0].text and "p9 a b c" in text_chunks[0].text
+    assert "Outro paragraph two." in text_chunks[1].text
+
+
+def test_caption_appended_after_the_last_page_returns_to_its_page():
+    # A parser with no in-text position for its images (DotsOCR) leaves the caption
+    # stage to append each caption last, so its block arrives out of page order.
+    caption = "<image_description>" + " ".join(["cap"] * 150) + "</image_description>"
+    splitter = RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text="Page one prose.", page_number=1),
+            TextBlock(text="Page two prose.", page_number=2),
+            TextBlock(text="Page three prose.", page_number=3),
+            TextBlock(text=caption, page_number=1),
+        ],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [(c.chunk_type, c.page_number) for c in chunks] == [
+        (ChunkType.TEXT, 1),
+        (ChunkType.IMAGE_CAPTION, 1),
+        (ChunkType.TEXT, 2),
+    ]
+    assert chunks[0].text == "Page one prose."
+    assert "Page two prose." in chunks[2].text and "Page three prose." in chunks[2].text
+    assert not any("[PAGE_0]" in c.text for c in chunks)
+
+
+def test_blocks_without_a_page_number_keep_their_order():
+    # With no page to sort on, a block's position is all that orders it.
+    splitter = RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text="Second page prose.", page_number=2),
+            TextBlock(text="Unpaged prose."),
+            TextBlock(text="First page prose.", page_number=1),
+        ],
+    )
+    text = splitter.chunk(doc, partition="p1")[0].text
+    assert text.index("Second page") < text.index("Unpaged") < text.index("First page")
+
+
+def test_page_break_between_two_full_pages_emits_no_marker_only_chunk():
+    # Neither page has room for the marker between them, so it splits off alone,
+    # with prose on both sides: only the check on each piece can drop it.
+    splitter = RecursiveSplitter(chunk_size=40, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=" ".join(f"one{i}" for i in range(40)), page_number=1),
+            TextBlock(text=" ".join(f"two{i}" for i in range(40)), page_number=2),
+        ],
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [c.page_number for c in chunks] == [1, 2]
+    assert chunks[0].text.startswith("one0") and chunks[1].text.startswith("two0")
