@@ -225,7 +225,7 @@ Grafana dashboards live once, in `infra/charts/openrag-stack/dashboards/` (Helm'
 The system uses token-based authentication with role-based access control (RBAC) for multi-tenant partition access.
 
 **Database Schema** (PostgreSQL with SQLAlchemy, in `openrag/services/persistence/schema.py`):
-- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`
+- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`, `managed_by_config` (provisioned from `auth.seed_users`)
 - `files` - File records with `file_id`, `partition_name`, `file_metadata`, `created_by` (FK to users), `relationship_id`, `parent_id`
 - `partition_memberships` - Join table linking users to partitions with roles (`owner`, `editor`, `viewer`)
 - `partitions` - Document collections with cascade delete to files and memberships
@@ -283,6 +283,8 @@ await vectordb.list_partition_members.remote(partition)
 **Token Format**: `"or-" + secrets.token_hex(16)` (34-char string, shown only once on creation/regeneration)
 
 **Bootstrap**: On startup, ensures admin user (id=1) exists using `AUTH_TOKEN` env var or generates a random token.
+
+**Seed users** (#1153): `auth.seed_users` (or the `SEED_USERS` env var, rendered by the chart from `openrag.seedUsers`) declares operator-managed accounts, provisioned by `PgUserRepository.ensure_seed_users` at API startup only, with each token read from the env var the entry names. Seeding only upserts rows it created (`users.managed_by_config`) and listed memberships; it never deletes, and a removed entry just has its token revoked. Full semantics: `docs/content/docs/documentation/user_auth.md`.
 
 **Multi-Partition Search**: Users can search across all their accessible partitions:
 - Search endpoint: `GET /search?partitions=all&text=query`
@@ -343,13 +345,11 @@ keys off the return value of `set_failed_if_not_cancelled` and the pool's pre-fl
 up to 5 s of indexing throughput per file, and an actor lost before the task settles notifies
 nothing at all. Clients keep a timeout and fall back to polling the task-status URL.
 
-`callback_url` is checked against the SSRF guard (`is_safe_url` — scheme, loopback/private/link-local,
-decimal/hex/octal/short-form IPv4 literals, all normalized through `socket.inet_aton` so a legacy
-numeric spelling can't overflow `ipaddress.ip_address(int(...))` into a false-negative IPv6 address)
-but not resolved: neither a DNS lookup nor an https requirement is enforced beyond that literal
-check, deliberately — the URL is caller-supplied, so picking a safe target is the caller's call, not
-OpenRag's to police. Checked twice — in the router (immediate `400`) and again in the sender (a
-direct caller bypasses the router) — so accepting a hostname the sender would refuse never happens.
+`callback_url` is checked against the SSRF guard (`is_safe_url`) in the router and again in the
+sender. The literal check covers the scheme, loopback/private/link-local and reserved addresses,
+alternate numeric IPv4 spellings, IDNA-equivalent separators, and a single DNS root dot. DNS
+hostnames are not resolved by this callback check; use network egress controls when hostname
+destinations must be restricted. HTTP and HTTPS are both allowed.
 `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS=true` / `indexing_callback.allow_private_urls` lifts the
 *address* half of the guard for dev stacks whose target is a local instance; the scheme check always
 applies. Keep it off in production: with it on, any user allowed to upload can make the server POST
@@ -435,7 +435,7 @@ All tests live in a separate `tests/` tree (zero test files inside the `openrag/
 **Running integration tests locally with act:**
 ```bash
 # Run API tests using GitHub Actions locally
-act -j api-tests -W .github/workflows/api_tests.yml --bind
+act -j api-tests -W .github/workflows/ci.yml --bind
 ```
 
 **Mock VLLM for CI:** `tests/api_tests/api_run/mock_vllm.py` provides fake embeddings and completions endpoints (streaming and non-streaming) for testing without a real LLM. Pydantic request models use `ConfigDict(extra="allow")` to accept vendor-specific fields like `extra_body`.

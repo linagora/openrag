@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from core.chunking.registry import chunking_registry
-from core.chunking.structured_section import StructuredSectionChunker
+from core.chunking.structured_section import StructuredSectionChunker, _Unit
 from core.models.chunk import ChunkType
 from core.models.document import ProcessedDocument, TextBlock
 
@@ -157,6 +157,41 @@ def test_large_table_is_atomic_table_chunk():
     assert any(c.chunk_type == ChunkType.TABLE for c in chunks), "expected an atomic table chunk"
 
 
+def test_table_caption_travels_into_the_table_chunk():
+    """A caption below its table used to open the next prose chunk, leaving the
+    table untitled and the prose chunk led by a stray caption."""
+    table = "| Domain | Value |\n|---|---|\n" + "\n".join(f"| D{i} | {' '.join(['x'] * 40)} |" for i in range(8))
+    doc = _doc(f"Some intro prose.\n\n{table}\n\n*Table 1. Regional totals*\n\nMore prose after the table.")
+    chunks = _chunker(chunk_size=50).chunk(doc)
+    table_chunk = next(c for c in chunks if c.chunk_type == ChunkType.TABLE)
+    assert "*Table 1. Regional totals*\n\n| Domain | Value |" in table_chunk.content
+    assert all(c.chunk_type == ChunkType.TABLE for c in chunks if "Table 1. Regional totals" in c.text)
+
+
+def test_split_table_repeats_its_caption_on_every_piece():
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    caption = "Table 4: " + " ".join(["Quarterly sales"] * 20)
+    md = f"| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n\n{caption}\n\nClosing remarks."
+    chunker = _chunker(chunk_size=200)
+    # csv_columns sends the table down chunk_table's CSV path.
+    for meta in ({}, {"csv_columns": ["Region", "Q1", "Q2", "Q3"]}):
+        tables = [c for c in chunker.chunk(_doc(md, **meta)) if c.chunk_type == ChunkType.TABLE]
+        assert len(tables) > 1, "the table must split"
+        for piece in tables:
+            assert f"{caption}\n\n| Region | Q1 | Q2 | Q3 |" in piece.content
+            assert _words(piece.text) <= chunker.max_tokens
+
+
+def test_caption_beside_a_placeholder_image_stays_in_the_text():
+    """A placeholder takes no caption, so the caption neither keeps an empty
+    image block alive nor moves onto another block."""
+    placeholder = "<image_description>\n\n[Image Placeholder]\n\n</image_description>"
+    doc = _doc(f"Some prose.\n\n*Figure 2. Logo*\n\n{placeholder}\n\nMore prose.")
+    joined = "\n".join(c.content for c in _chunker(chunk_size=512).chunk(doc))
+    assert "Figure 2. Logo" in joined
+    assert "<image_description>" not in joined
+
+
 def test_oversize_article_is_split_not_dropped():
     big_body = " ".join(f"clause{i}." for i in range(200))
     doc = _doc(f"Article L1\n{big_body}")
@@ -290,6 +325,19 @@ def test_table_does_not_absorb_prose_from_another_page():
     assert tables, "the table must stay its own chunk(s)"
     for table in tables:
         assert "Stray label" not in table.text, "table absorbed prose from another page"
+
+
+def test_csv_units_never_merge_and_keep_row_metadata():
+    chunker = _chunker(chunk_size=100, min_tokens=50)
+    units = [
+        _Unit([], "first row", 2, pages={1}, metadata={"csv_row_start": 2, "csv_row_end": 2}),
+        _Unit([], "second row", 2, pages={1}, metadata={"csv_row_start": 3, "csv_row_end": 3}),
+    ]
+
+    merged = chunker._merge_small(units, "people.csv")
+
+    assert [unit.metadata["csv_row_start"] for unit in merged] == [2, 3]
+    assert [unit.text for unit in merged] == ["first row", "second row"]
 
 
 def test_oversize_table_row_is_never_sentence_split():

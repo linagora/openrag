@@ -31,7 +31,7 @@ logger = get_logger()
 HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
 DATA_URI_IMAGE_PATTERN = re.compile(
     r"""!\[((?:\\[^\r\n]|(?!\]\()[^\\\r\n])*)\]\("""
-    r"""(<?data:image/(?:[^()"']+|"[^"\r\n]*"|'[^'\r\n]*'|\([^\)\r\n]*\))*)\)""",
+    r"""(<?data:image/(?:[^()"']|"[^"\r\n]*"|'[^'\r\n]*'|\([^\)\r\n]*\))*)\)""",
     re.IGNORECASE,
 )
 DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(<?data:image/[^)]*\)", re.IGNORECASE)
@@ -60,6 +60,13 @@ MAX_EMBEDDED_IMAGES = 50
 MAX_EMBEDDED_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_EMBEDDED_TOTAL_BYTES = 100 * 1024 * 1024
 _URI_DELIMITERS = frozenset("\"'<>()[]{}")
+
+#: Raster formats Pillow may decode from uploaded content: the image types an
+#: upload can be (``core.models.document``). Pictures embedded in Office
+#: documents or SVGs in any other format (TIFF, PSD, EMF, …) are skipped.
+#: Without ``formats``, ``Image.open`` picks a decoder from the bytes alone,
+#: whatever the file or zip entry is called.
+UPLOADED_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP", "BMP")
 
 
 # ---------------------------------------------------------------------------

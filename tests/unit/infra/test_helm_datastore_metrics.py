@@ -135,6 +135,10 @@ REQUIRED_SECRETS = [
     "env.secrets.AUTH_TOKEN=or-unit-test-token-0123",
     "--set",
     "postgresql.auth.password=unit-test-password-0123",
+    "--set",
+    "minioCredentials.accessKey=unit-test-minio",
+    "--set",
+    "minioCredentials.secretKey=unit-test-minio-secret-0123",
 ]
 POSTGRES_SUPERUSER = ["--set", "postgresql.auth.postgresPassword=unit-test-superuser-0123"]
 METRICS_FROM = [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}}]

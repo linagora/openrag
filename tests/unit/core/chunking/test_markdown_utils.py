@@ -9,12 +9,15 @@ from __future__ import annotations
 import pytest
 from core.chunking.markdown_utils import (
     MDElement,
+    _split_to_budget,
+    attach_captions,
     chunk_table,
     get_chunk_page_number,
     parse_markdown_table,
     span_inside,
     split_md_elements,
 )
+from core.utils.exceptions import PipelineError
 
 
 def _mock_length(text: str) -> int:
@@ -151,6 +154,100 @@ class TestSplitMdElements:
         assert images[0].page_number == 3
 
 
+TABLE = "| A | B |\n|---|---|\n| 1 | 2 |"
+
+
+def _captions(md: str) -> list[str]:
+    return [e.caption for e in attach_captions(split_md_elements(md)) if e.type != "text"]
+
+
+class TestAttachCaptions:
+    def test_caption_below_a_table_moves_to_its_head(self):
+        parts = attach_captions(split_md_elements(f"Intro.\n\n{TABLE}\n\n*Table 1. Totals*\n\nNext paragraph."))
+        assert [p.type for p in parts] == ["text", "table", "text"]
+        assert parts[1].caption == "*Table 1. Totals*"
+        assert parts[1].content == f"*Table 1. Totals*\n\n{TABLE}"
+        assert parts[2].content == "Next paragraph."
+
+    def test_caption_above_a_table_loses_its_heading_marks(self):
+        parts = attach_captions(split_md_elements(f"Intro.\n\n#### Tableau 2 - Totaux\n\n{TABLE}"))
+        assert parts[0].content == "Intro."
+        assert parts[1].caption == "Tableau 2 - Totaux"
+
+    def test_caption_between_two_blocks_follows_the_document_majority(self):
+        below = f"{TABLE}\n\nTable 1: First\n\nProse.\n\n{TABLE}\n\nTable 2: Second\n\n{TABLE}"
+        above = f"Table 1: First\n\n{TABLE}\n\nProse.\n\n{TABLE}\n\nTable 2: Second\n\n{TABLE}"
+        assert _captions(below) == ["Table 1: First", "Table 2: Second", ""]
+        assert _captions(above) == ["Table 1: First", "", "Table 2: Second"]
+
+    def test_page_marker_between_caption_and_block_stays_in_the_text(self):
+        parts = attach_captions(split_md_elements(f"*Table 2. Key features*\n\n[PAGE_27]\n\n{TABLE}"))
+        assert parts[0].content == "[PAGE_27]"
+        assert parts[1].caption == "*Table 2. Key features*"
+
+    @pytest.mark.parametrize(
+        "after",
+        [
+            "Table 2 below summarises the results.",
+            "Table 1.1 presents the results.",
+            "Some prose.\n\nFigure 1: A caption too far from its block",
+            "Source: Authors",
+            "Figure 1: Alpha .... 3\nFigure 2: Beta .... 7",
+            "Figure 1: Alpha 3\n\nFigure 2: Beta 7",
+        ],
+    )
+    def test_text_that_is_not_an_adjacent_caption_stays(self, after):
+        assert _captions(f"{TABLE}\n\n{after}\n\nNext.") == [""]
+
+    def test_credit_travels_with_its_caption(self):
+        assert _captions(f"{TABLE}\n\n*Figure 1. Map*\n\nSource: Authors\n\nNext.") == [
+            "*Figure 1. Map*\nSource: Authors"
+        ]
+
+    def test_heading_under_a_caption_stays_out_of_it(self):
+        parts = attach_captions(split_md_elements(f"{TABLE}\n\nTable 1: Totals\n## Findings\n\nBody."))
+        assert parts[0].caption == "Table 1: Totals"
+        assert parts[1].content == "## Findings\n\nBody."
+
+    def test_several_captions_can_label_one_block(self):
+        chart = "<image_description>\n\nTwo bar charts.\n\n</image_description>"
+        assert _captions(f"Prose.\n\nFigure 2.1: Tech firms\n\nFigure 2.2: AI investment\n\n{chart}") == [
+            "Figure 2.1: Tech firms\nFigure 2.2: AI investment"
+        ]
+
+    def test_captions_ending_in_a_year_are_not_a_list_of_figures(self):
+        md = f"Prose.\n\nFigure 1: Market share in 2022\n\nFigure 2: Market share in 2023\n\n{TABLE}\n\nProse."
+        assert _captions(md) == ["Figure 1: Market share in 2022\nFigure 2: Market share in 2023"]
+
+    @pytest.mark.parametrize(
+        "md",
+        [
+            f"{TABLE}\n\nTable 1: Regional totals\n(in millions)\n\nNext.",
+            f"Intro.\n\nTable 1: Regional totals\n(in millions)\n\n{TABLE}",
+        ],
+    )
+    def test_wrapped_caption_moves_whole(self, md):
+        assert _captions(md) == ["Table 1: Regional totals\n(in millions)"]
+
+    def test_caption_touching_a_block_that_takes_none_stays_in_the_text(self):
+        image = "<image_description>\n\nA logo.\n\n</image_description>"
+        md = f"{TABLE}\n\nFigure 2: Logo\n\n{image}\n\nProse."
+        parts = attach_captions(split_md_elements(md), takes_caption=lambda block: block.type != "image")
+        assert [p.caption for p in parts] == ["", "", "", ""]
+        assert parts[1].content == "Figure 2: Logo"
+
+    def test_caption_emitted_as_its_own_block_is_recognised(self):
+        caption_table = "| Table 5. Ranking |  |  |\n|---|--|--|\n|  |  |  |"
+        caption_image = "<image_description>\n\nFigure 1.2: Approaches\n\n</image_description>"
+        chart = "<image_description>\n\nA bar chart.\n\n</image_description>"
+        assert _captions(f"{TABLE}\n\n{caption_table}\n\nProse.") == ["Table 5. Ranking"]
+        assert _captions(f"Prose.\n\n{caption_image}\n\n{chart}") == ["Figure 1.2: Approaches"]
+
+    def test_list_of_figures_stays_a_table(self):
+        listing = "| Figure 1: Alpha 3 |\n|---|\n| Figure 2: Beta 7 |"
+        assert _captions(f"Prose.\n\n{listing}\n\nProse.") == [""]
+
+
 class TestGetChunkPageNumber:
     def test_no_markers_returns_previous_page(self):
         result = get_chunk_page_number("Just some plain text content.", previous_chunk_ending_page=1)
@@ -227,6 +324,217 @@ class TestChunkTable:
         # The earlier rows of g1 must NOT appear in the second chunk.
         assert "first" not in second_chunk
         assert "second" not in second_chunk
+
+    def test_csv_rows_are_packed_whole_with_a_header_in_every_chunk(self):
+        table = (
+            "| id | name | note |\n"
+            "| --- | --- | --- |\n"
+            "| 001 | Ali | short note |\n"
+            "| 002 | Bob | another short note |\n"
+            "| 003 | Cam | final short note |"
+        )
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name", "note"], "csv_row_start": 2},
+            ),
+            chunk_size=24,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) == 3
+        for row_number, chunk in enumerate(chunks, start=2):
+            assert chunk.content.splitlines()[:2] == table.splitlines()[:2]
+            assert chunk.metadata["csv_row_start"] == row_number
+            assert chunk.metadata["csv_row_end"] == row_number
+            assert chunk.metadata["csv_row_numbers"] == [row_number]
+        assert "001" in chunks[0].content
+        assert "002" in chunks[1].content
+        assert "003" in chunks[2].content
+
+    def test_csv_chunks_keep_source_record_numbers_after_a_skipped_row(self):
+        long_note = " ".join(f"detail{number}" for number in range(30))
+        table = f"| id | note |\n| --- | --- |\n| 001 | short |\n| 003 | {long_note} |"
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={
+                    "csv_columns": ["id", "note"],
+                    "csv_row_start": 2,
+                    "csv_row_end": 4,
+                    "csv_row_numbers": [2, 4],
+                },
+            ),
+            chunk_size=20,
+            length_function=lambda text: len(text.split()),
+        )
+
+        continuation_chunks = [chunk for chunk in chunks if "continuation" in chunk.content]
+        assert continuation_chunks
+        assert all("[CSV row 4;" in chunk.content for chunk in continuation_chunks)
+        assert all(chunk.metadata["csv_row_number"] == 4 for chunk in continuation_chunks)
+        assert all(chunk.metadata["csv_row_numbers"] == [4] for chunk in continuation_chunks)
+
+    def test_csv_long_cell_becomes_labelled_continuation_rows(self):
+        long_note = " ".join(f"word{number}" for number in range(45))
+        table = f"| id | name | note |\n| --- | --- | --- |\n| 024 | Theo | {long_note} |"
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name", "note"], "csv_row_start": 24},
+            ),
+            chunk_size=40,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) > 1
+        reconstructed = []
+        for part_number, chunk in enumerate(chunks, start=1):
+            assert "| id | name | note |" in chunk.content
+            assert "| 024 | Theo |" in chunk.content
+            assert f"[CSV row 24; note continuation {part_number}/{len(chunks)}]" in chunk.content
+            assert chunk.metadata["csv_row_number"] == 24
+            assert chunk.metadata["csv_column"] == "note"
+            assert chunk.metadata["csv_part"] == part_number
+            assert chunk.metadata["csv_parts_total"] == len(chunks)
+            reconstructed.append(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0])
+        assert "".join(reconstructed) == long_note
+
+    def test_csv_wide_row_is_grouped_by_columns_without_losing_values(self):
+        columns = ["person_id", "legal_name", *(f"fact_{number}" for number in range(1, 9))]
+        values = ["P-001", "Ari", *(f"value_{number}" for number in range(1, 9))]
+
+        def markdown_row(cells):
+            return "| " + " | ".join(cells) + " |"
+
+        def table_cells(row):
+            return [cell.strip() for cell in row.strip().split("|")[1:-1]]
+
+        table = "\n".join(
+            [
+                markdown_row(columns),
+                markdown_row(["---"] * len(columns)),
+                markdown_row(values),
+            ]
+        )
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": columns, "csv_row_start": 7},
+            ),
+            chunk_size=35,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) == 3
+        recovered: dict[str, str] = {}
+        for group_number, chunk in enumerate(chunks, start=1):
+            header, _, data = chunk.content.splitlines()
+            group_columns = table_cells(header)
+            group_values = table_cells(data)
+            assert group_columns[:2] == ["person_id", "legal_name"]
+            assert group_values[:2] == ["P-001", "Ari"]
+            assert chunk.metadata["csv_row_number"] == 7
+            assert chunk.metadata["csv_column_group"] == group_number
+            assert chunk.metadata["csv_column_groups_total"] == len(chunks)
+            assert chunk.metadata["csv_columns"] == group_columns
+            assert len(chunk.content.split()) <= 35
+            recovered.update(dict(zip(group_columns[2:], group_values[2:], strict=True)))
+
+        assert recovered == dict(zip(columns[2:], values[2:], strict=True))
+
+    def test_csv_identity_only_wide_row_falls_back_to_cell_continuations(self):
+        values = [" ".join(["identifier"] * 20), " ".join(["display-name"] * 20)]
+        table = "\n".join(
+            [
+                "| id | name |",
+                "| --- | --- |",
+                f"| {values[0]} | {values[1]} |",
+            ]
+        )
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name"], "csv_row_start": 2},
+            ),
+            chunk_size=20,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert chunks
+        assert all(chunk.metadata["csv_row_number"] == 2 for chunk in chunks)
+        assert all(len(chunk.content.split()) <= 20 for chunk in chunks)
+        assert len(chunks) < 10
+        reconstructed: dict[str, list[str]] = {"id": [], "name": []}
+        for chunk in chunks:
+            column = chunk.metadata["csv_column"]
+            reconstructed[column].append(chunk.content.split("] ", 1)[1].split(" |", 1)[0])
+        assert {column: "".join(parts) for column, parts in reconstructed.items()} == dict(
+            zip(["id", "name"], values, strict=True)
+        )
+
+    def test_csv_oversized_cells_are_split_independently(self):
+        columns = ["question", "answer"]
+        values = [
+            " ".join(f"question-{number}" for number in range(780)),
+            " ".join(f"answer-{number}" for number in range(2_000)),
+        ]
+        table = "\n".join(
+            [
+                "| question | answer |",
+                "| --- | --- |",
+                f"| {values[0]} | {values[1]} |",
+            ]
+        )
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": columns, "csv_row_start": 2},
+            ),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) < 100
+        assert all(len(chunk.content.split()) <= 100 for chunk in chunks)
+        reconstructed: dict[str, list[str]] = {column: [] for column in columns}
+        for chunk in chunks:
+            column = chunk.metadata["csv_column"]
+            reconstructed[column].append(chunk.content.split("] ", 1)[1].split(" |", 1)[0])
+        assert {column: "".join(parts) for column, parts in reconstructed.items()} == dict(
+            zip(columns, values, strict=True)
+        )
+
+
+def test_split_to_budget_uses_logarithmic_whitespace_probes():
+    text = " ".join(f"word{number}" for number in range(2_000))
+    calls = 0
+
+    def counted_length(value: str) -> int:
+        nonlocal calls
+        calls += 1
+        return len(value.split())
+
+    pieces = _split_to_budget(text, budget=1_000, length_function=counted_length)
+
+    assert "".join(pieces) == text
+    assert all(len(piece.split()) <= 1_000 for piece in pieces)
+    assert calls < 100
+
+
+def test_split_to_budget_rejects_non_positive_budget():
+    with pytest.raises(PipelineError, match="positive token budget"):
+        _split_to_budget("content", budget=0, length_function=len)
 
 
 def test_md_element_repr_truncates_content():

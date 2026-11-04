@@ -178,7 +178,9 @@ async def get_user(
 **Response:**
 Returns 204 No Content on successful deletion.
 
-**Note:** Cannot delete the default admin user (ID: 1).
+**Note:** Cannot delete the default admin user (ID: 1). An account still
+listed in `auth.seed_users` cannot be deleted either (409): remove its entry
+and restart the API first.
 """,
 )
 async def delete_user(
@@ -218,6 +220,9 @@ Returns user details including the new token:
 - Additional user details
 
 **Note:** Store the new token securely - the old token is now invalid.
+An account removed from `auth.seed_users` is refused (409): startup revokes
+its token again. One still listed is accepted, and its configured token is
+written again at the next startup.
 """,
 )
 async def regenerate_user_token(
@@ -245,6 +250,8 @@ async def regenerate_user_token(
     * `>= 0`: Specific file limit for this user
 
 Only fields explicitly provided in the request body are updated.
+Changing `external_user_id` or `is_admin` of an account managed by
+`auth.seed_users` is refused (409): change its entry there instead.
 
 **Permissions:**
 - Requires admin role

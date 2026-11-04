@@ -26,6 +26,76 @@ Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
 the actors on its own. See
 [Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
 
+From OpenRAG 2.3.2, `MARKER_PDFTEXT_WORKERS` is ignored: Marker runs pdftext with
+one worker, inside the Marker child, so its processes no longer outlive a crashed
+worker. Remove the setting; the Marker worker logs a warning while it is above 1.
+`MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
+`1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
+
+From OpenRAG 2.3.2, the bundled object store runs SILO, the maintained MinIO
+fork, instead of the unpatched MinIO build. The switch is one-way, so back up
+the MinIO, etcd and Milvus data first. On Kubernetes, stop every MinIO pod
+before `helm upgrade`, and set `minioCredentials.accessKey` and `secretKey`: the
+chart refuses to install without them. Deployments on an external S3 store are
+not affected. Follow
+[Object storage upgrade (MinIO to SILO)](/openrag/documentation/minio_silo_upgrade/)
+before upgrading.
+
+From OpenRAG 2.3.2, a default prompt that still holds the text an earlier release
+seeded is replaced with the bundled template at startup. Defaults you edited or
+renamed, and named prompts, are kept. In every deployment this replaces an
+untouched `query_contextualizer` default; in one first installed on 2.1.x, also
+the `sys_prompt` and `spoken_style_answer` defaults. To keep an earlier text, copy it
+into a named prompt before you upgrade: rolling the image back does not restore
+it. While 2.3.0 or 2.3.1 instances still run beside 2.3.2 ones, set
+`PROMPTS_REFRESH_DEFAULTS=false`, and remove it once they have stopped. See the
+[Prompt Library](/openrag/documentation/api/#-prompt-library).
+
+From OpenRAG 2.3.2, `enable_thinking: false` reaches the model's chat template;
+earlier releases dropped it. A model with a Mistral tokenizer rejects it with a
+400, so remove `enable_thinking` from the `extra` of that model's endpoint, on the
+Models page or with `PUT /model-endpoints/{model_type}/{name}`, which replaces
+`extra`: send the rest of it back. `LLM_ENABLE_THINKING` and `VLM_ENABLE_THINKING`
+are only copied into an endpoint when it is first created, so changing them does
+not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
+`"enable_thinking": false` in its `extra` the same way. `OPENAI_LOADER_ENABLE_THINKING`
+is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
+See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
+
+## OpenRAG 2.3.4 on Kubernetes: a larger venv volume
+
+With `ray.enabled: true`, the Ray head installs the Python dependencies into the
+`<fullname>-venv` volume when it first starts. They take about 7 GB, which left
+little room in the former 10Gi default. From OpenRAG 2.3.4, that default is
+20Gi, and an install that fails stops the Ray head's `init-venv-sync` init
+container instead of being marked complete.
+
+`helm upgrade` resizes the existing volume, which fails unless its StorageClass
+sets `allowVolumeExpansion: true`. On a StorageClass that does not, keep
+`persistence.volumes.venv.size: 10Gi` in your values, or delete the volume and
+let the upgrade create it again.
+
+If an earlier install failed, the volume can hold a half-installed environment
+already marked complete, and the pods start on it. To install it again, delete
+`/app/.venv/.ready` in the Ray head and restart the Ray head pod, then the Ray
+workers and the OpenRAG pod.
+
+## OpenRAG 2.3.5: Milvus 3.0.5
+
+The tested upgrade from Milvus 3.0.2 to 3.0.5 needs no Milvus data migration
+with the default message queue. Stop writes and take a verified backup first.
+Milvus 3.0.5 removes server-side row-level security (RLS); if you rely on RLS,
+hold the upgrade until an equivalent authorization control is in place and
+validated. Follow the [Milvus 3.0.2 to 3.0.5 upgrade procedure](/openrag/documentation/milvus_migration/#upgrade-from-milvus-302-to-305).
+
+## OpenRAG 2.3.3 on Docker Compose: the Ray dashboard is not published
+
+From OpenRAG 2.3.3, Docker Compose no longer maps port 8265. With the default
+`RAY_DASHBOARD_HOST`, that mapping did not reach the dashboard anyway. To open it
+while you need it, add `-f ray-dashboard.docker-compose.yaml` last, after
+`-f docker-compose.yaml` and any other overlay. See
+[Ray dashboard](/openrag/installation/docker/#ray-dashboard).
+
 ## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
 From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
@@ -48,6 +118,37 @@ The chart can check `env.secrets` only when it renders the Secret itself. Do not
 put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an
 external secrets operator: that value replaces `runMigrationsInApp` unchecked.
 See [Managed PostgreSQL](/openrag/documentation/kubernetes/#managed-postgresql).
+
+## OpenRAG 2.3.2 on Kubernetes: one value for the reranker's model and port
+
+The bundled reranker's model and port each have one value now:
+
+- `reranker.model.id` replaces `reranker.rerankerModelName`. `env.config.RERANKER_MODEL`
+  defaults to `'{{ .Values.reranker.model.id }}'`.
+- `reranker.service.port` replaces `reranker.servicePort`. `env.config.RERANKER_BASE_URL`
+  reads it.
+- `reranker.command` is removed. The chart never read it; extra Infinity flags go in
+  the new `reranker.extraArgs`.
+
+A values file copied from an earlier chart still installs while each removed key
+holds the same value as the key that replaces it, which is the case unless you
+changed one of them. When they differ, the install fails and names the value to
+fix. With the bundled reranker, that configuration was already broken: OpenRAG
+named one model while Infinity reranked with another, or called a port Infinity
+did not listen on. With an external reranker, `reranker.rerankerModelName` was
+the model OpenRAG asked for: move it to `reranker.model.id`. Extra flags left in
+`reranker.command` fail the same way, since they never applied.
+
+When you delete a removed key, also check `env.config` and `env.secrets`: a copied
+`env.config` still sets `RERANKER_MODEL` to `'{{ .Values.reranker.rerankerModelName }}'`
+and `RERANKER_BASE_URL` from `reranker.servicePort`. The install fails while any
+value reads a key you deleted, since it would render empty, and names the value to
+change. Set `RERANKER_MODEL` to `'{{ .Values.reranker.model.id }}'` and
+`RERANKER_BASE_URL` to the chart default, or remove both to take the defaults.
+
+The reranker also has a startup probe now, and `reranker.probes` sets all three of
+its probes. A start that hangs is restarted after 10 minutes instead of 2. See
+[Kubernetes](/openrag/documentation/kubernetes/#notes).
 
 ## Changes in 2.3.0 for every deployment
 
@@ -328,10 +429,9 @@ all three to `v2.3.0`, or remove them to take the chart's default. The 2.3.0
 chart's readiness probe calls `/ready`, which 2.2.x images do not serve: a 2.2.x
 image under the new chart never becomes Ready, and the rollout stops.
 
-If your values pin `milvus.image.all.tag`, set it to `v3.0.2` or remove the
-override. Charts 0.6.4 and 0.6.5 pinned it to `v3.0.1`. If you keep that pin, the
-migration runs on v3.0.1, which cannot compact the segments the migration
-creates.
+If your values contain `milvus.image.all.tag`, remove the override. The 2.3.0
+chart defaults to Milvus v3.0.2; a copied image tag takes precedence over that
+default.
 
 #### vLLM engine overrides
 
@@ -605,9 +705,10 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded, except section
-  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
-  neighbours. PostgreSQL keeps each file's original upload metadata.
+- On Milvus 3.0.2 and older or unverified builds, copying a chunk's metadata can
+  round integers above 2^53; the tested Milvus 3.0.5 build preserves them. The
+  copy folds section IDs below 2^53 so each chunk stays linked to its neighbours.
+  PostgreSQL keeps each file's original upload metadata.
 
 Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
@@ -922,9 +1023,10 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded, except section
-  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
-  neighbours. PostgreSQL keeps each file's original upload metadata.
+- On Milvus 3.0.2 and older or unverified builds, copying a chunk's metadata can
+  round integers above 2^53; the tested Milvus 3.0.5 build preserves them. The
+  copy folds section IDs below 2^53 so each chunk stays linked to its neighbours.
+  PostgreSQL keeps each file's original upload metadata.
 
 Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
