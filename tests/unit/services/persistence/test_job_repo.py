@@ -23,6 +23,7 @@ def _row(**kwargs):
         "error": None,
         "error_reason": None,
         "degraded_stages": [],
+        "stage_tracking_version": None,
         "created_at": _NOW,
         "updated_at": _NOW,
         "started_at": None,
@@ -54,6 +55,26 @@ class _FakePool:
 
 def _repo(pool):
     return PgJobRepository(lambda: pool)
+
+
+def test_indexation_job_retains_instrumentation_version() -> None:
+    job = IndexationJob(id="task-1", stage_tracking_version=1)
+
+    assert getattr(job, "stage_tracking_version", None) == 1
+
+
+@pytest.mark.asyncio
+async def test_upsert_job_persists_and_never_erases_a_known_tracking_version():
+    pool = _FakePool(fetchrow=_row(status="QUEUED", stage_tracking_version=1))
+    repo = _repo(pool)
+
+    job = await repo.upsert_job(IndexationJob(id="task-1", stage_tracking_version=1))
+
+    query, params = pool.calls[0]
+    assert "stage_tracking_version" in query
+    assert "COALESCE(jobs.stage_tracking_version" in query
+    assert params[11] == 1
+    assert job.stage_tracking_version == 1
 
 
 @pytest.mark.asyncio
@@ -112,8 +133,8 @@ async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
 
     query, params = pool.calls[0]
     # A settled row never reopens, mirroring the TaskStateManager guard.
-    assert "WHEN jobs.status = ANY($12::text[]) THEN jobs.status" in query
-    assert sorted(params[11]) == ["CANCELLED", "COMPLETED", "FAILED"]
+    assert "WHEN jobs.status = ANY($13::text[]) THEN jobs.status" in query
+    assert sorted(params[12]) == ["CANCELLED", "COMPLETED", "FAILED"]
     assert len(params[5]) == 8_000
 
 
@@ -163,7 +184,7 @@ async def test_upsert_job_freezes_the_outcome_fields_together_on_a_settled_row()
 
     query, _params = pool.calls[0]
     compact = " ".join(query.split())
-    settled = "jobs.status = ANY($12::text[])"
+    settled = "jobs.status = ANY($13::text[])"
     for field, frozen in (
         ("status", "jobs.status"),
         ("error", "jobs.error"),

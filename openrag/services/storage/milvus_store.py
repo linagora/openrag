@@ -34,15 +34,17 @@ Hybrid BM25:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import numpy as np
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk
 from core.models.retrieval_trace import RemovalReasonCode, TraceCandidate, TraceRemovalReason
@@ -70,6 +72,7 @@ from pymilvus import (
     MilvusException,
     RRFRanker,
 )
+from pymilvus.client.entity_helper import convert_to_json
 
 logger = get_logger()
 
@@ -80,6 +83,39 @@ logger = get_logger()
 
 #: Milvus VARCHAR upper bound used for ``text`` / ``partition`` / ``file_id``.
 MAX_LENGTH = 65_535
+
+#: Default cap matching Milvus's common.JSONMaxLength. A deployment can
+#: override it through VectorDBConfig to match its server configuration.
+MAX_DYNAMIC_FIELD_BYTES = 65_536
+DEFAULT_JSON_SAFETY_MARGIN_BYTES = 1_024
+
+#: Dynamic keys shortened first when a row is over that cap: ``content``
+#: repeats the chunk body ``text`` already holds, ``context`` is a summary.
+SHRINKABLE_DYNAMIC_KEYS = ("content", "context")
+
+#: Identity, routing, cleanup, and timestamp metadata must survive fitting unchanged,
+#: including when these keys appear inside nested user metadata.
+PROTECTED_DYNAMIC_KEYS = frozenset(
+    {
+        "source",
+        "filename",
+        "original_filename",
+        "_id",
+        "id",
+        "document_id",
+        "file_id",
+        "chunk_id",
+        "partition",
+        "section_id",
+        "prev_section_id",
+        "next_section_id",
+        "chunk_type",
+        "_openrag_indexing_task_id",
+        "indexed_at",
+        "created_at",
+        "updated_at",
+    }
+)
 
 #: Custom collection property holding the schema version integer.
 SCHEMA_VERSION_PROPERTY_KEY = "openrag.schema_version"
@@ -222,6 +258,313 @@ def _changed_by_float64(value: Any) -> bool:
     if isinstance(value, list):
         return any(_changed_by_float64(item) for item in value)
     return False
+
+
+def _json_bytes(value: Any) -> int:
+    """Size of *value* using the serializer PyMilvus uses for dynamic fields."""
+    return len(convert_to_json(value))
+
+
+def _json_string_bytes(value: str, *, ensure_ascii: bool = False) -> int:
+    """Size of a string value as encoded inside a JSON container."""
+    if ensure_ascii:
+        return len(json.dumps(value))
+    # Wrapping avoids convert_to_json's special case for top-level JSON strings.
+    return len(convert_to_json([value])) - 2
+
+
+def _truncate_json_string(value: str, max_bytes: int, *, ensure_ascii: bool) -> str:
+    """Keep the longest prefix whose JSON encoding fits, including its quotes."""
+    if max_bytes <= 2:
+        return ""
+    if _json_string_bytes(value, ensure_ascii=ensure_ascii) == len(value.encode("utf-8")) + 2:
+        return _truncate_utf8(value, max_bytes - 2)
+
+    # Most strings use the UTF-8 fast path above. Only the partially retained
+    # escaped string needs a search; exhausted strings return immediately.
+    lower, upper = 0, min(len(value), max_bytes - 2)
+    while lower < upper:
+        middle = (lower + upper + 1) // 2
+        if _json_string_bytes(value[:middle], ensure_ascii=ensure_ascii) <= max_bytes:
+            lower = middle
+        else:
+            upper = middle - 1
+    return value[:lower]
+
+
+def _has_cyclic_json_reference(value: Any) -> bool:
+    """Return whether JSON containers in *value* refer back to an ancestor.
+
+    PyMilvus converts NumPy object arrays, mappings, and sequences before JSON
+    encoding. Its converter walks mappings and lists with a work stack, so a
+    cyclic reference can keep that stack growing instead of raising a normal
+    serialization error. Track the active traversal path to detect cycles
+    while still allowing shared but acyclic values.
+    """
+
+    def children(container: Any) -> Iterable[Any] | None:
+        if isinstance(container, dict):
+            return container.values()
+        if isinstance(container, (list, tuple)):
+            return container
+        if isinstance(container, np.ndarray) and container.dtype.hasobject:
+            return container.flat
+        return None
+
+    root_children = children(value)
+    if root_children is None:
+        return False
+
+    active = {id(value)}
+    visited: set[int] = set()
+    pending: list[tuple[Any, Iterator[Any]]] = [(value, iter(root_children))]
+    while pending:
+        container, values = pending[-1]
+        try:
+            child = next(values)
+        except StopIteration:
+            pending.pop()
+            active.remove(id(container))
+            visited.add(id(container))
+            continue
+
+        child_values = children(child)
+        if child_values is None:
+            continue
+        child_id = id(child)
+        if child_id in active:
+            return True
+        if child_id in visited:
+            continue
+        active.add(child_id)
+        pending.append((child, iter(child_values)))
+
+    return False
+
+
+def _metadata_values_match(actual: Any, expected: Any) -> bool:
+    if actual is expected:
+        return True
+    # Cycles are reported by the row fitter itself; don't ask PyMilvus's
+    # serializer to compare them while deciding which values to protect.
+    if _has_cyclic_json_reference([actual, expected]):
+        return False
+    try:
+        actual_json = json.loads(convert_to_json({"value": actual}))
+        expected_json = json.loads(convert_to_json({"value": expected}))
+        return json.dumps(actual_json, sort_keys=True, separators=(",", ":")) == json.dumps(
+            expected_json, sort_keys=True, separators=(",", ":")
+        )
+    except (MilvusException, TypeError, ValueError, RecursionError):
+        return False
+
+
+def _matching_metadata_keys(entity: dict[str, Any], metadata: Mapping[str, Any] | None) -> frozenset[str]:
+    """Return catalog keys whose serialized values match the current row."""
+    if not metadata:
+        return frozenset()
+    return frozenset(
+        key for key, expected in metadata.items() if key in entity and _metadata_values_match(entity[key], expected)
+    )
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    """*value* cut to at most *max_bytes* UTF-8 bytes, never mid-character."""
+    return value.encode("utf-8")[: max(max_bytes, 0)].decode("utf-8", errors="ignore")
+
+
+def _fit_milvus_row_limits(
+    entity: dict[str, Any],
+    *,
+    static_fields: set[str],
+    json_max_length: int = MAX_DYNAMIC_FIELD_BYTES,
+    json_safety_margin_bytes: int = DEFAULT_JSON_SAFETY_MARGIN_BYTES,
+    protected_metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Shorten *entity* in place so Milvus accepts it, instead of failing the insert.
+
+    Two per-row limits are counted in bytes: the ``text`` VARCHAR
+    (:data:`MAX_LENGTH`) and the configured JSON limit for dynamic metadata.
+    Rows already within that limit are left alone; oversized rows must fit
+    below it by the configured safety margin. A degenerate output — a caption
+    padded with whitespace up to its token budget, say — can exceed either, and
+    one such chunk used to fail its whole file. ``content`` and ``context`` are
+    shortened first, then the longest remaining strings at any nesting depth;
+    each cut is logged. If protected or non-string metadata alone still
+    exceeds the limit, fail before sending the row to Milvus.
+    """
+    fit_target_bytes = json_max_length - json_safety_margin_bytes
+    file_id = entity.get("file_id")
+    text = entity.get("text")
+    if isinstance(text, str) and len(text.encode("utf-8")) > MAX_LENGTH:
+        text_is_protected = "text" in PROTECTED_DYNAMIC_KEYS or (
+            protected_metadata is not None
+            and "text" in protected_metadata
+            and _metadata_values_match(text, protected_metadata["text"])
+        )
+        if text_is_protected:
+            raise VDBInsertError(
+                f"Protected metadata field 'text' for chunk {file_id!r} exceeds Milvus's {MAX_LENGTH}-byte limit.",
+                file_id=file_id,
+                field="text",
+                bytes=len(text.encode("utf-8")),
+                limit=MAX_LENGTH,
+            )
+        entity["text"] = _truncate_utf8(text, MAX_LENGTH)
+        logger.bind(file_id=file_id, field="text", bytes=len(text.encode("utf-8")), limit=MAX_LENGTH).warning(
+            "Chunk field over the Milvus limit; truncated."
+        )
+
+    dynamic_payload = {k: v for k, v in entity.items() if k not in static_fields}
+    if _has_cyclic_json_reference(dynamic_payload):
+        raise VDBInsertError(
+            f"Cyclic dynamic metadata for chunk {file_id!r} cannot be serialized.",
+            file_id=file_id,
+        )
+    try:
+        serialized_dynamic = convert_to_json(dynamic_payload)
+    except (MilvusException, TypeError, ValueError, RecursionError) as exc:
+        raise VDBInsertError(
+            f"Failed to serialize dynamic metadata for chunk {file_id!r}.",
+            file_id=file_id,
+        ) from exc
+    if len(serialized_dynamic) <= json_max_length:
+        return
+
+    protected_keys = PROTECTED_DYNAMIC_KEYS | _matching_metadata_keys(entity, protected_metadata)
+
+    # Work on the same JSON-shaped values PyMilvus will store. This also
+    # exposes strings nested in tuples and NumPy arrays to the truncator
+    # without mutating the source Chunk metadata.
+    entity.update(json.loads(serialized_dynamic))
+
+    def json_children(value: dict[str, Any] | list[Any]) -> Iterator[tuple[str | int, Any]]:
+        return iter(value.items()) if isinstance(value, dict) else enumerate(value)
+
+    def without_reducible_strings(value: Any) -> Any:
+        if isinstance(value, str):
+            return ""
+        if not isinstance(value, (dict, list)):
+            return value
+
+        result: Any = {} if isinstance(value, dict) else [None] * len(value)
+        pending: list[tuple[Iterator[tuple[str | int, Any]], Any]] = [(json_children(value), result)]
+        while pending:
+            children, target = pending[-1]
+            try:
+                key, child = next(children)
+            except StopIteration:
+                pending.pop()
+                continue
+
+            if key in PROTECTED_DYNAMIC_KEYS:
+                target[key] = child
+            elif isinstance(child, str):
+                target[key] = ""
+            elif isinstance(child, (dict, list)):
+                replacement: Any = {} if isinstance(child, dict) else [None] * len(child)
+                target[key] = replacement
+                pending.append((json_children(child), replacement))
+            else:
+                target[key] = child
+        return result
+
+    minimum_payload = {
+        key: value if key in protected_keys else without_reducible_strings(value)
+        for key, value in entity.items()
+        if key not in static_fields
+    }
+    serialized_minimum = convert_to_json(minimum_payload)
+    minimum_bytes = len(serialized_minimum)
+
+    def fail_oversized_metadata(actual_bytes: int) -> None:
+        raise VDBInsertError(
+            f"Dynamic metadata for chunk {file_id!r} cannot fit the {fit_target_bytes}-byte truncation target "
+            f"below Milvus's {json_max_length}-byte limit "
+            f"(current size: {actual_bytes}; size after removing reducible strings: {minimum_bytes} bytes).",
+            file_id=file_id,
+            dynamic_bytes=actual_bytes,
+            minimum_bytes=minimum_bytes,
+            limit=json_max_length,
+            target_bytes=fit_target_bytes,
+        )
+
+    if minimum_bytes > fit_target_bytes:
+        fail_oversized_metadata(len(serialized_dynamic))
+
+    # Emptying string values preserves container depth and therefore PyMilvus's
+    # serializer choice. Its standard-json fallback also escapes non-ASCII.
+    ensure_ascii = serialized_minimum == json.dumps(minimum_payload).encode("utf-8")
+
+    def nested_string_slots(parent: Any, key: str | int) -> Iterable[tuple[Any, str | int, str]]:
+        value = parent[key]
+        if isinstance(value, str):
+            yield parent, key, value
+            return
+        if not isinstance(value, (dict, list)):
+            return
+
+        # JSON normalization makes the tree acyclic and gives each nested
+        # value its own container. Keeping parent/key slots avoids copying an
+        # entire path at every level while preserving depth-first order.
+        pending = [(value, json_children(value))]
+        while pending:
+            current, children = pending[-1]
+            try:
+                child_key, child = next(children)
+            except StopIteration:
+                pending.pop()
+                continue
+            if child_key in PROTECTED_DYNAMIC_KEYS:
+                continue
+            if isinstance(child, str):
+                yield current, child_key, child
+            elif isinstance(child, (dict, list)):
+                pending.append((child, json_children(child)))
+
+    shrink_first = [
+        (entity, key, entity[key])
+        for key in SHRINKABLE_DYNAMIC_KEYS
+        if key not in static_fields and key not in protected_keys and isinstance(entity.get(key), str)
+    ]
+    shrink_first_keys = {key for _, key, _ in shrink_first}
+    remaining_strings = [
+        item
+        for key in entity
+        if key not in static_fields and key not in protected_keys and key not in shrink_first_keys
+        for item in nested_string_slots(entity, key)
+    ]
+    remaining_strings.sort(key=lambda item: -len(item[2].encode("utf-8")))
+
+    actual_bytes = len(serialized_dynamic)
+    truncated_fields = 0
+    for parent, key, original in (*shrink_first, *remaining_strings):
+        over = actual_bytes - fit_target_bytes
+        if over <= 0:
+            break
+        if not original:
+            continue
+        value = parent[key]
+        if not isinstance(value, str) or not value:
+            continue
+        string_bytes = _json_string_bytes(value, ensure_ascii=ensure_ascii)
+        value = _truncate_json_string(value, string_bytes - over, ensure_ascii=ensure_ascii)
+        actual_bytes += _json_string_bytes(value, ensure_ascii=ensure_ascii) - string_bytes
+        parent[key] = value
+        if value != original:
+            truncated_fields += 1
+
+    if actual_bytes > fit_target_bytes:
+        fail_oversized_metadata(actual_bytes)
+    if truncated_fields:
+        logger.bind(
+            file_id=file_id,
+            fields_truncated=truncated_fields,
+            dynamic_bytes_before=len(serialized_dynamic),
+            dynamic_bytes_after=actual_bytes,
+            limit=json_max_length,
+            target_bytes=fit_target_bytes,
+        ).warning("Chunk metadata over the Milvus limit; strings truncated.")
 
 
 class MilvusVectorStore(VectorStore):
@@ -982,6 +1325,9 @@ class MilvusVectorStore(VectorStore):
         indexed_at: str,
         order: dict[str, int | None],
         vector_field: str,
+        json_max_length: int = MAX_DYNAMIC_FIELD_BYTES,
+        json_safety_margin_bytes: int = DEFAULT_JSON_SAFETY_MARGIN_BYTES,
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the Milvus insert payload for one chunk.
 
@@ -1014,6 +1360,13 @@ class MilvusVectorStore(VectorStore):
         ):
             if value is not None:
                 entity[field] = value
+        _fit_milvus_row_limits(
+            entity,
+            static_fields={"text", "partition", "file_id", vector_field, *INDEXED_TIME_FIELDS},
+            json_max_length=json_max_length,
+            json_safety_margin_bytes=json_safety_margin_bytes,
+            protected_metadata=protected_metadata,
+        )
         return entity
 
     # ------------------------------------------------------------------
@@ -1027,6 +1380,7 @@ class MilvusVectorStore(VectorStore):
         *,
         indexed_at: datetime | None = None,
         vector_field: str | None = None,
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> int:
         """Insert pre-embedded chunks into the backing Milvus collection.
 
@@ -1054,7 +1408,15 @@ class MilvusVectorStore(VectorStore):
         order_metadata = self._gen_chunk_order_metadata(len(chunks))
         field = resolve_vector_field(vector_field)
         entities = [
-            self._chunk_to_entity(c, indexed_at=indexed_at, order=o, vector_field=field)
+            self._chunk_to_entity(
+                c,
+                indexed_at=indexed_at,
+                order=o,
+                vector_field=field,
+                json_max_length=self._config.json_max_length,
+                json_safety_margin_bytes=self._config.json_safety_margin_bytes,
+                protected_metadata=protected_metadata,
+            )
             for c, o in zip(chunks, order_metadata, strict=True)
         ]
 
@@ -1954,7 +2316,37 @@ class MilvusVectorStore(VectorStore):
 
         return int(result.get("delete_count", 0)) if isinstance(result, dict) else 0
 
-    async def upsert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
+    def _fit_raw_entities(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        protected_metadata: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fit dynamic metadata in raw rows before metadata updates or copies are written."""
+        static_fields = {"_id", "text", "partition", "file_id", *INDEXED_TIME_FIELDS}
+        if self._hybrid:
+            static_fields.add("sparse")
+        static_fields.update(key for entity in entities for key in entity if is_vector_field_key(key))
+        fitted_entities = []
+        for entity in entities:
+            fitted = dict(entity)
+            _fit_milvus_row_limits(
+                fitted,
+                static_fields=static_fields,
+                json_max_length=self._config.json_max_length,
+                json_safety_margin_bytes=self._config.json_safety_margin_bytes,
+                protected_metadata=protected_metadata,
+            )
+            fitted_entities.append(fitted)
+        return fitted_entities
+
+    async def upsert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        collection: str = "default",
+        *,
+        protected_metadata: Mapping[str, Any] | None = None,
+    ) -> int:
         """Upsert raw Milvus entities that already include vector data.
 
         This is intentionally narrower than the VectorStore port: it supports
@@ -1964,11 +2356,12 @@ class MilvusVectorStore(VectorStore):
         self._resolve_collection(collection)
         if not entities:
             return 0
+        fitted_entities = self._fit_raw_entities(entities, protected_metadata=protected_metadata)
 
         try:
             result = await self._async_client.upsert(
                 collection_name=self._collection_name,
-                data=entities,
+                data=fitted_entities,
             )
         except MilvusException as e:
             raise VDBInsertError(
@@ -1981,8 +2374,10 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
-        await self._flush_new_fields(entities[0])
-        return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
+        await self._flush_new_fields(fitted_entities[0])
+        return (
+            int(result.get("upsert_count", len(fitted_entities))) if isinstance(result, dict) else len(fitted_entities)
+        )
 
     async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
         """Partial upsert of ``{_id, field}`` per chunk.
@@ -2058,16 +2453,23 @@ class MilvusVectorStore(VectorStore):
         await self._flush_new_fields([field])
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
-    async def insert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
+    async def insert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        collection: str = "default",
+        *,
+        protected_metadata: Mapping[str, Any] | None = None,
+    ) -> int:
         """Insert raw Milvus entities that already include vector data."""
         self._resolve_collection(collection)
         if not entities:
             return 0
+        fitted_entities = self._fit_raw_entities(entities, protected_metadata=protected_metadata)
 
         try:
             result = await self._async_client.insert(
                 collection_name=self._collection_name,
-                data=entities,
+                data=fitted_entities,
             )
         except MilvusException as e:
             raise VDBInsertError(
@@ -2080,8 +2482,10 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
-        await self._flush_new_fields(entities[0])
-        return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
+        await self._flush_new_fields(fitted_entities[0])
+        return (
+            int(result.get("insert_count", len(fitted_entities))) if isinstance(result, dict) else len(fitted_entities)
+        )
 
     async def make_searchable(self, field: str) -> None:
         """Flush, then wait until ``field`` answers a search.

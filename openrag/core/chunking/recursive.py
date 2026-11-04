@@ -324,6 +324,8 @@ class BaseChunker(ChunkingStrategy):
         # defensive pattern as `_chunk_metadata_base`.
         for element in tables_and_images:
             if element.type == "table" and self.length_function(element.content) > self.chunk_size:
+                if metadata.get("csv_columns"):
+                    element.metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
                 subtables = chunk_table(
                     table_element=element,
                     chunk_size=self.chunk_size,
@@ -332,6 +334,7 @@ class BaseChunker(ChunkingStrategy):
                 chunks.extend(
                     {
                         **metadata,
+                        **(subtable.metadata or {}),
                         "page_content": subtable.content.strip(),
                         "page": subtable.page_number,
                         "chunk_type": "table",

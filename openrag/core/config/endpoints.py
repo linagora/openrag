@@ -112,6 +112,17 @@ class SemaphoreConfig(ConfigMixin):
     vlm_semaphore: int = 10
 
 
+class LanguageDetectionConfig(ConfigMixin):
+    """fast-langdetect model used to detect the language of queries and documents.
+
+    ``lite`` ships inside the package and needs no network access. ``full``
+    and ``auto`` download the larger model on first use; it is more accurate
+    than ``lite`` on very short text.
+    """
+
+    model: Literal["lite", "full", "auto"] = "lite"
+
+
 class LLMContextConfig(ConfigMixin):
     """Token budget settings for LLM context."""
 

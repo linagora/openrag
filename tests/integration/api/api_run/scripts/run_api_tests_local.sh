@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local replica of .github/workflows/api_tests.yml
+# Local replica of the api-tests job in .github/workflows/ci.yml
 # Builds/starts the stack (mock-vllm included), waits for health, runs tests, then cleans up.
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

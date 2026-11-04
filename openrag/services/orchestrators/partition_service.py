@@ -1126,14 +1126,28 @@ class PartitionService:
         logger.info(f"User_id {user_id} added to partition '{partition}'.")
 
     async def remove_member(self, partition: str, user_id: int) -> None:
+        """Remove a member; the partition's last owner is refused with a 409."""
         await self._ensure_membership(partition, user_id)
-        await self._membership_repo.remove_partition_member(partition, user_id)
+        status = await self._membership_repo.remove_partition_member(partition, user_id)
+        self._raise_if_last_owner(status, partition, user_id)
         logger.info(f"User_id {user_id} removed from partition '{partition}'.")
 
     async def update_role(self, partition: str, user_id: int, new_role: str) -> None:
+        """Change a member's role; demoting the last owner is refused with a 409."""
         await self._ensure_membership(partition, user_id)
-        await self._membership_repo.update_partition_member_role(partition, user_id, new_role)
+        status = await self._membership_repo.update_partition_member_role(partition, user_id, new_role)
+        self._raise_if_last_owner(status, partition, user_id)
         logger.info(f"User_id {user_id} role updated to '{new_role}' in partition '{partition}'.")
+
+    @staticmethod
+    def _raise_if_last_owner(status: str, partition: str, user_id: int) -> None:
+        # A partition without an owner has nobody left to manage its members
+        # (only admins under SUPER_ADMIN_MODE bypass the owner check).
+        if status == "last_owner":
+            raise ConflictError(
+                f"User {user_id} is the last owner of partition '{partition}'. Make another member owner first.",
+                code="LAST_PARTITION_OWNER",
+            )
 
     # ------------------------------------------------------------------
     # Document relationships

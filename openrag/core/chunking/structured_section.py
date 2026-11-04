@@ -43,6 +43,7 @@ from typing import Any
 from core.chunking.markdown_utils import (
     PAGE_RE,
     MDElement,
+    attach_captions,
     chunk_table,
     split_md_elements,
 )
@@ -203,6 +204,8 @@ class _Unit:
     page_marks: list[tuple[int, int]] = field(default_factory=list)
     chunk_type: ChunkType = ChunkType.TEXT
     atomic: bool = False  # table / image — never merged into prose, never split by us
+    metadata: dict[str, Any] = field(default_factory=dict)
+    caption: str = ""  # leads ``text``; repeated on every piece of a split table
 
     @property
     def start_page(self) -> int | None:
@@ -296,6 +299,11 @@ class StructuredSectionChunker(BaseChunker):
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
         units = self._page_units(content) if paginated else self._build_units(content)
+        csv_metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
+        if csv_metadata:
+            for unit in units:
+                if unit.chunk_type is ChunkType.TABLE:
+                    unit.metadata.update(csv_metadata)
         candidates = self._single_chunk(units, filename)
         if candidates is None:
             candidates = self._pack(units, filename)
@@ -346,6 +354,7 @@ class StructuredSectionChunker(BaseChunker):
                         "hierarchy_path": list(unit.heading_path),
                         "section_title": unit.heading_path[-1] if unit.heading_path else "",
                         "page_range": _page_range(unit.pages),
+                        **unit.metadata,
                     },
                 )
             )
@@ -512,7 +521,13 @@ class StructuredSectionChunker(BaseChunker):
             buf_len = 0
             buf_has_body = False
 
-        for element in split_md_elements(content):
+        # A placeholder image takes no caption: one beside it stays in the text
+        # instead of moving onto a neighbouring block it does not label.
+        elements = attach_captions(
+            split_md_elements(content),
+            takes_caption=lambda e: e.type != "image" or not is_placeholder_image(e.content),
+        )
+        for element in elements:
             if element.type in ("table", "image"):
                 # Non-informative images (the captioner's "[Image Placeholder]")
                 # are dropped, matching the recursive chunker — otherwise every
@@ -625,6 +640,8 @@ class StructuredSectionChunker(BaseChunker):
             pages={element.page_number or page},
             chunk_type=ctype,
             atomic=True,
+            metadata=dict(element.metadata or {}),
+            caption=element.caption,
         )
 
     def _heading(self, line: str) -> tuple[int, str] | None:
@@ -739,18 +756,28 @@ class StructuredSectionChunker(BaseChunker):
             # then replayed instead of the column header, leaving every
             # continuation piece a wall of unlabelled numbers. Split the table
             # alone and re-attach the heading to the first piece, which is the
-            # one it introduces.
+            # one it introduces. A caption labels the whole table, so it goes
+            # back on every piece and counts against each piece's budget.
             lead, table_text = _split_leading_headings(unit.text)
-            element = MDElement(type="table", content=table_text, page_number=unit.start_page)
-            subs = chunk_table(element, chunk_size=emax, length_function=self.length_function)
+            caption = f"{unit.caption}\n\n" if unit.caption else ""
+            element = MDElement(
+                type="table",
+                content=table_text.removeprefix(caption),
+                page_number=unit.start_page,
+                metadata=unit.metadata,
+            )
+            subs = chunk_table(
+                element, chunk_size=emax - self.length_function(caption), length_function=self.length_function
+            )
             pieces = [
                 _Unit(
                     heading_path=list(unit.heading_path),
-                    text=s.content.strip(),
-                    tokens=self.length_function(s.content),
+                    text=f"{caption}{s.content.strip()}",
+                    tokens=self.length_function(f"{caption}{s.content}"),
                     pages={s.page_number} if s.page_number else set(unit.pages),
                     chunk_type=ChunkType.TABLE,
                     atomic=True,
+                    metadata=dict(s.metadata or {}),
                 )
                 for s in subs
             ]
@@ -780,13 +807,10 @@ class StructuredSectionChunker(BaseChunker):
         partition pointing at a small-context embedder gets a tighter bound.
         ``None`` disables the net entirely.
 
-        Tables are never force-split even above the bound: ``chunk_table``
-        already divides them losslessly on row boundaries, replaying the column
-        header. What reaches here is a single row too large to divide, and
-        cutting it mid-sentence yields a fragment that is neither a valid row
-        nor carries its headers. A physical-row fallback was measured and made
-        things worse — over-max chunks 113 → 80 but total excess tokens doubled
-        (16.6k → 33.3k), duplication 1.75% → 2.79%, orphan headings 5 → 22.
+        Tables are never force-split here. ``chunk_table`` already divides
+        regular Markdown tables on row boundaries and CSV tables can divide an
+        oversized cell into labelled continuation rows. Any remaining table is
+        left intact rather than sliced into a fragment without its headers.
         """
         if self.hard_max_tokens is None:
             return units
@@ -913,6 +937,11 @@ class StructuredSectionChunker(BaseChunker):
         out (a table glued to unrelated prose loses the column headers that make
         it readable) and the heading paths must be compatible.
         """
+        # CSV chunks carry row and continuation identifiers that must describe
+        # exactly one emitted table fragment.  Absorbing two rows would retain
+        # only ``prev.metadata`` and make those identifiers incorrect.
+        if "csv_row_start" in prev.metadata or "csv_row_start" in unit.metadata:
+            return False
         if prev.tokens >= self.min_tokens and unit.tokens >= self.min_tokens:
             return False
         # Never fold a heading-only unit into the chunk before it: the heading
@@ -1038,6 +1067,7 @@ def _copy_unit(unit: _Unit) -> _Unit:
         pages=set(unit.pages),
         chunk_type=unit.chunk_type,
         atomic=unit.atomic,
+        metadata=dict(unit.metadata),
     )
 
 
