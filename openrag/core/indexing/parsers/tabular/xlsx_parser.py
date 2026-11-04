@@ -331,9 +331,10 @@ def _analyze_formula(
         same_sheet = referenced_sheet is None or referenced_sheet == sheet_name
         start_reference_row = start_row
         end_reference_row = int(match.group("end_row")) if match.group("end_row") else start_row
-        within_table_rows = table_start_row <= min(start_reference_row, end_reference_row) and max(
-            start_reference_row, end_reference_row
-        ) <= table_end_row
+        within_table_rows = (
+            table_start_row <= min(start_reference_row, end_reference_row)
+            and max(start_reference_row, end_reference_row) <= table_end_row
+        )
         referenced_headers = []
         if same_sheet and within_table_rows:
             lower, upper = sorted((start_column, end_column))

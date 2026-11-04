@@ -416,11 +416,7 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
 
         selected = {excel_column(index) for index in selected_columns}
         formula = _xlsx_formula_context(
-            [
-                group
-                for group in element.metadata.get("formula_groups", [])
-                if group.get("target_column") in selected
-            ]
+            [group for group in element.metadata.get("formula_groups", []) if group.get("target_column") in selected]
         )
         number_format = (
             _xlsx_number_format_context(
