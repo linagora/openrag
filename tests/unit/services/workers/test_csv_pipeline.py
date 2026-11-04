@@ -571,7 +571,7 @@ async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline)
 
 
 @pytest.mark.parametrize("file_format", ["csv", "xlsx"])
-async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline, file_format):
+async def test_cancel_during_read_returns_promptly_and_defers_generator_close(setup_pipeline, file_format):
     pipeline, row, _ = setup_pipeline
     observed = []
     tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
@@ -591,15 +591,50 @@ async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pi
         assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
         await asyncio.sleep(0)
-        assert not task.done()
+        assert task.done()
+        assert not pipeline.parser.closed
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+    for _ in range(100):
+        if pipeline.parser.closed:
+            break
+        await asyncio.sleep(0.01)
     assert pipeline.parser.closed
     assert pipeline.vector_store.calls == []
     parse_events = [event for event in observed if event is not None and event.stage_id == "parse"]
     assert [event.status for event in parse_events] == [StageEventStatus.STARTED, StageEventStatus.CANCELLED]
+
+
+async def test_parse_timeout_returns_promptly_and_defers_generator_close(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    started, release = threading.Event(), threading.Event()
+    original = pipeline.parser.iter_batches
+
+    def blocking_batches(document):
+        try:
+            started.set()
+            release.wait(timeout=5)
+            yield from original(document)
+        finally:
+            pipeline.parser.closed = True
+
+    pipeline.parser.iter_batches = blocking_batches
+    pipeline = replace(pipeline, timeouts=PipelineTimeouts(parse=0.01))
+
+    try:
+        with pytest.raises(TimeoutError):
+            await pipeline.run(row)
+        assert await asyncio.to_thread(started.wait, 5)
+        assert not pipeline.parser.closed
+    finally:
+        release.set()
+    for _ in range(100):
+        if pipeline.parser.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert pipeline.parser.closed
 
 
 async def test_exhausted_parse_budget_stops_before_reading(setup_pipeline):

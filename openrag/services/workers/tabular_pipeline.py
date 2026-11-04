@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
-from contextlib import closing
 from datetime import UTC, datetime
 
 from core.indexing.topic_tags import TopicTagSample
@@ -20,16 +20,63 @@ from services.workers.stages.topic_tag import topic_tag_stage
 logger = get_logger()
 
 
-async def _next_batch(batches):
-    # next(..., None) avoids propagating StopIteration through an asyncio Future.
-    task = asyncio.create_task(asyncio.to_thread(next, batches, None))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        # A Python thread cannot be killed by cancelling the await. Wait for
-        # this bounded read to finish before the surrounding context closes it.
-        await asyncio.gather(task, return_exceptions=True)
-        raise
+class _AsyncBatchReader:
+    """Read a synchronous iterator without making cancellation wait on its thread.
+
+    Python cannot stop a thread already inside ``next()``.  On timeout or
+    cancellation, keep the iterator alive until that read returns, then close
+    it from the event-loop thread.  This lets the indexing task fail promptly
+    without closing parser resources while they are still in use.
+    """
+
+    def __init__(self, batches):
+        self.batches = batches
+        self.pending: asyncio.Task | None = None
+        self.read_finished: threading.Event | None = None
+        self.closed = False
+
+    def _read_one(self):
+        assert self.read_finished is not None
+        try:
+            return next(self.batches, None)
+        finally:
+            self.read_finished.set()
+
+    async def next(self):
+        # next(..., None) avoids propagating StopIteration through a Future.
+        self.read_finished = threading.Event()
+        self.pending = asyncio.create_task(asyncio.to_thread(self._read_one))
+        try:
+            return await asyncio.shield(self.pending)
+        finally:
+            if self.pending.done() and self.read_finished.is_set():
+                self.pending = None
+
+    def _close(self):
+        if self.closed:
+            return
+        self.closed = True
+        close = getattr(self.batches, "close", None)
+        if close is not None:
+            close()
+
+    async def aclose(self):
+        pending = self.pending
+        read_finished = self.read_finished
+        if pending is None or read_finished is None or read_finished.is_set():
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
+            self._close()
+            return
+
+        async def close_after_read():
+            # The asyncio Task may be cancelled while its worker thread is
+            # still executing.  Wait on the thread-owned signal rather than
+            # the Task so generator.close() never races next().
+            await asyncio.to_thread(read_finished.wait)
+            self._close()
+
+        asyncio.create_task(close_after_read())
 
 
 def _safe_tracking_call(tracker, method: str, *args, **kwargs) -> None:
@@ -77,7 +124,8 @@ async def run_tabular_batches(
 
     try:
         seed_parse_watchdog(tabular_format)
-        with closing(parser.iter_batches(document)) as batches:
+        reader = _AsyncBatchReader(parser.iter_batches(document))
+        try:
             while True:
                 child = None
                 row["stage"] = "parsing"
@@ -87,7 +135,7 @@ async def run_tabular_batches(
                         raise TimeoutError(f"{format_label} parsing exceeded the file's parse time budget")
                     start = time.perf_counter()
                     try:
-                        batch = await run_with_optional_timeout(lambda: _next_batch(batches), remaining_parse_time)
+                        batch = await run_with_optional_timeout(reader.next, remaining_parse_time)
                     finally:
                         elapsed = time.perf_counter() - start
                         observe_stage_duration("parse", elapsed)
@@ -154,6 +202,8 @@ async def run_tabular_batches(
                 child.clear()
                 child = None
                 del processed, batch
+        finally:
+            await reader.aclose()
 
         if topic_sample is not None:
             # The stage expects chunks, but only bounded text copies survive
