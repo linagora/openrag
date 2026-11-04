@@ -617,7 +617,20 @@ class IndexerWorkerActor:
                                 f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
                             )
                         for workspace_id, error in failures:
-                            self._logger.warning(
+                            # Bound, not passed to warning(): keyword arguments make loguru
+                            # str.format the message, which holds the exception text.
+                            reason = (
+                                {"error_reason": failure_reason_from_exception(error)}
+                                if isinstance(error, Exception)
+                                else {}
+                            )
+                            self._logger.bind(
+                                file_id=file_id,
+                                partition=partition,
+                                task_id=task_id,
+                                workspace_id=workspace_id,
+                                **reason,
+                            ).warning(
                                 f"Failed to attach indexed file to workspace '{workspace_id}'; "
                                 f"file retained independently: {error}"
                             )

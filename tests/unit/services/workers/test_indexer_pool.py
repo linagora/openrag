@@ -1879,8 +1879,11 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [RuntimeError("ws1 unavailable"), ["f"]])
-async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path, failure) -> None:
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [(RuntimeError("ws1 {unavailable}"), {"error_reason": "RuntimeError: ws1 {unavailable}"}), (["f"], {})],
+)
+async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path, failure, reason) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"x")
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
@@ -1897,6 +1900,13 @@ async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path
     assert result == {"stored_count": 1, "stage": "stored"}
     actor._catalog_store.document_repo.mark_file_independently_indexed.assert_awaited_once_with("f", "p")
     actor._catalog_store.document_repo.finalize_file_workspace_ownership.assert_not_awaited()
+    actor._logger.bind.assert_called_once_with(file_id="f", partition="p", task_id="t", workspace_id="ws1", **reason)
+    warning = actor._logger.bind.return_value.warning
+    warning.assert_called_once()
+    assert "Failed to attach indexed file to workspace 'ws1'" in warning.call_args.args[0]
+    assert str(failure) in warning.call_args.args[0]
+    # Keyword arguments would make loguru str.format the exception text.
+    assert warning.call_args.kwargs == {}
 
 
 @pytest.mark.asyncio
