@@ -178,7 +178,17 @@ docker inspect "$(docker compose ps -q milvus)" --format '{{.Config.Image}}'
 
 Wait for `/healthz` to report healthy and confirm the expected image before restarting OpenRAG.
 
-For Helm, remove any `milvus.image.all.tag` override and upgrade the release; chart 5.0.33 defaults to `v3.0.5`. The bundled PostgreSQL chart change recreates the database pod, and the MinIO configuration change rolls its pod. Schedule a maintenance window for the database outage, then confirm PostgreSQL, MinIO, and every Milvus workload are ready before resuming writes. An external PostgreSQL database is not restarted.
+The OpenRAG 2.3.4 chart defaults to Milvus `v3.0.2`; chart 5.0.33 defaults to `v3.0.5`. Check the release's saved overrides with `helm get values`. If no `milvus.image.all.tag` is listed, use `--reset-then-reuse-values` (supported by Helm 3.14.4) to apply the new chart defaults and reuse the release's saved settings. Do not use `--reuse-values` by itself: it can preserve the old chart default even when no image tag appears in the saved overrides. If the saved values explicitly pin `v3.0.2`, use `--reset-values` with a values file based on the new chart, carrying forward your required custom settings but omitting that pin. See the [Helm upgrade value options](https://helm.sh/docs/v3/helm/helm_upgrade/).
+
+After upgrading, confirm that all five Milvus workloads use `milvusdb/milvus:v3.0.5` and are ready:
+
+```bash
+kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}'
+# Expected: all five Milvus workloads use milvusdb/milvus:v3.0.5
+```
+
+The bundled PostgreSQL pod may be recreated when the resolved PostgreSQL sub-chart version changes. It was recreated when upgrading from the v2.3.4 chart's locked 18.10.0 dependency and from published chart 0.7.10's 18.12.16 dependency; it was not recreated from published chart 0.7.11, which already uses 18.12.17. MinIO rolls during the upgrade. Plan for a possible brief PostgreSQL outage, then confirm PostgreSQL, MinIO, and every Milvus workload are ready before resuming writes. An external PostgreSQL database is not restarted.
 
 ### Legacy path: upgrade Milvus 2.5.x to 2.6.11
 

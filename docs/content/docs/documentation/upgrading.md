@@ -80,7 +80,7 @@ already marked complete, and the pods start on it. To install it again, delete
 `/app/.venv/.ready` in the Ray head and restart the Ray head pod, then the Ray
 workers and the OpenRAG pod.
 
-## OpenRAG 2.3.4: Milvus 3.0.5
+## OpenRAG 2.3.5: Milvus 3.0.5
 
 The tested upgrade from Milvus 3.0.2 to 3.0.5 needs no Milvus data migration
 with the default message queue. Stop writes and take a verified backup first.
