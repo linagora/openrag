@@ -4,7 +4,9 @@ import asyncio
 from time import monotonic
 from typing import Any
 
+import pytest
 import services.workers.task_cancellation as task_cancellation
+from services.workers.task_state import TaskInfo, TaskStateManager
 
 
 class _RemoteMethod:
@@ -21,6 +23,16 @@ class _TaskStateManager:
     def __init__(self) -> None:
         self.set_cancelled_if_active = _RemoteMethod(False)
         self.set_state = _RemoteMethod(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_state", ["COMPLETED", "FAILED"])
+async def test_set_cancelled_if_active_preserves_terminal_task_state(terminal_state: str) -> None:
+    manager = TaskStateManager.__ray_metadata__.modified_class()
+    manager.tasks["task-1"] = TaskInfo(state=terminal_state)
+
+    assert await manager.set_cancelled_if_active("task-1") is False
+    assert await manager.get_state("task-1") == terminal_state
 
 
 def test_cancel_refs_does_not_overwrite_a_task_that_settled_before_cancellation(
