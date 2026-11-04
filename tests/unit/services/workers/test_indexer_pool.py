@@ -2276,6 +2276,24 @@ async def test_worker_polls_registration_without_fetching_its_own_ref(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_worker_does_not_start_while_has_object_ref_is_false(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._task_state_manager.has_object_ref = SimpleNamespace(remote=AsyncMock(return_value=False))
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="registered task reference"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert worker.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_missing_worker_reference_records_a_canonical_reason(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
