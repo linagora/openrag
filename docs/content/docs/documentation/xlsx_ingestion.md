@@ -222,10 +222,11 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_cells` | Physical cells across worksheets | 5,000,000 |
 | `max_sheet_area` | Worksheet rectangle, including gaps | 5,000,000 positions |
 | `max_tables` | Detected table regions across the workbook | 128 |
+| `max_merged_ranges` | Merged-cell ranges across the workbook | 100,000 |
 | `max_cell_chars` | Characters in one cell | 32,767 |
 | `max_batch_bytes` | Rendered batch size | 2 MiB |
 
-An upload whose bytes do not match its `.xlsx` or `.xlsm` extension is rejected with HTTP status 415 before indexing starts. A structurally invalid workbook that reaches the parser fails with `INVALID_XLSX` and status 422. Resource-limit failures use `XLSX_LIMIT_EXCEEDED` and status 413. Failed ingestion is cleaned up so partially indexed content is not left searchable.
+An upload missing the OOXML parts required by its `.xlsx` or `.xlsm` extension is rejected with HTTP status 415 before indexing starts. Macro-enabled content uploaded with an `.xlsx` name, or another structurally invalid workbook that reaches the parser, fails with `INVALID_XLSX` and status 422; use `.xlsm` for a macro-enabled workbook. Resource-limit failures use `XLSX_LIMIT_EXCEEDED` and status 413. Failed ingestion is cleaned up so partially indexed content is not left searchable.
 
 The validation scan is intentional. It checks actual cells rather than trusting worksheet dimension declarations and prevents sparse coordinates, compressed archives, large shared-string tables, or eager metadata from causing uncontrolled parser work. These limits constrain accepted input; they are not an exact process-memory ceiling.
 

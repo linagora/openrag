@@ -33,6 +33,7 @@ import email
 import io
 import logging
 from collections.abc import Mapping
+from contextlib import closing
 from email import policy
 from email.utils import parsedate_to_datetime
 
@@ -52,6 +53,7 @@ _IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"}
 # nested .eml-in-.eml recursion is bounded separately at parser-tree build time
 # via _MAX_EML_ATTACHMENT_DEPTH in the parser_dispatcher.)
 _MAX_EML_ATTACHMENTS = 50
+_MAX_EML_ATTACHMENT_TEXT_BYTES = 8 * 1024 * 1024
 
 
 @parser_registry.register("eml")
@@ -252,10 +254,15 @@ class EmlParser(DocumentParser):
                     content_type=Document.detect_content_type(attachment["filename"]),
                     metadata={"source": f"attachment:{attachment['filename']}"},
                 )
-                processed = await parser.parse(doc)
-                content = "\n\n".join(b.text for b in processed.text_blocks if b.text)
+                if hasattr(parser, "iter_batches"):
+                    content = await asyncio.to_thread(self._render_tabular_attachment, parser, doc)
+                    images = []
+                else:
+                    processed = await parser.parse(doc)
+                    content = "\n\n".join(b.text for b in processed.text_blocks if b.text)
+                    images = list(processed.images)
                 inline = f"Content:\n{content}\n" if content else ""
-                return inline, list(processed.images)
+                return inline, images
             except Exception as exc:
                 logger.warning("Attachment parser failed for %s: %s", attachment["filename"], exc)
 
@@ -273,6 +280,30 @@ class EmlParser(DocumentParser):
             ]
 
         return "", []
+
+    @staticmethod
+    def _render_tabular_attachment(parser, document: Document) -> str:
+        """Render a tabular attachment incrementally with a total text bound."""
+        rendered: list[str] = []
+        remaining = _MAX_EML_ATTACHMENT_TEXT_BYTES
+        truncated = False
+        with closing(parser.iter_batches(document)) as batches:
+            for batch in batches:
+                if not batch.text:
+                    continue
+                encoded = batch.text.encode("utf-8")
+                if len(encoded) > remaining:
+                    rendered.append(encoded[:remaining].decode("utf-8", errors="ignore"))
+                    truncated = True
+                    break
+                rendered.append(batch.text)
+                remaining -= len(encoded)
+                if remaining == 0:
+                    truncated = True
+                    break
+        if truncated:
+            rendered.append("[attachment content truncated at the safe text limit]")
+        return "\n\n".join(rendered)
 
     @staticmethod
     def _extension(filename: str) -> str:

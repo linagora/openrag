@@ -37,6 +37,7 @@ class XlsxLimits:
     max_cells: int = 5_000_000
     max_sheet_area: int = 5_000_000
     max_tables: int = 128
+    max_merged_ranges: int = 100_000
     max_cell_chars: int = 32767
     max_batch_bytes: int = 2 * 1024 * 1024
 
@@ -153,7 +154,7 @@ def _merge_preambles(
 
 def _merged_header_depth(
     region: TableRegion,
-    merged_ranges: list[tuple[int, int, int, int]],
+    merged_columns_by_row: dict[int, list[tuple[int, int]]],
     populated_rows: set[int],
 ) -> int:
     """Return merged header rows only when their leaf row contains cells.
@@ -167,11 +168,10 @@ def _merged_header_depth(
     depth = 0
     for row_number in range(region.start_row, region.end_row):
         covered_columns: set[int] = set()
-        for start_row, end_row, start_column, end_column in merged_ranges:
-            if start_row == end_row == row_number and end_column > start_column:
-                covered_columns.update(
-                    range(max(start_column, region.start_column), min(end_column, region.end_column) + 1)
-                )
+        for start_column, end_column in merged_columns_by_row.get(row_number, []):
+            covered_columns.update(
+                range(max(start_column, region.start_column), min(end_column, region.end_column) + 1)
+            )
         if not expected_columns.issubset(covered_columns):
             break
         depth += 1
@@ -516,6 +516,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 band_columns: set[int] = set()
                 regions: list[TableRegion] = []
                 merged_ranges: list[tuple[int, int, int, int]] = []
+                merged_columns_by_row: dict[int, list[tuple[int, int]]] = {}
                 hidden_rows: set[int] = set()
                 hidden_columns: set[int] = set()
 
@@ -655,7 +656,11 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 or end_column > limits.max_columns
                             ):
                                 raise invalid("XLSX merged cell has an invalid range")
+                            if len(merged_ranges) >= limits.max_merged_ranges:
+                                raise limit("XLSX merged-cell count exceeds the limit")
                             merged_ranges.append((start_row, end_row, start_column, end_column))
+                            if start_row == end_row and end_column > start_column:
+                                merged_columns_by_row.setdefault(start_row, []).append((start_column, end_column))
                         if tag == "tablePart":
                             rel_id = next((value for key, value in element.attrib.items() if key.endswith("}id")), None)
                             if not rel_id:
@@ -683,7 +688,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 hinted_regions: list[TableRegion] = []
                 for region in regions:
                     header_depth = (
-                        _merged_header_depth(region, merged_ranges, populated_rows)
+                        _merged_header_depth(region, merged_columns_by_row, populated_rows)
                         if region.header_row_hint is None
                         else 0
                     )

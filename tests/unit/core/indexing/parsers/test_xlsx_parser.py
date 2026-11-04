@@ -1268,6 +1268,34 @@ def test_formula_analysis_bounds_dependency_metadata_for_broad_ranges():
     assert analysis["source_columns_truncated"] is True
 
 
+def test_formula_analysis_does_not_map_another_table_to_local_headers():
+    analysis = module._analyze_formula(
+        "=A2+A20",
+        target_row=12,
+        target_column=2,
+        sheet_name="Data",
+        visible_columns=[1, 2],
+        headers=["quantity", "total"],
+        table_start_row=10,
+        table_end_row=15,
+    )
+
+    assert analysis["semantic_expression"] == "total = A2+A20"
+    assert analysis["source_columns"] == []
+    assert analysis["unresolved_references"] == ["A2", "A20"]
+
+
+def test_formula_individual_metadata_is_bounded_with_a_truncation_marker():
+    rows = [["input", "result"]]
+    rows.extend([number, f"=A{number + 1}+{number}"] for number in range(1, 20))
+
+    [block] = list(XlsxParser().iter_batches(_document(rows)))
+
+    formula_cells = block.metadata["formula_cells"]
+    assert len(formula_cells) == 17
+    assert formula_cells[-1] == {"truncated": True, "omitted_count": 3}
+
+
 def test_formula_only_rows_remain_searchable_without_cached_results():
     doc = _document([["calculation"], ["=SUM(1,2,3)"]])
 
@@ -1874,6 +1902,32 @@ def test_sheet_headers_override_global_and_allow_automatic_selection():
     # Without a blank structural boundary, automatic detection keeps the
     # first nonempty row rather than risking loss of an ordinary data record.
     assert by_sheet["Notes"][0].metadata["table_header_row"] == 1
+
+
+def test_sheet_header_override_does_not_validate_the_global_row_for_that_sheet():
+    blocks = list(
+        XlsxParser(header_row=1, sheet_header_rows={"People": 2}).iter_batches(
+            Document(raw_bytes=_workbook_bytes())
+        )
+    )
+
+    people = next(block for block in blocks if block.metadata["sheet_name"] == "People")
+    assert people.metadata["table_header_row"] == 2
+    assert people.metadata["table_columns"] == ["name", "column_2", "active", "joined"]
+
+
+def test_merged_range_limit_rejects_workbooks_before_openpyxl_reads_them():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["one", "two", "three", "four"])
+    sheet.merge_cells("A1:B1")
+    sheet.merge_cells("C1:D1")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    with pytest.raises(PipelineError, match="merged-cell count exceeds"):
+        list(XlsxParser(limits=XlsxLimits(max_merged_ranges=1)).iter_batches(Document(raw_bytes=output.getvalue())))
 
 
 @pytest.mark.parametrize("overrides", [{"people": 2}, {"Hidden": 1}, {"People": 99}])

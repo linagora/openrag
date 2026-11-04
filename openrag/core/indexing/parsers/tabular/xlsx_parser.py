@@ -52,6 +52,8 @@ _A1_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 _MAX_FORMULA_SOURCE_COLUMNS = 64
+_MAX_INDIVIDUAL_FORMULA_CELLS = 16
+_MAX_INDIVIDUAL_FORMULA_SOURCE_COLUMNS = 8
 _MAX_NUMBER_FORMAT_GROUPS = 64
 _MAX_NUMBER_FORMAT_RANGES = 32
 _MAX_NUMBER_FORMAT_CODE_LENGTH = 128
@@ -264,6 +266,8 @@ def _analyze_formula(
     sheet_name: str,
     visible_columns: list[int],
     headers: list[str],
+    table_start_row: int = 1,
+    table_end_row: int = 1_048_576,
 ) -> dict[str, Any]:
     """Normalize inert A1 references and map same-table inputs to headers."""
     from openpyxl.formula import Tokenizer
@@ -325,8 +329,13 @@ def _analyze_formula(
             )
         pattern_parts.append(prefix + start_pattern + (f":{end_pattern}" if end_pattern else ""))
         same_sheet = referenced_sheet is None or referenced_sheet == sheet_name
+        start_reference_row = start_row
+        end_reference_row = int(match.group("end_row")) if match.group("end_row") else start_row
+        within_table_rows = table_start_row <= min(start_reference_row, end_reference_row) and max(
+            start_reference_row, end_reference_row
+        ) <= table_end_row
         referenced_headers = []
-        if same_sheet:
+        if same_sheet and within_table_rows:
             lower, upper = sorted((start_column, end_column))
             start_index = bisect_left(visible_columns, lower)
             end_index = bisect_right(visible_columns, upper)
@@ -614,6 +623,8 @@ def _compact_formula_batch(
     sheet_name: str,
     visible_columns: list[int],
     headers: list[str],
+    table_start_row: int,
+    table_end_row: int,
     group_repeated: bool = True,
 ) -> tuple[list[list[str]], list[dict[str, Any]], list[dict[str, Any]], str]:
     """Group repeated relative formulas and retain isolated expressions inline.
@@ -634,6 +645,8 @@ def _compact_formula_batch(
                 sheet_name=sheet_name,
                 visible_columns=visible_columns,
                 headers=headers,
+                table_start_row=table_start_row,
+                table_end_row=table_end_row,
             )
             records.append(
                 {
@@ -696,11 +709,21 @@ def _compact_formula_batch(
     accepted = candidates if group_repeated else []
     formula_groups = [group for group, _ in accepted]
     grouped_targets = {record["target"] for _, segment in accepted for record in segment}
-    individual_cells = [
-        {key: value for key, value in record.items() if key != "position"}
-        for record in records
-        if record["target"] not in grouped_targets
-    ]
+    individual_cells = []
+    for record in records:
+        if record["target"] in grouped_targets:
+            continue
+        cell = {key: value for key, value in record.items() if key != "position"}
+        sources = cell.get("source_columns", [])
+        if len(sources) > _MAX_INDIVIDUAL_FORMULA_SOURCE_COLUMNS:
+            cell["source_column_count"] = cell.get("source_column_count", len(sources))
+            cell["source_columns"] = sources[:_MAX_INDIVIDUAL_FORMULA_SOURCE_COLUMNS]
+            cell["source_columns_truncated"] = True
+        individual_cells.append(cell)
+    if len(individual_cells) > _MAX_INDIVIDUAL_FORMULA_CELLS:
+        omitted = len(individual_cells) - _MAX_INDIVIDUAL_FORMULA_CELLS
+        individual_cells = individual_cells[:_MAX_INDIVIDUAL_FORMULA_CELLS]
+        individual_cells.append({"truncated": True, "omitted_count": omitted})
     rendered_rows: list[list[str]] = []
     for row_number, row in zip(row_numbers, rows, strict=True):
         rendered = []
@@ -1015,7 +1038,11 @@ class XlsxParser(TabularBatchParser):
             # Validate overrides before opening a backend or emitting any batches.
             by_name = {info.name: info for info in infos}
             if self.header_row is not None:
-                visible = [info for info in infos if not info.hidden and info.columns]
+                visible = [
+                    info
+                    for info in infos
+                    if not info.hidden and info.columns and info.name not in self.sheet_header_rows
+                ]
                 for info in visible:
                     if self.header_row > info.rows:
                         raise PipelineError(
@@ -1247,6 +1274,8 @@ class XlsxParser(TabularBatchParser):
                             sheet_name=sheet.name,
                             visible_columns=visible_columns,
                             headers=header_values,
+                            table_start_row=table.start_row,
+                            table_end_row=table.end_row,
                             group_repeated=group_repeated,
                         )
                         number_format_groups, display_context, number_formats_truncated = _compact_number_formats(

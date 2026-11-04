@@ -6,9 +6,10 @@ import base64
 import email.message
 
 import pytest
+from core.indexing.parsers import eml_parser as module
 from core.indexing.parsers.eml_parser import _MAX_EML_ATTACHMENTS, EmlParser
 from core.indexing.parsers.html_parser import HtmlParser
-from core.models.document import Document, DocumentType
+from core.models.document import Document, DocumentType, TextBlock
 
 
 def _eml_with_attachments(n: int) -> bytes:
@@ -58,6 +59,34 @@ async def test_eml_under_cap_processes_all():
     doc = Document(filename="ok.eml", content_type=DocumentType.EML, raw_bytes=raw)
     processed = await EmlParser().parse(doc)
     assert processed.metadata["email_attachment_count"] == 3
+
+
+def test_eml_streams_tabular_attachment_without_calling_parse(monkeypatch):
+    class StreamingParser:
+        def __init__(self):
+            self.parse_called = False
+            self.closed = False
+
+        async def parse(self, _document):
+            self.parse_called = True
+            raise AssertionError("tabular attachments must not be materialized through parse()")
+
+        def iter_batches(self, _document):
+            try:
+                yield TextBlock(text="first")
+                yield TextBlock(text="second")
+                yield TextBlock(text="third")
+            finally:
+                self.closed = True
+
+    parser = StreamingParser()
+    monkeypatch.setattr(module, "_MAX_EML_ATTACHMENT_TEXT_BYTES", 10)
+
+    rendered = EmlParser._render_tabular_attachment(parser, Document(filename="table.xlsx"))
+
+    assert parser.parse_called is False
+    assert parser.closed is True
+    assert rendered == "first\n\nsecon\n\n[attachment content truncated at the safe text limit]"
 
 
 @pytest.mark.asyncio

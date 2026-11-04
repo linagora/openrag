@@ -369,10 +369,10 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
             raise PipelineError("XLSX sheet context does not match table content")
         table = table[: -len(complete_context)]
     table = clean_markdown_table_spacing(table)
-    context_tokens = length_function(complete_context) if complete_context else 0
-    if context_tokens >= chunk_size:
+    base_context_tokens = length_function(base_context) if base_context else 0
+    if base_context_tokens >= chunk_size:
         raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
-    reserved_tokens = length_function("\n") + context_tokens
+    separator_tokens = length_function("\n")
     original_columns = list(element.metadata["table_columns"])
     rendered_columns = _table_cells(table.split("\n", 1)[0])
     if len(rendered_columns) != len(original_columns):
@@ -391,9 +391,63 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
     chunks = _chunk_csv_table(
         table,
         table_element=safe_element,
-        chunk_size=chunk_size - reserved_tokens,
+        chunk_size=chunk_size - separator_tokens - base_context_tokens,
         length_function=length_function,
     )
+
+    def supplemental_context(candidate):
+        candidate_positions = [column_positions[name] for name in candidate.metadata["table_columns"]]
+        worksheet_columns = element.metadata.get("table_worksheet_column_indices")
+        selected_columns = (
+            [worksheet_columns[index] for index in candidate_positions]
+            if isinstance(worksheet_columns, list) and len(worksheet_columns) == len(original_columns)
+            else [element.metadata.get("table_start_column", 1) + index for index in candidate_positions]
+        )
+
+        def excel_column(index):
+            name = ""
+            while index:
+                index, remainder = divmod(index - 1, 26)
+                name = chr(65 + remainder) + name
+            return name
+
+        selected = {excel_column(index) for index in selected_columns}
+        formula = _xlsx_formula_context(
+            [
+                group
+                for group in element.metadata.get("formula_groups", [])
+                if group.get("target_column") in selected
+            ]
+        )
+        number_format = (
+            _xlsx_number_format_context(
+                [
+                    group
+                    for group in element.metadata.get("number_format_groups", [])
+                    if group.get("target_column") in selected
+                ]
+            )
+            if include_number_format_context
+            else ""
+        )
+        return number_format + formula
+
+    # The shared splitter may split a wide table by columns. Reserve only the
+    # formula/display context that can accompany one resulting column group,
+    # rather than rejecting the table because all groups combined are large.
+    supplemental_tokens = max(
+        (length_function(supplemental_context(candidate)) for candidate in chunks),
+        default=0,
+    )
+    if separator_tokens + base_context_tokens + supplemental_tokens >= chunk_size:
+        raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
+    if supplemental_tokens:
+        chunks = _chunk_csv_table(
+            table,
+            table_element=safe_element,
+            chunk_size=chunk_size - separator_tokens - base_context_tokens - supplemental_tokens,
+            length_function=length_function,
+        )
     for chunk in chunks:
         metadata = chunk.metadata
         positions = [column_positions[name] for name in metadata["table_columns"]]
@@ -429,7 +483,9 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
             if group.get("target_column") in selected_excel_columns
         ]
         selected_cells = [
-            cell for cell in metadata.get("formula_cells", []) if cell.get("target_column") in selected_excel_columns
+            cell
+            for cell in metadata.get("formula_cells", [])
+            if cell.get("truncated") or cell.get("target_column") in selected_excel_columns
         ]
         selected_number_formats = [
             group
@@ -557,7 +613,9 @@ def _tabular_row_metadata(
     formula_cells = metadata.get("formula_cells")
     if isinstance(formula_cells, list):
         selected_cells = [
-            cell for cell in formula_cells if isinstance(cell, dict) and cell.get("row") in set(row_numbers)
+            cell
+            for cell in formula_cells
+            if isinstance(cell, dict) and (cell.get("truncated") or cell.get("row") in set(row_numbers))
         ]
         if selected_cells:
             updated["formula_cells"] = selected_cells
