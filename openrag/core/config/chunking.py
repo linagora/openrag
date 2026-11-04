@@ -47,7 +47,6 @@ class ChunkerConfig(ConfigMixin):
     # ``create_chunker`` derive it from the embedder actually used by the
     # partition (half its window). Set it explicitly only to override that.
     hard_max_tokens: int | None = Field(default=None, gt=0)
-    prepend_heading_path: bool = True
     # Layout of the source document, deciding whether a *page* is a meaningful
     # chunk boundary. "auto" detects it from the parsed pages (see
     # StructuredSectionChunker._looks_paginated); "paginated" and "flowing"

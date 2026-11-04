@@ -41,6 +41,10 @@ REQUIRED_SECRETS = [
     "env.secrets.AUTH_TOKEN=or-unit-test-token-0123",
     "--set",
     "postgresql.auth.password=unit-test-password-0123",
+    "--set",
+    "minioCredentials.accessKey=unit-test-minio",
+    "--set",
+    "minioCredentials.secretKey=unit-test-minio-secret-0123",
 ]
 METRICS_TOKEN = ["--set", "env.secrets.METRICS_TOKEN=unit-test-metrics-token"]
 RAY_SERVE = ["--set", "ray.enabled=true", "--set-string", "env.config.ENABLE_RAY_SERVE=true"]

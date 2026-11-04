@@ -47,10 +47,15 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
     LOGNAME=openrag
 
 # Install uv & setup venv
+# uv comes from its pinned image, so neither the base image's pip nor the one
+# bundled with uv's Python is needed; both are removed and the only pip left is
+# the venv's, from uv.lock.
+COPY --from=ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
-RUN pip3 install uv && \
+RUN pip3 uninstall -y pip && \
     uv python install 3.12.7 && \
-    uv python pin 3.12.7
+    uv python pin 3.12.7 && \
+    uv pip uninstall --python 3.12.7 --system --break-system-packages pip
     # && \ uv sync --no-dev
 COPY infra/scripts/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

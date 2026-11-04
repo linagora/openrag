@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 class DocumentType(str, Enum):
     PDF = "pdf"
     TEXT = "text"
+    CSV = "csv"
     HTML = "html"
     MARKDOWN = "markdown"
     IMAGE = "image"
@@ -36,6 +37,7 @@ class DocumentType(str, Enum):
 _EXTENSION_TYPES: dict[str, DocumentType] = {
     "pdf": DocumentType.PDF,
     "txt": DocumentType.TEXT,
+    "csv": DocumentType.CSV,
     "md": DocumentType.MARKDOWN,
     "html": DocumentType.HTML,
     "htm": DocumentType.HTML,
@@ -91,10 +93,9 @@ class ImageBlock(BaseModel):
     - Locally-extracted images set ``image_bytes`` (raw PNG / JPEG bytes)
       and leave ``source_url`` as ``None``.
     - Remote images parsed from a markdown ``![](http://…)`` ref leave
-      ``image_bytes`` empty and set ``source_url`` to the URL. A
-      downstream fetch stage may populate ``image_bytes`` later — but see
-      the lifetime note below: such a stage has to run *before* the caption
-      decision.
+      ``image_bytes`` empty and set ``source_url`` to the URL. Nothing
+      fetches it: the caption stage skips an image without bytes, so it
+      stays uncaptioned and its ref stays in the text.
     - The :attr:`image_url` property is the unified VLM-friendly form:
       a ``data:`` URI built from the bytes when present, otherwise the
       ``source_url`` as-is.

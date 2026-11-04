@@ -22,6 +22,10 @@ _REQUIRED = (
     "env.secrets.AUTH_TOKEN=or-render-check-0123456789",
     "--set",
     "env.secrets.POSTGRES_PASSWORD=render-check-pg-0123",
+    # Skips the MinIO Secret and its checks: these tests count the Secrets the
+    # Job's copies sit beside.
+    "--set",
+    "minioCredentials.create=false",
 )
 _JOB_ON = (
     "--set",
@@ -296,6 +300,48 @@ def test_a_vault_copy_does_not_restart_the_app(tmp_path: Path) -> None:
     assert copy["spec"]["destination"]["name"] == "openrag-migration-env-secrets"
     assert "rolloutRestartTargets" not in copy["spec"]
     assert "rolloutRestartTargets" in documents[("VaultStaticSecret", "openrag-env-secrets")]["spec"]
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(
+            (
+                "--set",
+                "minioCredentials.accessKey=render-check",
+                "--set",
+                "minioCredentials.secretKey=render-check-minio-0123",
+            ),
+            id="bundled-minio",
+        ),
+        pytest.param(
+            (
+                "--set",
+                "milvus.minio.enabled=false",
+                "--set",
+                "milvus.externalS3.enabled=true",
+                "--set",
+                "milvus.externalS3.accessKey=render-check",
+            ),
+            id="external-s3",
+        ),
+    ],
+)
+def test_the_minio_secret_is_not_copied_for_the_job(tmp_path: Path, args: tuple[str, ...]) -> None:
+    """The env Secret's template also renders the MinIO Secret, which the Job
+    doesn't read. Copied for the Job, it came out twice as a release resource,
+    and Helm failed the install on the second one."""
+    result = _render(tmp_path, *_JOB_ON, "--set", "minioCredentials.create=true", *args)
+
+    assert result.returncode == 0, result.stderr
+    minio_secrets = [
+        document
+        for document in yaml.safe_load_all(result.stdout)
+        if document and document["kind"] == "Secret" and document["metadata"]["name"] == "openrag-minio-credentials"
+    ]
+    assert len(minio_secrets) == 1
+    assert "helm.sh/hook" not in (minio_secrets[0]["metadata"].get("annotations") or {})
 
 
 @requires_helm
