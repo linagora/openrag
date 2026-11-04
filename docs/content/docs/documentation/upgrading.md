@@ -88,6 +88,13 @@ Milvus 3.0.5 removes server-side row-level security (RLS); if you rely on RLS,
 hold the upgrade until an equivalent authorization control is in place and
 validated. Follow the [Milvus 3.0.2 to 3.0.5 upgrade procedure](/openrag/documentation/milvus_migration/#upgrade-from-milvus-302-to-305).
 
+## OpenRAG 2.3.5: how new chunks name their file
+
+Two changes to chunks indexed after the upgrade. Chunks already indexed don't change.
+
+- Contextualized chunks no longer have a `* filename:` line. The chunker's `[Source: ...]` header now names the file once, using the sanitized filename.
+- `structured_section` no longer has a `prepend_heading_path` option. A preset that still sets it to `false` keeps loading and ignores it, so its new chunks get a header, which leaves less room for each chunk's body and can move chunk boundaries.
+
 ## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
 
 From OpenRAG 2.3.4, `recursive_splitter` puts the filename at the start of every

@@ -512,7 +512,7 @@ On a CPU host, use `docker compose --profile cpu run --no-deps --rm --entrypoint
 
 Good to know:
 
-- Chunks that already have their filename are skipped, so you can safely run it again. So are `structured_section` chunks with `prepend_heading_path` turned off.
+- Chunks that already have their filename are skipped, so you can safely run it again. So are `structured_section` chunks indexed with `prepend_heading_path` turned off, an option removed in 2.3.5.
 - The script changes each chunk's text and its `header` and `token_count` fields. Vectors aren't recomputed, because a question naming a file is a keyword search, so this only helps with hybrid search on (`VDB_HYBRID_SEARCH`, the default).
 - Chunks aren't re-split, so each one grows by its filename and can go over `CHUNK_SIZE`. A later embedder swap warns about any chunk that no longer fits the new embedder's limit, and embeds it without its tail.
 - OpenRAG can keep running, but don't run the script during an embedder swap.

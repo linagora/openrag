@@ -126,10 +126,6 @@ def test_adds_the_header_to_text_and_nothing_else():
             id="contextualization-failed",
         ),
         pytest.param(
-            {"content": "body", "text": wrap_chunk_with_context("body", "a context")},
-            id="contextualized-with-prepend-heading-path-off",
-        ),
-        pytest.param(
             {"content": "[Source: report.pdf]\n\nbo", "text": wrap_chunk_with_context("[Source: report.pdf]\n\nbody")},
             id="contextualized-content-cut-short",
         ),

@@ -69,7 +69,7 @@ def _is_body(content: Any, body: str) -> bool:
 
 def _is_enveloped(content: Any, text: str) -> bool:
     """Whether *text* is contextualization wrapped around *content*, the chunker's text.
-    That text is whatever the chunker chose, header or not, so there is nothing to add."""
+    That text already has the chunker's header, so there is nothing to add."""
     return isinstance(content, str) and f"[CHUNK_START]\n\n{content}" in text
 
 
@@ -80,7 +80,7 @@ def _needs_filename(row: dict[str, Any], header_for: Callable[[dict[str, Any]], 
         return False
     # Upload metadata can use the names ``header`` and ``content`` too, so they only
     # count when they match the text. ``content`` matching all of it is structured_section
-    # with ``prepend_heading_path`` off, which was asked not to carry a preamble.
+    # with the former ``prepend_heading_path`` off, which was asked not to carry a preamble.
     if (header and text.startswith(f"{header}\n\n")) or _is_body(row.get("content"), text):
         return False
     own_header = header_for(row)
