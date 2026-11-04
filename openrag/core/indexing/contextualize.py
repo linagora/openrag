@@ -144,11 +144,7 @@ class ChunkContextualizer:
             return [
                 chunk.model_copy(
                     update={
-                        "text": wrap_chunk_with_context(
-                            content=chunk.text,
-                            filename=filename,
-                            chunk_context=context,
-                        ),
+                        "text": wrap_chunk_with_context(content=chunk.text, chunk_context=context),
                         "context": context,
                         "content": chunk.text,
                     }
