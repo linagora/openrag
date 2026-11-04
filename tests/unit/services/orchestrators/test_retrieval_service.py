@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
@@ -22,6 +23,7 @@ from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.consts import MAX_RERANK_CANDIDATES
 from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
 from services.orchestrators.retrieval_service import RetrievalService
+from services.storage.vector_store_searcher import VectorStoreSearcher
 
 
 def _chunk(cid: str, text: str = "t") -> Chunk:
@@ -1135,6 +1137,76 @@ async def test_retrieve_splits_one_embedder_by_retrieval_preset():
     assert [(names, top_n) for names, _, top_n in groups] == [(["p1", "p3"], 5), (["p2"], 3)]
     await svc.retrieve(partitions=["p1", "p2", "p3"], query=Query(query="hello"))
     assert [c["partition"] for c in searchers["embed-a"].search_calls] == [["p1", "p3"], ["p2"]]
+
+
+def _embedding_svc(partitions: list[PartitionConfig], fields: dict[str, str]):
+    """A service whose searchers are real ``VectorStoreSearcher``s over an empty store.
+
+    Returns the service, the store and one embedder per embedder name.
+    """
+    store = MagicMock()
+    store.search = AsyncMock(return_value=[])
+    embedders: dict[str, MagicMock] = {}
+
+    def embedder_for(name: str) -> MagicMock:
+        if name not in embedders:
+            embedder = MagicMock()
+            embedder.embed_query = AsyncMock(side_effect=lambda texts: [[0.1] * 8 for _ in texts])
+            embedders[name] = embedder
+        return embedders[name]
+
+    cfg = _config()
+    cfg.partitions = {p.name: p for p in partitions}
+    cfg.models = SimpleNamespace(
+        reranker={}, embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()}
+    )
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: VectorStoreSearcher(
+            vector_store=store,
+            embedder=embedder_for(name),
+            document_repo=MagicMock(),
+            collection="col",
+            vector_field=fields[name],
+        ),
+    )
+    return svc, store, embedders
+
+
+_DATED_QUERY = Query(query="hello", temporal_filters=[{"operator": ">=", "value": "2026-01-01T00:00:00+00:00"}])
+
+
+@pytest.mark.asyncio
+async def test_retrieve_embeds_the_query_once_per_vector_space():
+    # p1 and p2 share an embedder but not a preset, so they search apart, and
+    # each retries without the date filter that emptied its results: four
+    # searches, one embedding.
+    svc, store, embedders = _embedding_svc(
+        [_partition(name="p1"), _partition(name="p2", retrieval=RetrievalPipelineConfig(top_n=3))],
+        {"embed-a": "vector_embed_a"},
+    )
+
+    await svc.retrieve(partitions=["p1", "p2"], query=_DATED_QUERY)
+
+    assert store.search.await_count == 4
+    embedders["embed-a"].embed_query.assert_awaited_once_with(["hello"])
+
+
+@pytest.mark.asyncio
+async def test_retrieve_per_query_shares_embeddings_across_its_queries():
+    svc, store, embedders = _embedding_svc(
+        [_partition(name="p1"), _partition(name="p2", embedder="embed-b")],
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+    )
+
+    await svc.retrieve_per_query(partitions=["p1", "p2"], queries=[_DATED_QUERY, _DATED_QUERY])
+
+    assert store.search.await_count == 8
+    embedders["embed-a"].embed_query.assert_awaited_once_with(["hello"])
+    embedders["embed-b"].embed_query.assert_awaited_once_with(["hello"])
 
 
 @pytest.mark.asyncio
