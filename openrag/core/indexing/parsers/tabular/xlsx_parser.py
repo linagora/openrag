@@ -723,8 +723,16 @@ def _compact_formula_batch(
         individual_cells.append(cell)
     if len(individual_cells) > _MAX_INDIVIDUAL_FORMULA_CELLS:
         omitted = len(individual_cells) - _MAX_INDIVIDUAL_FORMULA_CELLS
+        omitted_cells = individual_cells[_MAX_INDIVIDUAL_FORMULA_CELLS:]
         individual_cells = individual_cells[:_MAX_INDIVIDUAL_FORMULA_CELLS]
-        individual_cells.append({"truncated": True, "omitted_count": omitted})
+        individual_cells.append(
+            {
+                "truncated": True,
+                "omitted_count": omitted,
+                "omitted_row_ranges": _row_ranges([cell["row"] for cell in omitted_cells]),
+                "omitted_target_columns": sorted({cell["target_column"] for cell in omitted_cells}),
+            }
+        )
     rendered_rows: list[list[str]] = []
     for row_number, row in zip(row_numbers, rows, strict=True):
         rendered = []
@@ -997,8 +1005,6 @@ class XlsxParser(TabularBatchParser):
         self.sheet_header_rows = dict(sheet_header_rows or {})
         if sheet_headerless_schemas is not None and not isinstance(sheet_headerless_schemas, dict):
             raise ConfigError("XLSX sheet_headerless_schemas must map worksheet names to column-name lists")
-        if header_row is not None and sheet_headerless_schemas:
-            raise ConfigError("XLSX header_row cannot be combined with headerless schemas")
         for name, columns in (sheet_headerless_schemas or {}).items():
             if not isinstance(name, str) or not name.strip():
                 raise ConfigError("XLSX headerless schemas require nonempty worksheet names")
@@ -1010,6 +1016,8 @@ class XlsxParser(TabularBatchParser):
             ):
                 raise ConfigError("XLSX headerless schemas require a nonempty list of nonempty column names")
             base_name = name.rsplit("#", 1)[0]
+            if header_row is not None and base_name not in self.sheet_header_rows:
+                raise ConfigError("XLSX header_row cannot be combined with headerless schemas")
             if self.sheet_header_rows.get(base_name) is not None:
                 raise ConfigError("XLSX sheet header rows cannot be combined with a headerless schema")
         self.sheet_headerless_schemas = {
@@ -1275,7 +1283,7 @@ class XlsxParser(TabularBatchParser):
                             sheet_name=sheet.name,
                             visible_columns=visible_columns,
                             headers=header_values,
-                            table_start_row=table.start_row,
+                            table_start_row=header_row if header_row is not None else table.start_row,
                             table_end_row=table.end_row,
                             group_repeated=group_repeated,
                         )

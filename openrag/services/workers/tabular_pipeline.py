@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -32,24 +31,25 @@ class _AsyncBatchReader:
     def __init__(self, batches):
         self.batches = batches
         self.pending: asyncio.Task | None = None
-        self.read_finished: threading.Event | None = None
+        self.read_finished: asyncio.Event | None = None
         self.closed = False
 
-    def _read_one(self):
-        assert self.read_finished is not None
+    def _read_one(self, loop: asyncio.AbstractEventLoop, read_finished: asyncio.Event):
         try:
             return next(self.batches, None)
         finally:
-            self.read_finished.set()
+            loop.call_soon_threadsafe(read_finished.set)
 
     async def next(self):
         # next(..., None) avoids propagating StopIteration through a Future.
-        self.read_finished = threading.Event()
-        self.pending = asyncio.create_task(asyncio.to_thread(self._read_one))
+        read_finished = asyncio.Event()
+        self.read_finished = read_finished
+        pending = asyncio.create_task(asyncio.to_thread(self._read_one, asyncio.get_running_loop(), read_finished))
+        self.pending = pending
         try:
-            return await asyncio.shield(self.pending)
+            return await asyncio.shield(pending)
         finally:
-            if self.pending.done() and self.read_finished.is_set():
+            if pending.done() and read_finished.is_set() and self.pending is pending:
                 self.pending = None
 
     def _close(self):
@@ -71,9 +71,9 @@ class _AsyncBatchReader:
 
         async def close_after_read():
             # The asyncio Task may be cancelled while its worker thread is
-            # still executing.  Wait on the thread-owned signal rather than
-            # the Task so generator.close() never races next().
-            await asyncio.to_thread(read_finished.wait)
+            # still executing.  The worker signals the loop-owned event when
+            # it returns, so this does not occupy an executor thread.
+            await read_finished.wait()
             self._close()
 
         asyncio.create_task(close_after_read())

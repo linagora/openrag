@@ -156,6 +156,7 @@ def _merged_header_depth(
     region: TableRegion,
     merged_columns_by_row: dict[int, list[tuple[int, int]]],
     populated_rows: set[int],
+    hidden_rows: set[int],
 ) -> int:
     """Return merged header rows only when their leaf row contains cells.
 
@@ -175,7 +176,8 @@ def _merged_header_depth(
         if not expected_columns.issubset(covered_columns):
             break
         depth += 1
-    return depth if region.start_row + depth in populated_rows else 0
+    leaf_row = region.start_row + depth
+    return depth if leaf_row in populated_rows and leaf_row not in hidden_rows else 0
 
 
 def invalid(message: str):
@@ -478,6 +480,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 raise invalid("XLSX worksheet has an invalid visibility state")
             cells_seen = 0
             tables_seen = 0
+            merged_ranges_seen = 0
             worksheet_paths = set()
             for index, sheet in enumerate(sheets):
                 rel_id = next((v for k, v in sheet.attrib.items() if k.endswith("}id")), None)
@@ -656,8 +659,9 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 or end_column > limits.max_columns
                             ):
                                 raise invalid("XLSX merged cell has an invalid range")
-                            if len(merged_ranges) >= limits.max_merged_ranges:
+                            if merged_ranges_seen >= limits.max_merged_ranges:
                                 raise limit("XLSX merged-cell count exceeds the limit")
+                            merged_ranges_seen += 1
                             merged_ranges.append((start_row, end_row, start_column, end_column))
                             if start_row == end_row and end_column > start_column:
                                 merged_columns_by_row.setdefault(start_row, []).append((start_column, end_column))
@@ -688,7 +692,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 hinted_regions: list[TableRegion] = []
                 for region in regions:
                     header_depth = (
-                        _merged_header_depth(region, merged_columns_by_row, populated_rows)
+                        _merged_header_depth(region, merged_columns_by_row, populated_rows, hidden_rows)
                         if region.header_row_hint is None
                         else 0
                     )
