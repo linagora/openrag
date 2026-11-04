@@ -99,7 +99,9 @@ def get_task_state_manager():
         try:
             current = ray.get_actor("TaskStateManager", namespace="openrag")
         except ValueError:
-            return create_or_get()
+            # A process still on an older release may have recreated the actor
+            # first, and get_if_exists would attach to it: check the result too.
+            return get_task_state_manager()
         if _supports_task_state_recovery(current):
             return current
         sleep(0.05)
