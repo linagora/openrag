@@ -19,6 +19,8 @@ import logging
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 
+from core.utils.progress import gather_with_progress
+
 from ..llm import LLM
 from ..models.chunk import Chunk
 from ..prompts.contextualization_builder import build_messages, wrap_chunk_with_context
@@ -132,9 +134,12 @@ class ChunkContextualizer:
                     )
                     for i in range(start, end)
                 ]
-                # Not tqdm.gather: it abandons its wrapper tasks after the first
-                # failure, so a second one logs "Task exception was never retrieved" (#1299).
-                contexts.extend(await asyncio.gather(*batch))
+                contexts.extend(
+                    await gather_with_progress(
+                        *batch,
+                        desc=f"Contextualizing chunks of *{filename}* [{start + 1}-{end}/{len(chunks)}]",
+                    )
+                )
 
             return [
                 chunk.model_copy(
