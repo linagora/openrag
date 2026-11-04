@@ -11,6 +11,7 @@ The old module ``components/indexer/loaders/pdf_loaders/docling2.py`` re-exports
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import ray
 import torch
@@ -172,8 +173,16 @@ class DoclingLoader(BasePooledParser):
         async with document.as_temporary_file() as path:
             result: ConversionResult = await self._dispatch(str(path))
 
-        text_blocks = self._build_text_blocks(result)
-        image_blocks = self._build_image_blocks(result)
+        # Exporting each page re-walks the whole document and every picture is
+        # PNG-encoded: it can take minutes of CPU on a large PDF. On the loop that
+        # starves the lease renewals of every other file on this worker.
+        # A timeout or cancel cannot interrupt the thread; the event tells it to stop.
+        cancelled = threading.Event()
+        try:
+            text_blocks, image_blocks = await asyncio.to_thread(self._postprocess, result, cancelled)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
 
         return ProcessedDocument(
             document_id=document.id,
@@ -182,6 +191,16 @@ class DoclingLoader(BasePooledParser):
             metadata=dict(document.metadata),
             page_count=len(result.pages),
         )
+
+    def _postprocess(
+        self, result: ConversionResult, cancelled: threading.Event
+    ) -> tuple[list[TextBlock], list[ImageBlock]]:
+        """Build the text and image blocks off the loop.
+
+        ``cancelled`` is checked before each page and each picture: once set,
+        the caller has gone and the result is discarded, so the work stops early.
+        """
+        return self._build_text_blocks(result, cancelled), self._build_image_blocks(result, cancelled)
 
     async def _dispatch(self, file_path: str) -> ConversionResult:
         pool = self._pool()
@@ -192,18 +211,22 @@ class DoclingLoader(BasePooledParser):
         )
 
     @staticmethod
-    def _build_text_blocks(result: ConversionResult) -> list[TextBlock]:
+    def _build_text_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[TextBlock]:
         blocks: list[TextBlock] = []
         n_pages = len(result.pages)
         for i in range(1, n_pages + 1):
+            if cancelled is not None and cancelled.is_set():
+                break
             text = result.document.export_to_markdown(page_no=i).strip()
             blocks.append(TextBlock(text=text, page_number=i))
         return blocks
 
     @staticmethod
-    def _build_image_blocks(result: ConversionResult) -> list[ImageBlock]:
+    def _build_image_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[ImageBlock]:
         blocks: list[ImageBlock] = []
         for idx, picture in enumerate(result.document.pictures):
+            if cancelled is not None and cancelled.is_set():
+                break
             try:
                 pil_image = picture.image.pil_image
                 if pil_image is None:

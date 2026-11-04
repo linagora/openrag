@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from core.chunking import chunking_registry
 from core.indexing.contextualize import ChunkContextualizer
 from core.models.chunk import Chunk
+from core.models.document import ProcessedDocument, TextBlock
 
 
 class DictLLM:
@@ -94,3 +96,41 @@ async def test_contextualizer_reports_empty_provider_response_as_degraded():
     assert result[0].content == "chunk body"
     assert len(failures) == 1
     assert isinstance(failures[0], ValueError)
+
+
+_DOCUMENT = ProcessedDocument(
+    document_id="d1",
+    text_blocks=[TextBlock(text="# Synthèse\n\nLes dossiers sont instruits en priorité.", page_number=1)],
+    metadata={"filename": "xk29f.pdf"},
+)
+
+
+def _words(text: str) -> int:
+    return len(text.split())
+
+
+def _chunks_of(name: str) -> list[Chunk]:
+    chunker = chunking_registry.create(name, chunk_size=60, chunk_overlap_rate=0.0, length_function=_words)
+    return chunker.chunk(_DOCUMENT, partition="p")
+
+
+class _FailingLLM:
+    async def chat(self, messages, **kwargs):
+        raise RuntimeError("context provider unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("llm", [DictLLM(), _FailingLLM()], ids=["contextualized", "llm-failed"])
+@pytest.mark.parametrize("name", chunking_registry.list_registered())
+async def test_every_chunker_names_its_file_once_through_its_header(name, llm):
+    """The chunker's header names the file, so the envelope must not repeat it."""
+    contextualizer = ChunkContextualizer(llm, "System prompt")
+
+    result = await contextualizer.contextualize(_chunks_of(name), filename="xk29f.pdf")
+
+    assert result
+    for chunk in result:
+        assert chunk.text.count("xk29f") == 1
+        assert f"[CHUNK_START]\n\n{chunk.header}\n\n" in chunk.text
+        assert chunk.header.startswith("[Source: xk29f.pdf")
+        assert chunk.content.startswith(chunk.header)

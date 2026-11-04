@@ -1207,3 +1207,94 @@ async def test_other_failures_cross_both_hops_unchanged(monkeypatch):
         await loader._convert_pdf("/tmp/doc.pdf")
 
     assert raised.value is produced
+
+
+# ---------------------------------------------------------------------------
+# MarkerLoader.parse keeps the event loop free while building image blocks
+# ---------------------------------------------------------------------------
+
+
+async def test_parse_builds_image_blocks_off_the_event_loop(monkeypatch):
+    """PNG-encoding a figure-heavy PDF must not starve other coroutines
+    (worker lease renewals) running on the same loop."""
+    from core.models.document import Document, DocumentType
+
+    loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
+
+    ticks = 0
+    # Ticks seen when the build starts and ends: only that span counts, not the
+    # temporary-file write around the dispatch.
+    window: list[int] = []
+
+    async def _fake_dispatch(path):
+        return "<page1>{1}[PAGE_SEP]text", {"_page_1_Picture_0.png": object()}
+
+    def _slow_build(images, cancelled):
+        window.append(ticks)
+        time.sleep(0.5)
+        window.append(ticks)
+        return []
+
+    monkeypatch.setattr(loader, "_dispatch", _fake_dispatch)
+    monkeypatch.setattr(loader, "_build_image_blocks", _slow_build)
+
+    document = Document(id="d", filename="f.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF")
+
+    async def _ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    task = asyncio.create_task(_ticker())
+    try:
+        await loader.parse(document)
+    finally:
+        task.cancel()
+
+    during_build = window[1] - window[0]
+    assert during_build >= 20, f"event loop was blocked while building image blocks (ticks={during_build})"
+
+
+async def test_cancelling_parse_stops_the_image_build(monkeypatch):
+    """A cancelled parse must not leave the worker thread encoding every
+    remaining figure."""
+    from core.models.document import Document, DocumentType
+
+    loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
+    images = {f"_page_1_Picture_{i}.png": object() for i in range(50)}
+
+    async def _fake_dispatch(path):
+        return "<page1>{1}[PAGE_SEP]text", images
+
+    encoded = 0
+    started = threading.Event()
+
+    def _slow_encode(pil_image):
+        nonlocal encoded
+        encoded += 1
+        started.set()
+        time.sleep(0.02)
+        return b"png"
+
+    monkeypatch.setattr(loader, "_dispatch", _fake_dispatch)
+    monkeypatch.setattr(marker_workers, "pil_to_png_bytes", _slow_encode)
+
+    document = Document(id="d", filename="f.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF")
+
+    task = asyncio.create_task(loader.parse(document))
+    deadline = time.monotonic() + 5
+    while not started.is_set():
+        if task.done():
+            await task  # surfaces the parse error, if any
+            pytest.fail("parse returned before encoding any image")
+        assert time.monotonic() < deadline, "image encoding never started"
+        await asyncio.sleep(0.005)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(0.1)  # let the thread reach its next check
+    settled = encoded
+    await asyncio.sleep(0.3)
+    assert encoded == settled < len(images)

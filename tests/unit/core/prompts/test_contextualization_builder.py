@@ -53,30 +53,30 @@ def test_build_messages_returns_system_then_user():
 
 
 def test_wrap_chunk_with_context_uses_full_format_when_context_given():
-    out = wrap_chunk_with_context(content="body", filename="f.pdf", chunk_context="ctx")
+    out = wrap_chunk_with_context(content="body", chunk_context="ctx")
     assert "[CONTEXT]" in out
     assert "ctx" in out
     assert "[CHUNK_START]" in out
     assert "body" in out
     assert "[CHUNK_END]" in out
     # Sanity: result uses the documented CHUNK_FORMAT template.
-    assert out == CHUNK_FORMAT.format(content="body", chunk_context="ctx", filename="f.pdf")
+    assert out == CHUNK_FORMAT.format(content="body", chunk_context="ctx")
 
 
 def test_wrap_chunk_with_context_uses_base_format_when_context_empty():
-    out = wrap_chunk_with_context(content="body", filename="f.pdf", chunk_context="")
+    out = wrap_chunk_with_context(content="body", chunk_context="")
     assert "[CONTEXT]" not in out
     assert "[CHUNK_START]" in out
     assert "body" in out
-    assert out == BASE_CHUNK_FORMAT.format(content="body", filename="f.pdf")
+    assert out == BASE_CHUNK_FORMAT.format(content="body")
 
 
 def test_wrap_chunk_with_context_defaults_chunk_context_to_empty():
-    out = wrap_chunk_with_context(content="body", filename="f.pdf")
+    out = wrap_chunk_with_context(content="body")
     assert "[CONTEXT]" not in out
 
 
 def test_wrap_chunk_with_context_treats_whitespace_only_as_empty():
-    out = wrap_chunk_with_context(content="body", filename="f.pdf", chunk_context="   \n\t")
+    out = wrap_chunk_with_context(content="body", chunk_context="   \n\t")
     assert "[CONTEXT]" not in out
-    assert out == BASE_CHUNK_FORMAT.format(content="body", filename="f.pdf")
+    assert out == BASE_CHUNK_FORMAT.format(content="body")

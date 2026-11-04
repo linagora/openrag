@@ -30,6 +30,7 @@ To upgrade a running release to 2.3.0, follow [Upgrading OpenRAG — 2.2.x to 2.
    - Edit the `env.config` and `env.secrets` sections in your `values.yaml`.
    - Secrets (API keys, tokens, Hugging Face credentials, etc.) will be mounted into the cluster as Kubernetes secrets.
    - For managed PostgreSQL, point the `POSTGRES_*` values at the external database and disable database auto-creation.
+   - Set `minioCredentials.accessKey` and `minioCredentials.secretKey` for the bundled object store. They are required: the install fails without them, with a published value such as `minioadmin`, with an access key shorter than 3 characters, or with a secret key shorter than 12. The chart stores them in the Secret `openrag-minio-credentials`, which MinIO and Milvus read. To manage that Secret yourself, for example with External Secrets or Vault, create it with the keys `accesskey` and `secretkey` and set `minioCredentials.create: false`. `env.existingSecret` and the secrets providers don't cover it. With an external S3 store (`milvus.externalS3`), leave them unset: the chart writes the external store's keys to that Secret instead. Existing releases: read [Object storage upgrade](/openrag/documentation/minio_silo_upgrade/) first.
 
 3. **Install or upgrade the release from GHCR**:
 
@@ -202,7 +203,10 @@ PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
 It stops the old generation from accepting work, waits for the files it accepted
 to settle, then removes its actors. If the timeout expires, it leaves them running
 and accepting work again: do not start the new release then. Find out what is
-still indexing, and run the command again. See
+still indexing, and run the command again. After jobs settle, a separate
+stage-history writer timeout is best-effort; the idle generation is still
+removed if a writer does not respond, and its remaining history may be
+incomplete. See
 [Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
 
 ### Upgrades that keep the generation
