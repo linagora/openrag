@@ -37,7 +37,12 @@ from core.config import load_config
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens
 from pymilvus import MilvusClient, MilvusException
-from services.storage.milvus_store import MAX_SECTION_ID, SECTION_ID_KEYS, _changed_by_float64
+from services.storage.milvus_store import (
+    MAX_SECTION_ID,
+    SECTION_ID_KEYS,
+    _changed_by_float64,
+    _milvus_preserves_dynamic_int64,
+)
 
 logger = get_logger()
 
@@ -262,7 +267,8 @@ def run(
         if number % _PROGRESS_EVERY_PAGES == 0:
             logger.info(f"  {stats['scanned']} chunk(s) scanned, {stats['changed']} changed")
 
-    if rounded:
+    # Asked only here because most runs have nothing to report.
+    if rounded and not _milvus_preserves_dynamic_int64(client.get_server_version()):
         logger.bind(rounded={file_id: sorted(keys) for file_id, keys in rounded.items()}).warning(
             "Rewriting these files' chunks rounds integers beyond ±2**53 in their metadata. "
             "PostgreSQL keeps the exact values."

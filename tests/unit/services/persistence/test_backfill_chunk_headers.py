@@ -43,6 +43,7 @@ class _FakeClient:
         self.upsert_calls = 0
         self.flushed = 0
         self.iterators: list[_FakeIterator] = []
+        self.server_version = "3.0.2"
 
     def query_iterator(self, collection_name, filter, batch_size, output_fields):
         self.filters.append(filter)
@@ -64,6 +65,9 @@ class _FakeClient:
 
     def flush(self, collection_name):
         self.flushed += 1
+
+    def get_server_version(self):
+        return self.server_version
 
 
 def _run(client: _FakeClient, **kwargs: Any):
@@ -232,6 +236,26 @@ def test_other_integers_a_partial_upsert_rounds_are_reported():
         _run(client)
 
     assert logger.bind.call_args.kwargs["rounded"] == {"f": ["external_ref"]}
+
+
+@pytest.mark.parametrize(
+    ("server_version", "warns"),
+    [
+        pytest.param("3.0-20261030-af15c80751", False, id="tested-3.0.5-build"),
+        pytest.param("v3.0.5", False, id="3.0.5"),
+        pytest.param("3.0.2", True, id="older"),
+        pytest.param("3.0-some-other-build", True, id="unrecognized-build"),
+    ],
+)
+def test_integers_are_only_reported_on_servers_that_round_them(server_version, warns):
+    client = _FakeClient([_row(external_ref=2**60 + 1)])
+    client.server_version = server_version
+
+    with patch.object(backfill, "logger") as logger:
+        _run(client)
+
+    assert logger.bind.called is warns
+    assert client.rows[1]["text"].startswith("[Source: report.pdf]")
 
 
 def test_a_refused_chunk_does_not_cost_the_rest_of_its_batch():

@@ -520,7 +520,7 @@ Good to know:
 - A long filename is shortened the same way as on new chunks. A `header` or `content` value from upload metadata stays as it is.
 - If a chunk can't be updated, the script logs it, carries on and exits with status 1. Running it again retries those chunks, but a chunk too long to take the filename is refused every time and needs re-indexing.
 - If Milvus itself fails, or refuses the first 200 chunks it tries with none written, the script stops. Once that's fixed, run it again to carry on.
-- `--revert` removes what the script added, but integers above 2^53 in a chunk's metadata stay rounded. The script warns about those when it runs.
+- `--revert` removes what the script added. On a Milvus older than 3.0.5, rewriting a chunk also rounds integers above 2^53 in its metadata, and `--revert` can't restore them. The script warns about those when it runs.
 
 ---
 
