@@ -39,8 +39,6 @@ _IMAGE_BLOCK_TAG_RE = re.compile(r"</?image_description>", re.IGNORECASE)
 _IMAGE_PLACEHOLDER_RE = re.compile(re.escape(_IMAGE_PLACEHOLDER_MARKER), re.IGNORECASE)
 # Removing a marker leaves the blank lines that surrounded it.
 _COLLAPSE_BLANK_RE = re.compile(r"\n{3,}")
-# Page markers closing a run of prose, with nothing after them to label.
-_TRAILING_PAGE_MARKERS_RE = re.compile(r"(?:\[PAGE_\d+\]\s*)+$")
 
 
 def is_placeholder_image(content: str) -> bool:
@@ -89,6 +87,20 @@ def strip_placeholder_markers(content: str) -> str:
 # name, so the filesystem already stops it at 255 bytes; a name taken from a URL
 # (MCP index_url) has no such limit.
 _MAX_HEADER_FILENAME_CHARS = 255
+
+
+def strip_trailing_page_markers(text: str) -> str:
+    """Remove the ``[PAGE_N]`` markers closing *text*, with nothing after them to label.
+
+    Scans the markers backward rather than anchoring a regex with ``$``, which
+    retries from every marker and goes quadratic on a long run followed by prose.
+    """
+    end = len(text)
+    for match in reversed(list(PAGE_RE.finditer(text))):
+        if text[match.end() : end].strip():
+            break
+        end = match.start()
+    return text[:end].rstrip() if end < len(text) else text
 
 
 def source_header(filename: str, chunk_size: int, length_function: Callable[[str], int]) -> str | None:
@@ -402,7 +414,7 @@ class BaseChunker(ChunkingStrategy):
             # Markers closing the buffer label nothing: the element that follows
             # sets `prev_page` itself. Left in, one could split off with the
             # replayed overlap, as a chunk with no new content.
-            sanitized = _TRAILING_PAGE_MARKERS_RE.sub("", sanitized)
+            sanitized = strip_trailing_page_markers(sanitized)
             # A piece between two pages can still hold nothing but markers. It
             # is dropped per piece, after `prev_page` has advanced through it.
             for text_chunk in split(sanitized):

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from core.chunking.recursive import RecursiveSplitter
+import time
+
+from core.chunking.recursive import RecursiveSplitter, strip_trailing_page_markers
 from core.chunking.registry import chunking_registry
 from core.models.chunk import ChunkType
 from core.models.document import ProcessedDocument, TextBlock
@@ -830,3 +832,19 @@ def test_page_break_between_two_full_pages_emits_no_marker_only_chunk():
 
     assert [c.page_number for c in chunks] == [1, 2]
     assert chunks[0].text.startswith("one0") and chunks[1].text.startswith("two0")
+
+
+def test_strip_trailing_page_markers_only_removes_the_closing_run():
+    assert strip_trailing_page_markers("prose\n\n[PAGE_1]\n\n[PAGE_2]\n") == "prose"
+    assert strip_trailing_page_markers("[PAGE_1]\n\n[PAGE_2]") == ""
+    assert strip_trailing_page_markers("one\n\n[PAGE_1]\n\ntwo") == "one\n\n[PAGE_1]\n\ntwo"
+    assert strip_trailing_page_markers("no markers\n") == "no markers\n"
+
+
+def test_strip_trailing_page_markers_is_linear_on_a_long_run_before_prose():
+    # A document's text can repeat the marker. An anchored regex took 65s on this
+    # size of input, so finishing at all within the bound shows there's no retry.
+    text = "[PAGE_1]\n\n" * 40_000 + "prose"
+    start = time.perf_counter()
+    assert strip_trailing_page_markers(text) == text
+    assert time.perf_counter() - start < 5
