@@ -28,7 +28,7 @@ from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
-from core.retrieval.date_order import order_chunks_by_date
+from core.retrieval.date_order import interleave_chunks, order_chunks_by_date
 from core.retrieval.retriever import Retriever, has_csv_row_siblings, order_csv_continuations
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.trace import RetrievalTraceBuilder, merge_child_traces
@@ -261,7 +261,6 @@ class RetrieverPipeline:
             selected = chunks[:limit]
             if not self.expansion_enabled:
                 selected = [chunk for chunk in selected if has_csv_row_siblings([chunk])]
-            # A date order must also see the candidates ranked below the seed limit.
             preserve_ranked_candidates = has_csv_row_siblings(selected) or bool(query.date_order)
             expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in selected}
             head = copy.deepcopy(selected)
@@ -271,9 +270,9 @@ class RetrieverPipeline:
             if len(expanded) > len(head):
                 expansion_applied = True
                 if preserve_ranked_candidates:
-                    # Automatic CSV sibling expansion supplements the ranked
-                    # list at the seed's position. Regular document expansion
-                    # keeps develop's replacement behavior.
+                    # CSV sibling expansion and expansion under a date order
+                    # supplement the ranked list at the seed's position. Other
+                    # document expansion keeps develop's replacement behavior.
                     ranked_candidate_ids = {str(_chunk_key(chunk)) for chunk in chunks}
                     expanded_chunks = order_csv_continuations(
                         [
@@ -490,6 +489,9 @@ class RetrieverPipeline:
             # RRF only knows ranks, so a per-list date order does not survive
             # it: re-apply it on the fused list, before the cut.
             fusion_kwargs["reorder"] = lambda chunks: order_chunks_by_date(chunks, search_queries.date_order)
+        elif any(q.date_order for q in search_queries.query_list):
+            # RRF would favour chunks found by several lists over the ends the user asked for.
+            fusion_kwargs["reorder"] = lambda _: interleave_chunks(ranked_lists, _chunk_key)
         if top_k is not None:
             fusion_kwargs["top_k"] = top_k
         if trace is not None:

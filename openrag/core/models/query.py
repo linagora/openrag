@@ -139,7 +139,7 @@ class SearchQueries(BaseModel):
         """The date ordering to re-apply after RRF fusion, if all sub-queries share one.
 
         Otherwise ("my first and last invoice") one order would push a sub-query's
-        results past the cut, so each list keeps its own order and RRF fuses them.
+        results past the cut, so the lists are interleaved instead.
         """
         orders = {q.date_order for q in self.query_list}
         return orders.pop() if len(orders) == 1 else None

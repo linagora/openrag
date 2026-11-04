@@ -16,7 +16,9 @@ an unknown date is never mistaken for the newest or the oldest.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Hashable, Sequence
 from datetime import UTC, datetime
+from itertools import zip_longest
 from typing import Any
 
 from core.models.chunk import Chunk
@@ -77,4 +79,14 @@ def order_chunks_by_date(chunks: list[Chunk], order: DateOrder | None) -> list[C
     return [chunk for _, _, chunk in dated] + undated
 
 
-__all__ = ["CREATED_AT_KEY", "chunk_created_at", "order_chunks_by_date"]
+def interleave_chunks(ranked_lists: Sequence[Sequence[Chunk]], key_fn: Callable[[Chunk], Hashable]) -> list[Chunk]:
+    """Take from each list in turn, skipping repeats, so every list's top comes first."""
+    merged: dict[Hashable, Chunk] = {}
+    for row in zip_longest(*ranked_lists):
+        for chunk in row:
+            if chunk is not None:
+                merged.setdefault(key_fn(chunk), chunk)
+    return list(merged.values())
+
+
+__all__ = ["CREATED_AT_KEY", "chunk_created_at", "interleave_chunks", "order_chunks_by_date"]

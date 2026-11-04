@@ -758,14 +758,26 @@ async def test_the_date_order_sees_candidates_beyond_the_expansion_seeds():
     assert "related" in [c.id for c in out]
 
 
+NOV, JUL, JUN, JAN = (
+    _dated("nov", "2026-11-01T00:00:00Z"),
+    _dated("jul", "2026-07-01T00:00:00Z"),
+    _dated("jun", "2026-06-01T00:00:00Z"),
+    _dated("jan", "2026-01-01T00:00:00Z"),
+)
+
+
+@pytest.mark.parametrize(
+    ("orders", "lists", "top_k", "expected"),
+    [
+        (("newest", "oldest"), ([NOV, JUL, JUN], [JAN, JUN, JUL]), 3, ["nov", "jan", "jul"]),
+        (("newest", None), ([NOV, JAN], [JAN, JUL]), None, ["nov", "jan", "jul"]),
+    ],
+)
 @pytest.mark.asyncio
-async def test_sub_queries_with_opposite_orders_both_survive_the_cut():
+async def test_sub_queries_with_different_orders_are_interleaved(orders, lists, top_k, expected):
     r = FakeRetriever()
-    r.results_queue = [
-        [_dated("nov", "2026-11-01T00:00:00Z"), _dated("oct", "2026-10-01T00:00:00Z")],
-        [_dated("jan", "2026-01-01T00:00:00Z"), _dated("feb", "2026-02-01T00:00:00Z")],
-    ]
+    r.results_queue = [list(ranked) for ranked in lists]
     p = RetrieverPipeline(retriever=r)
-    sq = SearchQueries(query_list=[Query(query="a", date_order="newest"), Query(query="b", date_order="oldest")])
-    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq, top_k=2)
-    assert {c.id for c in out} == {"nov", "jan"}
+    sq = SearchQueries(query_list=[Query(query=str(i), date_order=order) for i, order in enumerate(orders)])
+    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq, top_k=top_k)
+    assert [c.id for c in out] == expected
