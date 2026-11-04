@@ -34,7 +34,7 @@ from services.workers.ray_utils import (
 )
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
-from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING
+from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING, read_ref_when_settled
 
 logger = get_logger()
 
@@ -551,6 +551,9 @@ class WorkerDispatcher(IndexingDispatcher):
             self._pool.submit.remote(**submit_kwargs),
             task_description=f"submit({task_id})",
         )
+        # Deserializing the ref made this process borrow it, and it is dropped
+        # once handed to the completion tracker.
+        read_ref_when_settled(submitted[0])
         return submitted[0]
 
     async def _mark_submit_failed(self, task_id: str, tb: str, error_reason: str) -> None:

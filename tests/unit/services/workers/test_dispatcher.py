@@ -447,6 +447,28 @@ async def test_dispatch_indexing_registers_completion_with_detached_tracker() ->
 
 
 @pytest.mark.asyncio
+async def test_submit_reads_the_borrowed_worker_ref() -> None:
+    """#1296: dropped unread, a failed ref makes Ray print an unhandled error in this process."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = asyncio.get_running_loop().create_future()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(ref),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.read_ref_when_settled") as read:
+        assert await dispatcher._submit_indexing_task_once("task-1", {}) is ref
+
+    read.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_rejects_content_already_claimed() -> None:
     from core.utils.exceptions import ConflictError
     from services.workers.dispatcher import WorkerDispatcher
