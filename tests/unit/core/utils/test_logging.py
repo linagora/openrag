@@ -501,8 +501,8 @@ def test_text_mode_access_line_is_minimised_through_uvicorns_own_config(capsys):
         _restore_default_logger()
 
 
-def test_full_client_ip_keeps_the_address_but_still_drops_the_query(capsys):
-    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json", full_client_ip=True))
+def test_personal_data_keeps_the_address_but_still_drops_the_query(capsys):
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json", personal_data=True))
     try:
         get_logger(config)
         _log_request("203.0.113.42:51234", "/search?text=secret")
@@ -538,12 +538,12 @@ def test_other_uvicorn_lines_are_left_alone(capsys):
 
 def test_access_log_minimiser_is_installed_once_and_follows_the_latest_config():
     try:
-        get_logger(SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="text", full_client_ip=True)))
+        get_logger(SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="text", personal_data=True)))
         get_logger(SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="text")))
         for name in _ACCESS_LOG_LOGGERS:
             filters = [f for f in logging.getLogger(name).filters if isinstance(f, AccessLogMinimiser)]
             assert len(filters) == 1
-            assert filters[0].full_client_ip is False
+            assert filters[0].personal_data is False
     finally:
         _restore_default_logger()
 
@@ -551,4 +551,4 @@ def test_access_log_minimiser_is_installed_once_and_follows_the_latest_config():
 def test_verbose_config_defaults_are_production_safe():
     config = VerboseConfig()
     assert config.level == "INFO"
-    assert config.full_client_ip is False
+    assert config.personal_data is False

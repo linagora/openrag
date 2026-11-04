@@ -94,7 +94,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     # Verbose
     ("LOG_LEVEL", "verbose.level", str),
     ("LOG_FORMAT", "verbose.format", str),
-    ("LOG_FULL_CLIENT_IP", "verbose.full_client_ip", bool),
+    ("LOG_PERSONAL_DATA", "verbose.personal_data", bool),
     # Server
     ("PREFERRED_URL_SCHEME", "server.preferred_url_scheme", str),
     ("METRICS_TOKEN", "server.metrics_token", str),

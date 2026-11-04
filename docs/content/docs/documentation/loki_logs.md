@@ -50,7 +50,7 @@ no `level` label.
 | --- | --- | --- |
 | `LOG_FORMAT` | `text` | `json` for collectors. The compose logging overlay and the Helm chart set it; a plain compose stack keeps the colorized text. |
 | `LOG_LEVEL` | `INFO` | `DEBUG` records user queries; use it briefly. |
-| `LOG_FULL_CLIENT_IP` | `false` | uvicorn's request lines keep only the client's network (`/24` IPv4, `/48` IPv6) and never the query string, which can carry a user's search text. `true` logs full client addresses; set a retention period that covers them. |
+| `LOG_PERSONAL_DATA` | `false` | Personal data in logs. Off, uvicorn's request lines keep only the client's network (`/24` IPv4, `/48` IPv6). `true` logs full client addresses; set a retention period that covers them. Query strings, which can carry a user's search text, are never logged. |
 | `RAY_DEDUP_LOGS` | `1` (Ray) | Must be `0` with `LOG_FORMAT=json`: the overlay and the chart set it. See above. |
 | `RAY_COLOR_PREFIX` | `1` (Ray) | Set to `0` by the overlay and the chart so the relay prefix is plain text. |
 | `RAY_LOG_TO_STDERR` | unset | Set to `1` by the chart when `ray.enabled=true`: workers write to their own pod's stderr instead of the API driver's relay. See the Kubernetes section. |

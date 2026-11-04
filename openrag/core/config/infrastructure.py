@@ -138,9 +138,11 @@ class VerboseConfig(ConfigMixin):
     # ``text``: colorized human format on stderr. ``json``: one flat JSON
     # object per line, no ANSI, for log collectors (Loki). Env: LOG_FORMAT.
     format: Literal["text", "json"] = "text"
+    # Off: logs keep personal data out where operations don't need it; today,
     # uvicorn's request lines keep only the client's /24 (IPv4) or /48 (IPv6)
-    # network unless this is set. Env: LOG_FULL_CLIENT_IP.
-    full_client_ip: bool = False
+    # network. On: full client addresses, for troubleshooting or security
+    # investigations. Query strings are never logged. Env: LOG_PERSONAL_DATA.
+    personal_data: bool = False
 
     @field_validator("format", mode="before")
     @classmethod

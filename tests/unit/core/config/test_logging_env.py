@@ -64,18 +64,18 @@ def test_log_level_and_client_ip_default_to_the_minimal_settings(monkeypatch, tm
     """A config without a ``verbose`` block logs at INFO with truncated client IPs."""
     _write_minimal_config(tmp_path)
     monkeypatch.delenv("LOG_LEVEL", raising=False)
-    monkeypatch.delenv("LOG_FULL_CLIENT_IP", raising=False)
+    monkeypatch.delenv("LOG_PERSONAL_DATA", raising=False)
 
     settings = load_config(config_path=tmp_path)
 
     assert settings.verbose.level == "INFO"
-    assert settings.verbose.full_client_ip is False
+    assert settings.verbose.personal_data is False
 
 
-def test_log_full_client_ip_from_env(monkeypatch, tmp_path):
+def test_log_personal_data_from_env(monkeypatch, tmp_path):
     _write_minimal_config(tmp_path)
-    monkeypatch.setenv("LOG_FULL_CLIENT_IP", "true")
+    monkeypatch.setenv("LOG_PERSONAL_DATA", "true")
 
     settings = load_config(config_path=tmp_path)
 
-    assert settings.verbose.full_client_ip is True
+    assert settings.verbose.personal_data is True

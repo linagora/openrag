@@ -68,8 +68,9 @@ class AccessLogMinimiser(logging.Filter):
 
     - every query string becomes ``?[REDACTED]``; the path is kept;
     - the client address is truncated by :func:`truncate_client_addr`, unless
-      ``full_client_ip`` is set (``LOG_FULL_CLIENT_IP=true``) by an operator
-      who keeps full addresses for security investigations.
+      ``personal_data`` is set (``LOG_PERSONAL_DATA=true``), the switch an
+      operator turns on to keep personal data in logs for troubleshooting or
+      security investigations.
 
     It sits on the loggers themselves, so it applies in text mode (uvicorn's
     own handlers) and in JSON mode (the root interceptor) alike, and survives
@@ -77,16 +78,16 @@ class AccessLogMinimiser(logging.Filter):
     removes its filters.
     """
 
-    def __init__(self, full_client_ip: bool = False) -> None:
+    def __init__(self, personal_data: bool = False) -> None:
         super().__init__()
-        self.full_client_ip = full_client_ip
+        self.personal_data = personal_data
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
         if not (isinstance(record.msg, str) and record.msg.startswith('%s - "') and isinstance(args, tuple) and args):
             return True
         client_addr, *rest = args
-        if not self.full_client_ip and isinstance(client_addr, str):
+        if not self.personal_data and isinstance(client_addr, str):
             client_addr = truncate_client_addr(client_addr)
         rest = [_strip_query_string(arg) if isinstance(arg, str) and arg.startswith("/") else arg for arg in rest]
         record.args = (client_addr, *rest)
@@ -98,7 +99,7 @@ class AccessLogMinimiser(logging.Filter):
 _ACCESS_LOG_LOGGERS = ("uvicorn.access", "uvicorn.error")
 
 
-def install_access_log_minimiser(full_client_ip: bool = False) -> None:
+def install_access_log_minimiser(personal_data: bool = False) -> None:
     """Attach one :class:`AccessLogMinimiser` to each uvicorn logger.
 
     Idempotent, like :func:`intercept_stdlib_logging`: ``get_logger()`` runs at
@@ -108,9 +109,9 @@ def install_access_log_minimiser(full_client_ip: bool = False) -> None:
         std_logger = logging.getLogger(name)
         existing = [f for f in std_logger.filters if isinstance(f, AccessLogMinimiser)]
         if existing:
-            existing[0].full_client_ip = full_client_ip
+            existing[0].personal_data = personal_data
         else:
-            std_logger.addFilter(AccessLogMinimiser(full_client_ip))
+            std_logger.addFilter(AccessLogMinimiser(personal_data))
 
 
 def terminal_formatter(record) -> str:
@@ -325,6 +326,6 @@ def get_logger(config=None):
 
     # Both formats: uvicorn's request lines are personal data (client address,
     # query string) whichever handler ends up printing them.
-    install_access_log_minimiser(getattr(config.verbose, "full_client_ip", False))
+    install_access_log_minimiser(getattr(config.verbose, "personal_data", False))
 
     return logger
