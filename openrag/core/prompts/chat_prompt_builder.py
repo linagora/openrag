@@ -26,10 +26,9 @@ import copy
 import json
 import re
 from collections.abc import Callable
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Protocol
 
-from core.utils.dates import parse_datetime
 from core.utils.text import neutralize_prompt_control_tokens, sanitize_text
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
@@ -79,8 +78,18 @@ def _format_created_at(value: object) -> str:
     Minute precision is enough to order two meetings of the same day and keeps
     the line short; the raw ISO form with microseconds is what the API returns.
     """
-    parsed = parse_datetime(value)
-    return parsed.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC") if parsed else ""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return ""
+    else:
+        return ""
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC)
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def format_context(

@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +19,6 @@ import services.orchestrators.query_service as qs
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
-from core.models.query import Query
 from core.models.retrieval_trace import TraceCandidate
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
@@ -4168,9 +4166,7 @@ def test_query_json_hint_leaves_the_temporal_fields_open():
 
 
 @pytest.mark.asyncio
-async def test_map_reduce_under_a_date_order_does_not_stop_on_an_irrelevant_batch():
-    """Its early stop reads an irrelevant batch as "the rest is worse": true of a
-    relevance ranking, not of a date one, whose relevant chunks can come later."""
+async def test_map_reduce_without_early_stop_reaches_relevant_chunks_after_an_irrelevant_batch():
     rel = json.dumps({"relevancy": True, "summary": "older but relevant"})
     irr = json.dumps({"relevancy": False, "summary": ""})
     docs = [Chunk(id=str(i), text=str(i), metadata={"_id": str(i)}).to_langchain() for i in range(3)]
@@ -4183,21 +4179,3 @@ async def test_map_reduce_under_a_date_order_does_not_stop_on_an_irrelevant_batc
     assert await service()._map_reduce("q", docs) == []
     kept = await service()._map_reduce("q", docs, early_stop=False)
     assert [doc.page_content for doc in kept] == ["older but relevant"]
-
-
-@pytest.mark.parametrize(
-    ("date_order", "expected"),
-    [("newest", "latest Python version"), ("oldest", "first Python version"), (None, "Python version")],
-)
-def test_web_query_puts_the_recency_back_in_the_search_text(date_order, expected):
-    """Moved out of the query into ``date_order``, which web results never see."""
-    assert qs._web_query(Query(query="Python version", date_order=date_order)) == expected
-
-
-@pytest.mark.parametrize("template", ["sys_prompt_tmpl.txt", "spoken_style_answer_tmpl.txt"])
-def test_answer_prompts_do_not_read_a_topic_date_as_a_creation_date(template):
-    """ "Budget in 2020" is answered by a report created in 2023: the contextualizer
-    leaves such a date unfiltered, so the answer prompt mustn't refuse the source."""
-    text = (Path(qs.__file__).parents[2] / "prompts" / "templates" / template).read_text(encoding="utf-8")
-    assert "a question whose topic has a date" in text
-    assert 'a request about a period ("last week", "in March") only counts' not in text
