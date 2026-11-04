@@ -283,10 +283,6 @@ class TestGetPageNumber:
     def test_no_markers_is_page_one(self):
         assert get_page_number(42, []) == 1
 
-    def test_marker_too_long_to_be_a_page_is_not_a_marker(self):
-        result = get_chunk_page_number("[PAGE_" + "1" * 5_000 + "]Content.", previous_chunk_ending_page=4)
-        assert result == {"start_page": 4, "end_page": 4}
-
 
 class TestChunkTable:
     def test_small_table_no_chunking(self):

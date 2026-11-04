@@ -585,3 +585,20 @@ def test_a_chunk_size_too_small_for_any_name_drops_the_header():
     chunk = splitter.chunk(doc, partition="p")[0]
     assert chunk.header is None
     assert chunk.text == "alpha beta"
+
+
+def test_a_marker_too_long_to_be_a_page_number_is_text():
+    """int() refuses more than 4,300 digits: such a marker in a document's own
+    text used to fail the file when the chunker read its page."""
+    marker = "[PAGE_" + "1" * 5_000 + "]"
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=f"Intro text. {marker} More text on the same page.", page_number=1)],
+        metadata={"source": "report.pdf"},
+    )
+    splitter = RecursiveSplitter(chunk_size=2_000, chunk_overlap_rate=0.0, length_function=_word_tokens)
+
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert chunks
+    assert all(c.page_number == 1 for c in chunks)
