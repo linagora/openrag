@@ -418,7 +418,8 @@ class BaseChunker(ChunkingStrategy):
                     **(piece.metadata or {}),
                     "page_content": piece.content,
                     "page": piece.page_number,
-                    "chunk_type": "table",
+                    # Large worksheet notes come back as their own text chunks.
+                    "chunk_type": "text" if piece.type == "text" else "table",
                 }
                 for piece in pieces
             ]

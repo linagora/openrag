@@ -2797,18 +2797,89 @@ def test_excessive_preamble_fails_without_truncation():
         )
 
 
-def test_sheet_context_larger_than_chunk_budget_fails():
+def test_sheet_context_larger_than_chunk_budget_is_indexed_in_its_own_chunks():
     from core.chunking.markdown_utils import MDElement, chunk_table
 
-    context = "\n\nWorksheet context:\n" + "title " * 100
-    table = "| id |\n| --- |\n| 1 |"
+    context = "\n\nWorksheet context (before column headers):\nRow 1: " + "title " * 100
+    table = "| id |\n| --- |\n| 1 |\n| 2 |"
     element = MDElement(
         type="table",
         content=table + context,
-        metadata={"tabular_format": "xlsx", "sheet_context": context, "table_columns": ["id"], "csv_columns": ["id"]},
+        metadata={
+            "tabular_format": "xlsx",
+            "sheet_name": "Sheet",
+            "sheet_context": context,
+            "sheet_context_row_numbers": [1],
+            "table_columns": ["id"],
+            "csv_columns": ["id"],
+            "table_row_start": 2,
+            "table_row_end": 3,
+            "table_row_numbers": [2, 3],
+            "cell_range": "'Sheet'!A2:A3",
+        },
     )
-    with pytest.raises(PipelineError, match="context exceeds chunk token budget"):
-        chunk_table(element, chunk_size=20, length_function=lambda text: len(text.split()))
+
+    chunks = chunk_table(element, chunk_size=20, length_function=lambda text: len(text.split()))
+
+    context_chunks = [chunk for chunk in chunks if chunk.type == "text"]
+    table_chunks = [chunk for chunk in chunks if chunk.type == "table"]
+    assert len(context_chunks) > 1
+    assert sum(chunk.content.count("title") for chunk in context_chunks) == 100
+    assert all(len(chunk.content.split()) <= 20 for chunk in chunks)
+    assert all(chunk.metadata["xlsx_content_kind"] == "sheet_context" for chunk in context_chunks)
+    assert all("table_columns" not in chunk.metadata and "cell_range" not in chunk.metadata for chunk in context_chunks)
+    assert table_chunks
+    assert all("title" not in chunk.content for chunk in table_chunks)
+    assert all("Worksheet context (row 1) is indexed in separate chunks." in chunk.content for chunk in table_chunks)
+    assert all("sheet_context" not in chunk.metadata for chunk in table_chunks)
+    assert all(chunk.metadata["sheet_context_indexed_separately"] for chunk in table_chunks)
+
+
+@pytest.mark.parametrize("chunker_name", ["recursive_splitter", "structured_section"])
+def test_long_worksheet_note_is_indexed_once_across_table_batches(chunker_name):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.chunking.structured_section import StructuredSectionChunker
+    from core.models.chunk import ChunkType
+    from core.models.document import ProcessedDocument
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "Note: " + " ".join(f"word{index}" for index in range(300))
+    sheet.append([])
+    sheet.append(["id", "label", "amount"])
+    for index in range(300):
+        sheet.append([index, f"line {index}", index * 10])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    def words(text):
+        return len(text.split())
+
+    chunker = (
+        RecursiveSplitter(chunk_size=200, length_function=words)
+        if chunker_name == "recursive_splitter"
+        else StructuredSectionChunker(chunk_size=200, min_tokens=0, max_tokens=200, length_function=words)
+    )
+    blocks = list(XlsxParser(batch_size=100).iter_batches(Document(raw_bytes=output.getvalue())))
+    assert [block.metadata["table_batch_index"] for block in blocks] == [1, 2, 3]
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunker.chunk(
+            ProcessedDocument(document_id="note", text_blocks=[block], metadata=dict(block.metadata))
+        )
+    ]
+
+    note_chunks = [chunk for chunk in chunks if chunk.metadata.get("xlsx_content_kind") == "sheet_context"]
+    table_chunks = [chunk for chunk in chunks if chunk.metadata.get("xlsx_content_kind") == "table"]
+    assert note_chunks and all(chunk.chunk_type is ChunkType.TEXT for chunk in note_chunks)
+    assert all(chunk.metadata["table_batch_index"] == 1 for chunk in note_chunks)
+    assert sum(chunk.text.count("word299") for chunk in chunks) == 1
+    assert all("Worksheet: Sheet" in chunk.text for chunk in note_chunks)
+    assert all(chunk.chunk_type is ChunkType.TABLE for chunk in table_chunks)
+    rows = sorted(row for chunk in table_chunks for row in chunk.metadata["table_row_numbers"])
+    assert set(rows) == set(range(4, 304))
 
 
 def test_xlsx_continuation_restores_context_to_expanded_chunk_budget():

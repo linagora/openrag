@@ -758,7 +758,8 @@ class StructuredSectionChunker(BaseChunker):
                     text=f"{caption}{s.content.strip()}",
                     tokens=self.length_function(f"{caption}{s.content}"),
                     pages={s.page_number} if s.page_number else set(unit.pages),
-                    chunk_type=ChunkType.TABLE,
+                    # XLSX worksheet notes split from a table are prose.
+                    chunk_type=ChunkType.TEXT if s.type == "text" else ChunkType.TABLE,
                     atomic=True,
                     metadata=dict(s.metadata or {}),
                 )
