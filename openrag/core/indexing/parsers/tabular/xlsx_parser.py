@@ -1329,6 +1329,9 @@ class XlsxParser(TabularBatchParser):
                 )
                 row_header_paths: dict[str, list[str]] = {}
                 table_rows_emitted = 0
+                # One-based batch number within this table; chunkers index a
+                # large worksheet context once, with the table's first batch.
+                table_batches = [0]
 
                 def block():
                     def render(group_repeated: bool, include_display_context: bool = True):
@@ -1408,6 +1411,7 @@ class XlsxParser(TabularBatchParser):
                         ) = render(False, include_display_context=False)
                     if block_bytes > self.limits.max_batch_bytes:
                         raise limit("XLSX batch exceeds the batch byte limit")
+                    table_batches[0] += 1
                     return self._block(
                         document,
                         sheet,
@@ -1432,6 +1436,7 @@ class XlsxParser(TabularBatchParser):
                         number_format_groups,
                         display_context,
                         number_formats_truncated,
+                        table_batch_index=table_batches[0],
                     )
 
                 for physical_row, values in enumerate(row_iterator, start=data_row_start):
@@ -1576,6 +1581,8 @@ class XlsxParser(TabularBatchParser):
         number_format_groups,
         display_context,
         number_formats_truncated,
+        *,
+        table_batch_index: int,
     ):
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
         visible_columns = _table_columns(table, sheet)
@@ -1589,6 +1596,7 @@ class XlsxParser(TabularBatchParser):
             "sheet_index": sheet.index,
             "table_id": f"sheet:{sheet.index}:table:{table.index}",
             "table_index": table.index,
+            "table_batch_index": table_batch_index,
             "worksheet_table_count": len(sheet.tables),
             "table_columns": list(headers),
             "table_header_row": header_row,

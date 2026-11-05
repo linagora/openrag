@@ -357,9 +357,51 @@ def chunk_table(
     return [MDElement(type="table", content=subtable, page_number=table_element.page_number) for subtable in subtables]
 
 
+# A worksheet context (notes above a table) is repeated on every table chunk.
+# Past this share of the chunk budget it costs more row space than it is worth,
+# so it is indexed once, as its own chunks, with the table's first batch.
+_XLSX_SHEET_CONTEXT_MAX_SHARE = 0.25
+_XLSX_SHEET_CONTEXT_HEADING = "Worksheet context (before column headers):"
+# Metadata that describes table rows/columns and must not travel to context chunks.
+_XLSX_TABLE_ONLY_PREFIXES = ("csv_", "formula_", "number_format_", "table_header", "table_row", "table_column")
+
+
+def _xlsx_sheet_context_chunks(sheet_context, element, chunk_size, length_function):
+    """Split a worksheet context into text chunks that carry the worksheet name."""
+    worksheet_context = element.metadata.get("worksheet_context", "")
+    lines = [line for line in sheet_context.strip().split("\n")[1:] if line.strip()]
+
+    def render(parts):
+        return _XLSX_SHEET_CONTEXT_HEADING + "\n" + "\n".join(parts) + worksheet_context
+
+    budget = chunk_size - length_function(render([])) - 2 * length_function("\n")
+    if budget <= 0:
+        raise PipelineError("XLSX worksheet name exceeds chunk token budget; increase chunk size")
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        for part in _split_to_budget(line, budget, length_function) if length_function(line) > budget else [line]:
+            if current and length_function(render([*current, part])) > chunk_size:
+                groups.append(current)
+                current = []
+            current.append(part)
+    if current:
+        groups.append(current)
+    metadata = {key: value for key, value in element.metadata.items() if not key.startswith(_XLSX_TABLE_ONLY_PREFIXES)}
+    # The batch's data-row citation does not describe the context rows.
+    metadata.pop("sheet_context", None)
+    metadata.pop("cell_range", None)
+    metadata["xlsx_content_kind"] = "sheet_context"
+    return [
+        MDElement(type="text", content=render(group), page_number=element.page_number, metadata=dict(metadata))
+        for group in groups
+    ]
+
+
 def _chunk_xlsx_table(table, element, chunk_size, length_function):
     """Reuse row splitting with escaped headers and exact sheet/column metadata."""
-    base_context = element.metadata.get("worksheet_context", "") + element.metadata.get("sheet_context", "")
+    sheet_context = element.metadata.get("sheet_context", "")
+    base_context = element.metadata.get("worksheet_context", "") + sheet_context
     formula_context = element.metadata.get("formula_context", "")
     number_format_context = element.metadata.get("number_format_context", "")
     include_number_format_context = bool(number_format_context)
@@ -374,6 +416,24 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
             table = table[: -len(stripped_context)]
         else:
             raise PipelineError("XLSX sheet context does not match table content")
+    context_chunks: list[MDElement] = []
+    worksheet_context = element.metadata.get("worksheet_context", "")
+    rows = element.metadata.get("sheet_context_row_numbers") or []
+    span = f"rows {rows[0]}-{rows[-1]}" if len(rows) > 1 else f"row {rows[0]}" if rows else "above the table"
+    pointer = f"\n\nWorksheet context ({span}) is indexed in separate chunks."
+    context_tokens = length_function(sheet_context) if sheet_context else 0
+    detach_sheet_context = (
+        context_tokens > chunk_size * _XLSX_SHEET_CONTEXT_MAX_SHARE
+        # A note no longer than about two pointers is not worth detaching.
+        and context_tokens > 2 * length_function(pointer)
+        and length_function(table + complete_context) > chunk_size
+    )
+    if length_function(worksheet_context + pointer) >= chunk_size:
+        pointer = ""
+    if detach_sheet_context:
+        base_context = worksheet_context + pointer
+        if element.metadata.get("table_batch_index", 1) == 1:
+            context_chunks = _xlsx_sheet_context_chunks(sheet_context, element, chunk_size, length_function)
     table = clean_markdown_table_spacing(table)
     base_context_tokens = length_function(base_context) if base_context else 0
     if base_context_tokens >= chunk_size:
@@ -447,6 +507,10 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
         )
     for chunk in chunks:
         metadata = chunk.metadata
+        if detach_sheet_context:
+            # The full context lives in its own chunks, not on every row chunk.
+            metadata.pop("sheet_context", None)
+            metadata["sheet_context_indexed_separately"] = True
         positions = [column_positions[name] for name in metadata["table_columns"]]
         metadata["table_column_indices"] = [index + 1 for index in positions]
         metadata["table_columns"] = [original_columns[index] for index in positions]
@@ -539,7 +603,7 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
         )
         # The bounding range can span blank rows/unselected columns. Exact
         # membership is table_row_numbers plus table_column_indices.
-    return chunks
+    return [*context_chunks, *chunks]
 
 
 def _formula_truncation_marker_matches(marker, row_numbers, selected_columns=None):
