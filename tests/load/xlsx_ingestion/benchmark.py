@@ -112,7 +112,7 @@ def measure(path):
     digest = hashlib.sha256()
     for block in parser.iter_batches(document):
         batches += 1
-        rows += len(block.metadata["table_row_numbers"])
+        rows += len(block.metadata.get("table_row_numbers") or block.metadata.get("cell_row_numbers") or ())
         encoded = block.text.encode()
         digest.update(encoded)
         max_bytes = max(max_bytes, len(encoded))

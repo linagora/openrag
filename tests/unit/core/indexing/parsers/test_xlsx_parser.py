@@ -828,6 +828,22 @@ def test_typed_rows_after_a_blank_spacer_continue_the_previous_table():
     assert "| Carol | 3200 |" in block.text
 
 
+def test_hidden_typed_row_does_not_turn_a_new_table_into_a_continuation():
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in (["Nom", "Salaire"], ["Alice", 3000], [], [99, 1], ["Produit", "Prix"], ["Pomme", 2]):
+        sheet.append(row)
+    sheet.row_dimensions[4].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [["Nom", "Salaire"], ["Produit", "Prix"]]
+    assert all("99" not in block.text for block in blocks)
+
+
 @pytest.mark.parametrize(
     ("rows", "expected_columns"),
     [
@@ -967,6 +983,24 @@ def test_regions_without_data_rows_are_indexed_as_worksheet_cells():
         "- D5:E5: Montant | 12000\n\n"
         "Worksheet: Contrat"
     )
+
+
+def test_ambiguous_header_warning_is_only_logged_for_emitted_tables():
+    from loguru import logger
+
+    records: list[str] = []
+    sink_id = logger.add(records.append, level="WARNING", format="{message}")
+    try:
+        list(XlsxParser().iter_batches(_loose_cells_workbook()))
+        cells_warnings = [record for record in records if "header detection is ambiguous" in record]
+        records.clear()
+        list(XlsxParser().iter_batches(_document([["code", "label"], ["A-1", "First"]])))
+        table_warnings = [record for record in records if "header detection is ambiguous" in record]
+    finally:
+        logger.remove(sink_id)
+
+    assert cells_warnings == []
+    assert len(table_warnings) == 1
 
 
 def test_worksheet_cells_are_split_into_bounded_blocks():

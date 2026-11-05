@@ -1250,14 +1250,6 @@ class XlsxParser(TabularBatchParser):
                             row_iterator, self.limits.max_batch_bytes, table.start_row
                         )
                         header_source = "automatic"
-                        if header_detection["status"] == "ambiguous":
-                            logger.bind(
-                                sheet_name=sheet.name,
-                                table_index=table.index,
-                                selected_row=selected_header_row,
-                                candidate_rows=header_detection["candidate_rows"],
-                                reason=header_detection["reason"],
-                            ).warning("XLSX automatic header detection is ambiguous")
                     header_values = None
                     header_row = table.start_row
                     for physical_row, values in enumerate(row_iterator, start=table.start_row):
@@ -1473,6 +1465,16 @@ class XlsxParser(TabularBatchParser):
                 if row_numbers:
                     yield block()
                 content_rows_seen += table_rows_emitted
+                if table_rows_emitted and header_source == "automatic" and header_detection["status"] == "ambiguous":
+                    # Logged only for real tables: a region emitted as worksheet
+                    # cells has no header, so its detection result is moot.
+                    logger.bind(
+                        sheet_name=sheet.name,
+                        table_index=table.index,
+                        selected_row=header_detection["selected_row"],
+                        candidate_rows=header_detection["candidate_rows"],
+                        reason=header_detection["reason"],
+                    ).warning("XLSX automatic header detection is ambiguous")
                 if not table_rows_emitted:
                     # A region with no data rows is a footnote, a total, or a
                     # form-like group of cells, not a table. Its only nonempty
