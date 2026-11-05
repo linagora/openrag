@@ -906,21 +906,32 @@ def _compact_number_formats(
             )
             group["rows"].append(row_number)
 
-    truncated = len(grouped) > _MAX_NUMBER_FORMAT_GROUPS
+    # A group with more than _MAX_NUMBER_FORMAT_RANGES separate row ranges is
+    # split into several groups, so each group's ranges stay exact: a chunk
+    # receives a format only when it holds one of the formatted rows.
     result: list[dict[str, Any]] = []
-    for group in list(grouped.values())[:_MAX_NUMBER_FORMAT_GROUPS]:
+    truncated = False
+    for group in grouped.values():
         rows_for_group = group.pop("rows")
         ranges = _row_ranges(rows_for_group)
-        group.update(
-            start_row=rows_for_group[0],
-            end_row=rows_for_group[-1],
-            cell_count=len(rows_for_group),
-            range=(f"{group['target_column']}{rows_for_group[0]}:{group['target_column']}{rows_for_group[-1]}"),
-            row_ranges=ranges[:_MAX_NUMBER_FORMAT_RANGES],
-        )
-        if len(ranges) > _MAX_NUMBER_FORMAT_RANGES:
-            group["row_ranges_truncated"] = True
-        result.append(group)
+        for start in range(0, len(ranges), _MAX_NUMBER_FORMAT_RANGES):
+            if len(result) == _MAX_NUMBER_FORMAT_GROUPS:
+                truncated = True
+                break
+            part = ranges[start : start + _MAX_NUMBER_FORMAT_RANGES]
+            first, last = part[0]["start_row"], part[-1]["end_row"]
+            result.append(
+                {
+                    **group,
+                    "start_row": first,
+                    "end_row": last,
+                    "cell_count": sum(item["end_row"] - item["start_row"] + 1 for item in part),
+                    "range": f"{group['target_column']}{first}:{group['target_column']}{last}",
+                    "row_ranges": part,
+                }
+            )
+        if truncated:
+            break
 
     if not result:
         return [], "", truncated

@@ -470,6 +470,23 @@ class TestChunkTable:
         assert all(chunk.metadata["csv_effective_chunk_size"] > 10 for chunk in chunks)
         assert all(len(chunk.content.split()) <= chunk.metadata["csv_effective_chunk_size"] for chunk in chunks)
 
+    def test_oversized_header_still_leaves_a_share_of_the_budget_for_cell_text(self):
+        column_name = " ".join(f"header{number}" for number in range(30))
+        cell = " ".join(f"word{number}" for number in range(400))
+        table = f"| {column_name} |\n| --- |\n| {cell} |"
+
+        chunks = chunk_table(
+            MDElement(type="table", content=table, metadata={"csv_columns": [column_name], "csv_row_start": 2}),
+            chunk_size=40,
+            length_function=lambda text: len(text.split()),
+        )
+
+        # Each part carries at least a quarter of the budget (10 words), so 400
+        # words need at most about 40 parts, not one part per word.
+        assert len(chunks) <= 45
+        reconstructed = "".join(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0] for chunk in chunks)
+        assert reconstructed == cell
+
     def test_csv_wide_row_is_grouped_by_columns_without_losing_values(self):
         columns = ["person_id", "legal_name", *(f"fact_{number}" for number in range(1, 9))]
         values = ["P-001", "Ari", *(f"value_{number}" for number in range(1, 9))]
