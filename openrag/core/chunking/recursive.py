@@ -412,10 +412,12 @@ class BaseChunker(ChunkingStrategy):
                 chunk_size=body_size,
                 length_function=self.length_function,
             )
+            # A piece's metadata is a complete copy of the block's, scoped to its
+            # rows and columns; spreading the block metadata under it would
+            # restore keys the piece dropped.
             return [
                 {
-                    **metadata,
-                    **(piece.metadata or {}),
+                    **(piece.metadata or metadata),
                     "page_content": piece.content,
                     "page": piece.page_number,
                     # Large worksheet notes come back as their own text chunks.
