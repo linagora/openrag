@@ -34,7 +34,12 @@ import zipfile
 from io import BytesIO
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
-from ..image_preprocessor import UPLOADED_IMAGE_FORMATS, ensure_png_compatible_mode, pil_to_png_bytes
+from ..image_preprocessor import (
+    UPLOADED_IMAGE_FORMATS,
+    ensure_png_compatible_mode,
+    find_inline_images,
+    pil_to_png_bytes,
+)
 from .document_parser import DocumentParser
 from .registry import parser_registry
 
@@ -44,9 +49,13 @@ logger = logging.getLogger(__name__)
 # Match MarkItDown's image refs in the rendered markdown. The current
 # version emits a truncated placeholder (``![](data:image/png;base64...)``)
 # but older / future versions may emit a full data URI or non-empty alt
-# text. The pattern below matches both shapes — same regex the legacy
-# loader used (``components/indexer/loaders/docx.py``).
-_MARKITDOWN_IMAGE_PLACEHOLDER = re.compile(r"!\[.*?\]\(data:image/[^)]*\)")
+# text. Both shapes are what the legacy loader matched with
+# ``!\[.*?\]\(data:image/[^)]*\)`` (``components/indexer/loaders/docx.py``),
+# found here by ``find_inline_images``: searched as a regex over the whole
+# Markdown, that pattern rescans the rest of each line from every ``![``, and
+# the rest of the text from every ``](data:image/``, so text typed into the
+# document made it cubic.
+_MARKITDOWN_IMAGE_TARGET = re.compile(r"\]\(data:image/")
 
 # Parser-bomb caps (mirrors the EML loader's module-level limits): bound how many
 # embedded media entries we iterate and how large any single (decompressed) entry
@@ -211,7 +220,7 @@ class DocxParser(DocumentParser):
         idx = 0
         consumed = 0  # count of `embedded` entries used so far
 
-        def replacer(_match: re.Match[str]) -> str:
+        def replacer() -> str:
             nonlocal idx, consumed
             if consumed >= len(embedded):
                 return ""  # more placeholders than zip images: drop extras
@@ -231,5 +240,11 @@ class DocxParser(DocumentParser):
             )
             return ref
 
-        new_markdown = _MARKITDOWN_IMAGE_PLACEHOLDER.sub(replacer, markdown)
-        return new_markdown, images
+        parts: list[str] = []
+        cursor = 0
+        for start, _, end in find_inline_images(markdown, _MARKITDOWN_IMAGE_TARGET, allow_empty_rest=True):
+            parts.append(markdown[cursor:start])
+            parts.append(replacer())
+            cursor = end
+        parts.append(markdown[cursor:])
+        return "".join(parts), images

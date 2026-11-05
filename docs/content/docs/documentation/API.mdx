@@ -594,11 +594,12 @@ There is no push notification: poll the `GET` route for progress.
 `embedder` must name a registered embedder endpoint, not the `default` alias (422 otherwise) — the alias can
 move to another model later, which would leave the partition pointing at a field it never filled.
 
-Writing the new vectors makes Milvus rewrite every number in a chunk's metadata as a 64-bit float, so an integer
-beyond ±2^53 in upload metadata comes back rounded on the re-embedded chunks, as after
+On Milvus 3.0.2, writing new vectors can make Milvus rewrite metadata numbers as 64-bit floats, rounding some
+integers beyond ±2^53 on re-embedded chunks. The tested Milvus 3.0.5 build preserves those values; OpenRAG skips
+the warning on that build and warns about potentially affected metadata on older or unverified builds. Section IDs
+remain folded below 2^53 to keep neighbour links stable across versions. The file's metadata in Postgres keeps the
+exact upload value. See
 [Milvus migration version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
-The file's metadata in Postgres keeps the exact value. Each rounding is logged as a warning naming the file and
-the metadata keys.
 
 :::caution
 While a swap runs, uploads, file replacements, metadata updates and copies **into** that partition return
