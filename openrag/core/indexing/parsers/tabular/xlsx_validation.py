@@ -94,9 +94,15 @@ def _column_runs(columns: set[int]):
 def _merge_preambles(
     regions: list[TableRegion],
     barriers: list[TableRegion] | None = None,
+    typed_first_rows: set[tuple[int, int]] | None = None,
 ) -> list[TableRegion]:
-    """Attach obvious title bands and isolated rows to their surrounding table."""
+    """Attach obvious title bands and isolated rows to their surrounding table.
+
+    ``typed_first_rows`` holds the ``(start_row, start_column)`` of inferred
+    regions whose first nonempty row contains a non-text value.
+    """
     barriers = barriers or []
+    typed_first_rows = typed_first_rows or set()
     merged: list[TableRegion] = []
     for region in regions:
         if merged:
@@ -119,7 +125,11 @@ def _merge_preambles(
             # continuation of the preceding table even across a large blank
             # gap; otherwise it would be treated as a header-only table and
             # silently emit no row.
-            if not has_barrier and region_height == 1 and same_columns:
+            # A header is text. A block with the same columns whose first row
+            # holds a number, date or boolean is data resuming after a blank
+            # spacer row; split off, that data row would become its header.
+            typed_continuation = previous_height >= 2 and (region.start_row, region.start_column) in typed_first_rows
+            if not has_barrier and same_columns and (region_height == 1 or typed_continuation):
                 merged[-1] = TableRegion(
                     previous.index,
                     previous.start_row,
@@ -517,6 +527,10 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 populated_rows: set[int] = set()
                 band_start = band_end = None
                 band_columns: set[int] = set()
+                # Per band column: (first content row, whether that cell is non-text).
+                band_first_cells: dict[int, tuple[int, bool]] = {}
+                row_typed_columns: set[int] = set()
+                typed_first_rows: set[tuple[int, int]] = set()
                 regions: list[TableRegion] = []
                 merged_ranges: list[tuple[int, int, int, int]] = []
                 merged_columns_by_row: dict[int, list[tuple[int, int]]] = {}
@@ -553,12 +567,17 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     return interval >= 0 and column <= active_column_ends[interval]
 
                 def finish_band():
-                    nonlocal band_start, band_end, band_columns
+                    nonlocal band_start, band_end, band_columns, band_first_cells
                     if band_start is not None and band_end is not None:
                         for start_column, end_column in _column_runs(band_columns):
                             regions.append(TableRegion(len(regions), band_start, band_end, start_column, end_column))
+                            firsts = [band_first_cells[column] for column in range(start_column, end_column + 1)]
+                            first_row = min(row for row, _ in firsts)
+                            if any(typed for row, typed in firsts if row == first_row):
+                                typed_first_rows.add((band_start, start_column))
                     band_start = band_end = None
                     band_columns = set()
+                    band_first_cells = {}
 
                 # clear completed children so memory does not grow with row count.
                 with archive.open(path) as stream:
@@ -575,6 +594,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 previous_row, previous_col = current_row, 0
                                 advance_explicit_tables(current_row)
                                 row_content_columns = set()
+                                row_typed_columns = set()
                                 if element.get("hidden", "0").lower() in {"1", "true"}:
                                     hidden_rows.add(current_row)
                             if element.tag.endswith("}c"):
@@ -625,6 +645,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 formula is not None or (value is not None and value.text is not None) or inline_text
                             ) and not is_in_explicit_table(current_cell_column):
                                 row_content_columns.add(current_cell_column)
+                                if element.get("t") not in {"s", "str", "inlineStr"}:
+                                    row_typed_columns.add(current_cell_column)
                         if tag == "row":
                             if row_content_columns:
                                 populated_rows.add(current_row)
@@ -635,6 +657,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                     band_start = current_row
                                 band_end = current_row
                                 band_columns.update(row_content_columns)
+                                for column in row_content_columns:
+                                    band_first_cells.setdefault(column, (current_row, column in row_typed_columns))
                             else:
                                 finish_band()
                         if tag == "mergeCell":
@@ -685,7 +709,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     count for column, count in missing_formula_columns.items() if column not in hidden_columns
                 )
                 regions = _combine_regions(
-                    _merge_preambles(regions, explicit_regions),
+                    _merge_preambles(regions, explicit_regions, typed_first_rows),
                     explicit_regions,
                     merged_ranges,
                 )
