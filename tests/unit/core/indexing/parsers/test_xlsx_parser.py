@@ -1811,6 +1811,55 @@ def test_sparse_rectangle_rejected_before_reader_allocation(monkeypatch):
         list(XlsxParser().iter_batches(doc))
 
 
+@pytest.mark.parametrize("reference", ["E1048576", "XFD1", "XFD1048576"])
+def test_far_empty_styled_cells_do_not_reject_the_workbook(reference):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "value"])
+    sheet.append([1, "kept"])
+    sheet[reference].number_format = "0.00"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_range"] == "'Sheet'!A1:B2"
+    assert block.metadata["table_row_numbers"] == [2]
+
+
+def test_content_beyond_the_column_limit_is_still_rejected(monkeypatch):
+    doc = _edit_xml(_document([["id", "value"], [1, "kept"]]), lambda xml: xml.replace('r="B2"', 'r="XFD2"'))
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="row/column limits") as error:
+        list(XlsxParser().iter_batches(doc))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+def test_cell_outside_the_excel_grid_is_invalid():
+    doc = _edit_xml(_document([["id"], ["value"]]), lambda xml: xml.replace('r="A2"', 'r="XFE2"'))
+    with pytest.raises(PipelineError, match="outside the worksheet grid") as error:
+        list(XlsxParser().iter_batches(doc))
+    assert error.value.code == "INVALID_XLSX"
+
+
+def test_whole_row_merge_past_the_column_limit_is_clamped():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "Rapport annuel"
+    sheet.merge_cells("A1:XFD1")
+    sheet.append(["id", "value"])
+    sheet.append([1, "kept"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert any("Rapport annuel" in block.text for block in blocks)
+    assert any(block.metadata.get("table_row_numbers") == [3] for block in blocks)
+
+
 def test_batch_bytes_bound_accumulation_without_losing_rows():
     doc = _document([["text"], *[["café & < > | " * 10] for _ in range(7)]])
     blocks = list(XlsxParser(batch_size=10_000, limits=XlsxLimits(max_batch_bytes=800)).iter_batches(doc))

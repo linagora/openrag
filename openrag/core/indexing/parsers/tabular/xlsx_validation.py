@@ -16,6 +16,9 @@ from defusedxml.ElementTree import fromstring, iterparse
 MAIN_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
 MACRO_MAIN_TYPE = "application/vnd.ms-excel.sheet.macroEnabled.main+xml"
 TABLE_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"
+# The Excel grid; coordinates beyond it are malformed, not merely large.
+EXCEL_MAX_ROWS = 1_048_576
+EXCEL_MAX_COLUMNS = 16_384
 CELL_REF = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
 CELL_RANGE = re.compile(r"([A-Z]+)([1-9][0-9]*):([A-Z]+)([1-9][0-9]*)\Z")
 
@@ -683,8 +686,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 current_row = int(element.get("r", "0"))
                                 if current_row <= previous_row:
                                     raise invalid("XLSX row coordinates are missing or out of order")
-                                if current_row > limits.max_rows:
-                                    raise limit("XLSX row coordinate exceeds the row limit")
+                                if current_row > EXCEL_MAX_ROWS:
+                                    raise invalid("XLSX row coordinate is outside the worksheet grid")
                                 previous_row, previous_col = current_row, 0
                                 advance_explicit_tables(current_row)
                                 row_content_columns = set()
@@ -699,8 +702,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 for char in match[1]:
                                     col = col * 26 + ord(char) - 64
                                 row = int(match[2])
-                                if row > limits.max_rows or col > limits.max_columns:
-                                    raise limit("XLSX cell coordinate exceeds row/column limits")
+                                if row > EXCEL_MAX_ROWS or col > EXCEL_MAX_COLUMNS:
+                                    raise invalid("XLSX cell coordinate is outside the worksheet grid")
                                 if row != current_row or col <= previous_col:
                                     raise invalid("XLSX cell coordinates are inconsistent or out of order")
                                 previous_col = col
@@ -708,7 +711,6 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 cells_seen += 1
                                 if cells_seen > limits.max_cells:
                                     raise limit("XLSX cell count exceeds the limit")
-                                max_row, max_col = max(max_row, row), max(max_col, col)
                             continue
                         tag = element.tag.rsplit("}", 1)[-1]
                         if tag == "col" and element.get("hidden", "0").lower() in {"1", "true"}:
@@ -735,9 +737,17 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 if not 0 <= string_index < shared_count:
                                     raise invalid("XLSX cell references a missing shared string")
                             inline_text = any(node.text for node in element.iter() if node.tag.endswith("}t"))
-                            if (
+                            has_content = (
                                 formula is not None or (value is not None and value.text is not None) or inline_text
-                            ) and not is_in_explicit_table(current_cell_column):
+                            )
+                            if has_content:
+                                # Only cells with content bound the reader's work: tables
+                                # are read up to their content, so an empty styled cell
+                                # far away (leftover formatting) must not reject the file.
+                                if current_row > limits.max_rows or current_cell_column > limits.max_columns:
+                                    raise limit("XLSX cell coordinate exceeds row/column limits")
+                                max_row, max_col = max(max_row, current_row), max(max_col, current_cell_column)
+                            if has_content and not is_in_explicit_table(current_cell_column):
                                 row_content_columns.add(current_cell_column)
                                 if element.get("t") not in {"s", "str", "inlineStr"}:
                                     row_typed_columns.add(current_cell_column)
@@ -779,16 +789,22 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                             if (
                                 start_row > end_row
                                 or start_column > end_column
-                                or end_row > limits.max_rows
-                                or end_column > limits.max_columns
+                                or end_row > EXCEL_MAX_ROWS
+                                or end_column > EXCEL_MAX_COLUMNS
                             ):
                                 raise invalid("XLSX merged cell has an invalid range")
                             if merged_ranges_seen >= limits.max_merged_ranges:
                                 raise limit("XLSX merged-cell count exceeds the limit")
                             merged_ranges_seen += 1
-                            merged_ranges.append((start_row, end_row, start_column, end_column))
-                            if start_row == end_row and end_column > start_column:
-                                merged_columns_by_row.setdefault(start_row, []).append((start_column, end_column))
+                            # A formatting merge may reach past the configured limits
+                            # (e.g. a whole-row title merge); only its part inside them
+                            # can hold extracted content.
+                            if start_row <= limits.max_rows and start_column <= limits.max_columns:
+                                end_row = min(end_row, limits.max_rows)
+                                end_column = min(end_column, limits.max_columns)
+                                merged_ranges.append((start_row, end_row, start_column, end_column))
+                                if start_row == end_row and end_column > start_column:
+                                    merged_columns_by_row.setdefault(start_row, []).append((start_column, end_column))
                         if tag == "tablePart":
                             rel_id = next((value for key, value in element.attrib.items() if key.endswith("}id")), None)
                             if not rel_id:
