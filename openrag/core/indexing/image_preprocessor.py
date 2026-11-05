@@ -18,6 +18,8 @@ import base64
 import bisect
 import hashlib
 import re
+from array import array
+from collections.abc import Iterable, Iterator
 from io import BytesIO
 from typing import Any
 
@@ -255,12 +257,12 @@ class _DataUriTargetEnds:
 
     def __init__(self, text: str) -> None:
         self._text = text
-        self._delimiters = [match.start() for match in re.finditer(r"""[()"']""", text)]
-        self._positions = {char: [i for i in self._delimiters if text[i] == char] for char in "\"')"}
-        self._line_breaks = [match.start() for match in re.finditer(r"[\r\n]", text)]
+        self._delimiters = array("q", (match.start() for match in re.finditer(r"""[()"']""", text)))
+        self._positions = {char: array("q", (i for i in self._delimiters if text[i] == char)) for char in "\"')"}
+        self._line_breaks = array("q", (match.start() for match in re.finditer(r"[\r\n]", text)))
         self._outcomes: dict[int, int] = {}
 
-    def _next(self, positions: list[int], pos: int) -> int:
+    def _next(self, positions: array[int], pos: int) -> int:
         index = bisect.bisect_left(positions, pos)
         return positions[index] if index < len(positions) else len(self._text)
 
@@ -290,9 +292,8 @@ class _DataUriTargetEnds:
         return outcome
 
 
-def _find_inline_data_uri_images(text: str) -> list[tuple[int, int, str, str]]:
-    """Return ``(start, end, alt, target)`` for every ``![alt](data:image/...)``."""
-    images: list[tuple[int, int, str, str]] = []
+def _find_inline_data_uri_images(text: str) -> Iterator[tuple[int, int, str, str]]:
+    """Yield ``(start, end, alt, target)`` for every ``![alt](data:image/...)``."""
     target_ends: _DataUriTargetEnds | None = None
     pos = 0
     while (start := text.find("![", pos)) != -1:
@@ -307,31 +308,27 @@ def _find_inline_data_uri_images(text: str) -> list[tuple[int, int, str, str]]:
         if close == -1:
             pos = alt_end
             continue
-        images.append((start, close + 1, text[start + 2 : alt_end], text[alt_end + 2 : close]))
+        yield (start, close + 1, text[start + 2 : alt_end], text[alt_end + 2 : close])
         pos = close + 1
-    return images
 
 
-def _find_reference_images(text: str) -> list[re.Match[str]]:
-    """Return a match for every ``![alt][label]``, ``![alt][]`` or ``![alt]``."""
-    images: list[re.Match[str]] = []
+def _find_reference_images(text: str) -> Iterator[re.Match[str]]:
+    """Yield a match for every ``![alt][label]``, ``![alt][]`` or ``![alt]``."""
     pos = 0
     while (start := text.find("![", pos)) != -1:
         match = _DATA_URI_REFERENCE_IMAGE_PATTERN.match(text, start)
         if match is not None:
-            images.append(match)
+            yield match
             pos = match.end()
             continue
         alt_end = text.find("]", start + 2)
         if alt_end == -1:
             break
         pos = alt_end + 1
-    return images
 
 
-def _find_data_uri_links(text: str) -> list[tuple[int, int, str]]:
-    """Return ``(start, end, label)`` for every ``[label](data:image/...)`` link."""
-    links: list[tuple[int, int, str]] = []
+def _find_data_uri_links(text: str) -> Iterator[tuple[int, int, str]]:
+    """Yield ``(start, end, label)`` for every ``[label](data:image/...)`` link."""
     pos = 0
     close = -1
     while (start := text.find("[", pos)) != -1:
@@ -349,9 +346,8 @@ def _find_data_uri_links(text: str) -> list[tuple[int, int, str]]:
             close = text.find(")", prefix.end())
             if close == -1:
                 break
-        links.append((start, close + 1, prefix.group(1)))
+        yield (start, close + 1, prefix.group(1))
         pos = close + 1
-    return links
 
 
 def _existing_embedded_targets(text: str) -> set[str]:
@@ -372,7 +368,7 @@ def _existing_embedded_targets(text: str) -> set[str]:
     return targets
 
 
-def _replace_spans(text: str, spans: list[tuple[int, int, str]]) -> str:
+def _replace_spans(text: str, spans: Iterable[tuple[int, int, str]]) -> str:
     """Replace ordered, non-overlapping ``(start, end, replacement)`` spans."""
     parts: list[str] = []
     cursor = 0
@@ -561,16 +557,16 @@ def normalize_data_uri_images(
 
     sanitized = _replace_spans(
         text,
-        [(start, end, replace_target(alt, target)) for start, end, alt, target in _find_inline_data_uri_images(text)],
+        ((start, end, replace_target(alt, target)) for start, end, alt, target in _find_inline_data_uri_images(text)),
     )
     sanitized = _replace_spans(
         sanitized,
-        [(match.start(), match.end(), replace_reference(match)) for match in _find_reference_images(sanitized)],
+        ((match.start(), match.end(), replace_reference(match)) for match in _find_reference_images(sanitized)),
     )
     sanitized = DATA_URI_REFERENCE_DEFINITION_PATTERN.sub("", sanitized)
     sanitized = _replace_spans(
         sanitized,
-        [(start, end, label.strip() or "[Link]") for start, end, label in _find_data_uri_links(sanitized)],
+        ((start, end, label.strip() or "[Link]") for start, end, label in _find_data_uri_links(sanitized)),
     )
     sanitized, residual_scrubbed = _scrub_residual_data_uris(sanitized)
     if skipped:
