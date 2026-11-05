@@ -548,13 +548,23 @@ def test_hard_max_above_the_band_changes_nothing():
     assert [c.token_count for c in with_bound] == [c.token_count for c in without]
 
 
-def test_header_is_none_when_not_prepended():
-    """``header`` is persisted next to ``text``; claiming one the chunk does not
-    carry lets a consumer rebuild a string that was never embedded."""
-    doc = _doc("# Titre I\n\nArticle L1\nSome body text here.")
-    chunk = _chunker(chunk_size=512, prepend_heading_path=False).chunk(doc)[0]
-    assert chunk.header is None
-    assert not chunk.text.startswith("[Source")
+def test_every_chunk_of_a_named_file_has_a_source_header():
+    doc = ProcessedDocument(
+        document_id="d",
+        text_blocks=[TextBlock(text="# Titre I\n\nArticle L1\nSome body text here.")],
+        metadata={"filename": "report.pdf"},
+    )
+    chunks = _chunker(chunk_size=512).chunk(doc)
+    assert chunks
+    assert all(c.header.startswith("[Source: report.pdf") for c in chunks)
+    assert all(c.text.startswith(f"{c.header}\n\n") for c in chunks)
+
+
+def test_a_document_without_a_name_gets_a_header_without_source():
+    doc = ProcessedDocument(document_id="d", text_blocks=[TextBlock(text="Some body text here.")], metadata={})
+    chunk = _chunker(chunk_size=512).chunk(doc)[0]
+    assert chunk.header == "[Page: 1]"
+    assert chunk.text == "[Page: 1]\n\nSome body text here."
 
 
 _MULTI_SECTION_PAGE = """Titre Ier : Dispositions fiscales
@@ -601,15 +611,13 @@ def test_merge_never_leaves_a_chunk_without_a_breadcrumb():
         assert chunk.metadata["hierarchy_path"], f"no breadcrumb on {chunk.text[:60]!r}"
 
 
-def test_headings_reach_the_index_even_without_the_header():
-    """_build_units never emits a heading as body, so the header is the only
-    path by which heading text reaches ``text``. Turning the flag off used to
-    delete the document's structure from the index outright."""
+def test_headings_stay_in_the_body_not_only_in_the_header():
+    """Path-shortening steps can drop a heading from the header's breadcrumb, so
+    the body has to keep its own copy for it to reach the index."""
     doc = _doc("# Livre Ier\n\n## Titre Ier\n\nArticle L110-1\nLe present code regit le sejour.")
-    joined = "\n".join(c.text for c in _chunker(chunk_size=512, prepend_heading_path=False).chunk(doc))
+    joined = "\n".join(c.content for c in _chunker(chunk_size=512).chunk(doc))
     for heading in ("Livre Ier", "Titre Ier"):
-        assert heading in joined, f"{heading!r} absent from every chunk's text"
-    assert "[Source:" not in joined, "the verbose preamble should still be dropped"
+        assert heading in joined, f"{heading!r} absent from every chunk's body"
 
 
 def test_split_pieces_report_the_pages_they_actually_cover():

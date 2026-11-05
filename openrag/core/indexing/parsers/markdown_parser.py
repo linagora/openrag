@@ -7,8 +7,8 @@ one :class:`ImageBlock` per image reference in the source:
   bytes stored on the block, and the raw payload replaced by a compact
   caption-compatible reference before chunking.
 - HTTP/HTTPS refs (``![alt](https://...)``) yield an :class:`ImageBlock`
-  with empty ``image_bytes`` and ``source_url`` set; a downstream fetch
-  stage can populate the bytes later. The :attr:`ImageBlock.image_url`
+  with empty ``image_bytes`` and ``source_url`` set; nothing fetches it, so
+  the caption stage leaves it uncaptioned. The :attr:`ImageBlock.image_url`
   property gives a uniform VLM-friendly URL in either case.
 
 Captioning is not done here — see :class:`ImageBlock` for the
@@ -17,7 +17,7 @@ parser→caption contract.
 
 from __future__ import annotations
 
-from core.indexing.image_preprocessor import HTTP_IMAGE_PATTERN, normalize_data_uri_images
+from core.indexing.image_preprocessor import find_http_images, normalize_data_uri_images
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from ..text_preprocessor import decode_bytes
@@ -61,7 +61,7 @@ class MarkdownParser(DocumentParser):
         if not text:
             return []
         blocks: list[ImageBlock] = []
-        for alt, url in HTTP_IMAGE_PATTERN.findall(text):
+        for alt, url in find_http_images(text):
             blocks.append(
                 ImageBlock(
                     source_url=url,

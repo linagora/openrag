@@ -289,6 +289,41 @@ class TestExtractAndStripSourcesBlock:
         assert clean == "Answer [Sources: 1]" + "[Sources: 2]" * 6
         assert citations == {2}
 
+    @pytest.mark.parametrize(
+        ("tag", "expected"),
+        [
+            pytest.param("[Sources: " + "1" * 5_000 + "]", [], id="only-overlong"),
+            pytest.param("[Sources: 2, " + "9" * 5_000 + "]", [{"file": "b.pdf"}], id="overlong-beside-valid"),
+            pytest.param("[Sources: " + "0" * 5_000 + "3]", [{"file": "c.pdf"}], id="leading-zeros"),
+            # \d and int() take any Unicode digit, so its zeros lead the number too.
+            pytest.param("[Sources: " + "٠" * 10 + "٣]", [{"file": "c.pdf"}], id="arabic-indic-zeros"),
+            pytest.param("[Sources: " + "０" * 5_000 + "３]", [{"file": "c.pdf"}], id="fullwidth-zeros"),
+        ],
+    )
+    def test_number_too_long_to_be_an_index_cites_no_source(self, tag, expected):
+        """int() refuses over 4,300 digits: such a number used to fail the request."""
+        clean, citations = extract_and_strip_sources_block("Answer\n" + tag)
+        assert clean == "Answer"
+        assert citations is not None
+        assert (
+            filter_sources_by_citations([{"file": "a.pdf"}, {"file": "b.pdf"}, {"file": "c.pdf"}], citations)
+            == expected
+        )
+
+    @pytest.mark.parametrize(
+        ("number", "index"),
+        [
+            pytest.param("9" * 9, 999_999_999, id="nine-digits-is-an-index"),
+            pytest.param("1" + "0" * 9, 0, id="ten-digits-is-not"),
+            pytest.param("0" * 20 + "9" * 9, 999_999_999, id="leading-zeros-do-not-count"),
+            pytest.param("000", 0, id="only-zeros"),
+            pytest.param("１２", 12, id="fullwidth"),
+        ],
+    )
+    def test_a_citation_keeps_up_to_nine_significant_digits(self, number, index):
+        _, citations = extract_and_strip_sources_block(f"Answer\n[Sources: {number}]")
+        assert citations == {index}
+
     def test_sources_numbers_case_insensitive(self):
         text = "Answer text\n[sources: 1, 3]"
         clean, citations = extract_and_strip_sources_block(text)
@@ -1151,3 +1186,12 @@ async def test_blank_run_taken_by_a_later_marker_is_not_emitted():
     lines = [_make_chunk(" " * 72), _make_chunk("[Source 1, "), _make_chunk("3]See above."), _make_finish(), DONE_LINE]
     result = await _collect(stream_with_source_filtering(_fake_stream(lines), [{"file": "a.pdf"}] * 3, "m"))
     assert _collect_content(result) == "See above."
+
+
+@pytest.mark.asyncio
+async def test_stream_with_a_number_too_long_to_be_an_index_cites_no_source():
+    """The streamed answer and its finish chunk survive a citation int() refuses to read."""
+    lines = [_make_chunk("The answer."), _make_chunk("\n[Sources: 1, " + "7" * 5_000 + "]"), _make_finish(), DONE_LINE]
+    result = await _collect(stream_with_source_filtering(_fake_stream(lines), [{"file": "a.pdf"}], "test-model"))
+    assert _collect_content(result) == "The answer."
+    assert _parse_finish_sources(result) == [{"file": "a.pdf"}]

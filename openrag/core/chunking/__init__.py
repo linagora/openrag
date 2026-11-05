@@ -4,7 +4,6 @@ from .chunking_strategy import ChunkingStrategy
 from .markdown_utils import (
     MDElement,
     chunk_table,
-    get_chunk_page_number,
     parse_markdown_table,
     split_md_elements,
 )
@@ -20,7 +19,6 @@ __all__ = [
     "StructuredSectionChunker",
     "MDElement",
     "chunk_table",
-    "get_chunk_page_number",
     "parse_markdown_table",
     "split_md_elements",
 ]
