@@ -6,7 +6,7 @@ import io
 import posixpath
 import re
 import zipfile
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from xml.etree.ElementTree import ParseError
 
 from core.utils.exceptions import ConfigError, PipelineError
@@ -58,6 +58,12 @@ class TableRegion:
     start_column: int
     end_column: int
     header_row_hint: int | None = None
+    # Blank columns inside the span that only separate parts of one table.
+    spacer_columns: frozenset[int] = frozenset()
+
+    @property
+    def occupied_columns(self) -> set[int]:
+        return set(range(self.start_column, self.end_column + 1)) - self.spacer_columns
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,49 @@ def _column_runs(columns: set[int]):
             start = previous = column
     if start is not None:
         yield start, previous
+
+
+def _join_spacer_columns(
+    runs: list[tuple[int, int]],
+    extents: dict[int, tuple[int, int]],
+    band_start: int,
+    band_end: int,
+    barriers: list[TableRegion],
+) -> list[tuple[int, int, frozenset[int]]]:
+    """Rejoin column runs that one blank column splits out of a single table.
+
+    A spacer column between two halves of a table would otherwise cut every
+    row in two, losing the link between its values. Runs covering exactly the
+    same rows with one blank column between them are kept together. Wrongly
+    merging only widens a table, while wrongly splitting loses associations;
+    truly separate adjacent tables can be declared as Excel Tables, which act
+    as barriers here.
+    """
+
+    def rows_of(start: int, end: int) -> tuple[int, int]:
+        columns = [extents[column] for column in range(start, end + 1) if column in extents]
+        return min(first for first, _ in columns), max(last for _, last in columns)
+
+    joined: list[tuple[int, int, frozenset[int]]] = []
+    for start, end in runs:
+        if joined:
+            previous_start, previous_end, spacers = joined[-1]
+            gap = previous_end + 1
+            blocked = any(
+                barrier.start_column <= gap <= barrier.end_column
+                and barrier.start_row <= band_end
+                and band_start <= barrier.end_row
+                for barrier in barriers
+            )
+            if (
+                start == previous_end + 2
+                and not blocked
+                and rows_of(previous_start, previous_end) == rows_of(start, end)
+            ):
+                joined[-1] = (previous_start, end, spacers | {gap})
+                continue
+        joined.append((start, end, frozenset()))
+    return joined
 
 
 def _merge_preambles(
@@ -129,14 +178,12 @@ def _merge_preambles(
             # holds a number, date or boolean is data resuming after a blank
             # spacer row; split off, that data row would become its header.
             typed_continuation = previous_height >= 2 and (region.start_row, region.start_column) in typed_first_rows
+            spacers = frozenset(
+                (previous.spacer_columns | region.spacer_columns)
+                - (previous.occupied_columns | region.occupied_columns)
+            )
             if not has_barrier and same_columns and (region_height == 1 or typed_continuation):
-                merged[-1] = TableRegion(
-                    previous.index,
-                    previous.start_row,
-                    region.end_row,
-                    previous.start_column,
-                    previous.end_column,
-                )
+                merged[-1] = replace(previous, end_row=region.end_row, spacer_columns=spacers)
                 continue
             if (
                 not has_barrier
@@ -147,19 +194,16 @@ def _merge_preambles(
                 and previous.end_column <= region.end_column
                 and is_preamble
             ):
-                merged[-1] = TableRegion(
-                    previous.index,
-                    previous.start_row,
-                    region.end_row,
-                    region.start_column,
-                    region.end_column,
+                merged[-1] = replace(
+                    previous,
+                    end_row=region.end_row,
+                    start_column=region.start_column,
+                    end_column=region.end_column,
+                    spacer_columns=spacers,
                 )
                 continue
         merged.append(region)
-    return [
-        TableRegion(index, region.start_row, region.end_row, region.start_column, region.end_column)
-        for index, region in enumerate(merged)
-    ]
+    return [replace(region, index=index, header_row_hint=None) for index, region in enumerate(merged)]
 
 
 def _merged_header_depth(
@@ -175,7 +219,7 @@ def _merged_header_depth(
     must not become a structural header hint merely because the title spans the
     table's columns.
     """
-    expected_columns = set(range(region.start_column, region.end_column + 1))
+    expected_columns = region.occupied_columns
     depth = 0
     for row_number in range(region.start_row, region.end_row):
         covered_columns: set[int] = set()
@@ -328,27 +372,10 @@ def _combine_regions(
         )
         if title is not None:
             remaining.remove(title)
-            table = TableRegion(
-                table.index,
-                title.start_row,
-                table.end_row,
-                table.start_column,
-                table.end_column,
-                table.header_row_hint,
-            )
+            table = replace(table, start_row=title.start_row)
         expanded.append(table)
     combined = sorted(expanded + remaining, key=lambda region: (region.start_row, region.start_column))
-    return [
-        TableRegion(
-            index,
-            region.start_row,
-            region.end_row,
-            region.start_column,
-            region.end_column,
-            region.header_row_hint,
-        )
-        for index, region in enumerate(combined)
-    ]
+    return [replace(region, index=index) for index, region in enumerate(combined)]
 
 
 def _shared_string_count(archive, types, limits):
@@ -527,6 +554,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 populated_rows: set[int] = set()
                 band_start = band_end = None
                 band_columns: set[int] = set()
+                # Per band column: (first and last content row), for spacer joining.
+                band_column_extents: dict[int, tuple[int, int]] = {}
                 # Per band column: (first visible content row, whether that cell is non-text).
                 band_first_cells: dict[int, tuple[int, bool]] = {}
                 row_typed_columns: set[int] = set()
@@ -567,14 +596,30 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     return interval >= 0 and column <= active_column_ends[interval]
 
                 def finish_band():
-                    nonlocal band_start, band_end, band_columns, band_first_cells
+                    nonlocal band_start, band_end, band_columns, band_first_cells, band_column_extents
                     if band_start is not None and band_end is not None:
-                        for start_column, end_column in _column_runs(band_columns):
-                            regions.append(TableRegion(len(regions), band_start, band_end, start_column, end_column))
+                        runs = _join_spacer_columns(
+                            list(_column_runs(band_columns)),
+                            band_column_extents,
+                            band_start,
+                            band_end,
+                            explicit_regions,
+                        )
+                        for start_column, end_column, spacers in runs:
+                            regions.append(
+                                TableRegion(
+                                    len(regions),
+                                    band_start,
+                                    band_end,
+                                    start_column,
+                                    end_column,
+                                    spacer_columns=spacers,
+                                )
+                            )
                             firsts = [
                                 band_first_cells[column]
                                 for column in range(start_column, end_column + 1)
-                                if column in band_first_cells
+                                if column in band_first_cells and column not in spacers
                             ]
                             first_row = min((row for row, _ in firsts), default=None)
                             if any(typed for row, typed in firsts if row == first_row):
@@ -582,6 +627,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     band_start = band_end = None
                     band_columns = set()
                     band_first_cells = {}
+                    band_column_extents = {}
 
                 # clear completed children so memory does not grow with row count.
                 with archive.open(path) as stream:
@@ -661,6 +707,9 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                     band_start = current_row
                                 band_end = current_row
                                 band_columns.update(row_content_columns)
+                                for column in row_content_columns:
+                                    first, _ = band_column_extents.get(column, (current_row, current_row))
+                                    band_column_extents[column] = (first, current_row)
                                 if current_row not in hidden_rows:
                                     # Hidden rows are not extracted, so they cannot
                                     # decide what the first extracted row holds.
@@ -728,13 +777,10 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                         else 0
                     )
                     hinted_regions.append(
-                        TableRegion(
-                            region.index,
-                            region.start_row,
-                            region.end_row,
-                            region.start_column,
-                            region.end_column,
-                            region.header_row_hint or (region.start_row + header_depth if header_depth else None),
+                        replace(
+                            region,
+                            header_row_hint=region.header_row_hint
+                            or (region.start_row + header_depth if header_depth else None),
                         )
                     )
                 regions = hinted_regions
