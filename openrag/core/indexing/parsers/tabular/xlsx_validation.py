@@ -6,6 +6,7 @@ import io
 import posixpath
 import re
 import zipfile
+from bisect import bisect_right
 from dataclasses import dataclass, fields, replace
 from xml.etree.ElementTree import ParseError
 
@@ -208,28 +209,48 @@ def _merge_preambles(
     return [replace(region, index=index, header_row_hint=None) for index, region in enumerate(merged)]
 
 
+# Merged column-header hierarchies deeper than this are not headers; the bound
+# also caps how far the parser looks ahead to validate a structural header row.
+MAX_MERGED_HEADER_DEPTH = 32
+
+
+def _merged_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Union of inclusive column intervals, sorted and disjoint."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def _merged_header_depth(
     region: TableRegion,
     merged_columns_by_row: dict[int, list[tuple[int, int]]],
     populated_rows: set[int],
     hidden_rows: set[int],
+    coverage_cache: dict[int, list[tuple[int, int]]] | None = None,
 ) -> int:
     """Return merged header rows only when their leaf row contains cells.
 
     A worksheet title can be a merged cell immediately followed by a blank
     spacer and a regular table.  The blank spacer is not a header row, so it
     must not become a structural header hint merely because the title spans the
-    table's columns.
+    table's columns. Coverage is tested on disjoint intervals, never by
+    expanding merges into single columns, and each row's union is computed once.
     """
-    expected_columns = region.occupied_columns
+    coverage_cache = {} if coverage_cache is None else coverage_cache
+    occupied_runs = list(_column_runs(region.occupied_columns))
     depth = 0
-    for row_number in range(region.start_row, region.end_row):
-        covered_columns: set[int] = set()
-        for start_column, end_column in merged_columns_by_row.get(row_number, []):
-            covered_columns.update(
-                range(max(start_column, region.start_column), min(end_column, region.end_column) + 1)
-            )
-        if not expected_columns.issubset(covered_columns):
+    for row_number in range(region.start_row, min(region.end_row, region.start_row + MAX_MERGED_HEADER_DEPTH)):
+        if row_number not in coverage_cache:
+            coverage_cache[row_number] = _merged_intervals(merged_columns_by_row.get(row_number, []))
+        covered = coverage_cache[row_number]
+        if not all(
+            (position := bisect_right(covered, (start, EXCEL_MAX_COLUMNS + 1)) - 1) >= 0 and covered[position][1] >= end
+            for start, end in occupied_runs
+        ):
             break
         depth += 1
     leaf_row = region.start_row + depth
@@ -355,6 +376,13 @@ def _combine_regions(
     """Combine source-defined Excel Tables with independently inferred regions."""
     remaining = list(inferred)
     expanded: list[TableRegion] = []
+    # One-row merges by (row, first column, last column): an O(1) title lookup
+    # instead of scanning every merged range for every candidate row.
+    single_row_merges = {
+        (start_row, start_column, end_column)
+        for start_row, end_row, start_column, end_column in merged_ranges
+        if start_row == end_row
+    }
     for table in explicit:
         title = next(
             (
@@ -363,12 +391,7 @@ def _combine_regions(
                 if region.end_row < table.start_row
                 and table.start_row - region.end_row <= 32
                 and region.start_row == region.end_row
-                and any(
-                    start_row == end_row == region.start_row
-                    and start_column == table.start_column
-                    and end_column == table.end_column
-                    for start_row, end_row, start_column, end_column in merged_ranges
-                )
+                and (region.start_row, table.start_column, table.end_column) in single_row_merges
             ),
             None,
         )
@@ -454,19 +477,30 @@ def _reader_loaded_parts(archive, names: set[str], relationship_nodes, limits: X
             loaded.add(_rels_path(target))
         if relationship_type.endswith("/chartsheet") and target in names:
             chartsheets.append(target)
+    total = sum(archive.getinfo(name).file_size for name in loaded)
+
+    def add(name: str) -> None:
+        # Bound the running total before any further relationship part is read.
+        nonlocal total
+        if name not in loaded:
+            loaded.add(name)
+            total += archive.getinfo(name).file_size
+            if total > limits.max_metadata_bytes:
+                raise limit("XLSX metadata exceeds the memory limit")
+
+    if total > limits.max_metadata_bytes:
+        raise limit("XLSX metadata exceeds the memory limit")
     visited: set[str] = set()
     while chartsheets:
         part = chartsheets.pop()
         if part in visited:
             continue
         visited.add(part)
-        loaded.add(part)
+        add(part)
         rels = _rels_path(part)
         if rels not in names:
             continue
-        loaded.add(rels)
-        if archive.getinfo(rels).file_size > limits.max_metadata_bytes:
-            raise limit("XLSX metadata exceeds the memory limit")
+        add(rels)
         for relationship in fromstring(archive.read(rels)):
             if relationship.get("TargetMode") == "External":
                 continue
@@ -850,15 +884,21 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 missing = sum(
                     count for column, count in missing_formula_columns.items() if column not in hidden_columns
                 )
-                regions = _combine_regions(
-                    _merge_preambles(regions, explicit_regions, typed_first_rows),
-                    explicit_regions,
-                    merged_ranges,
-                )
+                visible_sheet = sheet.get("state", "visible") == "visible"
+                inferred_regions = _merge_preambles(regions, explicit_regions, typed_first_rows)
+                # Bound the count before combining: _combine_regions never returns
+                # fewer regions than it receives (a table absorbs at most one title
+                # and is added back), and its work grows with the input.
+                if visible_sheet and len(inferred_regions) > limits.max_tables:
+                    raise limit("XLSX worksheet table count exceeds the limit")
+                regions = _combine_regions(inferred_regions, explicit_regions, merged_ranges)
+                header_coverage: dict[int, list[tuple[int, int]]] = {}
                 hinted_regions: list[TableRegion] = []
                 for region in regions:
                     header_depth = (
-                        _merged_header_depth(region, merged_columns_by_row, populated_rows, hidden_rows)
+                        _merged_header_depth(
+                            region, merged_columns_by_row, populated_rows, hidden_rows, header_coverage
+                        )
                         if region.header_row_hint is None
                         else 0
                     )
@@ -872,7 +912,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 regions = hinted_regions
                 # Each table costs one more pass over its own worksheet, so the
                 # bound is per worksheet. Hidden sheets are never read.
-                if sheet.get("state", "visible") == "visible" and len(regions) > limits.max_tables:
+                if visible_sheet and len(regions) > limits.max_tables:
                     raise limit("XLSX worksheet table count exceeds the limit")
                 if max_row * max_col > limits.max_sheet_area:
                     raise limit("XLSX worksheet rectangle exceeds the traversal limit")
