@@ -89,6 +89,20 @@ def strip_placeholder_markers(content: str) -> str:
 _MAX_HEADER_FILENAME_CHARS = 255
 
 
+def strip_trailing_page_markers(text: str) -> str:
+    """Remove the ``[PAGE_N]`` markers closing *text*, with nothing after them to label.
+
+    Scans the markers backward rather than anchoring a regex with ``$``, which
+    retries from every marker and goes quadratic on a long run followed by prose.
+    """
+    end = len(text)
+    for match in reversed(list(PAGE_RE.finditer(text))):
+        if text[match.end() : end].strip():
+            break
+        end = match.start()
+    return text[:end].rstrip() if end < len(text) else text
+
+
 def source_header(filename: str, chunk_size: int, length_function: Callable[[str], int]) -> str | None:
     """``[Source: <filename>]``, using at most half of *chunk_size*.
 
@@ -266,15 +280,24 @@ class BaseChunker(ChunkingStrategy):
         emit the marker for the *outgoing* page just before content from a
         new page begins, and we also prepend a marker for the first block if
         it doesn't start on page 1.
+
+        Blocks are put in page order, keeping their relative order within a
+        page: the caption stage appends a caption it has no position for after
+        the last page, and the chunk list follows this order. A document with
+        an unpaged block has nothing to sort on and keeps the order it came in.
         """
         if not document.text_blocks:
             return ""
         if len(document.text_blocks) == 1 and document.text_blocks[0].page_number in (None, 1):
             return document.text_blocks[0].text
 
+        blocks = document.text_blocks
+        if all(block.page_number is not None for block in blocks):
+            blocks = sorted(blocks, key=lambda block: block.page_number)
+
         parts: list[str] = []
         last_page: int | None = None
-        for index, block in enumerate(document.text_blocks):
+        for index, block in enumerate(blocks):
             if block.page_number is not None:
                 # Emit `[PAGE_{block.page_number - 1}]` immediately *before*
                 # this block's text so downstream resolution lands on
@@ -328,59 +351,114 @@ class BaseChunker(ChunkingStrategy):
             self.text_splitter = self._build_text_splitter(self.chunk_size)
         return self.text_splitter.split_text(text)
 
-    def _prepare_md_elements(self, content: str) -> tuple[list[MDElement], list[MDElement]]:
-        """Separate markdown into (inline-able texts) and (standalone tables/images)."""
-        md_elements = split_md_elements(content)
-        tables_and_images: list[MDElement] = []
-        texts: list[MDElement] = []
+    def _prepare_md_elements(self, content: str) -> list[MDElement]:
+        """Return the document's markdown elements in source order.
 
-        for element in md_elements:
-            if element.type in ("table", "image"):
-                if element.type == "image":
-                    if is_placeholder_image(element.content):
-                        continue
-                    element.content = strip_placeholder_markers(element.content)
-                if self.length_function(element.content) <= _INLINE_ELEMENT_TOKEN_THRESHOLD:
-                    texts.append(element)
-                else:
-                    tables_and_images.append(element)
-            else:
-                texts.append(element)
-
-        return texts, tables_and_images
+        Images are normalized in place: a placeholder-only caption block is
+        dropped, real caption text keeps but without the marker. The list is
+        strictly ordered (#353) — ``_get_chunks`` walks it in a single pass,
+        so inline-vs-standalone is decided per element there rather than by
+        bucketing, which would lose the position of each element in the
+        document and scramble the emitted chunk order.
+        """
+        elements: list[MDElement] = []
+        for element in split_md_elements(content):
+            if element.type == "image":
+                if is_placeholder_image(element.content):
+                    continue
+                element.content = strip_placeholder_markers(element.content)
+            elements.append(element)
+        return elements
 
     def _get_chunks(self, content: str, metadata: dict[str, Any], body_size: int | None = None) -> list[dict[str, Any]]:
         """Produce per-chunk dicts with ``page_content`` + metadata fields.
 
-        The dict shape is intentional — it lets ``chunk()`` build ``Chunk``
-        objects without leaking domain types into the lower-level helpers.
-        *body_size* is what each chunk's content may use, ``chunk_size`` by default.
+        Elements are consumed in source order (#353): inline-able pieces
+        accumulate in a text buffer that is flushed — sanitized, split, and
+        emitted — right before each standalone table/image, so no prose is
+        ever joined across a standalone element and the list this returns
+        IS the document's reading order (``chunk()`` numbers ``chunk_index``
+        from it). The dict shape is intentional — it lets ``chunk()`` build
+        ``Chunk`` objects without leaking domain types into the lower-level
+        helpers. *body_size* is what each chunk's content may use, ``chunk_size``
+        by default.
         """
         body_size = self.chunk_size if body_size is None else body_size
-        texts, tables_and_images = self._prepare_md_elements(content=content)
-        # Reflow PDF line-wraps within each element, then join elements as
-        # paragraphs (blank line) so the splitter cuts on paragraph/sentence
-        # boundaries rather than mid-sentence line-wraps (#579).
-        combined_texts = "\n\n".join(dewrap_paragraphs(e.content) for e in texts)
+        elements = self._prepare_md_elements(content=content)
+        # A document can flush hundreds of times, so its splitter is built once.
+        split = self.split_text if body_size == self.chunk_size else self._build_text_splitter(body_size).split_text
 
-        sanitized = sanitize_text(
-            combined_texts,
-            normalize_whitespace=True,
-            remove_control_chars=True,
-            remove_zero_width_chars=True,
-            max_consecutive_newlines=2,
-            normalize_unicode=True,
-        )
-        text_chunks = self.split_text(sanitized, body_size)
-
+        # Each chunk dict spreads `metadata` first, so reserved per-chunk keys
+        # win over arbitrary `metadata` values — a stray "chunk_type" / "page" /
+        # "page_content" in the document's metadata would otherwise clobber the
+        # resolved value (and crash `chunk()` when ChunkType(...) is fed an
+        # out-of-enum string). Same defensive pattern as `_chunk_metadata_base`.
         chunks: list[dict[str, Any]] = []
+        buffer: list[str] = []  # dewrapped inline pieces awaiting the next flush
+        prev_page = 1
 
-        # Reserved per-chunk keys must win over arbitrary `metadata` values —
-        # a stray "chunk_type" / "page" / "page_content" in the document's
-        # metadata would otherwise clobber the resolved value (and crash
-        # `chunk()` when ChunkType(...) is fed an out-of-enum string). Same
-        # defensive pattern as `_chunk_metadata_base`.
-        for element in tables_and_images:
+        def flush_text() -> None:
+            """Sanitize and split the buffered prose, emitting its chunks."""
+            if not buffer:
+                return
+            # Join the reflowed pieces as paragraphs (blank line) so the splitter
+            # cuts on paragraph/sentence boundaries rather than mid-sentence
+            # line-wraps (#579).
+            combined_texts = "\n\n".join(buffer)
+            buffer.clear()
+            sanitized = sanitize_text(
+                combined_texts,
+                normalize_whitespace=True,
+                remove_control_chars=True,
+                remove_zero_width_chars=True,
+                max_consecutive_newlines=2,
+                normalize_unicode=True,
+            )
+            # Markers closing the buffer label nothing. Left in, one could split
+            # off with the replayed overlap, as a chunk with no new content.
+            sanitized = strip_trailing_page_markers(sanitized)
+            # A chunk is on the page of its first word, read from where it starts
+            # in `sanitized` (#1204). Text before the buffer's first marker carries
+            # on the page of the element before it, which the leading entry gives.
+            page_markers = [(-1, prev_page - 1)]
+            page_markers += [(match.start(), int(match.group(1))) for match in PAGE_RE.finditer(sanitized)]
+            previous_start = -1
+            previous_end = 0
+            for text_chunk in split(sanitized):
+                # The splitter returns substrings of `sanitized` in order, each
+                # starting after the previous one and, overlap or not, ending past
+                # it. Requiring both keeps repeated text from matching inside the
+                # previous chunk, where it would read that chunk's page.
+                search_from = max(previous_start + 1, previous_end - len(text_chunk) + 1)
+                start = sanitized.find(text_chunk, search_from)
+                if start < 0:
+                    start = search_from
+                previous_start = start
+                previous_end = start + len(text_chunk)
+                # A piece between two pages can still hold nothing but markers.
+                if not PAGE_RE.sub("", text_chunk).strip():
+                    continue
+                first_word = start + _LEADING_PAGE_MARKERS_RE.match(text_chunk).end()
+                chunks.append(
+                    {
+                        **metadata,
+                        "page_content": text_chunk.strip(),
+                        "page": get_page_number(first_word, page_markers),
+                        "chunk_type": "text",
+                    }
+                )
+
+        for element in elements:
+            # Tables/images under the inline threshold join the surrounding
+            # prose instead of becoming chunks of their own; only standalone
+            # elements flush what came before and take their place in order.
+            if element.type not in ("table", "image") or (
+                self.length_function(element.content) <= _INLINE_ELEMENT_TOKEN_THRESHOLD
+            ):
+                buffer.append(dewrap_paragraphs(element.content))
+                continue
+
+            flush_text()
             if element.type == "table" and self.length_function(element.content) > body_size:
                 if metadata.get("csv_columns"):
                     element.metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
@@ -411,38 +489,9 @@ class BaseChunker(ChunkingStrategy):
                         "chunk_type": ct,
                     }
                 )
+            prev_page = element.page_number or prev_page
 
-        # A chunk is on the page of its first word, read from where it starts
-        # in `sanitized` (#1204). Carrying the previous chunk's end page put a
-        # chunk that follows a trailing [PAGE_N] one page too low, and one that
-        # overlap starts before that marker one page too high.
-        page_markers = [(match.start(), int(match.group(1))) for match in PAGE_RE.finditer(sanitized)]
-        previous_start = -1
-        previous_end = 0
-        for c in text_chunks:
-            # The splitter returns substrings of `sanitized` in order, each
-            # starting after the previous one and, overlap or not, ending past
-            # it. Requiring both keeps repeated text from matching inside the
-            # previous chunk, where it would read that chunk's page.
-            search_from = max(previous_start + 1, previous_end - len(c) + 1)
-            start = sanitized.find(c, search_from)
-            if start < 0:
-                start = search_from
-            previous_start = start
-            previous_end = start + len(c)
-            first_word = start + _LEADING_PAGE_MARKERS_RE.match(c).end()
-            chunks.append(
-                {
-                    **metadata,
-                    "page_content": c.strip(),
-                    "page": get_page_number(first_word, page_markers),
-                    "chunk_type": "text",
-                }
-            )
-
-        if not chunks:
-            return []
-        chunks.sort(key=lambda d: d.get("page") or 0)
+        flush_text()
         return chunks
 
 
