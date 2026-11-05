@@ -3248,6 +3248,40 @@ def test_percentage_context_is_bounded_to_a_share_of_each_chunk():
     assert all(len(chunk.metadata["number_format_groups"]) == 30 for chunk in percentages)
 
 
+def test_number_format_groups_with_many_row_ranges_stay_exact():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "rate"])
+    for row in range(2, 102):
+        sheet.append([row, 0.5])
+        if row % 2 == 0:
+            sheet.cell(row, 2).number_format = "0.0%"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    groups = block.metadata["number_format_groups"]
+    # 50 separate formatted rows: split into groups of at most 32 exact ranges.
+    assert [len(group["row_ranges"]) for group in groups] == [32, 18]
+    assert all("row_ranges_truncated" not in group for group in groups)
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=16,
+        length_function=lambda text: len(text.split()),
+    )
+    for chunk in chunks:
+        formatted = {row for row in chunk.metadata["table_row_numbers"] if row % 2 == 0}
+        has_rate = "rate" in chunk.metadata["table_columns"]
+        assert bool(chunk.metadata.get("number_format_groups")) == (has_rate and bool(formatted))
+    assert any(
+        "rate" in chunk.metadata["table_columns"] and not chunk.metadata.get("number_format_groups") for chunk in chunks
+    )
+
+
 def test_number_format_context_is_scoped_to_chunk_rows_and_columns():
     from core.chunking.markdown_utils import MDElement, chunk_table
 

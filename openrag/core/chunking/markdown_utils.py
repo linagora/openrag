@@ -722,7 +722,7 @@ def _tabular_row_metadata(
 
         def intersects(group: dict) -> bool:
             ranges = group.get("row_ranges")
-            if isinstance(ranges, list) and not group.get("row_ranges_truncated"):
+            if isinstance(ranges, list):
                 return any(
                     isinstance(item, dict)
                     and any(item.get("start_row", 0) <= row <= item.get("end_row", -1) for row in selected_rows)
@@ -987,7 +987,9 @@ def _chunk_csv_row_per_column(
         # use the smallest viable budget instead of rejecting the whole file.
         # The expanded budget is exposed in metadata so this degradation is
         # observable without dropping or truncating the original column name.
-        effective_chunk_size = max(chunk_size, reserved_tokens + 1)
+        # Still give cell text a fair share, so an oversized header does not
+        # turn one long cell into thousands of one-token continuations.
+        effective_chunk_size = max(chunk_size, reserved_tokens + max(1, chunk_size // 4))
         cell_budget = effective_chunk_size - reserved_tokens
         if effective_chunk_size > chunk_size:
             metadata["csv_effective_chunk_size"] = effective_chunk_size
