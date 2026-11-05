@@ -2771,9 +2771,9 @@ def test_long_worksheet_note_is_indexed_once_across_table_batches(chunker_name):
     sheet = workbook.active
     sheet["A1"] = "Note: " + " ".join(f"word{index}" for index in range(300))
     sheet.append([])
-    sheet.append(["id", "label", "amount"])
+    sheet.append(["id", "label", "amount", "double"])
     for index in range(300):
-        sheet.append([index, f"line {index}", index * 10])
+        sheet.append([index, f"line {index}", index * 10, f"=C{index + 4}*2"])
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -2805,6 +2805,15 @@ def test_long_worksheet_note_is_indexed_once_across_table_batches(chunker_name):
     assert all(chunk.chunk_type is ChunkType.TABLE for chunk in table_chunks)
     rows = sorted(row for chunk in table_chunks for row in chunk.metadata["table_row_numbers"])
     assert set(rows) == set(range(4, 304))
+    # Each chunk keeps its own scoped metadata; the block's is not merged back.
+    table_only = ("table_columns", "csv_columns", "table_row_numbers", "formula_groups", "cell_range")
+    assert all(not set(table_only) & set(chunk.metadata) for chunk in note_chunks)
+    assert all("sheet_context" not in chunk.metadata for chunk in table_chunks)
+    assert all(chunk.metadata["sheet_context_indexed_separately"] for chunk in table_chunks)
+    for chunk in table_chunks:
+        rows_in_chunk = set(chunk.metadata["table_row_numbers"])
+        for group in chunk.metadata["formula_groups"]:
+            assert rows_in_chunk & set(range(group["start_row"], group["end_row"] + 1))
 
 
 def test_xlsx_continuation_restores_context_to_expanded_chunk_budget():
