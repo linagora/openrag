@@ -482,8 +482,10 @@ def _reader_loaded_parts(archive, names: set[str], relationship_nodes, limits: X
 def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) -> list[SheetInfo]:
     """Inspect actual cells, not untrusted dimension/count declarations.
 
-    Retain at most one XML row. This is an intentional extra sequential read:
-    it prevents malformed dimensions from driving excessive reader work.
+    Retain only the open element path: every completed element is released, and
+    a cell's children are summarized as they complete. This is an intentional
+    extra sequential read: it prevents malformed dimensions from driving
+    excessive reader work.
     Shared strings/styles are capped separately because readers load them eagerly.
     """
     try:
@@ -675,12 +677,24 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     band_first_cells = {}
                     band_column_extents = {}
 
-                # clear completed children so memory does not grow with row count.
+                # Release every completed element so memory stays bounded by one
+                # open path, whatever the element (rows, hyperlinks, extLst...).
+                # A cell's children are folded into these values as they
+                # complete, so a cell with many children retains none of them.
+                cell_open = False
+                cell_has_value = cell_has_formula = cell_has_inline_text = False
+                cell_value_text: str | None = None
+                cell_chars = 0
                 with archive.open(path) as stream:
                     stack = []
                     for event, element in iterparse(stream, events=("start", "end")):
                         if event == "start":
                             stack.append(element)
+                            if element.tag.endswith("}c"):
+                                cell_open = True
+                                cell_has_value = cell_has_formula = cell_has_inline_text = False
+                                cell_value_text = None
+                                cell_chars = 0
                             if element.tag.endswith("}row"):
                                 current_row = int(element.get("r", "0"))
                                 if current_row <= previous_row:
@@ -712,6 +726,17 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                     raise limit("XLSX cell count exceeds the limit")
                             continue
                         tag = element.tag.rsplit("}", 1)[-1]
+                        if cell_open and tag != "c":
+                            cell_chars += len(element.text or "")
+                            if cell_chars > limits.max_cell_chars:
+                                raise limit("XLSX cell text exceeds the character limit")
+                            direct_child = len(stack) > 1 and stack[-2].tag.endswith("}c")
+                            if tag == "v" and direct_child:
+                                cell_has_value, cell_value_text = True, element.text
+                            elif tag == "f" and direct_child:
+                                cell_has_formula = True
+                            elif tag == "t" and element.text:
+                                cell_has_inline_text = True
                         if tag == "col" and element.get("hidden", "0").lower() in {"1", "true"}:
                             start_column = int(element.get("min", "0"))
                             end_column = int(element.get("max", "0"))
@@ -719,35 +744,29 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 raise invalid("XLSX hidden column range is invalid")
                             hidden_columns.update(range(start_column, min(end_column, limits.max_columns) + 1))
                         if tag == "c":
-                            value = element.find("{*}v")
-                            formula = element.find("{*}f")
-                            if (
-                                formula is not None
-                                and element.get("t") == "str"
-                                and not (value is not None and value.text)
-                            ):
+                            cell_open = False
+                            has_formula = cell_has_formula
+                            value_text = cell_value_text
+                            has_value = cell_has_value
+                            if has_formula and element.get("t") == "str" and not value_text:
                                 # Calculated to an empty string (e.g. =IF(A2="","",...)
                                 # filled down a template): an empty cell, not content
                                 # and not a formula missing its cached result.
-                                formula = value = None
-                            if formula is not None and current_row not in hidden_rows:
+                                has_formula = has_value = False
+                                value_text = None
+                            if has_formula and current_row not in hidden_rows:
                                 visible_formula_columns[current_cell_column] = (
                                     visible_formula_columns.get(current_cell_column, 0) + 1
                                 )
-                                if value is None or not value.text:
+                                if not value_text:
                                     missing_formula_columns[current_cell_column] = (
                                         missing_formula_columns.get(current_cell_column, 0) + 1
                                     )
-                            if sum(len(t.text or "") for t in element.iter()) > limits.max_cell_chars:
-                                raise limit("XLSX cell text exceeds the character limit")
                             if element.get("t") == "s":
-                                string_index = int(value.text) if value is not None and value.text else -1
+                                string_index = int(value_text) if value_text else -1
                                 if not 0 <= string_index < shared_count:
                                     raise invalid("XLSX cell references a missing shared string")
-                            inline_text = any(node.text for node in element.iter() if node.tag.endswith("}t"))
-                            has_content = (
-                                formula is not None or (value is not None and value.text is not None) or inline_text
-                            )
+                            has_content = has_formula or (has_value and value_text is not None) or cell_has_inline_text
                             if has_content:
                                 # Only cells with content bound the reader's work: tables
                                 # are read up to their content, so an empty styled cell
@@ -818,10 +837,9 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                             if not rel_id:
                                 raise invalid("XLSX table part is missing a relationship identifier")
                             table_part_ids.append(rel_id)
-                        if tag in {"c", "row"} or len(stack) <= 2:
-                            if len(stack) > 1:
-                                stack[-2].remove(element)
-                            element.clear()
+                        if len(stack) > 1:
+                            stack[-2].remove(element)
+                        element.clear()
                         stack.pop()
                 finish_band()
                 if len(set(table_part_ids)) != len(table_part_ids) or set(table_part_ids) != set(table_relationships):
