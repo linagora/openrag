@@ -264,6 +264,61 @@ class TestEndToEnd:
         assert hybrid_store._loaded is True
 
     @pytest.mark.asyncio
+    async def test_full_upsert_preserves_existing_auto_id(self, dense_only_store: MilvusVectorStore) -> None:
+        # initialize() loads the collection, as required for full AutoID upserts.
+        await dense_only_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await dense_only_store.upsert([_chunk("before", "p1", 0.1, external_id=2**60)], vector_field=_FIELD)
+
+        before = await dense_only_store.query_chunks_by_filter(
+            dense_only_store._collection_name, {"partition": "p1"}, output_fields=["*"]
+        )
+        assert len(before) == 1
+
+        entity = {field: before[0][field] for field in ("_id", "text", "partition", "file_id", "external_id", _FIELD)}
+        entity["text"] = "after"
+        await dense_only_store.upsert_entities([entity])
+
+        after = await dense_only_store.query_chunks_by_filter(
+            dense_only_store._collection_name, {"partition": "p1"}, output_fields=["*"]
+        )
+        assert len(after) == 1
+        assert after[0]["_id"] == before[0]["_id"]
+        assert after[0]["text"] == "after"
+        assert after[0]["external_id"] == before[0]["external_id"]
+        assert after[0][_FIELD] == before[0][_FIELD]
+
+    @pytest.mark.asyncio
+    async def test_partial_upsert_preserves_large_metadata_integers(self, dense_only_store: MilvusVectorStore) -> None:
+        from loguru import logger as _logger
+
+        await dense_only_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await dense_only_store.upsert(
+            [_chunk("large integer metadata", "p1", 0.1, external_id=2**60, nested={"ids": [2**60 + 1]})],
+            vector_field=_FIELD,
+        )
+
+        before = await dense_only_store.query_chunks_by_filter(
+            dense_only_store._collection_name, {"partition": "p1"}, output_fields=["*"]
+        )
+        assert len(before) == 1
+        warnings: list[dict] = []
+        sink = _logger.add(lambda message: warnings.append(message.record), level="WARNING")
+        try:
+            await dense_only_store.write_vectors(_FIELD, {str(before[0]["_id"]): _embedding(0.2)})
+        finally:
+            _logger.remove(sink)
+
+        after = await dense_only_store.query_chunks_by_filter(
+            dense_only_store._collection_name, {"partition": "p1"}, output_fields=["*"]
+        )
+        assert len(after) == 1
+        assert after[0]["_id"] == before[0]["_id"]
+        assert after[0]["external_id"] == 2**60
+        assert after[0]["nested"] == {"ids": [2**60 + 1]}
+        assert dense_only_store._server_version == "3.0-20261030-af15c80751"
+        assert not any("large integers" in record["message"] for record in warnings)
+
+    @pytest.mark.asyncio
     async def test_search_before_collection_creation_returns_no_results(self, hybrid_store: MilvusVectorStore) -> None:
         hits = await hybrid_store.search(
             _embedding(0.1),
@@ -508,12 +563,14 @@ class TestQueryByFilter:
     async def test_query_chunks_returns_full_records(self, hybrid_store: MilvusVectorStore) -> None:
         await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         await hybrid_store.upsert([_chunk("only", "p1", 0.1)], vector_field=_FIELD)
-        rows = await hybrid_store.query_chunks_by_filter(hybrid_store._collection_name, {"partition": "p1"})
+        rows = await hybrid_store.query_chunks_by_filter(
+            hybrid_store._collection_name, {"partition": "p1"}, output_fields=["*"]
+        )
         assert rows
         assert rows[0]["partition"] == "p1"
         assert rows[0]["text"] == "only"
-        # Milvus 3.0 returns the dense fields for the default ``["*"]``
-        # projection (unlike the search path, which strips them).
+        # An explicit ``["*"]`` projection includes dense fields (unlike the
+        # search path, which strips them).
         # ``_safe_batch_size`` relies on this to shrink the query_iterator page
         # for wildcard reads, so assert the behaviour explicitly rather than
         # only documenting it in prose.

@@ -43,6 +43,7 @@ from typing import Any
 from core.chunking.markdown_utils import (
     PAGE_RE,
     MDElement,
+    attach_captions,
     chunk_table,
     split_md_elements,
 )
@@ -204,6 +205,7 @@ class _Unit:
     chunk_type: ChunkType = ChunkType.TEXT
     atomic: bool = False  # table / image — never merged into prose, never split by us
     metadata: dict[str, Any] = field(default_factory=dict)
+    caption: str = ""  # leads ``text``; repeated on every piece of a split table
 
     @property
     def start_page(self) -> int | None:
@@ -226,7 +228,6 @@ class StructuredSectionChunker(BaseChunker):
         inline_threshold: int | None = None,
         heading_keywords: tuple[str, ...] | list[str] | None = None,
         leaf_patterns: tuple[str, ...] | list[str] | None = None,
-        prepend_heading_path: bool = True,
         layout: str = "flowing",
         **kwargs: Any,
     ) -> None:
@@ -273,7 +274,6 @@ class StructuredSectionChunker(BaseChunker):
         # surrounding prose instead of becoming standalone chunks (matches the
         # recursive chunker's inline threshold).
         self._inline_threshold = inline_threshold if inline_threshold is not None else _INLINE_ELEMENT_TOKEN_THRESHOLD
-        self.prepend_heading_path = prepend_heading_path
         self.layout = layout
 
         keywords = tuple(k.lower() for k in (heading_keywords or _DEFAULT_HEADING_KEYWORDS))
@@ -315,27 +315,9 @@ class StructuredSectionChunker(BaseChunker):
 
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
-            # ``_build_units`` never emits a heading line as body — it updates
-            # the stack and continues, so a heading can't be stranded as an
-            # orphan chunk. That makes the header the *only* path by which
-            # heading text reaches the index. With ``prepend_heading_path``
-            # off, the breadcrumb is therefore kept inline at the top of the
-            # body instead of dropped: BM25 is declared over ``text`` alone, so
-            # a heading living only in ``metadata["hierarchy_path"]`` is
-            # unreachable by dense *and* sparse retrieval. The flag drops the
-            # verbose ``[Source | Page | Section]`` preamble, which is what an
-            # operator turning it off is asking for — not the document's
-            # structure.
             header = self._build_header(filename, unit.heading_path, unit.pages)
             body = unit.text.strip()
-            if self.prepend_heading_path:
-                text = f"{header}\n\n{body}" if header else body
-            else:
-                # No breadcrumb fallback needed any more — the heading lines are
-                # in the body themselves, so turning the preamble off no longer
-                # removes the document's structure from the index.
-                text = body
-                header = ""
+            text = f"{header}\n\n{body}" if header else body
             chunks.append(
                 Chunk(
                     document_id=metadata.get("file_id", ""),
@@ -519,7 +501,13 @@ class StructuredSectionChunker(BaseChunker):
             buf_len = 0
             buf_has_body = False
 
-        for element in split_md_elements(content):
+        # A placeholder image takes no caption: one beside it stays in the text
+        # instead of moving onto a neighbouring block it does not label.
+        elements = attach_captions(
+            split_md_elements(content),
+            takes_caption=lambda e: e.type != "image" or not is_placeholder_image(e.content),
+        )
+        for element in elements:
             if element.type in ("table", "image"):
                 # Non-informative images (the captioner's "[Image Placeholder]")
                 # are dropped, matching the recursive chunker — otherwise every
@@ -580,8 +568,7 @@ class StructuredSectionChunker(BaseChunker):
                     # it only in the breadcrumb made the breadcrumb its sole
                     # home, so every path-shortening step deleted it outright:
                     # _merge_small taking a _common_prefix dropped the differing
-                    # leaf, a sibling heading popped it before any body flushed,
-                    # and prepend_heading_path=False removed the last copy.
+                    # leaf, and a sibling heading popped it before any body flushed.
                     # Coverage against the source ran 91-99% where
                     # recursive_splitter ran ~100%.
                     #
@@ -633,6 +620,7 @@ class StructuredSectionChunker(BaseChunker):
             chunk_type=ctype,
             atomic=True,
             metadata=dict(element.metadata or {}),
+            caption=element.caption,
         )
 
     def _heading(self, line: str) -> tuple[int, str] | None:
@@ -717,8 +705,6 @@ class StructuredSectionChunker(BaseChunker):
         the filename is long, and the body then overshoots ``max`` by exactly
         the amount the estimate missed.
         """
-        if not self.prepend_heading_path:
-            return 0
         header = self._build_header(filename, heading_path, pages)
         return self.length_function(f"{header}\n\n") if header else 0
 
@@ -747,20 +733,24 @@ class StructuredSectionChunker(BaseChunker):
             # then replayed instead of the column header, leaving every
             # continuation piece a wall of unlabelled numbers. Split the table
             # alone and re-attach the heading to the first piece, which is the
-            # one it introduces.
+            # one it introduces. A caption labels the whole table, so it goes
+            # back on every piece and counts against each piece's budget.
             lead, table_text = _split_leading_headings(unit.text)
+            caption = f"{unit.caption}\n\n" if unit.caption else ""
             element = MDElement(
                 type="table",
-                content=table_text,
+                content=table_text.removeprefix(caption),
                 page_number=unit.start_page,
                 metadata=unit.metadata,
             )
-            subs = chunk_table(element, chunk_size=emax, length_function=self.length_function)
+            subs = chunk_table(
+                element, chunk_size=emax - self.length_function(caption), length_function=self.length_function
+            )
             pieces = [
                 _Unit(
                     heading_path=list(unit.heading_path),
-                    text=s.content.strip(),
-                    tokens=self.length_function(s.content),
+                    text=f"{caption}{s.content.strip()}",
+                    tokens=self.length_function(f"{caption}{s.content}"),
                     pages={s.page_number} if s.page_number else set(unit.pages),
                     chunk_type=ChunkType.TABLE,
                     atomic=True,

@@ -10,9 +10,12 @@ This module has no IO and no config dependency.
 
 from __future__ import annotations
 
+import bisect
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections import defaultdict
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
+from operator import itemgetter
 from typing import Any, Literal
 
 from core.utils.exceptions import PipelineError
@@ -42,6 +45,22 @@ IMAGE_RE = re.compile(r"(<image_description>(.*?)</image_description>)", re.DOTA
 # `[PAGE_N]` page-boundary markers — content BEFORE [PAGE_N] is on page N.
 PAGE_RE = re.compile(r"\[PAGE_(\d+)\]")
 
+# A figure/table caption: a numbered label opening the line (``*Table 2. …*``,
+# ``#### Figure 1.1: …``, ``Tableau 3 - …``). The separator required after the
+# number keeps body references (``Table 2 below shows…``, ``see Figure 3,``) out.
+_CAPTION_RE = re.compile(
+    r"^\W*(?:figure|fig\.|table|tableau|illustration|graphique|sch[ée]ma|exhibit|encadr[ée])"
+    r"\s*\d+(?:[.-]\d+)*\W*?[.:–—-](?!\d)",
+    re.IGNORECASE,
+)
+# A credit line (``Source: …``), which travels with an adjacent caption.
+_CREDIT_RE = re.compile(r"^\W*source\s*:", re.IGNORECASE)
+# A list-of-figures entry ends with its page number (``Figure 2: Map .... 14``).
+# Four digits are a year (``Market share in 2022``), not a page.
+_PAGE_REFERENCE_RE = re.compile(r"(?<!\d)\d{1,3}\W*$")
+# A Markdown heading opens a new section, so it never continues a caption.
+_MD_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
+
 
 ElementType = Literal["text", "table", "image"]
 
@@ -54,6 +73,8 @@ class MDElement:
     content: str
     page_number: int | None = None
     metadata: dict[str, Any] | None = None
+    #: The block's caption, also leading ``content`` (see ``attach_captions``).
+    caption: str = ""
 
     def __repr__(self) -> str:
         return f"MDElement(type={self.type}, page_number={self.page_number}, content={self.content[:100]}...)"
@@ -71,13 +92,8 @@ def get_page_number(position: int, page_markers: list[tuple[int, int]]) -> int:
     from ``[PAGE_N]`` matches. Content AFTER ``[PAGE_N]`` belongs to page
     ``N + 1``; content before any marker is page 1.
     """
-    current_page = 1
-    for marker_pos, page_num in page_markers:
-        if position >= marker_pos:
-            current_page = page_num + 1
-        else:
-            break
-    return current_page
+    i = bisect.bisect_right(page_markers, position, key=itemgetter(0))
+    return page_markers[i - 1][1] + 1 if i else 1
 
 
 def split_md_elements(md_text: str) -> list[MDElement]:
@@ -127,34 +143,128 @@ def split_md_elements(md_text: str) -> list[MDElement]:
     return parts
 
 
-def get_chunk_page_number(chunk_str: str, previous_chunk_ending_page: int = 1) -> dict[str, int]:
-    """Resolve start and end pages for a text chunk containing ``[PAGE_N]`` markers.
+def attach_captions(
+    elements: list[MDElement],
+    takes_caption: Callable[[MDElement], bool] = lambda block: True,
+) -> list[MDElement]:
+    """Move each figure/table caption onto the table or image block it labels.
 
-    Returns ``{"start_page": int, "end_page": int}``.
+    Parsers put a caption above or below its block, inconsistently even within
+    one document, so a caption run (caption paragraphs plus any ``Source:``
+    credit) touching a block on one side only belongs to that block. A run alone
+    between two blocks follows the document's majority side, defaulting to the
+    block above. Only blank lines and page markers may separate a caption from
+    its block; a caption with prose on both sides stays where it is. A block
+    ``takes_caption`` rejects (a placeholder image) still bounds a run, but a
+    caption touching it stays in the text.
+
+    The caption leads the block's content, so it reaches the embedded text, and
+    is kept in ``caption`` so a split table can repeat it on every piece.
     """
-    matches = list(PAGE_RE.finditer(chunk_str))
+    parts: list[MDElement] = []
+    for element in elements:
+        caption = _sole_caption(element)
+        if caption:
+            element = MDElement(type="text", content=caption)
+        if element.type == "text" and parts and parts[-1].type == "text":
+            parts[-1] = MDElement(type="text", content=f"{parts[-1].content}\n\n{element.content}")
+        else:
+            parts.append(element)
 
-    if not matches:
-        return {
-            "start_page": previous_chunk_ending_page,
-            "end_page": previous_chunk_ending_page,
-        }
+    def is_block(i: int) -> bool:
+        return 0 <= i < len(parts) and parts[i].type != "text"
 
-    first_match = matches[0]
-    last_match = matches[-1]
-    last_char_idx = len(chunk_str) - 1
+    claims: list[tuple[int, int, list[int]]] = []  # (text part, block part, caption line indexes)
+    contested: list[tuple[int, list[int]]] = []
+    for i, part in enumerate(parts):
+        if part.type != "text":
+            continue
+        lines = part.content.split("\n")
+        paragraphs = _paragraphs(lines)
+        below = _caption_run(lines, paragraphs) if is_block(i - 1) else []
+        above = _caption_run(lines, reversed(paragraphs)) if is_block(i + 1) else []
+        if below and below == above:
+            if takes_caption(parts[i - 1]) and takes_caption(parts[i + 1]):
+                contested.append((i, below))
+            continue
+        if below and takes_caption(parts[i - 1]):
+            claims.append((i, i - 1, below))
+        if above and takes_caption(parts[i + 1]):
+            claims.append((i, i + 1, above))
 
-    if first_match.start() == 0:
-        start_page = int(first_match.group(1)) + 1
+    below_wins = 2 * sum(block < text for text, block, _ in claims) >= len(claims)
+    claims += [(text, text - 1 if below_wins else text + 1, run) for text, run in contested]
+
+    captions: dict[int, list[str]] = defaultdict(list)
+    moved: dict[int, set[int]] = defaultdict(set)
+    for text, block, run in sorted(claims):
+        lines = parts[text].content.split("\n")
+        # A caption is not a heading, whatever ``#`` the parser gave it.
+        captions[block] += [lines[k].strip().lstrip("#").strip() for k in run]
+        moved[text].update(run)
+
+    out: list[MDElement] = []
+    for i, part in enumerate(parts):
+        if i in moved:
+            kept = [line for k, line in enumerate(part.content.split("\n")) if k not in moved[i]]
+            part = replace(part, content="\n".join(kept).strip())
+        if i in captions:
+            caption = "\n".join(captions[i])
+            part = replace(part, content=f"{caption}\n\n{part.content}", caption=caption)
+        if part.content:
+            out.append(part)
+    return out
+
+
+def _sole_caption(element: MDElement) -> str | None:
+    """The caption a parser emitted as a block of its own, if that is all the block holds.
+
+    Marker renders some captions as a one-cell table padded with empty cells,
+    and the captioner transcribes a caption set as a picture. A list of figures
+    (one caption per row) holds several captions and is left a table.
+    """
+    if element.type == "table":
+        texts = [cell for row in element.content.splitlines() for cell in row.strip().strip("|").split("|")]
+    elif element.type == "image":
+        texts = IMAGE_RE.sub(r"\2", element.content).splitlines()
     else:
-        start_page = previous_chunk_ending_page
+        return None
+    texts = [text.strip() for text in texts if text.strip(" :-")]
+    return texts[0] if len(texts) == 1 and _CAPTION_RE.match(texts[0]) else None
 
-    if last_match.end() - 1 == last_char_idx:
-        end_page = int(last_match.group(1))
-    else:
-        end_page = int(last_match.group(1)) + 1
 
-    return {"start_page": start_page, "end_page": max(start_page, end_page)}
+def _paragraphs(lines: list[str]) -> list[list[int]]:
+    """Line indexes of each paragraph: a run of non-blank lines, which a heading always opens."""
+    paragraphs: list[list[int]] = []
+    for k, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if paragraphs and paragraphs[-1][-1] == k - 1 and not _MD_HEADING_RE.match(line):
+            paragraphs[-1].append(k)
+        else:
+            paragraphs.append([k])
+    return paragraphs
+
+
+def _caption_run(lines: list[str], paragraphs: Iterable[list[int]]) -> list[int]:
+    """Line indexes of the caption and credit paragraphs at one edge of ``lines``.
+
+    Walks ``paragraphs`` past page markers, stopping at any other paragraph, so
+    a caption wrapped over several lines moves whole. Empty unless the run holds
+    a caption (a credit alone stays put), and empty for a list of figures:
+    several captions that all end with a page number.
+    """
+    run: list[int] = []
+    for paragraph in paragraphs:
+        head = lines[paragraph[0]].strip()
+        if _CAPTION_RE.match(head) or _CREDIT_RE.match(head):
+            run += paragraph
+        elif not PAGE_RE.fullmatch(head):
+            break
+    captions = [lines[k].strip() for k in run if _CAPTION_RE.match(lines[k].strip())]
+    if not captions or (len(captions) > 1 and all(_PAGE_REFERENCE_RE.search(c) for c in captions)):
+        return []
+    return sorted(run)
 
 
 def parse_markdown_table(markdown_table: str) -> tuple[list[str], list[list[str]]]:

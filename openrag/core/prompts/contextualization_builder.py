@@ -11,7 +11,8 @@ Format strings:
 
 from __future__ import annotations
 
-BASE_CHUNK_FORMAT = "* filename: {filename}\n\n[CHUNK_START]\n\n{content}\n\n[CHUNK_END]"
+# No filename here: the chunk text already starts with the chunker's ``[Source: ...]`` header.
+BASE_CHUNK_FORMAT = "[CHUNK_START]\n\n{content}\n\n[CHUNK_END]"
 CHUNK_FORMAT = "[CONTEXT]\n\n{chunk_context}\n\n" + BASE_CHUNK_FORMAT
 
 
@@ -65,7 +66,7 @@ def build_messages(
     ]
 
 
-def wrap_chunk_with_context(content: str, filename: str, chunk_context: str = "") -> str:
+def wrap_chunk_with_context(content: str, chunk_context: str = "") -> str:
     """Wrap a chunk in the ``[CONTEXT] ... [CHUNK_START] ... [CHUNK_END]`` envelope.
 
     If ``chunk_context`` is empty or whitespace-only, only the BASE_CHUNK_FORMAT
@@ -73,5 +74,5 @@ def wrap_chunk_with_context(content: str, filename: str, chunk_context: str = ""
     that don't run contextualization.
     """
     if chunk_context and chunk_context.strip():
-        return CHUNK_FORMAT.format(content=content, chunk_context=chunk_context, filename=filename)
-    return BASE_CHUNK_FORMAT.format(content=content, filename=filename)
+        return CHUNK_FORMAT.format(content=content, chunk_context=chunk_context)
+    return BASE_CHUNK_FORMAT.format(content=content)

@@ -20,6 +20,7 @@ from core.models.stage_progress import (
     StageTaskPhase,
 )
 from services.persistence.connection import _ALEMBIC_INI, _MIGRATIONS_DIR
+from services.workers.stage_event_writer import StageEventWriter
 from sqlalchemy import URL
 
 from .conftest import _admin_dsn, _admin_dsn_parts, _connect_admin
@@ -176,6 +177,65 @@ async def test_stage_event_delivery_is_idempotent_and_reports_conflicting_outcom
     state_with_unknown_final = (await repo.get_stage_progress_summaries([task_id]))[task_id]
     assert state_with_unknown_final.latest_sequence == 4
     assert state_with_unknown_final.expected_final_sequence is None
+
+    stale_loss_marker = unknown_final.model_copy(
+        update={"latest_sequence": 3, "snapshot_revision": 4, "known_loss": True}
+    )
+    await repo.write_stage_progress(events=[], summaries=[stale_loss_marker])
+    state_with_known_loss = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert state_with_known_loss.latest_sequence == 4
+    assert state_with_known_loss.snapshot_revision == 5
+    assert state_with_known_loss.known_loss is True
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
+async def test_permanent_event_error_does_not_rollback_sibling_task_writes(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    invalid_task_id = f"stage-history-invalid-{uuid4()}"
+    valid_task_id = f"stage-history-valid-{uuid4()}"
+    for task_id in (invalid_task_id, valid_task_id):
+        await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="test"))
+
+    invalid_event = _events(invalid_task_id)[1].model_copy(update={"duration_ms": 2**63})
+    valid_events = _events(valid_task_id)
+    result = await repo.write_stage_progress(
+        events=[invalid_event, *valid_events],
+        summaries=[_summary(invalid_task_id), _summary(valid_task_id)],
+    )
+
+    assert result.permanent_failed_task_ids == [invalid_task_id]
+    assert [row.task_id for row in result.coverage] == [valid_task_id]
+    assert await repo.get_stage_progress_summaries([invalid_task_id]) == {}
+    valid_state = (await repo.get_stage_progress_summaries([valid_task_id]))[valid_task_id]
+    assert valid_state.persisted_through_sequence == 2
+    assert [event.sequence for event in (await repo.get_stage_progress_events(valid_task_id, limit=100)).events] == [
+        1,
+        2,
+    ]
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = ANY($1::text[])", [invalid_task_id, valid_task_id])
+
+
+async def test_permanent_summary_error_persists_sanitized_loss_marker(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"stage-history-invalid-summary-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="test"))
+    invalid_summary = _summary(task_id).model_copy(update={"current_stage_id": "x" * 65})
+    writer = StageEventWriter(repo)
+
+    assert await writer._write_batch([], [invalid_summary]) is True
+    loss_marker = writer.pending_summaries[task_id]
+    assert loss_marker.known_loss is True
+    assert loss_marker.current_stage_id is None
+
+    await writer._write_batch([], [writer._summaries.pop(task_id)])
+
+    persisted = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert persisted.known_loss is True
+    assert persisted.current_stage_id is None
+    assert persisted.phase is StageTaskPhase.PREPARING
+    assert persisted.latest_sequence == invalid_summary.latest_sequence
 
     await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
 

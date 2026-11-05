@@ -18,9 +18,10 @@ from typing import Any
 
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.chunking.markdown_utils import (
+    PAGE_RE,
     MDElement,
     chunk_table,
-    get_chunk_page_number,
+    get_page_number,
     split_md_elements,
 )
 from core.chunking.registry import chunking_registry
@@ -82,9 +83,38 @@ def strip_placeholder_markers(content: str) -> str:
     return _COLLAPSE_BLANK_RE.sub("\n\n", _IMAGE_PLACEHOLDER_RE.sub("", content)).strip()
 
 
+# Longest filename tokenized for a chunk's header. An upload is saved under its
+# name, so the filesystem already stops it at 255 bytes; a name taken from a URL
+# (MCP index_url) has no such limit.
+_MAX_HEADER_FILENAME_CHARS = 255
+
+
+def source_header(filename: str, chunk_size: int, length_function: Callable[[str], int]) -> str | None:
+    """``[Source: <filename>]``, using at most half of *chunk_size*.
+
+    The body keeps the other half: each chunk costs an embedding and maybe an
+    LLM call, so a name must not be able to cut a document into thousands of
+    pieces, nor push a chunk past *chunk_size*. A longer name is shortened,
+    and a *chunk_size* with no room for one gets no header.
+    """
+    name = filename[:_MAX_HEADER_FILENAME_CHARS]
+    limit = chunk_size // 2
+    while name:
+        header = f"[Source: {name}]"
+        tokens = length_function(f"{header}\n\n")
+        if tokens <= limit:
+            return header
+        name = name[: min(len(name) - 1, len(name) * limit // tokens)]
+    return None
+
+
 # Tables/images smaller than this token count are inlined with surrounding
 # text rather than emitted as standalone chunks.
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
+
+# [PAGE_N] markers (and the whitespace around them) a chunk opens with: its
+# page is the one its first word sits on, after them.
+_LEADING_PAGE_MARKERS_RE = re.compile(r"(?:\s*\[PAGE_\d+\])*\s*")
 
 # A line that begins a markdown block (heading, list item, blockquote, table
 # row, code fence, horizontal rule, or a synthetic [PAGE_N] marker). Such lines
@@ -184,23 +214,41 @@ class BaseChunker(ChunkingStrategy):
             return []
 
         metadata = self._chunk_metadata_base(document, partition)
-        md_chunks = self._get_chunks(content=content.strip(), metadata=metadata)
 
-        return [
-            Chunk(
-                document_id=metadata.get("file_id", ""),
-                text=md_chunks_meta["page_content"],
-                chunk_index=i,
-                chunk_type=ChunkType(md_chunks_meta["chunk_type"]),
-                metadata={k: v for k, v in md_chunks_meta.items() if k not in ("page_content", "chunk_type", "page")},
-                partition=partition,
-                page_number=md_chunks_meta.get("page"),
-                # The embedder-window checks read the stored count instead of
-                # re-tokenising every chunk on the event loop.
-                token_count=self.length_function(md_chunks_meta["page_content"]),
+        # BM25 and the embedder read ``text``, and ``text`` is all the answering
+        # model gets: a name left in metadata cannot be found by a query like
+        # "what is report.pdf about?". No page here, unlike structured_section:
+        # this chunker's text chunks can carry the wrong page (#1204).
+        header = source_header(
+            str(metadata.get("filename") or metadata.get("source") or ""), self.chunk_size, self.length_function
+        )
+        # The header is embedded with the chunk, so it comes out of the budget.
+        body_size = self.chunk_size - self.length_function(f"{header}\n\n") if header else self.chunk_size
+        md_chunks = self._get_chunks(content=content.strip(), metadata=metadata, body_size=body_size)
+
+        chunks: list[Chunk] = []
+        for i, md_chunks_meta in enumerate(md_chunks):
+            body = md_chunks_meta["page_content"]
+            text = f"{header}\n\n{body}" if header else body
+            chunks.append(
+                Chunk(
+                    document_id=metadata.get("file_id", ""),
+                    text=text,
+                    chunk_index=i,
+                    chunk_type=ChunkType(md_chunks_meta["chunk_type"]),
+                    metadata={
+                        k: v for k, v in md_chunks_meta.items() if k not in ("page_content", "chunk_type", "page")
+                    },
+                    partition=partition,
+                    page_number=md_chunks_meta.get("page"),
+                    # The embedder-window checks read the stored count instead of
+                    # re-tokenising every chunk on the event loop.
+                    token_count=self.length_function(text),
+                    header=header,
+                    content=body if header else None,
+                )
             )
-            for i, md_chunks_meta in enumerate(md_chunks)
-        ]
+        return chunks
 
     # ------------------------------------------------------------------
     # Helpers
@@ -256,20 +304,28 @@ class BaseChunker(ChunkingStrategy):
             "partition": partition,
         }
 
-    def split_text(self, text: str) -> list[str]:
+    def _build_text_splitter(self, chunk_size: int) -> Any:
+        """A splitter for *chunk_size*, with this chunker's overlap rate."""
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+        return RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=int(chunk_size * self.chunk_overlap_rate),
+            length_function=self.length_function,
+        )
+
+    def split_text(self, text: str, chunk_size: int | None = None) -> list[str]:
         """Split a text string with the configured text splitter.
 
         Lazy-initializes a ``RecursiveCharacterTextSplitter`` if a subclass
-        forgot to set one — preserves legacy behavior.
+        forgot to set one, which preserves legacy behavior. A *chunk_size* other than
+        the configured one gets its own splitter: chunkers are shared across
+        threads, so the configured one is never resized.
         """
+        if chunk_size is not None and chunk_size != self.chunk_size:
+            return self._build_text_splitter(chunk_size).split_text(text)
         if self.text_splitter is None:
-            from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-            self.text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap,
-                length_function=self.length_function,
-            )
+            self.text_splitter = self._build_text_splitter(self.chunk_size)
         return self.text_splitter.split_text(text)
 
     def _prepare_md_elements(self, content: str) -> tuple[list[MDElement], list[MDElement]]:
@@ -293,12 +349,14 @@ class BaseChunker(ChunkingStrategy):
 
         return texts, tables_and_images
 
-    def _get_chunks(self, content: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    def _get_chunks(self, content: str, metadata: dict[str, Any], body_size: int | None = None) -> list[dict[str, Any]]:
         """Produce per-chunk dicts with ``page_content`` + metadata fields.
 
         The dict shape is intentional — it lets ``chunk()`` build ``Chunk``
         objects without leaking domain types into the lower-level helpers.
+        *body_size* is what each chunk's content may use, ``chunk_size`` by default.
         """
+        body_size = self.chunk_size if body_size is None else body_size
         texts, tables_and_images = self._prepare_md_elements(content=content)
         # Reflow PDF line-wraps within each element, then join elements as
         # paragraphs (blank line) so the splitter cuts on paragraph/sentence
@@ -313,7 +371,7 @@ class BaseChunker(ChunkingStrategy):
             max_consecutive_newlines=2,
             normalize_unicode=True,
         )
-        text_chunks = self.split_text(sanitized)
+        text_chunks = self.split_text(sanitized, body_size)
 
         chunks: list[dict[str, Any]] = []
 
@@ -323,12 +381,12 @@ class BaseChunker(ChunkingStrategy):
         # `chunk()` when ChunkType(...) is fed an out-of-enum string). Same
         # defensive pattern as `_chunk_metadata_base`.
         for element in tables_and_images:
-            if element.type == "table" and self.length_function(element.content) > self.chunk_size:
+            if element.type == "table" and self.length_function(element.content) > body_size:
                 if metadata.get("csv_columns"):
                     element.metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
                 subtables = chunk_table(
                     table_element=element,
-                    chunk_size=self.chunk_size,
+                    chunk_size=body_size,
                     length_function=self.length_function,
                 )
                 chunks.extend(
@@ -354,15 +412,30 @@ class BaseChunker(ChunkingStrategy):
                     }
                 )
 
-        prev_page = 1
+        # A chunk is on the page of its first word, read from where it starts
+        # in `sanitized` (#1204). Carrying the previous chunk's end page put a
+        # chunk that follows a trailing [PAGE_N] one page too low, and one that
+        # overlap starts before that marker one page too high.
+        page_markers = [(match.start(), int(match.group(1))) for match in PAGE_RE.finditer(sanitized)]
+        previous_start = -1
+        previous_end = 0
         for c in text_chunks:
-            page_info = get_chunk_page_number(chunk_str=c, previous_chunk_ending_page=prev_page)
-            prev_page = page_info["end_page"]
+            # The splitter returns substrings of `sanitized` in order, each
+            # starting after the previous one and, overlap or not, ending past
+            # it. Requiring both keeps repeated text from matching inside the
+            # previous chunk, where it would read that chunk's page.
+            search_from = max(previous_start + 1, previous_end - len(c) + 1)
+            start = sanitized.find(c, search_from)
+            if start < 0:
+                start = search_from
+            previous_start = start
+            previous_end = start + len(c)
+            first_word = start + _LEADING_PAGE_MARKERS_RE.match(c).end()
             chunks.append(
                 {
                     **metadata,
                     "page_content": c.strip(),
-                    "page": page_info["start_page"],
+                    "page": get_page_number(first_word, page_markers),
                     "chunk_type": "text",
                 }
             )
@@ -394,11 +467,14 @@ class RecursiveSplitter(BaseChunker):
             length_function=length_function,
             **kwargs,
         )
+        self.text_splitter = self._build_text_splitter(self.chunk_size)
+
+    def _build_text_splitter(self, chunk_size: int) -> Any:
         from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
+        return RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=int(chunk_size * self.chunk_overlap_rate),
             length_function=self.length_function,
             is_separator_regex=True,
             # Paragraph → sentence → line → word. A single "\n" is a last
