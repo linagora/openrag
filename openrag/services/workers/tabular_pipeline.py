@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from core.indexing.topic_tags import TopicTagSample
 from core.models.document import ProcessedDocument
 from core.observability.metric_specs import STAGE_VALUES
 from core.observability.ray_metrics import observe_stage_duration, record_parse_completion, seed_parse_watchdog
+from core.utils.exceptions import PipelineError
 from core.utils.logging import get_logger
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
@@ -18,65 +20,94 @@ from services.workers.stages.topic_tag import topic_tag_stage
 
 logger = get_logger()
 
+_MAX_CONCURRENT_TABULAR_READS = 8
+_TABULAR_READ_SLOTS = threading.BoundedSemaphore(_MAX_CONCURRENT_TABULAR_READS)
+
 
 class _AsyncBatchReader:
     """Read a synchronous iterator without making cancellation wait on its thread.
 
-    Python cannot stop a thread already inside ``next()``.  On timeout or
-    cancellation, keep the iterator alive until that read returns, then close
-    it from the event-loop thread.  This lets the indexing task fail promptly
-    without closing parser resources while they are still in use.
+    Python cannot stop a thread already inside ``next()``. On timeout or
+    cancellation, ask that worker thread to close the iterator after the read
+    returns. A bounded semaphore prevents abandoned reads from exhausting the
+    default executor while keeping parser resource access on one thread.
     """
 
     def __init__(self, batches):
         self.batches = batches
         self.pending: asyncio.Task | None = None
-        self.read_finished: asyncio.Event | None = None
         self.closed = False
+        self._state_lock = threading.Lock()
+        self._read_in_progress = False
+        self._close_requested = False
+        self._read_slots = _TABULAR_READ_SLOTS
 
-    def _read_one(self, loop: asyncio.AbstractEventLoop, read_finished: asyncio.Event):
+    def _take_close_callback_locked(self):
+        if self.closed:
+            return None
+        self.closed = True
+        return getattr(self.batches, "close", None)
+
+    def _read_one(self):
         try:
             return next(self.batches, None)
         finally:
-            loop.call_soon_threadsafe(read_finished.set)
+            close = None
+            with self._state_lock:
+                self._read_in_progress = False
+                if self._close_requested:
+                    close = self._take_close_callback_locked()
+            try:
+                if close is not None:
+                    close()
+            finally:
+                self._read_slots.release()
+
+    def _read_done(self, pending: asyncio.Task):
+        try:
+            pending.exception()
+        except asyncio.CancelledError:
+            pass
+        with self._state_lock:
+            if self.pending is pending:
+                self.pending = None
 
     async def next(self):
         # next(..., None) avoids propagating StopIteration through a Future.
-        read_finished = asyncio.Event()
-        self.read_finished = read_finished
-        pending = asyncio.create_task(asyncio.to_thread(self._read_one, asyncio.get_running_loop(), read_finished))
-        self.pending = pending
-        try:
-            return await asyncio.shield(pending)
-        finally:
-            if pending.done() and read_finished.is_set() and self.pending is pending:
-                self.pending = None
+        with self._state_lock:
+            if self.closed or self._close_requested:
+                raise RuntimeError("Tabular batch reader is closed")
+            if self._read_in_progress:
+                raise RuntimeError("A tabular batch read is already in progress")
+            if not self._read_slots.acquire(blocking=False):
+                raise PipelineError("Too many tabular parser reads are still running")
+            self._read_in_progress = True
 
-    def _close(self):
-        if self.closed:
-            return
-        self.closed = True
-        close = getattr(self.batches, "close", None)
-        if close is not None:
-            close()
+        try:
+            pending = asyncio.create_task(asyncio.to_thread(self._read_one))
+        except BaseException:
+            with self._state_lock:
+                self._read_in_progress = False
+            self._read_slots.release()
+            raise
+
+        with self._state_lock:
+            self.pending = pending
+        pending.add_done_callback(self._read_done)
+        return await asyncio.shield(pending)
 
     async def aclose(self):
-        pending = self.pending
-        read_finished = self.read_finished
-        if pending is None or read_finished is None or read_finished.is_set():
-            if pending is not None:
-                await asyncio.gather(pending, return_exceptions=True)
-            self._close()
-            return
+        close = None
+        with self._state_lock:
+            self._close_requested = True
+            if not self._read_in_progress:
+                close = self._take_close_callback_locked()
+            pending = self.pending
 
-        async def close_after_read():
-            # The asyncio Task may be cancelled while its worker thread is
-            # still executing.  The worker signals the loop-owned event when
-            # it returns, so this does not occupy an executor thread.
-            await read_finished.wait()
-            self._close()
-
-        asyncio.create_task(close_after_read())
+        if close is not None:
+            close()
+        if pending is not None and pending.done():
+            await asyncio.gather(pending, return_exceptions=True)
 
 
 def _safe_tracking_call(tracker, method: str, *args, **kwargs) -> None:
