@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from operator import itemgetter
 from typing import Any, Literal
 
+from core.utils.consts import XLSX_TEXT_NUMBER_FORMAT_KINDS
 from core.utils.exceptions import PipelineError
 from core.utils.text import clean_markdown_table_spacing
 
@@ -362,6 +363,8 @@ def chunk_table(
 # so it is indexed once, as its own chunks, with the table's first batch.
 _XLSX_SHEET_CONTEXT_MAX_SHARE = 0.25
 _XLSX_SHEET_CONTEXT_HEADING = "Worksheet context (before column headers):"
+# Formula and display context is optional text: at most this share of a chunk.
+_XLSX_SUPPLEMENTAL_CONTEXT_MAX_SHARE = 0.2
 # Metadata that describes table rows/columns and must not travel to context chunks.
 _XLSX_TABLE_ONLY_PREFIXES = ("csv_", "formula_", "number_format_", "table_header", "table_row", "table_column")
 
@@ -452,59 +455,34 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
         page_number=element.page_number,
         metadata={**element.metadata, "table_columns": rendered_columns, "csv_columns": rendered_columns},
     )
+    # Rows first. Formula and display context is supplemental: reserve a fixed
+    # share of the budget for it (less when it is smaller), split the rows once,
+    # then add context lines to each chunk while they fit. Everything else stays
+    # in metadata, so no table explodes into per-column chunks or is rejected
+    # because of optional text.
+    text_number_format_groups = [
+        group
+        for group in element.metadata.get("number_format_groups", [])
+        if include_number_format_context and group.get("kind") in XLSX_TEXT_NUMBER_FORMAT_KINDS
+    ]
+    full_supplemental = _xlsx_number_format_context(text_number_format_groups) + _xlsx_formula_context(
+        element.metadata.get("formula_groups", [])
+    )
+    supplemental_budget = (
+        min(int(chunk_size * _XLSX_SUPPLEMENTAL_CONTEXT_MAX_SHARE), length_function(full_supplemental))
+        if full_supplemental
+        else 0
+    )
+    if separator_tokens + base_context_tokens + supplemental_budget >= chunk_size:
+        supplemental_budget = 0
     # Reserve the separator between header and body (the shared CSV splitter
     # counts those independently). Verify the complete rendered result below.
     chunks = _chunk_csv_table(
         table,
         table_element=safe_element,
-        chunk_size=chunk_size - separator_tokens - base_context_tokens,
+        chunk_size=chunk_size - separator_tokens - base_context_tokens - supplemental_budget,
         length_function=length_function,
     )
-
-    def supplemental_context(candidate):
-        candidate_positions = [column_positions[name] for name in candidate.metadata["table_columns"]]
-        worksheet_columns = element.metadata.get("table_worksheet_column_indices")
-        selected_columns = (
-            [worksheet_columns[index] for index in candidate_positions]
-            if isinstance(worksheet_columns, list) and len(worksheet_columns) == len(original_columns)
-            else [element.metadata.get("table_start_column", 1) + index for index in candidate_positions]
-        )
-
-        def excel_column(index):
-            name = ""
-            while index:
-                index, remainder = divmod(index - 1, 26)
-                name = chr(65 + remainder) + name
-            return name
-
-        selected = {excel_column(index) for index in selected_columns}
-        formula = _xlsx_formula_context(
-            [group for group in element.metadata.get("formula_groups", []) if group.get("target_column") in selected]
-        )
-        number_format = (
-            _xlsx_number_format_context(
-                [
-                    group
-                    for group in element.metadata.get("number_format_groups", [])
-                    if group.get("target_column") in selected
-                ]
-            )
-            if include_number_format_context
-            else ""
-        )
-        return number_format + formula
-
-    # The shared splitter may split a wide table by columns. Reserve only the
-    # formula/display context that can accompany one resulting column group,
-    # rather than rejecting the table because all groups combined are large.
-    supplemental_tokens = max((length_function(supplemental_context(candidate)) for candidate in chunks), default=0)
-    if supplemental_tokens and separator_tokens + base_context_tokens + supplemental_tokens < chunk_size:
-        chunks = _chunk_csv_table(
-            table,
-            table_element=safe_element,
-            chunk_size=chunk_size - separator_tokens - base_context_tokens - supplemental_tokens,
-            length_function=length_function,
-        )
     for chunk in chunks:
         metadata = chunk.metadata
         if detach_sheet_context:
@@ -574,14 +552,31 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
             metadata["number_format_groups"] = selected_number_formats
         else:
             metadata.pop("number_format_groups", None)
-        chunk_formula_context = _xlsx_formula_context(selected_groups)
+        # Formulas first, then percentage and currency displays, while they fit.
+        text_formulas: list[dict] = []
+        text_number_formats: list[dict] = []
+        candidates = [(text_formulas, group) for group in selected_groups] + [
+            (text_number_formats, group)
+            for group in selected_number_formats
+            if include_number_format_context and group.get("kind") in XLSX_TEXT_NUMBER_FORMAT_KINDS
+        ]
+        context_truncated = False
+        for target, group in candidates:
+            target.append(group)
+            rendered = _xlsx_number_format_context(text_number_formats) + _xlsx_formula_context(text_formulas)
+            if length_function(rendered) > supplemental_budget:
+                target.pop()
+                context_truncated = True
+        if context_truncated:
+            metadata["supplemental_context_truncated"] = True
+        else:
+            metadata.pop("supplemental_context_truncated", None)
+        chunk_formula_context = _xlsx_formula_context(text_formulas)
         if chunk_formula_context:
             metadata["formula_context"] = chunk_formula_context
         else:
             metadata.pop("formula_context", None)
-        chunk_number_format_context = (
-            _xlsx_number_format_context(selected_number_formats) if include_number_format_context else ""
-        )
+        chunk_number_format_context = _xlsx_number_format_context(text_number_formats)
         if chunk_number_format_context:
             metadata["number_format_context"] = chunk_number_format_context
         else:

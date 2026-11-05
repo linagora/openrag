@@ -3031,6 +3031,63 @@ def test_normalizes_safe_currency_locale_and_rejects_unknown_bracket_payloads():
     assert "instruction" not in block.text
 
 
+def _wide_formatted_chunks(number_format, columns=30, rows=300):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.models.document import ProcessedDocument
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append([f"col{column}" for column in range(columns)])
+    for row in range(rows):
+        sheet.append([(row + 1) * (column + 1) * 1.5 for column in range(columns)])
+        if number_format:
+            for column in range(columns):
+                sheet.cell(row + 2, column + 1).number_format = number_format
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    def words(text):
+        return len(text.split())
+
+    chunker = RecursiveSplitter(chunk_size=512, chunk_overlap_rate=0, length_function=words)
+    return [
+        chunk
+        for block in XlsxParser().iter_batches(Document(raw_bytes=output.getvalue()))
+        for chunk in chunker.chunk(
+            ProcessedDocument(document_id="wide", text_blocks=[block], metadata=dict(block.metadata))
+        )
+    ], words
+
+
+def test_plain_number_formats_do_not_multiply_wide_table_chunks():
+    general, _ = _wide_formatted_chunks(None)
+    formatted, _ = _wide_formatted_chunks("#,##0.00")
+
+    assert len(formatted) == len(general)
+    # Rows stay whole: no chunk is a column group of a row.
+    assert all(len(chunk.metadata["table_columns"]) == 30 for chunk in formatted)
+    assert all("Display format context" not in chunk.text for chunk in formatted)
+    # The display groups remain available in metadata.
+    assert all(chunk.metadata["number_format_groups"] for chunk in formatted)
+
+
+def test_percentage_context_is_bounded_to_a_share_of_each_chunk():
+    general, words = _wide_formatted_chunks(None)
+    percentages, _ = _wide_formatted_chunks("0.00%")
+
+    assert len(percentages) < 2 * len(general)
+    assert all(len(chunk.metadata["table_columns"]) == 30 for chunk in percentages)
+    for chunk in percentages:
+        context = chunk.metadata.get("number_format_context", "")
+        assert "percentage format" in context
+        assert words(context) <= 512 * 0.2
+        assert chunk.token_count <= 512
+    # Not every column's line fits the share; the rest is kept in metadata.
+    assert all(chunk.metadata.get("supplemental_context_truncated") for chunk in percentages)
+    assert all(len(chunk.metadata["number_format_groups"]) == 30 for chunk in percentages)
+
+
 def test_number_format_context_is_scoped_to_chunk_rows_and_columns():
     from core.chunking.markdown_utils import MDElement, chunk_table
 
@@ -3056,9 +3113,13 @@ def test_number_format_context_is_scoped_to_chunk_rows_and_columns():
     )
 
     assert chunks
-    assert any("rate" not in chunk.metadata["table_columns"] for chunk in chunks)
-    assert any("amount" not in chunk.metadata["table_columns"] for chunk in chunks)
+    # Rows first: display context no longer forces the table into column groups.
+    assert all(chunk.metadata["table_columns"] == ["id", "rate", "amount"] for chunk in chunks)
     for chunk in chunks:
+        # Only percentages and currencies are stated in text; the rest stays in metadata.
+        assert "scientific format" not in chunk.content
+        if 3 in chunk.metadata["table_row_numbers"]:
+            assert any(group["kind"] == "scientific" for group in chunk.metadata["number_format_groups"])
         selected_columns = set(chunk.metadata["table_columns"])
         formats = chunk.metadata.get("number_format_groups", [])
         assert all(group["target_header"] in selected_columns for group in formats)
