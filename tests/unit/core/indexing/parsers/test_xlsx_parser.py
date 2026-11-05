@@ -102,8 +102,9 @@ def test_detects_and_extracts_each_table_region_with_exact_coordinates():
     sheet.title = "Dashboard"
     for row in (("person_id", "name"), ("P-1", "Alice")):
         sheet.append(row)
-    sheet["D1"], sheet["E1"] = "office_id", "city"
-    sheet["D2"], sheet["E2"] = "O-1", "Paris"
+    # Two blank columns: a single blank column would join equal-height halves.
+    sheet["E1"], sheet["F1"] = "office_id", "city"
+    sheet["E2"], sheet["F2"] = "O-1", "Paris"
     sheet["L30"], sheet["M30"] = "metric", "value"
     sheet["L31"], sheet["M31"] = "latency", 42
     output = BytesIO()
@@ -120,12 +121,12 @@ def test_detects_and_extracts_each_table_region_with_exact_coordinates():
     assert all(block.metadata["worksheet_table_count"] == 3 for block in blocks)
     assert [block.metadata["table_range"] for block in blocks] == [
         "'Dashboard'!A1:B2",
-        "'Dashboard'!D1:E2",
+        "'Dashboard'!E1:F2",
         "'Dashboard'!L30:M31",
     ]
     assert [block.metadata["table_header_range"] for block in blocks] == [
         "'Dashboard'!A1:B1",
-        "'Dashboard'!D1:E1",
+        "'Dashboard'!E1:F1",
         "'Dashboard'!L30:M30",
     ]
     assert [block.metadata["table_row_numbers"] for block in blocks] == [[2], [2], [31]]
@@ -865,6 +866,68 @@ def test_blank_spacer_continuation_requires_typed_data_with_the_same_columns(row
     ]
 
     assert [block.metadata["table_columns"] for block in blocks] == expected_columns
+
+
+def test_one_blank_spacer_column_does_not_split_a_table():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Nom", "Age", None, "Ville", "Salaire", "Brut"])
+    for row_number, (name, age, city, salary) in enumerate(
+        [("Alice", 30, "Paris", 3000), ("Bob", 31, "Lyon", 3100)], start=2
+    ):
+        sheet.append([name, age, None, city, salary, f"=E{row_number}*1.25"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_columns"] == ["Nom", "Age", "Ville", "Salaire", "Brut"]
+    assert block.metadata["table_range"] == "'Sheet'!A1:F3"
+    # The spacer is not a column of the table, but citations keep worksheet columns.
+    assert block.metadata["table_worksheet_column_indices"] == [1, 2, 4, 5, 6]
+    assert "| Alice | 30 | Paris | 3000 |" in block.text
+    assert block.metadata["formula_groups"][0]["semantic_expression"] == "Brut = Salaire*1.25"
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=40,
+        length_function=lambda text: len(text.split()),
+    )
+    assert chunks
+    assert all("|  |" not in chunk.content.split("\n", 1)[0] for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # Halves that do not cover the same rows are separate tables.
+        [["Nom", "Age", None, "Produit", "Prix"], ["Alice", 30, None, "Pomme", 2], [None, None, None, "Poire", 3]],
+        # Two blank columns are a deliberate separation.
+        [["Nom", "Age", None, None, "Ville"], ["Alice", 30, None, None, "Paris"]],
+    ],
+)
+def test_spacer_column_join_requires_one_column_and_the_same_rows(rows):
+    blocks = list(XlsxParser().iter_batches(_document(rows)))
+
+    assert len(blocks) == 2
+    assert blocks[0].metadata["table_columns"] == ["Nom", "Age"]
+
+
+def test_excel_table_in_a_spacer_column_keeps_both_sides_separate():
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in (["Nom", "Age", "Code", "Ville", "Pays"], ["Alice", 30, "X", "Paris", "FR"]):
+        sheet.append(row)
+    sheet.add_table(Table(displayName="Codes", ref="C1:C2"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [["Nom", "Age"], ["Code"], ["Ville", "Pays"]]
 
 
 def test_style_only_cells_do_not_create_false_table_regions():
@@ -1622,11 +1685,12 @@ def test_formula_groups_remain_scoped_to_detected_tables_and_worksheets():
         sheet.append(["quantity", "price", "total"])
         for row_number in range(2, 22):
             sheet.append([row_number, row_number * 10, f"=A{row_number}+B{row_number}"])
-    first["E1"], first["F1"], first["G1"] = "hours", "rate", "cost"
+    # Two blank columns keep the second table separate.
+    first["F1"], first["G1"], first["H1"] = "hours", "rate", "cost"
     for row_number in range(2, 22):
-        first.cell(row_number, 5, row_number)
-        first.cell(row_number, 6, row_number * 100)
-        first.cell(row_number, 7, f"=E{row_number}*F{row_number}")
+        first.cell(row_number, 6, row_number)
+        first.cell(row_number, 7, row_number * 100)
+        first.cell(row_number, 8, f"=F{row_number}*G{row_number}")
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -1640,7 +1704,7 @@ def test_formula_groups_remain_scoped_to_detected_tables_and_worksheets():
     ]
     assert [block.metadata["formula_groups"][0]["range"] for block in blocks] == [
         "C2:C21",
-        "G2:G21",
+        "H2:H21",
         "C2:C21",
     ]
     assert [block.metadata["formula_groups"][0]["semantic_expression"] for block in blocks] == [

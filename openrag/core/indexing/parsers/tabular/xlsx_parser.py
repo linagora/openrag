@@ -867,11 +867,18 @@ def _compact_number_formats(
     return result, "\n\n" + "\n".join(lines), truncated
 
 
+def _table_columns(table: TableRegion, info: SheetInfo) -> list[int]:
+    """Worksheet columns extracted for a table: visible, and not a blank spacer."""
+    return [
+        column
+        for column in range(table.start_column, table.end_column + 1)
+        if column not in info.hidden_columns and column not in table.spacer_columns
+    ]
+
+
 def _visible_rows(rows, table: TableRegion, info: SheetInfo):
     """Mask hidden cells and expand source-backed vertical row-header merges."""
-    visible_columns = [
-        column for column in range(table.start_column, table.end_column + 1) if column not in info.hidden_columns
-    ]
+    visible_columns = _table_columns(table, info)
     visible_offsets = [column - table.start_column for column in visible_columns]
     column_positions = {column: index for index, column in enumerate(visible_columns)}
     merge_starts: dict[int, list[tuple[int, int]]] = {}
@@ -1175,11 +1182,7 @@ class XlsxParser(TabularBatchParser):
                     for cells_block in self._cell_blocks(document, pending_sheet, hidden_count, pending_cells):
                         content_rows_seen += len(cells_block.metadata["cell_row_numbers"])
                         yield cells_block
-                visible_columns = [
-                    column
-                    for column in range(table.start_column, table.end_column + 1)
-                    if column not in sheet.hidden_columns
-                ]
+                visible_columns = _table_columns(table, sheet)
                 visible_column_count = len(visible_columns)
                 if visible_column_count == 0:
                     continue
@@ -1573,9 +1576,7 @@ class XlsxParser(TabularBatchParser):
         number_formats_truncated,
     ):
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
-        visible_columns = [
-            column for column in range(table.start_column, table.end_column + 1) if column not in sheet.hidden_columns
-        ]
+        visible_columns = _table_columns(table, sheet)
         first_column = _column_name(visible_columns[0])
         last_column = _column_name(visible_columns[-1])
         metadata = {

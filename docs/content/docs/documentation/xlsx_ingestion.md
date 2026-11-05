@@ -24,7 +24,7 @@ Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a
 
 ## Table detection
 
-OpenRAG detects independent table regions from content-bearing cells during its bounded OOXML preflight. A fully blank row or column separates ordinary cell ranges. A single later row with the same column span as a preceding table is retained as a sparse continuation rather than being lost as a header-only table. Likewise, a block after a blank spacer row that has the same column span as the preceding table and whose first row contains a number, date, boolean, or error value continues that table under its header, since a header row is text. A block whose first row is all text may be the header of an independent table and stays separate; its header detection is reported as `ambiguous` when that cannot be decided. Source-defined Excel Tables are also treated as authoritative regions, so two Excel Tables remain independent even when their populated areas touch horizontally or vertically. Tables may therefore be stacked, placed side by side, or start away from `A1`, such as at `L30`.
+OpenRAG detects independent table regions from content-bearing cells during its bounded OOXML preflight. A fully blank row separates ordinary cell ranges, as do two or more fully blank columns. A single blank column between two blocks that cover exactly the same rows is treated as a spacer inside one table, because splitting there would cut every record in two (`Alice | 30` on one side, `Paris | 3000` on the other). The spacer is not indexed as a column; `table_worksheet_column_indices` keeps the real worksheet columns for citations. Side-by-side tables with the same rows and a single blank column between them are therefore read as one table: define them as Excel Tables, or leave two blank columns, to keep them apart. A single later row with the same column span as a preceding table is retained as a sparse continuation rather than being lost as a header-only table. Likewise, a block after a blank spacer row that has the same column span as the preceding table and whose first row contains a number, date, boolean, or error value continues that table under its header, since a header row is text. A block whose first row is all text may be the header of an independent table and stays separate; its header detection is reported as `ambiguous` when that cannot be decided. Source-defined Excel Tables are also treated as authoritative regions, so two Excel Tables remain independent even when their populated areas touch horizontally or vertically. Tables may therefore be stacked, placed side by side, or start away from `A1`, such as at `L30`.
 
 A detected region with no data row below its first nonempty row is not a table: footnotes such as `Source: ...`, isolated totals such as `Total | 300`, and form-like label/value cells. Instead of treating that row as a header and emitting nothing, OpenRAG indexes these cells as text, grouped per worksheet:
 
@@ -123,7 +123,7 @@ loader:
     Raw data#2: [office_id, city, service]
 ```
 
-Schema width must match the visible columns in the detected table. Headerless schemas cannot be combined with a configured header row for the same worksheet. Table-specific schemas remain independent across worksheets and detected table regions.
+Schema width must match the visible columns in the detected table, excluding a blank spacer column that joins two halves of it. Headerless schemas cannot be combined with a configured header row for the same worksheet. Table-specific schemas remain independent across worksheets and detected table regions.
 
 ## Formulas and numerical values
 
@@ -251,7 +251,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 
 | Workbook case | Current behavior | Recommended action |
 | --- | --- | --- |
-| Touching ranges without explicit Excel Table definitions | Their shared populated area is inherently ambiguous and is treated as one table | Define each range as an Excel Table, or add a fully blank separator row or column. Touching Excel Tables are extracted independently |
+| Touching ranges without explicit Excel Table definitions | Their shared populated area is inherently ambiguous and is treated as one table | Define each range as an Excel Table, or add a fully blank separator row or two blank columns. Touching Excel Tables are extracted independently |
 | Merged title above a single header row | The title is retained as table context and the following row becomes the header | No action is required when the title spans the detected table |
 | Merged column-header groups | Consecutive source-backed levels are flattened and retained as hierarchy metadata; arbitrary visual layouts without merged ranges remain ambiguous | Use actual merged ranges or a single explicit header row |
 | Merged row headers | Vertically merged single-column values are expanded through their covered data rows and recorded as per-row hierarchy metadata | No action is required for ordinary vertical row-header merges |
@@ -265,7 +265,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 
 ## Operational guidance
 
-- Define independent ranges as Excel Tables when they touch. Otherwise, separate them with at least one fully blank row or column. Add explicit headers or configure a headerless schema.
+- Define independent ranges as Excel Tables when they touch. Otherwise, separate them with at least one fully blank row, or two fully blank columns. Add explicit headers or configure a headerless schema.
 - Recalculate and save formula-heavy workbooks before uploading them.
 - Macros are never executed during ingestion. `.xlsm` support reads only its OOXML worksheet data with VBA retention disabled.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
