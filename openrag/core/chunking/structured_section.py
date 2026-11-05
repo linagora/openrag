@@ -299,7 +299,7 @@ class StructuredSectionChunker(BaseChunker):
         filename = str(metadata.get("filename") or metadata.get("source") or "")
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
-        if metadata.get("tabular_format") == "xlsx":
+        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells":
             units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
         else:
             units = self._page_units(content) if paginated else self._build_units(content)
