@@ -1861,6 +1861,49 @@ def test_whole_row_merge_past_the_column_limit_is_clamped():
     assert any(block.metadata.get("table_row_numbers") == [3] for block in blocks)
 
 
+@pytest.mark.parametrize("shape", ["hyperlinks", "cell_runs"])
+def test_preflight_releases_completed_elements_of_any_kind(shape):
+    import tracemalloc
+
+    from core.indexing.parsers.tabular.xlsx_validation import validate_ooxml
+
+    def edit(xml):
+        if shape == "hyperlinks":
+            # Many children under one element that is neither a row nor a cell.
+            links = "".join(
+                f'<hyperlink ref="A{index % 1000 + 1}" display="link {index}"/>' for index in range(200_000)
+            )
+            return xml.replace("<pageMargins", f"<hyperlinks>{links}</hyperlinks><pageMargins")
+        # Many empty rich-text runs inside one inline-string cell.
+        runs = "<r><t></t></r>" * 100_000
+        return xml.replace(
+            '<c r="B2" t="inlineStr"><is><t>kept</t></is></c>',
+            f'<c r="B2" t="inlineStr"><is><t>kept</t>{runs}</is></c>',
+        )
+
+    document = _document([["id", "value"], [1, "kept"]])
+    document = _edit_xml(
+        document,
+        lambda xml: xml.replace('<c r="B2" t="s"><v>2</v></c>', '<c r="B2" t="inlineStr"><is><t>kept</t></is></c>'),
+    )
+    document = _edit_xml(document, edit)
+
+    # Repetitive synthetic XML compresses far beyond real workbooks.
+    limits = XlsxLimits(max_compression_ratio=100_000)
+    tracemalloc.start()
+    try:
+        [info] = validate_ooxml(BytesIO(document.raw_bytes), limits)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert info.tables[0].end_row == 2
+    # Retaining the children would cost tens of MiB here.
+    assert peak < 16 * 1024 * 1024
+    [block] = list(XlsxParser(limits=limits).iter_batches(document))
+    assert "| 1 | kept |" in block.text
+
+
 def test_batch_bytes_bound_accumulation_without_losing_rows():
     doc = _document([["text"], *[["café & < > | " * 10] for _ in range(7)]])
     blocks = list(XlsxParser(batch_size=10_000, limits=XlsxLimits(max_batch_bytes=800)).iter_batches(doc))
