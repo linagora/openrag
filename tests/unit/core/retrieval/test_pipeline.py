@@ -758,6 +758,17 @@ async def test_the_date_order_sees_candidates_beyond_the_expansion_seeds():
     assert "related" in [c.id for c in out]
 
 
+@pytest.mark.parametrize(("date_order", "seed"), [("newest", "newer"), (None, "similar")])
+@pytest.mark.asyncio
+async def test_the_date_order_picks_the_expansion_seeds(date_order, seed):
+    """Related chunks are fetched for the document the user asked for, not the most similar one."""
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [[_dated("similar", "2026-09-04T00:00:00Z"), _dated("newer", "2026-09-22T00:00:00Z")]]
+    p = RetrieverPipeline(retriever=r, reranker_top_k=1)
+    await p.retrieve_docs(partition=["p1"], query=Query(query="q", date_order=date_order))
+    assert [c.id for c in r.expand_input] == [seed]
+
+
 NOV, JUL, JUN, JAN = (
     _dated("nov", "2026-11-01T00:00:00Z"),
     _dated("jul", "2026-07-01T00:00:00Z"),

@@ -258,6 +258,9 @@ class RetrieverPipeline:
         expansion_applied = False
         if self.expansion_enabled or has_csv_row_siblings(chunks):
             limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
+            # Under a date order the seeds are the documents the user asked for,
+            # not the most similar ones; the final order is restored below.
+            chunks = order_chunks_by_date(chunks, query.date_order)
             selected = chunks[:limit]
             if not self.expansion_enabled:
                 selected = [chunk for chunk in selected if has_csv_row_siblings([chunk])]
