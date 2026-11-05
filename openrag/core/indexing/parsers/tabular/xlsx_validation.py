@@ -527,7 +527,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 populated_rows: set[int] = set()
                 band_start = band_end = None
                 band_columns: set[int] = set()
-                # Per band column: (first content row, whether that cell is non-text).
+                # Per band column: (first visible content row, whether that cell is non-text).
                 band_first_cells: dict[int, tuple[int, bool]] = {}
                 row_typed_columns: set[int] = set()
                 typed_first_rows: set[tuple[int, int]] = set()
@@ -571,8 +571,12 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     if band_start is not None and band_end is not None:
                         for start_column, end_column in _column_runs(band_columns):
                             regions.append(TableRegion(len(regions), band_start, band_end, start_column, end_column))
-                            firsts = [band_first_cells[column] for column in range(start_column, end_column + 1)]
-                            first_row = min(row for row, _ in firsts)
+                            firsts = [
+                                band_first_cells[column]
+                                for column in range(start_column, end_column + 1)
+                                if column in band_first_cells
+                            ]
+                            first_row = min((row for row, _ in firsts), default=None)
                             if any(typed for row, typed in firsts if row == first_row):
                                 typed_first_rows.add((band_start, start_column))
                     band_start = band_end = None
@@ -657,8 +661,11 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                     band_start = current_row
                                 band_end = current_row
                                 band_columns.update(row_content_columns)
-                                for column in row_content_columns:
-                                    band_first_cells.setdefault(column, (current_row, column in row_typed_columns))
+                                if current_row not in hidden_rows:
+                                    # Hidden rows are not extracted, so they cannot
+                                    # decide what the first extracted row holds.
+                                    for column in row_content_columns:
+                                        band_first_cells.setdefault(column, (current_row, column in row_typed_columns))
                             else:
                                 finish_band()
                         if tag == "mergeCell":
