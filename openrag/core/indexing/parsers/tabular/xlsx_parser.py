@@ -20,6 +20,7 @@ from core.indexing.parsers.registry import parser_registry
 from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row, normalize_headers
 from core.indexing.parsers.tabular.xlsx_validation import SheetInfo, TableRegion, XlsxLimits, limit, validate_ooxml
 from core.models.document import Document, ProcessedDocument, TextBlock
+from core.utils.consts import XLSX_TEXT_NUMBER_FORMAT_KINDS
 from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
 from core.utils.logging import get_logger
 
@@ -869,8 +870,11 @@ def _compact_number_formats(
 
     if not result:
         return [], "", truncated
+    text_groups = [group for group in result if group["kind"] in XLSX_TEXT_NUMBER_FORMAT_KINDS]
+    if not text_groups:
+        return result, "", truncated
     lines = ["Display format context (raw values remain indexed):"]
-    for group in result:
+    for group in text_groups:
         location = (
             group["range"] if len(group["row_ranges"]) == 1 else f"{group['cell_count']} cells in {group['range']}"
         )
