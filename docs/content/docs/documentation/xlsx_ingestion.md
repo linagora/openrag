@@ -230,14 +230,16 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_shared_strings_bytes` | Shared-string XML | 32 MiB |
 | `max_shared_strings` | Shared-string entries | 250,000 |
 | `max_sheets` | Worksheets, including hidden sheets | 128 |
-| `max_rows` | Row coordinate | 1,048,576 |
-| `max_columns` | Column coordinate | 4,096 |
-| `max_cells` | Physical cells across worksheets | 5,000,000 |
-| `max_sheet_area` | Worksheet rectangle, including gaps | 5,000,000 positions |
+| `max_rows` | Row coordinate of a cell with content | 1,048,576 |
+| `max_columns` | Column coordinate of a cell with content | 4,096 |
+| `max_cells` | Physical cells across worksheets, empty styled cells included | 5,000,000 |
+| `max_sheet_area` | Rectangle spanned by cells with content, including gaps | 5,000,000 positions |
 | `max_tables` | Detected table regions across the workbook | 128 |
 | `max_merged_ranges` | Merged-cell ranges across the workbook | 100,000 |
 | `max_cell_chars` | Characters in one cell | 32,767 |
 | `max_batch_bytes` | Rendered batch size | 2 MiB |
+
+Empty cells that only carry formatting, such as a stray styled cell at `XFD1` or `E1048576`, do not count toward the coordinate or area limits; merged ranges are clipped to them. Coordinates outside the Excel grid are rejected as invalid.
 
 An upload missing the OOXML parts required by its `.xlsx` or `.xlsm` extension is rejected with HTTP status 415 before indexing starts. Macro-enabled content uploaded with an `.xlsx` name, or another structurally invalid workbook that reaches the parser, fails with `INVALID_XLSX` and status 422; use `.xlsm` for a macro-enabled workbook. Resource-limit failures use `XLSX_LIMIT_EXCEEDED` and status 413. Failed ingestion triggers best-effort cleanup; if cleanup fails during a re-index of an existing file, partial content can remain searchable until it is removed successfully.
 
