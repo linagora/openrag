@@ -239,7 +239,7 @@ def _detect_header(rows, byte_limit, start_row=1):
                 "A textual first row followed by typed data was selected as the header."
                 if confident
                 else "The first nonempty row was retained conservatively because no structural evidence "
-                "identified a safer header row. Configure a header row or schema when this is not intended."
+                "identified a safer header row. Define the range as an Excel Table when this is not intended."
             ),
         }
     if narrower_than_data and detection["status"] == "confident":
@@ -1056,44 +1056,10 @@ class XlsxParser(TabularBatchParser):
         self,
         *,
         batch_size: int = 10_000,
-        header_row: int | None = None,
-        sheet_header_rows: dict[str, int | None] | None = None,
-        sheet_headerless_schemas: dict[str, list[str]] | None = None,
         limits: XlsxLimits | dict[str, int] | None = None,
     ) -> None:
         if type(batch_size) is not int or batch_size < 1:
             raise ConfigError("XLSX batch_size must be a positive integer")
-        if header_row is not None and (type(header_row) is not int or not 1 <= header_row <= 1_048_576):
-            raise ConfigError("XLSX header_row must be an Excel row number between 1 and 1048576")
-        self.header_row = header_row
-        if sheet_header_rows is not None and not isinstance(sheet_header_rows, dict):
-            raise ConfigError("XLSX sheet_header_rows must map worksheet names to row numbers or null")
-        for name, row in (sheet_header_rows or {}).items():
-            if not isinstance(name, str) or not name.strip():
-                raise ConfigError("XLSX sheet_header_rows requires nonempty worksheet names")
-            if row is not None and (type(row) is not int or not 1 <= row <= 1_048_576):
-                raise ConfigError("XLSX sheet header rows must be Excel row numbers between 1 and 1048576 or null")
-        self.sheet_header_rows = dict(sheet_header_rows or {})
-        if sheet_headerless_schemas is not None and not isinstance(sheet_headerless_schemas, dict):
-            raise ConfigError("XLSX sheet_headerless_schemas must map worksheet names to column-name lists")
-        for name, columns in (sheet_headerless_schemas or {}).items():
-            if not isinstance(name, str) or not name.strip():
-                raise ConfigError("XLSX headerless schemas require nonempty worksheet names")
-            if (
-                not isinstance(columns, list)
-                or not columns
-                or len(columns) > 4096
-                or any(not isinstance(column, str) or not column.strip() for column in columns)
-            ):
-                raise ConfigError("XLSX headerless schemas require a nonempty list of nonempty column names")
-            base_name = name.rsplit("#", 1)[0]
-            if header_row is not None and base_name not in self.sheet_header_rows:
-                raise ConfigError("XLSX header_row cannot be combined with headerless schemas")
-            if self.sheet_header_rows.get(base_name) is not None:
-                raise ConfigError("XLSX sheet header rows cannot be combined with a headerless schema")
-        self.sheet_headerless_schemas = {
-            name: list(columns) for name, columns in (sheet_headerless_schemas or {}).items()
-        }
         self.batch_size = batch_size
         try:
             self.limits = XlsxLimits(**limits) if isinstance(limits, dict) else limits or XlsxLimits()
@@ -1115,59 +1081,6 @@ class XlsxParser(TabularBatchParser):
                 self.limits,
                 allow_macros=Document.type_extension(document.filename, document.metadata.get("mimetype")) == "xlsm",
             )
-            # Validate overrides before opening a backend or emitting any batches.
-            by_name = {info.name: info for info in infos}
-            if self.header_row is not None:
-                visible = [
-                    info
-                    for info in infos
-                    if not info.hidden and info.columns and info.name not in self.sheet_header_rows
-                ]
-                for info in visible:
-                    if self.header_row > info.rows:
-                        raise PipelineError(
-                            f"XLSX sheet {info.name!r}: selected header row {self.header_row} is missing",
-                            code="INVALID_XLSX",
-                            status_code=422,
-                        )
-                    if not any(table.start_row <= self.header_row <= table.end_row for table in info.tables):
-                        raise PipelineError(
-                            f"XLSX sheet {info.name!r}: selected header row {self.header_row} is empty",
-                            code="INVALID_XLSX",
-                            status_code=422,
-                        )
-                    if self.header_row in info.hidden_rows:
-                        raise PipelineError(
-                            f"XLSX sheet {info.name!r}: selected header row {self.header_row} is hidden",
-                            code="INVALID_XLSX",
-                            status_code=422,
-                        )
-            for name, row in self.sheet_header_rows.items():
-                info = by_name.get(name)
-                if info is None or info.hidden or not info.columns:
-                    raise PipelineError(
-                        f"XLSX header override targets an absent, hidden, or empty worksheet: {name!r}",
-                        code="INVALID_XLSX",
-                        status_code=422,
-                    )
-                if row is not None and row > info.rows:
-                    raise PipelineError(
-                        f"XLSX sheet {name!r}: selected header row {row} is missing",
-                        code="INVALID_XLSX",
-                        status_code=422,
-                    )
-                if row is not None and not any(table.start_row <= row <= table.end_row for table in info.tables):
-                    raise PipelineError(
-                        f"XLSX sheet {name!r}: selected header row {row} is empty",
-                        code="INVALID_XLSX",
-                        status_code=422,
-                    )
-                if row is not None and row in info.hidden_rows:
-                    raise PipelineError(
-                        f"XLSX sheet {name!r}: selected header row {row} is hidden",
-                        code="INVALID_XLSX",
-                        status_code=422,
-                    )
             with closing(self._iter_sheets(document, source, infos)) as batches:
                 try:
                     yield from batches
@@ -1203,11 +1116,6 @@ class XlsxParser(TabularBatchParser):
                 visible_column_count = len(visible_columns)
                 if visible_column_count == 0:
                     continue
-                table_schema_key = f"{sheet.name}#{table.index + 1}"
-                headerless_schema = self.sheet_headerless_schemas.get(
-                    table_schema_key, self.sheet_headerless_schemas.get(sheet.name)
-                )
-                configured_header_row = self.sheet_header_rows.get(sheet.name, self.header_row)
                 preamble = []
                 preamble_rows = []
                 preamble_values: list[tuple[int, list[str]]] = []
@@ -1215,107 +1123,69 @@ class XlsxParser(TabularBatchParser):
                 header_rendered: list[str] = []
                 header_hierarchy: list[dict[str, Any]] = []
                 header_hierarchy_rows: list[int] = []
-                header_source = "worksheet"
                 header_detection: dict[str, Any]
-                if headerless_schema is not None:
-                    if len(headerless_schema) != visible_column_count:
+                selected_header_row = table.header_row_hint
+                if selected_header_row is not None:
+                    header_source = "structural_hint"
+                    header_detection = {
+                        "mode": "structural",
+                        "status": "confident",
+                        "selected_row": selected_header_row,
+                        "candidate_rows": [selected_header_row],
+                        "reason": "validated_table_or_merged_header",
+                        "note": "Validated workbook structure identified the header row.",
+                    }
+                else:
+                    selected_header_row, row_iterator, header_detection = _detect_header(
+                        row_iterator, self.limits.max_batch_bytes, table.start_row
+                    )
+                    header_source = "automatic"
+                header_values = None
+                header_row = table.start_row
+                for physical_row, values in enumerate(row_iterator, start=table.start_row):
+                    rendered = [_cell_text(value) for value in values]
+                    rendered.extend([""] * (visible_column_count - len(rendered)))
+                    if selected_header_row is not None and physical_row < selected_header_row:
+                        preamble_values.append((physical_row, rendered))
+                        values_text = list(dict.fromkeys(value.strip() for value in rendered if value.strip()))
+                        if values_text:
+                            text = " ; ".join(values_text)
+                            preamble_bytes += len(text.encode("utf-8"))
+                            if preamble_bytes >= self.limits.max_batch_bytes:
+                                raise limit("XLSX sheet context exceeds the batch byte limit")
+                            preamble.append(f"Row {physical_row}: {text}")
+                            preamble_rows.append(physical_row)
+                        continue
+                    if selected_header_row is not None and not _has_text(rendered):
                         raise PipelineError(
-                            f"XLSX sheet {sheet.name!r} table {table.index + 1}: headerless schema has "
-                            f"{len(headerless_schema)} columns, expected {visible_column_count}",
+                            f"XLSX sheet {sheet.name!r}: selected header row {selected_header_row} is empty",
                             code="INVALID_XLSX",
                             status_code=422,
                         )
-                    header_values = _normalize_unique_headers(headerless_schema)
-                    header_row = None
-                    data_row_start = table.start_row
-                    header_source = "configured_schema"
-                    header_detection = {
-                        "mode": "configured_schema",
-                        "status": "explicit",
-                        "selected_row": None,
-                        "candidate_rows": [],
-                        "reason": "configured_headerless_schema",
-                        "note": "A configured schema is used; every physical row remains table data.",
-                    }
-                else:
-                    selected_header_row = (
-                        configured_header_row
-                        if configured_header_row is not None
-                        and table.start_row <= configured_header_row <= table.end_row
-                        else None
-                    )
-                    if selected_header_row is not None:
-                        header_source = "configured_row"
-                        header_detection = {
-                            "mode": "configured",
-                            "status": "explicit",
-                            "selected_row": selected_header_row,
-                            "candidate_rows": [selected_header_row],
-                            "reason": "configured_header_row",
-                            "note": "The configured physical row was used as the header.",
-                        }
-                    if configured_header_row is None and table.header_row_hint is not None:
-                        selected_header_row = table.header_row_hint
-                        header_source = "structural_hint"
-                        header_detection = {
-                            "mode": "structural",
-                            "status": "confident",
-                            "selected_row": selected_header_row,
-                            "candidate_rows": [selected_header_row],
-                            "reason": "validated_table_or_merged_header",
-                            "note": "Validated workbook structure identified the header row.",
-                        }
-                    if selected_header_row is None:
-                        selected_header_row, row_iterator, header_detection = _detect_header(
-                            row_iterator, self.limits.max_batch_bytes, table.start_row
+                    if _has_text(rendered):
+                        if any(len(value) > self.limits.max_cell_chars for value in rendered):
+                            raise limit("XLSX header text exceeds the character limit")
+                        if sum(len(value.encode("utf-8")) for value in rendered) >= self.limits.max_batch_bytes:
+                            raise limit("XLSX header exceeds the batch byte limit")
+                        leaf_headers = normalize_headers([value.strip() for value in rendered])
+                        flattened, header_hierarchy, header_hierarchy_rows = _column_header_hierarchy(
+                            sheet, table, visible_columns, preamble_values, leaf_headers
                         )
-                        header_source = "automatic"
-                    header_values = None
-                    header_row = table.start_row
-                    for physical_row, values in enumerate(row_iterator, start=table.start_row):
-                        rendered = [_cell_text(value) for value in values]
-                        rendered.extend([""] * (visible_column_count - len(rendered)))
-                        if selected_header_row is not None and physical_row < selected_header_row:
-                            preamble_values.append((physical_row, rendered))
-                            values_text = list(dict.fromkeys(value.strip() for value in rendered if value.strip()))
-                            if values_text:
-                                text = " ; ".join(values_text)
-                                preamble_bytes += len(text.encode("utf-8"))
-                                if preamble_bytes >= self.limits.max_batch_bytes:
-                                    raise limit("XLSX sheet context exceeds the batch byte limit")
-                                preamble.append(f"Row {physical_row}: {text}")
-                                preamble_rows.append(physical_row)
-                            continue
-                        if selected_header_row is not None and not _has_text(rendered):
-                            raise PipelineError(
-                                f"XLSX sheet {sheet.name!r}: selected header row {selected_header_row} is empty",
-                                code="INVALID_XLSX",
-                                status_code=422,
-                            )
-                        if _has_text(rendered):
-                            if any(len(value) > self.limits.max_cell_chars for value in rendered):
-                                raise limit("XLSX header text exceeds the character limit")
-                            if sum(len(value.encode("utf-8")) for value in rendered) >= self.limits.max_batch_bytes:
-                                raise limit("XLSX header exceeds the batch byte limit")
-                            leaf_headers = normalize_headers([value.strip() for value in rendered])
-                            flattened, header_hierarchy, header_hierarchy_rows = _column_header_hierarchy(
-                                sheet, table, visible_columns, preamble_values, leaf_headers
-                            )
-                            header_values = _normalize_unique_headers(flattened)
-                            for index, hierarchy in enumerate(header_hierarchy):
-                                hierarchy["column"] = header_values[index]
-                            header_row = physical_row
-                            header_rendered = rendered
-                            break
-                    if not header_values:
-                        if selected_header_row is not None:
-                            raise PipelineError(
-                                f"XLSX sheet {sheet.name!r}: selected header row {selected_header_row} is missing",
-                                code="INVALID_XLSX",
-                                status_code=422,
-                            )
-                        continue
-                    data_row_start = header_row + 1
+                        header_values = _normalize_unique_headers(flattened)
+                        for index, hierarchy in enumerate(header_hierarchy):
+                            hierarchy["column"] = header_values[index]
+                        header_row = physical_row
+                        header_rendered = rendered
+                        break
+                if not header_values:
+                    if selected_header_row is not None:
+                        raise PipelineError(
+                            f"XLSX sheet {sheet.name!r}: selected header row {selected_header_row} is missing",
+                            code="INVALID_XLSX",
+                            status_code=422,
+                        )
+                    continue
+                data_row_start = header_row + 1
                 if sheet.missing_formula_values:
                     logger.bind(sheet_name=sheet.name, missing_formula_values=sheet.missing_formula_values).warning(
                         "XLSX formula text was indexed without a cached result; formulas are not recalculated"

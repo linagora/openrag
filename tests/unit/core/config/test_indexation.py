@@ -38,9 +38,11 @@ def test_xlsx_loader_defaults_are_bounded_and_automatic():
     cfg = LoaderConfig()
 
     assert cfg.xlsx_batch_size == 10_000
-    assert cfg.xlsx_header_row is None
-    assert cfg.xlsx_sheet_header_rows == {}
-    assert cfg.xlsx_sheet_headerless_schemas == {}
+    # Header overrides were deployment-wide yet validated per file; they are
+    # not configurable until a per-file or per-partition route exists.
+    assert not {"xlsx_header_row", "xlsx_sheet_header_rows", "xlsx_sheet_headerless_schemas"} & set(
+        type(cfg).model_fields
+    )
     assert cfg.xlsx_limits == {}
 
 
