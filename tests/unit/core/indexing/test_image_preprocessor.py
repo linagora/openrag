@@ -560,22 +560,25 @@ class TestScannersMatchTheRegexesTheyReplace:
     EMBEDDED_TARGET = re.compile(r"\(openrag-embedded-image-[^)]+\)")
     DOCX_IMAGE = re.compile(r"!\[.*?\]\(data:image/[^)]*\)")
 
-    # Pieces of the syntax the scanners read, so short documents combine them often.
+    # Pieces of the syntax the scanners read, so short documents combine them often,
+    # and whole references, so that many documents hold several of them.
     TOKENS = [
         "![", "[", "]", "(", ")", "<", ">", "!", "\\", "\n", "\r", " ", "a", "=", '"', "'",
         "](", "](data:image/", "](<DATA:Image/", "](https://", "](http://", "data:image/",
         "x.png", ";base64,QQ==", "(openrag-embedded-image-", "(\r", '"\r', "'\n",
+        "![a](data:image/x)", "[l](data:image/x)", "[l](<data:image/x)", "![a](data:image/x", "[l]", "[]",
+        "![a](https://x)", "![a][l]",
     ]  # fmt: skip
 
     @pytest.fixture(scope="class")
     def documents(self):
         rng = random.Random(1319)
-        return ["".join(rng.choices(self.TOKENS, k=rng.randint(1, 14))) for _ in range(25_000)]
+        return ["".join(rng.choices(self.TOKENS, k=rng.randint(1, 40))) for _ in range(25_000)]
 
     def test_inline_data_uri_images(self, documents):
         for text in documents:
             expected = [(m.start(), m.end(), m.group(1), m.group(2)) for m in self.DATA_URI_IMAGE.finditer(text)]
-            assert _find_inline_data_uri_images(text) == expected, text
+            assert list(_find_inline_data_uri_images(text)) == expected, text
 
     def test_reference_images(self, documents):
         for text in documents:
@@ -585,7 +588,7 @@ class TestScannersMatchTheRegexesTheyReplace:
     def test_data_uri_links(self, documents):
         for text in documents:
             expected = [(m.start(), m.end(), m.group(1)) for m in self.DATA_URI_LINK.finditer(text)]
-            assert _find_data_uri_links(text) == expected, text
+            assert list(_find_data_uri_links(text)) == expected, text
 
     def test_http_images(self, documents):
         for text in documents:
