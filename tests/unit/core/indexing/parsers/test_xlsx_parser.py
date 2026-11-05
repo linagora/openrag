@@ -982,6 +982,58 @@ def test_table_limit_applies_per_visible_worksheet():
     assert {block.metadata["sheet_name"] for block in blocks} == {f"Week {week + 1}" for week in range(4)}
 
 
+def test_merged_header_coverage_uses_intervals_not_single_columns():
+    import time as clock
+
+    from core.indexing.parsers.tabular.xlsx_validation import _merged_header_depth
+
+    region = TableRegion(0, 1, 3, 1, 4096)
+    # Adjacent merges cover the region together; huge merges cost no expansion.
+    assert _merged_header_depth(region, {1: [(1, 2000), (2001, 4096)]}, {2}, set()) == 1
+    assert _merged_header_depth(region, {1: [(1, 2000), (2002, 4096)]}, {2}, set()) == 0
+    crafted = {1: [(1, 4096)] * 100_000}
+    started = clock.perf_counter()
+    assert _merged_header_depth(region, crafted, {2}, set()) == 1
+    assert clock.perf_counter() - started < 1
+
+
+def test_region_count_is_bounded_before_regions_are_combined(monkeypatch):
+    from core.indexing.parsers.tabular import xlsx_validation
+
+    workbook = Workbook()
+    for column in range(1, 20, 3):
+        workbook.active.cell(1, column, "id")
+        workbook.active.cell(2, column, column)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    monkeypatch.setattr(xlsx_validation, "_combine_regions", lambda *_: pytest.fail("combined before the bound"))
+    with pytest.raises(PipelineError, match="table count exceeds"):
+        list(XlsxParser(limits={"max_tables": 3}).iter_batches(Document(raw_bytes=output.getvalue())))
+
+
+def test_chartsheet_traversal_stops_at_the_metadata_budget(monkeypatch):
+    import zipfile
+
+    from core.indexing.parsers.tabular import xlsx_validation
+
+    document = _workbook_with_drawings(chartsheet=True)
+    with zipfile.ZipFile(BytesIO(document.raw_bytes)) as archive:
+        names = set(archive.namelist())
+        relationships = list(xlsx_validation.fromstring(archive.read("xl/_rels/workbook.xml.rels")))
+        fixed = sum(archive.getinfo(name).file_size for name in xlsx_validation.READER_FIXED_PARTS if name in names)
+        reads = []
+        original_read = archive.read
+        monkeypatch.setattr(archive, "read", lambda name: reads.append(name) or original_read(name))
+        sheet_rels = sum(archive.getinfo(name).file_size for name in names if name.startswith("xl/worksheets/_rels/"))
+        # Room for the fixed parts and sheet relationships, not the chart sheet.
+        limits = XlsxLimits(max_metadata_bytes=fixed + sheet_rels + 1)
+        with pytest.raises(PipelineError, match="metadata exceeds the memory limit"):
+            xlsx_validation._reader_loaded_parts(archive, names, relationships, limits)
+    assert not [name for name in reads if name.endswith(".rels")]
+
+
 def test_rejects_non_xlsx_archives_and_resource_amplification():
     document = Document(filename="fake.xlsx", content_type=DocumentType.XLSX, raw_bytes=b"not a zip")
     with pytest.raises(PipelineError, match="valid XLSX"):
