@@ -12,7 +12,7 @@ from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, localcontext
-from itertools import chain
+from itertools import chain, islice
 from pathlib import Path
 from typing import Any
 
@@ -1128,8 +1128,38 @@ class XlsxParser(TabularBatchParser):
                 header_hierarchy: list[dict[str, Any]] = []
                 header_hierarchy_rows: list[int] = []
                 header_detection: dict[str, Any]
+                # Excel Tables declare their column names. They label the table
+                # when it has no header row, or when its header row is hidden or
+                # blank (hidden cells are never extracted, the declared names are).
+                use_declared_names = table.declared_column_names is not None and table.header_row_hint is None
                 selected_header_row = table.header_row_hint
                 if selected_header_row is not None:
+                    # A structural hint (Excel Table header, merged header leaf)
+                    # can name a row that is hidden or blank within this table's
+                    # columns. Look ahead to it, bounded by the merged-header depth,
+                    # and detect the header automatically instead of rejecting.
+                    lookahead = list(islice(row_iterator, selected_header_row - table.start_row + 1))
+                    row_iterator = chain(lookahead, row_iterator)
+                    hinted = lookahead[-1] if len(lookahead) == selected_header_row - table.start_row + 1 else ()
+                    if not _has_text([_cell_text(value) for value in hinted]):
+                        use_declared_names = table.declared_column_names is not None
+                        selected_header_row = None
+                if use_declared_names:
+                    header_source = "structural_hint"
+                    without_header = table.header_row_hint is None
+                    header_detection = {
+                        "mode": "structural",
+                        "status": "confident",
+                        "selected_row": None,
+                        "candidate_rows": [],
+                        "reason": "excel_table_without_header_row" if without_header else "excel_table_header_unusable",
+                        "note": (
+                            "The Excel Table declares no header row; its column names are used and every row is data."
+                            if without_header
+                            else "The Excel Table header row is hidden or blank; its declared column names are used."
+                        ),
+                    }
+                elif selected_header_row is not None:
                     header_source = "structural_hint"
                     header_detection = {
                         "mode": "structural",
@@ -1144,9 +1174,20 @@ class XlsxParser(TabularBatchParser):
                         row_iterator, self.limits.max_batch_bytes, table.start_row
                     )
                     header_source = "automatic"
+                if use_declared_names:
+                    # Rows before the data (an absorbed title, a hidden or blank
+                    # header row) are context; blank ones add nothing.
+                    selected_header_row = table.data_start_row
                 header_values = None
                 header_row = table.start_row
                 for physical_row, values in enumerate(row_iterator, start=table.start_row):
+                    if use_declared_names and physical_row >= selected_header_row:
+                        names = [table.declared_column_names[column - table.start_column] for column in visible_columns]
+                        header_values = _normalize_unique_headers(normalize_headers([name.strip() for name in names]))
+                        header_row = None
+                        # This row is data: put it back in front of the stream.
+                        row_iterator = chain([values], row_iterator)
+                        break
                     rendered = [_cell_text(value) for value in values]
                     rendered.extend([""] * (visible_column_count - len(rendered)))
                     if selected_header_row is not None and physical_row < selected_header_row:
@@ -1182,14 +1223,14 @@ class XlsxParser(TabularBatchParser):
                         header_rendered = rendered
                         break
                 if not header_values:
-                    if selected_header_row is not None:
+                    if selected_header_row is not None and not use_declared_names:
                         raise PipelineError(
                             f"XLSX sheet {sheet.name!r}: selected header row {selected_header_row} is missing",
                             code="INVALID_XLSX",
                             status_code=422,
                         )
                     continue
-                data_row_start = header_row + 1
+                data_row_start = table.data_start_row if use_declared_names else header_row + 1
                 if sheet.missing_formula_values:
                     logger.bind(sheet_name=sheet.name, missing_formula_values=sheet.missing_formula_values).warning(
                         "XLSX formula text was indexed without a cached result; formulas are not recalculated"
