@@ -49,7 +49,7 @@ Every detected table is extracted and chunked independently. Its metadata includ
 - `sheet_name` and `sheet_index`, preserved on every batch and chunk;
 - exact `table_header_range`, data-row numbers, and chunk `cell_range` citations.
 
-An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Worksheet context is repeated on every chunk of its table while it stays small. A context larger than a quarter of the chunk budget (and longer than the short pointer that replaces it) would crowd out the rows, so when the table needs splitting it is indexed once, with the table's first batch, as its own text chunks (`xlsx_content_kind: sheet_context`). The table chunks then keep the worksheet name and a line such as `Worksheet context (rows 1-3) is indexed in separate chunks.`, drop the context text from their metadata, and set `sheet_context_indexed_separately: true`. Table batches report `table_batch_index`, their one-based position within the table. Detection and chunking are covered for at least ten tables in one worksheet and for multiple tables across multiple worksheets. The default safety limit permits at most 128 detected tables across a workbook.
+An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Worksheet context is repeated on every chunk of its table while it stays small. A context larger than a quarter of the chunk budget (and longer than the short pointer that replaces it) would crowd out the rows, so when the table needs splitting it is indexed once, with the table's first batch, as its own text chunks (`xlsx_content_kind: sheet_context`). The table chunks then keep the worksheet name and a line such as `Worksheet context (rows 1-3) is indexed in separate chunks.`, drop the context text from their metadata, and set `sheet_context_indexed_separately: true`. Table batches report `table_batch_index`, their one-based position within the table. Detection and chunking are covered for at least ten tables in one worksheet and for multiple tables across multiple worksheets. The default safety limit permits at most 128 detected tables per visible worksheet; hidden worksheets are skipped and do not count.
 
 ## Merged and hierarchical headers
 
@@ -234,7 +234,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_columns` | Column coordinate of a cell with content | 4,096 |
 | `max_cells` | Physical cells across worksheets, empty styled cells included | 5,000,000 |
 | `max_sheet_area` | Rectangle spanned by cells with content, including gaps | 5,000,000 positions |
-| `max_tables` | Detected table regions across the workbook | 128 |
+| `max_tables` | Detected table regions per visible worksheet, and Excel Tables per worksheet | 128 |
 | `max_merged_ranges` | Merged-cell ranges across the workbook | 100,000 |
 | `max_cell_chars` | Characters in one cell | 32,767 |
 | `max_batch_bytes` | Rendered batch size | 2 MiB |

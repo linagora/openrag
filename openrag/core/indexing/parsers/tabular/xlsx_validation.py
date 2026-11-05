@@ -563,7 +563,6 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
             if any(sheet.get("state", "visible") not in {"visible", "hidden", "veryHidden"} for sheet in sheets):
                 raise invalid("XLSX worksheet has an invalid visibility state")
             cells_seen = 0
-            tables_seen = 0
             merged_ranges_seen = 0
             worksheet_paths = set()
             for index, sheet in enumerate(sheets):
@@ -844,9 +843,10 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                         )
                     )
                 regions = hinted_regions
-                tables_seen += len(regions)
-                if tables_seen > limits.max_tables:
-                    raise limit("XLSX table count exceeds the limit")
+                # Each table costs one more pass over its own worksheet, so the
+                # bound is per worksheet. Hidden sheets are never read.
+                if sheet.get("state", "visible") == "visible" and len(regions) > limits.max_tables:
+                    raise limit("XLSX worksheet table count exceeds the limit")
                 if max_row * max_col > limits.max_sheet_area:
                     raise limit("XLSX worksheet rectangle exceeds the traversal limit")
                 infos.append(

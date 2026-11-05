@@ -1025,6 +1025,31 @@ def test_rejects_excessive_detected_table_fragmentation_before_reader_opens(monk
     assert error.value.code == "XLSX_LIMIT_EXCEEDED"
 
 
+def test_table_limit_applies_per_visible_worksheet():
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for week in range(4):
+        sheet = workbook.create_sheet(f"Week {week + 1}")
+        for block in range(3):
+            sheet.cell(block * 4 + 1, 1, "id")
+            sheet.cell(block * 4 + 1, 2, "value")
+            sheet.cell(block * 4 + 2, 1, f"W{week}-{block}")
+            sheet.cell(block * 4 + 2, 2, block)
+    hidden = workbook.create_sheet("Archive")
+    hidden.sheet_state = "hidden"
+    for block in range(5):
+        hidden.cell(block * 4 + 1, 1, "id")
+        hidden.cell(block * 4 + 2, 1, f"old-{block}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser(limits={"max_tables": 3}).iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 12
+    assert {block.metadata["sheet_name"] for block in blocks} == {f"Week {week + 1}" for week in range(4)}
+
+
 def test_rejects_non_xlsx_archives_and_resource_amplification():
     document = Document(filename="fake.xlsx", content_type=DocumentType.XLSX, raw_bytes=b"not a zip")
     with pytest.raises(PipelineError, match="valid XLSX"):
