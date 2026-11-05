@@ -12,7 +12,6 @@ from core.indexing.topic_tags import TopicTagSample
 from core.models.document import ProcessedDocument
 from core.observability.metric_specs import STAGE_VALUES
 from core.observability.ray_metrics import observe_stage_duration, record_parse_completion, seed_parse_watchdog
-from core.utils.exceptions import PipelineError
 from core.utils.logging import get_logger
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
@@ -22,6 +21,9 @@ logger = get_logger()
 
 _MAX_CONCURRENT_TABULAR_READS = 8
 _TABULAR_READ_SLOTS = threading.BoundedSemaphore(_MAX_CONCURRENT_TABULAR_READS)
+# How often a read waiting for a slot re-checks; the wait itself is bounded by
+# the caller's parse-time budget and is cancellable.
+_READ_SLOT_POLL_SECONDS = 0.05
 
 
 class _AsyncBatchReader:
@@ -74,14 +76,19 @@ class _AsyncBatchReader:
 
     async def next(self):
         # next(..., None) avoids propagating StopIteration through a Future.
-        with self._state_lock:
-            if self.closed or self._close_requested:
-                raise RuntimeError("Tabular batch reader is closed")
-            if self._read_in_progress:
-                raise RuntimeError("A tabular batch read is already in progress")
-            if not self._read_slots.acquire(blocking=False):
-                raise PipelineError("Too many tabular parser reads are still running")
-            self._read_in_progress = True
+        # The slots bound reads left running by abandoned callers; a healthy
+        # read waits for one (without blocking the event loop) instead of
+        # failing a valid file when other files are being parsed.
+        while True:
+            with self._state_lock:
+                if self.closed or self._close_requested:
+                    raise RuntimeError("Tabular batch reader is closed")
+                if self._read_in_progress:
+                    raise RuntimeError("A tabular batch read is already in progress")
+                if self._read_slots.acquire(blocking=False):
+                    self._read_in_progress = True
+                    break
+            await asyncio.sleep(_READ_SLOT_POLL_SECONDS)
 
         try:
             pending = asyncio.create_task(asyncio.to_thread(self._read_one))
