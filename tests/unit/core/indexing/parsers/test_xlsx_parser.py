@@ -1034,6 +1034,86 @@ def test_chartsheet_traversal_stops_at_the_metadata_budget(monkeypatch):
     assert not [name for name in reads if name.endswith(".rels")]
 
 
+def _excel_table_document(rows, ref, *, title=None, hide_row=None, header_row_count=None):
+    import re
+
+    workbook = Workbook()
+    sheet = workbook.active
+    if title is not None:
+        sheet["A1"] = title
+        sheet.merge_cells("A1:B1")
+    for row in rows:
+        sheet.append(row)
+    sheet.add_table(Table(displayName="Data", ref=ref))
+    if hide_row is not None:
+        sheet.row_dimensions[hide_row].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(filename="table.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+    if header_row_count is not None:
+        document = _edit_xml(
+            document,
+            lambda xml: re.sub(r'headerRowCount="\d"', f'headerRowCount="{header_row_count}"', xml)
+            if "headerRowCount" in xml
+            else xml.replace("<table ", f'<table headerRowCount="{header_row_count}" ', 1),
+            target="xl/tables/table1.xml",
+        )
+    return document
+
+
+def test_hidden_excel_table_header_uses_declared_column_names():
+    document = _excel_table_document([["id", "name"], [1, "Alice"], [2, "Bob"]], "A1:B3", hide_row=1)
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["id", "name"]
+    assert block.metadata["table_row_numbers"] == [2, 3]
+    assert block.metadata["table_header_detection"]["reason"] == "excel_table_header_unusable"
+
+
+@pytest.mark.parametrize("title", [None, "Inventaire"])
+def test_excel_table_without_header_row_indexes_every_row(title):
+    first = 2 if title else 1
+    document = _excel_table_document(
+        [["Column1", "Column2"], [1, "Alice"], [2, "Bob"]],
+        f"A{first}:B{first + 2}",
+        title=title,
+        header_row_count=0,
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["Column1", "Column2"]
+    assert block.metadata["table_row_numbers"] == [first, first + 1, first + 2]
+    assert block.metadata["table_header_row"] is None
+    assert block.metadata["table_header_detection"]["reason"] == "excel_table_without_header_row"
+    assert "| 1 | Alice |" in block.text
+    if title:
+        assert block.metadata["sheet_context_row_numbers"] == [1]
+
+
+def test_merged_header_hint_on_a_row_blank_within_the_table_falls_back():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "Report"
+    sheet.merge_cells("A1:B1")
+    # Row 2 holds content only outside the table's columns.
+    sheet["E2"] = "aside"
+    sheet.append(["id", "name"])
+    sheet.append([1, "Alice"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    [table] = [block for block in blocks if block.metadata["xlsx_content_kind"] == "table"]
+    assert table.metadata["table_columns"] == ["id", "name"]
+    assert table.metadata["table_row_numbers"] == [4]
+    assert any("aside" in block.text for block in blocks)
+
+
 def test_rejects_non_xlsx_archives_and_resource_amplification():
     document = Document(filename="fake.xlsx", content_type=DocumentType.XLSX, raw_bytes=b"not a zip")
     with pytest.raises(PipelineError, match="valid XLSX"):

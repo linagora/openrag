@@ -63,6 +63,11 @@ class TableRegion:
     header_row_hint: int | None = None
     # Blank columns inside the span that only separate parts of one table.
     spacer_columns: frozenset[int] = frozenset()
+    # An Excel Table's declared tableColumns names, one per span column, and its
+    # first data row (a merged title absorbed above it is context, not data).
+    # They label the table when it has no header row or its header is unusable.
+    declared_column_names: tuple[str, ...] | None = None
+    data_start_row: int | None = None
 
     @property
     def occupied_columns(self) -> set[int]:
@@ -345,6 +350,10 @@ def _worksheet_table_regions(archive, types, worksheet_path: str, names: set[str
             raise invalid("XLSX table has an invalid header row count") from exc
         if header_row_count not in {0, 1}:
             raise invalid("XLSX table has an invalid header row count")
+        declared = [str(column.get("name") or "") for column in table.findall("{*}tableColumns/{*}tableColumn")]
+        # A mismatched list cannot be mapped to columns; generate names.
+        width = end_column - start_column + 1
+        column_names = tuple(declared) if len(declared) == width else ("",) * width
         region = TableRegion(
             len(table_regions),
             start_row,
@@ -352,6 +361,8 @@ def _worksheet_table_regions(archive, types, worksheet_path: str, names: set[str
             start_column,
             end_column,
             start_row if header_row_count else None,
+            declared_column_names=column_names,
+            data_start_row=start_row + header_row_count,
         )
         for existing in table_regions.values():
             overlaps = not (
