@@ -46,6 +46,12 @@ def test_xlsx_loader_defaults_are_bounded_and_automatic():
     assert cfg.xlsx_limits == {}
 
 
+def test_xlsx_limits_validate_names_at_config_load():
+    assert LoaderConfig(xlsx_limits={"max_tables": 3}).xlsx_limits == {"max_tables": 3}
+    with pytest.raises(ValidationError, match="max_table"):
+        LoaderConfig(xlsx_limits={"max_table": 3})
+
+
 def test_transcriber_config_default_direct_upload_suffixes():
     cfg = TranscriberConfig()
     assert cfg.direct_upload_suffixes == set(_DEFAULT_DIRECT_UPLOAD_SUFFIXES)

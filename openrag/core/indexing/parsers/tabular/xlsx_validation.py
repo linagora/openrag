@@ -613,6 +613,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
             merged_ranges_seen = 0
             worksheet_paths = set()
             for index, sheet in enumerate(sheets):
+                visible_sheet = sheet.get("state", "visible") == "visible"
                 rel_id = next((v for k, v in sheet.attrib.items() if k.endswith("}id")), None)
                 relationship = relationships[rel_id]
                 if relationship.get("TargetMode") == "External":
@@ -819,7 +820,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 if current_row > limits.max_rows or current_cell_column > limits.max_columns:
                                     raise limit("XLSX cell coordinate exceeds row/column limits")
                                 max_row, max_col = max(max_row, current_row), max(max_col, current_cell_column)
-                            if has_content and not is_in_explicit_table(current_cell_column):
+                            if visible_sheet and has_content and not is_in_explicit_table(current_cell_column):
                                 row_content_columns.add(current_cell_column)
                                 if element.get("t") not in {"s", "str", "inlineStr"}:
                                     row_typed_columns.add(current_cell_column)
@@ -895,14 +896,15 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 missing = sum(
                     count for column, count in missing_formula_columns.items() if column not in hidden_columns
                 )
-                visible_sheet = sheet.get("state", "visible") == "visible"
-                inferred_regions = _merge_preambles(regions, explicit_regions, typed_first_rows)
+                inferred_regions = (
+                    _merge_preambles(regions, explicit_regions, typed_first_rows) if visible_sheet else []
+                )
                 # Bound the count before combining: _combine_regions never returns
                 # fewer regions than it receives (a table absorbs at most one title
                 # and is added back), and its work grows with the input.
                 if visible_sheet and len(inferred_regions) > limits.max_tables:
                     raise limit("XLSX worksheet table count exceeds the limit")
-                regions = _combine_regions(inferred_regions, explicit_regions, merged_ranges)
+                regions = _combine_regions(inferred_regions, explicit_regions, merged_ranges) if visible_sheet else []
                 header_coverage: dict[int, list[tuple[int, int]]] = {}
                 hinted_regions: list[TableRegion] = []
                 for region in regions:
