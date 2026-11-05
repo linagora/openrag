@@ -98,11 +98,29 @@ def _normalize_unique_headers(values: list[str]) -> list[str]:
     return headers
 
 
+_HEADER_ALIGNMENT_ROWS = 3
+
+
+def _aligned_with_following(occupied: list[int], following: list[list[str]]) -> bool:
+    """Whether data in the next few rows sits under most of these header columns.
+
+    One sparse record must not disqualify a header, so a column counts as
+    aligned when any of the next ``_HEADER_ALIGNMENT_ROWS`` nonempty rows fills
+    it, and a majority of the header's columns must be aligned.
+    """
+    window = following[:_HEADER_ALIGNMENT_ROWS]
+    if not occupied or not window:
+        return False
+    aligned = sum(any(column < len(values) and values[column] for values in window) for column in occupied)
+    return aligned * 2 > len(occupied)
+
+
 def _detect_header(rows, byte_limit, start_row=1):
     """Skip obvious title/preamble rows, retaining ambiguous first rows.
 
     Look ahead at most 32 physical rows and one batch worth of text. Promote a
-    later row only when it is a wider textual row followed by aligned data.
+    later row only when it is a wider textual row followed by aligned data
+    (see ``_aligned_with_following``).
     Equal-width layouts remain ambiguous and keep the first nonempty row.
     Replay buffered rows so physical coordinates remain unchanged.
     """
@@ -148,8 +166,7 @@ def _detect_header(rows, byte_limit, start_row=1):
                 continue
             if index + 1 >= len(nonempty):
                 break
-            following = nonempty[index + 1][2]
-            if all(column < len(following) and following[column] for column in occupied):
+            if _aligned_with_following(occupied, [values for _, _, values in nonempty[index + 1 :]]):
                 selected = number
                 promoted = True
                 break
@@ -160,10 +177,25 @@ def _detect_header(rows, byte_limit, start_row=1):
             isinstance(_raw_cell_value(value), str) for value in raw if _raw_cell_value(value) is not None
         ):
             continue
-        following = nonempty[index + 1][2]
-        if all(column < len(following) and following[column] for column in occupied):
+        if _aligned_with_following(occupied, [values for _, _, values in nonempty[index + 1 :]]):
             candidates.append(number)
 
+    # A header that does not reach the outermost columns holding data leaves
+    # those columns with generated names; that is not a confident result.
+    narrower_than_data = False
+    if selected is not None:
+        header_values = next(values for number, _, values in nonempty if number == selected)
+        header_columns = [column for column, value in enumerate(header_values) if value]
+        data_columns = [
+            column
+            for number, _, values in nonempty
+            if number > selected
+            for column, value in enumerate(values)
+            if value
+        ]
+        narrower_than_data = bool(data_columns) and (
+            min(data_columns) < header_columns[0] or max(data_columns) > header_columns[-1]
+        )
     if selected is None:
         detection = {
             "mode": "automatic",
@@ -210,6 +242,12 @@ def _detect_header(rows, byte_limit, start_row=1):
                 "identified a safer header row. Configure a header row or schema when this is not intended."
             ),
         }
+    if narrower_than_data and detection["status"] == "confident":
+        detection.update(
+            status="ambiguous",
+            reason="header_narrower_than_data",
+            note=detection["note"] + " Data was found in columns outside the header, which received generated names.",
+        )
     return selected, chain(buffered, rows), detection
 
 
@@ -1218,7 +1256,8 @@ class XlsxParser(TabularBatchParser):
                                 table_index=table.index,
                                 selected_row=selected_header_row,
                                 candidate_rows=header_detection["candidate_rows"],
-                            ).warning("XLSX automatic header detection is ambiguous; retained the first nonempty row")
+                                reason=header_detection["reason"],
+                            ).warning("XLSX automatic header detection is ambiguous")
                     header_values = None
                     header_row = table.start_row
                     for physical_row, values in enumerate(row_iterator, start=table.start_row):

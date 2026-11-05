@@ -2236,6 +2236,57 @@ def test_auto_header_skips_multiple_narrow_preamble_rows():
     assert block.metadata["table_header_detection"]["reason"] == "separated_wider_text_row"
 
 
+def test_auto_header_survives_a_gap_in_the_first_data_row():
+    document = _document(
+        [
+            ["KPI", "Valeur"],
+            ["CA", 1000],
+            ["Marge", 100],
+            [],
+            ["Nom", "Ville", "Pays", "Note"],
+            ["Alice", None, "FR", 3],
+            ["Bob", "Lyon", "FR", 4],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["Nom", "Ville", "Pays", "Note"]
+    assert block.metadata["table_header_row"] == 5
+    assert block.metadata["table_row_numbers"] == [6, 7]
+    assert block.metadata["sheet_context_row_numbers"] == [1, 2, 3]
+    assert block.metadata["table_header_detection"]["reason"] == "separated_wider_text_row"
+    assert "| Alice |  | FR | 3 |" in block.text
+
+
+def test_auto_header_is_not_promoted_over_mostly_unaligned_rows():
+    document = _document(
+        [
+            ["Rapport", None, None, None],
+            [],
+            ["Nom", "Ville", "Pays", "Note"],
+            ["Alice", None, None, None],
+            ["Bob", None, None, None],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_header_detection_status"] == "ambiguous"
+
+
+def test_auto_header_narrower_than_its_data_is_ambiguous():
+    document = _document([["Nom", "Age"], ["Alice", 30, "extra"], ["Bob", 31, "x"]])
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["Nom", "Age", "column_3"]
+    assert block.metadata["table_header_detection_status"] == "ambiguous"
+    assert block.metadata["table_header_detection"]["reason"] == "header_narrower_than_data"
+    assert "outside the header" in block.metadata["table_header_detection"]["note"]
+
+
 def test_auto_header_reports_ambiguous_equal_width_text_rows_without_dropping_data():
     from core.chunking.markdown_utils import MDElement, chunk_table
 
