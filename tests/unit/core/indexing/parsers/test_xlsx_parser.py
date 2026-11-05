@@ -67,6 +67,34 @@ def test_reader_is_openpyxl_only():
     assert "spreadsheet_fallback_used" not in block.metadata
 
 
+def test_hidden_worksheets_skip_region_inference(monkeypatch):
+    from core.indexing.parsers.tabular import xlsx_validation
+
+    workbook = Workbook()
+    workbook.active.append(["name", "value"])
+    workbook.active.append(["visible", 1])
+    hidden = workbook.create_sheet("Hidden")
+    hidden.sheet_state = "hidden"
+    for row in range(1, 50, 2):
+        hidden.cell(row, 1, "hidden")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    original = xlsx_validation._combine_regions
+    calls = []
+
+    def track_regions(*args):
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(xlsx_validation, "_combine_regions", track_regions)
+    infos = xlsx_validation.validate_ooxml(BytesIO(output.getvalue()), XlsxLimits())
+    assert len(calls) == 1
+    assert infos[0].tables
+    assert not infos[1].tables
+
+
 def test_worksheet_name_is_searchable_without_a_table_preamble():
     from core.chunking.markdown_utils import MDElement, chunk_table
 
