@@ -2,7 +2,6 @@ import asyncio
 import threading
 
 import pytest
-from core.utils.exceptions import PipelineError
 from services.workers import tabular_pipeline
 
 
@@ -63,13 +62,37 @@ async def test_abandoned_reads_remain_bounded_until_worker_finishes(monkeypatch)
         await blocked_task
     await blocked_reader.aclose()
 
-    excess_reader = tabular_pipeline._AsyncBatchReader(iter(["excess"]))
-    with pytest.raises(PipelineError, match="Too many tabular parser reads"):
-        await excess_reader.next()
+    # A healthy read waits for the abandoned one's slot instead of failing.
+    excess_batches = _BlockingIterator()
+    excess_reader = tabular_pipeline._AsyncBatchReader(excess_batches)
+    excess_task = asyncio.create_task(excess_reader.next())
+    await asyncio.sleep(0.2)
+    assert not excess_task.done()
+    assert not excess_batches.started.is_set()
 
     blocked_batches.release.set()
     assert await asyncio.to_thread(blocked_batches.closed.wait, 1)
+    assert await asyncio.to_thread(excess_batches.started.wait, 2)
+    excess_batches.release.set()
+    assert await asyncio.wait_for(excess_task, 2) == "batch"
+    await excess_reader.aclose()
 
-    replacement_reader = tabular_pipeline._AsyncBatchReader(iter(["replacement"]))
-    assert await replacement_reader.next() == "replacement"
-    await replacement_reader.aclose()
+
+@pytest.mark.asyncio
+async def test_waiting_read_is_cancellable_and_releases_nothing(monkeypatch):
+    read_slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(tabular_pipeline, "_TABULAR_READ_SLOTS", read_slots)
+    assert read_slots.acquire(blocking=False)
+
+    reader = tabular_pipeline._AsyncBatchReader(iter(["never"]))
+    waiting = asyncio.create_task(reader.next())
+    await asyncio.sleep(0.1)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+    read_slots.release()
+    # The cancelled wait took no slot: exactly one is free again.
+    assert read_slots.acquire(blocking=False)
+    assert not read_slots.acquire(blocking=False)
+    read_slots.release()
