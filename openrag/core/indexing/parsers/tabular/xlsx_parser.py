@@ -411,7 +411,9 @@ def _analyze_formula(
 
 def _worksheet_context(sheet_name: str) -> str:
     """Render the worksheet identity as searchable, single-line chunk context."""
-    safe_name = sheet_name.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    # Chunkers strip block text, so trailing whitespace in a name such as
+    # "Budget " must not end the context. ``sheet_name`` keeps the exact name.
+    safe_name = sheet_name.replace("\r\n", " ").replace("\r", " ").replace("\n", " ").strip()
     return f"\n\nWorksheet: {safe_name}"
 
 

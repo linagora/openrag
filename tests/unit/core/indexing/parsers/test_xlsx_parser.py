@@ -94,6 +94,69 @@ def test_worksheet_name_is_searchable_without_a_table_preamble():
     assert chunk.metadata["cell_range"] == "'Research O''Brien'!A2:B2"
 
 
+@pytest.mark.parametrize("sheet_name", ["Budget ", " Budget\t", " "])
+@pytest.mark.parametrize("chunker_name", ["recursive_splitter", "structured_section"])
+def test_sheet_names_with_surrounding_whitespace_chunk_when_split(sheet_name, chunker_name):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.chunking.structured_section import StructuredSectionChunker
+    from core.models.document import ProcessedDocument
+
+    workbook = Workbook()
+    workbook.active.title = sheet_name
+    workbook.active.append(["id", "label", "amount"])
+    for index in range(200):
+        workbook.active.append([index, f"line {index}", index * 10])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    def words(text):
+        return len(text.split())
+
+    chunker = (
+        RecursiveSplitter(chunk_size=200, length_function=words)
+        if chunker_name == "recursive_splitter"
+        else StructuredSectionChunker(chunk_size=200, min_tokens=0, max_tokens=400, length_function=words)
+    )
+    chunks = [
+        chunk
+        for block in XlsxParser().iter_batches(Document(raw_bytes=output.getvalue()))
+        for chunk in chunker.chunk(
+            ProcessedDocument(document_id="budget", text_blocks=[block], metadata=dict(block.metadata))
+        )
+    ]
+
+    assert len(chunks) > 1
+    assert all(chunk.metadata["sheet_name"] == sheet_name for chunk in chunks)
+    assert all(f"Worksheet: {sheet_name.strip()}".strip() in chunk.text for chunk in chunks)
+
+
+def test_xlsx_chunking_accepts_a_trailing_context_stripped_of_whitespace():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    formula_context = "\n\nFormula context:\n- total = quantity+price "
+    table = "| quantity | price |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\nWorksheet: Sheet" + formula_context
+    metadata = {
+        "tabular_format": "xlsx",
+        "sheet_name": "Sheet",
+        "worksheet_context": "\n\nWorksheet: Sheet",
+        "formula_context": formula_context,
+        "table_start_column": 1,
+        "table_worksheet_column_indices": [1, 2],
+        "table_columns": ["quantity", "price"],
+        "table_row_numbers": [2, 3],
+    }
+
+    chunks = chunk_table(
+        MDElement(type="table", content=table.strip(), metadata=metadata),
+        chunk_size=12,
+        length_function=lambda text: len(text.split()),
+    )
+
+    assert len(chunks) > 1
+    assert all("Worksheet: Sheet" in chunk.content for chunk in chunks)
+
+
 def test_detects_and_extracts_each_table_region_with_exact_coordinates():
     from core.chunking.markdown_utils import MDElement, chunk_table
 
