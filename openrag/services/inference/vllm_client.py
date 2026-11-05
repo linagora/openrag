@@ -39,8 +39,8 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from core.utils.logging import get_logger
+from core.utils.progress import gather_with_progress
 from core.vlm import VLM, vlm_registry
-from tqdm.asyncio import tqdm
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
@@ -634,13 +634,12 @@ class VLLMEmbedder(Embedder):
             async with semaphore:
                 return await self._embed_batch(batch, offset=offset)
 
-        # Explicit tasks so that when one batch fails we can cancel the rest.
-        # tqdm.gather (like asyncio.gather) propagates the first exception but
-        # leaves the other in-flight batches running, where they would keep
-        # consuming embedder capacity after embed() has already failed.
+        # Explicit tasks so that when one batch fails we can cancel the rest:
+        # the gather propagates the first exception but leaves the other
+        # in-flight batches running, consuming embedder capacity.
         tasks = [asyncio.ensure_future(_run(batch, offset)) for batch, offset in zip(batches, offsets, strict=True)]
         try:
-            results = await tqdm.gather(
+            results = await gather_with_progress(
                 *tasks,
                 desc=f"Embedding {len(texts)} chunks ({len(batches)} batches of {self._batch_size})",
             )
