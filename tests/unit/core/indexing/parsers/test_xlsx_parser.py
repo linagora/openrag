@@ -1401,6 +1401,50 @@ def test_preserves_error_cells_and_reports_missing_formula_caches():
     assert block.metadata["spreadsheet_backend"] == "openpyxl"
 
 
+def _template_formula_document(*, extra_uncalculated: bool):
+    import re
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["qty", "double"])
+    sheet.append([3, '=IF(A2="","",A2*2)'])
+    for row in range(3, 2002):
+        sheet.cell(row, 2, f'=IF(A{row}="","",A{row}*2)')
+    if extra_uncalculated:
+        sheet.cell(2003, 1, "uncalculated")
+        sheet.cell(2003, 2, "=A2+1")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(filename="template.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+    def calculate(xml):
+        # As Excel saves it: the first row holds a number, the empty rows an
+        # empty string result (t="str" with an empty cached value).
+        xml = xml.replace(
+            '<c r="B2"><f>IF(A2="","",A2*2)</f><v></v></c>', '<c r="B2"><f>IF(A2="","",A2*2)</f><v>6</v></c>'
+        )
+        return re.sub(
+            r'<c r="B(\d+)"><f>(IF\(A\1=[^<]*)</f><v></v></c>', r'<c r="B\1" t="str"><f>\2</f><v></v></c>', xml
+        )
+
+    return _edit_xml(document, calculate)
+
+
+@pytest.mark.parametrize("extra_uncalculated", [False, True])
+def test_formulas_calculated_to_empty_strings_are_empty_cells(extra_uncalculated):
+    blocks = list(XlsxParser().iter_batches(_template_formula_document(extra_uncalculated=extra_uncalculated)))
+
+    rows = [row for block in blocks for row in block.metadata["table_row_numbers"]]
+    assert rows == ([2, 2003] if extra_uncalculated else [2])
+    text = "".join(block.text for block in blocks)
+    assert '| 3 | 6 [formula: =IF(A2="","",A2*2)] |' in text
+    # Only a formula that was never calculated reports a missing cached value.
+    assert text.count("cached value unavailable") == (1 if extra_uncalculated else 0)
+    assert blocks[0].metadata["sheet_missing_formula_values"] == (1 if extra_uncalculated else 0)
+    assert blocks[0].metadata["sheet_formula_cells"] == (2 if extra_uncalculated else 1)
+
+
 def test_cached_formula_values_are_returned_without_execution():
     doc = _document([["formula"], ["=1+1"]])
     doc = _edit_xml(

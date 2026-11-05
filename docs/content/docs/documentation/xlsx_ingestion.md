@@ -133,7 +133,7 @@ Formula cells are indexed as a cached scalar paired with inert formula text, for
 42 [formula: =SUM(B2:B10)]
 ```
 
-OpenRAG never executes workbook formulas or macros. When a formula has no cached value, its expression remains searchable and a warning is logged. Cached results may be absent or stale if the workbook was not recalculated and saved by Excel, LibreOffice, or another calculation engine after its inputs changed.
+OpenRAG never executes workbook formulas or macros. When a formula has no cached value, its expression remains searchable and a warning is logged. A formula whose cached result is an empty string, such as `=IF(A2="","",A2*2)` filled down a template, is indexed as an empty cell: it does not create rows, does not count as a formula, and is not reported as missing a cached value. Cached results may be absent or stale if the workbook was not recalculated and saved by Excel, LibreOffice, or another calculation engine after its inputs changed.
 
 The bounded OOXML preflight detects formulas before OpenPyXL opens the workbook. OpenRAG normally uses one read-only, `data_only=True` reader. It opens the second read-only formula reader only when at least one formula exists in a visible row and column of a visible worksheet. Formulas located exclusively in skipped worksheets, hidden rows, or hidden columns therefore do not add the cost of a second workbook reader.
 

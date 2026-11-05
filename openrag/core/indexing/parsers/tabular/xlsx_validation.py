@@ -721,6 +721,15 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                         if tag == "c":
                             value = element.find("{*}v")
                             formula = element.find("{*}f")
+                            if (
+                                formula is not None
+                                and element.get("t") == "str"
+                                and not (value is not None and value.text)
+                            ):
+                                # Calculated to an empty string (e.g. =IF(A2="","",...)
+                                # filled down a template): an empty cell, not content
+                                # and not a formula missing its cached result.
+                                formula = value = None
                             if formula is not None and current_row not in hidden_rows:
                                 visible_formula_columns[current_cell_column] = (
                                     visible_formula_columns.get(current_cell_column, 0) + 1
