@@ -365,9 +365,15 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
     include_number_format_context = bool(number_format_context)
     complete_context = number_format_context + base_context + formula_context
     if complete_context:
-        if not table.endswith(complete_context):
+        # Chunkers strip block text, which removes trailing whitespace from
+        # whichever context comes last.
+        stripped_context = complete_context.rstrip()
+        if table.endswith(complete_context):
+            table = table[: -len(complete_context)]
+        elif stripped_context and table.endswith(stripped_context):
+            table = table[: -len(stripped_context)]
+        else:
             raise PipelineError("XLSX sheet context does not match table content")
-        table = table[: -len(complete_context)]
     table = clean_markdown_table_spacing(table)
     base_context_tokens = length_function(base_context) if base_context else 0
     if base_context_tokens >= chunk_size:
