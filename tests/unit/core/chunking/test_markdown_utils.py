@@ -30,13 +30,28 @@ def _mock_length(text: str) -> int:
 def test_formula_truncation_marker_is_scoped_to_omitted_rows_and_columns():
     marker = {
         "truncated": True,
-        "omitted_row_ranges": [{"start_row": 18, "end_row": 20}],
-        "omitted_target_columns": ["B"],
+        "omitted_cells_by_column": [{"column": "B", "row_ranges": [{"start_row": 18, "end_row": 20}]}],
     }
 
     assert markdown_utils._formula_truncation_marker_matches(marker, [18], {"B"})
     assert not markdown_utils._formula_truncation_marker_matches(marker, [17], {"B"})
     assert not markdown_utils._formula_truncation_marker_matches(marker, [18], {"C"})
+
+
+def test_formula_truncation_marker_pairs_rows_with_their_column():
+    # B18 and C19 were omitted; C18 and B19 were not.
+    marker = {
+        "truncated": True,
+        "omitted_cells_by_column": [
+            {"column": "B", "row_ranges": [{"start_row": 18, "end_row": 18}]},
+            {"column": "C", "row_ranges": [{"start_row": 19, "end_row": 19}]},
+        ],
+    }
+
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [18], {"C"})
+    assert markdown_utils._formula_truncation_marker_matches(marker, [19], {"C"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [19], {"B"})
+    assert markdown_utils._formula_truncation_marker_matches(marker, [18], None)
 
 
 class TestSplitMdElements:

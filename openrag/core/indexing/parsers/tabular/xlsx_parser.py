@@ -790,14 +790,7 @@ def _compact_formula_batch(
         omitted = len(individual_cells) - _MAX_INDIVIDUAL_FORMULA_CELLS
         omitted_cells = individual_cells[_MAX_INDIVIDUAL_FORMULA_CELLS:]
         individual_cells = individual_cells[:_MAX_INDIVIDUAL_FORMULA_CELLS]
-        individual_cells.append(
-            {
-                "truncated": True,
-                "omitted_count": omitted,
-                "omitted_row_ranges": _row_ranges([cell["row"] for cell in omitted_cells]),
-                "omitted_target_columns": sorted({cell["target_column"] for cell in omitted_cells}),
-            }
-        )
+        individual_cells.append(_omitted_formula_marker(omitted, omitted_cells))
     rendered_rows: list[list[str]] = []
     for row_number, row in zip(row_numbers, rows, strict=True):
         rendered = []
@@ -821,6 +814,67 @@ def _row_ranges(row_numbers: list[int]) -> list[dict[str, int]]:
         else:
             ranges[-1]["end_row"] = row
     return ranges
+
+
+# The truncation marker is copied onto every chunk it concerns, so its size is
+# bounded: at most this many row ranges in total, over at most this many named
+# columns (further columns share one "*" entry).
+_MAX_OMITTED_FORMULA_RANGES = 64
+_MAX_OMITTED_FORMULA_COLUMNS = 32
+
+
+def _omitted_formula_marker(omitted_count: int, omitted_cells: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe omitted individual formulas by (column, rows), with a bounded size.
+
+    Rows are recorded per target column, so a chunk matches only when it holds
+    an omitted cell's row and column together. Past the bounds, the closest row
+    ranges are joined (and extra columns pooled under "*"): the marker may then
+    cover rows without an omitted formula, never miss one, and says so with
+    ``omitted_ranges_coalesced``.
+    """
+    rows_by_column: dict[str, list[int]] = {}
+    for cell in omitted_cells:
+        rows_by_column.setdefault(cell["target_column"], []).append(cell["row"])
+    columns = sorted(rows_by_column, key=lambda column: (len(column), column))
+    coalesced = False
+    if len(columns) > _MAX_OMITTED_FORMULA_COLUMNS:
+        kept, pooled = columns[: _MAX_OMITTED_FORMULA_COLUMNS - 1], columns[_MAX_OMITTED_FORMULA_COLUMNS - 1 :]
+        rows_by_column["*"] = [row for column in pooled for row in rows_by_column[column]]
+        columns = [*kept, "*"]
+        coalesced = True
+    ranges = {
+        column: [(item["start_row"], item["end_row"]) for item in _row_ranges(rows_by_column[column])]
+        for column in columns
+    }
+    excess = sum(map(len, ranges.values())) - _MAX_OMITTED_FORMULA_RANGES
+    if excess > 0:
+        # Join the `excess` narrowest gaps; each column keeps at least one range.
+        gaps = sorted(
+            (spans[index + 1][0] - spans[index][1], column, index)
+            for column, spans in ranges.items()
+            for index in range(len(spans) - 1)
+        )
+        joined = {(column, index) for _, column, index in gaps[:excess]}
+        for column, spans in ranges.items():
+            merged = [spans[0]]
+            for index, span in enumerate(spans[1:]):
+                if (column, index) in joined:
+                    merged[-1] = (merged[-1][0], span[1])
+                else:
+                    merged.append(span)
+            ranges[column] = merged
+        coalesced = True
+    marker: dict[str, Any] = {
+        "truncated": True,
+        "omitted_count": omitted_count,
+        "omitted_cells_by_column": [
+            {"column": column, "row_ranges": [{"start_row": start, "end_row": end} for start, end in ranges[column]]}
+            for column in columns
+        ],
+    }
+    if coalesced:
+        marker["omitted_ranges_coalesced"] = True
+    return marker
 
 
 def _compact_number_formats(

@@ -1733,9 +1733,28 @@ def test_formula_individual_metadata_is_bounded_with_a_truncation_marker():
     assert formula_cells[-1] == {
         "truncated": True,
         "omitted_count": 3,
-        "omitted_row_ranges": [{"start_row": 18, "end_row": 20}],
-        "omitted_target_columns": ["B"],
+        "omitted_cells_by_column": [{"column": "B", "row_ranges": [{"start_row": 18, "end_row": 20}]}],
     }
+
+
+def test_formula_truncation_marker_size_is_bounded_without_missing_omitted_cells():
+    from core.chunking.markdown_utils import _formula_truncation_marker_matches
+
+    # Alternating formula rows, across 40 columns: thousands of single-row ranges.
+    omitted = [
+        {"row": row, "target_column": module._column_name(column)}
+        for column in range(1, 41)
+        for row in range(2, 2000, 2)
+    ]
+
+    marker = module._omitted_formula_marker(len(omitted), omitted)
+
+    entries = marker["omitted_cells_by_column"]
+    assert marker["omitted_ranges_coalesced"] is True
+    assert sum(len(entry["row_ranges"]) for entry in entries) <= 64
+    assert len(entries) <= 32 and entries[-1]["column"] == "*"
+    for cell in omitted:
+        assert _formula_truncation_marker_matches(marker, [cell["row"]], {cell["target_column"]})
 
 
 def test_formula_only_rows_remain_searchable_without_cached_results():

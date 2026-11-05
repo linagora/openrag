@@ -605,22 +605,28 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
 
 
 def _formula_truncation_marker_matches(marker, row_numbers, selected_columns=None):
-    """Return whether a truncated-formula marker belongs to a chunk."""
+    """Return whether a truncated-formula marker concerns a chunk's cells.
+
+    Rows are paired with their target column: a chunk matches only when it
+    holds one of a column's omitted rows *and* that column. The "*" entry pools
+    columns past the marker's bound and matches any selected column.
+    """
     if not marker.get("truncated"):
         return False
-    ranges = marker.get("omitted_row_ranges", [])
-    row_matches = any(
-        row_range.get("start_row", 0) <= row <= row_range.get("end_row", -1)
-        for row_range in ranges
-        if isinstance(row_range, dict)
-        for row in row_numbers
-    )
-    if not row_matches:
-        return False
-    if selected_columns is None:
-        return True
-    omitted_columns = marker.get("omitted_target_columns", [])
-    return bool(set(omitted_columns) & set(selected_columns))
+    for entry in marker.get("omitted_cells_by_column", []):
+        if not isinstance(entry, dict):
+            continue
+        column = entry.get("column")
+        if selected_columns is not None and column != "*" and column not in selected_columns:
+            continue
+        if any(
+            row_range.get("start_row", 0) <= row <= row_range.get("end_row", -1)
+            for row_range in entry.get("row_ranges", [])
+            if isinstance(row_range, dict)
+            for row in row_numbers
+        ):
+            return True
+    return False
 
 
 def _table_cells(row: str) -> list[str]:
