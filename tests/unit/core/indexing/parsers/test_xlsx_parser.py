@@ -661,74 +661,6 @@ def test_merged_row_header_expansion_is_scoped_to_separated_tables():
     assert "Europe" not in blocks[1].text
 
 
-def test_headerless_schema_preserves_first_row_as_data():
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Raw"
-    sheet.append(["HL-001", "Alice", "Accessibility"])
-    sheet.append(["HL-002", "René", "Search"])
-    output = BytesIO()
-    workbook.save(output)
-    workbook.close()
-
-    [block] = list(
-        XlsxParser(sheet_headerless_schemas={"Raw": ["id", "name", "topic"]}).iter_batches(
-            Document(raw_bytes=output.getvalue())
-        )
-    )
-
-    assert block.metadata["table_columns"] == ["id", "name", "topic"]
-    assert block.metadata["table_header_row"] is None
-    assert block.metadata["table_header_range"] is None
-    assert block.metadata["table_header_source"] == "configured_schema"
-    assert block.metadata["table_header_detection"] == {
-        "mode": "configured_schema",
-        "status": "explicit",
-        "selected_row": None,
-        "candidate_rows": [],
-        "reason": "configured_headerless_schema",
-        "note": "A configured schema is used; every physical row remains table data.",
-    }
-    assert block.metadata["table_row_numbers"] == [1, 2]
-    assert "HL-001" in block.text
-
-
-def test_table_specific_headerless_schemas_work_across_tables_and_sheets():
-    workbook = Workbook()
-    first = workbook.active
-    first.title = "Raw"
-    first.append(["P-1", "Alice"])
-    first.append([])
-    first.append(["O-1", "Paris", "Support"])
-    second = workbook.create_sheet("Metrics")
-    second.append(["M-1", 42])
-    output = BytesIO()
-    workbook.save(output)
-    workbook.close()
-
-    blocks = list(
-        XlsxParser(
-            sheet_headerless_schemas={
-                "Raw#1": ["person_id", "name"],
-                "Raw#2": ["office_id", "city", "service"],
-                "Metrics": ["metric_id", "value"],
-            }
-        ).iter_batches(Document(raw_bytes=output.getvalue()))
-    )
-
-    assert [block.metadata["table_columns"] for block in blocks] == [
-        ["person_id", "name"],
-        ["office_id", "city", "service"],
-        ["metric_id", "value"],
-    ]
-    assert [block.metadata["sheet_name"] for block in blocks] == ["Raw", "Raw", "Metrics"]
-    assert [block.metadata["table_id"] for block in blocks] == [
-        "sheet:0:table:0",
-        "sheet:0:table:1",
-        "sheet:1:table:0",
-    ]
-
-
 def test_detects_extracts_and_chunks_ten_tables_in_one_worksheet():
     from core.chunking.markdown_utils import MDElement, chunk_table
 
@@ -1987,18 +1919,13 @@ def test_rendered_header_names_remain_unique_through_recursive_chunking(headers,
 
 
 def test_whitespace_only_cells_do_not_become_headers_or_data():
-    doc = _document([["title"], ["name", "   "], ["Alice", "\t"], [" ", "\t"], ["Bob", "Lyon"]])
+    doc = _document([["name", "   "], ["Alice", "\t"], [" ", "\t"], ["Bob", "Lyon"]])
 
-    [block] = list(XlsxParser(header_row=2).iter_batches(doc))
+    [block] = list(XlsxParser().iter_batches(doc))
 
     assert block.metadata["table_columns"] == ["name", "column_2"]
-    assert block.metadata["table_row_numbers"] == [3, 5]
+    assert block.metadata["table_row_numbers"] == [2, 4]
     assert "Alice" in block.text and "Bob" in block.text
-
-
-def test_explicit_whitespace_only_header_is_rejected():
-    with pytest.raises(PipelineError, match="selected header row 1 is empty"):
-        list(XlsxParser(header_row=1).iter_batches(_document([["   ", "\t"], [1, 2]])))
 
 
 def test_rejects_case_insensitive_duplicate_sheet_names_before_reader_opens(monkeypatch):
@@ -2281,7 +2208,7 @@ def test_explicit_header_skips_report_title_and_preserves_physical_citations():
     output = BytesIO()
     workbook.save(output)
     workbook.close()
-    blocks = list(XlsxParser(header_row=3, batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+    blocks = list(XlsxParser(batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
     assert [b.metadata["table_row_numbers"] for b in blocks] == [[4], [6]]
     assert all(b.metadata["table_columns"] == ["name", "city"] for b in blocks)
     assert all(b.metadata["table_header_range"] == "'Report'!A3:B3" for b in blocks)
@@ -2289,57 +2216,6 @@ def test_explicit_header_skips_report_title_and_preserves_physical_citations():
     assert all("Annual report" in b.text for b in blocks)
     assert all(b.metadata["sheet_context_row_numbers"] == [1] for b in blocks)
     assert "René" in blocks[1].text
-
-
-@pytest.mark.parametrize("header_row, message", [(1, "empty"), (99, "missing")])
-def test_invalid_selected_header_is_not_silently_inferred(header_row, message):
-    with pytest.raises(PipelineError, match=message):
-        list(XlsxParser(header_row=header_row).iter_batches(Document(raw_bytes=_workbook_bytes())))
-
-
-@pytest.mark.parametrize("header_row", [0, -1, True, 1.5, "3", 1_048_577])
-def test_header_row_requires_a_valid_physical_excel_row(header_row):
-    from core.utils.exceptions import ConfigError
-
-    with pytest.raises(ConfigError):
-        XlsxParser(header_row=header_row)
-
-
-def test_sheet_headers_override_global_and_allow_automatic_selection():
-    workbook = Workbook()
-    workbook.active.title = "People"
-    for sheet in (workbook.active, workbook.create_sheet("Projects"), workbook.create_sheet("Notes")):
-        sheet.append(["title"])
-        sheet.append(["name", "value"])
-        sheet.append(["Alice", "Paris"])
-        sheet.append(["René", "Lyon"])
-    output = BytesIO()
-    workbook.save(output)
-    workbook.close()
-    mapping = {"People": 3, "Notes": None}
-    parser = XlsxParser(batch_size=1, header_row=2, sheet_header_rows=mapping)
-    mapping["People"] = 4  # The parser owns a snapshot of its configuration.
-    blocks = list(parser.iter_batches(Document(raw_bytes=output.getvalue())))
-    by_sheet = {
-        name: [b for b in blocks if b.metadata["sheet_name"] == name] for name in ["People", "Projects", "Notes"]
-    }
-    assert by_sheet["People"][0].metadata["table_columns"] == ["Alice", "Paris"]
-    assert by_sheet["People"][0].metadata["table_header_range"] == "'People'!A3:B3"
-    assert by_sheet["People"][0].metadata["cell_range"] == "'People'!A4:B4"
-    assert [b.metadata["table_row_numbers"] for b in by_sheet["Projects"]] == [[3], [4]]
-    # Without a blank structural boundary, automatic detection keeps the
-    # first nonempty row rather than risking loss of an ordinary data record.
-    assert by_sheet["Notes"][0].metadata["table_header_row"] == 1
-
-
-def test_sheet_header_override_does_not_validate_the_global_row_for_that_sheet():
-    blocks = list(
-        XlsxParser(header_row=1, sheet_header_rows={"People": 2}).iter_batches(Document(raw_bytes=_workbook_bytes()))
-    )
-
-    people = next(block for block in blocks if block.metadata["sheet_name"] == "People")
-    assert people.metadata["table_header_row"] == 2
-    assert people.metadata["table_columns"] == ["name", "column_2", "active", "joined"]
 
 
 def test_merged_range_limit_rejects_workbooks_before_openpyxl_reads_them():
@@ -2373,106 +2249,6 @@ def test_hidden_merged_header_leaf_falls_back_to_automatic_detection():
 
     assert _merged_header_depth(region, {1: [(1, 2)]}, {2}, {2}) == 0
     assert _merged_header_depth(region, {1: [(1, 2)]}, {2}, set()) == 1
-
-
-@pytest.mark.parametrize("overrides", [{"people": 2}, {"Hidden": 1}, {"People": 99}])
-def test_sheet_override_validation_precedes_backend_and_emission(overrides, monkeypatch):
-    parser = XlsxParser(sheet_header_rows=overrides)
-
-    def unexpected(*args):
-        pytest.fail("invalid overrides must fail before opening a reader")
-
-    monkeypatch.setattr(module, "_openpyxl_sheets", unexpected)
-    with pytest.raises(PipelineError):
-        next(parser.iter_batches(Document(raw_bytes=_workbook_bytes())))
-
-
-def test_sheet_override_empty_header_is_rejected():
-    with pytest.raises(PipelineError, match="empty"):
-        list(XlsxParser(sheet_header_rows={"People": 1}).iter_batches(Document(raw_bytes=_workbook_bytes())))
-
-
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        [],
-        {"": 1},
-        {"  ": 1},
-        {1: 2},
-        {"People": True},
-        {"People": 0},
-        {"People": "2"},
-        {"People": 1.5},
-        {"People": 1_048_577},
-    ],
-)
-def test_invalid_sheet_override_configuration(overrides):
-    from core.utils.exceptions import ConfigError
-
-    with pytest.raises(ConfigError):
-        XlsxParser(sheet_header_rows=overrides)
-
-
-def test_loader_config_validates_sheet_rows():
-    from core.config.indexation import LoaderConfig
-    from pydantic import ValidationError
-
-    config = LoaderConfig(xlsx_sheet_header_rows={"People": 3, "Notes": None})
-    assert config.xlsx_sheet_header_rows == {"People": 3, "Notes": None}
-    for invalid_row in (True, 0, "3", 1_048_577):
-        with pytest.raises(ValidationError):
-            LoaderConfig(xlsx_sheet_header_rows={"People": invalid_row})
-
-
-@pytest.mark.parametrize(
-    "schemas",
-    [
-        [],
-        {"": ["id"]},
-        {"Raw": []},
-        {"Raw": [""]},
-        {"Raw": [1]},
-        {1: ["id"]},
-    ],
-)
-def test_invalid_headerless_schema_configuration(schemas):
-    from core.utils.exceptions import ConfigError
-
-    with pytest.raises(ConfigError):
-        XlsxParser(sheet_headerless_schemas=schemas)
-
-
-def test_headerless_schema_rejects_conflicting_or_wrong_width_configuration():
-    from core.utils.exceptions import ConfigError
-
-    with pytest.raises(ConfigError, match="cannot be combined"):
-        XlsxParser(header_row=1, sheet_headerless_schemas={"Raw": ["id"]})
-    with pytest.raises(ConfigError, match="cannot be combined"):
-        XlsxParser(sheet_header_rows={"Raw": 1}, sheet_headerless_schemas={"Raw": ["id"]})
-
-    parser = XlsxParser(
-        header_row=1,
-        sheet_header_rows={"Raw": None},
-        sheet_headerless_schemas={"Raw": ["id", "name"]},
-    )
-
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Raw"
-    sheet.append(["A", "B"])
-    output = BytesIO()
-    workbook.save(output)
-    workbook.close()
-
-    with pytest.raises(PipelineError, match="headerless schema has 1 columns, expected 2"):
-        list(
-            XlsxParser(sheet_headerless_schemas={"Raw": ["only_one"]}).iter_batches(
-                Document(raw_bytes=output.getvalue())
-            )
-        )
-
-    [block] = list(parser.iter_batches(Document(raw_bytes=output.getvalue())))
-    assert block.metadata["table_columns"] == ["id", "name"]
 
 
 @pytest.mark.parametrize("repeated", [False, True])
@@ -2606,17 +2382,6 @@ def test_auto_header_reports_confidence_when_text_labels_are_followed_by_typed_d
     }
 
 
-def test_configured_header_row_is_reported_as_explicit():
-    document = _document([["Report title"], ["id", "name"], ["R-1", "Alice"]])
-
-    [block] = list(XlsxParser(header_row=2).iter_batches(document))
-
-    assert block.metadata["table_header_source"] == "configured_row"
-    assert block.metadata["table_header_detection_status"] == "explicit"
-    assert block.metadata["table_header_detection"]["selected_row"] == 2
-    assert block.metadata["table_header_detection"]["reason"] == "configured_header_row"
-
-
 def test_auto_header_preserves_single_column_and_explicit_title():
     wb = Workbook()
     ws = wb.active
@@ -2655,7 +2420,7 @@ def test_auto_header_keeps_ambiguous_header_and_does_not_skip_numeric_data():
         "reason": "first_nonempty_row_retained",
         "note": (
             "The first nonempty row was retained conservatively because no structural evidence identified "
-            "a safer header row. Configure a header row or schema when this is not intended."
+            "a safer header row. Define the range as an Excel Table when this is not intended."
         ),
     }
     assert list(replay) == original
@@ -2840,8 +2605,7 @@ def test_malformed_backend_metadata_raises_domain_error(target):
 
 
 @pytest.mark.parametrize("strategy", ["recursive", "structured"])
-@pytest.mark.parametrize("header_row", [None, 3])
-def test_preamble_is_searchable_in_each_split_chunk(strategy, header_row):
+def test_preamble_is_searchable_in_each_split_chunk(strategy):
     from core.chunking.recursive import RecursiveSplitter
     from core.chunking.structured_section import StructuredSectionChunker
     from core.models.document import ProcessedDocument
@@ -2855,7 +2619,7 @@ def test_preamble_is_searchable_in_each_split_chunk(strategy, header_row):
         ws.append([str(i), "Long description " * 100])
     output = BytesIO()
     wb.save(output)
-    blocks = list(XlsxParser(header_row=header_row, batch_size=2).iter_batches(Document(raw_bytes=output.getvalue())))
+    blocks = list(XlsxParser(batch_size=2).iter_batches(Document(raw_bytes=output.getvalue())))
     assert all(b.metadata["sheet_context_row_numbers"] == [1] for b in blocks)
     assert all(b.text.count("Quarterly | report") == 1 for b in blocks)
     processed = ProcessedDocument(document_id="test", text_blocks=blocks, metadata={"source": "report.xlsx"})
@@ -2878,7 +2642,7 @@ def test_preamble_is_searchable_in_each_split_chunk(strategy, header_row):
 
 
 def test_blank_preamble_does_not_create_context():
-    blocks = list(XlsxParser(header_row=2).iter_batches(Document(raw_bytes=_workbook_bytes())))
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=_workbook_bytes())))
     assert "sheet_context" not in blocks[0].metadata
     assert blocks[0].metadata["worksheet_context"] == "\n\nWorksheet: People"
     assert blocks[0].text.endswith("\n\nWorksheet: People")
@@ -2887,15 +2651,17 @@ def test_blank_preamble_does_not_create_context():
 def test_explicit_preamble_retains_multiple_rows_and_values():
     wb = Workbook()
     ws = wb.active
-    ws.append(["Report", "Region: West"])
+    ws.append(["Report"])
     ws.append(["Period: 2026", "Period: 2026"])
-    ws.append(["id", "value"])
-    ws.append([1, 2])
+    ws.append([])
+    ws.append(["id", "value", "unit"])
+    ws.append([1, 2, "EUR"])
     output = BytesIO()
     wb.save(output)
-    block = next(XlsxParser(header_row=3).iter_batches(Document(raw_bytes=output.getvalue())))
+    block = next(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    assert block.metadata["table_header_row"] == 4
     assert block.metadata["sheet_context_row_numbers"] == [1, 2]
-    assert "Report ; Region: West" in block.text
+    assert "Row 1: Report" in block.text
     assert block.text.count("Period: 2026") == 1
 
 
@@ -2903,16 +2669,14 @@ def test_excessive_preamble_fails_without_truncation():
     wb = Workbook()
     ws = wb.active
     ws.append(["Title " * 100])
+    # A merged title spanning the table makes the next row a structural header.
+    ws.merge_cells("A1:B1")
     ws.append(["id", "value"])
     ws.append([1, 2])
     output = BytesIO()
     wb.save(output)
     with pytest.raises(PipelineError, match="context exceeds"):
-        list(
-            XlsxParser(header_row=2, limits={"max_batch_bytes": 100}).iter_batches(
-                Document(raw_bytes=output.getvalue())
-            )
-        )
+        list(XlsxParser(limits={"max_batch_bytes": 100}).iter_batches(Document(raw_bytes=output.getvalue())))
 
 
 def test_sheet_context_larger_than_chunk_budget_is_indexed_in_its_own_chunks():
@@ -3134,20 +2898,6 @@ def test_hidden_columns_keep_physical_cell_coordinates_after_chunking():
     assert chunks[0].metadata["cell_range"] == "'Report'!A2:C2"
     assert chunks[0].metadata["table_worksheet_column_indices"] == [1, 3]
     assert "classified" not in chunks[0].content
-
-
-def test_hidden_header_override_is_rejected():
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(["id", "name"])
-    sheet.append(["R-1", "Alice"])
-    sheet.row_dimensions[1].hidden = True
-    output = BytesIO()
-    workbook.save(output)
-    workbook.close()
-
-    with pytest.raises(PipelineError, match="selected header row 1 is hidden"):
-        list(XlsxParser(header_row=1).iter_batches(Document(raw_bytes=output.getvalue())))
 
 
 def test_hidden_unused_columns_beyond_parser_limit_do_not_reject_workbook():

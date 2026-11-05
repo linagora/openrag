@@ -74,56 +74,13 @@ Header selection runs independently for each detected table.
 
 By default, OpenRAG performs a bounded scan of the first 32 physical rows in each detected region. It may select a later textual row when a blank row clearly separates a title or preamble from a wider table and data in the next three nonempty rows sits under most of that row's columns, so one record with an empty cell does not disqualify its header. A merged title spanning the table also selects the following row as the header. Other ambiguous layouts keep the first nonempty row to avoid silently discarding a data record.
 
-Every emitted table block reports how its header was selected. `table_header_source` distinguishes `automatic`, `configured_row`, `configured_schema`, and `structural_hint`. The structured `table_header_detection` metadata contains the status (`explicit`, `confident`, or `ambiguous`), selected row, bounded candidate-row list, machine-readable reason, and explanatory note. `table_header_detection_status` duplicates the status for simple filtering. Ambiguous automatic detection also emits one warning per table, while keeping the conservative first-row behavior unchanged.
+Every emitted table block reports how its header was selected. `table_header_source` distinguishes `automatic` and `structural_hint` (an Excel Table or merged header). The structured `table_header_detection` metadata contains the status (`confident` or `ambiguous`), selected row, bounded candidate-row list, machine-readable reason, and explanatory note. `table_header_detection_status` duplicates the status for simple filtering. Ambiguous automatic detection also emits one warning per table, while keeping the conservative first-row behavior unchanged.
 
-An automatic result is marked confident only when the bounded scan finds strong structural evidence, such as a wider textual header after a blank separator, or unique textual labels followed by typed data. Equal-width all-text layouts remain ambiguous because values alone cannot prove which row is the header. A header that does not reach the outermost columns holding data is also reported as `ambiguous` (reason `header_narrower_than_data`), because those columns receive generated names. For deterministic ingestion, configure the header row or a headerless schema rather than relying on a guess.
+An automatic result is marked confident only when the bounded scan finds strong structural evidence, such as a wider textual header after a blank separator, or unique textual labels followed by typed data. Equal-width all-text layouts remain ambiguous because values alone cannot prove which row is the header. A header that does not reach the outermost columns holding data is also reported as `ambiguous` (reason `header_narrower_than_data`), because those columns receive generated names. For deterministic ingestion, define the range as an Excel Table, whose header row is authoritative, or put the column headers in the first row of the range.
 
-For deterministic exports, configure a physical Excel row number:
-
-```yaml
-loader:
-  xlsx_header_row: 3
-```
-
-The equivalent environment variable is `XLSX_HEADER_ROW=3`.
-
-Per-sheet overrides use exact, case-sensitive worksheet names:
-
-```yaml
-loader:
-  xlsx_header_row: 2
-  xlsx_sheet_header_rows:
-    People: 3
-    Projects: 5
-    Notes: null
-```
-
-A per-sheet value overrides the global row. `null` restores automatic selection for every table on that sheet. A configured row is used by the table region containing it; other detected tables on that sheet retain automatic header selection. An override that targets an absent, hidden, empty, or out-of-range worksheet fails before any content is indexed.
+Header rows cannot be configured. Deployment-wide overrides were checked against every uploaded workbook, so a setting meant for one file rejected the others; a per-file or per-partition route may be added later.
 
 Blank header cells receive generated names such as `column_2`. Duplicate rendered names are made unique.
-
-### Headerless tables
-
-Headerless data is never guessed automatically. Supply a schema using the exact worksheet name:
-
-```yaml
-loader:
-  xlsx_sheet_headerless_schemas:
-    Raw data: [id, name, topic]
-```
-
-Every physical row, including the first, is then indexed as data. Metadata reports `table_header_source: configured_schema`, while `table_header_row` and `table_header_range` remain `null` so generated labels are not mistaken for source cells.
-
-For multiple headerless tables with different schemas in one worksheet, append the one-based detected table number:
-
-```yaml
-loader:
-  xlsx_sheet_headerless_schemas:
-    Raw data#1: [person_id, name]
-    Raw data#2: [office_id, city, service]
-```
-
-Schema width must match the visible columns in the detected table, excluding a blank spacer column that joins two halves of it. Headerless schemas cannot be combined with a configured header row for the same worksheet. Table-specific schemas remain independent across worksheets and detected table regions.
 
 ## Formulas and numerical values
 
@@ -204,9 +161,6 @@ During Markdown chunking, display groups are retained only when their physical r
 ```yaml
 loader:
   xlsx_batch_size: 10000
-  xlsx_header_row: null
-  xlsx_sheet_header_rows: {}
-  xlsx_sheet_headerless_schemas: {}
   xlsx_limits:
     max_batch_bytes: 2097152
     max_shared_strings: 250000
@@ -257,7 +211,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Merged title above a single header row | The title is retained as table context and the following row becomes the header | No action is required when the title spans the detected table |
 | Merged column-header groups | Consecutive source-backed levels are flattened and retained as hierarchy metadata; arbitrary visual layouts without merged ranges remain ambiguous | Use actual merged ranges or a single explicit header row |
 | Merged row headers | Vertically merged single-column values are expanded through their covered data rows and recorded as per-row hierarchy metadata | No action is required for ordinary vertical row-header merges |
-| Headerless worksheet | Without configuration, the first nonempty row is conservatively treated as the header | Supply `xlsx_sheet_headerless_schemas` or add a header row |
+| Headerless worksheet | The first nonempty row is conservatively treated as the header | Add a header row, or define the range as an Excel Table |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
 | Password-protected or encrypted workbook | Rejected | Decrypt it before upload |
@@ -267,7 +221,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 
 ## Operational guidance
 
-- Define independent ranges as Excel Tables when they touch. Otherwise, separate them with at least one fully blank row, or two fully blank columns. Add explicit headers or configure a headerless schema.
+- Define independent ranges as Excel Tables when they touch. Otherwise, separate them with at least one fully blank row, or two fully blank columns. Add explicit headers.
 - Recalculate and save formula-heavy workbooks before uploading them.
 - Macros are never executed during ingestion. `.xlsm` support reads only its OOXML worksheet data with VBA retention disabled.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
