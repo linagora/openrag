@@ -804,6 +804,53 @@ def test_distant_single_row_with_matching_columns_is_not_lost():
     assert "SP-999" in block.text
 
 
+def test_typed_rows_after_a_blank_spacer_continue_the_previous_table():
+    document = _document(
+        [
+            ["Nom", "Salaire"],
+            ["Alice", 3000],
+            ["Bob", 3100],
+            [],
+            ["Carol", 3200],
+            ["Dan", 3300],
+            ["Eve", 3400],
+            [],
+            [],
+            ["Fay", date(2025, 1, 2)],
+            ["Gus", 3600],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["Nom", "Salaire"]
+    assert block.metadata["table_row_numbers"] == [2, 3, 5, 6, 7, 10, 11]
+    assert "| Carol | 3200 |" in block.text
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_columns"),
+    [
+        # A text first row may be the header of an independent table.
+        (
+            [["Nom", "Salaire"], ["Alice", 3000], [], ["Produit", "Prix"], ["Pomme", 2]],
+            [["Nom", "Salaire"], ["Produit", "Prix"]],
+        ),
+        # A different column span is a different table.
+        (
+            [["Nom", "Salaire", "Ville"], ["Alice", 3000, "Paris"], [], ["Bob", 3100], ["Cam", 3200]],
+            [["Nom", "Salaire", "Ville"], ["Bob", "3100"]],
+        ),
+    ],
+)
+def test_blank_spacer_continuation_requires_typed_data_with_the_same_columns(rows, expected_columns):
+    blocks = [
+        block for block in XlsxParser().iter_batches(_document(rows)) if block.metadata["xlsx_content_kind"] == "table"
+    ]
+
+    assert [block.metadata["table_columns"] for block in blocks] == expected_columns
+
+
 def test_style_only_cells_do_not_create_false_table_regions():
     workbook = Workbook()
     sheet = workbook.active
