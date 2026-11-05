@@ -18,7 +18,6 @@ MACRO_MAIN_TYPE = "application/vnd.ms-excel.sheet.macroEnabled.main+xml"
 TABLE_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"
 CELL_REF = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
 CELL_RANGE = re.compile(r"([A-Z]+)([1-9][0-9]*):([A-Z]+)([1-9][0-9]*)\Z")
-STREAMED_XML_PARTS = {"xl/sharedStrings.xml"}
 
 
 @dataclass(frozen=True)
@@ -411,19 +410,70 @@ def _shared_string_count(archive, types, limits):
     return count
 
 
-def _streamed_xml_parts(types) -> set[str]:
-    """Return explicitly declared large XML parts consumed as streams."""
-    suffixes = (".worksheet+xml", ".sharedStrings+xml")
-    return STREAMED_XML_PARTS | {
-        node.get("PartName", "").lstrip("/")
-        for node in types
-        if node.get("PartName") and node.get("ContentType", "").endswith(suffixes)
-    }
+# Parts read-only OpenPyXL reads whole while opening any workbook, at fixed
+# paths (openpyxl.reader.excel.ExcelReader.read, apply_stylesheet).
+READER_FIXED_PARTS = (
+    "[Content_Types].xml",
+    "docProps/core.xml",
+    "docProps/custom.xml",
+    "xl/workbook.xml",
+    "xl/_rels/workbook.xml.rels",
+    "xl/styles.xml",
+    "xl/theme/theme1.xml",
+)
 
 
-def _is_eager_xml_part(name: str, streamed_parts: set[str]) -> bool:
-    """Return whether OpenPyXL may materialize this XML package part."""
-    return name.endswith((".xml", ".rels")) and name not in streamed_parts
+def _rels_path(part: str) -> str:
+    directory, name = posixpath.split(part)
+    return posixpath.join(directory, "_rels", f"{name}.rels")
+
+
+def _reader_loaded_parts(archive, names: set[str], relationship_nodes, limits: XlsxLimits) -> set[str]:
+    """Return the parts read-only OpenPyXL materializes while opening the workbook.
+
+    Worksheets and shared strings are streamed. Everything else a worksheet
+    references (comments, drawings, media, pivot tables and caches, external
+    links with ``keep_links=False``) is never opened in read-only mode, so it
+    is governed by the per-entry and total extraction limits instead. The
+    reader still parses each sheet's relationship part, and loads a chart sheet
+    whole together with what it references: drawings, charts and images.
+    """
+    loaded = {name for name in READER_FIXED_PARTS if name in names}
+    chartsheets = []
+    for relationship in relationship_nodes:
+        relationship_type = relationship.get("Type", "")
+        if relationship.get("TargetMode") == "External" or not relationship_type.endswith(
+            ("/worksheet", "/chartsheet")
+        ):
+            continue
+        target = _related_part_path("xl/workbook.xml", relationship.get("Target", ""))
+        if _rels_path(target) in names:
+            loaded.add(_rels_path(target))
+        if relationship_type.endswith("/chartsheet") and target in names:
+            chartsheets.append(target)
+    visited: set[str] = set()
+    while chartsheets:
+        part = chartsheets.pop()
+        if part in visited:
+            continue
+        visited.add(part)
+        loaded.add(part)
+        rels = _rels_path(part)
+        if rels not in names:
+            continue
+        loaded.add(rels)
+        if archive.getinfo(rels).file_size > limits.max_metadata_bytes:
+            raise limit("XLSX metadata exceeds the memory limit")
+        for relationship in fromstring(archive.read(rels)):
+            if relationship.get("TargetMode") == "External":
+                continue
+            try:
+                target = _related_part_path(part, relationship.get("Target", ""))
+            except PipelineError:
+                continue
+            if target in names:
+                chartsheets.append(target)
+    return loaded
 
 
 def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) -> list[SheetInfo]:
@@ -480,11 +530,6 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 # A macro project hidden in a file presented as .xlsx is not
                 # a plain workbook.  Require the explicit .xlsm route below.
                 raise invalid("Macro-enabled workbooks must use the .xlsm extension")
-            streamed_parts = _streamed_xml_parts(types)
-            eager_entries = [entry for entry in entries if _is_eager_xml_part(entry.filename, streamed_parts)]
-            eager_metadata_bytes = sum(entry.file_size for entry in eager_entries)
-            if any(entry.file_size > limits.max_metadata_bytes for entry in eager_entries):
-                raise limit("XLSX metadata exceeds the memory limit")
             for part in types:
                 if part.get("ContentType", "").endswith(".styles+xml"):
                     if archive.getinfo(part.get("PartName", "").lstrip("/")).file_size > limits.max_metadata_bytes:
@@ -495,15 +540,14 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
             if any(not rel_id for rel_id in relationship_ids) or len(set(relationship_ids)) != len(relationship_ids):
                 raise invalid("XLSX workbook relationships have missing or duplicate identifiers")
             relationships = dict(zip(relationship_ids, relationship_nodes, strict=True))
-            # Read-only OpenPyXL still materializes chart sheets and their
-            # drawing media while opening a workbook. Bound those binary parts
-            # before the backend can allocate them; ordinary worksheet media
-            # remains ignored and is governed by the archive limits instead.
-            if any(relationship.get("Type", "").endswith("/chartsheet") for relationship in relationship_nodes):
-                eager_metadata_bytes += sum(
-                    entry.file_size for entry in entries if entry.filename.startswith("xl/media/")
-                )
-            if eager_metadata_bytes > limits.max_metadata_bytes:
+            # Bound only what the backend materializes before it can allocate it.
+            loaded_sizes = [
+                archive.getinfo(name).file_size
+                for name in _reader_loaded_parts(archive, names, relationship_nodes, limits)
+            ]
+            if any(size > limits.max_metadata_bytes for size in loaded_sizes) or (
+                sum(loaded_sizes) > limits.max_metadata_bytes
+            ):
                 raise limit("XLSX metadata exceeds the memory limit")
             sheets = xml("xl/workbook.xml").findall("{*}sheets/{*}sheet")
             if len(sheets) > limits.max_sheets:

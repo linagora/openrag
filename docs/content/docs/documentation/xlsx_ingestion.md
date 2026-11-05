@@ -226,7 +226,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_uncompressed_bytes` | Total uncompressed archive | 1 GiB |
 | `max_entry_bytes` | Individual ZIP entry | 256 MiB |
 | `max_compression_ratio` | Compression ratio per entry | 200 |
-| `max_metadata_bytes` | Total eagerly loaded XML, metadata, and chart media | 8 MiB |
+| `max_metadata_bytes` | Total size of the parts the reader loads whole: workbook, styles, theme, document properties, worksheet relationships, and chart sheets with their drawings, charts, and images. Pivot caches, comments, and worksheet drawings or media are never loaded and only count toward the archive limits | 8 MiB |
 | `max_shared_strings_bytes` | Shared-string XML | 32 MiB |
 | `max_shared_strings` | Shared-string entries | 250,000 |
 | `max_sheets` | Worksheets, including hidden sheets | 128 |

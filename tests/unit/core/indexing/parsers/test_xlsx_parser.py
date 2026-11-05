@@ -2543,6 +2543,111 @@ def test_worksheet_relationship_metadata_is_bounded_before_reader_opens(monkeypa
     assert error.value.code == "XLSX_LIMIT_EXCEEDED"
 
 
+def _add_part(document, target, data):
+    import zipfile
+
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            dest.writestr(name, source.read(name))
+        dest.writestr(target, data)
+    return document.model_copy(update={"raw_bytes": output.getvalue()})
+
+
+def _incompressible(size):
+    import random
+
+    return random.Random(0).randbytes(size)
+
+
+def _workbook_with_drawings(*, chartsheet: bool):
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.comments import Comment
+    from openpyxl.drawing.image import Image
+    from PIL import Image as PILImage
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in (["key", "value"], ["a", 1], ["b", 2]):
+        sheet.append(row)
+    sheet["A1"].comment = Comment("note", "author")
+    image = BytesIO()
+    PILImage.new("RGB", (4, 4)).save(image, "PNG")
+    sheet.add_image(Image(image), "D2")
+    chart = BarChart()
+    chart.add_data(Reference(sheet, min_col=2, min_row=1, max_row=3), titles_from_data=True)
+    sheet.add_chart(chart, "F2")
+    if chartsheet:
+        sheet_chart = BarChart()
+        sheet_chart.add_data(Reference(sheet, min_col=2, min_row=1, max_row=3))
+        workbook.create_chartsheet("Chart").add_chart(sheet_chart)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return Document(filename="drawings.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+@pytest.mark.parametrize("chartsheet", [False, True])
+def test_metadata_budget_covers_every_part_the_reader_materializes(chartsheet, monkeypatch):
+    import zipfile
+
+    from core.indexing.parsers.tabular import xlsx_validation
+    from openpyxl import load_workbook
+
+    document = _workbook_with_drawings(chartsheet=chartsheet)
+    opened = set()
+    original_open = zipfile.ZipFile.open
+
+    def recording_open(self, name, *args, **kwargs):
+        opened.add(getattr(name, "filename", name))
+        return original_open(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", recording_open)
+    workbook = load_workbook(BytesIO(document.raw_bytes), read_only=True, data_only=True, keep_links=False)
+    for sheet in workbook.worksheets:
+        if hasattr(sheet, "iter_rows"):
+            list(sheet.iter_rows())
+    workbook.close()
+    monkeypatch.setattr(zipfile.ZipFile, "open", original_open)
+
+    with zipfile.ZipFile(BytesIO(document.raw_bytes)) as archive:
+        names = set(archive.namelist())
+        relationships = list(xlsx_validation.fromstring(archive.read("xl/_rels/workbook.xml.rels")))
+        counted = xlsx_validation._reader_loaded_parts(archive, names, relationships, XlsxLimits())
+    streamed = {name for name in opened if name.startswith("xl/worksheets/sheet") or name == "xl/sharedStrings.xml"}
+    # The reader also probes optional parts that are absent from the package.
+    assert (opened & names) - streamed <= counted
+    # Worksheet comments, drawings and media are never opened in read-only mode.
+    assert not {"xl/comments/comment1.xml", "xl/media/image1.png", "xl/drawings/drawing1.xml"} & counted
+    assert chartsheet == ("xl/chartsheets/sheet1.xml" in counted)
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["xl/pivotCache/pivotCacheRecords1.xml", "xl/comments/comment1.xml", "xl/media/image1.png"],
+)
+def test_large_parts_the_reader_never_opens_do_not_count_as_metadata(target):
+    document = _workbook_with_drawings(chartsheet=False)
+    data = _incompressible(100_000)
+    document = _add_part(document, target, data) if "pivot" in target else _replace_part(document, target, data)
+
+    blocks = list(XlsxParser(limits={"max_metadata_bytes": 30_000}).iter_batches(document))
+
+    assert blocks[0].metadata["table_columns"] == ["key", "value"]
+
+
+def test_chartsheet_parts_count_as_metadata_before_reader_opens(monkeypatch):
+    document = _replace_part(_workbook_with_drawings(chartsheet=True), "xl/charts/chart2.xml", _incompressible(40_000))
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
+        list(XlsxParser(limits={"max_metadata_bytes": 30_000}).iter_batches(document))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
 @pytest.mark.parametrize("target", ["xl/styles.xml", "docProps/core.xml"])
 def test_malformed_backend_metadata_raises_domain_error(target):
     document = _replace_part(_document([["id"], [1]]), target, b"<broken")
