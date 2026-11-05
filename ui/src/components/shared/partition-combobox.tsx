@@ -61,7 +61,7 @@ export function PartitionCombobox({
       <PopoverContent
         align="start"
         collisionPadding={{ top: HEADER_HEIGHT }}
-        className="w-(--radix-popover-trigger-width) min-w-72 p-0"
+        className="w-(--radix-popover-trigger-width) min-w-[min(18rem,var(--radix-popover-content-available-width))] p-0"
       >
         <Command defaultValue={value}>
           <CommandInput placeholder="Search partitions..." />
