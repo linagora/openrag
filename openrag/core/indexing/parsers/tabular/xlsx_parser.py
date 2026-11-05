@@ -564,8 +564,15 @@ def _safe_number_format(value: Any, format_code: Any) -> dict[str, Any] | None:
     return result
 
 
+# A formula whose cached result is an empty string: the cached reader reports
+# data_type "str" with no value, unlike an uncalculated formula ("n").
+_CALCULATED_EMPTY = object()
+
+
 def _formatted_value(cell) -> Any:
     value = cell.value
+    if value is None and getattr(cell, "data_type", None) == "str":
+        return _CALCULATED_EMPTY
     display_format = _safe_number_format(value, getattr(cell, "number_format", None))
     return _FormattedValue(value, display_format) if display_format else value
 
@@ -639,11 +646,19 @@ def _formula_text(cell) -> str | None:
     return text if text.startswith("=") else f"={text}"
 
 
+def _without_calculated_empty(value_rows):
+    """Index formulas calculated to an empty string as empty cells."""
+    for values in value_rows:
+        yield tuple(None if value is _CALCULATED_EMPTY else value for value in values)
+
+
 def _rows_with_formulas(value_rows, formula_rows):
     """Merge cached values with formula text while both readers stream."""
     for values, formula_cells in zip(value_rows, formula_rows, strict=True):
         yield tuple(
-            _FormulaValue(_raw_cell_value(value), formula, _cell_display_format(value))
+            None
+            if value is _CALCULATED_EMPTY
+            else _FormulaValue(_raw_cell_value(value), formula, _cell_display_format(value))
             if (formula := _formula_text(cell)) is not None
             else value
             for value, cell in zip(values, formula_cells, strict=True)
@@ -1007,7 +1022,7 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                         ) as rows:
                             visible_rows = _value_rows(_visible_rows(rows, table, info))
                             if not info.formula_cells:
-                                yield info, table, visible_rows
+                                yield info, table, _without_calculated_empty(visible_rows)
                                 continue
                             if formula_workbook is None:
                                 raise PipelineError("XLSX formula reader is unavailable", code="INVALID_XLSX")
