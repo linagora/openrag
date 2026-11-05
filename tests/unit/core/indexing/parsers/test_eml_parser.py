@@ -74,19 +74,43 @@ def test_eml_streams_tabular_attachment_without_calling_parse(monkeypatch):
         def iter_batches(self, _document):
             try:
                 yield TextBlock(text="first")
-                yield TextBlock(text="second")
+                yield TextBlock(text="s" * 100)
                 yield TextBlock(text="third")
             finally:
                 self.closed = True
 
     parser = StreamingParser()
-    monkeypatch.setattr(module, "_MAX_EML_ATTACHMENT_TEXT_BYTES", 10)
+    marker = "[attachment content truncated at the safe text limit]"
+    limit = len("first\n\n" + "s" * 10 + "\n\n" + marker)
+    monkeypatch.setattr(module, "_MAX_EML_ATTACHMENT_TEXT_BYTES", limit)
 
     rendered = EmlParser._render_tabular_attachment(parser, Document(filename="table.xlsx"))
 
     assert parser.parse_called is False
     assert parser.closed is True
-    assert rendered == "first\n\nsec\n\n[attachment content truncated at the safe text limit]"
+    # The marker counts inside the bound.
+    assert rendered == "first\n\n" + "s" * 10 + "\n\n" + marker
+    assert len(rendered.encode()) == limit
+
+
+def test_eml_tabular_attachments_share_one_text_budget_per_email(monkeypatch):
+    class StreamingParser:
+        def iter_batches(self, _document):
+            yield TextBlock(text="x" * 60)
+            yield TextBlock(text="y" * 60)
+
+    monkeypatch.setattr(module, "_MAX_EML_ATTACHMENT_TEXT_BYTES", 200)
+    budget = module._AttachmentTextBudget(200)
+
+    rendered = [
+        EmlParser._render_tabular_attachment(StreamingParser(), Document(filename=f"t{index}.xlsx"), budget)
+        for index in range(5)
+    ]
+
+    assert rendered[0] == "x" * 60 + "\n\n" + "y" * 60
+    assert rendered[1].endswith("[attachment content truncated at the safe text limit]")
+    assert sum(len(text.encode()) for text in rendered) <= 200
+    assert rendered[2:] == ["", "", ""]
 
 
 def test_eml_tabular_attachment_at_exact_limit_is_not_marked_truncated(monkeypatch):
