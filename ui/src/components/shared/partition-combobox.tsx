@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useMemo, useState, type KeyboardEvent } from "react";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -7,12 +7,13 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import type { PartitionResponse } from "@/lib/api/partitions";
 import { cn } from "@/lib/utils";
 
-// Popover height around the rows: search input, group padding, border and offset.
-const POPOVER_CHROME_HEIGHT = 50;
+// Keep the list clear of the app header when it opens upward.
+const HEADER_HEIGHT = 56;
 const ROW_HEIGHT = 32;
-const LIST_MAX_HEIGHT = 300;
-// Below this there's too little room under the trigger for a usable list.
-const MIN_POPOVER_HEIGHT = 180;
+const GROUP_PADDING = 8;
+const SEARCH_INPUT_HEIGHT = 38;
+// Room for the "No partition found." message.
+const MIN_LIST_HEIGHT = 76;
 
 interface PartitionComboboxProps {
   partitions: readonly Pick<PartitionResponse, "partition" | "name">[];
@@ -31,36 +32,21 @@ export function PartitionCombobox({
   "aria-label": ariaLabel,
 }: PartitionComboboxProps) {
   const [open, setOpen] = useState(false);
-  const [side, setSide] = useState<"top" | "bottom">("bottom");
-  const triggerRef = useRef<HTMLButtonElement>(null);
   const sorted = useMemo(() => [...partitions].sort((a, b) => a.name.localeCompare(b.name)), [partitions]);
   const selected = partitions.find((p) => p.partition === value);
-
-  const handleOpenChange = (next: boolean) => {
-    const trigger = triggerRef.current;
-    if (next && trigger) {
-      const roomBelow = () => window.innerHeight - trigger.getBoundingClientRect().bottom;
-      const popoverHeight = POPOVER_CHROME_HEIGHT + Math.min(LIST_MAX_HEIGHT, partitions.length * ROW_HEIGHT);
-      if (roomBelow() < popoverHeight) trigger.scrollIntoView({ block: "center" });
-      // Scrolling can't help at the end of a page, so only then open above.
-      setSide(roomBelow() < Math.min(popoverHeight, MIN_POPOVER_HEIGHT) ? "top" : "bottom");
-    }
-    setOpen(next);
-  };
 
   // A Select opens on the arrow keys; PopoverTrigger only handles Enter and Space.
   const handleTriggerKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
       e.preventDefault();
-      handleOpenChange(true);
+      setOpen(true);
     }
   };
 
   return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
-          ref={triggerRef}
           variant="outline"
           role="combobox"
           aria-expanded={open}
@@ -72,17 +58,19 @@ export function PartitionCombobox({
           <ChevronDownIcon className="size-4 opacity-50" />
         </Button>
       </PopoverTrigger>
-      {/* Side is chosen on open: automatic flipping would put long lists over the page header.
-          Disabling collisions also disables shifting, so size to the space that's left. */}
       <PopoverContent
-        side={side}
         align="start"
-        avoidCollisions={false}
-        className="w-(--radix-popover-trigger-width) min-w-[min(18rem,var(--radix-popover-content-available-width))] p-0"
+        collisionPadding={{ top: HEADER_HEIGHT }}
+        className="w-(--radix-popover-trigger-width) min-w-72 p-0"
       >
         <Command defaultValue={value}>
           <CommandInput placeholder="Search partitions..." />
-          <CommandList className="max-h-[min(300px,calc(var(--radix-popover-content-available-height)-38px))]">
+          {/* Fixed height, so filtering can't resize the popover and flip it to the other side. */}
+          <CommandList
+            style={{
+              height: `min(${Math.max(sorted.length * ROW_HEIGHT + GROUP_PADDING, MIN_LIST_HEIGHT)}px, calc(var(--radix-popover-content-available-height) - ${SEARCH_INPUT_HEIGHT}px))`,
+            }}
+          >
             <CommandEmpty>No partition found.</CommandEmpty>
             <CommandGroup>
               {sorted.map((p) => (
