@@ -26,6 +26,19 @@ Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a
 
 OpenRAG detects independent table regions from content-bearing cells during its bounded OOXML preflight. A fully blank row or column separates ordinary cell ranges. A single later row with the same column span as a preceding table is retained as a sparse continuation rather than being lost as a header-only table. Source-defined Excel Tables are also treated as authoritative regions, so two Excel Tables remain independent even when their populated areas touch horizontally or vertically. Tables may therefore be stacked, placed side by side, or start away from `A1`, such as at `L30`.
 
+A detected region with no data row below its first nonempty row is not a table: footnotes such as `Source: ...`, isolated totals such as `Total | 300`, and form-like label/value cells. Instead of treating that row as a header and emitting nothing, OpenRAG indexes these cells as text, grouped per worksheet:
+
+```text
+Worksheet cells outside tables:
+- A1: Contrat 2026-114
+- A3:B3: Client | ACME
+- D5:E5: Montant | 12000
+
+Worksheet: Contrat
+```
+
+These blocks carry `xlsx_content_kind: cells` (table blocks carry `table`), `sheet_name`, `sheet_index`, the sheet-qualified `cell_ranges` of each line, and `cell_row_numbers`. They are chunked as prose and have no `table_columns`. A workbook made only of such cells, such as a form sheet, is therefore indexed rather than rejected.
+
 Every detected table is extracted and chunked independently. Its metadata includes:
 
 - `table_id`, unique within the workbook;

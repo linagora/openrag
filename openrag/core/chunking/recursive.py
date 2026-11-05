@@ -404,7 +404,7 @@ class BaseChunker(ChunkingStrategy):
         by default.
         """
         body_size = self.chunk_size if body_size is None else body_size
-        if metadata.get("tabular_format") == "xlsx":
+        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells":
             # Canonical workbook tables must never enter prose sanitization or
             # lose sheet metadata, even when below the inline-table threshold.
             pieces = chunk_table(

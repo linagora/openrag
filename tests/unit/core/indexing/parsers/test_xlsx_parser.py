@@ -847,9 +847,12 @@ def test_rejects_non_xlsx_archives_and_resource_amplification():
         list(parser.iter_batches(document))
 
 
-def test_rejects_workbook_without_visible_data_rows():
+def test_rejects_workbook_without_visible_content():
     workbook = Workbook()
-    workbook.active.append(["header"])
+    workbook.active["C3"].number_format = "0.00"
+    hidden = workbook.create_sheet("Hidden")
+    hidden.sheet_state = "hidden"
+    hidden.append(["secret"])
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -857,6 +860,85 @@ def test_rejects_workbook_without_visible_data_rows():
     document = Document(filename="empty.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
     with pytest.raises(NoIndexableContentError, match="no visible worksheet"):
         list(XlsxParser().iter_batches(document))
+
+
+def test_single_text_cell_is_indexed_instead_of_being_taken_as_a_header():
+    [block] = list(XlsxParser().iter_batches(_document([["header"]])))
+
+    assert block.block_type == "text"
+    assert block.metadata["xlsx_content_kind"] == "cells"
+    assert block.metadata["cell_ranges"] == ["'Sheet'!A1"]
+    assert "- A1: header" in block.text
+
+
+def _loose_cells_workbook():
+    workbook = Workbook()
+    salaries = workbook.active
+    salaries.title = "Salaires"
+    for row in (["Nom", "Ville", "Salaire"], ["Alice", "Paris", 100], ["Bob", "Lyon", 200]):
+        salaries.append(row)
+    salaries["A5"] = "Source: comptabilite interne"
+    salaries["E7"] = "Total general"
+    salaries["F7"] = 300
+    contract = workbook.create_sheet("Contrat")
+    contract["A1"] = "Contrat 2026-114"
+    contract["A3"] = "Client"
+    contract["B3"] = "ACME"
+    contract["D5"] = "Montant"
+    contract["E5"] = 12000
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return Document(filename="loose.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+def test_regions_without_data_rows_are_indexed_as_worksheet_cells():
+    table, salary_cells, contract_cells = list(XlsxParser().iter_batches(_loose_cells_workbook()))
+
+    assert table.block_type == "table"
+    assert table.metadata["xlsx_content_kind"] == "table"
+    assert table.metadata["table_row_numbers"] == [2, 3]
+
+    # Footnotes and totals outside the table keep their sheet and coordinates.
+    assert salary_cells.block_type == "text"
+    assert salary_cells.metadata["xlsx_content_kind"] == "cells"
+    assert salary_cells.metadata["sheet_name"] == "Salaires"
+    assert salary_cells.metadata["cell_ranges"] == ["'Salaires'!A5", "'Salaires'!E7:F7"]
+    assert salary_cells.metadata["cell_row_numbers"] == [5, 7]
+    assert "- A5: Source: comptabilite interne" in salary_cells.text
+    assert "- E7:F7: Total general | 300" in salary_cells.text
+    assert "csv_columns" not in salary_cells.metadata
+
+    # A form-like sheet has no table at all; its label/value pairs stay together
+    # in one block instead of failing the workbook.
+    assert contract_cells.metadata["sheet_name"] == "Contrat"
+    assert contract_cells.metadata["cell_ranges"] == ["'Contrat'!A1", "'Contrat'!A3:B3", "'Contrat'!D5:E5"]
+    assert contract_cells.text == (
+        "Worksheet cells outside tables:\n"
+        "- A1: Contrat 2026-114\n"
+        "- A3:B3: Client | ACME\n"
+        "- D5:E5: Montant | 12000\n\n"
+        "Worksheet: Contrat"
+    )
+
+
+def test_worksheet_cells_are_split_into_bounded_blocks():
+    # Alternating column spans keep each note in its own region.
+    workbook = Workbook()
+    for index in range(6):
+        workbook.active.cell(1 + index * 2, 1, f"note {index} " + "x" * 40)
+        if index % 2:
+            workbook.active.cell(1 + index * 2, 2, index)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(filename="notes.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+    blocks = list(XlsxParser(limits=XlsxLimits(max_batch_bytes=200)).iter_batches(document))
+
+    assert len(blocks) > 1
+    assert all(block.metadata["xlsx_content_kind"] == "cells" for block in blocks)
+    assert all(len(block.text.encode("utf-8")) < 200 for block in blocks)
+    assert [row for block in blocks for row in block.metadata["cell_row_numbers"]] == [1, 3, 5, 7, 9, 11]
 
 
 def test_names_a_trailing_header_cell_when_its_column_contains_data():

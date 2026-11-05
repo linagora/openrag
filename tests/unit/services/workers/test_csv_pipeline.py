@@ -4,6 +4,7 @@ import asyncio
 import threading
 from contextlib import closing
 from dataclasses import replace
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -240,6 +241,46 @@ async def test_xlsx_uses_the_same_streaming_pipeline_with_sheet_metadata(setup_p
     assert chunk.metadata["tabular_batch_index"] == 1
     assert chunk.metadata["sheet_name"] == "People"
     assert chunk.metadata["table_id"] == "sheet:0"
+
+
+@pytest.mark.parametrize("chunker_name", ["structured_section", "recursive_splitter"])
+async def test_xlsx_cells_outside_tables_are_chunked_as_text(setup_pipeline, chunker_name):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
+    from core.models.chunk import ChunkType
+    from openpyxl import Workbook
+
+    pipeline, row, _ = setup_pipeline
+    if chunker_name == "recursive_splitter":
+        pipeline = replace(
+            pipeline,
+            chunker=RecursiveSplitter(chunk_size=50, chunk_overlap_rate=0.0, length_function=lambda t: len(t.split())),
+        )
+    workbook = Workbook()
+    workbook.active["A1"] = "Contrat 2026-114"
+    workbook.active["A3"] = "Client"
+    workbook.active["B3"] = "ACME"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    row["document"] = Document(
+        id="form-file",
+        filename="form.xlsx",
+        content_type=DocumentType.XLSX,
+        partition="customers",
+        raw_bytes=output.getvalue(),
+    )
+
+    result = await replace(pipeline, parser=XlsxParser()).run(row)
+
+    assert result["stage"] == "stored"
+    [chunk] = [chunk for group, _ in pipeline.vector_store.calls for chunk in group]
+    assert chunk.chunk_type is ChunkType.TEXT
+    assert "Contrat 2026-114" in chunk.text
+    assert "A3:B3: Client | ACME" in chunk.text
+    assert "Worksheet: Sheet" in chunk.text
+    assert chunk.metadata["sheet_name"] == "Sheet"
+    assert chunk.metadata["cell_ranges"] == ["'Sheet'!A1", "'Sheet'!A3:B3"]
 
 
 async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):

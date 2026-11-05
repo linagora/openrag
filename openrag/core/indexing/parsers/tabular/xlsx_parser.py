@@ -563,6 +563,15 @@ def _cell_text(value: Any) -> str:
     return f"[formula: {formula}; cached value unavailable]"
 
 
+def _cell_line(physical_row: int, values: list[str], visible_columns: list[int]) -> tuple[int, str, str]:
+    """Render one row of loose cells, cited by the span of its nonempty cells."""
+    occupied = [index for index, value in enumerate(values) if value.strip()]
+    first = f"{_column_name(visible_columns[occupied[0]])}{physical_row}"
+    last = f"{_column_name(visible_columns[occupied[-1]])}{physical_row}"
+    cell_range = first if first == last else f"{first}:{last}"
+    return physical_row, cell_range, f"- {cell_range}: " + " | ".join(values[index].strip() for index in occupied)
+
+
 def _has_text(values: list[str]) -> bool:
     """Treat cells containing only formatting whitespace as empty."""
     return any(value.strip() for value in values)
@@ -1117,10 +1126,17 @@ class XlsxParser(TabularBatchParser):
                     ) from exc
 
     def _iter_sheets(self, document, source, infos):
-        data_rows_seen = 0
+        content_rows_seen = 0
+        # Cells outside any table, grouped per worksheet: (row, range, line).
+        pending_cells: list[tuple[int, str, str]] = []
+        pending_sheet = None
         hidden_count = sum(info.hidden for info in infos)
         with closing(_openpyxl_sheets(document, source, infos)) as sheets:
             for sheet, table, row_iterator in sheets:
+                if pending_cells and sheet is not pending_sheet:
+                    for cells_block in self._cell_blocks(document, pending_sheet, hidden_count, pending_cells):
+                        content_rows_seen += len(cells_block.metadata["cell_row_numbers"])
+                        yield cells_block
                 visible_columns = [
                     column
                     for column in range(table.start_column, table.end_column + 1)
@@ -1138,6 +1154,7 @@ class XlsxParser(TabularBatchParser):
                 preamble_rows = []
                 preamble_values: list[tuple[int, list[str]]] = []
                 preamble_bytes = 0
+                header_rendered: list[str] = []
                 header_hierarchy: list[dict[str, Any]] = []
                 header_hierarchy_rows: list[int] = []
                 header_source = "worksheet"
@@ -1237,6 +1254,7 @@ class XlsxParser(TabularBatchParser):
                             for index, hierarchy in enumerate(header_hierarchy):
                                 hierarchy["column"] = header_values[index]
                             header_row = physical_row
+                            header_rendered = rendered
                             break
                     if not header_values:
                         if selected_header_row is not None:
@@ -1274,6 +1292,7 @@ class XlsxParser(TabularBatchParser):
                     }
                 )
                 row_header_paths: dict[str, list[str]] = {}
+                table_rows_emitted = 0
 
                 def block():
                     def render(group_repeated: bool, include_display_context: bool = True):
@@ -1407,15 +1426,84 @@ class XlsxParser(TabularBatchParser):
                     if path:
                         row_header_paths[str(physical_row)] = path
                     batch_bytes += row_bytes
-                    data_rows_seen += 1
+                    table_rows_emitted += 1
                     if len(row_numbers) == self.batch_size:
                         yield block()
                         batch_rows, row_numbers, batch_bytes = [], [], header_bytes
                         row_header_paths = {}
                 if row_numbers:
                     yield block()
-        if not data_rows_seen:
-            raise NoIndexableContentError("XLSX contains no visible worksheet with indexable data rows")
+                content_rows_seen += table_rows_emitted
+                if not table_rows_emitted:
+                    # A region with no data rows is a footnote, a total, or a
+                    # form-like group of cells, not a table. Its only nonempty
+                    # row would otherwise be consumed as a header and lost.
+                    region_rows = [(number, values) for number, values in preamble_values if _has_text(values)]
+                    if header_rendered:
+                        region_rows.append((header_row, header_rendered))
+                    for number, values in region_rows:
+                        pending_cells.append(_cell_line(number, values, visible_columns))
+                    pending_sheet = sheet
+                    # Emit filled blocks now; only one partial block stays buffered.
+                    for cells_block in self._cell_blocks(
+                        document, pending_sheet, hidden_count, pending_cells, final=False
+                    ):
+                        content_rows_seen += len(cells_block.metadata["cell_row_numbers"])
+                        yield cells_block
+            for cells_block in self._cell_blocks(document, pending_sheet, hidden_count, pending_cells):
+                content_rows_seen += len(cells_block.metadata["cell_row_numbers"])
+                yield cells_block
+        if not content_rows_seen:
+            raise NoIndexableContentError("XLSX contains no visible worksheet with indexable content")
+
+    def _cell_blocks(self, document, sheet, hidden_count, cells, *, final=True):
+        """Group one worksheet's loose cells into bounded text blocks.
+
+        Emitted cells are removed from ``cells``. Unless ``final``, the last,
+        possibly partial block is kept so later regions of the sheet can join it.
+        """
+        if not cells:
+            return
+        sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
+        worksheet_context = _worksheet_context(sheet.name)
+        heading = "Worksheet cells outside tables:\n"
+        overhead = len((heading + worksheet_context).encode("utf-8"))
+        batches: list[list[tuple[int, str, str]]] = [[]]
+        size = overhead
+        for cell in cells:
+            physical_row, _, line = cell
+            line_bytes = len(line.encode("utf-8")) + 1
+            if overhead + line_bytes >= self.limits.max_batch_bytes:
+                raise limit(f"XLSX row {physical_row} exceeds the batch byte limit")
+            if batches[-1] and size + line_bytes >= self.limits.max_batch_bytes:
+                batches.append([])
+                size = overhead
+            batches[-1].append(cell)
+            size += line_bytes
+        if not final:
+            batches.pop()
+        del cells[: sum(len(batch) for batch in batches)]
+        for batch in batches:
+            yield TextBlock(
+                text=heading + "\n".join(line for _, _, line in batch) + worksheet_context,
+                block_type="text",
+                metadata={
+                    "tabular_format": "xlsx",
+                    "xlsx_content_kind": "cells",
+                    "workbook_filename": document.filename,
+                    "sheet_name": sheet.name,
+                    "worksheet_context": worksheet_context,
+                    "sheet_index": sheet.index,
+                    "worksheet_table_count": len(sheet.tables),
+                    "cell_ranges": [sheet_ref + cell_range for _, cell_range, _ in batch],
+                    "cell_row_numbers": sorted({row for row, _, _ in batch}),
+                    "hidden_sheet": False,
+                    "hidden_sheets_skipped": hidden_count,
+                    "hidden_rows_skipped": len(sheet.hidden_rows),
+                    "hidden_columns_skipped": len(sheet.hidden_columns),
+                    "spreadsheet_backend": "openpyxl",
+                },
+            )
 
     def _block(
         self,
@@ -1490,6 +1578,7 @@ class XlsxParser(TabularBatchParser):
             "sheet_formula_cells": sheet.formula_cells,
             "sheet_missing_formula_values": sheet.missing_formula_values,
             "spreadsheet_backend": "openpyxl",
+            "xlsx_content_kind": "table",
             # Transitional aliases keep existing chunking/retrieval operational.
             "csv_columns": list(headers),
             "csv_row_start": row_numbers[0],
