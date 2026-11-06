@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { MouseEvent } from "react";
@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import { usePermissions } from "@/lib/permissions";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { defaultStageBadgeColor, StageElapsedTime, stageBadgeColors } from "@/components/shared/stage-progress";
 import {
   DegradedCompletionStatus,
   normalizeDegradedStages,
@@ -29,6 +30,7 @@ import {
   cancelTask,
   isActiveState,
   isTerminalState,
+  type StageProgressSummary,
 } from "@/lib/api/jobs";
 import { listPartitions } from "@/lib/api/partitions";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
@@ -67,6 +69,77 @@ function historyQualityLabel(quality: string | undefined): string {
     default: return "Stage history completeness is unknown.";
   }
 }
+
+const stageLabelsById: Record<string, string> = {
+  parse: "Parsing",
+  caption: "Image captioning",
+  chunk: "Chunking",
+  contextualize: "Contextualization",
+  topic_tag: "Topic tagging",
+  embed: "Embedding",
+  store: "Storing",
+};
+
+const phaseLabels: Record<string, string> = {
+  preparing: "Preparing",
+  between_stages: "Between stages",
+  finalizing: "Finalizing",
+};
+
+function taskActivityDisplay(taskState: string, progress: StageProgressSummary | undefined) {
+  if (taskState !== "SERIALIZING") return null;
+  if (!progress) {
+    return { label: "Waiting for stage update…", stageId: null, elapsedMs: null, elapsedSampledAt: null };
+  }
+
+  const workerLive = progress.freshness === "live";
+  const liveStage = workerLive && progress.is_currently_running;
+  const phaseLabel = phaseLabels[progress.phase ?? ""];
+  const stageId = liveStage
+    ? progress.stage_id ?? null
+    : progress.last_known_stage_id ?? progress.stage_id ?? null;
+  const stageLabel = liveStage
+    ? progress.stage_label ?? stageLabelsById[stageId ?? ""]
+    : progress.last_known_stage_label
+      ?? stageLabelsById[progress.last_known_stage_id ?? ""]
+      ?? progress.stage_label
+      ?? stageLabelsById[progress.stage_id ?? ""];
+  const interrupted = !!progress.interrupted_invocation_id
+    && progress.interrupted_invocation_id === progress.current_invocation_id;
+
+  let label = "Waiting for stage update…";
+  if (interrupted) {
+    label = stageLabel ? `Interrupted: ${stageLabel}` : "Interrupted before a stage was recorded";
+  } else if (workerLive) {
+    label = phaseLabel ?? stageLabel ?? label;
+  } else if (stageLabel) {
+    label = `Last observed: ${stageLabel}`;
+  } else if (phaseLabel) {
+    label = `Last observed: ${phaseLabel}`;
+  }
+
+  const displayedStageId = phaseLabel ? null : stageId;
+  const substageIsParse = stageId === "parse";
+  if (substageIsParse && progress.current_substage_label) {
+    const hasCount = progress.current_substage_progress != null && progress.current_substage_total != null;
+    const count = hasCount
+      ? ` (${progress.current_substage_progress}/${progress.current_substage_total})`
+      : "";
+    label = `${label} · ${progress.current_substage_label}${count}`;
+  }
+  if (!workerLive && !interrupted && (stageLabel || phaseLabel)) {
+    label = `${label} · Status unconfirmed`;
+  }
+
+  return {
+    label,
+    stageId: displayedStageId,
+    elapsedMs: liveStage ? progress.elapsed_ms ?? null : null,
+    elapsedSampledAt: liveStage ? progress.elapsed_sampled_at ?? null : null,
+  };
+}
+
+const TERMINAL_HISTORY_POLL_WINDOW_MS = 30_000;
 
 function stageEventText(
   eventStatus: string,
@@ -114,6 +187,10 @@ export default function JobDetailPage() {
     }));
   };
   const historyCursor = historyCursors[historyCursors.length - 1] ?? null;
+  const terminalHistoryPollDeadline = useRef<{ identity: string; at: number | null }>({
+    identity: historyIdentity,
+    at: null,
+  });
 
   // Admins see every user's tasks, but opening a file still needs a role on its
   // partition (or SUPER_ADMIN_MODE), so the file is only linked when the API will
@@ -147,8 +224,35 @@ export default function JobDetailPage() {
     ],
     queryFn: () => getTaskStageProgress(id!, historyCursor, 50),
     enabled: !!id && !!user,
-    refetchInterval: historyCursors.length === 1 && isActiveState(taskQuery.data?.task_state ?? "") ? 3000 : false,
+    refetchInterval: (query) => {
+      const taskActive = isActiveState(taskQuery.data?.task_state ?? "");
+      const persistencePending = query.state.data?.history_quality === "pending_persistence";
+      if (historyCursors.length !== 1) return false;
+      if (taskActive) return 3000;
+      const taskFinished = isTerminalState(taskQuery.data?.task_state ?? "");
+      const deadline = terminalHistoryPollDeadline.current.identity === historyIdentity
+        ? terminalHistoryPollDeadline.current.at
+        : null;
+      const handoffPending =
+        taskFinished &&
+        persistencePending &&
+        (deadline === null || Date.now() < deadline);
+      return handoffPending ? 3000 : false;
+    },
   });
+
+  useEffect(() => {
+    const taskFinished = isTerminalState(taskQuery.data?.task_state ?? "");
+    const persistencePending = stageQuery.data?.history_quality === "pending_persistence";
+    if (terminalHistoryPollDeadline.current.identity !== historyIdentity) {
+      terminalHistoryPollDeadline.current = { identity: historyIdentity, at: null };
+    }
+    if (!taskFinished || !persistencePending) {
+      terminalHistoryPollDeadline.current.at = null;
+      return;
+    }
+    terminalHistoryPollDeadline.current.at ??= Date.now() + TERMINAL_HISTORY_POLL_WINDOW_MS;
+  }, [historyIdentity, stageQuery.data?.history_quality, taskQuery.data?.task_state]);
 
   const state = taskQuery.data?.task_state;
   const active = !!state && isActiveState(state);
@@ -190,6 +294,7 @@ export default function JobDetailPage() {
   if (!task) return null;
 
   const details = task.details;
+  const taskActivity = taskActivityDisplay(task.task_state, stageQuery.data);
   const degradedStages = normalizeDegradedStages(details?.degraded_stages);
   const degraded = task.task_state === "COMPLETED" && degradedStages.length > 0;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
@@ -296,6 +401,23 @@ export default function JobDetailPage() {
               <dd>
                 {degraded ? (
                   <DegradedCompletionStatus stages={degradedStages} />
+                ) : taskActivity ? (
+                  <Badge
+                    variant="outline"
+                    className={stageBadgeColors[taskActivity.stageId ?? ""] ?? defaultStageBadgeColor}
+                  >
+                    {taskActivity.label}
+                    {taskActivity.elapsedMs !== null && (
+                      <>
+                        {" · "}
+                        <StageElapsedTime
+                          key={`${taskActivity.stageId ?? taskActivity.label}:${taskActivity.elapsedSampledAt ?? ""}`}
+                          elapsedMs={taskActivity.elapsedMs}
+                          elapsedSampledAt={taskActivity.elapsedSampledAt}
+                        />
+                      </>
+                    )}
+                  </Badge>
                 ) : (
                   <StatusBadge status={task.task_state} />
                 )}
@@ -382,13 +504,14 @@ export default function JobDetailPage() {
                     <span className="absolute -left-[1.34rem] top-1.5 h-2 w-2 rounded-full bg-primary" />
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{event.stage_id.replace(/_/g, " ")}</span>
+                      {event.attempt > 1 && <Badge variant="secondary">Attempt {event.attempt}</Badge>}
                       <Badge variant={event.status === "failed" ? "destructive" : "outline"}>
                         {stageEventText(
                           event.status,
                           event.failure_effect,
                           isOpenCurrentInvocation,
                           isInterruptedInvocation,
-                          !!stageQuery.data?.is_currently_running,
+                          stageQuery.data?.freshness === "live" && !!stageQuery.data?.is_currently_running,
                           taskTerminal,
                         )}
                       </Badge>

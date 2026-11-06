@@ -4,6 +4,7 @@ import { getQueueInfo, listTasks, type TaskListPagination } from "@/lib/api/jobs
 import { useAuth } from "@/lib/auth";
 
 export const JOBS_REFETCH_INTERVAL_MS = 5_000;
+export const ACTIVE_JOBS_REFETCH_INTERVAL_MS = 5_000;
 
 export interface JobsQueryScope {
   userId: number;
@@ -46,11 +47,14 @@ export function jobsTaskListQueryOptions(
   taskStatus?: string,
   pagination?: Pick<TaskListPagination, "limit" | "offset">,
 ) {
+  const refetchInterval = taskStatus?.toLowerCase() === "active"
+    ? ACTIVE_JOBS_REFETCH_INTERVAL_MS
+    : JOBS_REFETCH_INTERVAL_MS;
   return queryOptions({
     queryKey: jobsQueryKeys.tasks(scope, taskStatus, pagination),
     queryFn: () => listTasks(taskStatus, pagination),
-    refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
-    staleTime: JOBS_REFETCH_INTERVAL_MS,
+    refetchInterval, // poll — OpenRag has no task SSE
+    staleTime: refetchInterval,
   });
 }
 

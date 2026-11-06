@@ -54,6 +54,10 @@ export interface StageProgressSummary {
   stage_id?: string | null;
   stage_label?: string | null;
   stage_rank?: number | null;
+  current_substage_id?: string | null;
+  current_substage_label?: string | null;
+  current_substage_progress?: number | null;
+  current_substage_total?: number | null;
   position_score?: number;
   is_currently_running: boolean;
   elapsed_ms?: number | null;
@@ -151,7 +155,8 @@ export function listTasks(
     query.set("limit", String(pagination.limit));
     query.set("offset", String(pagination.offset));
   }
-  const qs = query.size ? `?${query.toString()}` : "";
+  const search = query.toString();
+  const qs = search ? `?${search}` : "";
   return request<TaskListResponse>(`${QUEUE}/tasks${qs}`);
 }
 
