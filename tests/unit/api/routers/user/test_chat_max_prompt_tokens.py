@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from types import SimpleNamespace
 
 import pytest
 from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
@@ -157,6 +158,118 @@ async def test_a_streamed_prompt_over_the_window_is_an_error_event(make_client):
     assert json.loads(events[0])["error"]["code"] == "CONTEXT_WINDOW_EXCEEDED"
     assert events[-1] == "[DONE]"
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/completions"])
+@pytest.mark.parametrize(
+    ("preferred_scheme", "expected_scheme"),
+    [("https", "https"), (None, "http")],
+    ids=["preferred-https", "request-scheme-fallback"],
+)
+async def test_chat_source_urls_use_preferred_scheme(
+    async_client_factory, monkeypatch, path, preferred_scheme, expected_scheme
+):
+    import api.routers.user.chat as chat_router
+
+    settings = Settings.model_validate(
+    {
+        **Settings().model_dump(),
+        "server": {
+            **Settings().server.model_dump(),
+            "preferred_url_scheme": preferred_scheme,
+        },
+    }
+)
+
+    # Isolate URL generation from the document metadata format.
+    def fake_build_document_source_link(metadata, static_url, chunk_url):
+        extract_id = metadata["extract_id"]
+        return {
+            "file_url": static_url(extract_id),
+            "chunk_url": chunk_url(extract_id),
+        }
+
+    monkeypatch.setattr(
+        chat_router,
+        "build_document_source_link",
+        fake_build_document_source_link,
+    )
+
+    class SourceQueryService(RecordingQueryService):
+        async def chat(self, **kwargs):
+            sources = kwargs["prepare_sources"](
+                [SimpleNamespace(metadata={"extract_id": "test-extract"})],
+                [],
+            )
+            return {"choices": [], "extra": {"sources": sources}}
+
+        async def complete(self, **kwargs):
+            sources = kwargs["prepare_sources"](
+                [SimpleNamespace(metadata={"extract_id": "test-extract"})],
+                [],
+            )
+            return {"choices": [], "extra": {"sources": sources}}
+
+    service = SourceQueryService()
+
+    # Use the same app fixtures as the existing route tests, with the
+    # requested preferred scheme in its injected configuration.
+    def make_scheme_client(service):
+        from fastapi import FastAPI
+        from api.error_handlers import register_error_handlers
+        from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
+        from di.providers import get_config, get_partition_service, get_query_service
+
+        app = FastAPI()
+        register_error_handlers(app)
+        app.include_router(chat_router.router, prefix="/v1")
+        app.add_api_route(
+            "/test-source/{extract_id}",
+            lambda extract_id: {"id": extract_id},
+            name="download_source",
+            )
+        app.add_api_route(
+            "/test-extract/{extract_id}",
+            lambda extract_id: {"id": extract_id},
+            name="get_extract",
+            )
+        app.dependency_overrides[current_user] = lambda: {
+            "id": 2,
+            "is_admin": False,
+        }
+        app.dependency_overrides[current_user_or_admin_partitions_list] = lambda: ["p"]
+        app.dependency_overrides[get_query_service] = lambda: service
+        app.dependency_overrides[get_partition_service] = FakePartitionService
+        app.dependency_overrides[get_config] = lambda: settings
+        return async_client_factory(app)
+
+    # Use HTTP as the incoming request scheme to test the fallback.
+    async with make_scheme_client(service) as client:
+        if path.endswith("/chat/completions"):
+            response = await client.post(
+                path,
+                json={
+                    "model": "openrag-p",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 100,
+                },
+            )
+        else:
+            response = await client.post(
+                path,
+                json={
+                    "model": "openrag-p",
+                    "prompt": "hello",
+                    "max_tokens": 100,
+                },
+            )
+
+    assert response.status_code == 200, response.text
+    sources = response.json()["extra"]["sources"]
+    assert len(sources) == 1
+
+    for field in ("file_url", "chunk_url"):
+        assert sources[0][field].startswith(f"{expected_scheme}://")
+        assert "test-extract" in sources[0][field]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["initialization", "invocation"])

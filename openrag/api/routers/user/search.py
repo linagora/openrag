@@ -11,6 +11,7 @@ shaping (domain ``Chunk`` → ``{link, metadata, content}``).
 
 import uuid
 from typing import Annotated
+from api.dependencies.build_url import build_url
 
 from api.dependencies.auth import (
     current_user_or_admin_partitions_list,
@@ -116,7 +117,7 @@ class CommonSearchParams:
         self.include_retrieval_trace = include_retrieval_trace
 
 
-def _documents(request: Request, chunks) -> list[dict]:
+def _documents(request: Request, chunks, config) -> list[dict]:
     docs: list[dict] = []
     for c in chunks:
         # Restore the legacy response metadata shape. Chunk.from_langchain
@@ -130,14 +131,18 @@ def _documents(request: Request, chunks) -> list[dict]:
         scores = {key: meta.pop(key) for key in RETRIEVAL_SCORE_KEYS if key in meta}
         docs.append(
             {
-                "link": str(request.url_for("get_extract", extract_id=meta.get("_id") or c.id)),
+                "link": build_url(
+                            request,
+                            "get_extract",
+                            preferred_url_scheme=config.server.preferred_url_scheme,
+                            extract_id=meta.get("_id") or c.id,
+                        ),
                 "metadata": meta,
                 "content": c.text,
                 **scores,
             }
         )
     return docs
-
 
 def _new_trace(request: Request, search_params: CommonSearchParams) -> RetrievalTraceBuilder | None:
     if not search_params.include_retrieval_trace:
@@ -181,8 +186,9 @@ async def _response_payload(
     effective_options: dict[str, object],
     filter_expression: str | None = None,
     filter_params: dict | None = None,
+    config=None,
 ) -> dict[str, object]:
-    payload: dict[str, object] = {"documents": _documents(request, chunks)}
+    payload: dict[str, object] = {"documents": _documents(request, chunks, config)}
     if trace is None:
         return payload
     fingerprint_options = dict(effective_options)
@@ -343,6 +349,7 @@ async def search_multiple_partitions(
     service=Depends(get_retrieval_service),
     workspaces=Depends(get_workspace_service),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+    config=Depends(get_config),
 ):
     if partitions == ["all"]:
         partitions = user_partitions
@@ -396,6 +403,7 @@ async def search_multiple_partitions(
             effective_options,
             filter_expression=search_params.filter,
             filter_params=filter_params,
+            config=config,
         ),
     )
 
@@ -453,6 +461,7 @@ async def search_one_partition(
     service=Depends(get_retrieval_service),
     workspaces=Depends(get_workspace_service),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+    config=Depends(get_config),
 ):
     log = logger.bind(
         partition=partition,
@@ -496,6 +505,7 @@ async def search_one_partition(
             effective_options,
             filter_expression=search_params.filter,
             filter_params=filter_params,
+            config=config,
         ),
     )
 
@@ -547,6 +557,7 @@ async def search_file(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_retrieval_service),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+    config=Depends(get_config),
 ):
     log = logger.bind(
         partition=partition, file_id=file_id, query_len=len(search_params.text), top_k=search_params.top_k
@@ -585,5 +596,6 @@ async def search_file(
             effective_options,
             filter_expression=search_params.filter,
             filter_params=filter_params,
+            config=config,
         ),
     )
