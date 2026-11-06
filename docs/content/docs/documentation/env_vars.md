@@ -80,6 +80,16 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 `PyMuPDFLoader` (the default) is a lightweight PDF loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images. Set `PDFLOADER=MarkerLoader` when you need those.
 :::
 
+#### Excel workbook ingestion
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `XLSX_BATCH_SIZE` | `int` | `10000` | Positive number of data rows per parser batch for `.xlsx` and `.xlsm` workbooks. The rendered batch byte limit can flush a batch earlier. This is independent of the chunk token budget. |
+
+Set archive, worksheet, cell, and batch byte limits through `loader.xlsx_limits` in YAML; there are no individual environment-variable overrides for these limits. Unknown limit names, non-integer values, and non-positive values are rejected. Header selection is automatic per table; the former `XLSX_HEADER_ROW` and per-sheet header settings are no longer supported.
+
+See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, formula handling, hidden content, and default safety limits.
+
 #### PDF Loader
 ##### PyMuPDF Loader Configuration
 These settings apply wherever PyMuPDF parses a PDF during indexing — the default `PyMuPDFLoader`, and a preset whose parsing strategy is `pymupdf` whatever `PDFLOADER` says — and during indexing only: the API's direct-extract path always parses on a single thread. With nothing set, parsing runs one PDF at a time on a single thread per indexer worker, as before.
