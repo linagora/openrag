@@ -8,7 +8,7 @@ from typing import Literal
 
 from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointType
 
-ReadinessStatus = Literal["ok", "timeout", "unavailable", "unresolvable"]
+ReadinessStatus = Literal["ok", "timeout", "unavailable", "unresolvable", "migration_required"]
 
 
 class _ImmutableMapping(Mapping[str, ReadinessStatus]):
