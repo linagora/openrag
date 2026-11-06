@@ -4108,3 +4108,64 @@ async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
     assert "Current date: Wednesday, September 16, 2026, 23:30:00" in system
     assert "- today 2026-09-16T00:00:00+00:00, tomorrow 2026-09-17T00:00:00+00:00" in system
     assert "- last week [2026-09-07, 2026-09-14)" in system
+
+
+# --------------------------------------------------------------------------- #
+# a conversation ending with the results of tool calls (an agentic loop)
+# --------------------------------------------------------------------------- #
+
+_TOOL_TURN = [
+    {"role": "user", "content": "Reply to the last email of Claire"},
+    {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function"}]},
+    {"role": "tool", "tool_call_id": "c1", "content": "2 emails: ..."},
+]
+
+
+def test_history_window_keeps_the_latest_message_of_the_user():
+    messages = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "ok"}, *_TOOL_TURN]
+    assert qs._history_window(messages, 2) == _TOOL_TURN, "widened to the request the results serve"
+    assert qs._history_window(messages, 10) == messages
+    assert qs._history_window(messages, 3) == _TOOL_TURN
+
+
+def test_history_window_never_opens_on_a_tool_result():
+    messages = [*_TOOL_TURN, {"role": "assistant", "content": "Claire wrote..."}, {"role": "user", "content": "thanks"}]
+    assert qs._history_window(messages, 3) == messages[3:], "the result cut from its call is dropped"
+    assert qs._history_window([{"role": "tool", "content": "x"}], 4) == []
+
+
+@pytest.mark.asyncio
+async def test_generate_query_searches_the_request_of_the_user_not_the_tool_result():
+    svc = _svc(mode="SimpleRag")
+    sq = await svc.generate_query(_TOOL_TURN)
+    assert sq.query_list[0].query == "Reply to the last email of Claire"
+
+
+@pytest.mark.asyncio
+async def test_generate_query_leaves_the_tool_results_out_of_the_history():
+    llm = FakeLLM(chat_responses=['{"requires_retrieval": true, "query_list": [{"query": "q"}]}'])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+    await svc.generate_query(_TOOL_TURN)
+    history = llm.chat_calls[0][0][1]["content"]
+    assert "2 emails" not in history, "the data the app gave do not shape the search"
+    assert "user: Reply to the last email of Claire" in history
+
+
+@pytest.mark.asyncio
+async def test_chat_after_a_tool_result_retrieves_for_a_short_request():
+    retrieval = FakeRetrieval()
+    llm = FakeLLM(chat_responses=["Claire asks..."])
+    svc = _svc(retrieval=retrieval, llm=llm, mode="SimpleRag")
+    # "thanks" alone is a casual message answered without retrieval; the result
+    # of a tool call is not a casual turn
+    messages = [{"role": "user", "content": "thanks"}, *_TOOL_TURN[1:]]
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": messages, "metadata": {}},
+        prepare_sources=lambda d, w: [{"source_type": "document"}] if d or w else [],
+        model_name="m1",
+    )
+    assert len(retrieval.retrieve_multi_calls) == 1
+    sent = llm.chat_calls[-1][0]
+    assert sent[-1]["role"] == "tool"
+    assert out["choices"][0]["message"]["content"].startswith("Claire asks")
