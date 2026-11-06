@@ -549,7 +549,7 @@ class QueryService:
         # different day.
         now = datetime.now(UTC)
         prompt = contextualizer.content.format(
-            query_language=detect_language(last_user),
+            query_language=detect_language(last_user) or "en",
             current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
             # Pre-computed week/month/year ranges: the model must not do the
             # calendar arithmetic itself (see core.prompts.calendar_anchors).
