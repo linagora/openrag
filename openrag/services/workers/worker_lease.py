@@ -77,6 +77,7 @@ async def keep_worker_lease(
     started: asyncio.Event | None = None,
     is_working: Callable[[], bool] | None = None,
     snapshot_provider: Callable[[], StageProgressWorkerSnapshot | None] | None = None,
+    stage_progress_sink: Callable[[str, StageProgressWorkerSnapshot], Any] | None = None,
 ) -> None:
     """Renew the task's lease until cancelled, starting the moment work begins.
 
@@ -148,6 +149,17 @@ async def keep_worker_lease(
             worker_task.cancel()
         if started is not None:
             started.set()
+        if snapshot_remote is None and stage_progress_sink is not None and snapshot_provider is not None:
+            try:
+                stage_snapshot = snapshot_provider()
+                if stage_snapshot is not None:
+                    snapshot_delivery = stage_progress_sink(task_id, stage_snapshot)
+                    await asyncio.wait_for(
+                        asyncio.gather(snapshot_delivery),
+                        timeout=min(interval, stop_at - loop.time()),
+                    )
+            except Exception as exc:  # noqa: BLE001 - snapshot sidecar failure must not fail indexing
+                logger.warning(f"Failed to publish live stage progress for task {task_id}: {type(exc).__name__}: {exc}")
         if renewed is False:
             return
         await asyncio.sleep(interval)

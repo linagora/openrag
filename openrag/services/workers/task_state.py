@@ -19,6 +19,7 @@ from core.models.catalog import (
     DocumentStatus,
     normalize_degraded_stages,
 )
+from core.models.stage_progress import StageProgressWorkerSnapshot
 from core.observability.ray_metrics import (
     initialize_ingest_counters,
     observe_queue_wait_from,
@@ -538,6 +539,8 @@ class TaskStateManager:
     def __init__(self, worker_lease_ttl_seconds: float = _WORKER_LEASE_TTL_SECONDS) -> None:
         # A parameter only so a test can watch a lease lapse in seconds.
         self._worker_lease_ttl_seconds = worker_lease_ttl_seconds
+        self._live_stage_progress: OrderedDict[str, tuple[StageProgressWorkerSnapshot, float]] = OrderedDict()
+        self._live_stage_progress_capacity = max(1, _POOL_SIZE * _MAX_TASKS_PER_WORKER)
         self.tasks, expiries = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
         # Terminal task ids in eviction order, mapped to the time they may go.
@@ -575,6 +578,8 @@ class TaskStateManager:
     def _persist_task_locked(self, task_id: str, info: TaskInfo) -> None:
         """Persist a task mutation and keep the terminal-retention ledger in sync."""
         _save_recoverable_task(task_id, info)
+        if info.state in TERMINAL_TASK_STATES or getattr(info, "worker_finished", False):
+            self._live_stage_progress.pop(task_id, None)
         self.terminal_tasks.pop(task_id, None)
         # A record that settled into a state we track normally follows the
         # terminal/fence rule below. A record that never got a state at all
@@ -601,6 +606,7 @@ class TaskStateManager:
 
     def _forget_task_locked(self, task_id: str) -> None:
         info = self.tasks.pop(task_id, None)
+        self._live_stage_progress.pop(task_id, None)
         if info is None:
             return
         user_id = (info.details or {}).get("user_id")
@@ -1216,6 +1222,79 @@ class TaskStateManager:
                 info.worker_started = True
                 self._persist_task_locked(task_id, info)
             return info.state != "CANCELLED"
+
+    @ray.method(concurrency_group="set")
+    async def renew_worker_lease_with_stage_snapshot(
+        self,
+        task_id: str,
+        snapshot: StageProgressWorkerSnapshot | None,
+    ) -> bool | None:
+        """Renew the worker lease and retain its compact, current stage view."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return None
+            if getattr(info, "worker_abandoned", False):
+                return False
+            info.worker_lease_expires_at = time.time() + self._worker_lease_ttl_seconds
+            if not getattr(info, "worker_started", False):
+                info.worker_started = True
+                self._persist_task_locked(task_id, info)
+
+            if snapshot is None:
+                self._live_stage_progress.pop(task_id, None)
+            elif (
+                info.state in CANCELLABLE_INDEXING_STATES
+                and not getattr(info, "worker_finished", False)
+                and snapshot.summary.task_id == task_id
+                and snapshot.active_invocation_id == snapshot.summary.current_invocation_id
+            ):
+                current = self._live_stage_progress.get(task_id)
+                incoming_order = (snapshot.summary.attempt, snapshot.summary.snapshot_revision)
+                current_order = (
+                    (
+                        current[0].summary.attempt,
+                        current[0].summary.snapshot_revision,
+                    )
+                    if current is not None
+                    else None
+                )
+                if current_order is None or incoming_order >= current_order:
+                    compact = snapshot.model_copy(update={"event_tail": []})
+                    max_age = min(self._worker_lease_ttl_seconds, 2 * WORKER_LEASE_RENEW_INTERVAL_SECONDS)
+                    self._live_stage_progress[task_id] = (compact, time.monotonic() + max_age)
+                    self._live_stage_progress.move_to_end(task_id)
+                    while len(self._live_stage_progress) > self._live_stage_progress_capacity:
+                        self._live_stage_progress.popitem(last=False)
+            return info.state != "CANCELLED"
+
+    @ray.method(concurrency_group="get")
+    async def get_stage_progress_snapshots(self, task_ids: list[str]) -> dict[str, StageProgressWorkerSnapshot]:
+        """Bulk-read only snapshots backed by a fresh active worker lease."""
+        with self.lock:
+            now = time.monotonic()
+            for task_id, (_, expires_at) in list(self._live_stage_progress.items()):
+                if expires_at <= now:
+                    self._live_stage_progress.pop(task_id, None)
+
+            snapshots: dict[str, StageProgressWorkerSnapshot] = {}
+            for task_id in task_ids:
+                cached = self._live_stage_progress.get(task_id)
+                info = self.tasks.get(task_id)
+                if cached is None or info is None:
+                    continue
+                if (
+                    cached[1] <= now
+                    or info.state not in CANCELLABLE_INDEXING_STATES
+                    or not getattr(info, "worker_started", False)
+                    or getattr(info, "worker_finished", False)
+                    or not _worker_lease_is_live(info)
+                ):
+                    self._live_stage_progress.pop(task_id, None)
+                    continue
+                snapshots[task_id] = cached[0]
+                self._live_stage_progress.move_to_end(task_id)
+            return snapshots
 
     @ray.method(concurrency_group="set")
     async def end_worker_lease(self, task_id: str) -> None:

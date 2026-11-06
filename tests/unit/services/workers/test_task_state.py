@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -1817,6 +1818,84 @@ async def test_admission_fence_keeps_a_serializing_task_whose_worker_is_running(
     )
 
     assert refused == {"accepted": False, "reason": "file_indexing", "existing_task_id": "task-1"}
+
+
+@pytest.mark.asyncio
+async def test_live_stage_snapshot_requires_a_fresh_worker_lease_and_is_compact() -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    await manager.set_state("task-1", "SERIALIZING")
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+
+    assert await manager.renew_worker_lease_with_stage_snapshot("task-1", tracker.snapshot()) is True
+    snapshots = await manager.get_stage_progress_snapshots(["task-1"])
+    assert snapshots["task-1"].event_tail == []
+    assert snapshots["task-1"].summary.current_stage_id == "parse"
+
+    manager.tasks["task-1"].worker_lease_expires_at = task_state_module.time.time() - 1
+    assert await manager.get_stage_progress_snapshots(["task-1"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_live_stage_snapshot_rejects_regressions_and_clears_on_terminal_state() -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    await manager.set_state("task-1", "SERIALIZING")
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+    newer = tracker.sample_elapsed()
+    assert newer is not None
+    await manager.renew_worker_lease_with_stage_snapshot("task-1", newer)
+    older = newer.model_copy(
+        update={"summary": newer.summary.model_copy(update={"snapshot_revision": newer.summary.snapshot_revision - 1})}
+    )
+    await manager.renew_worker_lease_with_stage_snapshot("task-1", older)
+    retained = await manager.get_stage_progress_snapshots(["task-1"])
+    assert retained["task-1"].summary.snapshot_revision == newer.summary.snapshot_revision
+
+    await manager.set_state("task-1", "FAILED")
+    assert await manager.get_stage_progress_snapshots(["task-1"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_live_stage_snapshot_cache_is_bounded(monkeypatch) -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    monkeypatch.setattr(task_state_module, "_POOL_SIZE", 1)
+    monkeypatch.setattr(task_state_module, "_MAX_TASKS_PER_WORKER", 1)
+    manager = _task_state_manager()
+    for task_id in ("task-1", "task-2"):
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=42)
+        await manager.set_state(task_id, "SERIALIZING")
+        tracker = StageTracker(task_id)
+        tracker.start_stage("parse", 0)
+        await manager.renew_worker_lease_with_stage_snapshot(task_id, tracker.snapshot())
+
+    snapshots = await manager.get_stage_progress_snapshots(["task-1", "task-2"])
+    assert set(snapshots) == {"task-2"}
+
+
+@pytest.mark.asyncio
+async def test_live_stage_snapshot_expires_before_the_worker_lease(monkeypatch) -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    monkeypatch.setattr(task_state_module, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    manager = TaskStateManager.__ray_metadata__.modified_class(worker_lease_ttl_seconds=1.0)
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    await manager.set_state("task-1", "SERIALIZING")
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+    await manager.renew_worker_lease_with_stage_snapshot("task-1", tracker.snapshot())
+
+    await asyncio.sleep(0.03)
+
+    assert task_state_module._worker_lease_is_live(manager.tasks["task-1"]) is True
+    assert await manager.get_stage_progress_snapshots(["task-1"]) == {}
 
 
 @pytest.mark.asyncio
