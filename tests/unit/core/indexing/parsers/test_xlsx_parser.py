@@ -2262,6 +2262,27 @@ def test_header_and_sheet_limits():
         list(XlsxParser(limits=XlsxLimits(max_sheets=1)).iter_batches(doc))
 
 
+@pytest.mark.parametrize("end_row, should_fail", [(4, False), (5, True)])
+def test_sparse_excel_table_range_respects_traversal_limit_before_reader_opens(end_row, should_fail, monkeypatch):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "name"])
+    sheet.append([1, "Alice"])
+    sheet.add_table(Table(displayName="SparseTable", ref=f"A1:B{end_row}"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(filename="sparse.xlsx", raw_bytes=output.getvalue())
+    parser = XlsxParser(limits=XlsxLimits(max_sheet_area=8))
+    if should_fail:
+        monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+        with pytest.raises(PipelineError, match="worksheet rectangle exceeds the traversal limit") as error:
+            list(parser.iter_batches(document))
+        assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+    else:
+        assert any("Alice" in block.text for block in parser.iter_batches(document))
+
+
 @pytest.mark.parametrize(
     "headers,values",
     [
@@ -2364,6 +2385,20 @@ def test_shared_string_count_is_bounded_before_openpyxl_loads_sheet(monkeypatch)
     monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
     with pytest.raises(PipelineError, match="shared string count"):
         list(XlsxParser(limits=XlsxLimits(max_shared_strings=1)).iter_batches(doc))
+
+
+@pytest.mark.parametrize("rich_text", [False, True])
+def test_oversized_shared_string_is_rejected_before_reader_opens(monkeypatch, rich_text):
+    doc = _with_shared_strings(_document([["name"], ["abcdef"]]))
+    if rich_text:
+        doc = _edit_xml(
+            doc,
+            lambda xml: xml.replace("<t>abcdef</t>", "<r><t>abc</t></r><r><t>def</t></r>"),
+            "xl/sharedStrings.xml",
+        )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="shared string exceeds the character limit"):
+        list(XlsxParser(limits=XlsxLimits(max_cell_chars=5)).iter_batches(doc))
 
 
 def test_shared_strings_are_preserved():
