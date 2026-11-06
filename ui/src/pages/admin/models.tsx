@@ -307,8 +307,8 @@ export default function ModelsPage() {
                     return (
                       <Card key={`${ep.model_type}-${ep.name}`}>
                         <CardHeader className="pb-3">
-                          <div className="flex items-center justify-between gap-2">
-                            <CardTitle className="text-base truncate min-w-0">
+                          <div className="flex items-center justify-between gap-2 min-w-0">
+                            <CardTitle className="text-base truncate min-w-0" title={ep.name}>
                               {ep.name}
                             </CardTitle>
                             <div className="flex items-center gap-1.5 shrink-0">
@@ -326,7 +326,7 @@ export default function ModelsPage() {
                             </div>
                           </div>
                           {ep.model_name && (
-                            <CardDescription className="font-mono text-xs truncate">
+                            <CardDescription className="font-mono text-xs truncate" title={ep.model_name}>
                               {ep.model_name}
                             </CardDescription>
                           )}
