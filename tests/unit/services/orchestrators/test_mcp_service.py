@@ -417,6 +417,20 @@ async def test_task_status_admin_bypasses_owner():
     assert "error" not in out
 
 
+@pytest.mark.parametrize(("is_admin", "expected"), [(False, True), (True, False)])
+@pytest.mark.asyncio
+async def test_task_status_forwards_owner_identity_requirement(is_admin: bool, expected: bool) -> None:
+    jobs = FakeJobs(details={"user_id": 1})
+
+    await _service(jobs=jobs, indexing=FakeIndexing(state="COMPLETED")).get_task_status(
+        task_id="t1",
+        user_id=1,
+        is_admin=is_admin,
+    )
+
+    assert jobs.require_owner_identity is expected
+
+
 @pytest.mark.asyncio
 async def test_task_status_failed_redacts_error_for_non_admin():
     jobs = FakeJobs(details={"user_id": 1})
