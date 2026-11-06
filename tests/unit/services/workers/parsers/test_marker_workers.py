@@ -1298,3 +1298,22 @@ async def test_cancelling_parse_stops_the_image_build(monkeypatch):
     settled = encoded
     await asyncio.sleep(0.3)
     assert encoded == settled < len(images)
+
+
+def test_a_page_separator_too_long_to_be_a_page_stays_text():
+    """int() refuses more than 4,300 digits, and the PDF's own text can hold the
+    separator's shape: such a number used to fail the file."""
+    forged = "{" + "9" * 5_000 + "}[PAGE_SEP]"
+    pages = marker_workers.MarkerLoader._split_pages(
+        "[PAGE_SEP]one " + forged + " still one{1}[PAGE_SEP]two{2}[PAGE_SEP]"
+    )
+
+    assert [page for page, _ in pages] == [1, 2]
+    assert forged in pages[0][1]
+
+
+def test_a_page_separator_has_at_most_nine_digits():
+    pages = marker_workers.MarkerLoader._split_pages("[PAGE_SEP]a{999999999}[PAGE_SEP]b{1000000000}[PAGE_SEP]")
+
+    assert [page for page, _ in pages] == [999_999_999, 1_000_000_000]
+    assert "{1000000000}[PAGE_SEP]" in pages[1][1]

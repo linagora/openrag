@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 from core.chunking.markdown_utils import (
+    PAGE_RE,
     MDElement,
     _split_to_budget,
     attach_captions,
@@ -152,6 +153,19 @@ class TestSplitMdElements:
         images = [e for e in elems if e.type == "image"]
         assert len(images) == 1
         assert images[0].page_number == 3
+
+    def test_marker_too_long_to_be_a_page_stays_text(self):
+        # int() refuses more than 4,300 digits: such a marker used to fail the file.
+        marker = "[PAGE_" + "1" * 5_000 + "]"
+        elems = split_md_elements(f"Intro.\n{marker}\nMore.")
+        assert [e.type for e in elems] == ["text"]
+        assert marker in elems[0].content
+
+    def test_a_page_has_at_most_nine_digits(self):
+        # Ten digits is past any page count; above 2**63 the page would not
+        # even fit the integer Milvus stores.
+        assert PAGE_RE.fullmatch("[PAGE_999999999]")
+        assert PAGE_RE.search("[PAGE_1000000000]") is None
 
 
 TABLE = "| A | B |\n|---|---|\n| 1 | 2 |"

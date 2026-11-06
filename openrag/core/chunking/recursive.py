@@ -142,7 +142,7 @@ _BLOCK_LINE_RE = re.compile(
     r"|\|"  # table row
     r"|```|~~~"  # code fence
     r"|(?:-{3,}|\*{3,}|_{3,})\s*$"  # horizontal rule (---, ***, ___)
-    r"|\[PAGE_\d+\]\s*$"  # synthetic page marker
+    r"|\[PAGE_\d{1,9}\]\s*$"  # synthetic page marker, as PAGE_RE reads it
     r")"
 )
 
