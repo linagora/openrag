@@ -2995,6 +2995,29 @@ def test_long_worksheet_note_is_indexed_once_across_table_batches(chunker_name):
             assert rows_in_chunk & set(range(group["start_row"], group["end_row"] + 1))
 
 
+def test_xlsx_context_and_separator_must_leave_a_positive_table_budget():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    context = "\n\nWorksheet: Sheet"
+    table = "| name |\n| --- |\n| Alice |"
+    element = MDElement(
+        type="table",
+        content=table + context,
+        metadata={
+            "tabular_format": "xlsx",
+            "worksheet_context": context,
+            "sheet_name": "Sheet",
+            "table_columns": ["name"],
+            "csv_columns": ["name"],
+            "table_row_start": 2,
+            "table_row_end": 2,
+            "table_row_numbers": [2],
+        },
+    )
+    with pytest.raises(PipelineError, match="sheet context exceeds chunk token budget"):
+        chunk_table(element, chunk_size=len(context) + 1, length_function=len)
+
+
 def test_xlsx_continuation_restores_context_to_expanded_chunk_budget():
     from core.chunking.markdown_utils import MDElement, chunk_table
 

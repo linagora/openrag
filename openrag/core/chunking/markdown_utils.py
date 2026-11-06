@@ -442,9 +442,9 @@ def _chunk_xlsx_table(table, element, chunk_size, length_function):
             context_chunks = _xlsx_sheet_context_chunks(sheet_context, element, chunk_size, length_function)
     table = clean_markdown_table_spacing(table)
     base_context_tokens = length_function(base_context) if base_context else 0
-    if base_context_tokens >= chunk_size:
-        raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
     separator_tokens = length_function("\n")
+    if base_context_tokens + separator_tokens >= chunk_size:
+        raise PipelineError("XLSX sheet context exceeds chunk token budget; increase chunk size")
     original_columns = list(element.metadata["table_columns"])
     rendered_columns = _table_cells(table.split("\n", 1)[0])
     if len(rendered_columns) != len(original_columns):

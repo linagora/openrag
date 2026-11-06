@@ -80,6 +80,8 @@ An automatic result is marked confident only when the bounded scan finds strong 
 
 Header rows cannot be configured. Deployment-wide overrides were checked against every uploaded workbook, so a setting meant for one file rejected the others; a per-file or per-partition route may be added later.
 
+When a single column header cannot fit within the configured chunk size, the chunker preserves it using an expanded effective budget recorded in `csv_effective_chunk_size`. Worksheet context and the separator must still leave a positive table budget; otherwise indexing fails with a clear chunk-budget error.
+
 Blank header cells receive generated names such as `column_2`. Duplicate rendered names are made unique.
 
 ## Formulas and numerical values
