@@ -69,7 +69,11 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # replacement changes the actor id the previous generation's handles point at.
 # v14: workers emit stage history and stamp its tracking version; old detached
 # workers are reused by name and would keep settling jobs without that history.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v14"
+# v15: workers index .xlsx/.xlsm through the streaming workbook parser. New API
+# replicas accept those uploads, while a v14 worker reused by name does not know
+# the extension: detect_content_type falls back to TEXT and decode_bytes decodes
+# the ZIP without raising, so the binary would be indexed as text.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v15"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
