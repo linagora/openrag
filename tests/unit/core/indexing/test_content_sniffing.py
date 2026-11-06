@@ -265,7 +265,7 @@ def test_a_compression_bomb_is_never_expanded():
     validate_ooxml_package("docx", io.BytesIO(buf.getvalue()))
 
 
-@pytest.mark.parametrize("extension", ["pdf", "png", "txt", "doc", ""])
+@pytest.mark.parametrize("extension", ["pdf", "png", "txt", "doc", "ods", ""])
 def test_non_ooxml_extensions_are_left_alone(extension):
     stream = io.BytesIO(b"anything at all")
     stream.seek(4)
@@ -285,6 +285,90 @@ def test_the_stream_position_is_restored_on_success_and_on_rejection():
     with pytest.raises(ValidationError):
         validate_ooxml_package("docx", bad)
     assert bad.tell() == 0
+
+
+# ---------------------------------------------------------------------------
+# OpenDocument packages (#1287)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("extension", ["odt", "odp"])
+def test_an_opendocument_package_of_its_kind_is_accepted(odf_package, extension):
+    package = odf_package(extension, "")
+    validate_content_matches_extension(extension, package[:CONTENT_SNIFF_BYTES])
+    validate_ooxml_package(extension, io.BytesIO(package))
+
+
+def test_a_package_that_does_not_write_the_mimetype_entry_first_is_accepted():
+    """ODF asks for ``mimetype`` first, but the central directory is what is read."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("content.xml", "<x/>")
+        archive.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+    validate_ooxml_package("odt", io.BytesIO(buf.getvalue()))
+
+
+@pytest.mark.parametrize(
+    ("extension", "payload"),
+    [
+        pytest.param("odt", _zip("content.xml"), id="zip-without-mimetype"),
+        pytest.param("odt", _zip("mimetype", payload="application/vnd.oasis.opendocument.text"), id="no-content"),
+        pytest.param(
+            "odp",
+            _zip("mimetype", "content.xml", payload="application/vnd.oasis.opendocument.text"),
+            id="text-document-named-odp",
+        ),
+        pytest.param("odt", _zip("mimetype", "content.xml", payload="application/zip"), id="foreign-mimetype"),
+        pytest.param("odt", DOCX, id="docx-named-odt"),
+        pytest.param("odt", PDF, id="pdf-named-odt"),
+        pytest.param("odp", b"PK\x03\x04" + b"\x00" * 64, id="truncated"),
+    ],
+)
+def test_an_archive_that_is_not_an_opendocument_of_that_kind_is_refused(extension, payload):
+    with pytest.raises(ValidationError) as excinfo:
+        validate_ooxml_package(extension, io.BytesIO(payload))
+    assert excinfo.value.status_code == 415
+    assert f".{extension} extension" in excinfo.value.message
+
+
+def test_the_mimetype_entry_is_read_with_a_bound():
+    """A huge ``mimetype`` entry is read only as far as the expected value."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("mimetype", "application/vnd.oasis.opendocument.text" + " " * (64 * 1024 * 1024) + "x")
+        archive.writestr("content.xml", "<x/>")
+    with pytest.raises(ValidationError):
+        validate_ooxml_package("odt", io.BytesIO(buf.getvalue()))
+
+
+@pytest.mark.parametrize("how", ["encrypted", "corrupt"])
+def test_an_unreadable_mimetype_entry_is_refused(damaged_zip_entry, how):
+    """An encrypted entry raises RuntimeError and a broken deflate stream
+    zlib.error: both are a 415, not a 500."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+        archive.writestr("content.xml", "<x/>")
+    with pytest.raises(ValidationError) as excinfo:
+        validate_ooxml_package("odt", io.BytesIO(damaged_zip_entry(buf.getvalue(), "mimetype", how)))
+    assert excinfo.value.status_code == 415
+
+
+def test_an_opendocument_check_restores_the_stream_position(odf_package):
+    good = io.BytesIO(odf_package("odt", ""))
+    validate_ooxml_package("odt", good)
+    assert good.tell() == 0
+
+    bad = io.BytesIO(_zip("content.xml"))
+    with pytest.raises(ValidationError):
+        validate_ooxml_package("odt", bad)
+    assert bad.tell() == 0
+
+
+def test_an_opendocument_named_doc_is_refused_before_spire(odf_package):
+    """``filetype`` names an ODT, so the ``.doc`` tolerance does not let it through."""
+    with pytest.raises(ValidationError):
+        validate_content_matches_extension("doc", odf_package("odt", "")[:CONTENT_SNIFF_BYTES])
 
 
 # ---------------------------------------------------------------------------

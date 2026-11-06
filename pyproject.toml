@@ -77,6 +77,8 @@ dependencies = [
     "aiobreaker>=1.2.0",
     "mcp>=1.11.0",
     "httpx>=0.27.0",
+    # Reads .odt and .odp: see core/indexing/parsers/odf.py.
+    "xberg>=1.3.9,<2",
 ]
 
 [dependency-groups]
