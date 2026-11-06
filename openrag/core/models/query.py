@@ -6,9 +6,12 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of search queries accepted for one retrieval request.
+MAX_QUERY_SUBQUERIES = 8
 
 
 class RetrievalQuery(BaseModel):
@@ -101,7 +104,11 @@ class Query(BaseModel):
 class SearchQueries(BaseModel):
     """Collection of sub-queries produced by query decomposition."""
 
-    query_list: list[Query] = Field(..., description="Search sub-queries to retrieve relevant documents.")
+    query_list: list[Query] = Field(
+        ...,
+        max_length=MAX_QUERY_SUBQUERIES,
+        description=f"Up to {MAX_QUERY_SUBQUERIES} search sub-queries to retrieve relevant documents.",
+    )
     intent: Literal["greeting", "gratitude", "farewell", "capability", "other"] = Field(
         default="other",
         description="Conservative classification of the complete latest user message.",
@@ -110,6 +117,19 @@ class SearchQueries(BaseModel):
         default=True,
         description="Whether the user's request needs document retrieval.",
     )
+
+    @field_validator("query_list", mode="before")
+    @classmethod
+    def remove_blank_queries(cls, value: Any) -> Any:
+        if not isinstance(value, (list, tuple)):
+            return value
+        result = []
+        for entry in value:
+            text = entry.query if isinstance(entry, Query) else entry.get("query") if isinstance(entry, dict) else None
+            if isinstance(text, str) and not text.strip():
+                continue
+            result.append(entry)
+        return result
 
     def __str__(self) -> str:
         return " --- ".join(str(q) for q in self.query_list)
