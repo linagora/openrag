@@ -10,10 +10,12 @@ This module has no IO and no config dependency.
 
 from __future__ import annotations
 
+import bisect
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from operator import itemgetter
 from typing import Any, Literal
 
 from core.utils.exceptions import PipelineError
@@ -41,7 +43,10 @@ TABLE_RE = re.compile(
 IMAGE_RE = re.compile(r"(<image_description>(.*?)</image_description>)", re.DOTALL)
 
 # `[PAGE_N]` page-boundary markers — content BEFORE [PAGE_N] is on page N.
-PAGE_RE = re.compile(r"\[PAGE_(\d+)\]")
+# N is read with int(), which refuses more than 4,300 digits: the marker can
+# also come from the document's own text, so a number no page count reaches
+# leaves it plain text.
+PAGE_RE = re.compile(r"\[PAGE_(\d{1,9})\]")
 
 # A figure/table caption: a numbered label opening the line (``*Table 2. …*``,
 # ``#### Figure 1.1: …``, ``Tableau 3 - …``). The separator required after the
@@ -90,13 +95,8 @@ def get_page_number(position: int, page_markers: list[tuple[int, int]]) -> int:
     from ``[PAGE_N]`` matches. Content AFTER ``[PAGE_N]`` belongs to page
     ``N + 1``; content before any marker is page 1.
     """
-    current_page = 1
-    for marker_pos, page_num in page_markers:
-        if position >= marker_pos:
-            current_page = page_num + 1
-        else:
-            break
-    return current_page
+    i = bisect.bisect_right(page_markers, position, key=itemgetter(0))
+    return page_markers[i - 1][1] + 1 if i else 1
 
 
 def split_md_elements(md_text: str) -> list[MDElement]:
@@ -268,36 +268,6 @@ def _caption_run(lines: list[str], paragraphs: Iterable[list[int]]) -> list[int]
     if not captions or (len(captions) > 1 and all(_PAGE_REFERENCE_RE.search(c) for c in captions)):
         return []
     return sorted(run)
-
-
-def get_chunk_page_number(chunk_str: str, previous_chunk_ending_page: int = 1) -> dict[str, int]:
-    """Resolve start and end pages for a text chunk containing ``[PAGE_N]`` markers.
-
-    Returns ``{"start_page": int, "end_page": int}``.
-    """
-    matches = list(PAGE_RE.finditer(chunk_str))
-
-    if not matches:
-        return {
-            "start_page": previous_chunk_ending_page,
-            "end_page": previous_chunk_ending_page,
-        }
-
-    first_match = matches[0]
-    last_match = matches[-1]
-    last_char_idx = len(chunk_str) - 1
-
-    if first_match.start() == 0:
-        start_page = int(first_match.group(1)) + 1
-    else:
-        start_page = previous_chunk_ending_page
-
-    if last_match.end() - 1 == last_char_idx:
-        end_page = int(last_match.group(1))
-    else:
-        end_page = int(last_match.group(1)) + 1
-
-    return {"start_page": start_page, "end_page": max(start_page, end_page)}
 
 
 def parse_markdown_table(markdown_table: str) -> tuple[list[str], list[list[str]]]:

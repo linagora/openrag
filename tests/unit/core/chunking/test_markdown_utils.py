@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import pytest
 from core.chunking.markdown_utils import (
+    PAGE_RE,
     MDElement,
     _split_to_budget,
     attach_captions,
     chunk_table,
-    get_chunk_page_number,
+    get_page_number,
     parse_markdown_table,
     span_inside,
     split_md_elements,
@@ -153,6 +154,19 @@ class TestSplitMdElements:
         assert len(images) == 1
         assert images[0].page_number == 3
 
+    def test_marker_too_long_to_be_a_page_stays_text(self):
+        # int() refuses more than 4,300 digits: such a marker used to fail the file.
+        marker = "[PAGE_" + "1" * 5_000 + "]"
+        elems = split_md_elements(f"Intro.\n{marker}\nMore.")
+        assert [e.type for e in elems] == ["text"]
+        assert marker in elems[0].content
+
+    def test_a_page_has_at_most_nine_digits(self):
+        # Ten digits is past any page count; above 2**63 the page would not
+        # even fit the integer Milvus stores.
+        assert PAGE_RE.fullmatch("[PAGE_999999999]")
+        assert PAGE_RE.search("[PAGE_1000000000]") is None
+
 
 TABLE = "| A | B |\n|---|---|\n| 1 | 2 |"
 
@@ -248,22 +262,26 @@ class TestAttachCaptions:
         assert _captions(f"Prose.\n\n{listing}\n\nProse.") == [""]
 
 
-class TestGetChunkPageNumber:
-    def test_no_markers_returns_previous_page(self):
-        result = get_chunk_page_number("Just some plain text content.", previous_chunk_ending_page=1)
-        assert result == {"start_page": 1, "end_page": 1}
+class TestGetPageNumber:
+    # A [PAGE_N] marker at offset P means everything before P is on page N.
+    MARKERS = [(10, 1), (20, 4)]
 
-    def test_chunk_starts_with_marker(self):
-        result = get_chunk_page_number("[PAGE_2]Content on page 3.", previous_chunk_ending_page=1)
-        assert result == {"start_page": 3, "end_page": 3}
+    @pytest.mark.parametrize(
+        ("position", "page"),
+        [
+            (0, 1),  # before any marker
+            (9, 1),
+            (10, 2),  # the marker itself opens the next page
+            (19, 2),
+            (20, 5),  # pages may skip (4 -> 5)
+            (1000, 5),  # after the last marker
+        ],
+    )
+    def test_page_is_the_one_after_the_last_marker_at_or_before_the_position(self, position, page):
+        assert get_page_number(position, self.MARKERS) == page
 
-    def test_chunk_ends_with_marker(self):
-        result = get_chunk_page_number("Content on page 1.[PAGE_1]", previous_chunk_ending_page=1)
-        assert result == {"start_page": 1, "end_page": 1}
-
-    def test_marker_in_middle(self):
-        result = get_chunk_page_number("Start on page 1.[PAGE_1]End on page 2.", previous_chunk_ending_page=1)
-        assert result == {"start_page": 1, "end_page": 2}
+    def test_no_markers_is_page_one(self):
+        assert get_page_number(42, []) == 1
 
 
 class TestChunkTable:

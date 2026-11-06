@@ -5,6 +5,7 @@ import httpx
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
 from core.models.readiness import ConfigurationReferenceFinding, ModelEndpointDiscovery, ModelEndpointTarget
+from core.utils.exceptions import VDBSchemaMigrationRequiredError
 from fastapi.encoders import jsonable_encoder
 from services.orchestrators import readiness_service as readiness_module
 from services.orchestrators.readiness_service import ReadinessService, check_model_endpoint
@@ -44,6 +45,13 @@ async def test_snapshot_checks_cannot_be_mutated_through_cached_or_published_res
     assert cached is snapshot
     assert cached.checks == {"postgres": "ok"}
     assert jsonable_encoder(cached.checks) == {"postgres": "ok"}
+
+
+async def test_a_pending_schema_migration_is_reported_as_such():
+    check = AsyncMock(side_effect=VDBSchemaMigrationRequiredError("Collection is at schema version 2"))
+    service = ReadinessService({"postgres": AsyncMock(), "milvus": check})
+
+    assert await service.check() == {"postgres": "ok", "milvus": "migration_required"}
 
 
 async def test_cached_snapshot_is_json_serializable():

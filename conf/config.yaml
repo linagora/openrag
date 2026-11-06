@@ -134,6 +134,9 @@ map_reduce:
 verbose:
   level: INFO
   format: text
+  # Off: request lines keep only the client's /24 (IPv4) or /48 (IPv6) network,
+  # never the query string. On: full client addresses (LOG_PERSONAL_DATA).
+  personal_data: false
 
 # --- Server ---
 # Env: PREFERRED_URL_SCHEME, ASSISTANT_NAME
@@ -171,13 +174,12 @@ prompts:
 
 # --- Document loader ---
 loader:
-  # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
+  # Env: IMAGE_CAPTIONING, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
   #      CONTENT_DEDUPLICATION_ENABLED, CSV_BATCH_SIZE, CSV_DELIMITER
   csv_batch_size: 10000
   # Null enables delimiter sniffing. Set one character to force a delimiter.
   csv_delimiter: null
   image_captioning: true
-  image_captioning_url: true
   save_markdown: false
   # Keep the raw upload on disk after indexation (needed for source viewing in
   # Chainlit). Set false for clients that manage their own files (e.g. Twake).

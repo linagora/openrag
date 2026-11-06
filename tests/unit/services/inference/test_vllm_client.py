@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import json
 from unittest.mock import AsyncMock
 
@@ -35,6 +36,29 @@ def _clean_breakers():
     for breaker in _breakers.values():
         breaker.close()
     _breakers.clear()
+
+
+async def _unretrieved_task_errors(coro) -> list[str]:
+    """Await *coro*, then return the "Task exception was never retrieved"
+    contexts asyncio reports once the leftover tasks are garbage collected."""
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    recorded: list[str] = []
+
+    def handler(_loop, ctx):
+        if "never retrieved" in ctx["message"]:
+            recorded.append(f"{ctx['message']}: {ctx.get('future')!r}")
+
+    loop.set_exception_handler(handler)
+    try:
+        await coro
+        for _ in range(3):
+            await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    return recorded
 
 
 def _make_transport(handler):
@@ -913,6 +937,32 @@ class TestVLLMEmbedder:
 
         assert "fail" in started
         assert sorted(cancelled) == ["slow1", "slow2"]  # both slow batches were cancelled
+
+    @pytest.mark.asyncio
+    async def test_embed_leaves_no_unretrieved_task_exception_when_several_batches_fail(self):
+        """#1299: tqdm.gather re-raises the first failed batch and abandons the
+        other wrapper tasks, so a second failed batch logs "Task exception was
+        never retrieved". Both fail before embed() gets to cancel anything."""
+        embedder = VLLMEmbedder(endpoint="http://x", model_name="m", batch_size=1, embed_concurrency=5)
+
+        async def fake_embed_batch(texts: list[str], *, offset: int = 0) -> list[list[float]]:
+            raise EmbeddingAPIError("boom", model_name="m", base_url="http://x", error="boom")
+
+        embedder._embed_batch = fake_embed_batch  # type: ignore[method-assign]
+        # Record only the type: an ExceptionInfo's traceback would keep the
+        # abandoned tasks alive past the gc.collect() in the helper.
+        raised: list[type[BaseException]] = []
+
+        async def run():
+            try:
+                await embedder.embed(["a", "b", "c"])
+            except EmbeddingAPIError as exc:
+                raised.append(type(exc))
+
+        recorded = await _unretrieved_task_errors(run())
+
+        assert raised == [EmbeddingAPIError]
+        assert recorded == []
 
     @pytest.mark.asyncio
     async def test_embed_empty_returns_empty(self):
