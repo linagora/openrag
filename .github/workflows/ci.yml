@@ -392,6 +392,21 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      # The repo suite's fixtures need Postgres, Milvus tests included. The same
+      # major version as the Compose stack.
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: root_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U root"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -446,7 +461,21 @@ jobs:
         env:
           OPENRAG_TEST_VDB_HOST: localhost
           OPENRAG_TEST_VDB_PORT: "19530"
-        run: uv run pytest tests/integration/repos/ -m integration -v --tb=short
+          POSTGRES_TEST_ADMIN_DSN: postgresql://root:root_password@localhost:5432/postgres
+        run: uv run pytest tests/integration/repos/ -m integration -v --tb=short -rs --junitxml=integration-results.xml
+
+      # Every skip in this suite means a service is missing, and pytest exits 0
+      # when all tests skip: this job passed for months having run nothing (#1068).
+      - name: Fail if a test was skipped or none ran
+        run: |
+          python3 -c "
+          import sys
+          import xml.etree.ElementTree as ET
+          suite = ET.parse('integration-results.xml').getroot().find('testsuite')
+          tests, skipped = int(suite.get('tests')), int(suite.get('skipped'))
+          print(f'{tests} tests, {skipped} skipped')
+          sys.exit(tests == 0 or skipped > 0)
+          "
 
       - name: Show logs on failure
         if: failure()
