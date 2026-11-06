@@ -50,6 +50,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatDate, copyToClipboard } from "@/lib/utils";
+import { DeleteUserAction } from "./delete-user-action";
 
 export default function UserDetailPage() {
   // Remount the entire detail view when the route's user id changes. React Router
@@ -112,6 +113,7 @@ function UserDetail() {
     onSuccess: () => {
       toast.success("User deleted");
       navigate("/users");
+      queryClient.removeQueries({ queryKey: ["user", id] });
     },
     onError: (e) => toast.error((e as Error).message),
   });
@@ -134,15 +136,11 @@ function UserDetail() {
                 <ArrowLeft className="mr-2 h-4 w-4" /> Back
               </Link>
             </Button>
-            <ConfirmDialog
-              title="Delete user?"
-              description={`Permanently delete "${title}"? This removes them from all partitions and invalidates their token.`}
-              onConfirm={() => deleteMut.mutate()}
-            >
+            <DeleteUserAction userId={user.id} label={title} onConfirm={() => deleteMut.mutate()}>
               <Button variant="destructive" disabled={user.id === 1}>
                 <Trash2 className="mr-2 h-4 w-4" /> Delete
               </Button>
-            </ConfirmDialog>
+            </DeleteUserAction>
           </div>
         }
       />
@@ -255,6 +253,7 @@ function PartitionsTab({ userId }: { userId: number }) {
     mutationFn: () => grantMembership(partition, userId, role),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      queryClient.invalidateQueries({ queryKey: ["user", String(userId)] });
       toast.success(`Granted ${role} on ${partition}`);
       setDialogOpen(false);
       setPartition("");
@@ -267,6 +266,7 @@ function PartitionsTab({ userId }: { userId: number }) {
     mutationFn: (part: string) => revokeMembership(part, userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      queryClient.invalidateQueries({ queryKey: ["user", String(userId)] });
       toast.success("Access removed");
     },
     onError: (e) => toast.error((e as Error).message),
@@ -277,6 +277,7 @@ function PartitionsTab({ userId }: { userId: number }) {
       changeMembershipRole(part, userId, newRole),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      queryClient.invalidateQueries({ queryKey: ["user", String(userId)] });
       toast.success("Role updated");
     },
     onError: (e) => toast.error((e as Error).message),
