@@ -80,7 +80,7 @@ An automatic result is marked confident only when the bounded scan finds strong 
 
 Header rows cannot be configured. Deployment-wide overrides were checked against every uploaded workbook, so a setting meant for one file rejected the others; a per-file or per-partition route may be added later.
 
-When a single column header cannot fit within the configured chunk size, the chunker preserves it using an expanded effective budget recorded in `csv_effective_chunk_size`. Worksheet context and the separator must still leave a positive table budget; otherwise indexing fails with a clear chunk-budget error.
+When a single column header cannot fit within the configured chunk size, the chunker preserves it using an expanded effective budget recorded in `csv_effective_chunk_size`. The final continuation chunk also restores the reserved separator and worksheet/formula/display context allowance when checking that expanded budget. Worksheet context and the separator must still leave a positive table budget; otherwise indexing fails with a clear chunk-budget error.
 
 Blank header cells receive generated names such as `column_2`. Duplicate rendered names are made unique.
 
@@ -169,7 +169,9 @@ loader:
     max_tables: 128
 ```
 
-`xlsx_batch_size` limits the number of data rows emitted in one parser batch. `xlsx_limits` accepts the positive-integer limit names listed below. Values not specified retain their defaults.
+`xlsx_batch_size` limits the number of data rows emitted in one parser batch and can also be set with `XLSX_BATCH_SIZE` (see the [environment reference](/openrag/documentation/env_vars/#excel-workbook-ingestion)). A batch may flush earlier to stay within `max_batch_bytes`. Parser batches are then split into retrieval chunks according to the configured chunk token budget; batch size is not chunk size.
+
+`xlsx_limits` accepts the limit names listed below through YAML configuration. Batch size and limit values must be positive integers; booleans, fractional values, and unknown limit names are rejected. Values not specified retain their defaults. Increase limits only after measuring resource use for the intended workload; they do not impose a hard memory ceiling across simultaneous indexing jobs.
 
 ## Default safety limits
 
@@ -189,7 +191,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_rows` | Row coordinate of a cell with content | 1,048,576 |
 | `max_columns` | Column coordinate of a cell with content | 4,096 |
 | `max_cells` | Physical cells across worksheets, empty styled cells included | 5,000,000 |
-| `max_sheet_area` | Rectangle spanned by cells with content or by declared Excel Table bounds, including gaps | 5,000,000 positions |
+| `max_sheet_area` | Traversal rectangle from `A1` to the last content-bearing cell or a declared Excel Table's bottom-right corner, including leading space and gaps | 5,000,000 positions |
 | `max_tables` | Detected table regions per visible worksheet, and Excel Tables per worksheet | 128 |
 | `max_merged_ranges` | Merged-cell ranges across the workbook | 100,000 |
 | `max_cell_chars` | Characters in one cell | 32,767 |
