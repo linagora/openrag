@@ -92,6 +92,9 @@ class EmbedderConfig(ConfigMixin):
     # non-positive batch_size/embed_concurrency to 1 and would pass a <= 0
     # timeout straight into httpx).
     timeout: float = Field(default=120.0, gt=0)
+    # A search embeds the user's query while they wait, so it gets a budget of
+    # its own: this timeout and one retry, instead of `timeout` and two (#1078).
+    query_timeout: float = Field(default=10.0, gt=0)
     # Big documents are embedded in slices of `batch_size`, at most
     # `embed_concurrency` requests in flight, to stay within the timeout above.
     batch_size: int = Field(default=32, gt=0)

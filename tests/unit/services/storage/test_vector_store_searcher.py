@@ -48,7 +48,7 @@ def _make_searcher(
     store.query_chunks_by_filter = AsyncMock(return_value=filter_results or [])
 
     embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC])
+    embedder.embed_query = AsyncMock(return_value=[_EMBED_VEC])
 
     doc_repo = MagicMock()
     doc_repo.get_file_ids_by_relationship = AsyncMock(return_value=file_ids_by_rel or [])
@@ -122,7 +122,7 @@ async def test_search_embeds_query_and_calls_store():
     )
     await searcher.search(query="hello", partition=["p1"], top_k=5, with_surrounding_chunks=False)
 
-    embedder.embed.assert_awaited_once_with(["hello"])
+    embedder.embed_query.assert_awaited_once_with(["hello"])
     store.search.assert_awaited_once()
     call_kwargs = store.search.call_args.kwargs
     assert call_kwargs["embedding"] == _EMBED_VEC
@@ -214,7 +214,7 @@ async def test_search_combines_filter_and_filter_params():
 @pytest.mark.asyncio
 async def test_multi_query_search_merges_filter_params():
     embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+    embedder.embed_query = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
     store = MagicMock()
     store.search = AsyncMock(return_value=[])
     store.query_chunks_by_filter = AsyncMock(return_value=[])
@@ -289,7 +289,7 @@ async def test_search_skips_surrounding_when_no_results():
 @pytest.mark.asyncio
 async def test_multi_query_search_embeds_all_queries():
     embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+    embedder.embed_query = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
 
     store = MagicMock()
     store.search = AsyncMock(return_value=[])
@@ -304,13 +304,13 @@ async def test_multi_query_search_embeds_all_queries():
     await searcher.multi_query_search(
         queries=["q1", "q2"], partition=["p1"], top_k_per_query=3, with_surrounding_chunks=False
     )
-    embedder.embed.assert_awaited_once_with(["q1", "q2"])
+    embedder.embed_query.assert_awaited_once_with(["q1", "q2"])
 
 
 @pytest.mark.asyncio
 async def test_multi_query_search_deduplicates_across_queries():
     embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+    embedder.embed_query = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
 
     # Both queries return the same chunk "1" plus a unique one each
     store = MagicMock()
@@ -339,7 +339,7 @@ async def test_multi_query_search_deduplicates_across_queries():
 @pytest.mark.asyncio
 async def test_multi_query_search_uses_independent_traces_and_merges_in_query_order():
     embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+    embedder.embed_query = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
     child_traces = []
 
     async def search(*, query_text, trace, **_kwargs):
@@ -389,7 +389,7 @@ async def test_multi_query_search_uses_independent_traces_and_merges_in_query_or
 @pytest.mark.asyncio
 async def test_multi_query_search_uses_parallel_wall_clock_latency():
     embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+    embedder.embed_query = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
 
     async def search(*, query_text, trace, **_kwargs):
         duration = 0.2 if query_text == "q1" else 0.7
@@ -424,7 +424,7 @@ async def test_multi_query_search_uses_parallel_wall_clock_latency():
 @pytest.mark.asyncio
 async def test_multi_query_search_does_not_create_traces_when_disabled():
     searcher, store, embedder, _ = _make_searcher()
-    embedder.embed.return_value = [_EMBED_VEC, _EMBED_VEC]
+    embedder.embed_query.return_value = [_EMBED_VEC, _EMBED_VEC]
 
     await searcher.multi_query_search(
         queries=["q1", "q2"],
