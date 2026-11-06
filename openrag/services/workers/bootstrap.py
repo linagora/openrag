@@ -99,7 +99,9 @@ def get_task_state_manager():
         try:
             current = ray.get_actor("TaskStateManager", namespace="openrag")
         except ValueError:
-            return create_or_get()
+            # A process still on an older release may have recreated the actor
+            # first, and get_if_exists would attach to it: check the result too.
+            return get_task_state_manager()
         if _supports_task_state_recovery(current):
             return current
         sleep(0.05)
@@ -123,6 +125,10 @@ def _supports_task_state_recovery(actor) -> bool:
         # queue time. The dispatcher degrades to the unfenced method against an
         # older actor, so keeping one would silently readmit duplicate uploads.
         and getattr(actor, "set_queued_details_v2", None) is not None
+        # has_object_ref marks the release that reads the worker refs it holds;
+        # an older actor drops them unread, and Ray prints each failed one as an
+        # unhandled error (#1296).
+        and getattr(actor, "has_object_ref", None) is not None
     )
 
 

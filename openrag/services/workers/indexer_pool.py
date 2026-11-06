@@ -15,7 +15,7 @@ from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
-from services.workers.failure_reporting import submit_task_failure
+from services.workers.failure_reporting import log_interrupted_failure, log_task_failure, submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
@@ -69,7 +69,10 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # replacement changes the actor id the previous generation's handles point at.
 # v14: workers emit stage history and stamp its tracking version; old detached
 # workers are reused by name and would keep settling jobs without that history.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v14"
+# v15: folds in an independent v14 lineage (#1296): workers log their own
+# failures and poll has_object_ref instead of borrowing their task's ref, and
+# the TaskStateManager is replaced when it lacks has_object_ref.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v15"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -526,6 +529,14 @@ class IndexerWorkerActor:
                 is_working=lambda: working,
             )
         )
+
+        def stop_lease_interrupting() -> None:
+            # A failure being reported must not be stopped by the lease: the
+            # handler below would report the lost lease as a second failure, log
+            # and notify again, and overwrite the recorded reason.
+            nonlocal working
+            working = False
+
         try:
             try:
                 # A pickup the task state refuses (a task cancelled or abandoned
@@ -556,6 +567,7 @@ class IndexerWorkerActor:
             except Exception as exc:
                 # Not BaseException: a cancellation here must not notify or be
                 # reported as failed (same rule as set_failed_if_not_cancelled).
+                stop_lease_interrupting()
                 await self._report_task_failure(
                     task_id,
                     exc,
@@ -582,43 +594,66 @@ class IndexerWorkerActor:
                     callback_token=callback_token,
                     require_existing_partition=require_existing_partition,
                     resolved_prompts=resolved_prompts,
+                    on_failure_report=stop_lease_interrupting,
                 )
             finally:
                 self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
-            if workspace_ids and not replace and file_id:
-                results = await asyncio.gather(
-                    *(
-                        self._catalog_store.workspace_repo.add_files_to_workspace(partition, workspace_id, [file_id])
-                        for workspace_id in workspace_ids
-                    ),
-                    return_exceptions=True,
+            try:
+                if workspace_ids and not replace and file_id:
+                    results = await asyncio.gather(
+                        *(
+                            self._catalog_store.workspace_repo.add_files_to_workspace(
+                                partition, workspace_id, [file_id]
+                            )
+                            for workspace_id in workspace_ids
+                        ),
+                        return_exceptions=True,
+                    )
+                    cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
+                    if cancelled is not None:
+                        raise cancelled
+                    failures = [
+                        (workspace_id, result)
+                        for workspace_id, result in zip(workspace_ids, results, strict=True)
+                        if isinstance(result, Exception) or result
+                    ]
+                    if failures:
+                        protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
+                            file_id, partition
+                        )
+                        if not protected:
+                            raise RuntimeError(
+                                f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
+                            )
+                        for workspace_id, error in failures:
+                            # Bound, not passed to warning(): keyword arguments make loguru
+                            # str.format the message, which holds the exception text.
+                            reason = (
+                                {"error_reason": failure_reason_from_exception(error)}
+                                if isinstance(error, Exception)
+                                else {}
+                            )
+                            self._logger.bind(
+                                file_id=file_id,
+                                partition=partition,
+                                task_id=task_id,
+                                workspace_id=workspace_id,
+                                **reason,
+                            ).warning(
+                                f"Failed to attach indexed file to workspace '{workspace_id}'; "
+                                f"file retained independently: {error}"
+                            )
+                    else:
+                        await self._catalog_store.document_repo.finalize_file_workspace_ownership(
+                            file_id, partition, workspace_ids
+                        )
+            except Exception as exc:
+                # The file is already indexed and reported COMPLETED by the worker.
+                self._logger.bind(file_id=file_id, partition=partition, task_id=task_id).opt(exception=exc).error(
+                    "Workspace attachment failed after indexing.", error_reason=failure_reason_from_exception(exc)
                 )
-                cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
-                if cancelled is not None:
-                    raise cancelled
-                failures = [
-                    (workspace_id, result)
-                    for workspace_id, result in zip(workspace_ids, results, strict=True)
-                    if isinstance(result, Exception) or result
-                ]
-                if failures:
-                    protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
-                        file_id, partition
-                    )
-                    if not protected:
-                        raise RuntimeError(
-                            f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
-                        )
-                    for workspace_id, error in failures:
-                        self._logger.warning(
-                            f"Failed to attach indexed file to workspace '{workspace_id}'; "
-                            f"file retained independently: {error}"
-                        )
-                else:
-                    await self._catalog_store.document_repo.finalize_file_workspace_ownership(
-                        file_id, partition, workspace_ids
-                    )
+                raise
             return result
         except asyncio.CancelledError:
             # The lease stopped this worker because the task state stopped
@@ -682,19 +717,25 @@ class IndexerWorkerActor:
         callback_url: str | None,
         callback_token: str | None,
     ) -> None:
+        error_reason = failure_reason_from_exception(exc)
+        log = self._logger.bind(file_id=worker_metadata.get("file_id", ""), partition=partition, task_id=task_id)
         try:
             was_failed = await retry_idempotent_ray_actor_method(
                 lambda: submit_task_failure(
                     self._tsm,
                     task_id,
                     tb,
-                    failure_reason_from_exception(exc),
+                    error_reason,
                 ),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
+        except asyncio.CancelledError:
+            log_interrupted_failure(log, exc, error_reason)
+            raise
         except Exception:
             was_failed = True
         if was_failed:
+            log_task_failure(log, exc, error_reason)
             await send_indexing_callback(
                 callback_url,
                 partition,
@@ -708,15 +749,21 @@ class IndexerWorkerActor:
         """Do not start indexing until cancellation can target this worker."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _WORKER_REF_REGISTRATION_TIMEOUT_SECONDS
+        # has_object_ref keeps this worker from borrowing its own task's ref
+        # (see TaskStateManager.has_object_ref); a TSM from an older release
+        # lacks it, and a real handle raises AttributeError for it then.
+        has_ref = getattr(getattr(self._task_state_manager, "has_object_ref", None), "remote", None)
+        method = "has_object_ref" if has_ref is not None else "get_object_ref"
+        poll = has_ref or self._task_state_manager.get_object_ref.remote
         while loop.time() < deadline:
             remaining = max(0.01, deadline - loop.time())
             object_ref = await retry_idempotent_ray_actor_method(
-                lambda: self._task_state_manager.get_object_ref.remote(task_id),
+                lambda: poll(task_id),
                 recovery_timeout=remaining,
-                task_description=f"get_object_ref({task_id}) before indexing",
+                task_description=f"{method}({task_id}) before indexing",
             )
             ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
-            if ref is not None:
+            if ref is not None and ref is not False:
                 return
             await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
 
