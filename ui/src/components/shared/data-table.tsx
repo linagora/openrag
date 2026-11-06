@@ -5,13 +5,14 @@ import {
   type RowSelectionState,
   type SortingState,
   flexRender,
+  functionalUpdate,
   getCoreRowModel,
   getFilteredRowModel,
   getPaginationRowModel,
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import {
   Table,
@@ -38,6 +39,14 @@ interface BaseDataTableProps<TData, TValue> {
   canSelectRow?: (row: TData) => boolean;
   /** Stable row id (e.g. file_id) so selection survives a data refetch. */
   getRowId?: (row: TData) => string;
+  /** Controlled server pagination for lists that must sort before slicing. */
+  manualPage?: {
+    pageIndex: number;
+    pageCount: number;
+    onPageIndexChange: (pageIndex: number) => void;
+  };
+  /** Prevent client sorting from changing a backend-defined global order. */
+  disableSorting?: boolean;
 }
 
 type DataTableSelectionProps =
@@ -63,25 +72,42 @@ export function DataTable<TData, TValue>({
   enableSelection = false,
   canSelectRow,
   getRowId,
+  manualPage,
+  disableSorting = false,
   rowSelection: controlledRowSelection,
   onRowSelectionChange,
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = useState<SortingState>(initialSorting);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [pagination, setPagination] = useState({ pageIndex: 0, pageSize });
+  const previousPageResetKey = useRef(pageResetKey);
+  const tablePagination = manualPage
+    ? { pageIndex: manualPage.pageIndex, pageSize }
+    : pagination;
   const [internalRowSelection, setInternalRowSelection] = useState<RowSelectionState>({});
   const rowSelection = controlledRowSelection ?? internalRowSelection;
   const setRowSelection = onRowSelectionChange ?? setInternalRowSelection;
 
   useEffect(() => {
-    setPagination((previous) =>
-      previous.pageIndex === 0 ? previous : { ...previous, pageIndex: 0 },
-    );
-  }, [pageResetKey]);
+    if (Object.is(previousPageResetKey.current, pageResetKey)) return;
+    previousPageResetKey.current = pageResetKey;
+    if (manualPage) {
+      if (manualPage.pageIndex !== 0) manualPage.onPageIndexChange(0);
+    } else {
+      setPagination((previous) =>
+        previous.pageIndex === 0 ? previous : { ...previous, pageIndex: 0 },
+      );
+    }
+  }, [pageResetKey, manualPage]);
 
   // Prepend a checkbox column when selection is enabled.
+  const sortableColumns = useMemo<ColumnDef<TData, TValue>[]>(
+    () => disableSorting ? columns.map((column) => ({ ...column, enableSorting: false })) : columns,
+    [columns, disableSorting],
+  );
+
   const tableColumns = useMemo<ColumnDef<TData, TValue>[]>(() => {
-    if (!enableSelection) return columns;
+    if (!enableSelection) return sortableColumns;
     const selectColumn: ColumnDef<TData, TValue> = {
       id: "__select",
       enableSorting: false,
@@ -108,40 +134,51 @@ export function DataTable<TData, TValue>({
         />
       ),
     };
-    return [selectColumn, ...columns];
-  }, [columns, enableSelection]);
+    return [selectColumn, ...sortableColumns];
+  }, [sortableColumns, enableSelection]);
 
   const table = useReactTable({
     data,
     columns: tableColumns,
     getCoreRowModel: getCoreRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
+    ...(manualPage ? {} : { getPaginationRowModel: getPaginationRowModel() }),
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
-    onPaginationChange: setPagination,
+    onPaginationChange: (updater) => {
+      if (manualPage) {
+        const next = functionalUpdate(updater, tablePagination);
+        manualPage.onPageIndexChange(next.pageIndex);
+      } else {
+        setPagination(updater);
+      }
+    },
     onRowSelectionChange: setRowSelection,
     enableRowSelection: enableSelection
       ? (row) => (canSelectRow ? canSelectRow(row.original) : true)
       : false,
     getRowId,
+    manualPagination: !!manualPage,
+    pageCount: manualPage?.pageCount,
     // Keep the user on their current page when the rows change underneath them
     // (e.g. deleting a row refetches the list). TanStack resets pageIndex to 0
     // on every data change by default, which bounced the user back to page 1.
     autoResetPageIndex: false,
-    state: { sorting, columnFilters, pagination, rowSelection },
+    state: { sorting, columnFilters, pagination: tablePagination, rowSelection },
   });
 
   // If the current page no longer exists after the data shrank — e.g. the last
   // remaining row on the last page was deleted — fall back to the last valid
   // page instead of stranding the user on an empty "No results" page.
-  const pageCount = table.getPageCount();
+  const pageCount = manualPage?.pageCount ?? table.getPageCount();
   useEffect(() => {
-    if (pagination.pageIndex > 0 && pagination.pageIndex > pageCount - 1) {
-      setPagination((prev) => ({ ...prev, pageIndex: Math.max(0, pageCount - 1) }));
+    if (tablePagination.pageIndex > 0 && tablePagination.pageIndex > pageCount - 1) {
+      const lastPageIndex = Math.max(0, pageCount - 1);
+      if (manualPage) manualPage.onPageIndexChange(lastPageIndex);
+      else setPagination((prev) => ({ ...prev, pageIndex: lastPageIndex }));
     }
-  }, [pageCount, pagination.pageIndex]);
+  }, [pageCount, tablePagination.pageIndex, manualPage]);
 
   const columnCount = table.getAllLeafColumns().length;
 
@@ -195,11 +232,10 @@ export function DataTable<TData, TValue>({
           </TableBody>
         </Table>
       </div>
-      {table.getPageCount() > 1 && (
+      {pageCount > 1 && (
         <div className="flex items-center justify-between py-4">
           <p className="text-sm text-muted-foreground">
-            Page {table.getState().pagination.pageIndex + 1} of{" "}
-            {table.getPageCount()}
+            Page {tablePagination.pageIndex + 1} of {pageCount}
           </p>
           <div className="flex gap-2">
             <Button
@@ -234,7 +270,11 @@ export function SortableHeader({
   column,
   title,
 }: {
-  column: { toggleSorting: (desc: boolean) => void; getIsSorted: () => false | "asc" | "desc" };
+  column: {
+    toggleSorting: (desc: boolean) => void;
+    getIsSorted: () => false | "asc" | "desc";
+    getCanSort?: () => boolean;
+  };
   title: string;
 }) {
   const sorted = column.getIsSorted();
@@ -245,6 +285,7 @@ export function SortableHeader({
       size="sm"
       className="-ml-3 h-8"
       onClick={() => column.toggleSorting(sorted === "asc")}
+      disabled={column.getCanSort?.() === false}
     >
       {title}
       <Icon className="ml-2 h-3 w-3" />
