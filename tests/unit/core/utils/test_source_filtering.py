@@ -283,6 +283,40 @@ class TestExtractAndStripSourcesBlock:
     def test_a_tag_exposed_by_stripping_counts_its_citations(self, text, expected_citations):
         assert extract_and_strip_sources_block(text) == ("Answer", expected_citations)
 
+    @pytest.mark.parametrize(
+        ("text", "expected_clean", "expected_citations"),
+        [
+            ("Nombre de sources : 3 [Source 2]", "Nombre de sources : 3", {2}),
+            (
+                "The study draws on two open sources: 4 [Source 1]\n\n[Sources: 1]",
+                "The study draws on two open sources: 4",
+                {1},
+            ),
+            ("Selon nos sources : 2 [Source 1].\n\nSuite.", "Selon nos sources : 2.\n\nSuite.", {1}),
+            ("Il n'y a sources : none [Source 1]", "Il n'y a sources : none", {1}),
+            ("Answer. Sources: 1, 2 [Source 3]", "Answer. Sources: 1, 2", {3}),
+        ],
+    )
+    def test_prose_a_removed_marker_leaves_at_the_line_end_is_kept(self, text, expected_clean, expected_citations):
+        """Without a bracket, a mark or its own line, "sources: 3" is the answer's words, not a tag."""
+        assert extract_and_strip_sources_block(text) == (expected_clean, expected_citations)
+
+    @pytest.mark.parametrize(
+        ("text", "expected_clean", "expected_citations"),
+        [
+            ("Answer.\n\nSources: 1, 2 [Source 3]", "Answer.", {1, 2, 3}),
+            ("Answer.\n  Sources: 1 [Sources: 2]", "Answer.", {1, 2}),
+            ("Sources: 3 [Source 2]", "", {2, 3}),
+            ("Answer.\nSources: none [Source 1]", "Answer.", {1}),
+        ],
+    )
+    def test_label_on_its_own_line_a_marker_exposes_is_a_tag(self, text, expected_clean, expected_citations):
+        assert extract_and_strip_sources_block(text) == (expected_clean, expected_citations)
+
+    def test_label_already_ending_its_line_is_still_read_as_a_tag(self):
+        """Only a label a removed marker exposes needs more proof; models do write this one."""
+        assert extract_and_strip_sources_block("Answer. Sources: 1, 3") == ("Answer.", {1, 3})
+
     def test_chain_longer_than_the_round_cap_keeps_its_first_tags(self):
         """Each round strips the last tag of a chain; the cap bounds the work, not the result's tidiness."""
         clean, citations = extract_and_strip_sources_block("Answer [Sources: 1]" + "[Sources: 2]" * 10)
@@ -1161,6 +1195,25 @@ class TestStreamOfLongAnswers:
         result = await _collect(stream_with_source_filtering(_fake_stream(_chunked(answer, 4)), self.SOURCES, "m"))
         assert _collect_content(result) == ("The answer, at length. " * 40).rstrip()
         assert _parse_finish_sources(result) == [self.SOURCES[0], self.SOURCES[2]]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("answer", "chunk_size", "buffer_size"),
+        [
+            # The start of the text the stream measures what is settled with is
+            # mid-line: read as a line's start, it emits the label too early.
+            pytest.param("x sources: 4 [Sources: none]\n" + "abcd " * 8, 2, 10, id="settled-fragment"),
+            # Same for the tail once its head is folded away.
+            pytest.param("x" * 50 + " x sources : 3 [Source 2]\nabc", 7, 1, id="folded-tail"),
+            # The answer itself does begin a line, so this one is a tag.
+            pytest.param("sources : 3 [Source 2]\n" + "m" * 12, 3, 1, id="first-line"),
+        ],
+    )
+    async def test_stream_tells_prose_from_a_tag_as_the_batch_does(self, answer, chunk_size, buffer_size):
+        result = await _collect(
+            stream_with_source_filtering(_fake_stream(_chunked(answer, chunk_size)), self.SOURCES, "m", buffer_size)
+        )
+        assert _collect_content(result) == extract_and_strip_sources_block(answer)[0]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

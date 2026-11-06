@@ -103,12 +103,32 @@ def _citation_index(digits: str) -> int:
 _MAX_STRIP_ROUNDS = 4
 
 
-def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tuple[str, set[int], bool]:
+def _reads_as_a_tag(match: re.Match[str], starts_line: bool) -> bool:
+    """Whether a label that a removed tag left at the end of its line is a tag, not prose.
+
+    A bracket, a mark or a line of its own makes it one ("**Sources:** 1",
+    "Answer.\n\nSources: 1, 2"). Without them it is the answer's own words
+    ("Nombre de sources : 3 [Source 2]"), which stay, their number uncounted.
+    *starts_line* says whether the text itself begins a line.
+    """
+    tag = match.group(0)
+    if tag.startswith("\n") or any(mark in tag for mark in "[*_`"):
+        return True
+    return match.start() == 0 and starts_line
+
+
+def _strip_sources_tags(
+    text: str,
+    *,
+    include_inline_markers: bool = True,
+    starts_line: bool = True,
+) -> tuple[str, set[int], bool]:
     """Strip source tags and return citations found."""
     cited: set[int] = set()
     saw_none = False
+    exposed = False
 
-    def take_numbers(match: re.Match[str]) -> str:
+    def take_inline_numbers(match: re.Match[str]) -> str:
         # Every number the tag holds is a citation, whatever separates them:
         # the regexes accept spaces, newlines and marks as well as commas
         # ([Sources: **1** **3**]), and a tag stripped with its numbers
@@ -116,8 +136,15 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
         cited.update(_citation_index(n) for n in re.findall(r"\d+", match.group(1)))
         return ""
 
+    def take_numbers(match: re.Match[str]) -> str:
+        if exposed and not _reads_as_a_tag(match, starts_line):
+            return match.group(0)
+        return take_inline_numbers(match)
+
     def take_none(match: re.Match[str]) -> str:
         nonlocal saw_none
+        if exposed and not _reads_as_a_tag(match, starts_line):
+            return match.group(0)
         saw_none = True
         return ""
 
@@ -126,8 +153,8 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
     substitutions = [(_SOURCES_NUMS_RE, take_numbers), (_SOURCES_NONE_RE, take_none), (_SOURCES_EMPTY_RE, "")]
     if include_inline_markers:
         substitutions += [
-            (_INLINE_SOURCE_NUMS_RE, take_numbers),
-            (_UNCLOSED_SOURCE_NUMS_RE, take_numbers),
+            (_INLINE_SOURCE_NUMS_RE, take_inline_numbers),
+            (_UNCLOSED_SOURCE_NUMS_RE, take_inline_numbers),
             (_DANGLING_SOURCE_RE, ""),
         ]
     cleaned = text
@@ -138,6 +165,7 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
         if stripped == cleaned:
             break
         cleaned = stripped
+        exposed = True
     return cleaned, cited, saw_none
 
 
@@ -215,7 +243,11 @@ def _settled_length(tail: str, cleaned: str, include_inline_markers: bool) -> in
     match = _LAST_TAG_FREE_CHAR_RE.match(tail)
     if match is None:
         return 0
-    rest, _, _ = _strip_sources_tags(tail[match.end() :], include_inline_markers=include_inline_markers)
+    rest, _, _ = _strip_sources_tags(
+        tail[match.end() :],
+        include_inline_markers=include_inline_markers,
+        starts_line=False,
+    )
     return len(cleaned) - len(rest)
 
 
@@ -234,7 +266,11 @@ def _fold_point(
     match = _LAST_TAG_FREE_CHAR_RE.match(tail, 0, max(0, len(tail) - keep))
     if match is None:
         return None
-    rest, _, _ = _strip_sources_tags(tail[match.end() :], include_inline_markers=include_inline_markers)
+    rest, _, _ = _strip_sources_tags(
+        tail[match.end() :],
+        include_inline_markers=include_inline_markers,
+        starts_line=False,
+    )
     folded = len(cleaned) - len(rest)
     if folded > emitted:
         return None
@@ -298,6 +334,8 @@ async def stream_with_source_filtering(
     # lookahead grows with the number of sources, so the cost per delta does too.
     tail = ""
     folded_len = 0
+    # The first tail begins the answer; a folded one begins past a character on its line.
+    tail_starts_line = True
     stripped_len = 0
     stuck = False
     emitted_len = 0
@@ -362,6 +400,7 @@ async def stream_with_source_filtering(
                     cleaned, _, _ = _strip_sources_tags(
                         tail,
                         include_inline_markers=include_inline_markers,
+                        starts_line=tail_starts_line,
                     )
                     stripped_len = len(tail)
                     # Emitted text cannot be taken back, so only what is settled is emitted.
@@ -404,6 +443,7 @@ async def stream_with_source_filtering(
                     if fold is not None:
                         cut, folded = fold
                         tail = tail[cut:]
+                        tail_starts_line = False
                         folded_len += folded
                         stripped_len = len(tail)
             elif not finish_reason:
