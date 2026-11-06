@@ -344,6 +344,11 @@ def _worksheet_table_regions(archive, types, worksheet_path: str, names: set[str
             or end_column > limits.max_columns
         ):
             raise invalid("XLSX table has an invalid range")
+        # Explicit table references can extend far beyond populated cells.
+        # Read-only OpenPyXL iterates through the declared rectangle, so apply
+        # the same worksheet traversal bound before opening the workbook.
+        if end_row * end_column > limits.max_sheet_area:
+            raise limit("XLSX worksheet rectangle exceeds the traversal limit")
         try:
             header_row_count = int(table.get("headerRowCount", "1"))
         except ValueError as exc:

@@ -189,7 +189,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_rows` | Row coordinate of a cell with content | 1,048,576 |
 | `max_columns` | Column coordinate of a cell with content | 4,096 |
 | `max_cells` | Physical cells across worksheets, empty styled cells included | 5,000,000 |
-| `max_sheet_area` | Rectangle spanned by cells with content, including gaps | 5,000,000 positions |
+| `max_sheet_area` | Rectangle spanned by cells with content or by declared Excel Table bounds, including gaps | 5,000,000 positions |
 | `max_tables` | Detected table regions per visible worksheet, and Excel Tables per worksheet | 128 |
 | `max_merged_ranges` | Merged-cell ranges across the workbook | 100,000 |
 | `max_cell_chars` | Characters in one cell | 32,767 |
