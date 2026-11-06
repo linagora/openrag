@@ -150,6 +150,14 @@ def test_page_markers_become_metadata_not_text():
         assert c.page_number in (1, 2)
 
 
+def test_marker_too_long_to_be_a_page_stays_text():
+    # int() refuses more than 4,300 digits: such a marker used to fail the file.
+    marker = "[PAGE_" + "1" * 5_000 + "]"
+    chunks = _chunker(chunk_size=30).chunk(_doc(f"Article L1\nBody on page one.\n{marker}\nMore body."))
+    assert any(marker in c.text for c in chunks)
+    assert all(c.page_number == 1 for c in chunks)
+
+
 def test_large_table_is_atomic_table_chunk():
     table = "| Domain | Value |\n|---|---|\n" + "\n".join(f"| D{i} | {' '.join(['x'] * 40)} |" for i in range(8))
     doc = _doc(f"Article L1\nSome intro prose.\n\n{table}\n\nArticle L2\nMore prose after the table.")
