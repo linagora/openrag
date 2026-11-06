@@ -1102,6 +1102,28 @@ def _bounded_mmap(headroom_mb: int) -> str:
 class TestPagesWithFallback:
     """Per-page plain-text fallback when pymupdf4llm drops text (issue #1102)."""
 
+    def test_reports_progress_for_pages_checked(self, monkeypatch):
+        reports = []
+        monkeypatch.setattr(
+            pymupdf_mod, "report_parser_substage", lambda *args, **kwargs: reports.append((args, kwargs))
+        )
+        pdf_doc = pymupdf.open()
+        try:
+            first = pdf_doc.new_page()
+            first.insert_text((72, 72), "first page")
+            second = pdf_doc.new_page()
+            second.insert_text((72, 72), "second page")
+            raw = pdf_doc.tobytes()
+        finally:
+            pdf_doc.close()
+
+        with pymupdf.open(stream=raw, filetype="pdf") as doc:
+            pages = _pages_with_fallback(doc, [{"text": "first page"}, {"text": "second page"}], "pages.pdf")
+
+        assert len(pages) == 2
+        assert reports[0] == (("parse.text", "Extracting page text"), {"progress": 0, "total": 2})
+        assert reports[-1] == (("parse.text", "Extracting page text"), {"progress": 2, "total": 2})
+
     def test_keeps_markdown_when_text_is_retained(self):
         """No fallback when markdown length is at least the threshold fraction."""
         raw = _pdf_with_text("hello world")
