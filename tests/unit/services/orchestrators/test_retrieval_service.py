@@ -1633,3 +1633,69 @@ async def test_dropped_partition_is_named_in_the_log():
     assert dropped, f"the dropped partition was not logged: {messages}"
     assert "RuntimeError" in dropped[0]
     assert "healthy" not in dropped[0], "only the failed partition should be named"
+
+
+# --------------------------------------------------------------------------- #
+# date_order survives the cross-partition fusion
+# --------------------------------------------------------------------------- #
+
+
+def _dated_chunk(cid: str, created_at: str) -> Chunk:
+    return Chunk(id=cid, text=cid, metadata={"_id": cid, "created_at": created_at})
+
+
+class _PerPartitionSearcher(FakeSearcher):
+    """Answers each partition with its own list, so the fusion has something to fuse."""
+
+    def __init__(self, by_partition: dict[str, list[Chunk]]):
+        super().__init__()
+        self._by_partition = by_partition
+
+    async def search(self, **kwargs):
+        self.search_calls.append(kwargs)
+        partitions = kwargs.get("partition") or kwargs.get("partitions") or []
+        key = partitions[0] if isinstance(partitions, list) else partitions
+        return list(self._by_partition.get(key, []))
+
+
+def _two_partition_service(searcher):
+    svc = _svc(searcher)
+    # One pipeline group per partition, so retrieve()/retrieve_multi() take the
+    # cross-partition fuse path rather than returning the single list as-is.
+    default = svc._pipeline
+    svc._pipeline_groups_for_partitions = _groups_one_per_partition(default)
+    return svc
+
+
+def _groups_one_per_partition(pipeline):
+    async def _groups(partitions, **_kwargs):
+        return [([p], pipeline, None) for p in partitions]
+
+    return _groups
+
+
+@pytest.mark.asyncio
+async def test_retrieve_reapplies_newest_order_after_cross_partition_fusion():
+    searcher = _PerPartitionSearcher(
+        {
+            "p1": [_dated_chunk("p1-old", "2026-09-04T10:00:00Z")],
+            "p2": [_dated_chunk("p2-new", "2026-09-22T14:51:30Z")],
+        }
+    )
+    svc = _two_partition_service(searcher)
+    out = await svc.retrieve(partitions=["p1", "p2"], query=Query(query="meeting", date_order="newest"))
+    assert [c.id for c in out] == ["p2-new", "p1-old"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_multi_reapplies_order_and_then_applies_top_k():
+    searcher = _PerPartitionSearcher(
+        {
+            "p1": [_dated_chunk("p1-old", "2026-09-04T10:00:00Z")],
+            "p2": [_dated_chunk("p2-new", "2026-09-22T14:51:30Z")],
+        }
+    )
+    svc = _two_partition_service(searcher)
+    sq = SearchQueries(query_list=[Query(query="meeting", date_order="newest")])
+    out = await svc.retrieve_multi(partitions=["p1", "p2"], search_queries=sq, top_k=1)
+    assert [c.id for c in out] == ["p2-new"]
