@@ -1,6 +1,7 @@
 import os
 
 from core.indexing.validators import validate_partition_name
+from core.utils.consts import is_reserved_partition_name
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from di.providers import get_auth_service, get_config, get_job_service, get_partition_service
@@ -74,6 +75,12 @@ async def ensure_partition_role(
     validate_partition_name(partition)
     if SUPER_ADMIN_MODE and user.get("is_admin"):
         return True
+    # Reserved names never name a partition a user can act on.
+    if is_reserved_partition_name(partition):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access to partition '{partition}' forbidden",
+        )
 
     membership = next((p for p in user_partitions if p["partition"] == partition), None)
     if not membership:

@@ -92,3 +92,16 @@ async def test_add_member_conflict_does_not_overwrite_existing_role():
     assert "DO NOTHING" in membership_query
     assert "DO UPDATE" not in membership_query
     assert "RETURNING 1" in membership_query
+
+
+@pytest.mark.parametrize("partition_exists", [False, True])
+@pytest.mark.asyncio
+async def test_add_member_refuses_a_reserved_partition_name(partition_exists):
+    from services.persistence.partition_membership_repo import PgPartitionMembershipRepository
+
+    pool = _FakePool(partition_exists=partition_exists)
+    repo = PgPartitionMembershipRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ValueError, match="reserved"):
+        await repo.add_partition_member("all", 5, "owner")
+    assert pool.conn.executed == []
