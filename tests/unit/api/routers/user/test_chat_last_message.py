@@ -122,3 +122,18 @@ async def test_only_a_search_needs_a_user_message(client, body, status_code):
         response = await client.post("/v1/chat/completions", json={**body, "messages": TOOL_TURN[1:]})
 
     assert response.status_code == status_code, response.text
+
+
+@pytest.mark.asyncio
+async def test_a_search_needs_the_latest_user_message_non_empty(client):
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": ""},
+        *TOOL_TURN[1:],
+    ]
+    async with client:
+        response = await client.post("/v1/chat/completions", json={"model": "openrag-p", "messages": messages})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "A search needs the latest user message to be non-empty"
