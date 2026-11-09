@@ -21,8 +21,8 @@ RAY_MAX_TASKS_PER_WORKER=5
 
 # PDF specific resources when using marker
 MARKER_MAX_TASKS_PER_CHILD=10
-MARKER_MAX_PROCESSES=5 # Number of subprocesses <-> Number of concurrent pdfs per worker
-MARKER_POOL_SIZE=1 # Number of workers (typically 1 worker per cluster node)
+MARKER_CHILD_WORKERS_PER_INSTANCE=5 # Child processes per instance <-> PDF chunks parsed at once per instance
+MARKER_NUM_INSTANCES=1 # Marker instances (typically 1 per cluster node)
 MARKER_NUM_GPUS=0.6
 
 SHARED_ENV=/ray_mount/.env
@@ -58,7 +58,7 @@ Total indexing concurrency is `RAY_POOL_SIZE × RAY_MAX_TASKS_PER_WORKER` — e.
 :::
 
 :::caution
-`RAY_POOL_SIZE` and `RAY_MAX_TASKS_PER_WORKER` size **indexing throughput**, not GPU reservation — the indexer workers don't claim GPU memory. GPU on each node is consumed by the model servers (e.g. vLLM) and by the GPU-accelerated parsers, so budget GPU memory through **`MARKER_NUM_GPUS`** / **`MARKER_POOL_SIZE`** (and the Docling equivalents) and the model-server settings rather than through the indexer pool size.
+`RAY_POOL_SIZE` and `RAY_MAX_TASKS_PER_WORKER` size **indexing throughput**, not GPU reservation — the indexer workers don't claim GPU memory. GPU on each node is consumed by the model servers (e.g. vLLM) and by the GPU-accelerated parsers, so budget GPU memory through **`MARKER_NUM_GPUS`** / **`MARKER_NUM_INSTANCES`** (and the Docling equivalents) and the model-server settings rather than through the indexer pool size.
 :::
 
 ---

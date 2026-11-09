@@ -10,7 +10,7 @@ Measure the impact of `MARKER_CHUNK_SIZE` on PDF parsing speed and GPU memory us
 
 | Variable | Value |
 |----------|-------|
-| `MARKER_MAX_PROCESSES` | 5 |
+| `MARKER_CHILD_WORKERS_PER_INSTANCE` (then `MARKER_MAX_PROCESSES`) | 5 |
 | `MARKER_MAX_TASKS_PER_CHILD` | 100 |
 
 ### Disabled features
@@ -44,9 +44,9 @@ Tested with `MARKER_CHUNK_SIZE` values of 10, 20, and 30
 
 ### Speed
 
-These results are at **equal number of workers** (`MARKER_MAX_PROCESSES=5`). All chunk sizes perform similarly (~16-17 min), and with smaller chunks the workload per worker actually *increases* since each worker handles more tasks (more chunks to process).
+These results are at **equal number of workers** (`MARKER_CHILD_WORKERS_PER_INSTANCE=5`). All chunk sizes perform similarly (~16-17 min), and with smaller chunks the workload per worker actually *increases* since each worker handles more tasks (more chunks to process).
 
-The main advantage of chunking is therefore not raw speed at fixed worker count, but the ability to **scale the number of workers without risking OOM**. By keeping per-worker memory spikes low and spike duration low aswell, chunking allows safely increasing `MARKER_MAX_PROCESSES`, which is where the real speed gains come from.
+The main advantage of chunking is therefore not raw speed at fixed worker count, but the ability to **scale the number of workers without risking OOM**. By keeping per-worker memory spikes low and spike duration low aswell, chunking allows safely increasing `MARKER_CHILD_WORKERS_PER_INSTANCE`, which is where the real speed gains come from.
 
 The GPU memory constraint can be estimated as:
 
