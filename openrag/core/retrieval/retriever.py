@@ -342,6 +342,8 @@ async def _expand_with_related_chunks(
             }
             if table_id is not None:
                 kwargs["table_id"] = table_id
+            if filter:
+                kwargs["filter"] = filter
             if row_limit > related_limit:
                 logger.warning(
                     "Tabular row sibling expansion capped (partition=%s, file_id=%s, row_number=%s, "
@@ -352,7 +354,8 @@ async def _expand_with_related_chunks(
                     row_limit,
                     related_limit,
                 )
-            return await searcher.get_csv_row_chunks(**kwargs)
+            async with semaphore:
+                return await searcher.get_csv_row_chunks(**kwargs)
         except Exception:
             logger.warning(
                 "get_csv_row_chunks failed (partition=%s, file_id=%s, row_number=%s)",

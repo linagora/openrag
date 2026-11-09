@@ -104,6 +104,7 @@ class RetrievalSearcher(ABC):
         limit: int = 10,
         allowed_file_ids: list[str] | None = None,
         table_id: str | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         """Fetch every continuation chunk for one logical tabular row.
 

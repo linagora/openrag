@@ -88,6 +88,7 @@ class SheetInfo:
     hidden_rows: frozenset[int]
     hidden_columns: frozenset[int]
     merged_ranges: tuple[tuple[int, int, int, int], ...]
+    uncached_string_formulas: frozenset[tuple[int, int]] = frozenset()
 
 
 def _column_runs(columns: set[int]):
@@ -158,60 +159,76 @@ def _merge_preambles(
     ``typed_first_rows`` holds the ``(start_row, start_column)`` of inferred
     regions whose first nonempty row contains a non-text value.
     """
-    barriers = barriers or []
-    typed_first_rows = typed_first_rows or set()
     merged: list[TableRegion] = []
     for region in regions:
-        if merged:
-            previous = merged[-1]
-            previous_height = previous.end_row - previous.start_row + 1
-            previous_width = previous.end_column - previous.start_column + 1
-            region_height = region.end_row - region.start_row + 1
-            region_width = region.end_column - region.start_column + 1
-            is_preamble = previous_height == 1 or previous_width < region_width
-            same_columns = previous.start_column == region.start_column and previous.end_column == region.end_column
-            has_barrier = any(
-                barrier.start_row <= region.start_row
-                and previous.end_row <= barrier.end_row
-                and barrier.start_column <= region.end_column
-                and previous.start_column <= barrier.end_column
-                for barrier in barriers
-            )
-            # A lone band after a table cannot itself contain both a header and
-            # data. When it has the same columns, preserve it as a sparse
-            # continuation of the preceding table even across a large blank
-            # gap; otherwise it would be treated as a header-only table and
-            # silently emit no row.
-            # A header is text. A block with the same columns whose first row
-            # holds a number, date or boolean is data resuming after a blank
-            # spacer row; split off, that data row would become its header.
-            typed_continuation = previous_height >= 2 and (region.start_row, region.start_column) in typed_first_rows
-            spacers = frozenset(
-                (previous.spacer_columns | region.spacer_columns)
-                - (previous.occupied_columns | region.occupied_columns)
-            )
-            if not has_barrier and same_columns and (region_height == 1 or typed_continuation):
-                merged[-1] = replace(previous, end_row=region.end_row, spacer_columns=spacers)
-                continue
-            if (
-                not has_barrier
-                and previous.end_row < region.start_row - 1
-                and region.start_row - previous.end_row <= 32
-                and region_height >= 2
-                and region.start_column <= previous.start_column
-                and previous.end_column <= region.end_column
-                and is_preamble
-            ):
-                merged[-1] = replace(
-                    previous,
-                    end_row=region.end_row,
-                    start_column=region.start_column,
-                    end_column=region.end_column,
-                    spacer_columns=spacers,
-                )
-                continue
-        merged.append(region)
+        _fold_preamble(merged, region, barriers or [], typed_first_rows or set())
+    return _reindexed_regions(merged)
+
+
+def _reindexed_regions(merged: list[TableRegion]) -> list[TableRegion]:
     return [replace(region, index=index, header_row_hint=None) for index, region in enumerate(merged)]
+
+
+def _fold_preamble(
+    merged: list[TableRegion],
+    region: TableRegion,
+    barriers: list[TableRegion],
+    typed_first_rows: set[tuple[int, int]],
+) -> None:
+    """Fold one inferred region into ``merged`` (one step of ``_merge_preambles``).
+
+    Each region is compared with the current last merged region only, so
+    folding regions as the worksheet scan produces them gives exactly the
+    batch result while keeping the retained list bounded by the merged count.
+    """
+    if merged:
+        previous = merged[-1]
+        previous_height = previous.end_row - previous.start_row + 1
+        previous_width = previous.end_column - previous.start_column + 1
+        region_height = region.end_row - region.start_row + 1
+        region_width = region.end_column - region.start_column + 1
+        is_preamble = previous_height == 1 or previous_width < region_width
+        same_columns = previous.start_column == region.start_column and previous.end_column == region.end_column
+        has_barrier = any(
+            barrier.start_row <= region.start_row
+            and previous.end_row <= barrier.end_row
+            and barrier.start_column <= region.end_column
+            and previous.start_column <= barrier.end_column
+            for barrier in barriers
+        )
+        # A lone band after a table cannot itself contain both a header and
+        # data. When it has the same columns, preserve it as a sparse
+        # continuation of the preceding table even across a large blank
+        # gap; otherwise it would be treated as a header-only table and
+        # silently emit no row.
+        # A header is text. A block with the same columns whose first row
+        # holds a number, date or boolean is data resuming after a blank
+        # spacer row; split off, that data row would become its header.
+        typed_continuation = previous_height >= 2 and (region.start_row, region.start_column) in typed_first_rows
+        spacers = frozenset(
+            (previous.spacer_columns | region.spacer_columns) - (previous.occupied_columns | region.occupied_columns)
+        )
+        if not has_barrier and same_columns and (region_height == 1 or typed_continuation):
+            merged[-1] = replace(previous, end_row=region.end_row, spacer_columns=spacers)
+            return
+        if (
+            not has_barrier
+            and previous.end_row < region.start_row - 1
+            and region.start_row - previous.end_row <= 32
+            and region_height >= 2
+            and region.start_column <= previous.start_column
+            and previous.end_column <= region.end_column
+            and is_preamble
+        ):
+            merged[-1] = replace(
+                previous,
+                end_row=region.end_row,
+                start_column=region.start_column,
+                end_column=region.end_column,
+                spacer_columns=spacers,
+            )
+            return
+    merged.append(region)
 
 
 # Merged column-header hierarchies deeper than this are not headers; the bound
@@ -340,10 +357,12 @@ def _worksheet_table_regions(archive, types, worksheet_path: str, names: set[str
         if (
             start_row > end_row
             or start_column > end_column
-            or end_row > limits.max_rows
-            or end_column > limits.max_columns
+            or end_row > EXCEL_MAX_ROWS
+            or end_column > EXCEL_MAX_COLUMNS
         ):
             raise invalid("XLSX table has an invalid range")
+        if end_row > limits.max_rows or end_column > limits.max_columns:
+            raise limit("XLSX table coordinate exceeds row/column limits")
         # Explicit table references can extend far beyond populated cells.
         # Read-only OpenPyXL iterates through the declared rectangle, so apply
         # the same worksheet traversal bound before opening the workbook.
@@ -407,6 +426,8 @@ def _combine_regions(
                 if region.end_row < table.start_row
                 and table.start_row - region.end_row <= 32
                 and region.start_row == region.end_row
+                and region.start_column == table.start_column
+                and region.end_column <= table.end_column
                 and (region.start_row, table.start_column, table.end_column) in single_row_merges
             ),
             None,
@@ -434,20 +455,24 @@ def _shared_string_count(archive, types, limits):
             raise limit("XLSX shared strings exceed the memory limit")
         with archive.open(path) as stream:
             stack = []
+            string_chars = 0
             for event, element in iterparse(stream, events=("start", "end")):
                 if event == "start":
                     stack.append(element)
+                    if element.tag.endswith("}si"):
+                        string_chars = 0
                     continue
-                if element.tag.endswith("}si"):
-                    texts = [node.text or "" for node in element.iter() if node.tag.endswith("}t")]
-                    if sum(map(len, texts)) > limits.max_cell_chars:
+                if element.tag.endswith("}t"):
+                    string_chars += len(element.text or "")
+                    if string_chars > limits.max_cell_chars:
                         raise limit("XLSX shared string exceeds the character limit")
+                if element.tag.endswith("}si"):
                     count += 1
                     if count > limits.max_shared_strings:
                         raise limit("XLSX shared string count exceeds the memory limit")
-                    if len(stack) > 1:
-                        stack[-2].remove(element)
-                    element.clear()
+                if len(stack) > 1:
+                    stack[-2].remove(element)
+                element.clear()
                 stack.pop()
     return count
 
@@ -574,6 +599,19 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 return fromstring(archive.read(name))
 
             types = xml("[Content_Types].xml")
+            workbook_types = {
+                MAIN_TYPE,
+                MACRO_MAIN_TYPE,
+                "application/vnd.ms-excel.template.macroEnabled.main+xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+            }
+            workbook_parts = [
+                part.get("PartName")
+                for part in types
+                if part.get("PartName") is not None and part.get("ContentType") in workbook_types
+            ]
+            if workbook_parts not in ([], ["/xl/workbook.xml"]):
+                raise invalid("XLSX contains competing or invalid workbook declarations")
             workbook_type = _content_type(types, "/xl/workbook.xml")
             has_vba_project = any(name.lower().endswith("vbaproject.bin") for name in names)
             if workbook_type == MACRO_MAIN_TYPE:
@@ -664,6 +702,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 merged_columns_by_row: dict[int, list[tuple[int, int]]] = {}
                 hidden_rows: set[int] = set()
                 hidden_columns: set[int] = set()
+                uncached_string_formulas: set[tuple[int, int]] = set()
 
                 def advance_explicit_tables(row_number: int):
                     nonlocal table_event_index, active_column_starts, active_column_ends
@@ -705,15 +744,13 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                             explicit_regions,
                         )
                         for start_column, end_column, spacers in runs:
-                            regions.append(
-                                TableRegion(
-                                    len(regions),
-                                    band_start,
-                                    band_end,
-                                    start_column,
-                                    end_column,
-                                    spacer_columns=spacers,
-                                )
+                            region = TableRegion(
+                                len(regions),
+                                band_start,
+                                band_end,
+                                start_column,
+                                end_column,
+                                spacer_columns=spacers,
                             )
                             firsts = [
                                 band_first_cells[column]
@@ -723,6 +760,14 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                             first_row = min((row for row, _ in firsts), default=None)
                             if any(typed for row, typed in firsts if row == first_row):
                                 typed_first_rows.add((band_start, start_column))
+                            # Fold as the scan goes: a sparse sheet can produce
+                            # hundreds of thousands of raw bands, but only the
+                            # merged regions are retained. The merged count never
+                            # decreases, so failing as soon as it passes the
+                            # limit matches checking it after the scan.
+                            _fold_preamble(regions, region, explicit_regions, typed_first_rows)
+                            if visible_sheet and len(regions) > limits.max_tables:
+                                raise limit("XLSX worksheet table count exceeds the limit")
                     band_start = band_end = None
                     band_columns = set()
                     band_first_cells = {}
@@ -799,7 +844,9 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                             has_formula = cell_has_formula
                             value_text = cell_value_text
                             has_value = cell_has_value
-                            if has_formula and element.get("t") == "str" and not value_text:
+                            if has_formula and element.get("t") == "str" and not has_value:
+                                uncached_string_formulas.add((current_row, current_cell_column))
+                            if has_formula and element.get("t") == "str" and has_value and not value_text:
                                 # Calculated to an empty string (e.g. =IF(A2="","",...)
                                 # filled down a template): an empty cell, not content
                                 # and not a formula missing its cached result.
@@ -827,7 +874,11 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 max_row, max_col = max(max_row, current_row), max(max_col, current_cell_column)
                             if visible_sheet and has_content and not is_in_explicit_table(current_cell_column):
                                 row_content_columns.add(current_cell_column)
-                                if element.get("t") not in {"s", "str", "inlineStr"}:
+                                if current_cell_column not in hidden_columns and element.get("t") not in {
+                                    "s",
+                                    "str",
+                                    "inlineStr",
+                                }:
                                     row_typed_columns.add(current_cell_column)
                         if tag == "row":
                             if row_content_columns:
@@ -901,9 +952,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 missing = sum(
                     count for column, count in missing_formula_columns.items() if column not in hidden_columns
                 )
-                inferred_regions = (
-                    _merge_preambles(regions, explicit_regions, typed_first_rows) if visible_sheet else []
-                )
+                # ``regions`` was folded during the scan (see finish_band).
+                inferred_regions = _reindexed_regions(regions) if visible_sheet else []
                 # Bound the count before combining: _combine_regions never returns
                 # fewer regions than it receives (a table absorbs at most one title
                 # and is added back), and its work grows with the input.
@@ -917,7 +967,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                         _merged_header_depth(
                             region, merged_columns_by_row, populated_rows, hidden_rows, header_coverage
                         )
-                        if region.header_row_hint is None
+                        if region.header_row_hint is None and region.declared_column_names is None
                         else 0
                     )
                     hinted_regions.append(
@@ -948,6 +998,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                         frozenset(hidden_rows),
                         frozenset(hidden_columns),
                         tuple(merged_ranges),
+                        frozenset(uncached_string_formulas),
                     )
                 )
             return infos

@@ -129,7 +129,7 @@ Formula groups are scoped to the detected table and parser batch. During Markdow
 
 The parser still enforces the configured batch byte limit. In the unusual case where adding generalized context would make an otherwise valid batch exceed that limit, formulas in that batch remain attached to their individual cells instead of failing workbook ingestion.
 
-Absolute references remain absolute in the normalized pattern. Same-table A1 references are mapped to headers. Cross-sheet references, structured table references, named ranges, and dynamic references that cannot be resolved safely are preserved verbatim in `unresolved_references`; OpenRAG does not guess their meaning or execute them.
+Absolute references remain absolute in the normalized pattern. Same-table A1 references are mapped to headers when every referenced column is visible and belongs to the table. A partially mapped range is kept intact and marked unresolved rather than described as a smaller range. Cross-sheet references, structured table references, named ranges, and dynamic references that cannot be resolved safely are preserved verbatim in `unresolved_references`; OpenRAG does not guess their meaning or execute them.
 
 ### Safe number and date display metadata
 

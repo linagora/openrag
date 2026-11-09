@@ -344,6 +344,20 @@ def test_merged_title_stays_with_its_explicit_table_and_not_a_later_region():
     assert "People title" not in blocks[1].text
 
 
+def test_unrelated_note_is_not_absorbed_as_an_explicit_table_title():
+    from core.indexing.parsers.tabular.xlsx_validation import _combine_regions
+
+    unrelated = TableRegion(0, 1, 1, 1, 1)
+    title = TableRegion(1, 1, 1, 3, 3)
+    table = TableRegion(0, 2, 3, 3, 4, header_row_hint=2)
+
+    regions = _combine_regions([unrelated, title], [table], [(1, 1, 3, 4)])
+
+    assert len(regions) == 2
+    assert regions[0].start_column == 1
+    assert regions[1].start_row == 1 and regions[1].start_column == 3
+
+
 def test_plain_contiguous_cells_are_not_split_without_source_boundaries():
     workbook = Workbook()
     sheet = workbook.active
@@ -985,6 +999,79 @@ def test_rejects_excessive_detected_table_fragmentation_before_reader_opens(monk
     assert error.value.code == "XLSX_LIMIT_EXCEEDED"
 
 
+def test_inferred_region_limit_is_enforced_during_scan(monkeypatch):
+    workbook = Workbook()
+    for row in range(1, 200, 2):
+        workbook.active.cell(row, 1, f"item-{row}")
+        workbook.active.cell(row, 4, f"other-{row}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="table count exceeds"):
+        list(XlsxParser(limits={"max_tables": 3}).iter_batches(Document(raw_bytes=output.getvalue())))
+
+
+def test_partially_mapped_formula_range_keeps_full_reference():
+    result = module._analyze_formula(
+        "=SUM(A12:C12)",
+        target_row=12,
+        target_column=4,
+        sheet_name="Sheet",
+        visible_columns=[1, 3, 4],
+        headers=["first", "third", "total"],
+        table_start_row=10,
+        table_end_row=15,
+    )
+    assert result["semantic_expression"] == "total = SUM(A12:C12)"
+    assert result["unresolved_references"] == ["A12:C12"]
+
+
+def test_filled_down_cross_sheet_formula_groups_keep_all_references():
+    rows = [
+        (module._FormulaValue(1, "=Other!A2"),),
+        (module._FormulaValue(2, "=Other!A3"),),
+    ]
+    _, groups, cells, _ = module._compact_formula_batch(
+        rows,
+        [2, 3],
+        sheet_name="Sheet",
+        visible_columns=[1],
+        headers=["total"],
+        table_start_row=1,
+        table_end_row=3,
+    )
+    assert not cells
+    assert len(groups) == 1
+    assert groups[0]["pattern"] == "=Other!RC"
+    assert groups[0]["semantic_expression"] == "total = Other!RC"
+    assert groups[0]["unresolved_references"] == ["Other!A2", "Other!A3"]
+
+
+def test_hidden_typed_cell_does_not_merge_two_tables():
+    workbook = Workbook()
+    sheet = workbook.active
+    for row, values in enumerate(
+        [["person", "secret"], ["Alice", 1], [None, None], ["city", 42], ["Paris", 2]], start=1
+    ):
+        for column, value in enumerate(values, start=1):
+            if value is not None:
+                sheet.cell(row, column, value)
+    sheet.column_dimensions["B"].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [["person"], ["city"]]
+    assert "Paris" in blocks[1].text
+
+
+def test_escaped_unit_number_format_is_not_interpreted():
+    assert module._safe_number_format(123, r"0\k\g") is None
+
+
 def test_table_limit_applies_per_visible_worksheet():
     workbook = Workbook()
     workbook.remove(workbook.active)
@@ -1164,6 +1251,15 @@ def test_hidden_excel_table_header_uses_declared_column_names():
     assert block.metadata["table_header_detection"]["reason"] == "excel_table_header_unusable"
 
 
+def test_excel_table_exceeding_configured_column_limit_is_a_limit_error():
+    document = _excel_table_document([["id", "name"], [1, "Alice"]], "A1:B2")
+
+    with pytest.raises(PipelineError) as error:
+        list(XlsxParser(limits={"max_columns": 1}).iter_batches(document))
+
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
 @pytest.mark.parametrize("title", [None, "Inventaire"])
 def test_excel_table_without_header_row_indexes_every_row(title):
     first = 2 if title else 1
@@ -1180,6 +1276,8 @@ def test_excel_table_without_header_row_indexes_every_row(title):
     assert block.metadata["table_row_numbers"] == [first, first + 1, first + 2]
     assert block.metadata["table_header_row"] is None
     assert block.metadata["table_header_detection"]["reason"] == "excel_table_without_header_row"
+    assert block.metadata["table_start_row"] == first
+    assert block.metadata["table_range"].startswith(f"'Sheet'!A{first}:")
     assert "| 1 | Alice |" in block.text
     if title:
         assert block.metadata["sheet_context_row_numbers"] == [1]
@@ -1468,6 +1566,28 @@ def test_accepts_workbook_content_type_declared_as_default():
     assert "Alice" in block.text
 
 
+def test_rejects_competing_workbook_declarations_before_opening(monkeypatch):
+    from xml.etree import ElementTree as ET
+
+    def add_competing_workbook(xml):
+        root = ET.fromstring(xml)
+        ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+        ET.SubElement(
+            root,
+            f"{{{ns}}}Override",
+            {
+                "PartName": "/xl/alternate.xml",
+                "ContentType": MAIN_TYPE,
+            },
+        )
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(_document([["name"], ["Alice"]]), add_competing_workbook, target="[Content_Types].xml")
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="competing or invalid workbook declarations"):
+        list(XlsxParser().iter_batches(doc))
+
+
 def test_indexes_xlsm_cells_without_retaining_or_executing_macros(monkeypatch):
     document = _macro_enabled_document(_document([["name"], ["Alice"]]))
 
@@ -1555,6 +1675,23 @@ def test_preserves_error_cells_and_reports_missing_formula_caches():
     assert block.metadata["sheet_formula_cells"] == 1
     assert block.metadata["sheet_missing_formula_values"] == 1
     assert block.metadata["spreadsheet_backend"] == "openpyxl"
+
+
+def test_string_formula_without_cache_is_not_treated_as_empty():
+    doc = _document([["name", "formula"], ["Alice", '=CONCAT("a","b")']])
+
+    def remove_cache(xml):
+        original = '<c r="B2"><f>CONCAT("a","b")</f><v></v></c>'
+        assert original in xml
+        return xml.replace(original, '<c r="B2" t="str"><f>CONCAT("a","b")</f></c>')
+
+    doc = _edit_xml(doc, remove_cache)
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert '=CONCAT("a","b")' in block.text
+    assert "cached value unavailable" in block.text
+    assert block.metadata["sheet_missing_formula_values"] == 1
 
 
 def _template_formula_document(*, extra_uncalculated: bool):
@@ -2455,9 +2592,24 @@ def test_shared_string_count_is_bounded_before_openpyxl_loads_sheet(monkeypatch)
 def test_oversized_shared_string_is_rejected_before_reader_opens(monkeypatch, rich_text):
     doc = _with_shared_strings(_document([["name"], ["abcdef"]]))
     if rich_text:
+        from xml.etree import ElementTree as ET
+
+        def make_rich_text(xml):
+            root = ET.fromstring(xml)
+            entries = [item for item in root.findall("{*}si") if item.findtext("{*}t") == "abcdef"]
+            assert len(entries) == 1
+            item = entries[0]
+            item.remove(item.find("{*}t"))
+            ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            for text in ("abc", "def"):
+                run = ET.SubElement(item, f"{{{ns}}}r")
+                ET.SubElement(run, f"{{{ns}}}t").text = text
+            assert [part.text for part in item.findall("{*}r/{*}t")] == ["abc", "def"]
+            return ET.tostring(root, encoding="unicode")
+
         doc = _edit_xml(
             doc,
-            lambda xml: xml.replace("<t>abcdef</t>", "<r><t>abc</t></r><r><t>def</t></r>"),
+            make_rich_text,
             "xl/sharedStrings.xml",
         )
     monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))

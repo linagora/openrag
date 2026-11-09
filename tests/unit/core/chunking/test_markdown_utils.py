@@ -470,6 +470,16 @@ class TestChunkTable:
         assert all(chunk.metadata["csv_effective_chunk_size"] > 10 for chunk in chunks)
         assert all(len(chunk.content.split()) <= chunk.metadata["csv_effective_chunk_size"] for chunk in chunks)
 
+    def test_continuation_reserves_label_separator_in_character_budget(self):
+        column = "column"
+        table = f"| {column} |\n| --- |\n| {'x' * 100} |"
+        chunks = chunk_table(
+            MDElement(type="table", content=table, metadata={"csv_columns": [column], "csv_row_start": 2}),
+            chunk_size=50,
+            length_function=len,
+        )
+        assert all(len(chunk.content) <= chunk.metadata.get("csv_effective_chunk_size", 50) for chunk in chunks)
+
     def test_oversized_header_still_leaves_a_share_of_the_budget_for_cell_text(self):
         column_name = " ".join(f"header{number}" for number in range(30))
         cell = " ".join(f"word{number}" for number in range(400))
@@ -637,6 +647,7 @@ def test_split_to_budget_bounds_tokenization_and_scans_boundaries_once(monkeypat
     pieces = _split_to_budget(text, budget=1, length_function=counted_length)
 
     assert "".join(pieces) == text
+    assert all(len(piece.split()) <= 1 for piece in pieces)
     assert finditer_calls == 1
     assert tokenized_characters < len(text) * 20
 

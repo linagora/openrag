@@ -387,7 +387,12 @@ def _analyze_formula(
                 if key not in seen_sources and len(source_columns) < _MAX_FORMULA_SOURCE_COLUMNS:
                     source_columns.append({"column": key[0], "header": key[1]})
                     seen_sources.add(key)
-        if referenced_headers:
+        # A range that reaches hidden or out-of-table columns must not be
+        # described as its visible intersection: keep it verbatim, unresolved.
+        complete_mapping = (
+            same_sheet and within_table_rows and len(referenced_headers) == abs(end_column - start_column) + 1
+        )
+        if complete_mapping:
             semantic_parts.append(
                 referenced_headers[0]
                 if len(referenced_headers) == 1
@@ -479,7 +484,16 @@ def _safe_number_format(value: Any, format_code: Any) -> dict[str, Any] | None:
         currency_symbol = next((symbol for symbol in "$€£¥₹₩" if symbol in without_brackets), None)
 
     simplified = re.sub(r"\[[^]]+]", "", section)
-    simplified = re.sub(r"\\.|_.|\*.", "", simplified)
+    # Escaped literals carry display meaning: keep the literal so the allowed
+    # character check below rejects formats such as ``0.0\k\g`` instead of
+    # inventing an example without the unit, while ``#,##0\ €`` stays valid.
+    # Padding (``_x``) and fill (``*x``) directives are layout only. One pass,
+    # so an escaped ``\_`` is not mistaken for a padding directive.
+    simplified = re.sub(
+        r"\\(.)|_.|\*.",
+        lambda match: match.group(1) if match.group(1) is not None else "",
+        simplified,
+    )
     allowed = set("0#,.%Ee+- $€£¥₹₩")
     if (
         not simplified
@@ -578,9 +592,14 @@ def _formatted_value(cell) -> Any:
     return _FormattedValue(value, display_format) if display_format else value
 
 
-def _value_rows(cell_rows):
+def _value_rows(cell_rows, uncached_string_formulas=frozenset()):
     for cells in cell_rows:
-        yield tuple(_formatted_value(cell) if cell is not None else None for cell in cells)
+        yield tuple(
+            None
+            if cell is None or (getattr(cell, "row", None), getattr(cell, "column", None)) in uncached_string_formulas
+            else _formatted_value(cell)
+            for cell in cells
+        )
 
 
 def _cached_cell_text(value: Any) -> str:
@@ -730,14 +749,11 @@ def _compact_formula_batch(
     grouped_records: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for record in records:
         sources = tuple((source["column"], source["header"]) for source in record["source_columns"])
-        unresolved = tuple(record.get("unresolved_references", []))
         key = (
             record["target_column"],
             record["target_header"],
             record["pattern"],
-            record["semantic_expression"],
             sources,
-            unresolved,
         )
         grouped_records.setdefault(key, []).append(record)
 
@@ -765,8 +781,16 @@ def _compact_formula_batch(
                 "end_row": last["row"],
                 "formula_count": len(segment),
             }
-            if first.get("unresolved_references"):
-                group["unresolved_references"] = first["unresolved_references"]
+            unresolved = list(
+                dict.fromkeys(ref for record in segment for ref in record.get("unresolved_references", []))
+            )
+            if unresolved:
+                group["unresolved_references"] = unresolved
+            if any(record["semantic_expression"] != first["semantic_expression"] for record in segment):
+                # Absolute A1 references from another worksheet can vary per
+                # row. The normalized pattern describes every row without
+                # presenting the first row's reference as a constant.
+                group["semantic_expression"] = f"{first['target_header']} = {first['pattern'].lstrip('=')}"
             if first.get("source_columns_truncated"):
                 group["source_column_count"] = first["source_column_count"]
                 group["source_columns_truncated"] = True
@@ -1127,7 +1151,8 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                                     start = table.start_column - first_column
                                     end = table.end_column - first_column + 1
                                     visible_rows = _value_rows(
-                                        _visible_rows((row[start:end] for row in row_window), table, info)
+                                        _visible_rows((row[start:end] for row in row_window), table, info),
+                                        info.uncached_string_formulas,
                                     )
                                     if formula_window is None:
                                         yield info, table, _without_calculated_empty(visible_rows)
@@ -1155,7 +1180,7 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                                 values_only=False,
                             )
                         ) as rows:
-                            visible_rows = _value_rows(_visible_rows(rows, table, info))
+                            visible_rows = _value_rows(_visible_rows(rows, table, info), info.uncached_string_formulas)
                             if not info.formula_cells:
                                 yield info, table, _without_calculated_empty(visible_rows)
                                 continue
@@ -1674,7 +1699,7 @@ class XlsxParser(TabularBatchParser):
             "table_header_source": header_source,
             "table_header_detection": dict(header_detection),
             "table_header_detection_status": header_detection["status"],
-            "table_start_row": header_row if header_row is not None else table.start_row,
+            "table_start_row": header_row if header_row is not None else (table.data_start_row or table.start_row),
             "table_end_row": table.end_row,
             "table_start_column": visible_columns[0],
             "table_end_column": visible_columns[-1],
@@ -1682,7 +1707,7 @@ class XlsxParser(TabularBatchParser):
             "table_range": (
                 f"{sheet_ref}{first_column}{header_row}:{last_column}{table.end_row}"
                 if header_row is not None
-                else f"{sheet_ref}{first_column}{table.start_row}:{last_column}{table.end_row}"
+                else f"{sheet_ref}{first_column}{table.data_start_row or table.start_row}:{last_column}{table.end_row}"
             ),
             "table_region_range": f"{sheet_ref}{first_column}{table.start_row}:{last_column}{table.end_row}",
             "table_region_start_row": table.start_row,

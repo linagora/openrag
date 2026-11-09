@@ -471,6 +471,15 @@ async def test_get_csv_row_chunks_honors_expansion_limit():
 
 
 @pytest.mark.asyncio
+async def test_get_csv_row_chunks_preserves_search_filter():
+    searcher, store, _, _ = _make_searcher(filter_results=[])
+
+    await searcher.get_csv_row_chunks(partition="p1", file_id="f1", row_number=30, filter='category == "public"')
+
+    assert store.query_chunks_by_filter.call_args.args[1]["expr"] == 'category == "public"'
+
+
+@pytest.mark.asyncio
 async def test_get_tabular_row_chunks_can_scope_to_one_workbook_sheet():
     searcher, store, _, _ = _make_searcher(filter_results=[])
 

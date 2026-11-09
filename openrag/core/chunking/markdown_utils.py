@@ -985,7 +985,7 @@ def _chunk_csv_row_per_column(
 
         source_label = _tabular_label(table_element)
         label = f"[{source_label} row {row_number}; {column_name} continuation 999/999]"
-        reserved_tokens = length_function(_markdown_table(group_columns, [label]))
+        reserved_tokens = length_function(_markdown_table(group_columns, [label + " "]))
         # A header is indivisible: when it alone exhausts the configured budget,
         # use the smallest viable budget instead of rejecting the whole file.
         # The expanded budget is exposed in metadata so this degradation is
