@@ -27,7 +27,11 @@ from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.failure_reporting import submit_task_failure
-from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
+from services.workers.ray_utils import (
+    RemoteTimeoutError,
+    call_ray_actor_with_timeout,
+    retry_idempotent_ray_actor_method,
+)
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING
@@ -143,6 +147,12 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             return _queue_admitted(accepted is not False)
 
+        # Unreachable while bootstrap replaces any TaskStateManager without
+        # set_queued_details_v2; kept for a handle that somehow predates both.
+        logger.bind(task_id=task_id, file_id=file_id, partition=partition).warning(
+            "TaskStateManager has no atomic queue registration; registering state and details separately, "
+            "without the file admission fence"
+        )
         await self._call_method(
             lambda: self._tsm.set_state.remote(task_id, "QUEUED"),
             task_description=f"set_state({task_id})",
@@ -576,15 +586,17 @@ class WorkerDispatcher(IndexingDispatcher):
             )
         except TaskCancelledError:
             return True
-        except TimeoutError as exc:
-            logger.warning(
-                "Timed out waiting for submitted indexing task to settle after dispatch failure",
-                task_id=task_id,
-            )
-            raise TimeoutError(
-                f"Timed out waiting for submitted indexing task {task_id} to settle after dispatch failure"
-            ) from exc
         except Exception as exc:
+            # A RemoteTimeoutError is the task failing on a timeout of its own:
+            # it has settled, so only our own wait running out is a timeout here.
+            if isinstance(exc, TimeoutError) and not isinstance(exc, RemoteTimeoutError):
+                logger.warning(
+                    "Timed out waiting for submitted indexing task to settle after dispatch failure",
+                    task_id=task_id,
+                )
+                raise TimeoutError(
+                    f"Timed out waiting for submitted indexing task {task_id} to settle after dispatch failure"
+                ) from exc
             logger.info(
                 "Submitted indexing task settled after dispatch failure cancellation request",
                 task_id=task_id,
@@ -653,7 +665,8 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
-        if await self._document_repo.get_file_metadata(file_id, partition) is None:
+        catalog_metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        if catalog_metadata is None:
             return
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
@@ -673,7 +686,9 @@ class WorkerDispatcher(IndexingDispatcher):
             entity.update(internal_metadata)
             entities.append(entity)
 
-        await self._upsert_entities(entities)
+        target_catalog_metadata = dict(catalog_metadata)
+        target_catalog_metadata.update(public_metadata)
+        await self._upsert_entities(entities, protected_metadata=target_catalog_metadata)
 
         await self._document_repo.update_file_metadata_in_db(file_id, partition, public_metadata)
 
@@ -723,6 +738,9 @@ class WorkerDispatcher(IndexingDispatcher):
 
             public_metadata = strip_internal_metadata(metadata)
             indexed_at = datetime.now(UTC)
+            file_metadata = dict(source_file_metadata)
+            file_metadata.update(public_metadata)
+            file_metadata["indexed_at"] = indexed_at.isoformat()
             entities = []
             for row in rows:
                 entity = strip_internal_metadata(row)
@@ -748,11 +766,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     catalog_kwargs["embedder_fingerprint"] = embedder_fingerprint
             if indexation_config is not None:
                 catalog_kwargs["indexation_config"] = indexation_config
-            await self._insert_entities(entities)
-
-            file_metadata = dict(source_file_metadata)
-            file_metadata.update(public_metadata)
-            file_metadata["indexed_at"] = indexed_at.isoformat()
+            await self._insert_entities(entities, protected_metadata=file_metadata)
             try:
                 await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
@@ -828,17 +842,27 @@ class WorkerDispatcher(IndexingDispatcher):
                 provenance["embedder_dimension"] = widths.pop()
         return provenance
 
-    async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
+    async def _upsert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        protected_metadata: Mapping[str, Any],
+    ) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)
         if upsert_entities is None:
             raise TypeError("vector_store must expose upsert_entities for file metadata mutations")
-        await upsert_entities(entities, self._collection)
+        await upsert_entities(entities, self._collection, protected_metadata=protected_metadata)
 
-    async def _insert_entities(self, entities: list[dict[str, Any]]) -> None:
+    async def _insert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        protected_metadata: Mapping[str, Any],
+    ) -> None:
         insert_entities = getattr(self._vector_store, "insert_entities", None)
         if insert_entities is None:
             raise TypeError("vector_store must expose insert_entities for file copy mutations")
-        await insert_entities(entities, self._collection)
+        await insert_entities(entities, self._collection, protected_metadata=protected_metadata)
 
     async def _record_job(
         self,

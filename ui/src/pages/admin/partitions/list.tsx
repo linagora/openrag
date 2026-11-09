@@ -56,6 +56,8 @@ import { partitionDetailPath } from "@/lib/routes";
 type SortDir = "asc" | "desc" | null;
 const PARTITIONS_PAGE_SIZE = 10;
 const PARTITIONS_REFETCH_INTERVAL_MS = 5000;
+// Seeded at startup; the API refuses to delete it.
+const DEFAULT_PARTITION_NAME = "default";
 
 function RowActions({
   partition,
@@ -144,6 +146,11 @@ function SortButton({ label, active, direction, onClick }: { label: string; acti
 export default function PartitionListPage() {
   const queryClient = useQueryClient();
   const { canManagePartitions, canConfigurePartition, canWrite } = usePermissions();
+  const canDeletePartition = useCallback(
+    (partition: PartitionResponse) =>
+      partition.name !== DEFAULT_PARTITION_NAME && canConfigurePartition(partition.role),
+    [canConfigurePartition],
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
 
   // Open the create dialog directly when arriving from the Overview quick action
@@ -307,12 +314,12 @@ export default function PartitionListPage() {
     return filteredAndSorted.slice(start, start + PARTITIONS_PAGE_SIZE);
   }, [filteredAndSorted, pageIndex]);
   const visibleDeletablePartitionNames = useMemo(
-    () => visiblePartitions.filter((p) => canConfigurePartition(p.role)).map((p) => p.name),
-    [visiblePartitions, canConfigurePartition],
+    () => visiblePartitions.filter(canDeletePartition).map((p) => p.name),
+    [visiblePartitions, canDeletePartition],
   );
   const hasDeletablePartitions = useMemo(
-    () => filteredAndSorted.some((p) => canConfigurePartition(p.role)),
-    [filteredAndSorted, canConfigurePartition],
+    () => filteredAndSorted.some(canDeletePartition),
+    [filteredAndSorted, canDeletePartition],
   );
   const visibleDeletablePartitionNameSet = useMemo(
     () => new Set(visibleDeletablePartitionNames),
@@ -322,9 +329,9 @@ export default function PartitionListPage() {
   const selectedPartitions = useMemo(
     () =>
       filteredAndSorted.filter(
-        (p) => selectedPartitionNameSet.has(p.name) && canConfigurePartition(p.role),
+        (p) => selectedPartitionNameSet.has(p.name) && canDeletePartition(p),
       ),
-    [filteredAndSorted, selectedPartitionNameSet, canConfigurePartition],
+    [filteredAndSorted, selectedPartitionNameSet, canDeletePartition],
   );
   const allDeletableSelected =
     visibleDeletablePartitionNames.length > 0 &&
@@ -335,13 +342,13 @@ export default function PartitionListPage() {
 
   useEffect(() => {
     const allowed = new Set(
-      filteredAndSorted.filter((p) => canConfigurePartition(p.role)).map((p) => p.name),
+      filteredAndSorted.filter(canDeletePartition).map((p) => p.name),
     );
     setSelectedPartitionNames((prev) => {
       const next = prev.filter((name) => allowed.has(name));
       return next.length === prev.length ? prev : next;
     });
-  }, [filteredAndSorted, canConfigurePartition]);
+  }, [filteredAndSorted, canDeletePartition]);
 
   const handleSort = (column: "name" | "created_at") => {
     if (sortColumn !== column) {
@@ -566,7 +573,7 @@ export default function PartitionListPage() {
                         <TableCell>
                           <Checkbox
                             checked={selectedPartitionNameSet.has(p.name)}
-                            disabled={!canConfigurePartition(p.role)}
+                            disabled={!canDeletePartition(p)}
                             onCheckedChange={(value) =>
                               setSelectedPartitionNames((prev) =>
                                 value
@@ -638,7 +645,7 @@ export default function PartitionListPage() {
                             partition={p}
                             showUpload={canWrite(p.role)}
                             showEdit={canManagePartitions}
-                            showDelete={canConfigurePartition(p.role)}
+                            showDelete={canDeletePartition(p)}
                           />
                         </TableCell>
                       )}

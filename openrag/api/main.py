@@ -38,6 +38,7 @@ from api.middleware import (
     RequestIdMiddleware,
     RequestTimeoutMiddleware,
     SecurityHeadersMiddleware,
+    UrlencodedBodyLimitMiddleware,
 )
 from api.routers.admin.cluster import router as actors_router
 from api.routers.admin.indexing import router as indexer_router
@@ -224,7 +225,7 @@ async def lifespan(app: FastAPI):
     if container is not None:
         try:
             logger.info("Startup: initializing ServiceContainer", timeout=CONTAINER_STARTUP_TIMEOUT)
-            await asyncio.wait_for(container.initialize(), timeout=CONTAINER_STARTUP_TIMEOUT)
+            await asyncio.wait_for(container.initialize(seed_users=True), timeout=CONTAINER_STARTUP_TIMEOUT)
             logger.info("Startup: ServiceContainer initialized")
         except TimeoutError:  # pragma: no cover - defensive boot guard
             logger.exception("ServiceContainer.initialize timed out; serving degraded (503)")
@@ -300,7 +301,7 @@ app.openapi = custom_openapi
 # (last ``add_middleware`` call wraps the outermost layer). The
 # Phase 10C target order on a request is:
 #
-#     Instrumentation -> RequestTimeout -> RequestId -> Auth -> route
+#     Instrumentation -> RequestTimeout -> RequestId -> Auth -> RateLimit -> UrlencodedBodyLimit -> route
 #
 # so Auth is the innermost guard (lifespan's request_id already on
 # request.state when an auth failure runs through the error handlers),
@@ -310,6 +311,10 @@ app.openapi = custom_openapi
 # RateLimitMiddleware is registered BEFORE AuthMiddleware so it executes AFTER
 # it (registration is reverse of execution), letting it key limits on the
 # authenticated user id that AuthMiddleware just put on request.state.
+# UrlencodedBodyLimitMiddleware is registered first, so it runs innermost: Auth
+# and the rate limiter refuse a request before its body is read, and a route that
+# needs no credentials still has its form bounded before FastAPI parses it.
+app.add_middleware(UrlencodedBodyLimitMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     AuthMiddleware,

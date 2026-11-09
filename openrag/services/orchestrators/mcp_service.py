@@ -37,6 +37,7 @@ from core.indexing.validators import (
     validate_content_matches_extension,
     validate_ooxml_package,
 )
+from core.models.document import Document
 from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ConflictError, ValidationError
 from core.utils.logging import get_logger
@@ -400,7 +401,7 @@ class MCPService:
         user_id: int | None,
         is_admin: bool,
     ) -> dict[str, Any]:
-        details = await self._jobs.get_task_details(task_id)
+        details = await self._jobs.get_task_details(task_id, require_owner_identity=not is_admin)
         if details is None:
             raise KeyError(f"Task '{task_id}' not found")
         if not is_admin and user_id is not None and details.get("user_id") != user_id:
@@ -577,7 +578,15 @@ class MCPService:
             raise FileExistsError(f"File '{file_id}' already exists in partition '{partition}'")
 
         filename = Path(urlparse(url).path.rstrip("/")).name or file_id
-        suffix = Path(filename).suffix or ""
+        metadata = _strip_protected_metadata(extra_metadata)
+        metadata["source_url"] = url
+        guessed_mime, _ = mimetypes.guess_type(filename)
+        if guessed_mime and "mimetype" not in metadata:
+            metadata["mimetype"] = guessed_mime
+
+        # Downloaded under the suffix it is parsed as, like an upload, so the
+        # path-based parsers read this file rather than a second copy.
+        suffix = Document.type_suffix(filename, metadata.get("mimetype"))
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = Path(tmp.name)
         download_complete = False
@@ -590,12 +599,13 @@ class MCPService:
             if not download_complete:
                 tmp_path.unlink(missing_ok=True)
 
-        # The extension comes from the URL path, and it alone selects the
-        # parser — the same trust the upload routes refuse to extend to a
-        # caller-supplied filename. Check the downloaded bytes agree with it.
+        # The extension from the URL path, or the mimetype standing in for an
+        # unknown one, selects the parser — the same trust the upload routes
+        # refuse to extend to a caller-supplied filename. Check the downloaded
+        # bytes agree with it.
         content_verified = False
         try:
-            extension = suffix.lstrip(".").lower()
+            extension = Document.type_extension(filename, metadata.get("mimetype"))
             with tmp_path.open("rb") as downloaded:
                 validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
                 await asyncio.to_thread(validate_ooxml_package, extension, downloaded)
@@ -607,12 +617,6 @@ class MCPService:
             # would otherwise be left on disk.
             if not content_verified:
                 tmp_path.unlink(missing_ok=True)
-
-        metadata = _strip_protected_metadata(extra_metadata)
-        metadata["source_url"] = url
-        guessed_mime, _ = mimetypes.guess_type(filename)
-        if guessed_mime and "mimetype" not in metadata:
-            metadata["mimetype"] = guessed_mime
 
         try:
             task_id = await self._indexing.add_file(
@@ -684,8 +688,9 @@ class MCPService:
             for _ in range(_MAX_REDIRECTS + 1):
                 if not is_safe_url(current_url):
                     raise ValueError(f"redirect to a disallowed URL: {current_url!r}")
-                await self._assert_host_resolves_safely(urlparse(current_url).hostname or "")
-                async with client.stream("GET", current_url) as response:
+                request_url = httpx.URL(current_url)
+                await self._assert_host_resolves_safely(request_url.raw_host.decode("ascii"))
+                async with client.stream("GET", request_url) as response:
                     if response.is_redirect:
                         location = response.headers.get("location", "")
                         if not location:

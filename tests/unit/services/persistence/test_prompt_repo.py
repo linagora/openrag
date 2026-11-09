@@ -56,6 +56,18 @@ class _ReferenceCountsPool:
         return []
 
 
+class _ConditionalRefreshPool:
+    def __init__(self, *, matched: bool) -> None:
+        self.matched = matched
+        self.query = ""
+        self.params: tuple = ()
+
+    async def fetchval(self, query: str, *params):
+        self.query = query
+        self.params = params
+        return "prompt-id" if self.matched else None
+
+
 class _DeletePool:
     def __init__(self, *, prompt_type: str = "asr_transcription") -> None:
         self.executed: list[tuple[str, tuple]] = []
@@ -86,6 +98,21 @@ def _prompt_row(*, name: str) -> dict:
         "created_at": _NOW,
         "updated_at": _NOW,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("matched", [True, False])
+async def test_seed_refresh_updates_only_the_unchanged_default(matched: bool) -> None:
+    from services.persistence.prompt_repo import PgPromptRepository
+
+    pool = _ConditionalRefreshPool(matched=matched)
+    repo = PgPromptRepository(pool_getter=lambda: pool)
+
+    assert await repo.update_default_content_if_unchanged("prompt-id", "default_sys_prompt", "old", "new") is matched
+    assert "is_default = true" in pool.query
+    assert "name = $2" in pool.query
+    assert "content = $3" in pool.query
+    assert pool.params == ("prompt-id", "default_sys_prompt", "old", "new")
 
 
 @pytest.mark.asyncio

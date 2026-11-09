@@ -44,10 +44,15 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
         "partition",
         "page",
         "chunk_type",
+        "$meta",
         *RETRIEVAL_SCORE_KEYS,
     }
+    dynamic_metadata = row.get("$meta")
+    dynamic_metadata = dynamic_metadata if isinstance(dynamic_metadata, dict) else {}
     metadata = {
-        k: v for k, v in row.items() if k not in skip and not is_vector_field_key(k) and not is_internal_metadata_key(k)
+        k: v
+        for k, v in {**dynamic_metadata, **row}.items()
+        if k not in skip and not is_vector_field_key(k) and not is_internal_metadata_key(k)
     }
     return Chunk(
         id=chunk_id,
@@ -198,12 +203,43 @@ class VectorStoreSearcher(RetrievalSearcher):
     ) -> list[Chunk]:
         return await self._fetch_surrounding(chunks, allowed_file_ids=allowed_file_ids)
 
+    async def get_csv_row_chunks(
+        self,
+        partition: str,
+        file_id: str,
+        row_number: int,
+        limit: int = 10,
+        allowed_file_ids: list[str] | None = None,
+        table_id: str | None = None,
+        filter: str | None = None,
+    ) -> list[Chunk]:
+        """Return every stored continuation for one CSV row in part order."""
+        if allowed_file_ids is not None and file_id not in allowed_file_ids:
+            return []
+        metadata_filter = {
+            "partition": partition,
+            "file_id": file_id,
+            "csv_row_number": row_number,
+        }
+        if table_id is not None:
+            metadata_filter["table_id"] = table_id
+        if filter:
+            metadata_filter["expr"] = filter
+        rows = await self._store.query_chunks_by_filter(
+            self._collection,
+            metadata_filter,
+            limit=limit,
+        )
+        chunks = [_dict_to_chunk(row) for row in rows]
+        return sorted(chunks, key=_csv_part_sort_key)
+
     async def get_related_chunks(
         self,
         partition: str,
         relationship_id: str,
         limit: int,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         if limit <= 0:
             return []
@@ -215,9 +251,12 @@ class VectorStoreSearcher(RetrievalSearcher):
             file_ids = [f for f in file_ids if f in allowed]
         if not file_ids:
             return []
+        filters: dict[str, Any] = {"partition": partition, "file_id": file_ids}
+        if filter:
+            filters["expr"] = filter
         rows = await self._store.query_chunks_by_filter(
             self._collection,
-            {"partition": partition, "file_id": file_ids},
+            filters,
             limit=limit,
         )
         return [_dict_to_chunk(r) for r in rows[:limit]]
@@ -229,6 +268,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         limit: int,
         max_ancestor_depth: int | None = None,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         if limit <= 0:
             return []
@@ -240,9 +280,12 @@ class VectorStoreSearcher(RetrievalSearcher):
             ancestor_ids = [f for f in ancestor_ids if f in allowed]
         if not ancestor_ids:
             return []
+        filters: dict[str, Any] = {"partition": partition, "file_id": ancestor_ids}
+        if filter:
+            filters["expr"] = filter
         rows = await self._store.query_chunks_by_filter(
             self._collection,
-            {"partition": partition, "file_id": ancestor_ids},
+            filters,
             limit=limit,
         )
         return [_dict_to_chunk(r) for r in rows[:limit]]
@@ -295,6 +338,14 @@ class VectorStoreSearcher(RetrievalSearcher):
                 )
             results.extend(_dict_to_chunk(hits[0]) for hits in hits_by_sid.values() if len(hits) == 1)
         return results
+
+
+def _csv_part_sort_key(chunk: Chunk) -> tuple[int, str]:
+    """Order malformed or legacy CSV metadata after valid continuation parts."""
+    try:
+        return int(chunk.metadata.get("csv_part")), chunk.id
+    except (TypeError, ValueError):
+        return 2**31 - 1, chunk.id
 
 
 __all__ = ["VectorStoreSearcher"]

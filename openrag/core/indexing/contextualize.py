@@ -19,7 +19,7 @@ import logging
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 
-from tqdm.asyncio import tqdm
+from core.utils.progress import gather_with_progress
 
 from ..llm import LLM
 from ..models.chunk import Chunk
@@ -135,7 +135,7 @@ class ChunkContextualizer:
                     for i in range(start, end)
                 ]
                 contexts.extend(
-                    await tqdm.gather(
+                    await gather_with_progress(
                         *batch,
                         desc=f"Contextualizing chunks of *{filename}* [{start + 1}-{end}/{len(chunks)}]",
                     )
@@ -144,11 +144,7 @@ class ChunkContextualizer:
             return [
                 chunk.model_copy(
                     update={
-                        "text": wrap_chunk_with_context(
-                            content=chunk.text,
-                            filename=filename,
-                            chunk_context=context,
-                        ),
+                        "text": wrap_chunk_with_context(content=chunk.text, chunk_context=context),
                         "context": context,
                         "content": chunk.text,
                     }

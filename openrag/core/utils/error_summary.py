@@ -11,6 +11,25 @@ _CHAIN_SEPARATORS = (
     "During handling of the above exception",
     "The above exception was the direct cause",
 )
+_ELISION = " ... "
+
+
+def elide_middle(text: str, max_length: int) -> str:
+    """Shorten *text* to at most *max_length* characters by cutting its middle.
+
+    A wrapped failure reads outermost first (``"X failed: Y failed: ValueError:
+    ..."``), so the root cause sits at the end. Cutting the middle keeps both the
+    outer task's name and that root cause, where cutting the end would drop it.
+    """
+    if len(text) <= max_length:
+        return text
+    budget = max_length - len(_ELISION)
+    if budget < 2:
+        # Too short to keep something on both sides of the marker.
+        return text[:max_length]
+    head = max(1, budget // 3)
+    tail = budget - head
+    return f"{text[:head].rstrip()}{_ELISION}{text[len(text) - tail :].lstrip()}"
 
 
 def failure_reason_from_exception(exc: BaseException) -> str:
@@ -18,9 +37,7 @@ def failure_reason_from_exception(exc: BaseException) -> str:
     exception_type = type(exc).__name__
     message = next((" ".join(line.split()) for line in str(exc).splitlines() if line.strip()), "")
     reason = f"{exception_type}: {message}" if message else exception_type
-    if len(reason) <= _FAILURE_REASON_MAX_LENGTH:
-        return reason
-    return f"{reason[: _FAILURE_REASON_MAX_LENGTH - 3]}..."
+    return elide_middle(reason, _FAILURE_REASON_MAX_LENGTH)
 
 
 def extract_task_error_reason(error: str | None) -> str | None:
@@ -52,6 +69,4 @@ def summarize_task_error(error: str | None, *, reason: str | None = None) -> str
     value = " ".join((reason or extract_task_error_reason(error) or "").split())
     if not value:
         return None
-    if len(value) <= _ERROR_SUMMARY_MAX_LENGTH:
-        return value
-    return f"{value[: _ERROR_SUMMARY_MAX_LENGTH - 3].rstrip()}..."
+    return elide_middle(value, _ERROR_SUMMARY_MAX_LENGTH)

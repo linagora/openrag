@@ -65,7 +65,7 @@ class DocParser(DocumentParser):
             )
 
         # ``asyncio.to_thread`` cannot be interrupted, so on cancellation — a parse
-        # timeout (``asyncio.wait_for`` in ``services/workers/stages/parse.py``) or
+        # timeout (``asyncio.timeout`` in ``services/workers/stages/parse.py``) or
         # ``ray.cancel`` — this coroutine unwinds while Spire is still converting,
         # and a cleanup here would run before the file exists. ``_convert`` re-checks
         # this flag after writing and removes the file itself when nobody is left to

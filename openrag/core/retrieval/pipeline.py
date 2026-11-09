@@ -28,7 +28,7 @@ from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
-from core.retrieval.retriever import Retriever
+from core.retrieval.retriever import Retriever, has_csv_row_siblings, order_csv_continuations
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.trace import RetrievalTraceBuilder, merge_child_traces
 
@@ -137,6 +137,10 @@ class RetrieverPipeline:
     ) -> list[Chunk]:
         """Run a single ``Query`` through retrieval, expansion, and reranking."""
         milvus_filter = query.to_milvus_filter()
+        # The expression the chunks below were actually retrieved with. A
+        # filterless fallback replaces it, and expansion must follow that
+        # attempt rather than re-imposing a filter the retry dropped.
+        applied_filter = milvus_filter
         attempt_traces: list[RetrievalTraceBuilder] = []
         retrieval_trace = trace
         if trace is not None and milvus_filter and self.allow_filterless_fallback:
@@ -171,6 +175,7 @@ class RetrieverPipeline:
                 )
                 attempt_traces.append(fallback_trace)
             fallback_trace_kwargs = {"trace": fallback_trace} if fallback_trace is not None else {}
+            applied_filter = None
             chunks = await self.retriever.retrieve(
                 partition=partition,
                 query=query.query,
@@ -250,16 +255,34 @@ class RetrieverPipeline:
             )
 
         expansion_applied = False
-        if self.expansion_enabled:
+        if self.expansion_enabled or has_csv_row_siblings(chunks):
             limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
-            expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in chunks[:limit]}
-            head = copy.deepcopy(chunks[:limit])
-            expanded = await self.retriever.expand_search_results(results=head, filter_params=filter_params)
+            selected = chunks[:limit]
+            if not self.expansion_enabled:
+                selected = [chunk for chunk in selected if has_csv_row_siblings([chunk])]
+            preserve_ranked_candidates = has_csv_row_siblings(selected)
+            expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in selected}
+            head = copy.deepcopy(selected)
+            expanded = await self.retriever.expand_search_results(
+                results=head, filter_params=filter_params, filter=applied_filter
+            )
             if len(expanded) > len(head):
                 expansion_applied = True
-                expanded_chunks = list(expanded)
+                if preserve_ranked_candidates:
+                    # Automatic CSV sibling expansion supplements the ranked
+                    # list at the seed's position. Regular document expansion
+                    # keeps develop's replacement behavior.
+                    ranked_candidate_ids = {str(_chunk_key(chunk)) for chunk in chunks}
+                    expanded_chunks = order_csv_continuations(
+                        [
+                            *chunks,
+                            *(chunk for chunk in expanded if str(_chunk_key(chunk)) not in ranked_candidate_ids),
+                        ]
+                    )
+                else:
+                    expanded_chunks = list(expanded)
                 expanded_candidate_ids = {str(_chunk_key(chunk)) for chunk in expanded_chunks}
-                chunks = expanded
+                chunks = expanded_chunks
                 if self.reranker_enabled:
                     if trace is not None:
                         omitted_seed_ids = (
@@ -392,6 +415,7 @@ class RetrieverPipeline:
                     record_final_cutoff,
                 )
             chunks = chunks[:top_k]
+        chunks = order_csv_continuations(chunks)
         _safe_trace(
             trace,
             "final",
@@ -465,6 +489,7 @@ class RetrieverPipeline:
             trace_stage="multi_query_fused",
             **fusion_kwargs,
         )
+        fused = order_csv_continuations(fused)
         _safe_trace(
             trace,
             "final",

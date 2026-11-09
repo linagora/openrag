@@ -96,18 +96,41 @@ class RetrievalSearcher(ABC):
         ...
 
     @abstractmethod
+    async def get_csv_row_chunks(
+        self,
+        partition: str,
+        file_id: str,
+        row_number: int,
+        limit: int = 10,
+        allowed_file_ids: list[str] | None = None,
+        table_id: str | None = None,
+        filter: str | None = None,
+    ) -> list[Chunk]:
+        """Fetch every continuation chunk for one logical tabular row.
+
+        ``row_number`` is the CSV record number (including its header offset),
+        not a chunk index. ``table_id`` prevents equal row numbers in separate
+        workbook sheets from becoming siblings. ``allowed_file_ids`` keeps expansion inside the same
+        workspace scope as the original vector search. ``limit`` prevents one
+        very wide row from consuming the entire answer context.
+        """
+        ...
+
+    @abstractmethod
     async def get_related_chunks(
         self,
         partition: str,
         relationship_id: str,
         limit: int,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         """Fetch other chunks belonging to the same relationship group.
 
         ``allowed_file_ids``, when not ``None``, restricts results to that
         file-id set (workspace scoping) — expansion must never surface a
-        related file outside the caller's authorized scope.
+        related file outside the caller's authorized scope. ``filter`` is the
+        same expression the initial search used, such as a temporal predicate.
         """
         ...
 
@@ -119,11 +142,13 @@ class RetrievalSearcher(ABC):
         limit: int,
         max_ancestor_depth: int | None = None,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         """Walk parent links up the document tree from a file.
 
         ``allowed_file_ids``, when not ``None``, restricts results to that
         file-id set (workspace scoping) — expansion must never surface an
-        ancestor file outside the caller's authorized scope.
+        ancestor file outside the caller's authorized scope. ``filter`` is the
+        same expression the initial search used, such as a temporal predicate.
         """
         ...

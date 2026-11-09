@@ -149,8 +149,10 @@ class FakeMembershipRepo:
         owned: dict[int, int] | None = None,
         candidate_rows: list[dict] | None = None,
         add_result: bool = True,
+        owners: set[tuple[int, str]] | None = None,
     ):
         self._members = members or set()
+        self._owners = owners or set()
         self._owned = owned or {}  # user_id -> number of partitions owned
         self._candidate_rows = candidate_rows or []
         self._add_result = add_result
@@ -207,13 +209,20 @@ class FakeMembershipRepo:
         self.added.append((partition, user_id, role))
         return self._add_result
 
-    async def remove_partition_member(self, partition: str, user_id: int) -> bool:
-        self.removed.append((partition, user_id))
-        return True
+    def _is_last_owner(self, partition: str, user_id: int) -> bool:
+        return {u for (u, p) in self._owners if p == partition} == {user_id}
 
-    async def update_partition_member_role(self, partition: str, user_id: int, new_role: str) -> bool:
+    async def remove_partition_member(self, partition: str, user_id: int) -> str:
+        if self._is_last_owner(partition, user_id):
+            return "last_owner"
+        self.removed.append((partition, user_id))
+        return "ok"
+
+    async def update_partition_member_role(self, partition: str, user_id: int, new_role: str) -> str:
+        if new_role != "owner" and self._is_last_owner(partition, user_id):
+            return "last_owner"
         self.role_updates.append((partition, user_id, new_role))
-        return True
+        return "ok"
 
 
 class FakeDocumentRepo:
@@ -277,6 +286,21 @@ class FakeVectorStore:
         return [row for row in self._rows if all(row.get(key) == value for key, value in filters.items())]
 
 
+class FakeTopicTagRepo:
+    def __init__(self, rows: list[dict] | None = None, error: Exception | None = None):
+        """Seed canned tag rows, an optional error to raise, and record calls."""
+        self._rows = rows if rows is not None else []
+        self._error = error
+        self.calls: list[tuple[str, str]] = []
+
+    async def get_by_document(self, document_id: str, partition: str) -> list[dict]:
+        """Record the lookup, then replay the canned rows or raise."""
+        self.calls.append((document_id, partition))
+        if self._error is not None:
+            raise self._error
+        return list(self._rows)
+
+
 class FakeUserRepo:
     def __init__(
         self,
@@ -325,7 +349,9 @@ def _svc(
     tsm=None,
     task_cancel_timeout=60.0,
     config=None,
+    trepo=None,
 ) -> PartitionService:
+    """Build a service over fake repos with an optional topic-tag repo."""
     return PartitionService(
         partition_repo=prepo or FakePartitionRepo(),
         membership_repo=mrepo or FakeMembershipRepo(),
@@ -336,6 +362,7 @@ def _svc(
         task_state_manager=tsm,
         task_cancel_timeout=task_cancel_timeout,
         config=config,
+        topic_tag_repo=trepo,
     )
 
 
@@ -422,6 +449,36 @@ async def test_create_partition_rejects_reserved_name(name):
 async def test_delete_partition_missing_raises_404():
     with pytest.raises(PartitionNotFoundError):
         await _svc(prepo=FakePartitionRepo(existing=set())).delete_partition("ghost")
+
+
+@pytest.mark.asyncio
+async def test_delete_default_partition_is_refused_before_any_cleanup():
+    # Deleting the seeded "default" partition could leave a deployment with no
+    # partition at all, an empty partition cache startup never produces.
+    # Refused before any vector or row is touched.
+    prepo = FakePartitionRepo(existing={"default", "p1"})
+    vstore = FakeVectorStore(ids=["c1"])
+    config = SimpleNamespace(partitions={"default": "cfg-default", "p1": "cfg-p1"})
+
+    with pytest.raises(ConflictError) as ei:
+        await _svc(prepo=prepo, vstore=vstore, config=config).delete_partition("default")
+
+    assert ei.value.status_code == 409
+    assert ei.value.code == "DEFAULT_PARTITION_PROTECTED"
+    assert prepo.deleted == []
+    assert vstore.deleted_filters == []
+    assert config.partitions == {"default": "cfg-default", "p1": "cfg-p1"}
+
+
+@pytest.mark.asyncio
+async def test_delete_other_partition_still_works_and_keeps_default_cached():
+    prepo = FakePartitionRepo(existing={"default", "p1"})
+    config = SimpleNamespace(partitions={"default": "cfg-default", "p1": "cfg-p1"})
+
+    await _svc(prepo=prepo, config=config).delete_partition("p1")
+
+    assert prepo.deleted == ["p1"]
+    assert config.partitions == {"default": "cfg-default"}
 
 
 @pytest.mark.asyncio
@@ -849,6 +906,44 @@ async def test_get_file_metadata_rejects_a_missing_catalog_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_file_topic_tags_returns_stored_tags_in_order() -> None:
+    """Stored tag rows survive the read path in their stored order."""
+    trepo = FakeTopicTagRepo(
+        rows=[
+            {"document_id": "f", "partition": "p", "tag": "finance"},
+            {"document_id": "f", "partition": "p", "tag": "risk"},
+        ]
+    )
+    svc = _svc(trepo=trepo)
+
+    assert await svc.get_file_topic_tags("p", "f") == ["finance", "risk"]
+    assert trepo.calls == [("f", "p")]
+
+
+@pytest.mark.asyncio
+async def test_get_file_topic_tags_returns_empty_when_untagged() -> None:
+    """A file with no stored tags reads back as an empty list."""
+    svc = _svc(trepo=FakeTopicTagRepo(rows=[]))
+
+    assert await svc.get_file_topic_tags("p", "f") == []
+
+
+@pytest.mark.asyncio
+async def test_get_file_topic_tags_returns_empty_without_a_repo() -> None:
+    """A service built without a topic-tag repo answers [] instead of failing."""
+    assert await _svc(trepo=None).get_file_topic_tags("p", "f") == []
+
+
+@pytest.mark.asyncio
+async def test_get_file_topic_tags_propagates_repository_errors() -> None:
+    """Repository failures surface as-is, never masked as 'no tags'."""
+    svc = _svc(trepo=FakeTopicTagRepo(error=RuntimeError("db down")))
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await svc.get_file_topic_tags("p", "f")
+
+
+@pytest.mark.asyncio
 async def test_get_file_chunks_missing_file_404():
     svc = _svc(drepo=FakeDocumentRepo(files=set()))
     with pytest.raises(NotFoundError) as ei:
@@ -1244,6 +1339,53 @@ async def test_update_role_success():
     svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=FakeUserRepo({9}))
     await svc.update_role("p", 9, "owner")
     assert mrepo.role_updates == [("p", 9, "owner")]
+
+
+@pytest.mark.asyncio
+async def test_remove_last_owner_is_refused_with_409():
+    # Without an owner nobody can manage the partition's members any more
+    # (short of SUPER_ADMIN_MODE), so the last owner cannot leave.
+    mrepo = FakeMembershipRepo(members={(1, "default"), (9, "default")}, owners={(1, "default")})
+    svc = _svc(prepo=FakePartitionRepo({"default"}), mrepo=mrepo, urepo=FakeUserRepo({1, 9}))
+
+    with pytest.raises(ConflictError) as ei:
+        await svc.remove_member("default", 1)
+
+    assert ei.value.status_code == 409
+    assert ei.value.code == "LAST_PARTITION_OWNER"
+    assert mrepo.removed == []
+
+
+@pytest.mark.asyncio
+async def test_remove_owner_when_another_owner_remains():
+    mrepo = FakeMembershipRepo(members={(1, "p"), (9, "p")}, owners={(1, "p"), (9, "p")})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=FakeUserRepo({1, 9}))
+
+    await svc.remove_member("p", 1)
+
+    assert mrepo.removed == [("p", 1)]
+
+
+@pytest.mark.asyncio
+async def test_demote_last_owner_is_refused_with_409():
+    mrepo = FakeMembershipRepo(members={(1, "p")}, owners={(1, "p")})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=FakeUserRepo({1}))
+
+    with pytest.raises(ConflictError) as ei:
+        await svc.update_role("p", 1, "editor")
+
+    assert ei.value.code == "LAST_PARTITION_OWNER"
+    assert mrepo.role_updates == []
+
+
+@pytest.mark.asyncio
+async def test_demote_owner_when_another_owner_remains():
+    mrepo = FakeMembershipRepo(members={(1, "p"), (9, "p")}, owners={(1, "p"), (9, "p")})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=FakeUserRepo({1, 9}))
+
+    await svc.update_role("p", 1, "viewer")
+
+    assert mrepo.role_updates == [("p", 1, "viewer")]
 
 
 # --------------------------------------------------------------------------- #

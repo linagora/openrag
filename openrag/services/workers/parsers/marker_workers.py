@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import os
 import re
 import threading
 import time
@@ -10,6 +11,7 @@ import torch
 from core.config import load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
+from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import (
     Document,
     DocumentType,
@@ -17,7 +19,9 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
+from core.utils.child_process import kill_process_group, tie_to_parent
 from core.utils.logging import get_logger
+from core.utils.process_limits import apply_parse_memory_limit
 from marker.converters.pdf import PdfConverter
 from ray.exceptions import TaskCancelledError
 
@@ -36,6 +40,9 @@ def _force_kill_executor(executor, log) -> None:
     reclaim a wedged worker. ``ProcessPoolExecutor`` doesn't expose which
     process ran a given task, which is why ``MarkerWorker`` gives every slot its
     own single-process executor: killing one never touches another slot's parse.
+
+    Each worker leads its own process group (``tie_to_parent``), and the whole
+    group is killed, so nothing a worker started outlives it (#1167).
     """
     if executor is None:
         return
@@ -43,7 +50,12 @@ def _force_kill_executor(executor, log) -> None:
     procs = list(getattr(executor, "_processes", {}).values())
     for proc in procs:
         try:
-            proc.kill()
+            # A broken pool keeps its crashed child, already reaped: its pid may
+            # belong to another process now. Nothing it started is left to
+            # reclaim, since pdftext runs inside the child (``pdftext_workers``).
+            if proc.exitcode is not None:
+                continue
+            kill_process_group(proc.pid)
         except Exception:  # noqa: BLE001 - one unkillable proc must not block the rest
             log.warning("Failed to kill Marker worker process", exc_info=True)
     try:
@@ -80,23 +92,6 @@ def _marker_num_gpus(config) -> float:
 #: misconfiguration than a tight budget, so it is reported rather than left to
 #: surface as a 100% Marker failure rate.
 _MIN_PARSE_HEADROOM_MB = 256
-
-
-def _child_vmdata_mb() -> int | None:
-    """This process's current ``VmData`` in MiB, or ``None`` where unreadable.
-
-    ``VmData`` is exactly what ``RLIMIT_DATA`` bounds, so it is the number an
-    operator needs to pick a ceiling. Linux-only and best-effort: callers treat
-    ``None`` as "could not measure", never as zero.
-    """
-    try:
-        with open("/proc/self/status", encoding="utf-8") as status:
-            for line in status:
-                if line.startswith("VmData:"):
-                    return int(line.split()[1]) // 1024
-    except (OSError, ValueError, IndexError):
-        return None
-    return None
 
 
 #: Torch's CPU allocator reports a refused allocation as a ``RuntimeError`` with
@@ -152,65 +147,19 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     not ``RLIMIT_AS``: that also counts file-backed mappings, so it would refuse
     the model weights and CUDA's device maps and break the parse outright.
 
-    **The ceiling is per process, and children inherit it.** Marker runs with
-    ``disable_multiprocessing: False`` and ``pdftext_workers``, so pdftext starts
-    its own processes, each of which gets its own full allowance rather than a
-    share of one. A chunk's process tree can therefore reach roughly
-    ``(1 + marker_pdftext_workers) x MARKER_PARSE_MEMORY_LIMIT_MB``, which can
-    still trip the pod-level OOM kill this exists to prevent. Size it as
-    ``pod budget / (1 + marker_pdftext_workers)``, not as the pod budget.
+    The ceiling is per process. Marker runs pdftext with one worker, which
+    extracts text inside the child instead of starting processes, so one ceiling
+    bounds a chunk's whole parse.
 
-    The startup diagnostics below measure only the slot's own child: a pdftext
-    process created by fork inherits the parent's ``VmData`` and its baseline is
-    never reported, so under a tight ceiling it can fail immediately with nothing
-    logged about why.
-
-    Best-effort — a platform without ``RLIMIT_DATA``, or an existing hard limit
+    Best-effort — a platform without ``RLIMIT_DATA``, or an existing limit
     below the request, must not stop the worker from starting.
     """
-    if memory_limit_mb <= 0:
-        return
-    try:
-        # Imported here rather than at module scope: ``resource`` is Unix-only,
-        # and a missing module raises at import time, where the best-effort
-        # contract below cannot catch it.
-        import resource
-
-        limit = memory_limit_mb * 1024 * 1024
-        _, hard = resource.getrlimit(resource.RLIMIT_DATA)
-        if hard != resource.RLIM_INFINITY:
-            limit = min(limit, hard)
-        effective_mb = limit // (1024 * 1024)
-        baseline_mb = _child_vmdata_mb()
-        if baseline_mb is None:
-            logger.info(f"Marker child memory limit set to {effective_mb} MiB (baseline unreadable)")
-        elif effective_mb <= baseline_mb:
-            # Applying it would fail every parse on this child, and with the
-            # recycle on MemoryError each chunk would also respawn the child — so
-            # Marker would churn processes while doing nothing. Keep it working
-            # unbounded and say so loudly instead.
-            logger.error(
-                f"Marker child memory limit {effective_mb} MiB is at or below this child's baseline "
-                f"of {baseline_mb} MiB, so it is NOT applied — this child runs without a ceiling. "
-                f"Raise MARKER_PARSE_MEMORY_LIMIT_MB well above {baseline_mb}, or unset it."
-            )
-            return
-        elif effective_mb - baseline_mb < _MIN_PARSE_HEADROOM_MB:
-            logger.warning(
-                f"Marker child memory limit {effective_mb} MiB leaves only {effective_mb - baseline_mb} MiB "
-                f"above this child's baseline of {baseline_mb} MiB; parses are likely to fail. "
-                f"Consider at least {baseline_mb + _MIN_PARSE_HEADROOM_MB} MiB."
-            )
-        else:
-            logger.info(f"Marker child memory limit set to {effective_mb} MiB (baseline {baseline_mb} MiB)")
-        # Applied last, deliberately. Reading /proc and formatting these lines
-        # can each need an allocation, and a ceiling at or below current VmData
-        # makes any allocation raise MemoryError — which this handler does not
-        # catch and `_worker_init` has no outer handler for, so the pool's
-        # initializer would die with the diagnostics that explain why.
-        resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
-    except (ImportError, ValueError, OSError, AttributeError) as exc:
-        logger.warning(f"Could not apply Marker child memory limit ({memory_limit_mb} MiB): {exc}")
+    apply_parse_memory_limit(
+        memory_limit_mb,
+        process="Marker child",
+        setting="MARKER_PARSE_MEMORY_LIMIT_MB",
+        min_headroom_mb=_MIN_PARSE_HEADROOM_MB,
+    )
 
 
 # Parser-bomb cap: never process more than this many pages from one PDF, so a
@@ -227,8 +176,6 @@ _RECYCLE_CANCEL_RETRY_DELAY = 0.5
 @ray.remote
 class MarkerWorker:
     def __init__(self):
-        import os
-
         from core.config import load_config
         from core.utils.logging import get_logger
 
@@ -242,9 +189,17 @@ class MarkerWorker:
             "output_format": "markdown",
             "paginate_output": True,
             "page_separator": self.page_sep,
-            "pdftext_workers": self.config.loader.marker_pdftext_workers,
-            "disable_multiprocessing": False,
+            # One worker: pdftext extracts in the slot child itself. With more,
+            # it starts processes of its own, which do not die with the child
+            # and each get a full memory ceiling (#1167). The slots already
+            # parse chunks in parallel.
+            "pdftext_workers": 1,
         }
+        if self.config.loader.marker_pdftext_workers > 1:
+            self.logger.warning(
+                f"MARKER_PDFTEXT_WORKERS={self.config.loader.marker_pdftext_workers} is ignored: "
+                "Marker runs pdftext with one worker. Remove the setting."
+            )
         os.environ["RAY_ADDRESS"] = "auto"
 
         # One single-process executor per slot. MarkerPool hands each slot to at
@@ -275,7 +230,7 @@ class MarkerWorker:
         We use ProcessPoolExecutor instead of multiprocessing.Pool because:
         - Ray actors run as daemon processes
         - Pool workers are daemonic by default and cannot spawn children
-        - The pdftext library (used by Marker) internally spawns processes
+        - Libraries used in a parse may start processes of their own
         - ProcessPoolExecutor workers are non-daemon, allowing nested process creation
 
         ``old_executor`` guards against concurrent resets cascading: a timeout
@@ -310,15 +265,19 @@ class MarkerWorker:
             self.executors[slot] = ProcessPoolExecutor(
                 max_workers=1,
                 initializer=self._worker_init,
-                initargs=(self.model_dict, self.config.loader.marker_parse_memory_limit_mb),
+                initargs=(self.model_dict, self.config.loader.marker_parse_memory_limit_mb, os.getpid()),
                 mp_context=mp.get_context("spawn"),
                 max_tasks_per_child=self.config.loader.marker_max_tasks_per_child,
             )
             self.logger.debug(f"MarkerWorker slot {slot} executor ready")
 
     @staticmethod
-    def _worker_init(model_dict, memory_limit_mb: int = 0):
+    def _worker_init(model_dict, memory_limit_mb: int = 0, parent_pid: int | None = None):
         global worker_model_dict
+        # First, so a child whose actor is already gone exits before loading
+        # anything, and one whose actor dies later dies with it (#1167).
+        if parent_pid is not None:
+            tie_to_parent(parent_pid)
         worker_model_dict = model_dict
         # Logged before the ceiling, like `_apply_parse_memory_limit`'s own lines:
         # under a tight limit the log call's allocation could raise MemoryError,
@@ -368,6 +327,12 @@ class MarkerWorker:
         # actually runs instead of being cancelled from outside (#894).
         timeout = self.config.loader.marker_child_timeout
 
+        # Runs on the event loop's default thread pool, whose threads live as
+        # long as the actor. A slot's child is started either here by
+        # ``submit``, or by the executor's manager thread when it replaces a
+        # child after ``max_tasks_per_child``; both threads outlive the child.
+        # The child is tied to the thread that started it (``tie_to_parent``):
+        # a short-lived thread would take the child with it when it ends.
         def run_with_timeout():
             with self._executor_locks[slot]:
                 current_executor = self.executors[slot]
@@ -694,7 +659,10 @@ class MarkerLoader(BasePooledParser):
     """
 
     PAGE_SEP = "[PAGE_SEP]"
-    _PAGE_MARKER_RE = re.compile(r"\{(\d+)\}" + re.escape(PAGE_SEP))
+    # The page is read with int(), which refuses more than 4,300 digits, and the
+    # PDF's own text can contain ``{N}[PAGE_SEP]``: a number no page count reaches
+    # leaves it plain text, as ``PAGE_RE`` does for ``[PAGE_N]``.
+    _PAGE_MARKER_RE = re.compile(r"\{(\d{1,9})\}" + re.escape(PAGE_SEP))
 
     def __init__(self) -> None:
         self.config = load_config()
@@ -726,11 +694,19 @@ class MarkerLoader(BasePooledParser):
                 metadata=dict(document.metadata),
             )
 
+        report_parser_substage("parse.convert", "Converting PDF with Marker")
         async with document.as_temporary_file() as path:
             markdown, images = await self._dispatch(str(path))
 
-        pages = self._split_pages(markdown)
-        image_blocks = self._build_image_blocks(images)
+        # PNG-encoding every figure of a large PDF takes seconds of pure CPU; on
+        # the loop it starves the lease renewals of every other file on this worker.
+        # A timeout or cancel cannot interrupt the thread; the event tells it to stop.
+        cancelled = threading.Event()
+        try:
+            pages, image_blocks = await asyncio.to_thread(self._postprocess, markdown, images, cancelled)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
         text_blocks = [TextBlock(text=text, page_number=page) for page, text in pages]
 
         return ProcessedDocument(
@@ -743,6 +719,11 @@ class MarkerLoader(BasePooledParser):
 
     # ----- helpers -----
 
+    def _postprocess(
+        self, markdown: str, images: dict, cancelled: threading.Event
+    ) -> tuple[list[tuple[int, str]], list[ImageBlock]]:
+        return self._split_pages(markdown), self._build_image_blocks(images, cancelled)
+
     async def _convert_pdf(self, file_path: str):
         pool = self._pool()
         try:
@@ -752,10 +733,10 @@ class MarkerLoader(BasePooledParser):
                 task_description=f"MarkerLoader PDF loading ({file_path})",
             )
         except Exception as exc:
-            # A task's failure reason is read from the top exception only, and
-            # here that is the Ray wrapper's generic RuntimeError — the same text
-            # as a corrupt PDF or a crash. Name the memory failure, and the
-            # setting that decides it, so an admin can act from the jobs view.
+            # The Ray wrapper's message names the remote cause, but only as
+            # "MemoryError" at the end of a chain of task names. Name the memory
+            # failure up front, and the setting that decides it, so an admin
+            # can act from the jobs view.
             if not caused_by(exc, MemoryError):
                 raise
             raise MemoryError(self._out_of_memory_message()) from exc
@@ -783,7 +764,7 @@ class MarkerLoader(BasePooledParser):
             raise
 
     @staticmethod
-    def _build_image_blocks(images: dict) -> list[ImageBlock]:
+    def _build_image_blocks(images: dict, cancelled: threading.Event | None = None) -> list[ImageBlock]:
         """Convert Marker's ``{key: PIL_image}`` dict into ``ImageBlock``s.
 
         Each block records the ``![](key)`` markdown ref in
@@ -792,22 +773,31 @@ class MarkerLoader(BasePooledParser):
         number is parsed from Marker's key format
         (``_page_{N}_Picture_{i}.{ext}``) and stored 1-indexed to match
         the ``[PAGE_N]`` markers in the post-processed markdown.
+
+        ``cancelled`` is checked before each image: once set, the caller has
+        gone and the result is discarded, so encoding stops early.
         """
         blocks: list[ImageBlock] = []
-        for key, pil_image in images.items():
+        total = len(images)
+        if total:
+            report_parser_substage("parse.images", "Extracting images", progress=0, total=total)
+        for index, (key, pil_image) in enumerate(images.items(), start=1):
+            if cancelled is not None and cancelled.is_set():
+                break
             try:
                 png_bytes = pil_to_png_bytes(pil_image)
             except Exception as exc:
                 logger.warning(f"Failed to encode Marker image {key}: {exc}")
-                continue
-            blocks.append(
-                ImageBlock(
-                    image_bytes=png_bytes,
-                    page_number=_marker_key_to_page(str(key)),
-                    mime_type="image/png",
-                    metadata={"markdown_ref": f"![]({key})", "marker_key": str(key)},
+            else:
+                blocks.append(
+                    ImageBlock(
+                        image_bytes=png_bytes,
+                        page_number=_marker_key_to_page(str(key)),
+                        mime_type="image/png",
+                        metadata={"markdown_ref": f"![]({key})", "marker_key": str(key)},
+                    )
                 )
-            )
+            report_parser_substage("parse.images", "Extracting images", progress=index, total=total)
         return blocks
 
     @classmethod
@@ -831,18 +821,28 @@ class MarkerLoader(BasePooledParser):
             markdown = markdown.split(cls.PAGE_SEP, 1)[1]
         markdown = markdown.replace("<br>", "")
 
+        matches = list(cls._PAGE_MARKER_RE.finditer(markdown))
+        has_trailing_page = bool(markdown[matches[-1].end() :].strip()) if matches else bool(markdown.strip())
+        total_pages = len(matches) + int(has_trailing_page and bool(matches))
+        if not matches and markdown.strip():
+            total_pages = 1
+        if total_pages:
+            report_parser_substage("parse.text", "Extracting page text", progress=0, total=total_pages)
+
         pairs: list[tuple[int, str]] = []
         cursor = 0
         last_page = 0
-        for match in cls._PAGE_MARKER_RE.finditer(markdown):
+        for index, match in enumerate(matches, start=1):
             page = int(match.group(1))
             text = markdown[cursor : match.start()].strip()
             pairs.append((page, text))
             cursor = match.end()
             last_page = page
+            report_parser_substage("parse.text", "Extracting page text", progress=index, total=total_pages)
         tail = markdown[cursor:].strip()
         if tail:
             pairs.append((last_page + 1, tail))
+            report_parser_substage("parse.text", "Extracting page text", progress=len(pairs), total=total_pages)
         elif not pairs and markdown.strip():
             pairs.append((1, markdown.strip()))
         return pairs

@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { getMyInfo, type MyInfo } from "./api/account";
-import { apiUrl, TOKEN_KEY } from "./api/client";
+import { apiUrl, isTokenRejection, TOKEN_KEY } from "./api/client";
 
 const CHAINLIT_LOGOUT_COOKIE_NAME = "openrag_chainlit_logout";
 const CHAINLIT_LOGOUT_SIGNAL_HEADER = "x-openrag-chainlit-logout-signal";
@@ -61,7 +61,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isAdmin: boolean;
   isLoading: boolean;
-  /** Store a bearer token and resolve identity; throws if the token is invalid. */
+  /** Store a bearer token and resolve identity; rejected tokens are cleared, transient failures remain retryable. */
   loginWithToken: (token: string) => Promise<void>;
   /**
    * Clear local auth state. Returns `true` when this was an OIDC/SSO session
@@ -121,7 +121,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       setUser(await getMyInfo());
     } catch (e) {
-      localStorage.removeItem(TOKEN_KEY);
+      // The API client already clears 401s; token mode uses 403 for "Invalid token".
+      if (isTokenRejection(e)) localStorage.removeItem(TOKEN_KEY);
       setUser(null);
       throw e;
     }

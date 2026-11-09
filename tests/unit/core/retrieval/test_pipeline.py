@@ -20,6 +20,7 @@ class FakeRetriever(Retriever):
         self.expand_input: list[Chunk] | None = None
         self.expand_result: list[Chunk] | None = None
         self.expand_filter_params: dict | None = None
+        self.expand_filter: str | None = None
         self.expansion_enabled = expansion_enabled
 
     async def retrieve(self, partition, query, filter=None, filter_params=None, trace=None):
@@ -36,9 +37,10 @@ class FakeRetriever(Retriever):
             return self.results_queue.pop(0)
         return []
 
-    async def expand_search_results(self, results, filter_params=None):
+    async def expand_search_results(self, results, filter_params=None, filter=None):
         self.expand_input = list(results)
         self.expand_filter_params = filter_params
+        self.expand_filter = filter
         return list(self.expand_result) if self.expand_result is not None else list(results)
 
 
@@ -79,6 +81,32 @@ async def test_retrieve_docs_temporal_filter_passed_through():
     )
     await p.retrieve_docs(partition=["p1"], query=q)
     assert "created_at" in r.calls[0]["filter"]
+
+
+@pytest.mark.asyncio
+async def test_expansion_receives_the_filter_the_search_used():
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [_chunks("a")]
+    p = RetrieverPipeline(retriever=r)
+    q = Query(
+        query="hi",
+        temporal_filters=[TemporalPredicate(operator=">=", value="2026-01-01T00:00:00+00:00")],
+    )
+    await p.retrieve_docs(partition=["p1"], query=q)
+    assert r.expand_filter == r.calls[0]["filter"]
+
+
+@pytest.mark.asyncio
+async def test_expansion_follows_filterless_fallback():
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [[], _chunks("a")]
+    p = RetrieverPipeline(retriever=r, allow_filterless_fallback=True)
+    q = Query(
+        query="hi",
+        temporal_filters=[TemporalPredicate(operator=">=", value="2026-01-01T00:00:00+00:00")],
+    )
+    await p.retrieve_docs(partition=["p1"], query=q)
+    assert r.expand_filter is None
 
 
 @pytest.mark.asyncio
@@ -310,6 +338,29 @@ async def test_no_score_at_all_when_reranker_disabled():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_docs_orders_csv_continuations_after_reranking():
+    r = FakeRetriever()
+    r.results_queue = [
+        [
+            Chunk(
+                id=f"part-{part}",
+                text=f"part {part}",
+                document_id="file-1",
+                partition="p1",
+                metadata={"csv_row_number": 30, "csv_part": part, "csv_parts_total": 3},
+            )
+            for part in (1, 2, 3)
+        ]
+    ]
+
+    out = await RetrieverPipeline(retriever=r, reranker=FakeReranker()).retrieve_docs(
+        partition=["p1"], query=Query(query="final value")
+    )
+
+    assert [chunk.id for chunk in out] == ["part-1", "part-2", "part-3"]
+
+
+@pytest.mark.asyncio
 async def test_reranking_does_not_mutate_the_retriever_s_chunks():
     """The score lands on a new object. The same chunk is reranked twice on the
     expansion path and, on the multi-query path, once per sub-query against a
@@ -354,7 +405,7 @@ async def test_retrieve_docs_expansion_path_re_reranks():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_reranker", [False, True])
-async def test_expansion_trace_marks_candidates_outside_seed_limit(with_reranker):
+async def test_regular_expansion_trace_marks_candidates_outside_seed_limit(with_reranker):
     candidate_ids = [f"c{index}" for index in range(10)]
     seed_ids = ["c9", "c8", "c7"] if with_reranker else ["c0", "c1", "c2"]
     retriever = FakeRetriever(expansion_enabled=True)
@@ -380,6 +431,65 @@ async def test_expansion_trace_marks_candidates_outside_seed_limit(with_reranker
         if candidate.removal_reason is not None and candidate.removal_reason.code == "expansion_top_n"
     } == set(candidate_ids) - set(seed_ids)
     assert {candidate.id for candidate in trace.stages["post_expansion"].candidates} == set(seed_ids) | {"related"}
+
+
+@pytest.mark.asyncio
+async def test_csv_sibling_expansion_keeps_ranked_non_seed_candidates():
+    seed = Chunk(
+        id="csv-seed",
+        text="first column group",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 7, "csv_column_group": 1, "csv_column_groups_total": 2},
+    )
+    sibling = Chunk(
+        id="csv-sibling",
+        text="second column group",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 7, "csv_column_group": 2, "csv_column_groups_total": 2},
+    )
+    retriever = FakeRetriever()
+    retriever.results_queue = [[seed, *_chunks("other-1", "other-2")]]
+    retriever.expand_result = [seed, sibling]
+    pipeline = RetrieverPipeline(retriever=retriever, reranker_top_k=1)
+
+    result = await pipeline.retrieve_docs(partition=["p1"], query=Query(query="hi"))
+
+    assert [chunk.id for chunk in result] == ["csv-seed", "csv-sibling", "other-1", "other-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("top_k", "expected_ids"),
+    [
+        (None, ["pdf-1", "pdf-2", "csv-seed", "csv-sibling"]),
+        (2, ["pdf-1", "pdf-2"]),
+    ],
+)
+async def test_csv_sibling_expansion_preserves_seed_rank_without_reranking(top_k, expected_ids):
+    seed = Chunk(
+        id="csv-seed",
+        text="first column group",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 7, "csv_column_group": 1, "csv_column_groups_total": 2},
+    )
+    sibling = Chunk(
+        id="csv-sibling",
+        text="second column group",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 7, "csv_column_group": 2, "csv_column_groups_total": 2},
+    )
+    retriever = FakeRetriever()
+    retriever.results_queue = [[*_chunks("pdf-1", "pdf-2"), seed]]
+    retriever.expand_result = [seed, sibling]
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    result = await pipeline.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=top_k)
+
+    assert [chunk.id for chunk in result] == expected_ids
 
 
 @pytest.mark.asyncio

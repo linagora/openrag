@@ -50,6 +50,8 @@ def _config(
         image_captioning=image_captioning,
         openai=openai,
         transcriber=transcriber,
+        xlsx_batch_size=512,
+        xlsx_limits={"max_batch_bytes": 1024},
     )
     vlm = SimpleNamespace(
         base_url=vlm_base_url,
@@ -82,6 +84,8 @@ class _FakeParser:
         ("a.docx", DocumentType.DOCX, "docx"),
         ("a.doc", DocumentType.DOC, "doc"),
         ("a.pptx", DocumentType.PPTX, "pptx"),
+        ("a.xlsx", DocumentType.XLSX, "xlsx"),
+        ("a.xlsm", DocumentType.XLSX, "xlsx"),
         ("a.eml", DocumentType.EML, "eml"),
         ("a.png", DocumentType.IMAGE, "image"),
         ("a.svg", DocumentType.IMAGE, "image"),
@@ -95,9 +99,7 @@ class _FakeParser:
 )
 def test_resolve_backend(filename: str, content_type: DocumentType, expected_backend: str) -> None:
     disp = ParserDispatcher(_config())
-    from services.workers.parsers.parser_dispatcher import _suffix
-
-    assert disp._resolve_backend(content_type, _suffix(filename)) == expected_backend
+    assert disp._resolve_backend(content_type, Document.type_extension(filename)) == expected_backend
 
 
 def test_resolve_pdf_backend_variants() -> None:
@@ -109,6 +111,21 @@ def test_resolve_pdf_backend_variants() -> None:
 def test_resolve_audio_backend_openai() -> None:
     disp = ParserDispatcher(_config(audio="OpenAIAudioLoader"))
     assert disp._resolve_audio_backend("mp3") == "audio_client"
+
+
+def test_xlsx_builder_passes_streaming_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.parsers.parser_dispatcher as dispatcher
+
+    monkeypatch.setattr(dispatcher, "_create", lambda module, name, **kwargs: (module, name, kwargs))
+
+    module, name, kwargs = ParserDispatcher(_config())._build("xlsx")
+
+    assert module == "core.indexing.parsers.tabular.xlsx_parser"
+    assert name == "xlsx"
+    assert kwargs == {
+        "batch_size": 512,
+        "limits": {"max_batch_bytes": 1024},
+    }
 
 
 def test_audio_client_receives_live_transcription_prompt_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,3 +408,37 @@ async def test_a_pool_that_never_completes_still_seeds_the_watchdog_once(monkeyp
             await disp.parse(_text_document())
 
     assert stamped == ["text"]
+
+
+def test_building_the_dispatcher_leaves_pymupdf_on_its_thread():
+    """The API replicas build this dispatcher for the direct-extract path. Only
+    the indexer worker gives PyMuPDF its process pool (``configure_pymupdf_pool``),
+    so building a dispatcher — and the PyMuPDF parser in it — must not."""
+    from core.indexing.parsers.pdf import pymupdf as pymupdf_mod
+    from services.workers.parsers.parser_dispatcher import build_parser_dispatcher
+
+    # A config that asks for a pool, so pushing it from here would show.
+    config = _config()
+    config.loader.pymupdf_pool_size = 2
+    config.loader.pymupdf_parse_memory_limit_mb = 512
+    config.loader.pymupdf_max_tasks_per_child = 7
+    pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())
+    disp = build_parser_dispatcher(config)
+    disp._get("pymupdf")
+
+    assert pymupdf_mod._POOL_SETTINGS == pymupdf_mod.PyMuPDFPoolSettings()
+    assert pymupdf_mod._get_pool().uses_processes is False
+
+
+def test_configure_pymupdf_pool_pushes_the_loader_settings():
+    from core.indexing.parsers.pdf import pymupdf as pymupdf_mod
+    from services.workers.parsers.parser_dispatcher import configure_pymupdf_pool
+
+    loader = SimpleNamespace(pymupdf_pool_size=3, pymupdf_parse_memory_limit_mb=512, pymupdf_max_tasks_per_child=7)
+    try:
+        configure_pymupdf_pool(SimpleNamespace(loader=loader))
+        assert pymupdf_mod._POOL_SETTINGS == pymupdf_mod.PyMuPDFPoolSettings(
+            max_workers=3, memory_limit_mb=512, max_tasks_per_child=7
+        )
+    finally:
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())

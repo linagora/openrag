@@ -392,6 +392,78 @@ git show "$VER:infra/charts/openrag-stack/Chart.yaml" | grep -E '^version:'
 
 **PASS**: `step 8 PASS`, and chart `version` moved.
 
+## 9. The GitHub Release itself is correctly formed
+
+Run this once the GitHub Release is published, after steps 1-8 pass: the
+Release comes last (rule 3 below), so before then this step fails.
+
+Steps 1-8 verify what was *built*. Nothing so far looks at the Release object
+users actually land on. v2.2.0 was published displaying
+`Merge pull request #895 from linagora/release/v2.2.0` — the release merge
+commit's subject — as its title, and corrected by hand minutes later. Nothing
+caught it: the title is only right when someone happens to notice.
+
+The convention is a title that is the tag: **always pass `--title "$VER"`**,
+however the notes are written. Run non-interactively, `gh release create` sets
+no title unless `--title` or `--generate-notes` is passed, and an untitled
+release displays whatever GitHub falls back to — the tag, sometimes followed by
+the tagged commit's subject. This step rejects an untitled release either way.
+
+```bash
+gh release view "${VER:?set VER to the release tag first}" -R linagora/openrag \
+  --json name,tagName,isDraft,isPrerelease,body \
+  --jq '{name, tag: .tagName, draft: .isDraft, prerelease: .isPrerelease, notes: (.body|gsub("\\s"; "")|length)}'
+```
+
+A hard gate:
+
+```bash
+fail=0
+rel=$(gh release view "${VER:?set VER to the release tag first}" -R linagora/openrag \
+  --json name,tagName,isDraft,isPrerelease,body) || {
+  echo "FAIL  could not read the GitHub Release for $VER (see the error above)" >&2; exit 1; }
+
+# The title must be the tag, optionally followed by a space and a description
+# (v2.0.0 is "v2.0.0 — Hexagonal architecture"). A commit subject, an empty
+# title, "v2.0.0-rc.1" or "v2.0.01" fails; the tag check below is what pins the
+# version, so a description is not checked.
+name=$(printf '%s' "$rel" | jq -r '.name')
+case "$name" in
+  "$VER"|"$VER "*) echo "OK    title=$name" ;;
+  *) echo "FAIL  title=${name:-<empty>} (want $VER)"; fail=1 ;;
+esac
+
+[ "$(printf '%s' "$rel" | jq -r '.tagName')" = "$VER" ] \
+  && echo "OK    tag=$VER" || { echo "FAIL  tag mismatch"; fail=1; }
+
+[ "$(printf '%s' "$rel" | jq -r '.isDraft')" = "false" ] \
+  && echo "OK    published (not a draft)" || { echo "FAIL  still a draft"; fail=1; }
+
+# A GA release marked prerelease is excluded from "latest" and from most tooling.
+[ "$(printf '%s' "$rel" | jq -r '.isPrerelease')" = "false" ] \
+  && echo "OK    not flagged prerelease" || { echo "FAIL  GA release flagged as prerelease"; fail=1; }
+
+# Counts non-blank characters, so a body of spaces or newlines does not pass.
+# 200, not 0: a body of "." passes a >0 check while telling a user nothing.
+# Real notes are far longer (non-blank: v2.2.1 623, v2.2.2 709, v2.3.1 2270,
+# v2.3.0 11384), so this trips empty or near-empty bodies. It does not prove the
+# notes were edited: an unedited --generate-notes body listing one PR passes.
+n=$(printf '%s' "$rel" | jq -r '.body | gsub("\\s"; "") | length')
+[ "$n" -gt 200 ] \
+  && echo "OK    release notes present ($n non-blank chars)" \
+  || { echo "FAIL  release notes empty or near-empty ($n non-blank chars)"; fail=1; }
+
+[ "$fail" -eq 0 ] && echo "step 9 PASS" || { echo "step 9 FAIL" >&2; exit 1; }
+```
+
+**PASS**: `step 9 PASS`.
+
+Fixing a bad title needs no rebuild and no retag — it is metadata only:
+
+```bash
+gh release edit "$VER" -R linagora/openrag --title "$VER"
+```
+
 ---
 
 ## What v2.0.1 actually did, and the rules that follow

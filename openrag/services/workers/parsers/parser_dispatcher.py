@@ -20,6 +20,7 @@ from typing import Any
 
 from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.parsers.document_parser import DocumentParser
+from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.observability.ray_metrics import record_parse_completion, seed_parse_watchdog
@@ -59,6 +60,8 @@ _EML_ATTACHMENT_TYPES: dict[str, DocumentType] = {
     "htm": DocumentType.HTML,
     "eml": DocumentType.EML,
     "docx": DocumentType.DOCX,
+    "xlsx": DocumentType.XLSX,
+    "xlsm": DocumentType.XLSX,
     "doc": DocumentType.DOC,
     "pptx": DocumentType.PPTX,
     "pdf": DocumentType.PDF,
@@ -99,7 +102,8 @@ class ParserDispatcher(DocumentParser):
         return [doc_type.value for doc_type in DocumentType]
 
     async def parse(self, document: Document) -> ProcessedDocument:
-        backend = self._resolve_backend(document.content_type, _suffix(document.filename))
+        ext = Document.type_extension(document.filename, document.metadata.get("mimetype"))
+        backend = self._resolve_backend(document.content_type, ext)
         return await self._parse_with(backend, document)
 
     async def _parse_with(self, backend: str, document: Document) -> ProcessedDocument:
@@ -117,6 +121,13 @@ class ParserDispatcher(DocumentParser):
         completes a parse still has a stamp to age from.
         """
         seed_parse_watchdog(backend)
+        labels = {
+            "pymupdf": "Reading PDF with PyMuPDF",
+            "pdf_client": "Parsing PDF with the configured service",
+            "local_whisper": "Transcribing audio locally",
+            "audio_client": "Transcribing audio with the configured service",
+        }
+        report_parser_substage("parse.backend", labels.get(backend, f"Parsing with {backend}"))
         processed = await self._get(backend).parse(document)
         record_parse_completion(backend)
         return processed
@@ -135,6 +146,12 @@ class ParserDispatcher(DocumentParser):
                 f"Unsupported PDF parsing strategy {strategy!r}; expected one of {sorted(_PDF_BACKEND_NAMES)}"
             )
         return _PdfStrategyParser(self, strategy)
+
+    def resolve(self, document: Document) -> DocumentParser:
+        """Return the concrete parser (does not require parsing the document)."""
+        ext = Document.type_extension(document.filename, document.metadata.get("mimetype"))
+        backend = self._resolve_backend(document.content_type, ext)
+        return self._get(backend)
 
     # ----- backend resolution -----
 
@@ -253,6 +270,27 @@ class ParserDispatcher(DocumentParser):
         return _create("core.indexing.parsers.audio.client_based", "audio_client", client=client)
 
 
+def configure_pymupdf_pool(config) -> None:
+    """Give PyMuPDF its configured process pool in *this* process.
+
+    Called by the indexer worker only. The API replicas build the same
+    dispatcher for the direct-extract path and keep the one dedicated thread:
+    there a spawned child would start on the loop that serves ``/health_check``.
+    ``core`` never reads config, so the numbers are pushed in. Idempotent:
+    identical settings leave a running pool alone.
+    """
+    from core.indexing.parsers.pdf.pymupdf import PyMuPDFPoolSettings, configure_pool
+
+    loader = config.loader
+    configure_pool(
+        PyMuPDFPoolSettings(
+            max_workers=loader.pymupdf_pool_size,
+            memory_limit_mb=loader.pymupdf_parse_memory_limit_mb,
+            max_tasks_per_child=loader.pymupdf_max_tasks_per_child,
+        )
+    )
+
+
 class _PdfStrategyParser(DocumentParser):
     """Force a specific PDF backend (a preset's ``parsing_strategy``) for PDF
     documents, delegating every other content type to the shared dispatcher so
@@ -264,6 +302,11 @@ class _PdfStrategyParser(DocumentParser):
 
     def supported_types(self) -> list[str]:
         return self._dispatcher.supported_types()
+
+    def resolve(self, document: Document) -> DocumentParser:
+        if document.content_type is DocumentType.PDF:
+            return self._dispatcher._get(self._pdf_backend)
+        return self._dispatcher.resolve(document)
 
     async def parse(self, document: Document) -> ProcessedDocument:
         if document.content_type is DocumentType.PDF:
@@ -286,12 +329,19 @@ _BUILDERS: dict[str, Any] = {
     "local_whisper": lambda d: d._build_local_whisper(),
     "pdf_client": lambda d: d._build_pdf_client(),
     "audio_client": lambda d: d._build_audio_client(),
+    "csv": lambda d: _create(
+        "core.indexing.parsers.tabular.csv_parser",
+        "csv",
+        batch_size=d._config.loader.csv_batch_size,
+        delimiter=d._config.loader.csv_delimiter,
+    ),
+    "xlsx": lambda d: _create(
+        "core.indexing.parsers.tabular.xlsx_parser",
+        "xlsx",
+        batch_size=d._config.loader.xlsx_batch_size,
+        limits=d._config.loader.xlsx_limits,
+    ),
 }
-
-
-def _suffix(filename: str) -> str:
-    """Lowercased extension without the dot (``"report.PDF"`` → ``"pdf"``)."""
-    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
 def _configured_audio_loader(config: Any, ext: str) -> str | None:
@@ -300,12 +350,12 @@ def _configured_audio_loader(config: Any, ext: str) -> str | None:
     return getattr(file_loaders, ext, None) or getattr(file_loaders, "mp3", None) or getattr(file_loaders, "wav", None)
 
 
-def routes_to_openai_audio_loader(config: Any, filename: str) -> bool:
+def routes_to_openai_audio_loader(config: Any, filename: str, mimetype: str | None = None) -> bool:
     """Whether indexing ``filename`` can invoke the managed STT resolver."""
-    content_type = Document.detect_content_type(filename)
+    content_type = Document.detect_content_type(filename, mimetype)
     if content_type not in {DocumentType.AUDIO, DocumentType.VIDEO}:
         return False
-    return _configured_audio_loader(config, _suffix(filename)) == "OpenAIAudioLoader"
+    return _configured_audio_loader(config, Document.type_extension(filename, mimetype)) == "OpenAIAudioLoader"
 
 
 def _build_vlm(base_url: str, model: str, api_key: str, timeout: float, enable_thinking: bool | None = None) -> Any:

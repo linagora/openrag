@@ -43,6 +43,7 @@ from typing import Any
 from core.chunking.markdown_utils import (
     PAGE_RE,
     MDElement,
+    attach_captions,
     chunk_table,
     split_md_elements,
 )
@@ -203,6 +204,8 @@ class _Unit:
     page_marks: list[tuple[int, int]] = field(default_factory=list)
     chunk_type: ChunkType = ChunkType.TEXT
     atomic: bool = False  # table / image — never merged into prose, never split by us
+    metadata: dict[str, Any] = field(default_factory=dict)
+    caption: str = ""  # leads ``text``; repeated on every piece of a split table
 
     @property
     def start_page(self) -> int | None:
@@ -225,7 +228,6 @@ class StructuredSectionChunker(BaseChunker):
         inline_threshold: int | None = None,
         heading_keywords: tuple[str, ...] | list[str] | None = None,
         leaf_patterns: tuple[str, ...] | list[str] | None = None,
-        prepend_heading_path: bool = True,
         layout: str = "flowing",
         **kwargs: Any,
     ) -> None:
@@ -272,7 +274,6 @@ class StructuredSectionChunker(BaseChunker):
         # surrounding prose instead of becoming standalone chunks (matches the
         # recursive chunker's inline threshold).
         self._inline_threshold = inline_threshold if inline_threshold is not None else _INLINE_ELEMENT_TOKEN_THRESHOLD
-        self.prepend_heading_path = prepend_heading_path
         self.layout = layout
 
         keywords = tuple(k.lower() for k in (heading_keywords or _DEFAULT_HEADING_KEYWORDS))
@@ -287,6 +288,9 @@ class StructuredSectionChunker(BaseChunker):
     # ChunkingStrategy contract
     # ------------------------------------------------------------------
     def chunk(self, document: ProcessedDocument, partition: str = "default") -> list[Chunk]:
+        workbook_chunks = self._chunk_workbook_blocks(document, partition)
+        if workbook_chunks is not None:
+            return workbook_chunks
         content = self._content_from(document)
         if not content.strip():
             return []
@@ -295,7 +299,15 @@ class StructuredSectionChunker(BaseChunker):
         filename = str(metadata.get("filename") or metadata.get("source") or "")
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
-        units = self._page_units(content) if paginated else self._build_units(content)
+        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells":
+            units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
+        else:
+            units = self._page_units(content) if paginated else self._build_units(content)
+        csv_metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
+        if csv_metadata:
+            for unit in units:
+                if unit.chunk_type is ChunkType.TABLE:
+                    unit.metadata.update(csv_metadata)
         candidates = self._single_chunk(units, filename)
         if candidates is None:
             candidates = self._pack(units, filename)
@@ -307,29 +319,18 @@ class StructuredSectionChunker(BaseChunker):
             if not paginated:
                 candidates = self._merge_small(candidates, filename)
 
+        # An XLSX table unit's metadata is a complete copy of the block's that
+        # chunk_table scoped to the unit's rows and columns. Spreading the block
+        # metadata under it would bring back keys the unit dropped (whole-table
+        # formula/format groups, a detached worksheet context, table columns on
+        # a worksheet-note chunk).
+        xlsx_table = metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells"
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
-            # ``_build_units`` never emits a heading line as body — it updates
-            # the stack and continues, so a heading can't be stranded as an
-            # orphan chunk. That makes the header the *only* path by which
-            # heading text reaches the index. With ``prepend_heading_path``
-            # off, the breadcrumb is therefore kept inline at the top of the
-            # body instead of dropped: BM25 is declared over ``text`` alone, so
-            # a heading living only in ``metadata["hierarchy_path"]`` is
-            # unreachable by dense *and* sparse retrieval. The flag drops the
-            # verbose ``[Source | Page | Section]`` preamble, which is what an
-            # operator turning it off is asking for — not the document's
-            # structure.
+            base = unit.metadata if xlsx_table and unit.metadata else metadata
             header = self._build_header(filename, unit.heading_path, unit.pages)
             body = unit.text.strip()
-            if self.prepend_heading_path:
-                text = f"{header}\n\n{body}" if header else body
-            else:
-                # No breadcrumb fallback needed any more — the heading lines are
-                # in the body themselves, so turning the preamble off no longer
-                # removes the document's structure from the index.
-                text = body
-                header = ""
+            text = f"{header}\n\n{body}" if header else body
             chunks.append(
                 Chunk(
                     document_id=metadata.get("file_id", ""),
@@ -342,10 +343,11 @@ class StructuredSectionChunker(BaseChunker):
                     header=header or None,
                     content=body,
                     metadata={
-                        **{k: v for k, v in metadata.items() if k not in ("file_id", "partition")},
+                        **{k: v for k, v in base.items() if k not in ("file_id", "partition")},
                         "hierarchy_path": list(unit.heading_path),
                         "section_title": unit.heading_path[-1] if unit.heading_path else "",
                         "page_range": _page_range(unit.pages),
+                        **({} if base is unit.metadata else unit.metadata),
                     },
                 )
             )
@@ -512,7 +514,13 @@ class StructuredSectionChunker(BaseChunker):
             buf_len = 0
             buf_has_body = False
 
-        for element in split_md_elements(content):
+        # A placeholder image takes no caption: one beside it stays in the text
+        # instead of moving onto a neighbouring block it does not label.
+        elements = attach_captions(
+            split_md_elements(content),
+            takes_caption=lambda e: e.type != "image" or not is_placeholder_image(e.content),
+        )
+        for element in elements:
             if element.type in ("table", "image"):
                 # Non-informative images (the captioner's "[Image Placeholder]")
                 # are dropped, matching the recursive chunker — otherwise every
@@ -573,8 +581,7 @@ class StructuredSectionChunker(BaseChunker):
                     # it only in the breadcrumb made the breadcrumb its sole
                     # home, so every path-shortening step deleted it outright:
                     # _merge_small taking a _common_prefix dropped the differing
-                    # leaf, a sibling heading popped it before any body flushed,
-                    # and prepend_heading_path=False removed the last copy.
+                    # leaf, and a sibling heading popped it before any body flushed.
                     # Coverage against the source ran 91-99% where
                     # recursive_splitter ran ~100%.
                     #
@@ -625,6 +632,8 @@ class StructuredSectionChunker(BaseChunker):
             pages={element.page_number or page},
             chunk_type=ctype,
             atomic=True,
+            metadata=dict(element.metadata or {}),
+            caption=element.caption,
         )
 
     def _heading(self, line: str) -> tuple[int, str] | None:
@@ -709,8 +718,6 @@ class StructuredSectionChunker(BaseChunker):
         the filename is long, and the body then overshoots ``max`` by exactly
         the amount the estimate missed.
         """
-        if not self.prepend_heading_path:
-            return 0
         header = self._build_header(filename, heading_path, pages)
         return self.length_function(f"{header}\n\n") if header else 0
 
@@ -739,18 +746,29 @@ class StructuredSectionChunker(BaseChunker):
             # then replayed instead of the column header, leaving every
             # continuation piece a wall of unlabelled numbers. Split the table
             # alone and re-attach the heading to the first piece, which is the
-            # one it introduces.
+            # one it introduces. A caption labels the whole table, so it goes
+            # back on every piece and counts against each piece's budget.
             lead, table_text = _split_leading_headings(unit.text)
-            element = MDElement(type="table", content=table_text, page_number=unit.start_page)
-            subs = chunk_table(element, chunk_size=emax, length_function=self.length_function)
+            caption = f"{unit.caption}\n\n" if unit.caption else ""
+            element = MDElement(
+                type="table",
+                content=table_text.removeprefix(caption),
+                page_number=unit.start_page,
+                metadata=unit.metadata,
+            )
+            subs = chunk_table(
+                element, chunk_size=emax - self.length_function(caption), length_function=self.length_function
+            )
             pieces = [
                 _Unit(
                     heading_path=list(unit.heading_path),
-                    text=s.content.strip(),
-                    tokens=self.length_function(s.content),
+                    text=f"{caption}{s.content.strip()}",
+                    tokens=self.length_function(f"{caption}{s.content}"),
                     pages={s.page_number} if s.page_number else set(unit.pages),
-                    chunk_type=ChunkType.TABLE,
+                    # XLSX worksheet notes split from a table are prose.
+                    chunk_type=ChunkType.TEXT if s.type == "text" else ChunkType.TABLE,
                     atomic=True,
+                    metadata=dict(s.metadata or {}),
                 )
                 for s in subs
             ]
@@ -780,13 +798,10 @@ class StructuredSectionChunker(BaseChunker):
         partition pointing at a small-context embedder gets a tighter bound.
         ``None`` disables the net entirely.
 
-        Tables are never force-split even above the bound: ``chunk_table``
-        already divides them losslessly on row boundaries, replaying the column
-        header. What reaches here is a single row too large to divide, and
-        cutting it mid-sentence yields a fragment that is neither a valid row
-        nor carries its headers. A physical-row fallback was measured and made
-        things worse — over-max chunks 113 → 80 but total excess tokens doubled
-        (16.6k → 33.3k), duplication 1.75% → 2.79%, orphan headings 5 → 22.
+        Tables are never force-split here. ``chunk_table`` already divides
+        regular Markdown tables on row boundaries and CSV tables can divide an
+        oversized cell into labelled continuation rows. Any remaining table is
+        left intact rather than sliced into a fragment without its headers.
         """
         if self.hard_max_tokens is None:
             return units
@@ -913,6 +928,11 @@ class StructuredSectionChunker(BaseChunker):
         out (a table glued to unrelated prose loses the column headers that make
         it readable) and the heading paths must be compatible.
         """
+        # CSV chunks carry row and continuation identifiers that must describe
+        # exactly one emitted table fragment.  Absorbing two rows would retain
+        # only ``prev.metadata`` and make those identifiers incorrect.
+        if "csv_row_start" in prev.metadata or "csv_row_start" in unit.metadata:
+            return False
         if prev.tokens >= self.min_tokens and unit.tokens >= self.min_tokens:
             return False
         # Never fold a heading-only unit into the chunk before it: the heading
@@ -1038,6 +1058,7 @@ def _copy_unit(unit: _Unit) -> _Unit:
         pages=set(unit.pages),
         chunk_type=unit.chunk_type,
         atomic=unit.atomic,
+        metadata=dict(unit.metadata),
     )
 
 

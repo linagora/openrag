@@ -160,12 +160,35 @@ class CatalogSearcher(RetrievalSearcher):
             await self._searcher.get_surrounding_chunks(chunks=chunks, allowed_file_ids=allowed_file_ids)
         )
 
+    async def get_csv_row_chunks(
+        self,
+        partition: str,
+        file_id: str,
+        row_number: int,
+        limit: int = 10,
+        allowed_file_ids: list[str] | None = None,
+        table_id: str | None = None,
+        filter: str | None = None,
+    ) -> list[Chunk]:
+        return await self._filter(
+            await self._searcher.get_csv_row_chunks(
+                partition=partition,
+                file_id=file_id,
+                row_number=row_number,
+                limit=limit,
+                allowed_file_ids=allowed_file_ids,
+                table_id=table_id,
+                filter=filter,
+            )
+        )
+
     async def get_related_chunks(
         self,
         partition: str,
         relationship_id: str,
         limit: int,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         return await self._filter(
             await self._searcher.get_related_chunks(
@@ -173,6 +196,7 @@ class CatalogSearcher(RetrievalSearcher):
                 relationship_id=relationship_id,
                 limit=limit,
                 allowed_file_ids=allowed_file_ids,
+                filter=filter,
             )
         )
 
@@ -183,6 +207,7 @@ class CatalogSearcher(RetrievalSearcher):
         limit: int,
         max_ancestor_depth: int | None = None,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         return await self._filter(
             await self._searcher.get_ancestor_chunks(
@@ -191,6 +216,7 @@ class CatalogSearcher(RetrievalSearcher):
                 limit=limit,
                 max_ancestor_depth=max_ancestor_depth,
                 allowed_file_ids=allowed_file_ids,
+                filter=filter,
             )
         )
 

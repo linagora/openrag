@@ -22,6 +22,7 @@ from api.error_handlers import register_error_handlers
 from api.middleware.auth import AuthMiddleware
 from api.middleware.request_id import RequestIdMiddleware
 from api.middleware.security_headers import SecurityHeadersMiddleware
+from api.middleware.urlencoded_body_limit import UrlencodedBodyLimitMiddleware
 from api.routers.user.download import router as download_router
 from chainlit.utils import mount_chainlit
 from core.config import load_config
@@ -78,6 +79,8 @@ def _get_auth_service(request):
 
 app = FastAPI(lifespan=lifespan)
 app.state.container = None
+# Inside Auth, as in api.main: Chainlit's login form is parsed on this origin too.
+app.add_middleware(UrlencodedBodyLimitMiddleware)
 app.add_middleware(
     AuthMiddleware,
     get_auth_service=_get_auth_service,

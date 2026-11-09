@@ -34,6 +34,17 @@ def _pool_with_ref(ref: object) -> MagicMock:
     return pool
 
 
+# A delete budget no runner stall can use up before the check a test is about.
+# With 0.01 s, a slow CI runner timed out the first task-state lookup instead.
+_DELETE_BUDGET = 5.0
+
+
+def _straight_to_final_check():
+    """A wait interval above the budget sends the delete's first pass straight to
+    its final check, so a test given ``_DELETE_BUDGET`` doesn't wait it out."""
+    return patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 999)
+
+
 def _settled_ref() -> asyncio.Future[None]:
     ref = asyncio.get_running_loop().create_future()
     ref.set_result(None)
@@ -254,6 +265,41 @@ async def test_queue_registration_warns_when_the_actor_predates_the_admission_fe
         assert "admission fence" in warning.call_args.args[0]
     else:
         warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_queue_registration_warns_on_the_split_write_fallback() -> None:
+    """Neither registration method: state and details go separately, unfenced, and the log says so."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"set_state", "set_details"}
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    with patch("services.workers.dispatcher.logger") as mock_logger:
+        admission = await dispatcher._set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=42,
+            reject_if_file_active=False,
+        )
+
+    assert admission == _queue_admitted()
+    tsm.set_state.remote.assert_called_once_with("task-1", "QUEUED")
+    tsm.set_details.remote.assert_called_once()
+    mock_logger.bind.assert_called_once_with(task_id="task-1", file_id="file-1", partition="tenant-a")
+    assert "admission fence" in mock_logger.bind.return_value.warning.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -1351,7 +1397,7 @@ async def test_dispatch_indexing_keeps_claim_when_submission_outcome_is_unknown(
         patch("services.workers.ray_utils.ray.cancel"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(TimeoutError, match="submit timed out"):
+        with pytest.raises(TimeoutError, match=r"submit\(task-1\) timed out after"):
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "content_sha256": "abc123"},
@@ -1390,7 +1436,7 @@ async def test_dispatch_indexing_preserves_unknown_submission_without_content_cl
         patch("services.workers.ray_utils.ray.cancel"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(TimeoutError, match="submit timed out"):
+        with pytest.raises(TimeoutError, match=r"submit\(task-1\) timed out after"):
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "source": "/data/report.txt"},
@@ -1524,11 +1570,12 @@ async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() 
         "title": "old",
         "degraded_stages": ["caption", "topic_tag"],
     }
+    vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=_task_state_manager(),
         completion_tracker=_completion_tracker(),
-        vector_store=_vector_store(),
+        vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=_workspace_repo(),
         collection="default",
@@ -1537,6 +1584,9 @@ async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() 
     await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
 
     assert document_repo.update_file_metadata_in_db.await_args.args[2] == {"title": "new"}
+    protected_metadata = vector_store.upsert_entities.await_args.kwargs["protected_metadata"]
+    assert protected_metadata["title"] == "new"
+    assert protected_metadata["degraded_stages"] == ["caption", "topic_tag"]
 
 
 @pytest.mark.asyncio
@@ -1574,6 +1624,12 @@ async def test_copy_inherits_catalog_degraded_stages(degraded_stages: list[str])
     assert copied_metadata["partition"] == "tenant-b"
     assert copied_metadata["title"] == "Copy"
     assert copied_metadata["degraded_stages"] == degraded_stages
+    protected_metadata = vector_store.insert_entities.await_args.kwargs["protected_metadata"]
+    assert protected_metadata["file_id"] == "copy"
+    assert protected_metadata["partition"] == "tenant-b"
+    assert protected_metadata["title"] == "Copy"
+    assert protected_metadata["degraded_stages"] == degraded_stages
+    assert "indexed_at" in protected_metadata
 
 
 @pytest.mark.asyncio
@@ -1640,7 +1696,7 @@ async def test_copy_receives_grace_before_catalog_write_and_matches_afterward() 
         for offset in range(0, len(rows), batch_size):
             yield rows[offset : offset + batch_size]
 
-    async def insert(entities, collection):
+    async def insert(entities, collection, *, protected_metadata):
         copied.extend({**entity, "_id": index + 10} for index, entity in enumerate(entities))
         events = [e async for e in reconcile_partition(catalog, vectors, collection, "b", repair=True)]
         assert events[-1]["recent_chunks_skipped"] == 2
@@ -2077,10 +2133,10 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with patch("ray.cancel") as cancel:
+    with _straight_to_final_check(), patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
     assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
@@ -2139,10 +2195,18 @@ async def test_delete_file_fails_closed_when_pending_task_details_do_not_settle(
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=5.0,
     )
 
-    with pytest.raises(TimeoutError, match="routing details"), patch("ray.cancel") as cancel:
+    # The interval above the timeout sends the first pass straight to the final
+    # check, so the test doesn't wait out the deadline, and each lookup gets the
+    # whole budget: with 0.01 s a slow CI runner timed out the first lookup
+    # instead, before the routing-details check.
+    with (
+        pytest.raises(TimeoutError, match="routing details"),
+        patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 999),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2170,10 +2234,14 @@ async def test_delete_file_fails_closed_for_submitted_task_without_ref() -> None
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="expose worker references or settle"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="expose worker references or settle"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2386,10 +2454,14 @@ async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> Non
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="routing details"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="routing details"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     assert tsm.get_all_info.remote.call_count == 2
@@ -2426,10 +2498,14 @@ async def test_delete_file_legacy_lookup_blocks_submitted_task_without_ref() -> 
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="expose worker references or settle"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="expose worker references or settle"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2456,7 +2532,9 @@ async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle(
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        # The ref never settles, so the test waits the whole budget out: 0.5 s
+        # leaves a stalled runner time to reach that wait at all.
+        timeout=0.5,
     )
 
     with pytest.raises(TimeoutError, match="settle after cancellation request"), patch("ray.cancel") as cancel:
@@ -2467,6 +2545,122 @@ async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle(
     vector_store.delete_by_filter.assert_not_called()
     workspace_repo.remove_file_from_all_workspaces.assert_not_called()
     document_repo.remove_file_from_partition.assert_not_called()
+
+
+def _owner_died_ref() -> asyncio.Future[None]:
+    from ray.exceptions import OwnerDiedError
+
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_exception(OwnerDiedError("00" * 28, owner_address=None, call_site=""))
+    return ref
+
+
+@pytest.mark.asyncio
+async def test_delete_file_waits_for_an_orphaned_worker_to_settle_before_cleanup() -> None:
+    """ray.cancel cannot reach a worker whose ref lost its owner: it would write the file back after the delete."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": _owner_died_ref()}})
+    calls: list[str] = []
+    tsm.set_cancelled_if_active.remote.side_effect = lambda task_id: calls.append("set_cancelled_if_active")
+    settled = iter([False, False, True])
+    tsm.has_worker_settled = _remote_mock()
+    tsm.has_worker_settled.remote.side_effect = lambda task_id: calls.append("has_worker_settled") or next(settled)
+    vector_store = _vector_store()
+    vector_store.delete_by_filter.side_effect = lambda *_a, **_k: calls.append("delete_chunks")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.task_cancellation._ORPHANED_WORKER_POLL_SECONDS", 0), patch("ray.cancel"):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    # Cancelled first, so the worker reads it on its next lease renewal and stops.
+    assert calls[:4] == ["set_cancelled_if_active", "has_worker_settled", "has_worker_settled", "has_worker_settled"]
+    assert calls.index("delete_chunks") > 3
+    tsm.has_worker_settled.remote.assert_called_with("task-1")
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_delete_file_does_not_cleanup_while_an_orphaned_worker_still_runs() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": _owner_died_ref()}})
+    tsm.has_worker_settled = _remote_mock(False)
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=_DELETE_BUDGET,
+    )
+
+    with (
+        # A poll interval above the budget raises on the first unsettled answer,
+        # so the test doesn't wait the budget out.
+        patch("services.workers.task_cancellation._ORPHANED_WORKER_POLL_SECONDS", 999),
+        pytest.raises(TimeoutError, match="settle after cancellation request"),
+        patch("ray.cancel"),
+    ):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
+    tsm.set_state.remote.assert_not_called()
+    assert tsm.has_worker_settled.remote.await_count >= 1
+    tsm.finish_cancellation.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
+    document_repo.remove_file_from_partition.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_worker_wait_keeps_the_state_of_a_task_that_completed_meanwhile() -> None:
+    from time import monotonic
+
+    from services.workers import task_cancellation
+
+    tsm = _task_state_manager()
+    tsm.set_cancelled_if_active = _remote_mock(False)
+    tsm.has_worker_settled = _remote_mock(True)
+
+    await task_cancellation._wait_for_orphaned_worker_to_settle(
+        tsm, task_id="task-1", deadline=monotonic() + 5, partition="tenant-a", file_id="file-1"
+    )
+
+    tsm.set_cancelled_if_active.remote.assert_awaited_once_with("task-1")
+    tsm.set_state.remote.assert_not_called()
+    tsm.has_worker_settled.remote.assert_awaited_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_orphaned_worker_wait_warns_that_an_older_task_state_manager_needs_a_ray_restart() -> None:
+    from time import monotonic
+
+    from services.workers import task_cancellation
+
+    tsm = MagicMock()
+    tsm._ray_actor_method_names = frozenset({"set_state"})
+    with patch.object(task_cancellation, "logger") as logger:
+        await task_cancellation._wait_for_orphaned_worker_to_settle(
+            tsm, task_id="task-1", deadline=monotonic() + 5, partition="tenant-a", file_id="file-1"
+        )
+
+    logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in logger.warning.call_args.args[0]
+    tsm.set_state.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2486,10 +2680,10 @@ async def test_delete_file_marks_stale_ref_less_task_failed_before_cleanup() -> 
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with patch("ray.cancel") as cancel:
+    with _straight_to_final_check(), patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -3123,3 +3317,96 @@ async def test_a_copy_the_catalog_refuses_leaves_none_of_its_chunks() -> None:
     store.delete_by_filter.assert_awaited_once_with(
         {"partition": "b", "file_id": "copy-1", INDEXING_TASK_ID_METADATA_KEY: marker}
     )
+
+
+def _ref_failed_on_its_own_timeout() -> asyncio.Future[None]:
+    """A task ref whose task already failed with a TimeoutError it raised itself
+    (a parse bound, say), shaped the way Ray hands it back to the caller."""
+    from ray.exceptions import RayTaskError
+
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_exception(
+        RayTaskError(
+            "IndexerWorker.process_file", "traceback", TimeoutError("parse timed out after 3600s for 'f.pdf'")
+        ).as_instanceof_cause()
+    )
+    return ref
+
+
+@pytest.mark.asyncio
+async def test_cancel_submitted_task_treats_a_task_raised_timeout_as_settled() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=5,
+    )
+
+    with patch("ray.cancel"):
+        cancelled = await dispatcher._cancel_submitted_task("task-1", _ref_failed_on_its_own_timeout())
+
+    assert cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_submitted_task_still_times_out_on_its_own_wait() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=0.01,
+    )
+    never_settles = asyncio.get_running_loop().create_future()
+
+    with patch("ray.cancel"), pytest.raises(TimeoutError, match="to settle after dispatch failure"):
+        await dispatcher._cancel_submitted_task("task-1", never_settles)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_to_settle_treats_a_task_raised_timeout_as_settled() -> None:
+    from time import monotonic
+
+    from services.workers.task_cancellation import _wait_for_task_to_settle
+
+    with patch("ray.cancel") as cancel:
+        await _wait_for_task_to_settle(
+            MagicMock(),
+            _ref_failed_on_its_own_timeout(),
+            task_id="task-1",
+            deadline=monotonic() + 5,
+            partition="tenant-a",
+            file_id="file-1",
+        )
+
+    cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_to_settle_still_times_out_on_its_own_wait() -> None:
+    from time import monotonic
+
+    from services.workers.task_cancellation import _wait_for_task_to_settle
+
+    never_settles = asyncio.get_running_loop().create_future()
+
+    with patch("ray.cancel"), pytest.raises(TimeoutError, match="to settle after cancellation request"):
+        await _wait_for_task_to_settle(
+            MagicMock(),
+            never_settles,
+            task_id="task-1",
+            deadline=monotonic() + 0.01,
+            partition="tenant-a",
+            file_id="file-1",
+        )

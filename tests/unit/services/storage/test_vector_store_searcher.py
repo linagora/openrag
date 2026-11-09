@@ -27,11 +27,12 @@ def _make_row(id_: str, text: str = "hello", partition: str = "p1", **extra) -> 
 def _filtering(rows: list[dict]):
     """A ``query_chunks_by_filter`` over ``rows`` that applies the filter, as Milvus does."""
 
-    async def query(_collection, filters, output_fields=None):
+    async def query(_collection, filters, output_fields=None, limit=None):
         def keep(row):
             return all(row.get(k) in (v if isinstance(v, list) else [v]) for k, v in filters.items())
 
-        return [r for r in rows if keep(r)]
+        matched = [r for r in rows if keep(r)]
+        return matched if limit is None else matched[:limit]
 
     return query
 
@@ -93,6 +94,20 @@ def test_dict_to_chunk_metadata_excludes_reserved_keys():
     assert "score" not in c.metadata
     assert "_openrag_indexing_task_id" not in c.metadata
     assert "extra_key" in c.metadata
+
+
+def test_dict_to_chunk_includes_milvus_dynamic_metadata():
+    c = _dict_to_chunk(
+        {
+            "id": "csv-2",
+            "text": "continuation",
+            "partition": "p1",
+            "file_id": "f1",
+            "$meta": {"csv_row_number": 30, "csv_part": 2, "csv_parts_total": 3},
+        }
+    )
+
+    assert c.metadata == {"csv_row_number": 30, "csv_part": 2, "csv_parts_total": 3}
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +437,83 @@ async def test_multi_query_search_does_not_create_traces_when_disabled():
 
 
 # ---------------------------------------------------------------------------
+# get_csv_row_chunks()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_csv_row_chunks_scopes_and_orders_continuations():
+    rows = [
+        _make_row("part-3", csv_row_number=30, csv_part=3, csv_parts_total=3),
+        _make_row("part-1", csv_row_number=30, csv_part=1, csv_parts_total=3),
+        _make_row("part-2", csv_row_number=30, csv_part=2, csv_parts_total=3),
+    ]
+    searcher, store, _, _ = _make_searcher(filter_results=rows)
+
+    chunks = await searcher.get_csv_row_chunks(partition="p1", file_id="f1", row_number=30)
+
+    assert [chunk.id for chunk in chunks] == ["part-1", "part-2", "part-3"]
+    assert store.query_chunks_by_filter.call_args.args[1] == {
+        "partition": "p1",
+        "file_id": "f1",
+        "csv_row_number": 30,
+    }
+    assert store.query_chunks_by_filter.call_args.kwargs["limit"] == 10
+
+
+@pytest.mark.asyncio
+async def test_get_csv_row_chunks_honors_expansion_limit():
+    searcher, store, _, _ = _make_searcher(filter_results=[])
+
+    await searcher.get_csv_row_chunks(partition="p1", file_id="f1", row_number=30, limit=4)
+
+    assert store.query_chunks_by_filter.call_args.kwargs["limit"] == 4
+
+
+@pytest.mark.asyncio
+async def test_get_csv_row_chunks_preserves_search_filter():
+    searcher, store, _, _ = _make_searcher(filter_results=[])
+
+    await searcher.get_csv_row_chunks(partition="p1", file_id="f1", row_number=30, filter='category == "public"')
+
+    assert store.query_chunks_by_filter.call_args.args[1]["expr"] == 'category == "public"'
+
+
+@pytest.mark.asyncio
+async def test_get_tabular_row_chunks_can_scope_to_one_workbook_sheet():
+    searcher, store, _, _ = _make_searcher(filter_results=[])
+
+    await searcher.get_csv_row_chunks(
+        partition="p1",
+        file_id="f1",
+        row_number=3,
+        table_id="sheet:1",
+    )
+
+    assert store.query_chunks_by_filter.call_args.args[1] == {
+        "partition": "p1",
+        "file_id": "f1",
+        "csv_row_number": 3,
+        "table_id": "sheet:1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_csv_row_chunks_respects_file_restriction():
+    searcher, store, _, _ = _make_searcher()
+
+    chunks = await searcher.get_csv_row_chunks(
+        partition="p1",
+        file_id="f1",
+        row_number=30,
+        allowed_file_ids=["other-file"],
+    )
+
+    assert chunks == []
+    store.query_chunks_by_filter.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # get_related_chunks()
 # ---------------------------------------------------------------------------
 
@@ -447,6 +539,16 @@ async def test_get_related_chunks_queries_store_with_file_ids():
     call_args = store.query_chunks_by_filter.call_args
     assert call_args.args[1]["file_id"] == ["f1", "f2"]
     assert call_args.kwargs["limit"] == 2
+
+
+@pytest.mark.asyncio
+async def test_related_and_ancestor_queries_keep_the_search_filter():
+    expr = 'created_at >= ISO "2026-01-01T00:00:00+00:00"'
+    searcher, store, _, _ = _make_searcher(file_ids_by_rel=["f1"], ancestor_ids=["a1"], filter_results=[_make_row("1")])
+    await searcher.get_related_chunks(partition="p1", relationship_id="r1", limit=10, filter=expr)
+    await searcher.get_ancestor_chunks(partition="p1", file_id="f1", limit=10, filter=expr)
+    assert store.query_chunks_by_filter.await_args_list[0].args[1]["expr"] == expr
+    assert store.query_chunks_by_filter.await_args_list[1].args[1]["expr"] == expr
 
 
 @pytest.mark.asyncio
