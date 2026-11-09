@@ -12,6 +12,30 @@
 {{- if and .Values.ray.enabled (not $rayServeEnabled) (not (include "openrag-stack.rayAddress" .)) -}}
 {{- fail (printf "ray.enabled=true with neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS: the API would start its own Ray inside the openrag pod, the RayCluster would do no work, and the Ray PodMonitor would scrape a cluster holding none of the indexing metrics. Point the API at the cluster with env.config.RAY_ADDRESS: ray://%s-raycluster-head-svc:10001 (in env.config even when env.existingSecret also carries it), or set env.config.ENABLE_RAY_SERVE=true." (include "openrag-stack.fullname" .)) -}}
 {{- end -}}
+{{- /* With neither ray.enabled nor a RAY_ADDRESS (Ray Serve needs ray.enabled),
+   each openrag pod starts its own Ray: its own indexer workers, task state and
+   Marker workers, sized to that pod's resources. */ -}}
+{{- $embeddedRay := and (not .Values.ray.enabled) (not (include "openrag-stack.rayAddress" .)) -}}
+{{- if and $embeddedRay (gt (int .Values.openrag.replicas) 1) -}}
+{{- fail (printf "openrag.replicas=%v with the embedded Ray (ray.enabled=false and no RAY_ADDRESS): each openrag pod would run its own Ray and task state, so each pod's job reconciler marks the jobs still queued on the other pods FAILED, and cancel and the quota's pending count only see the pod that receives the request. Keep openrag.replicas: 1, or share one Ray cluster with ray.enabled=true." .Values.openrag.replicas) -}}
+{{- end -}}
+{{- /* Every Marker worker reserves MARKER_NUM_GPUS of the Ray node it runs on.
+   With the embedded Ray that node is this pod, so a pool larger than the pod's
+   GPUs leaves workers that never start, and PDFs sent to them fail after
+   marker_timeout. Any preset can select Marker at runtime, whatever PDFLOADER
+   says, so this holds for every deployment. Without a GPU in the pod the
+   reservation is dropped (marker_workers._marker_num_gpus). The defaults are
+   the app's (conf/config.yaml). */ -}}
+{{- if $embeddedRay -}}
+{{- $resources := .Values.openrag.resources | default dict -}}
+{{- $podGpus := float64 (dig "limits" "nvidia.com/gpu" (dig "requests" "nvidia.com/gpu" 0 $resources) $resources) -}}
+{{- $markerPool := float64 (dig "MARKER_POOL_SIZE" "1" (.Values.env.config | default dict)) -}}
+{{- $markerGpus := float64 (dig "MARKER_NUM_GPUS" "0.01" (.Values.env.config | default dict)) -}}
+{{- $markerTotal := mulf $markerPool $markerGpus -}}
+{{- if and (gt $podGpus 0.0) (gt $markerTotal $podGpus) -}}
+{{- fail (printf "MARKER_POOL_SIZE (%v) x MARKER_NUM_GPUS (%v) reserves %v GPU, but the openrag pod has %v and runs the embedded Ray: the Marker workers past the pod's GPUs never start, and PDFs sent to them fail after marker_timeout. Lower MARKER_POOL_SIZE or MARKER_NUM_GPUS, or give the pod more GPUs." $markerPool $markerGpus $markerTotal $podGpus) -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

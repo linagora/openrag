@@ -62,6 +62,21 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+## OpenRAG 2.3.5 on Kubernetes: settings the chart refuses with the embedded Ray
+
+With `ray.enabled: false` and no `RAY_ADDRESS` (the default), each OpenRAG pod
+starts its own Ray. From OpenRAG 2.3.5, the chart refuses two settings that break
+indexing in that mode. `helm upgrade` then stops before it changes anything, and
+the error names the setting.
+
+| The chart refuses | Why | What to change |
+|---|---|---|
+| `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. | Keep `openrag.replicas: 1`, or share one Ray cluster with `ray.enabled: true`. |
+| `MARKER_POOL_SIZE` × `MARKER_NUM_GPUS` above the GPUs of the OpenRAG pod | Each Marker worker reserves `MARKER_NUM_GPUS` of the pod's GPUs. The workers that don't fit never start, and PDFs sent to them fail after `MARKER_TIMEOUT`. A preset can select Marker even when `PDFLOADER` names another parser, so the check applies to every deployment with a GPU in the pod. | Lower `MARKER_POOL_SIZE` or `MARKER_NUM_GPUS`, or give the pod more GPUs. |
+
+The chart also drops `RAY_NUM_GPUS` from its defaults: OpenRAG never read it, so a
+copy in your values does nothing.
+
 ## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
 
 With `ray.enabled: true`, the Ray head installs the Python dependencies into the
