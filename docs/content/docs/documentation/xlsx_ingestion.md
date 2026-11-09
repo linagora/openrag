@@ -167,7 +167,7 @@ loader:
   xlsx_batch_size: 10000
   xlsx_limits:
     max_batch_bytes: 2097152
-    max_shared_strings: 250000
+    max_shared_strings: 1000000
     max_tables: 256
 ```
 
@@ -187,8 +187,8 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_entry_bytes` | Individual ZIP entry | 256 MiB |
 | `max_compression_ratio` | Compression ratio per entry | 200 |
 | `max_metadata_bytes` | Total size of the parts the reader loads whole: workbook, styles, theme, document properties, worksheet relationships, and chart sheets with their drawings, charts, and images. Pivot caches, comments, and worksheet drawings or media are never loaded and only count toward the archive limits | 8 MiB |
-| `max_shared_strings_bytes` | Shared-string XML | 32 MiB |
-| `max_shared_strings` | Shared-string entries | 250,000 |
+| `max_shared_strings_bytes` | Shared-string XML. OpenPyXL keeps the whole table in memory, about 4–5 times this size, so this is the limit that bounds that memory | 32 MiB |
+| `max_shared_strings` | Shared-string entries. Distinct text values in a workbook usually reach the byte limit first; 60,000 rows of 5 unique text columns is 300,000 entries and about 11 MB of XML | 1,000,000 |
 | `max_sheets` | Worksheets, including hidden sheets | 128 |
 | `max_rows` | Row coordinate of a cell with content | 1,048,576 |
 | `max_columns` | Column coordinate of a cell with content | 4,096 |

@@ -33,7 +33,13 @@ class XlsxLimits:
     max_compression_ratio: int = 200
     max_metadata_bytes: int = 8 * 1024 * 1024
     max_shared_strings_bytes: int = 32 * 1024 * 1024
-    max_shared_strings: int = 250_000
+    # OpenPyXL keeps the whole shared-string table in memory, about 4.7x the
+    # size of its XML (measured with ~20-character strings). The byte limit
+    # above is therefore the memory guard: it caps the table at roughly 150 MB
+    # whatever the entry count. This count only bounds per-entry overhead and
+    # must not reject ordinary exports first: 60k rows x 5 columns of unique
+    # text is 300k entries but only ~11 MB of XML.
+    max_shared_strings: int = 1_000_000
     max_sheets: int = 128
     max_rows: int = 1_048_576
     max_columns: int = 4096

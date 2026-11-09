@@ -2588,6 +2588,33 @@ def test_shared_string_count_is_bounded_before_openpyxl_loads_sheet(monkeypatch)
         list(XlsxParser(limits=XlsxLimits(max_shared_strings=1)).iter_batches(doc))
 
 
+def test_default_limits_accept_an_export_of_unique_text_columns():
+    """60k rows x 5 columns of unique text is 300k shared strings but only ~11 MB
+    of XML. The default count limit used to reject the whole workbook while the
+    same data indexed as CSV; the byte limit is what bounds OpenPyXL's memory."""
+    import zipfile
+
+    from core.indexing.parsers.tabular.xlsx_validation import _shared_string_count
+
+    entries = 300_000
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED) as archive:
+        with archive.open("xl/sharedStrings.xml", "w") as stream:
+            stream.write(b'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">')
+            for index in range(entries):
+                stream.write(f"<si><t>item {index} lorem ipsum</t></si>".encode())
+            stream.write(b"</sst>")
+    content_types = [
+        {
+            "PartName": "/xl/sharedStrings.xml",
+            "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml",
+        }
+    ]
+    with zipfile.ZipFile(payload) as archive:
+        assert archive.getinfo("xl/sharedStrings.xml").file_size < XlsxLimits().max_shared_strings_bytes
+        assert _shared_string_count(archive, content_types, XlsxLimits()) == entries
+
+
 @pytest.mark.parametrize("rich_text", [False, True])
 def test_oversized_shared_string_is_rejected_before_reader_opens(monkeypatch, rich_text):
     doc = _with_shared_strings(_document([["name"], ["abcdef"]]))
