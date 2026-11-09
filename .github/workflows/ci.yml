@@ -462,7 +462,7 @@ jobs:
           OPENRAG_TEST_VDB_HOST: localhost
           OPENRAG_TEST_VDB_PORT: "19530"
           POSTGRES_TEST_ADMIN_DSN: postgresql://root:root_password@localhost:5432/postgres
-        run: uv run pytest tests/integration/repos/ -m integration -v --tb=short -rs --junitxml=integration-results.xml
+        run: uv run pytest tests/integration/repos/ -v --tb=short -rs --junitxml=integration-results.xml
 
       # Every skip in this suite means a service is missing, and pytest exits 0
       # when all tests skip: this job passed for months having run nothing (#1068).

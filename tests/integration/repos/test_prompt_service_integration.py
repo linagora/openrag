@@ -30,8 +30,11 @@ class TestSeedAndResolve:
         for prompt_type in PROMPT_TYPE_KEYS:
             default = await postgres_store.prompt_repo.get_default(prompt_type)
             assert default is not None
-            # A blank ASR prompt is deliberate: it selects the model's own prompt.
-            assert default.content.strip() or prompt_type == PromptType.ASR_TRANSCRIPTION.value
+            if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
+                # Blank on purpose: it selects the model's own prompt.
+                assert default.content == ""
+            else:
+                assert default.content.strip()
 
     async def test_seed_is_idempotent(self, postgres_store: PostgresStore):
         svc = _service(postgres_store)
