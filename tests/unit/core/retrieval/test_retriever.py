@@ -257,7 +257,7 @@ async def test_expansion_fetches_and_orders_csv_continuations():
 
 
 @pytest.mark.asyncio
-async def test_csv_sibling_expansion_uses_exact_row_total_above_related_limit():
+async def test_csv_sibling_expansion_respects_related_limit():
     s = FakeSearcher()
     initial = Chunk(
         id="part-1",
@@ -275,11 +275,11 @@ async def test_csv_sibling_expansion_uses_exact_row_total_above_related_limit():
 
     await SingleRetriever(searcher=s, related_limit=10).expand_search_results([initial])
 
-    assert s.csv_row_calls[0]["limit"] == 14
+    assert s.csv_row_calls[0]["limit"] == 10
 
 
 @pytest.mark.asyncio
-async def test_csv_sibling_expansion_still_runs_when_related_limit_is_zero():
+async def test_csv_sibling_expansion_is_disabled_when_related_limit_is_zero():
     s = FakeSearcher()
     initial = Chunk(
         id="part-1",
@@ -297,7 +297,7 @@ async def test_csv_sibling_expansion_still_runs_when_related_limit_is_zero():
 
     await SingleRetriever(searcher=s, related_limit=0).expand_search_results([initial])
 
-    assert s.csv_row_calls[0]["limit"] == 2
+    assert not s.csv_row_calls
 
 
 @pytest.mark.asyncio

@@ -1079,6 +1079,72 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                     sheet = workbook[info.name]
                     # Exporters may declare A1:A1 or a huge dimension. Use inspected cells.
                     sheet.reset_dimensions()
+                    # Vertically disjoint regions can share one forward-only
+                    # worksheet scan. Overlapping regions still use separate
+                    # scans so their rows never need unbounded buffering.
+                    if len(info.tables) > 1 and all(
+                        left.end_row < right.start_row for left, right in zip(info.tables, info.tables[1:])
+                    ):
+                        first_column = min(table.start_column for table in info.tables)
+                        last_column = max(table.end_column for table in info.tables)
+                        with closing(
+                            sheet.iter_rows(
+                                min_row=info.tables[0].start_row,
+                                max_row=info.tables[-1].end_row,
+                                min_col=first_column,
+                                max_col=last_column,
+                                values_only=False,
+                            )
+                        ) as all_rows:
+                            formula_sheet = formula_workbook[info.name] if info.formula_cells else None
+                            if formula_sheet is not None:
+                                formula_sheet.reset_dimensions()
+                            formula_iter = (
+                                closing(
+                                    formula_sheet.iter_rows(
+                                        min_row=info.tables[0].start_row,
+                                        max_row=info.tables[-1].end_row,
+                                        min_col=first_column,
+                                        max_col=last_column,
+                                        values_only=False,
+                                    )
+                                )
+                                if formula_sheet is not None
+                                else nullcontext(None)
+                            )
+                            with formula_iter as all_formula_rows:
+                                previous_end = info.tables[0].start_row - 1
+                                for table in info.tables:
+                                    gap = table.start_row - previous_end - 1
+                                    for _ in islice(all_rows, gap):
+                                        pass
+                                    if all_formula_rows is not None:
+                                        for _ in islice(all_formula_rows, gap):
+                                            pass
+                                    count = table.end_row - table.start_row + 1
+                                    row_window = islice(all_rows, count)
+                                    formula_window = islice(all_formula_rows, count) if all_formula_rows else None
+                                    start = table.start_column - first_column
+                                    end = table.end_column - first_column + 1
+                                    visible_rows = _value_rows(
+                                        _visible_rows((row[start:end] for row in row_window), table, info)
+                                    )
+                                    if formula_window is None:
+                                        yield info, table, _without_calculated_empty(visible_rows)
+                                    else:
+                                        visible_formulas = _visible_rows(
+                                            (row[start:end] for row in formula_window), table, info
+                                        )
+                                        yield info, table, _rows_with_formulas(visible_rows, visible_formulas)
+                                    # A table with no visible columns may not consume
+                                    # its iterator; advance both streams regardless.
+                                    for _ in row_window:
+                                        pass
+                                    if formula_window is not None:
+                                        for _ in formula_window:
+                                            pass
+                                    previous_end = table.end_row
+                        continue
                     for table in info.tables:
                         with closing(
                             sheet.iter_rows(
@@ -1302,6 +1368,11 @@ class XlsxParser(TabularBatchParser):
                     )
                 header_lines = [markdown_row(header_values), markdown_row(["---"] * len(header_values))]
                 worksheet_context = _worksheet_context(sheet.name)
+                if sheet.hidden_rows:
+                    worksheet_context += (
+                        f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} "
+                        "(this may include filtered or collapsed rows)."
+                    )
                 sheet_context = (
                     "\n\nWorksheet context (before column headers):\n" + "\n".join(preamble) if preamble else ""
                 )
@@ -1512,6 +1583,11 @@ class XlsxParser(TabularBatchParser):
             return
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
         worksheet_context = _worksheet_context(sheet.name)
+        if sheet.hidden_rows:
+            worksheet_context += (
+                f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} "
+                "(this may include filtered or collapsed rows)."
+            )
         heading = "Worksheet cells outside tables:\n"
         overhead = len((heading + worksheet_context).encode("utf-8"))
         batches: list[list[tuple[int, str, str]]] = [[]]

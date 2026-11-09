@@ -20,7 +20,9 @@ For every visible, nonempty worksheet, OpenRAG preserves:
 
 Rows are emitted incrementally as bounded Markdown table batches. Chunk metadata keeps rows scoped by both worksheet and table ID, so sibling-row retrieval does not mix independent tables from the same or different sheets.
 
-Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a visible worksheet are also excluded. Their counts are recorded in chunk metadata, and removing hidden columns does not change physical worksheet citations.
+Retrieval limits row-sibling expansion to `related_limit` chunks; setting it to zero disables expansion. A row split into more chunks than the limit can therefore be incomplete, and the cap is logged.
+
+Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a visible worksheet are also excluded. Excel may mark filtered or collapsed rows as hidden, so those rows are also excluded. When rows are hidden, the worksheet context included in extracted chunks reports the count and warns that filtered or collapsed rows may be missing. Counts are also recorded in chunk metadata, and removing hidden columns does not change physical worksheet citations.
 
 ## Table detection
 
@@ -49,7 +51,7 @@ Every detected table is extracted and chunked independently. Its metadata includ
 - `sheet_name` and `sheet_index`, preserved on every batch and chunk;
 - exact `table_header_range`, data-row numbers, and chunk `cell_range` citations.
 
-An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Worksheet context is repeated on every chunk of its table while it stays small. A context larger than a quarter of the chunk budget (and longer than the short pointer that replaces it) would crowd out the rows, so when the table needs splitting it is indexed once, with the table's first batch, as its own text chunks (`xlsx_content_kind: sheet_context`). The table chunks then keep the worksheet name and a line such as `Worksheet context (rows 1-3) is indexed in separate chunks.`, drop the context text from their metadata, and set `sheet_context_indexed_separately: true`. Table batches report `table_batch_index`, their one-based position within the table. Detection and chunking are covered for at least ten tables in one worksheet and for multiple tables across multiple worksheets. The default safety limit permits at most 128 detected tables per visible worksheet; hidden worksheets are skipped and do not count.
+An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Worksheet context is repeated on every chunk of its table while it stays small. A context larger than a quarter of the chunk budget (and longer than the short pointer that replaces it) would crowd out the rows, so when the table needs splitting it is indexed once, with the table's first batch, as its own text chunks (`xlsx_content_kind: sheet_context`). The table chunks then keep the worksheet name and a line such as `Worksheet context (rows 1-3) is indexed in separate chunks.`, drop the context text from their metadata, and set `sheet_context_indexed_separately: true`. Table batches report `table_batch_index`, their one-based position within the table. Vertically disjoint tables are read in one forward pass per worksheet reader; overlapping table rows still require separate scans. The default safety limit permits at most 256 detected tables per visible worksheet; hidden worksheets are skipped and do not count.
 
 ## Merged and hierarchical headers
 
@@ -166,7 +168,7 @@ loader:
   xlsx_limits:
     max_batch_bytes: 2097152
     max_shared_strings: 250000
-    max_tables: 128
+    max_tables: 256
 ```
 
 `xlsx_batch_size` limits the number of data rows emitted in one parser batch and can also be set with `XLSX_BATCH_SIZE` (see the [environment reference](/openrag/documentation/env_vars/#excel-workbook-ingestion)). A batch may flush earlier to stay within `max_batch_bytes`. Parser batches are then split into retrieval chunks according to the configured chunk token budget; batch size is not chunk size.
@@ -192,7 +194,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_columns` | Column coordinate of a cell with content | 4,096 |
 | `max_cells` | Physical cells across worksheets, empty styled cells included | 5,000,000 |
 | `max_sheet_area` | Traversal rectangle from `A1` to the last content-bearing cell or a declared Excel Table's bottom-right corner, including leading space and gaps | 5,000,000 positions |
-| `max_tables` | Detected table regions per visible worksheet, and Excel Tables per worksheet | 128 |
+| `max_tables` | Detected table regions per visible worksheet, and Excel Tables per worksheet | 256 |
 | `max_merged_ranges` | Merged-cell ranges across the workbook | 100,000 |
 | `max_cell_chars` | Characters in one cell | 32,767 |
 | `max_batch_bytes` | Rendered batch size | 2 MiB |

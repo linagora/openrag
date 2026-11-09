@@ -1010,6 +1010,70 @@ def test_table_limit_applies_per_visible_worksheet():
     assert {block.metadata["sheet_name"] for block in blocks} == {f"Week {week + 1}" for week in range(4)}
 
 
+def test_many_stacked_tables_use_one_sheet_scan(monkeypatch):
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Weeks"
+    for week in range(150):
+        row = week * 6 + 1
+        sheet.cell(row, 1, "Day")
+        sheet.cell(row, 2, "Hours")
+        for day in range(3):
+            sheet.cell(row + day + 1, 1, f"week-{week}-day-{day}")
+            sheet.cell(row + day + 1, 2, day + 1)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    original = ReadOnlyWorksheet.iter_rows
+    scans = []
+
+    def track_scan(self, *args, **kwargs):
+        scans.append(self.title)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "iter_rows", track_scan)
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 150
+    assert scans == ["Weeks"]
+    assert "week-0-day-0" in blocks[0].text
+    assert "week-149-day-2" in blocks[-1].text
+    assert blocks[-1].metadata["worksheet_table_count"] == 150
+
+
+def test_stacked_tables_keep_formulas_scoped_with_one_scan_per_reader(monkeypatch):
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row, name in ((1, "first"), (6, "second")):
+        sheet.cell(row, 1, "name")
+        sheet.cell(row, 2, "calculation")
+        sheet.cell(row + 1, 1, name)
+        sheet.cell(row + 1, 2, f"=A{row + 1}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    original = ReadOnlyWorksheet.iter_rows
+    scans = []
+
+    def track_scan(self, *args, **kwargs):
+        scans.append(self.title)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "iter_rows", track_scan)
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert len(scans) == 2
+    assert "first" in blocks[0].text and "=A2" in blocks[0].text
+    assert "second" in blocks[1].text and "=A7" in blocks[1].text
+    assert blocks[0].metadata["table_id"] != blocks[1].metadata["table_id"]
+
+
 def test_merged_header_coverage_uses_intervals_not_single_columns():
     import time as clock
 
@@ -3159,8 +3223,37 @@ def test_hidden_rows_and_columns_are_not_indexed():
     assert "internal_note" not in block.text
     assert "column secret" not in block.text
     assert block.metadata["hidden_rows_skipped"] == 1
+    assert "Hidden worksheet rows excluded: 1" in block.text
+    assert "filtered or collapsed rows" in block.text
     assert block.metadata["hidden_columns_skipped"] == 1
     assert block.metadata["table_worksheet_column_indices"] == [1, 3]
+
+
+def test_filtered_hidden_rows_are_disclosed_in_chunk_context():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "status"])
+    sheet.append(["T-1", "open"])
+    sheet.append(["T-2", "closed"])
+    sheet.auto_filter.ref = "A1:B3"
+    sheet.sheet_properties.filterMode = True
+    sheet.row_dimensions[3].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=1000,
+        length_function=len,
+    )
+
+    assert "T-2" not in block.text
+    assert all("Hidden worksheet rows excluded: 1" in chunk.content for chunk in chunks)
+    assert all("filtered or collapsed rows" in chunk.content for chunk in chunks)
 
 
 def test_hidden_columns_keep_physical_cell_coordinates_after_chunking():

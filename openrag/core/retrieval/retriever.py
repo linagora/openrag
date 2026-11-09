@@ -272,7 +272,7 @@ async def _expand_with_related_chunks(
     if not include_related and not include_ancestors and not contains_csv_row_siblings:
         return results
 
-    if related_limit == 0 and not contains_csv_row_siblings:
+    if related_limit == 0:
         return results
 
     allowed_file_ids = file_id_restriction(filter_params)
@@ -337,11 +337,21 @@ async def _expand_with_related_chunks(
                 "partition": part,
                 "file_id": file_id,
                 "row_number": row_number,
-                "limit": max(related_limit, row_limit),
+                "limit": related_limit,
                 "allowed_file_ids": allowed_file_ids,
             }
             if table_id is not None:
                 kwargs["table_id"] = table_id
+            if row_limit > related_limit:
+                logger.warning(
+                    "Tabular row sibling expansion capped (partition=%s, file_id=%s, row_number=%s, "
+                    "pieces=%s, limit=%s)",
+                    part,
+                    file_id,
+                    row_number,
+                    row_limit,
+                    related_limit,
+                )
             return await searcher.get_csv_row_chunks(**kwargs)
         except Exception:
             logger.warning(

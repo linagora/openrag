@@ -39,7 +39,7 @@ class XlsxLimits:
     max_columns: int = 4096
     max_cells: int = 5_000_000
     max_sheet_area: int = 5_000_000
-    max_tables: int = 128
+    max_tables: int = 256
     max_merged_ranges: int = 100_000
     max_cell_chars: int = 32767
     max_batch_bytes: int = 2 * 1024 * 1024
@@ -928,8 +928,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                         )
                     )
                 regions = hinted_regions
-                # Each table costs one more pass over its own worksheet, so the
-                # bound is per worksheet. Hidden sheets are never read.
+                # Bound region metadata and the cost of overlapping regions,
+                # which can still require separate worksheet scans.
                 if visible_sheet and len(regions) > limits.max_tables:
                     raise limit("XLSX worksheet table count exceeds the limit")
                 if max_row * max_col > limits.max_sheet_area:
