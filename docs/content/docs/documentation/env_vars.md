@@ -449,7 +449,7 @@ Enable only where every API caller is already trusted with both.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory, not when the download fails. Without that access, every detection retries the download, which can block for about two minutes when the host doesn't answer, and then falls back to English. |
+| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory. When the model cannot be loaded (for example the download fails), a warning is logged once and the process uses `lite` from then on. |
 
 ### RAG Pipeline Mode
 
