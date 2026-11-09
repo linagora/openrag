@@ -607,14 +607,15 @@ async def openai_chat_completion(
 
     # The search runs on the latest message of the user: a tool result alone
     # gives it nothing to look for.
+    latest_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
     if (
         (partitions is not None or metadata.get("websearch"))
         and last.role == "tool"
-        and not any(m.role == "user" and m.content for m in request.messages)
+        and not (latest_user and latest_user.content)
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A search needs a non-empty user message in the conversation",
+            detail="A search needs the latest user message to be non-empty",
         )
 
     # Bound the caller's input size in every mode, against the resolved
