@@ -81,9 +81,9 @@ kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
 kubectl wait -n "$NS" pod -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance="$FULLNAME" \
   --for=delete --timeout=10m
 kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
-# Retries until KubeRay has created the new pods, then until they are Ready.
-until kubectl wait -n "$NS" pod -l ray.io/cluster="$FULLNAME-raycluster" \
-  --for=condition=Ready --timeout=10m; do sleep 5; done
+# Wait for KubeRay to create the new pods, then for them to be Ready (fails after 10m).
+until kubectl get pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster" -o name | grep -q .; do sleep 5; done
+kubectl wait -n "$NS" pod -l ray.io/cluster="$FULLNAME-raycluster" --for=condition=Ready --timeout=10m
 kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas="$REPLICAS"
 kubectl rollout status -n "$NS" deploy/"$FULLNAME-openrag"   # before resuming indexing
 ```
