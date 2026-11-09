@@ -3685,3 +3685,76 @@ def test_number_format_context_is_scoped_to_chunk_rows_and_columns():
             assert "scientific format" not in context
         if row_numbers == [3]:
             assert "percentage format" not in context
+
+
+def _side_by_side_workbook() -> Document:
+    """Three side-by-side tables on one sheet, with what a shared scan must keep
+    per table: formulas, a vertically merged row header and hidden rows."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Blocks"
+    for column, header in enumerate(["Group", "Month", "Sales"], start=1):
+        sheet.cell(1, column, header)
+    for column, header in enumerate(["Item", "Qty", "Double"], start=6):
+        sheet.cell(1, column, header)
+    for column, header in enumerate(["City", "Pop"], start=11):
+        sheet.cell(1, column, header)
+    for row in range(2, 62):
+        sheet.cell(row, 2, f"m{row}")
+        sheet.cell(row, 3, row * 10)
+        sheet.cell(row, 6, f"item {row}")
+        sheet.cell(row, 7, row)
+        sheet.cell(row, 8, f"=G{row}*2")
+        sheet.cell(row, 11, f"city {row}")
+        sheet.cell(row, 12, row * 1000)
+    for top in range(2, 62, 10):
+        sheet.cell(top, 1, f"group {top}")
+        sheet.merge_cells(start_row=top, start_column=1, end_row=top + 9, end_column=1)
+    for row in (15, 16, 40):
+        sheet.row_dimensions[row].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return Document(filename="blocks.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+def _batch_signature(blocks):
+    return [(block.text, block.metadata) for block in blocks]
+
+
+def test_side_by_side_tables_are_read_with_one_scan_per_reader(monkeypatch):
+    """Read-only OpenPyXL parses whole rows whatever column window is asked for,
+    so a scan per table parsed the sheet once per table (twice with formulas)."""
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+    document = _side_by_side_workbook()
+    scans = []
+    original_iter_rows = ReadOnlyWorksheet.iter_rows
+
+    def counting_iter_rows(self, *args, **kwargs):
+        scans.append((self.title, kwargs.get("min_col"), kwargs.get("max_col")))
+        return original_iter_rows(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "iter_rows", counting_iter_rows)
+    blocks = list(XlsxParser().iter_batches(document))
+
+    assert len({block.metadata["table_id"] for block in blocks}) == 3
+    # One value scan and one formula scan over the tables' bounding box.
+    assert scans == [("Blocks", 1, 12), ("Blocks", 1, 12)]
+
+
+def test_shared_scan_output_matches_one_scan_per_table():
+    """A spool budget of one byte hands every waiting table back to its own scan,
+    which is how each table was read before; the rows must not change."""
+    document = _side_by_side_workbook()
+    shared = list(XlsxParser().iter_batches(document))
+    per_table = list(XlsxParser(limits=XlsxLimits(max_spool_bytes=1)).iter_batches(document))
+
+    assert _batch_signature(shared) == _batch_signature(per_table)
+    by_table = {block.metadata["table_id"]: block for block in shared}
+    # Per-table state survived the shared scan: hidden rows split the formula
+    # groups, and the merged row header is repeated through its rows.
+    formulas = by_table["sheet:0:table:1"].metadata["formula_groups"]
+    assert [group["range"] for group in formulas] == ["H2:H14", "H17:H39", "H41:H61"]
+    assert "| group 12 | m13 | 130 |" in by_table["sheet:0:table:0"].text
+    assert {15, 16, 40}.isdisjoint(by_table["sheet:0:table:2"].metadata["table_row_numbers"])

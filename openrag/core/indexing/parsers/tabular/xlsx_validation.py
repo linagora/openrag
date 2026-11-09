@@ -49,6 +49,10 @@ class XlsxLimits:
     max_merged_ranges: int = 100_000
     max_cell_chars: int = 32767
     max_batch_bytes: int = 2 * 1024 * 1024
+    # Temporary-file space per worksheet for rows of tables waiting for their
+    # turn in the single shared scan (see xlsx_row_router). Past it, waiting
+    # tables fall back to their own scan: slower, never more disk.
+    max_spool_bytes: int = 256 * 1024 * 1024
 
     def __post_init__(self):
         for field in fields(self):
