@@ -39,8 +39,9 @@ def strip_internal_metadata(row: dict) -> dict:
 # ``indexed_at`` controls reconciliation's grace period and repair eligibility,
 # so only storage paths may assign it.
 #
-# ``partition`` is intentionally NOT here — the MCP update tool uses it as an
-# authorized move control and re-checks editor access on the destination.
+# ``partition`` is not here: a metadata update naming any partition but the
+# file's own is refused (``IndexingService.update_metadata``), and the copy
+# path sets it from the server side.
 #
 # Lives in core/ (not in one orchestrator) so every transport shares one guard:
 # the upload path, the MCP tools, and the REST PATCH path previously each

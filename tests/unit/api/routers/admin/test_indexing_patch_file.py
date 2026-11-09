@@ -55,7 +55,7 @@ async def test_patch_naming_the_file_partition_updates_the_metadata():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target", ["p2", "missing", "all"])
+@pytest.mark.parametrize("target", ["p2", "missing", "all", None, "P1"])
 async def test_patch_refuses_another_partition_and_writes_nothing(target):
     response, dispatcher = await _patch({"title": "new", "partition": target})
 

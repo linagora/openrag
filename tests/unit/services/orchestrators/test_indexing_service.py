@@ -755,7 +755,7 @@ async def test_update_metadata_injects_file_id():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target", ["p2", "missing", "all", ""])
+@pytest.mark.parametrize("target", ["p2", "missing", "all", "", None, "P1", " p1", "p1 ", 1, ["p1"], {"name": "p1"}])
 async def test_update_metadata_refuses_another_partition(target):
     disp = FakeDispatcher()
     with pytest.raises(ValidationError) as exc:

@@ -347,8 +347,8 @@ class IndexingService:
     ) -> None:
         # The file's row stays in its partition while its chunks would be
         # rewritten into the other one, so it would drop out of every search.
-        target = (metadata or {}).get("partition")
-        if target is not None and target != partition:
+        # A null is refused too: it would be written into every chunk.
+        if "partition" in (metadata or {}) and metadata["partition"] != partition:
             raise ValidationError(
                 "A metadata update cannot change the partition of a file. "
                 "Copy the file to the other partition, then delete it from this one.",
