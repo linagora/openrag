@@ -175,6 +175,28 @@ The client can include the temporal field to allow temporal-aware search in sear
 This is a first iteration — additional temporal fields (e.g. `updated_at`) may be added in future releases as needed.
 :::
 
+On the chat endpoint, `created_at` drives three behaviours. The first two are derived from
+the user's wording by the query contextualizer (no request parameter), so they only apply in
+the default `RAG_MODE=ChatBotRag`; `SimpleRag` skips query generation and gets neither.
+
+* **Period filters** — "last week", "in March 2026", "since January": the retrieval is
+  restricted to documents whose `created_at` falls in the period (Milvus predicates). When
+  the filtered search returns nothing, the default configuration retries without the filter
+  and can return out-of-period sources; `RETRIEVER_ALLOW_FILTERLESS_FALLBACK=false` makes
+  the period strict and returns no source instead.
+* **Date ordering** — "the last meeting I had", "my latest invoice", "the first contract
+  with ACME": the relevance-ranked chunks are reordered by `created_at` (newest or oldest
+  first) before the context budget is applied, so the document the user means is the
+  first one the model reads. Chunks without a `created_at` are placed last.
+* **Provenance line** — a document source block in the prompt carries a
+  `Created: <date> UTC | File: <filename>` line under its `[Source N]` marker, so the
+  model can name the date it relied on and tell documents apart. A field the chunk's
+  metadata lacks is omitted, and a source with neither a date nor a file name has no
+  line; web sources keep their own title and URL format.
+
+A file uploaded without `created_at` is never filtered in and never sorted first: to get
+these behaviours on an existing corpus, re-upload (or re-index) the files with the field.
+
 
 ##### Upload files while modeling relations between them
 
