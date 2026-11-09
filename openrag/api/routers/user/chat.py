@@ -570,7 +570,7 @@ async def openai_chat_completion(
     log = logger.bind(model=model_name, endpoint="/chat/completions")
 
     # The conversation ends with a message of the user, or with the result
-    # of a tool call of the assistant that the client ran (an agentic loop).
+    # of a tool call of the assistant that the client ran.
     last = request.messages[-1] if request.messages else None
     if last is None or last.role not in ("user", "tool") or not last.content:
         log.warning("Invalid request: missing or malformed last message.")
