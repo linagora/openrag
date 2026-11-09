@@ -220,7 +220,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Headerless worksheet | The first nonempty row is conservatively treated as the header | Add a header row, or define the range as an Excel Table |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
-| Password-protected or encrypted workbook | Rejected | Decrypt it before upload |
+| Password-protected or encrypted workbook | Rejected at upload with HTTP 422 `ENCRYPTED_OFFICE_FILE` ("This file is password-protected or encrypted"); encrypted `.docx` and `.pptx` uploads get the same response | Remove the password and upload it again |
 | `.xlsm` macro-enabled workbook | Tabular cells, cached values, and formula text are indexed; VBA is neither retained nor executed | Upload it directly when the workbook's tabular content is needed |
 | `.xls`, `.xlsb`, or `.ods` | Unsupported by the XLSX route | Convert to a plain `.xlsx`/`.xlsm` workbook or use a dedicated parser |
 | Exact aggregation across very large tables or several workbooks | Semantic retrieval may not return every row needed for a calculation | Use an analytical query pipeline for exact full-dataset computation |
