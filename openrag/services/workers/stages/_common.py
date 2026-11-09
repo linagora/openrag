@@ -8,7 +8,7 @@ from typing import Any
 
 from core.chunking.markdown_utils import PAGE_RE
 from core.models.chunk import ChunkType
-from services.inference.runtime import detect_language
+from services.inference.runtime import detect_language_off_loop
 
 _CREDENTIAL_KEYS = frozenset({"credentials", "credential", "api_key", "token", "secret", "password"})
 
@@ -43,7 +43,7 @@ _LANGUAGE_WORD = re.compile(
 _LANGUAGE_MIN_WORDS = 3
 
 
-def resolve_language(row: MutableMapping[str, Any]) -> str:
+async def resolve_language(row: MutableMapping[str, Any]) -> str:
     """Language the file's contextualization and topic tags are written in.
 
     The upload's ``language`` metadata wins. Without it, the language is
@@ -52,6 +52,9 @@ def resolve_language(row: MutableMapping[str, Any]) -> str:
     the stage passes an explicit language that overrides them: defaulting it
     to English wrote English contexts for whole non-English corpora, which
     then no longer matched their own keywords in the lexical search.
+
+    Detection runs in a thread: loading the model can block for minutes, and
+    the worker's lease renewals share this event loop.
     """
     explicit = row.get("language")
     if explicit:
@@ -60,9 +63,11 @@ def resolve_language(row: MutableMapping[str, Any]) -> str:
     text = _language_sample(chunks, captions=False)
     language = None
     if len({word.lower() for word in _LANGUAGE_WORD.findall(text)}) >= _LANGUAGE_MIN_WORDS:
-        language = detect_language(text, min_confidence=_LANGUAGE_MIN_CONFIDENCE)
+        language = await detect_language_off_loop(text, min_confidence=_LANGUAGE_MIN_CONFIDENCE)
     if language is None:
-        language = detect_language(_language_sample(chunks, captions=True), min_confidence=_LANGUAGE_MIN_CONFIDENCE)
+        language = await detect_language_off_loop(
+            _language_sample(chunks, captions=True), min_confidence=_LANGUAGE_MIN_CONFIDENCE
+        )
     row["language"] = language or DEFAULT_LANGUAGE
     return row["language"]
 

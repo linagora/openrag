@@ -16,8 +16,8 @@ Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
   (retry → raw user query; relevancy=False on parse failure).
 * **Streaming + citations live here; the router is pure transport.**
   ``chat_stream`` drives the proven
-  ``core.utils.source_filtering.stream_with_source_filtering`` (100-char buffer that
-  strips the ``[Sources: N]`` tag before it reaches the client);
+  ``core.utils.source_filtering.stream_with_source_filtering`` (it holds back a lookahead that
+  keeps the ``[Sources: N]`` tag from reaching the client, and emits only settled text);
   ``chat`` / ``complete`` return the finalized OpenAI dict with the
   citation-filtered ``extra`` sources. The router only maps the
   partition, builds request-bound source links (``prepare_sources``
