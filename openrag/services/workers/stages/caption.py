@@ -9,6 +9,7 @@ from typing import Any
 from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.utils.logging import get_logger
+from core.utils.progress import gather_with_progress
 from core.vlm.vlm import VLM
 from services.inference.runtime import get_vlm_semaphore
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials, stage_timeout
@@ -251,7 +252,12 @@ async def _caption_document(
 
     # gather cancels and awaits every child if it is itself cancelled (stage
     # timeout), so nothing keeps holding the shared VLM semaphore afterwards.
-    results = await asyncio.gather(*(caption_one(image) for image in images), return_exceptions=True)
+    label = processed_document.metadata.get("filename") or processed_document.document_id
+    results = await gather_with_progress(
+        *(caption_one(image) for image in images),
+        desc=f"Captioning images of *{label}*",
+        return_exceptions=True,
+    )
     failures: list[Exception] = []
     for result in results:
         if isinstance(result, Exception):
@@ -262,7 +268,6 @@ async def _caption_document(
     if failures and len(failures) == captionable:
         raise failures[0]
     if failures:
-        label = processed_document.metadata.get("filename") or processed_document.document_id
         logger.bind(filename=label, stage="caption").warning(
             f"{len(failures)}/{captionable} image(s) failed captioning; keeping the other captions: {failures[0]}"
         )
