@@ -345,6 +345,16 @@ class IndexingService:
         partition: str,
         user: dict | None,
     ) -> None:
+        # The file's row stays in its partition while its chunks would be
+        # rewritten into the other one, so it would drop out of every search.
+        target = (metadata or {}).get("partition")
+        if target is not None and target != partition:
+            raise ValidationError(
+                "A metadata update cannot change the partition of a file. "
+                "Copy the file to the other partition, then delete it from this one.",
+                status_code=400,
+                code="PARTITION_CHANGE_UNSUPPORTED",
+            )
         # Drop server-managed keys before they reach the store (#713). Without
         # this a partition editor could repoint ``source`` at another tenant's
         # upload under the shared data dir and read it back through

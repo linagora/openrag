@@ -494,7 +494,8 @@ async def put_file(
 **Behavior:**
 - Updates only the specified metadata fields
 - Does not require file re-upload
-- Can change the file's partition if user has access
+- Does not move the file: a `partition` other than the file's own is refused
+  with `400 Bad Request`. Copy the file to the other partition, then delete it.
 
 **Response:**
 Returns 200 OK with a success message.
@@ -505,22 +506,8 @@ async def patch_file(
     file_id: str = Depends(validate_file_id),
     metadata: Any | None = Depends(validate_metadata),
     user=Depends(require_partition_editor),
-    user_partitions=Depends(current_user_partitions),
     service=Depends(get_indexing_service),
-    auth_service=Depends(get_auth_service),
-    partition_service=Depends(get_partition_service),
 ):
-    # Make sure partition role is valid if partition is being changed
-    if "partition" in metadata:
-        await ensure_partition_role(
-            partition=metadata["partition"],
-            user=user,
-            user_partitions=user_partitions,
-            required_role="editor",
-            auth_service=auth_service,
-            partition_service=partition_service,
-        )
-
     await service.update_metadata(file_id, metadata, partition, user)
     return JSONResponse(
         status_code=status.HTTP_200_OK,

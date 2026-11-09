@@ -755,6 +755,24 @@ async def test_update_metadata_injects_file_id():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["p2", "missing", "all", ""])
+async def test_update_metadata_refuses_another_partition(target):
+    disp = FakeDispatcher()
+    with pytest.raises(ValidationError) as exc:
+        await _service(disp=disp).update_metadata("f1", {"author": "bob", "partition": target}, "p1", {"id": 1})
+    assert exc.value.status_code == 400
+    assert exc.value.code == "PARTITION_CHANGE_UNSUPPORTED"
+    assert disp.updated == []
+
+
+@pytest.mark.asyncio
+async def test_update_metadata_naming_the_file_partition_is_an_update():
+    disp = FakeDispatcher()
+    await _service(disp=disp).update_metadata("f1", {"author": "bob", "partition": "p1"}, "p1", {"id": 1})
+    assert disp.updated[0][1] == {"author": "bob", "partition": "p1", "file_id": "f1"}
+
+
+@pytest.mark.asyncio
 async def test_update_metadata_cannot_override_content_hash():
     disp = FakeDispatcher()
     svc = _service(disp=disp)

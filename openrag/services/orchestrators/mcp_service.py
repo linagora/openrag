@@ -490,12 +490,9 @@ class MCPService:
     ) -> dict[str, Any]:
         self._validate_file_id(file_id)
         await self._enforce_editor_access(partition, allowed_partitions, user_id)
-        # ``partition`` in the payload is an authorized move control (not a
-        # protected key) — require editor on the destination too.
-        if metadata and "partition" in metadata:
-            await self._enforce_editor_access(metadata["partition"], allowed_partitions, user_id)
         if not await self._partitions.file_exists(file_id, partition):
             raise FileNotFoundError(f"File '{file_id}' not found in partition '{partition}'")
+        # A ``partition`` other than the file's own is refused there.
         await self._indexing.update_metadata(
             file_id,
             _strip_protected_metadata(metadata),
