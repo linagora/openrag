@@ -610,8 +610,10 @@ helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
 Once `helm upgrade` has returned, delete every Ray pod, head included, so KubeRay
 recreates them from the 2.3.0 template (deleting them earlier would bring them
 back on 2.2.x). The notes `helm upgrade` prints say to recreate only the workers,
-for their metrics port; this upgrade needs the head recreated too. Once they are
-Ready, scale OpenRAG up:
+for their metrics port; this upgrade needs the head recreated too.
+The same deletion is required after any upgrade that changes an `env.config` value
+consumed by Ray, including `TQDM_DISABLE`, because these values are read when the
+Ray containers start. Once they are Ready, scale OpenRAG up:
 
 ```bash
 kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
