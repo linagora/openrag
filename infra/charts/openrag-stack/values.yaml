@@ -1007,9 +1007,10 @@ openrag:
       cpu: "4"
       memory: "16Gi"
       nvidia.com/gpu: 1
-  # More than 1 needs a Ray cluster shared by the pods (ray.enabled: true, or
-  # RAY_ADDRESS). With the embedded Ray each pod has its own task state, and the
-  # chart refuses to render (see docs/content/docs/documentation/upgrading.md).
+  # More than 1 needs a Ray cluster shared by the pods: ray.enabled: true with
+  # RAY_ADDRESS or ENABLE_RAY_SERVE=true, or an external cluster through
+  # RAY_ADDRESS (or ray.externalCluster). With the embedded Ray each pod has its
+  # own task state, and the chart refuses to render (see upgrading.md).
   replicas: 1
   # Size of the /dev/shm emptyDir volume. Ray's plasma object store and Python
   # multiprocessing both use /dev/shm for POSIX semaphores and shared memory.

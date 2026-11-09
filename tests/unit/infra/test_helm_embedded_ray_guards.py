@@ -64,6 +64,8 @@ def test_several_replicas_with_the_embedded_ray_are_refused(tmp_path: Path) -> N
     result = _render(tmp_path, "--set", "openrag.replicas=2")
     assert result.returncode != 0
     assert "openrag.replicas=2 with the embedded Ray" in result.stderr
+    # The remedy names everything a shared Ray needs: ray.enabled alone fails to render.
+    assert "ray.enabled=true together with env.config.RAY_ADDRESS or env.config.ENABLE_RAY_SERVE=true" in result.stderr
 
 
 @requires_helm
@@ -73,8 +75,10 @@ def test_several_replicas_with_the_embedded_ray_are_refused(tmp_path: Path) -> N
         SHARED_RAY,
         # An external Ray cluster without the chart's RayCluster.
         ("--set", "env.config.RAY_ADDRESS=ray://external:10001"),
+        # RAY_ADDRESS from a Secret the chart cannot read, declared by ray.externalCluster.
+        ("--set", "ray.externalCluster=true"),
     ],
-    ids=["chart-ray-cluster", "external-ray"],
+    ids=["chart-ray-cluster", "external-ray", "external-ray-from-secret"],
 )
 def test_several_replicas_sharing_a_ray_cluster_render(tmp_path: Path, shared_ray: tuple[str, ...]) -> None:
     result = _render(tmp_path, "--set", "openrag.replicas=2", *shared_ray)
@@ -99,8 +103,9 @@ def test_a_marker_pool_larger_than_the_pod_gpus_is_refused(tmp_path: Path) -> No
         ("--set-string", "env.config.MARKER_POOL_SIZE=3", "--set-json", f"openrag.resources={NO_GPU_RESOURCES}"),
         # On a shared Ray cluster, Marker runs on the Ray worker pods.
         ("--set-string", "env.config.MARKER_POOL_SIZE=3", *SHARED_RAY),
+        ("--set-string", "env.config.MARKER_POOL_SIZE=3", "--set", "ray.externalCluster=true"),
     ],
-    ids=["fits-exactly", "no-gpu-in-pod", "shared-ray"],
+    ids=["fits-exactly", "no-gpu-in-pod", "shared-ray", "external-ray-from-secret"],
 )
 def test_marker_pools_that_fit_render(tmp_path: Path, args: tuple[str, ...]) -> None:
     result = _render(tmp_path, *args)

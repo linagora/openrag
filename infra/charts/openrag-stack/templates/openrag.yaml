@@ -12,12 +12,13 @@
 {{- if and .Values.ray.enabled (not $rayServeEnabled) (not (include "openrag-stack.rayAddress" .)) -}}
 {{- fail (printf "ray.enabled=true with neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS: the API would start its own Ray inside the openrag pod, the RayCluster would do no work, and the Ray PodMonitor would scrape a cluster holding none of the indexing metrics. Point the API at the cluster with env.config.RAY_ADDRESS: ray://%s-raycluster-head-svc:10001 (in env.config even when env.existingSecret also carries it), or set env.config.ENABLE_RAY_SERVE=true." (include "openrag-stack.fullname" .)) -}}
 {{- end -}}
-{{- /* With neither ray.enabled nor a RAY_ADDRESS (Ray Serve needs ray.enabled),
-   each openrag pod starts its own Ray: its own indexer workers, task state and
-   Marker workers, sized to that pod's resources. */ -}}
-{{- $embeddedRay := and (not .Values.ray.enabled) (not (include "openrag-stack.rayAddress" .)) -}}
+{{- /* With neither ray.enabled, nor a RAY_ADDRESS, nor ray.externalCluster
+   (openrag-stack.embeddedRay), each openrag pod starts its own Ray: its own
+   indexer workers, task state and Marker workers, sized to that pod's
+   resources. */ -}}
+{{- $embeddedRay := eq (include "openrag-stack.embeddedRay" .) "true" -}}
 {{- if and $embeddedRay (gt (int .Values.openrag.replicas) 1) -}}
-{{- fail (printf "openrag.replicas=%v with the embedded Ray (ray.enabled=false and no RAY_ADDRESS): each openrag pod would run its own Ray and task state, so each pod's job reconciler marks the jobs still queued on the other pods FAILED, and cancel and the quota's pending count only see the pod that receives the request. Keep openrag.replicas: 1, or share one Ray cluster with ray.enabled=true." .Values.openrag.replicas) -}}
+{{- fail (printf "openrag.replicas=%v with the embedded Ray (ray.enabled=false, no RAY_ADDRESS, ray.externalCluster=false): each openrag pod would run its own Ray and task state, so each pod's job reconciler marks the jobs still queued on the other pods FAILED, and cancel and the quota's pending count only see the pod that receives the request. Keep openrag.replicas: 1, or share one Ray cluster: ray.enabled=true together with env.config.RAY_ADDRESS or env.config.ENABLE_RAY_SERVE=true, or an external cluster through env.config.RAY_ADDRESS (ray.externalCluster=true when RAY_ADDRESS comes from a Secret the chart cannot read)." .Values.openrag.replicas) -}}
 {{- end -}}
 {{- /* Every Marker worker reserves MARKER_NUM_GPUS of the Ray node it runs on.
    With the embedded Ray that node is this pod, so a pool larger than the pod's
