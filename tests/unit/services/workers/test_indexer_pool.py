@@ -248,6 +248,7 @@ def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.Monke
             }
         ),
         llm=SimpleNamespace(base_url="", model=""),
+        semaphore=SimpleNamespace(llm_semaphore=7),
         paths=SimpleNamespace(prompts_dir="/tmp/prompts"),
         prompts=SimpleNamespace(topic_tagger="topic.txt"),
     )
@@ -259,6 +260,10 @@ def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.Monke
     assert tagger._llm.kwargs["endpoint"] == "http://llm:8000/v1"
     assert tagger._llm.kwargs["model_name"] == "topic-model"
     assert tagger._llm.kwargs["temperature"] == 0.1
+    # Topic tagging counts against the same cluster-wide LLM limit as
+    # contextualization (#1364).
+    assert tagger._semaphore._name == "llmSemaphore"
+    assert tagger._semaphore._max_concurrent_ops == 7
 
 
 def test_worker_factories_do_not_forward_the_env_managed_marker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,6 +307,7 @@ def test_worker_factories_do_not_forward_the_env_managed_marker(monkeypatch: pyt
             }
         ),
         llm=SimpleNamespace(base_url="", model=""),
+        semaphore=SimpleNamespace(llm_semaphore=7),
         paths=SimpleNamespace(prompts_dir="/tmp/prompts"),
         prompts=SimpleNamespace(topic_tagger="topic.txt"),
     )
