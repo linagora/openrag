@@ -17,3 +17,13 @@ it("updates the displayed duration every five seconds", async () => {
     vi.useRealTimers();
   }
 });
+
+it("applies a refreshed elapsed-time sample immediately", () => {
+  const { rerender } = render(<StageElapsedTime elapsedMs={10_000} elapsedSampledAt={null} />);
+
+  expect(screen.getByText("10s")).not.toBeNull();
+
+  rerender(<StageElapsedTime elapsedMs={20_000} elapsedSampledAt={null} />);
+
+  expect(screen.getByText("20s")).not.toBeNull();
+});

@@ -12,6 +12,7 @@ import {
   type TaskOutcome,
   type TaskState,
 } from "@/lib/api/jobs";
+import { ApiError } from "@/lib/api/client";
 import { downloadCsv } from "@/lib/csv";
 import { ACTIVE_JOBS_REFETCH_INTERVAL_MS } from "@/lib/jobs-queries";
 import JobListPage from "./list";
@@ -905,6 +906,16 @@ describe("JobListPage stage progress", () => {
     expect(screen.getByText("Page 1 of 2")).not.toBeNull();
     expect(screen.getByRole("button", { name: "File" }).hasAttribute("disabled")).toBe(true);
 
+    await userEvent.click(screen.getByRole("checkbox", { name: /select row/i }));
+    expect(screen.getByText("1 selected")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+    expect(listTasksMock).toHaveBeenCalledWith("active");
+    expect(downloadCsvMock).toHaveBeenCalledWith(
+      "openrag-jobs.csv",
+      expect.any(Array),
+      [firstPageTask, secondPageTask],
+    );
+
     await userEvent.click(screen.getByRole("button", { name: "Next page" }));
 
     expect(listTasksMock).toHaveBeenCalledWith("active", { limit: 10, offset: 10 });
@@ -915,6 +926,7 @@ describe("JobListPage stage progress", () => {
     });
     expect(await screen.findByText("parse-next.pdf")).not.toBeNull();
     expect(screen.queryByText("embed-first.pdf")).toBeNull();
+    expect(screen.queryByText("1 selected")).toBeNull();
 
     await userEvent.click(screen.getByRole("combobox", { name: /filter jobs by partition/i }));
     expect(await screen.findByRole("option", { name: "archive" })).not.toBeNull();
@@ -933,5 +945,24 @@ describe("JobListPage stage progress", () => {
     expect(screen.getByText("11 jobs")).not.toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Next page" }));
     expect(await screen.findByText("queued-10.pdf")).not.toBeNull();
+  });
+
+  it("falls back to an unpaginated active-task request when the API reports unsupported paging", async () => {
+    const activeTasks = Array.from({ length: 11 }, (_, index) =>
+      task(`active-${index}`, "SERIALIZING", `active-${index}.pdf`),
+    );
+    listTasksMock.mockImplementation(async (status, pagination) => {
+      if (status === "active" && pagination) {
+        throw new ApiError(503, { detail: "[TASK_LIST_PAGINATION_UNAVAILABLE]: older API" });
+      }
+      return { tasks: status === "active" ? activeTasks : [] };
+    });
+
+    renderJobs();
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+
+    expect(await screen.findByText("Page 1 of 2")).not.toBeNull();
+    expect(listTasksMock).toHaveBeenCalledWith("active", { limit: 10, offset: 0 });
+    expect(listTasksMock).toHaveBeenCalledWith("active");
   });
 });

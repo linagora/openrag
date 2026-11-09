@@ -133,3 +133,48 @@ async def test_legacy_task_state_manager_sends_snapshots_to_sidecar() -> None:
         await lease
     with pytest.raises(asyncio.CancelledError):
         await worker_task
+
+
+@pytest.mark.asyncio
+async def test_slow_sidecar_delivery_does_not_delay_worker_lease_renewal() -> None:
+    tracker = StageTracker("task-legacy")
+    tracker.start_stage("parse", 0)
+    lease_calls = []
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+
+    async def renew(task_id):
+        lease_calls.append(task_id)
+        return True
+
+    async def publish(_task_id, _snapshot):
+        delivery_started.set()
+        await release_delivery.wait()
+
+    tsm = SimpleNamespace(renew_worker_lease=SimpleNamespace(remote=renew))
+    worker_task = asyncio.create_task(asyncio.sleep(10))
+    lease = asyncio.create_task(
+        keep_worker_lease(
+            tsm,
+            "task-legacy",
+            worker_task=worker_task,
+            logger=_QuietLogger(),
+            renew_interval=0.01,
+            lease_ttl=0.2,
+            snapshot_provider=tracker.snapshot,
+            stage_progress_sink=publish,
+        )
+    )
+
+    await asyncio.wait_for(delivery_started.wait(), timeout=0.05)
+    await asyncio.sleep(0.035)
+
+    assert len(lease_calls) >= 2
+
+    release_delivery.set()
+    lease.cancel()
+    worker_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await lease
+    with pytest.raises(asyncio.CancelledError):
+        await worker_task

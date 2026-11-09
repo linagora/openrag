@@ -52,6 +52,7 @@ _FENCE_KV_KEY = b"file-delete-fences-v1"
 _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
 _LEGACY_FENCE_ID = "__legacy__"
 _RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
+TASK_JOB_OUTCOME_PENDING_METADATA_KEY = "_openrag_job_outcome_pending"
 _CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 _FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
 _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
@@ -200,7 +201,12 @@ def _load_recoverable_tasks() -> tuple[dict[str, TaskInfo], dict[str, float]]:
         if payload is None:
             continue
         task_id, info, expires_at = _decode_recoverable_task(payload)
-        if expires_at is not None and expires_at <= now and not _cancelled_task_has_worker_fence(info):
+        if (
+            expires_at is not None
+            and expires_at <= now
+            and not _cancelled_task_has_worker_fence(info)
+            and not _job_outcome_requires_persistence(info)
+        ):
             _internal_kv_del(key, namespace=namespace)
             continue
         tasks[task_id] = info
@@ -341,6 +347,18 @@ class TaskInfo:
     # incarnation the task went to, so the task may still be picked up; this
     # makes its pickup refused instead of indexing a file already released.
     worker_abandoned: bool = False
+
+
+def _job_outcome_pending(info: TaskInfo) -> bool:
+    metadata = info.details.get("metadata") if isinstance(info.details, dict) else None
+    return isinstance(metadata, dict) and metadata.get(TASK_JOB_OUTCOME_PENDING_METADATA_KEY) is True
+
+
+def _job_outcome_requires_persistence(info: TaskInfo) -> bool:
+    metadata = info.details.get("metadata") if isinstance(info.details, dict) else None
+    return info.state in TERMINAL_TASK_STATES and not (
+        isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata
+    )
 
 
 _REF_PENDING = "pending"
@@ -551,6 +569,12 @@ class TaskStateManager:
             info.worker_lease_expires_at = now + worker_lease_ttl_seconds
             if info.state not in TERMINAL_TASK_STATES:
                 continue
+            if _job_outcome_requires_persistence(info):
+                metadata = info.details.get("metadata")
+                metadata = dict(metadata) if isinstance(metadata, dict) else {}
+                metadata[TASK_JOB_OUTCOME_PENDING_METADATA_KEY] = True
+                info.details["metadata"] = metadata
+                _save_recoverable_task(task_id, info)
             # A restart must not restart the clock: a record that was persisted
             # with a fence deadline is held to that deadline, not to a fresh
             # window. Only a fence has one, so the rest get the receipt window.
@@ -601,6 +625,11 @@ class TaskStateManager:
         else touched the actor. Only call this from a public entry point:
         eviction mutates ``self.tasks`` and would break a caller iterating it.
         """
+        if _job_outcome_requires_persistence(info):
+            metadata = info.details.get("metadata")
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            metadata[TASK_JOB_OUTCOME_PENDING_METADATA_KEY] = True
+            info.details["metadata"] = metadata
         self._persist_task_locked(task_id, info)
         self._evict_terminal_tasks_locked()
 
@@ -638,6 +667,10 @@ class TaskStateManager:
                 examined += 1
                 continue
             info = self.tasks.get(task_id)
+            if info is not None and _job_outcome_pending(info):
+                self.terminal_tasks.move_to_end(task_id)
+                examined += 1
+                continue
             if info is not None and _cancelled_task_has_worker_fence(info):
                 # An unsettled cancellation still fences a live worker. Losing it
                 # would let that worker write after the file was cancelled.
@@ -1523,6 +1556,11 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def supports_bounded_task_retention(self) -> bool:
         """Identify actors that bound terminal task retention (#660)."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_job_outcome_retention(self) -> bool:
+        """Identify actors that retain terminal outcomes until Postgres accepts them."""
         return True
 
     @ray.method(concurrency_group="queue_info")

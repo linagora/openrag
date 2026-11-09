@@ -114,6 +114,9 @@ def _supports_task_state_recovery(actor) -> bool:
         # Retention is a lifecycle change, and creation options cannot retrofit
         # it onto an actor a previous deployment left detached and leaking.
         and getattr(actor, "supports_bounded_task_retention", None) is not None
+        # Terminal state is retained until its durable job outcome is accepted;
+        # older actors can evict it before recovery writes the outcome.
+        and getattr(actor, "supports_job_outcome_retention", None) is not None
         # Degradation and COMPLETED must be one actor mutation. An older actor
         # can only perform the unsafe split writes and must not survive rollout.
         and getattr(actor, "complete_with_degraded_stages", None) is not None

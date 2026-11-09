@@ -377,22 +377,33 @@ async def test_list_tasks_orders_durable_progress_before_client_pagination() -> 
 
 
 @pytest.mark.asyncio
-async def test_unpaginated_task_list_loads_stage_summaries_only_for_running_tasks() -> None:
+async def test_unpaginated_task_list_loads_stage_summaries_for_active_and_terminal_tasks() -> None:
     from core.models.stage_progress import DurableStageProgress
 
     summary = DurableStageProgress(task_id="task-1", current_stage_id="embed", current_stage_rank=5)
     queued_summary = DurableStageProgress(task_id="queued", current_stage_id="parse", current_stage_rank=0)
+    completed_summary = DurableStageProgress(task_id="completed", current_stage_id="store", current_stage_rank=6)
+    failed_summary = DurableStageProgress(task_id="failed", current_stage_id="embed", current_stage_rank=5)
     repo = FakeJobRepo(
         [
             _job(id="task-1", status="SERIALIZING", stage_tracking_version=1),
             _job(id="queued", status="QUEUED", stage_tracking_version=1),
+            _job(id="completed", status="COMPLETED", stage_tracking_version=1),
+            _job(id="failed", status="FAILED", stage_tracking_version=1),
         ],
-        stage_summaries={"task-1": summary, "queued": queued_summary},
+        stage_summaries={
+            "task-1": summary,
+            "queued": queued_summary,
+            "completed": completed_summary,
+            "failed": failed_summary,
+        },
     )
     tsm = FakeTSM(
         info={
             "task-1": {"state": "SERIALIZING", "details": {}, "user": 1},
             "queued": {"state": "QUEUED", "details": {}, "user": 1},
+            "completed": {"state": "COMPLETED", "details": {}, "user": 1},
+            "failed": {"state": "FAILED", "details": {}, "user": 1},
         }
     )
 
@@ -401,7 +412,9 @@ async def test_unpaginated_task_list_loads_stage_summaries_only_for_running_task
 
     assert rows_by_id["task-1"]["stage_progress"]["stage_id"] == "embed"
     assert "stage_progress" not in rows_by_id["queued"]
-    assert repo.stage_summary_requests == [("task-1",)]
+    assert rows_by_id["completed"]["stage_progress"]["stage_id"] == "store"
+    assert rows_by_id["failed"]["stage_progress"]["stage_id"] == "embed"
+    assert set(repo.stage_summary_requests[0]) == {"task-1", "completed", "failed"}
 
 
 @pytest.mark.asyncio
@@ -669,9 +682,8 @@ async def test_paginated_task_list_keeps_last_failed_stage_in_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_paginated_task_list_fails_if_last_known_stage_lookup_fails() -> None:
+async def test_paginated_task_list_survives_missing_last_known_stage_metadata() -> None:
     from core.models.stage_progress import DurableStageProgress
-    from core.utils.exceptions import ServiceUnavailableError
     from services.workers.stage_tracker import StageTracker
 
     tracker = StageTracker("failed-task")
@@ -690,16 +702,42 @@ async def test_paginated_task_list_fails_if_last_known_stage_lookup_fails() -> N
     )
     tsm = FakeTSM(info={"failed-task": {"state": "FAILED", "details": {}, "user": 7}})
 
-    with pytest.raises(ServiceUnavailableError, match="stage history") as exc_info:
-        await JobService(tsm, job_repo=repo).list_tasks(
-            is_admin=True,
-            user_id=7,
-            task_status="FAILED",
-            limit=10,
-            offset=0,
-        )
+    result = await JobService(tsm, job_repo=repo).list_tasks(
+        is_admin=True,
+        user_id=7,
+        task_status="FAILED",
+        limit=10,
+        offset=0,
+    )
 
-    assert exc_info.value.code == "TASK_LIST_PAGINATION_UNAVAILABLE"
+    assert [task["task_id"] for task in result["tasks"]] == ["failed-task"]
+    assert result["tasks"][0]["stage_progress"]["stage_id"] is None
+    assert result["tasks"][0]["stage_progress"].get("last_known_stage_id") is None
+
+
+@pytest.mark.asyncio
+async def test_slow_optional_stage_sidecar_does_not_block_task_state_snapshot_fallback(monkeypatch) -> None:
+    import asyncio
+
+    from services.orchestrators import job_service
+
+    monkeypatch.setattr(job_service, "_OPTIONAL_STAGE_PROGRESS_SIDECAR_TIMEOUT_SECONDS", 0.01)
+    tsm = FakeTSM(info={"task-1": {"state": "SERIALIZING", "details": {}}})
+
+    class SlowSidecarMethod:
+        @staticmethod
+        async def remote(_task_ids):
+            await asyncio.Event().wait()
+
+    class SlowSidecar:
+        get_stage_progress_snapshots = SlowSidecarMethod()
+
+    snapshots = await JobService(tsm, stage_progress_manager=SlowSidecar())._live_stage_progress_snapshots(
+        {"task-1": {"state": "SERIALIZING"}}
+    )
+
+    assert snapshots == {}
+    assert tsm.stage_snapshot_bulk_reads == 1
 
 
 @pytest.mark.asyncio

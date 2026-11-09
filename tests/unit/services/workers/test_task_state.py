@@ -22,6 +22,20 @@ def _task_state_manager() -> Any:
     return TaskStateManager.__ray_metadata__.modified_class()
 
 
+async def _mark_job_outcome_persisted(manager: Any, task_id: str) -> None:
+    details = await manager.get_details(task_id)
+    metadata = dict(details.get("metadata") or {})
+    metadata.pop(task_state_module.TASK_JOB_OUTCOME_PENDING_METADATA_KEY, None)
+    metadata[TASK_FINISHED_AT_METADATA_KEY] = "2026-11-09T00:00:00+00:00"
+    await manager.set_details(
+        task_id,
+        file_id=details.get("file_id"),
+        partition=details.get("partition") or "default",
+        metadata=metadata,
+        user_id=details.get("user_id"),
+    )
+
+
 class _FakeWorkerRef:
     """A worker ``ObjectRef`` stand-in that ``ray.wait``/``ray.get`` answer for.
 
@@ -112,6 +126,34 @@ async def test_reports_support_for_bounded_task_retention() -> None:
     manager = _task_state_manager()
 
     assert await manager.supports_bounded_task_retention() is True
+
+
+@pytest.mark.asyncio
+async def test_reports_support_for_pending_job_outcome_retention() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.supports_job_outcome_retention() is True
+
+
+def test_expired_terminal_outcome_without_finished_stamp_survives_recovery(monkeypatch) -> None:
+    import ray.cloudpickle as cloudpickle
+    from ray.experimental import internal_kv
+
+    key = task_state_module._recoverable_task_key("task-1")
+    payload = cloudpickle.dumps(("task-1", TaskInfo(state="COMPLETED", details={"metadata": {}}), 99.0))
+    deleted: list[bytes] = []
+    monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
+    monkeypatch.setattr(task_state_module, "_task_state_kv_namespace", lambda: b"test")
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(internal_kv, "_internal_kv_list", lambda *_args, **_kwargs: [key])
+    monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(internal_kv, "_internal_kv_del", lambda candidate, **_kwargs: deleted.append(candidate))
+
+    recovered, expiries = task_state_module._load_recoverable_tasks()
+
+    assert recovered["task-1"].state == "COMPLETED"
+    assert expiries["task-1"] == 99.0
+    assert deleted == []
 
 
 @pytest.mark.asyncio
@@ -576,7 +618,7 @@ async def test_file_delete_fence_rejects_matching_queued_details() -> None:
     assert await manager.get_details("task-1") == {
         "file_id": "file-1",
         "partition": "tenant-a",
-        "metadata": {"filename": "report.txt"},
+        "metadata": {"filename": "report.txt", "_openrag_job_outcome_pending": True},
         "user_id": 42,
     }
 
@@ -899,7 +941,16 @@ def test_expired_settled_cancellation_is_removed_during_recovery(monkeypatch) ->
     from ray.experimental import internal_kv
 
     key = task_state_module._recoverable_task_key("task-1")
-    payload = cloudpickle.dumps(("task-1", TaskInfo(state="CANCELLED"), 99.0))
+    payload = cloudpickle.dumps(
+        (
+            "task-1",
+            TaskInfo(
+                state="CANCELLED",
+                details={"metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-07-20T08:00:00+00:00"}},
+            ),
+            99.0,
+        )
+    )
     deleted: list[bytes] = []
 
     monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
@@ -1060,6 +1111,8 @@ async def test_terminal_tasks_are_evicted_once_retention_expires(monkeypatch) ->
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=7)
     await manager.set_state("done-task", "COMPLETED")
     await manager.set_failed_if_not_cancelled("failed-task", "boom")
+    await _mark_job_outcome_persisted(manager, "done-task")
+    await _mark_job_outcome_persisted(manager, "failed-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
     await manager.set_queued_details("new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=7)
@@ -1078,9 +1131,30 @@ async def test_terminal_task_retention_is_capped(monkeypatch) -> None:
         task_id = f"task-{index}"
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
         await manager.set_state(task_id, "COMPLETED")
+        await _mark_job_outcome_persisted(manager, task_id)
 
     # Settling sheds history itself, so the cap holds without another caller.
     assert set(manager.tasks) == {"task-3", "task-4"}
+
+
+@pytest.mark.asyncio
+async def test_terminal_outcomes_stay_retained_until_history_is_persisted(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 1)
+    manager = _task_state_manager()
+
+    for task_id in ("pending-1", "pending-2"):
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
+        await manager.set_state(task_id, "COMPLETED")
+
+    assert set(manager.tasks) == {"pending-1", "pending-2"}
+    for task_id in manager.tasks:
+        metadata = manager.tasks[task_id].details["metadata"]
+        assert metadata[task_state_module.TASK_JOB_OUTCOME_PENDING_METADATA_KEY] is True
+
+    await _mark_job_outcome_persisted(manager, "pending-1")
+    await manager.get_all_states()
+
+    assert set(manager.tasks) == {"pending-2"}
 
 
 @pytest.mark.asyncio
@@ -1094,6 +1168,7 @@ async def test_eviction_keeps_active_tasks_and_unsettled_cancellations(monkeypat
     await manager.set_object_ref("cancelled-task", {"ref": _FakeWorkerRef()})
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_state("completed-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "completed-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
     await manager.set_queued_details("new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=None)
@@ -1115,6 +1190,7 @@ async def test_a_settling_burst_sheds_history_with_nothing_else_running(monkeypa
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
     for index in range(4):
         await manager.set_state(f"task-{index}", "COMPLETED")
+        await _mark_job_outcome_persisted(manager, f"task-{index}")
 
     assert set(manager.tasks) == {"task-2", "task-3"}
 
@@ -1138,6 +1214,7 @@ async def test_cancellation_fence_outlives_the_receipt_window(monkeypatch) -> No
     manager = _task_state_manager()
     await manager.set_queued_details("cancelled-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
     await manager.set_cancelled_if_active("cancelled-task")
+    await _mark_job_outcome_persisted(manager, "cancelled-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
 
@@ -1163,6 +1240,8 @@ async def test_an_expired_receipt_behind_a_fence_is_still_evicted(monkeypatch) -
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=1)
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_state("done-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "cancelled-task")
+    await _mark_job_outcome_persisted(manager, "done-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
 
@@ -1184,12 +1263,15 @@ async def test_capacity_pressure_does_not_evict_an_unexpired_cancellation_tombst
     manager = _task_state_manager()
     await manager.set_queued_details("cancelled-task", file_id="f1", partition="tenant-a", metadata={}, user_id=1)
     assert await manager.set_cancelled_if_active("cancelled-task") is True
+    await _mark_job_outcome_persisted(manager, "cancelled-task")
 
     # An unrelated task settles well within the cancellation's 24h fence and
     # pushes the ledger over its 1-record cap.
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_100.0)
     await manager.set_queued_details("done-task", file_id="f2", partition="tenant-a", metadata={}, user_id=2)
     await manager.set_state("done-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "done-task")
+    assert await manager.get_state("done-task") is None
 
     assert "cancelled-task" in manager.tasks
     assert "done-task" not in manager.tasks
@@ -1225,7 +1307,13 @@ async def test_recovered_terminal_tasks_are_subject_to_retention(monkeypatch) ->
         "_load_recoverable_tasks",
         lambda: (
             {
-                "settled-cancelled-task": TaskInfo(state="CANCELLED", details={"user_id": 3}),
+                "settled-cancelled-task": TaskInfo(
+                    state="CANCELLED",
+                    details={
+                        "user_id": 3,
+                        "metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-07-20T08:00:00+00:00"},
+                    },
+                ),
                 "queued-task": TaskInfo(state="QUEUED", details={"user_id": 3}),
             },
             {},
@@ -1250,6 +1338,7 @@ async def test_expired_task_is_evicted_when_its_status_is_polled(monkeypatch) ->
     manager = _task_state_manager()
     await manager.set_queued_details("done-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
     await manager.set_state("done-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "done-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
 
@@ -1268,7 +1357,15 @@ async def test_recovery_preserves_the_original_retention_deadline(monkeypatch) -
         task_state_module,
         "_load_recoverable_tasks",
         lambda: (
-            {"old-task": TaskInfo(state="CANCELLED", details={"user_id": 3})},
+            {
+                "old-task": TaskInfo(
+                    state="CANCELLED",
+                    details={
+                        "user_id": 3,
+                        "metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-07-20T08:00:00+00:00"},
+                    },
+                )
+            },
             {"old-task": 1_060.0},
         ),
     )
@@ -1299,6 +1396,7 @@ async def test_expired_task_is_evicted_when_the_queue_is_listed(monkeypatch, rea
     manager = _task_state_manager()
     await manager.set_queued_details("done-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
     await manager.set_state("done-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "done-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
 
@@ -1339,6 +1437,7 @@ async def test_details_written_on_an_evicted_id_does_not_leak_a_stateless_record
     manager = _task_state_manager()
     await manager.set_queued_details("done", file_id="f", partition="p", metadata={}, user_id=7)
     await manager.set_state("done", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "done")
     details = await manager.get_details("done")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)

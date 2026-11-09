@@ -74,7 +74,9 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # supply fresh live progress to the TaskStateManager.
 # v16: new workers also publish snapshots to a separate short-lived store when
 # an older detached TaskStateManager is safely reused during rollout.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v16"
+# v17: preserve unsettled terminal outcomes in the replacement TaskStateManager;
+# pools must not keep handles to the generation that predates that contract.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v17"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -185,7 +187,7 @@ class IndexerWorkerActor:
         self._vector_store = MilvusVectorStore(cfg.vectordb)
         task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
         self._task_state_manager = task_state_manager
-        self._stage_progress_manager = ray.get_actor(TASK_STAGE_PROGRESS_MANAGER_NAME, namespace=self._namespace)
+        self._stage_progress_manager = self._get_stage_progress_manager()
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -517,6 +519,7 @@ class IndexerWorkerActor:
     ) -> dict[str, Any]:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
+        stage_progress_manager = self._get_stage_progress_manager()
         # Started before anything else, so the first renewal also tells the
         # task state this task left the actor's queue. Until the finally below,
         # a renewal answered False cancels this task.
@@ -532,7 +535,7 @@ class IndexerWorkerActor:
                 is_working=lambda: working,
                 snapshot_provider=lambda: self._worker.get_stage_progress_snapshot(task_id),
                 stage_progress_sink=getattr(
-                    getattr(getattr(self, "_stage_progress_manager", None), "set_snapshot", None),
+                    getattr(stage_progress_manager, "set_snapshot", None),
                     "remote",
                     None,
                 ),
@@ -691,6 +694,18 @@ class IndexerWorkerActor:
             self._logger.warning(
                 f"Failed to remove live stage progress for task {task_id}: {type(exc).__name__}: {exc}"
             )
+
+    def _get_stage_progress_manager(self) -> Any | None:
+        """Connect to the optional progress sidecar when it is available."""
+        manager = getattr(self, "_stage_progress_manager", None)
+        if manager is not None:
+            return manager
+        try:
+            manager = ray.get_actor(TASK_STAGE_PROGRESS_MANAGER_NAME, namespace=self._namespace)
+        except ValueError:
+            return None
+        self._stage_progress_manager = manager
+        return manager
 
     async def close_stage_writer(self) -> None:
         """Drain this worker's bounded stage-history queue before retirement."""

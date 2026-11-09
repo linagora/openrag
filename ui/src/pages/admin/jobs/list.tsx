@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cancelTask, isActiveState, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
+import { ApiError } from "@/lib/api/client";
 import { downloadCsv } from "@/lib/csv";
 import {
   invalidateJobsQueries,
@@ -362,6 +363,16 @@ export default function JobListPage() {
 
   const tasksQuery = useQuery({
     ...jobsTaskListQueryOptions(queryScope, taskStatusFilter, requestedPage),
+    queryFn: async () => {
+      try {
+        return await listTasks(taskStatusFilter, requestedPage);
+      } catch (error) {
+        if (requestServerPage && error instanceof ApiError && error.code === "TASK_LIST_PAGINATION_UNAVAILABLE") {
+          return listTasks(taskStatusFilter);
+        }
+        throw error;
+      }
+    },
     enabled: !!user,
   });
   const queueInfoQuery = useQuery({
@@ -580,7 +591,10 @@ export default function JobListPage() {
                     ? {
                         pageIndex: activePageIndex,
                         pageCount: Math.max(1, Math.ceil(serverPagination.total / serverPagination.limit)),
-                        onPageIndexChange: setActivePageIndex,
+                        onPageIndexChange: (pageIndex) => {
+                          setActivePageIndex(pageIndex);
+                          setRowSelection({});
+                        },
                       }
                     : undefined
                 }

@@ -112,10 +112,10 @@ function taskActivityDisplay(taskState: string, progress: StageProgressSummary |
     label = stageLabel ? `Interrupted: ${stageLabel}` : "Interrupted before a stage was recorded";
   } else if (workerLive) {
     label = phaseLabel ?? stageLabel ?? label;
-  } else if (stageLabel) {
-    label = `Last observed: ${stageLabel}`;
   } else if (phaseLabel) {
     label = `Last observed: ${phaseLabel}`;
+  } else if (stageLabel) {
+    label = `Last observed: ${stageLabel}`;
   }
 
   const displayedStageId = phaseLabel ? null : stageId;
@@ -151,7 +151,7 @@ function stageEventText(
 ): string {
   if (eventStatus === "started") {
     if (isInterruptedInvocation) return "Interrupted — worker stopped before a stage end was observed";
-    if (isOpenCurrentInvocation && taskTerminal) return "Last observed start — no stage end was recorded before the task ended";
+    if (isOpenCurrentInvocation && taskTerminal) return "Last observed start";
     if (isOpenCurrentInvocation && isCurrentlyRunning) return "Running";
     if (isOpenCurrentInvocation) return "Last observed start — worker activity is not confirmed";
     return "Started";
@@ -241,6 +241,15 @@ export default function JobDetailPage() {
     },
   });
 
+  // Keep the activity summary current while the timeline pages through older
+  // events. The summary needs only one event, not the full history page.
+  const currentProgressQuery = useQuery({
+    queryKey: ["task-stage-progress-current", id, userId, authorizationScope],
+    queryFn: () => getTaskStageProgress(id!, null, 1),
+    enabled: !!id && !!user,
+    refetchInterval: () => isActiveState(taskQuery.data?.task_state ?? "") ? 3000 : false,
+  });
+
   useEffect(() => {
     const taskFinished = isTerminalState(taskQuery.data?.task_state ?? "");
     const persistencePending = stageQuery.data?.history_quality === "pending_persistence";
@@ -294,7 +303,7 @@ export default function JobDetailPage() {
   if (!task) return null;
 
   const details = task.details;
-  const taskActivity = taskActivityDisplay(task.task_state, stageQuery.data);
+  const taskActivity = taskActivityDisplay(task.task_state, currentProgressQuery.data);
   const degradedStages = normalizeDegradedStages(details?.degraded_stages);
   const degraded = task.task_state === "COMPLETED" && degradedStages.length > 0;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
@@ -317,8 +326,8 @@ export default function JobDetailPage() {
   const stage = failedStage(details);
   const stageEvents = stageQuery.data?.events ?? [];
   const taskTerminal = isTerminalState(task.task_state);
-  const currentInvocationId = stageQuery.data?.current_invocation_id;
-  const interruptedInvocationId = stageQuery.data?.interrupted_invocation_id;
+  const currentInvocationId = currentProgressQuery.data?.current_invocation_id;
+  const interruptedInvocationId = currentProgressQuery.data?.interrupted_invocation_id;
   const nextStageCursor = stageQuery.data?.next_cursor;
   const diagnostics = [
     `Task ID: ${task.task_id}`,
@@ -511,7 +520,8 @@ export default function JobDetailPage() {
                           event.failure_effect,
                           isOpenCurrentInvocation,
                           isInterruptedInvocation,
-                          stageQuery.data?.freshness === "live" && !!stageQuery.data?.is_currently_running,
+                          currentProgressQuery.data?.freshness === "live" &&
+                            !!currentProgressQuery.data?.is_currently_running,
                           taskTerminal,
                         )}
                       </Badge>

@@ -16,7 +16,7 @@ from core.models.catalog import (
 )
 from core.utils.error_summary import extract_task_error_reason
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
-from services.workers.task_state import STALE_TASK_STATE_MANAGER_HINT
+from services.workers.task_state import STALE_TASK_STATE_MANAGER_HINT, TASK_JOB_OUTCOME_PENDING_METADATA_KEY
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _REFLESS_RECOVERY_POLL_SECONDS = 5.0
@@ -308,9 +308,19 @@ class TaskCompletionTracker:
         if worker_settled:
             settlement_confirmed = stage_settlement_confirmed is not False
         else:
-            if not await self._wait_for_worker_settled(task_id, task_state_manager):
-                return
-            settlement_confirmed = True
+            state = await self._call_task_state(
+                lambda: task_state_manager.get_state.remote(task_id),
+                f"get_state({task_id}) before recovered completion",
+            )
+            if state == "COMPLETED":
+                # COMPLETED is written only after indexing has returned. Older
+                # task-state actors may not expose the settlement probe, but
+                # that optional probe must not erase an already-known outcome.
+                settlement_confirmed = False
+            else:
+                if not await self._wait_for_worker_settled(task_id, task_state_manager):
+                    return
+                settlement_confirmed = True
 
         # Persist before stamping the actor: the stamp is what stops this method
         # running again, so a failed write must leave the task unstamped for
@@ -367,6 +377,7 @@ class TaskCompletionTracker:
                 return
         metadata = details.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata.pop(TASK_JOB_OUTCOME_PENDING_METADATA_KEY, None)
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
         await self._call_task_state(
             lambda: task_state_manager.set_details.remote(
@@ -557,6 +568,17 @@ class TaskCompletionTracker:
                     task_state_manager.get_all_info.remote,
                     "get_all_info_for_periodic_reconcile",
                 )
+                for task_id, info in all_info.items():
+                    if (
+                        info.get("state") in _TERMINAL_STATES
+                        and not _has_finished_at(info.get("details"))
+                        and task_id not in self._pending_settlements
+                    ):
+                        # A prior persistence attempt may have failed before it
+                        # could enter the bounded retry queue. The task-state
+                        # actor retains its outcome marker until the history
+                        # write succeeds, so the periodic scan can retry it.
+                        self._schedule_terminal_settlement(task_id)
                 await self.reconcile_jobs(list(all_info))
             except Exception as exc:
                 self._logger.warning("Periodic indexing job reconciliation failed", error=str(exc))

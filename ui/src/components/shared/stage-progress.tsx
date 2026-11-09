@@ -36,6 +36,7 @@ export function StageElapsedTime({
   useEffect(() => {
     const sampledElapsedMs = elapsedFromSample(elapsedMs, elapsedSampledAt);
     const startedAt = performance.now();
+    setElapsed(sampledElapsedMs);
     const interval = window.setInterval(() => {
       setElapsed(sampledElapsedMs + (performance.now() - startedAt));
     }, STAGE_ELAPSED_UPDATE_MS);

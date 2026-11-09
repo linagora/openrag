@@ -13,6 +13,7 @@ row from hiding a terminal result in the live actor.
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -43,6 +44,7 @@ _DURABLE_TASK_LIMIT = 500
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _MAX_STAGE_HISTORY_PAGE = 200
 _MAX_PAGINATION_OFFSET = 2**63 - 1
+_OPTIONAL_STAGE_PROGRESS_SIDECAR_TIMEOUT_SECONDS = 2.0
 _STAGE_LABELS = {
     "parse": "Parsing",
     "caption": "Image captioning",
@@ -321,7 +323,11 @@ class JobService:
         stage_progress_tasks = (
             dict(filtered)
             if pagination_requested
-            else {task_id: info for task_id, info in filtered if info.get("state") == "SERIALIZING"}
+            else {
+                task_id: info
+                for task_id, info in filtered
+                if info.get("state") == "SERIALIZING" or info.get("state") in _TERMINAL_STATES
+            }
         )
         stage_progress = await self._stage_progress_for_tasks(
             stage_progress_tasks,
@@ -642,13 +648,6 @@ class JobService:
                 latest_stage_ids = await get_latest_stage_ids(task_ids)
             except Exception as exc:
                 logger.warning("Failed to read latest stage IDs", error=str(exc))
-                if require_ordering_metadata and any(
-                    view.get("last_known_stage_id") is None for view in result.values()
-                ):
-                    raise ServiceUnavailableError(
-                        "Task stage history is temporarily unavailable.",
-                        code="TASK_LIST_PAGINATION_UNAVAILABLE",
-                    ) from exc
             else:
                 for task_id, stage_id in latest_stage_ids.items():
                     view = result.get(task_id)
@@ -671,11 +670,18 @@ class JobService:
             return {}
         snapshots: dict[str, Any] = {}
         if self._stage_progress_manager is not None:
-            sidecar_snapshots = await self._optional_actor_call(
-                "get_stage_progress_snapshots",
-                active_task_ids,
-                actor=self._stage_progress_manager,
-            )
+            try:
+                sidecar_snapshots = await asyncio.wait_for(
+                    self._optional_actor_call(
+                        "get_stage_progress_snapshots",
+                        active_task_ids,
+                        actor=self._stage_progress_manager,
+                    ),
+                    timeout=_OPTIONAL_STAGE_PROGRESS_SIDECAR_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning("Timed out reading optional live stage progress sidecar")
+                sidecar_snapshots = None
             if isinstance(sidecar_snapshots, dict):
                 snapshots.update(sidecar_snapshots)
         task_state_snapshots = await self._optional_actor_call("get_stage_progress_snapshots", active_task_ids)

@@ -67,6 +67,7 @@ def test_task_state_manager_restarts_without_retrying_mutations(monkeypatch):
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
@@ -98,6 +99,7 @@ def test_legacy_task_state_manager_is_replaced_before_handle_is_returned(monkeyp
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
@@ -121,6 +123,7 @@ def test_legacy_task_state_manager_is_reused_without_disrupting_active_workers(m
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
@@ -166,6 +169,7 @@ def test_task_state_manager_without_renewable_fences_is_replaced(monkeypatch):
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
@@ -195,6 +199,39 @@ def test_task_state_manager_without_bounded_retention_is_replaced(monkeypatch):
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
+        set_queued_details_v2=SimpleNamespace(),
+        renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
+        get_stage_progress_snapshots=SimpleNamespace(),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_state_manager() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
+
+
+def test_task_state_manager_without_pending_outcome_retention_is_replaced(monkeypatch):
+    legacy = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
+        set_queued_details_v2=SimpleNamespace(),
+    )
+    replacement = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
@@ -218,11 +255,13 @@ def test_task_state_manager_without_atomic_degraded_completion_is_replaced(monke
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
     )
     replacement = SimpleNamespace(
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
@@ -246,12 +285,14 @@ def test_task_state_manager_without_explicit_completion_outcomes_is_replaced(mon
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
     )
     replacement = SimpleNamespace(
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
@@ -277,6 +318,7 @@ def test_task_state_manager_without_admission_fence_is_replaced(monkeypatch):
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
     )
@@ -284,6 +326,7 @@ def test_task_state_manager_without_admission_fence_is_replaced(monkeypatch):
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),

@@ -390,8 +390,133 @@ describe("JobDetailPage", () => {
 
     renderJobDetail();
 
-    expect(await screen.findByText("Last observed start — no stage end was recorded before the task ended")).not.toBeNull();
+    expect(await screen.findByText("Last observed start")).not.toBeNull();
     expect(screen.getByText("Stage history completeness is unknown.")).not.toBeNull();
+  });
+
+  it("shows the durable finalizing phase ahead of a retained stage label", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "SERIALIZING",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "finalizing.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "unknown",
+      phase: "finalizing",
+      is_currently_running: false,
+      last_known_stage_id: "store",
+      last_known_stage_label: "Storing",
+      current_invocation_id: "invocation-1",
+      persisted_through_sequence: 1,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText("Last observed: Finalizing · Status unconfirmed")).not.toBeNull();
+    expect(screen.queryByText("Last observed: Storing · Status unconfirmed")).toBeNull();
+  });
+
+  it("keeps the live activity query polling while the timeline pages through history", async () => {
+    const currentSummary = {
+      freshness: "live" as const,
+      history_quality: "complete" as const,
+      phase: "stage",
+      stage_id: "embed",
+      stage_label: "Embedding",
+      is_currently_running: true,
+      current_invocation_id: "invocation-1",
+      persisted_through_sequence: 1,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    };
+    const event = (sequence: number, stage_id: string) => ({
+      event_id: `event-${sequence}`,
+      task_id: "task-1",
+      attempt: 1,
+      sequence,
+      invocation_id: "invocation-1",
+      stage_id,
+      stage_rank: sequence,
+      status: "started" as const,
+      occurred_at: "2026-10-22T10:00:00Z",
+    });
+    const latestPage = {
+      ...currentSummary,
+      events: [event(3, "embed")],
+      has_more: true,
+      next_cursor: { attempt: 1, sequence: 2 },
+    };
+    const olderPage = {
+      ...currentSummary,
+      events: [event(1, "parse")],
+      has_more: false,
+      next_cursor: null,
+    };
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "SERIALIZING",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "history.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockImplementation(async (_taskId, cursor, limit) => {
+      if (limit === 1) return currentSummary;
+      return cursor ? olderPage : latestPage;
+    });
+
+    const { queryClient, rerenderJobDetail } = renderJobDetail();
+    await userEvent.click(await screen.findByRole("button", { name: "Older stages" }));
+
+    await waitFor(() => {
+      expect(getTaskStageProgressMock).toHaveBeenCalledWith("task-1", { attempt: 1, sequence: 2 }, 50);
+    });
+    expect(await screen.findByText("Embedding")).not.toBeNull();
+    expect(await screen.findByRole("button", { name: "Newer stages" })).not.toBeNull();
+
+    const currentQuery = queryClient.getQueryCache().find({
+      queryKey: ["task-stage-progress-current", "task-1", 7, "admin"],
+    });
+    const historyQuery = queryClient.getQueryCache().find({
+      queryKey: ["task-stage-progress", "task-1", 7, "admin", 1, 2],
+    });
+    expect(currentQuery).toBeDefined();
+    expect(historyQuery).toBeDefined();
+    if (currentQuery) {
+      const currentRefetchInterval = (currentQuery.options as unknown as {
+        refetchInterval?: (query: typeof currentQuery) => unknown;
+      }).refetchInterval;
+      expect(currentRefetchInterval).toBeTypeOf("function");
+      expect(currentRefetchInterval?.(currentQuery)).toBe(3000);
+    }
+    if (historyQuery) {
+      const historyRefetchInterval = (historyQuery.options as unknown as {
+        refetchInterval?: (query: typeof historyQuery) => unknown;
+      }).refetchInterval;
+      expect(historyRefetchInterval).toBeTypeOf("function");
+      expect(historyRefetchInterval?.(historyQuery)).toBe(false);
+    }
+
+    await userEvent.click(screen.getByRole("button", { name: "Newer stages" }));
+    await waitFor(() => {
+      expect(queryClient.getQueryData(["task-stage-progress", "task-1", 7, "admin", null, null])).toMatchObject({
+        events: [expect.objectContaining({ stage_id: "embed" })],
+      });
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Older stages" }));
+    auth.user = { id: 8, is_admin: false };
+    permissions.isAdmin = false;
+    rerenderJobDetail();
+
+    expect(screen.queryByRole("button", { name: "Newer stages" })).toBeNull();
+    await waitFor(() => {
+      expect(queryClient.getQueryCache().find({
+        queryKey: ["task-stage-progress", "task-1", 8, "user", null, null],
+      })).toBeDefined();
+    });
   });
 
   it("labels an open stage interrupted only when worker loss was confirmed", async () => {
