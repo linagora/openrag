@@ -83,12 +83,42 @@ async def test_a_conversation_may_end_with_a_tool_result(client, service, model)
     [
         [],
         [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
-        [{"role": "user", "content": "hello"}, {"role": "tool", "tool_call_id": "c1", "content": ""}],
+        [{"role": "user", "content": ""}],
+        [{"role": "user", "content": "hello"}, {"role": "tool", "content": "2 emails: ..."}],
+        [{"role": "user", "content": "hello"}, {"role": "tool", "tool_call_id": "c1"}],
     ],
 )
-async def test_the_last_message_is_a_non_empty_user_or_tool_message(client, messages):
+async def test_the_last_message_is_a_non_empty_user_message_or_a_tool_result(client, messages):
     async with client:
         response = await client.post("/v1/chat/completions", json={"model": "openrag-p", "messages": messages})
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "The last message must be a non-empty user or tool message"
+    assert response.json()["detail"] == (
+        "The last message must be a non-empty user message or a tool result with its tool_call_id"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tool_may_return_nothing(client, service):
+    messages = [*TOOL_TURN[:-1], {"role": "tool", "tool_call_id": "c1", "content": ""}]
+    async with client:
+        response = await client.post("/v1/chat/completions", json={"model": "openrag-p", "messages": messages})
+
+    assert response.status_code == 200, response.text
+    assert service.calls["chat"]["payload"]["messages"][-1]["content"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "status_code"),
+    [
+        ({"model": "openrag-p"}, 400),
+        ({"metadata": {"websearch": True}}, 400),
+        ({}, 200),
+    ],
+)
+async def test_only_a_search_needs_a_user_message(client, body, status_code):
+    async with client:
+        response = await client.post("/v1/chat/completions", json={**body, "messages": TOOL_TURN[1:]})
+
+    assert response.status_code == status_code, response.text
