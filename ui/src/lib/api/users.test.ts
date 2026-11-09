@@ -14,12 +14,13 @@ const listPartitionMembersMock = vi.mocked(listPartitionMembers);
 describe("listUserMemberships", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("returns memberships and records partitions hidden by the caller's role", async () => {
+  it("marks forbidden partitions unavailable but treats removed partitions as absent", async () => {
     listPartitionsMock.mockResolvedValue({
-      partitions: [{ name: "visible" }, { name: "restricted" }] as never,
+      partitions: [{ name: "visible" }, { name: "restricted" }, { name: "removed" }] as never,
     });
     listPartitionMembersMock.mockImplementation(async (name) => {
       if (name === "restricted") throw new ApiError(403, { detail: "Forbidden" });
+      if (name === "removed") throw new ApiError(404, { detail: "Partition not found" });
       return { members: [{ user_id: 7, role: "editor", added_at: null }] as never };
     });
 

@@ -3,14 +3,19 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getUser, type UserResponse } from "@/lib/api/users";
+import { getUser, listUserMemberships, type UserResponse } from "@/lib/api/users";
 import { getConfig } from "@/lib/api/system";
+import { listPartitions } from "@/lib/api/partitions";
 import { ApiError } from "@/lib/api/client";
 import UserDetailPage from "./detail";
 
 vi.mock("@/lib/api/users", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api/users")>("@/lib/api/users");
-  return { ...actual, getUser: vi.fn() };
+  return { ...actual, getUser: vi.fn(), listUserMemberships: vi.fn() };
+});
+vi.mock("@/lib/api/partitions", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api/partitions")>("@/lib/api/partitions");
+  return { ...actual, listPartitions: vi.fn() };
 });
 vi.mock("@/lib/api/system", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api/system")>("@/lib/api/system");
@@ -18,6 +23,8 @@ vi.mock("@/lib/api/system", async () => {
 });
 
 const getUserMock = vi.mocked(getUser);
+const listUserMembershipsMock = vi.mocked(listUserMemberships);
+const listPartitionsMock = vi.mocked(listPartitions);
 
 vi.stubGlobal(
   "ResizeObserver",
@@ -59,6 +66,8 @@ describe("UserDetailPage read errors", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getUserMock.mockReset();
+    listUserMembershipsMock.mockReset().mockResolvedValue({ memberships: [], unavailablePartitions: [] });
+    listPartitionsMock.mockReset().mockResolvedValue({ partitions: [] } as never);
     vi.mocked(getConfig).mockResolvedValue({ rdb: { default_file_quota: 200 } } as never);
   });
 
@@ -88,6 +97,20 @@ describe("UserDetailPage read errors", () => {
     expect(await screen.findByText("User could not be loaded")).not.toBeNull();
     expect(screen.queryByText("User not found.")).toBeNull();
     expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
+  });
+
+  it("does not offer retry when partition access is hidden by permissions", async () => {
+    getUserMock.mockResolvedValue(makeUser());
+    listUserMembershipsMock.mockResolvedValue({
+      memberships: [],
+      unavailablePartitions: ["restricted"],
+    });
+    const user = userEvent.setup();
+    renderUserDetail();
+
+    await user.click(await screen.findByRole("tab", { name: "Partitions" }));
+    expect(await screen.findByText("Some partition access could not be checked")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("keeps the loaded user visible and labels the profile stale after refresh fails", async () => {

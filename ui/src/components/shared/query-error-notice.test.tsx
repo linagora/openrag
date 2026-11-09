@@ -29,4 +29,17 @@ describe("QueryErrorNotice", () => {
     );
     expect(screen.getByRole("button", { name: "Retrying…" }).hasAttribute("disabled")).toBe(true);
   });
+
+  it("can show an informational notice without a retry action", () => {
+    render(
+      <QueryErrorNotice
+        title="Some partition access could not be checked"
+        message="Your access does not allow checking every partition."
+        variant="default"
+      />,
+    );
+
+    expect(screen.getByRole("alert").textContent).toContain("Some partition access could not be checked");
+    expect(screen.queryByRole("button")).toBeNull();
+  });
 });

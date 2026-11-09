@@ -1338,7 +1338,7 @@ function PresetDialog({
           )}
 
           <DialogFooter>
-            <Button type="submit" disabled={loading}>
+            <Button type="submit" disabled={loading || optionLoading || optionInitialLoadFailed}>
               {loading ? "Saving..." : editing ? "Update" : "Create"}
             </Button>
           </DialogFooter>

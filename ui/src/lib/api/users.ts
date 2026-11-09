@@ -134,12 +134,14 @@ export async function listUserMemberships(userId: number): Promise<UserMembershi
           unavailable: false,
         };
       } catch (error) {
-        // Partition membership reads require owner access. A 403 is expected for
-        // partitions outside the caller's management scope; a 404 can occur if
-        // a partition was removed after the initial list. Other failures must
-        // propagate so the UI does not present a partial scan as complete.
-        if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+        // A 403 means the caller cannot inspect this partition, so the result
+        // is incomplete. A 404 means it disappeared after the initial list and
+        // cannot contain a current membership. Other failures must propagate.
+        if (error instanceof ApiError && error.status === 403) {
           return { membership: null, unavailable: true };
+        }
+        if (error instanceof ApiError && error.status === 404) {
+          return { membership: null, unavailable: false };
         }
         throw error;
       }

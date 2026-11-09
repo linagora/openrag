@@ -174,6 +174,7 @@ describe("PresetsPage read errors", () => {
     await user.click(screen.getByRole("button", { name: "Add Preset" }));
     expect(await screen.findByText("Preset options could not be loaded")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
   });
 });
 

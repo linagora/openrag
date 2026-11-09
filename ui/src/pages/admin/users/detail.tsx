@@ -356,9 +356,8 @@ function PartitionsTab({ userId }: { userId: number }) {
               <div className="mb-3">
                 <QueryErrorNotice
                   title="Some partition access could not be checked"
-                  message="Some partitions could not be checked because access was restricted or a partition was removed. The list below may be incomplete."
-                  isRetrying={membershipsQuery.isFetching}
-                  onRetry={() => void membershipsQuery.refetch()}
+                  message="Your access does not allow checking every partition, so this membership list may be incomplete."
+                  variant="default"
                 />
               </div>
             )}
