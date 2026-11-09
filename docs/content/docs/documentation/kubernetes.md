@@ -227,8 +227,8 @@ inside the OpenRAG pod, so the pod restart of the upgrade recreates the actors.
 
 ## Sizing indexing
 
-With `ray.enabled: false` and no `RAY_ADDRESS` (the default), the `openrag` pod
-starts its own Ray: chat, the indexer workers, the document parsers and the task
+With `ray.enabled: false`, no `RAY_ADDRESS` and `ray.externalCluster: false` (the
+default), the `openrag` pod starts its own Ray: chat, the indexer workers, the document parsers and the task
 tracker share that pod's CPU, memory and GPU. Indexing then scales **vertically
 only**, by giving that pod more resources.
 
@@ -270,8 +270,11 @@ What to watch:
 ### More than one replica
 
 Several `openrag` replicas need one Ray cluster shared by all of them: with
-`ray.enabled: true`, or an external cluster through `RAY_ADDRESS`. The pods then
-use the same task state. The chart's `RayCluster` runs a fixed number of workers
+`ray.enabled: true` together with `env.config.RAY_ADDRESS` or
+`env.config.ENABLE_RAY_SERVE=true` (see [Notes](#notes)), or with an external
+cluster through `env.config.RAY_ADDRESS`. Set `ray.externalCluster: true` when
+`RAY_ADDRESS` comes from a Secret the chart cannot read. The pods then use the
+same task state. The chart's `RayCluster` runs a fixed number of workers
 (`ray.workers`), and upgrades follow
 [Upgrades that change the indexer generation](#upgrades-that-change-the-indexer-generation).
 See [Deploy a Ray cluster](/openrag/documentation/deploy_ray_cluster/).
