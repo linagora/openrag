@@ -1,4 +1,5 @@
-"""Marker's OCR server in Compose (surya-vllm, surya-llamacpp)."""
+"""Marker's OCR server in Compose (surya-vllm, surya-llamacpp), and the chart's
+surya engine running the same vLLM flags."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPOSE = ROOT / "infra" / "compose" / "docker-compose.yaml"
+VALUES = ROOT / "infra" / "charts" / "openrag-stack" / "values.yaml"
 MODEL = "datalab-to/surya-ocr-2.5"
 
 
@@ -83,3 +85,44 @@ def test_the_llamacpp_image_is_pinned():
     image = _services()["surya-llamacpp"]["image"]
 
     assert re.fullmatch(r"ghcr\.io/ggml-org/llama\.cpp:server-b\d+", image), image
+
+
+def _normalized(args: list[str]) -> dict[str, str | None]:
+    """vLLM flags as {name: value}, ``_`` and ``-`` spelled alike."""
+    flags: dict[str, str | None] = {}
+    i = 0
+    while i < len(args):
+        name = args[i].replace("_", "-")
+        if i + 1 < len(args) and not args[i + 1].startswith("--"):
+            flags[name] = args[i + 1]
+            i += 2
+        else:
+            flags[name] = None
+            i += 1
+    return flags
+
+
+def _chart_engine_args() -> list[str]:
+    """The surya engine's flags as vllm-stack 0.1.12 builds them from vllmConfig."""
+    engines = yaml.safe_load(VALUES.read_text(encoding="utf-8"))["vllm"]["servingEngineSpec"]["modelSpec"]
+    config = next(e for e in engines if e["name"] == "surya")["vllmConfig"]
+    args = ["--enable-prefix-caching" if config.get("enablePrefixCaching") else "--no-enable-prefix-caching"]
+    for key, flag in (
+        ("maxModelLen", "--max-model-len"),
+        ("dtype", "--dtype"),
+        ("maxNumSeqs", "--max-num-seqs"),
+        ("gpuMemoryUtilization", "--gpu_memory_utilization"),
+    ):
+        if key in config:
+            args += [flag, str(config[key])]
+    return args + [str(a) for a in config.get("extraArgs", [])]
+
+
+def test_compose_and_the_chart_run_the_same_ocr_server():
+    compose = _command(_services()["surya-vllm"])
+    assert compose[0] == MODEL
+
+    compose_flags = _normalized(compose[1:])
+    compose_flags.pop("--served-model-name")  # vllm-stack serves the modelURL, which is the same name
+
+    assert compose_flags == _normalized(_chart_engine_args())

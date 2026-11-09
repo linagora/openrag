@@ -8,6 +8,14 @@ Called with the release context plus `configMapName`, and `hookAnnotations`
 for the hook copy.
 */}}
 {{- define "openrag-stack.envConfigMap" -}}
+{{- /* The app still reads these old names, but only while the new one is
+     unset, and the chart sets the new one: a value kept under the old name
+     would be ignored. */}}
+{{- range $old, $new := dict "MARKER_POOL_SIZE" "MARKER_NUM_INSTANCES" "MARKER_MAX_PROCESSES" "MARKER_CHILD_WORKERS_PER_INSTANCE" }}
+{{- if hasKey $.Values.env.config $old }}
+{{- fail (printf "env.config.%s was renamed %s: move its value there." $old $new) }}
+{{- end }}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
