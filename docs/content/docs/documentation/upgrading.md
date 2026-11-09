@@ -32,6 +32,13 @@ worker. Remove the setting; the Marker worker logs a warning while it is above 1
 `MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
 `1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
 
+When web search is enabled, `WEBSEARCH_MAX_QUERIES` allows up to three provider
+calls per request by default (maximum `8`), keeping separate searches for common
+two- or three-facet queries. Additional facets are combined as needed without
+being dropped. Earlier 2.3.x versions could make one provider call for each
+sub-query, so results may differ. Check the provider's per-request and aggregate
+replica quotas before raising the limit.
+
 From OpenRAG 2.3.2, the bundled object store runs SILO, the maintained MinIO
 fork, instead of the unpatched MinIO build. The switch is one-way, so back up
 the MinIO, etcd and Milvus data first. On Kubernetes, stop every MinIO pod

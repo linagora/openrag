@@ -1,0 +1,168 @@
+[
+  {
+    "id": "thermogenesis",
+    "question": "Compare chenodeoxycholic acid treatment in human brown adipose tissue and cold exposure causing UCP1-dependent lipolysis in their effects on energy expenditure and lipid metabolism.",
+    "gold_chunk_ids": [
+      "1568684",
+      "970012"
+    ],
+    "source_claim_ids": [
+      "248",
+      "268"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "neuronal-damage",
+    "question": "Compare APOE4-associated tau phosphorylation in human neurons, TDP-43 mitochondrial localization affecting respiratory complex I, and SIRT1 regulation of FOXO3 in their mechanisms of cell injury and survival.",
+    "gold_chunk_ids": [
+      "4709641",
+      "16966326",
+      "28937856"
+    ],
+    "source_claim_ids": [
+      "56",
+      "180",
+      "431"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "breast-cancer",
+    "question": "Compare ALDH1, CHEK2 and Scribble in their relationship to breast cancer development and prognosis.",
+    "gold_chunk_ids": [
+      "45638119",
+      "13519661",
+      "8774475"
+    ],
+    "source_claim_ids": [
+      "51",
+      "208",
+      "354"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "inflammation",
+    "question": "Compare autoreactive-IgE activation of basophils in lupus nephritis, CX3CR1-mediated T-helper-cell survival in asthma, and oncogenic mTOR signalling recruiting myeloid suppressor cells through G-CSF in their effects on immune-cell regulation and disease progression.",
+    "gold_chunk_ids": [
+      "12670680",
+      "21366394",
+      "2014909"
+    ],
+    "source_claim_ids": [
+      "171",
+      "218",
+      "324"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "aging",
+    "question": "Compare restoring chaperone-mediated autophagy in aging liver and using perceived age with leucocyte telomere length as an aging biomarker in their evidence about functional health and survival in aging.",
+    "gold_chunk_ids": [
+      "1084345",
+      "14079881"
+    ],
+    "source_claim_ids": [
+      "148",
+      "239"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "surgical-risk",
+    "question": "Compare dexamethasone after pediatric tonsillectomy and C-reactive-protein risk models for prioritising coronary bypass surgery in their evidence about surgical outcomes and risk assessment.",
+    "gold_chunk_ids": [
+      "23349986",
+      "13625993"
+    ],
+    "source_claim_ids": [
+      "338",
+      "213"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "ion-and-gene",
+    "question": "Compare stress-dependent activation of microRNA targets and Golli-dependent regulation of calcium influx in T cells in their mechanisms of cellular regulation.",
+    "gold_chunk_ids": [
+      "2251426",
+      "14767844"
+    ],
+    "source_claim_ids": [
+      "238",
+      "478"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "infection",
+    "question": "Compare antibiotic-induced changes in gut metabolites affecting Clostridium difficile and IL-4/IL-13 suppression of macrophage autophagy against Mycobacterium tuberculosis in their mechanisms of infection resistance.",
+    "gold_chunk_ids": [
+      "6372244",
+      "30774694"
+    ],
+    "source_claim_ids": [
+      "118",
+      "507"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "stem-cells",
+    "question": "Compare GATA-3 regulation of hematopoietic stem cell maintenance and single-cell functional assays with index sorting to resolve stem cell heterogeneity in their evidence about hematopoietic stem cell function.",
+    "gold_chunk_ids": [
+      "10165258",
+      "13980338"
+    ],
+    "source_claim_ids": [
+      "443",
+      "508"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "neural-mechanisms",
+    "question": "Compare APOE4 in human iPSC-derived neurons and SIRT1 deacetylation of FOXO3 in their effects on cell death and stress resistance.",
+    "gold_chunk_ids": [
+      "4709641",
+      "28937856"
+    ],
+    "source_claim_ids": [
+      "56",
+      "431"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "metabolism",
+    "question": "Compare chenodeoxycholic acid activation of human brown adipose tissue, cold-induced UCP1 lipolysis and vesicular GAPDH glycolysis powering axonal transport in their mechanisms of energy metabolism.",
+    "gold_chunk_ids": [
+      "1568684",
+      "970012",
+      "18678095"
+    ],
+    "source_claim_ids": [
+      "248",
+      "268",
+      "475"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  },
+  {
+    "id": "tumor-and-neuron",
+    "question": "Compare ALDH1 expression, APOE4 expression and Scribble mislocalization in their effects on cell survival and disease progression.",
+    "gold_chunk_ids": [
+      "45638119",
+      "4709641",
+      "8774475"
+    ],
+    "source_claim_ids": [
+      "51",
+      "56",
+      "354"
+    ],
+    "gold_source": "SciFact BEIR test qrels as document pointers; question facets manually checked against the actual title+abstract chunk, rather than assuming every original full-paper claim is in the abstract"
+  }
+]
