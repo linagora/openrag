@@ -519,6 +519,18 @@ async def test_delete_file_admin_wildcard_bypasses_membership():
     assert indexing.deleted == [("f1", "a")]
 
 
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.asyncio
+async def test_admin_wildcard_cannot_delete_in_a_reserved_partition(partition):
+    """The store reads `all` as every partition: deleting file X in it deleted X everywhere."""
+    indexing = FakeIndexing()
+    with pytest.raises(PermissionError, match="reserved"):
+        await _service(partitions=FakePartitions(exists=True), indexing=indexing).delete_file(
+            partition=partition, file_id="f1", allowed_partitions=["all"], user_id=1
+        )
+    assert indexing.deleted == []
+
+
 @pytest.mark.asyncio
 async def test_delete_file_invalid_file_id():
     with pytest.raises(ValueError):

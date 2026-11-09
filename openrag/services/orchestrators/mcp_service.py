@@ -38,7 +38,7 @@ from core.indexing.validators import (
     validate_ooxml_package,
 )
 from core.models.document import Document
-from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
+from core.utils.consts import is_internal_metadata_key, is_reserved_partition_name, strip_protected_metadata
 from core.utils.exceptions import ConflictError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -154,6 +154,11 @@ class MCPService:
         user_id: int | None,
     ) -> None:
         """Require editor (or owner) role on *partition*."""
+        # The store reads a reserved name as "every partition", so no one, the
+        # admin wildcard included, may change one (deleting file X in it would
+        # delete X in every partition).
+        if is_reserved_partition_name(partition):
+            raise PermissionError(f"Partition name '{partition}' is reserved")
         self._enforce_partition_access(partition, allowed_partitions)
         if allowed_partitions == ["all"]:
             return  # admin wildcard

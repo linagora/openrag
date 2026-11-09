@@ -512,7 +512,7 @@ async def test_ensure_partition_role_refuses_a_reserved_partition_name(partition
 
 
 @pytest.mark.asyncio
-async def test_super_admin_passes_the_reserved_name_check(monkeypatch):
+async def test_super_admin_may_read_through_a_reserved_name(monkeypatch):
     import api.dependencies.auth as auth_dependencies
 
     monkeypatch.setattr(auth_dependencies, "SUPER_ADMIN_MODE", True)
@@ -524,3 +524,23 @@ async def test_super_admin_passes_the_reserved_name_check(monkeypatch):
         auth_service=FakeAuthService,
         partition_service=FakePartitionService(existing=set()),
     )
+
+
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.parametrize("role", ["editor", "owner"])
+@pytest.mark.asyncio
+async def test_super_admin_cannot_change_a_reserved_partition(monkeypatch, partition, role):
+    """The store reads `all` as every partition: deleting file X in it deleted X everywhere."""
+    import api.dependencies.auth as auth_dependencies
+
+    monkeypatch.setattr(auth_dependencies, "SUPER_ADMIN_MODE", True)
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            partition=partition,
+            user={"id": 1, "is_admin": True},
+            user_partitions=[],
+            required_role=role,
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing={"all"}),
+        )
+    assert exc.value.status_code == 403
