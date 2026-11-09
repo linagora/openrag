@@ -76,10 +76,15 @@ reconnect on its own.
 ```bash
 NS=openrag            # the release namespace
 FULLNAME=openrag      # fullnameOverride; `kubectl get raycluster -n $NS` shows it as <FULLNAME>-raycluster
+REPLICAS=$(kubectl get deploy -n "$NS" "$FULLNAME-openrag" -o jsonpath='{.spec.replicas}')
 kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
+kubectl wait -n "$NS" pod -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance="$FULLNAME" \
+  --for=delete --timeout=10m
 kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
-kubectl get pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster" -w   # until the new pods are Running and Ready
-kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=<your usual count>
+# Retries until KubeRay has created the new pods, then until they are Ready.
+until kubectl wait -n "$NS" pod -l ray.io/cluster="$FULLNAME-raycluster" \
+  --for=condition=Ready --timeout=10m; do sleep 5; done
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas="$REPLICAS"
 kubectl rollout status -n "$NS" deploy/"$FULLNAME-openrag"   # before resuming indexing
 ```
 
