@@ -570,13 +570,17 @@ async def openai_chat_completion(
     log = logger.bind(model=model_name, endpoint="/chat/completions")
 
     # The conversation ends with a message of the user, or with the result
-    # of a tool call of the assistant that the client ran.
+    # of a tool call of the assistant that the client ran. A tool may return
+    # nothing, but the result names the call it answers.
     last = request.messages[-1] if request.messages else None
-    if last is None or last.role not in ("user", "tool") or not last.content:
+    if last is None or not (
+        (last.role == "user" and last.content)
+        or (last.role == "tool" and last.content is not None and (last.model_extra or {}).get("tool_call_id"))
+    ):
         log.warning("Invalid request: missing or malformed last message.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The last message must be a non-empty user or tool message",
+            detail="The last message must be a non-empty user message or a tool result with its tool_call_id",
         )
 
     metadata = request.metadata or {}
@@ -600,6 +604,18 @@ async def openai_chat_completion(
         )
         await service.refresh_partition_configs()
         log.debug(f"Using partitions: {partitions}")
+
+    # The search runs on the latest message of the user: a tool result alone
+    # gives it nothing to look for.
+    if (
+        (partitions is not None or metadata.get("websearch"))
+        and last.role == "tool"
+        and not any(m.role == "user" and m.content for m in request.messages)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A search needs a non-empty user message in the conversation",
+        )
 
     # Bound the caller's input size in every mode, against the resolved
     # partition's chat_llm endpoint budget when one applies (else the default
