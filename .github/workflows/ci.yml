@@ -466,17 +466,19 @@ jobs:
 
       # Every skip in this suite means a service is missing, and pytest exits 0
       # when all tests skip: this job passed for months having run nothing (#1068).
-      # The report also writes an expected failure as <skipped>; those don't count.
+      # The report also writes an expected failure as <skipped>; those don't count
+      # as skips, but nor as run: xfail(run=False) never runs its test at all.
       - name: Fail if a test was skipped or none ran
         run: |
           python3 -c "
           import sys
           import xml.etree.ElementTree as ET
           root = ET.parse('integration-results.xml').getroot()
-          tests = len(root.findall('.//testcase'))
+          tests = root.findall('.//testcase')
+          ran = [t for t in tests if t.find('skipped') is None]
           skipped = [s for s in root.iter('skipped') if s.get('type') != 'pytest.xfail']
-          print(f'{tests} tests, {len(skipped)} skipped')
-          sys.exit(tests == 0 or len(skipped) > 0)
+          print(f'{len(tests)} tests, {len(ran)} ran, {len(skipped)} skipped')
+          sys.exit(not ran or len(skipped) > 0)
           "
 
       - name: Show logs on failure
