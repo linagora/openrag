@@ -166,3 +166,40 @@ def test_rrf_stops_constructing_trace_candidates_when_the_request_budget_is_exha
 
     assert created == 3
     assert trace.stages["hybrid_fused"].candidate_count == 10
+
+
+def test_rrf_trace_with_a_reorder_never_marks_the_kept_object_as_its_own_duplicate():
+    """A ``reorder`` (the date interleave) may keep the second occurrence of a
+    chunk; the trace must then list the first one as the duplicate, not the
+    kept object itself."""
+    first_x = Chunk(id="x", text="first-x", partition="legal")
+    second_x = Chunk(id="x", text="second-x", partition="science")
+    a, b = Chunk(id="a", text="a"), Chunk(id="b", text="b")
+    trace = RetrievalTraceBuilder("req-1", "q")
+
+    fused = rrf_reranking(
+        [[a, first_x], [second_x, b]],
+        key_fn=lambda chunk: chunk.id,
+        trace=trace,
+        trace_stage="multi_query_fused",
+        reorder=lambda _fused: [a, second_x, b],
+    )
+
+    assert [chunk.text for chunk in fused] == ["a", "second-x", "b"]
+    candidates = trace.stages["multi_query_fused"].candidates
+    kept = next(c for c in candidates if c.id == "x" and c.duplicate_of is None)
+    duplicates = [c for c in candidates if c.duplicate_of is not None]
+    assert kept.partition == "science"
+    assert [(c.partition, c.duplicate_of) for c in duplicates] == [("legal", "x")]
+
+
+def test_rrf_trace_records_a_duplicate_even_when_lists_share_the_same_object():
+    shared = Chunk(id="x", text="shared")
+    a = Chunk(id="a", text="a")
+    trace = RetrievalTraceBuilder("req-1", "q")
+
+    rrf_reranking([[shared, a], [shared]], key_fn=lambda chunk: chunk.id, trace=trace, trace_stage="multi_query_fused")
+
+    candidates = trace.stages["multi_query_fused"].candidates
+    assert [c.id for c in candidates if c.duplicate_of is None] == ["x", "a"]
+    assert [(c.id, c.duplicate_of) for c in candidates if c.duplicate_of is not None] == [("x", "x")]

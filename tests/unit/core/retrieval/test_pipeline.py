@@ -682,3 +682,143 @@ def test_persisted_score_in_metadata_never_masquerades_as_this_query_s_score():
 
     unscored = ScoredChunk(id="x", text="t", metadata=dict(stale))
     assert "rerank_score" not in unscored.to_langchain().metadata
+
+
+# --------------------------------------------------------------------------- #
+# date_order — "summarize the last meeting I had"
+# --------------------------------------------------------------------------- #
+
+
+def _dated(cid: str, created_at: str | None) -> Chunk:
+    metadata = {} if created_at is None else {"created_at": created_at}
+    return Chunk(id=cid, text=f"text-{cid}", partition="p1", metadata=metadata)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_docs_newest_order_puts_the_most_recent_document_first():
+    """Relevance picked the candidates (``old`` ranked first); the date decides
+    what the LLM reads first. No Milvus filter is involved."""
+    r = FakeRetriever()
+    r.results_queue = [
+        [_dated("old", "2026-09-04T10:00:00Z"), _dated("new", "2026-09-22T14:51:30Z"), _dated("undated", None)]
+    ]
+    p = RetrieverPipeline(retriever=r)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="meeting notes", date_order="newest"))
+    assert [c.id for c in out] == ["new", "old", "undated"]
+    assert r.calls[0]["filter"] is None
+
+
+@pytest.mark.asyncio
+async def test_retrieve_docs_orders_after_reranking_and_before_the_top_k_cut():
+    """A ``top_k`` must keep the newest documents, not the most similar ones —
+    and the reranker's order (reversed by the fake) must not undo the date order."""
+    r = FakeRetriever()
+    r.results_queue = [[_dated("new", "2026-09-22T14:51:30Z"), _dated("old", "2026-09-04T10:00:00Z")]]
+    p = RetrieverPipeline(retriever=r, reranker=FakeReranker())
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="q", date_order="newest"), top_k=1)
+    assert [c.id for c in out] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_docs_reapplies_the_order_after_rrf_fusion():
+    """RRF only knows ranks: two sub-queries both ranking ``old`` first would
+    fuse it first. The requested order is re-applied on the fused list."""
+    r = FakeRetriever()
+    r.results_queue = [
+        [_dated("old", "2026-09-04T10:00:00Z"), _dated("new", "2026-09-22T14:51:30Z")],
+        [_dated("old", "2026-09-04T10:00:00Z"), _dated("mid", "2026-09-10T08:00:00Z")],
+    ]
+    p = RetrieverPipeline(retriever=r)
+    sq = SearchQueries(query_list=[Query(query="a", date_order="newest"), Query(query="b", date_order="newest")])
+    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq)
+    assert [c.id for c in out] == ["new", "mid", "old"]
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_docs_without_order_keeps_the_rrf_ranking():
+    r = FakeRetriever()
+    r.results_queue = [
+        [_dated("old", "2026-09-04T10:00:00Z"), _dated("new", "2026-09-22T14:51:30Z")],
+        [_dated("old", "2026-09-04T10:00:00Z")],
+    ]
+    p = RetrieverPipeline(retriever=r)
+    sq = SearchQueries(query_list=[Query(query="a"), Query(query="b")])
+    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq)
+    assert [c.id for c in out] == ["old", "new"]
+
+
+@pytest.mark.asyncio
+async def test_the_date_order_sees_candidates_beyond_the_expansion_seeds():
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [[_dated("seed", "2026-09-04T00:00:00Z"), _dated("newer", "2026-09-22T00:00:00Z")]]
+    r.expand_result = [_dated("seed", "2026-09-04T00:00:00Z"), _dated("related", "2026-09-04T00:00:00Z")]
+    p = RetrieverPipeline(retriever=r, reranker_top_k=1)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="q", date_order="newest"))
+    assert out[0].id == "newer"
+    assert "related" in [c.id for c in out]
+
+
+@pytest.mark.parametrize(("date_order", "seed"), [("newest", "newer"), (None, "similar")])
+@pytest.mark.asyncio
+async def test_the_date_order_picks_the_expansion_seeds(date_order, seed):
+    """Related chunks are fetched for the document the user asked for, not the most similar one."""
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [[_dated("similar", "2026-09-04T00:00:00Z"), _dated("newer", "2026-09-22T00:00:00Z")]]
+    p = RetrieverPipeline(retriever=r, reranker_top_k=1)
+    await p.retrieve_docs(partition=["p1"], query=Query(query="q", date_order=date_order))
+    assert [c.id for c in r.expand_input] == [seed]
+
+
+@pytest.mark.asyncio
+async def test_expansion_only_chunks_never_displace_the_retrieved_ones_under_a_date_order():
+    """A newer related document found by expansion is kept, but after the
+    documents retrieval found: with a one-source cut the meeting notes the
+    user asked for still reach the answer, not their newer attachment."""
+    r = FakeRetriever(expansion_enabled=True)
+    notes = _dated("notes", "2026-09-04T00:00:00Z")
+    r.results_queue = [[notes]]
+    r.expand_result = [notes, _dated("newer-invoice", "2026-09-22T00:00:00Z")]
+    p = RetrieverPipeline(retriever=r)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="meeting notes", date_order="newest"), top_k=1)
+    assert [c.id for c in out] == ["notes"]
+
+
+@pytest.mark.asyncio
+async def test_sub_queries_sharing_an_order_keep_their_coverage_through_the_cut():
+    """ "The last contract with ACME and with BETA": two sub-queries, both
+    newest first. A global re-sort would put ACME's two newest chunks ahead of
+    BETA's latest; interleaving keeps one of each within a two-source cut."""
+    r = FakeRetriever()
+    r.results_queue = [
+        [_dated("acme-2", "2026-10-02T00:00:00Z"), _dated("acme-1", "2026-10-01T00:00:00Z")],
+        [_dated("beta-1", "2026-03-01T00:00:00Z")],
+    ]
+    p = RetrieverPipeline(retriever=r)
+    sq = SearchQueries(query_list=[Query(query="ACME", date_order="newest"), Query(query="BETA", date_order="newest")])
+    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq, top_k=2)
+    assert [c.id for c in out] == ["acme-2", "beta-1"]
+
+
+NOV, JUL, JUN, JAN = (
+    _dated("nov", "2026-11-01T00:00:00Z"),
+    _dated("jul", "2026-07-01T00:00:00Z"),
+    _dated("jun", "2026-06-01T00:00:00Z"),
+    _dated("jan", "2026-01-01T00:00:00Z"),
+)
+
+
+@pytest.mark.parametrize(
+    ("orders", "lists", "top_k", "expected"),
+    [
+        (("newest", "oldest"), ([NOV, JUL, JUN], [JAN, JUN, JUL]), 3, ["nov", "jan", "jul"]),
+        (("newest", None), ([NOV, JAN], [JAN, JUL]), None, ["nov", "jan", "jul"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_sub_queries_with_different_orders_are_interleaved(orders, lists, top_k, expected):
+    r = FakeRetriever()
+    r.results_queue = [list(ranked) for ranked in lists]
+    p = RetrieverPipeline(retriever=r)
+    sq = SearchQueries(query_list=[Query(query=str(i), date_order=order) for i, order in enumerate(orders)])
+    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq, top_k=top_k)
+    assert [c.id for c in out] == expected

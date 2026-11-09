@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,12 @@ class RetrievalQuery(BaseModel):
     max_ancestor_depth: int | None = None
     with_surrounding_chunks: bool = True
     rerank: bool = True
+
+
+#: How the retrieved chunks are reordered by their document's ``created_at``.
+#: Set by the query contextualizer for "the latest X" / "the first X" requests,
+#: applied after relevance ranking (see ``core.retrieval.date_order``).
+DateOrder = Literal["newest", "oldest"]
 
 
 class TemporalPredicate(BaseModel):
@@ -60,6 +66,24 @@ class Query(BaseModel):
         default=None,
         description="Date predicates on `created_at`, AND-combined.",
     )
+    date_order: DateOrder | None = Field(
+        default=None,
+        description=(
+            'Reorder the retrieved chunks by document creation date: "newest" for '
+            '"the latest / last / most recent X", "oldest" for "the first / earliest X". '
+            "None keeps the relevance order."
+        ),
+    )
+
+    @field_validator("date_order", mode="before")
+    @classmethod
+    def _ignore_unknown_date_order(cls, value: Any) -> Any:
+        # LLM output isn't schema-enforced: a bad value mustn't fail the whole
+        # response, whose other sub-queries and filters are still valid.
+        if value is None or value in ("newest", "oldest"):
+            return value
+        logger.warning("Ignoring unknown date_order from the contextualizer: %r", value)
+        return None
 
     def to_milvus_filter(self) -> str | None:
         """Render the AND-combined predicates as a Milvus filter expression.
@@ -95,7 +119,10 @@ class Query(BaseModel):
         return " and ".join(parts)
 
     def __str__(self) -> str:
-        return f"Query: {self.query}, Filter: {self.to_milvus_filter()}"
+        text = f"Query: {self.query}, Filter: {self.to_milvus_filter()}"
+        if self.date_order:
+            text += f", Order: {self.date_order}"
+        return text
 
 
 class SearchQueries(BaseModel):
@@ -110,6 +137,16 @@ class SearchQueries(BaseModel):
         default=True,
         description="Whether the user's request needs document retrieval.",
     )
+
+    @property
+    def date_order(self) -> DateOrder | None:
+        """The date ordering to re-apply after RRF fusion, if all sub-queries share one.
+
+        Otherwise ("my first and last invoice") one order would push a sub-query's
+        results past the cut, so the lists are interleaved instead.
+        """
+        orders = {q.date_order for q in self.query_list}
+        return orders.pop() if len(orders) == 1 else None
 
     def __str__(self) -> str:
         return " --- ".join(str(q) for q in self.query_list)
