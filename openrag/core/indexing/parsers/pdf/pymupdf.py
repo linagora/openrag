@@ -16,8 +16,9 @@ Concurrency note: PyMuPDF is **not** thread-safe — concurrent calls to
 can raise ``ValueError: not a textpage of this page`` (upstream
 maintainer position: documented limitation, won't fix). That is a
 *thread* constraint: each process gets its own MuPDF state, so once
-configured (``PYMUPDF_POOL_SIZE`` above 1, or a memory limit) parses run in
-a pool of child processes. Unconfigured, they keep the one dedicated thread.
+configured (``PYMUPDF_CHILD_WORKERS_PER_INDEXER`` above 1, or a memory
+limit) parses run in a pool of child processes. Unconfigured, they keep the
+one dedicated thread.
 
 Two things follow, and both were measured (300-page PDF, 4 concurrent
 parses): threads cannot parallelize this at all — one dedicated thread took

@@ -274,7 +274,7 @@ def configure_pymupdf_pool(config) -> None:
     loader = config.loader
     configure_pool(
         PyMuPDFPoolSettings(
-            max_workers=loader.pymupdf_pool_size,
+            max_workers=loader.pymupdf_child_workers_per_indexer,
             memory_limit_mb=loader.pymupdf_parse_memory_limit_mb,
             max_tasks_per_child=loader.pymupdf_max_tasks_per_child,
         )

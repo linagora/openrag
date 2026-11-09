@@ -88,7 +88,7 @@ class DoclingPool:
     def __init__(self):
         self.logger = get_logger()
         self.config = load_config()
-        self.pool_size = self.config.loader.docling_pool_size
+        self.num_instances = self.config.loader.docling_num_instances
         self.max_tasks_per_worker = self.config.loader.docling_max_tasks_per_worker
 
         # max_restarts mirrors MarkerWorker: a worker that OOMs/CUDA-faults is
@@ -96,7 +96,7 @@ class DoclingPool:
         # working instead of every retry drawing the same dead handle (#722).
         self.actors = [
             DoclingWorker.options(num_gpus=_docling_num_gpus(self.config), max_restarts=5).remote()
-            for _ in range(self.pool_size)
+            for _ in range(self.num_instances)
         ]
         self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
 
@@ -104,9 +104,9 @@ class DoclingPool:
             for actor in self.actors:
                 self._queue.put_nowait(actor)
 
-        total_slots = self.pool_size * self.max_tasks_per_worker
+        total_slots = self.num_instances * self.max_tasks_per_worker
         self.logger.info(
-            f"Docling pool: {self.pool_size} actors × {self.max_tasks_per_worker} slots = {total_slots} PDF concurrency"
+            f"Docling pool: {self.num_instances} instances × {self.max_tasks_per_worker} slots = {total_slots} PDF concurrency"
         )
 
     async def process_pdf(self, file_path: str) -> ConversionResult:

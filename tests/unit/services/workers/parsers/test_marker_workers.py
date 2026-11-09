@@ -220,7 +220,9 @@ def _initialized_marker_worker(monkeypatch, pdftext_workers: int):
     import core.utils.logging
 
     log = _RecordingLogger()
-    config = SimpleNamespace(loader=SimpleNamespace(marker_max_processes=1, marker_pdftext_workers=pdftext_workers))
+    config = SimpleNamespace(
+        loader=SimpleNamespace(marker_child_workers_per_instance=1, marker_pdftext_workers=pdftext_workers)
+    )
     monkeypatch.setattr(core.config, "load_config", lambda: config)
     monkeypatch.setattr(core.utils.logging, "get_logger", lambda: log)
     monkeypatch.setenv("RAY_ADDRESS", "")

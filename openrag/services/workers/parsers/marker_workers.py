@@ -182,7 +182,7 @@ class MarkerWorker:
         self.config = load_config()
         self.page_sep = "[PAGE_SEP]"
 
-        self._workers = self.config.loader.marker_max_processes
+        self._workers = self.config.loader.marker_child_workers_per_instance
 
         self.converter_config = {
             "output_format": "markdown",
@@ -388,23 +388,23 @@ class MarkerPool:
 
         self.logger = get_logger()
         self.config = load_config()
-        self.max_processes = self.config.loader.marker_max_processes
-        self.pool_size = self.config.loader.marker_pool_size
+        self.child_workers_per_instance = self.config.loader.marker_child_workers_per_instance
+        self.num_instances = self.config.loader.marker_num_instances
         self.actors = [
             MarkerWorker.options(num_gpus=_marker_num_gpus(self.config), max_restarts=5).remote()
-            for _ in range(self.pool_size)
+            for _ in range(self.num_instances)
         ]
         # A slot is ``(actor, slot index)``: the index picks that actor's
         # single-process executor, so a slot recycle only touches its own child.
         self._queue: asyncio.Queue[tuple[ray.actor.ActorHandle, int]] = asyncio.Queue()
 
-        for slot in range(self.max_processes):
+        for slot in range(self.child_workers_per_instance):
             for actor in self.actors:
                 self._queue.put_nowait((actor, slot))
 
         self.logger.info(
-            f"Marker pool: {self.pool_size} actors × {self.max_processes} slots = "
-            f"{self.pool_size * self.max_processes} PDF concurrency"
+            f"Marker pool: {self.num_instances} instances × {self.child_workers_per_instance} child workers = "
+            f"{self.num_instances * self.child_workers_per_instance} PDF concurrency"
         )
 
     @staticmethod

@@ -120,18 +120,18 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),
     ("MARKER_PARSE_MEMORY_LIMIT_MB", "loader.marker_parse_memory_limit_mb", int),
-    ("PYMUPDF_POOL_SIZE", "loader.pymupdf_pool_size", int),
+    ("PYMUPDF_CHILD_WORKERS_PER_INDEXER", "loader.pymupdf_child_workers_per_indexer", int),
     ("PYMUPDF_PARSE_MEMORY_LIMIT_MB", "loader.pymupdf_parse_memory_limit_mb", int),
     ("PYMUPDF_MAX_TASKS_PER_CHILD", "loader.pymupdf_max_tasks_per_child", int),
-    ("MARKER_POOL_SIZE", "loader.marker_pool_size", int),
-    ("MARKER_MAX_PROCESSES", "loader.marker_max_processes", int),
+    ("MARKER_NUM_INSTANCES", "loader.marker_num_instances", int),
+    ("MARKER_CHILD_WORKERS_PER_INSTANCE", "loader.marker_child_workers_per_instance", int),
     ("MARKER_NUM_GPUS", "loader.marker_num_gpus", float),
     ("MARKER_TIMEOUT", "loader.marker_timeout", int),
     ("MARKER_CHILD_TIMEOUT_RATIO", "loader.marker_child_timeout_ratio", float),
     ("MARKER_PDFTEXT_WORKERS", "loader.marker_pdftext_workers", int),
     ("MARKER_CHUNK_SIZE", "loader.marker_chunk_size", int),
     ("DOCLING_NUM_GPUS", "loader.docling_num_gpus", float),
-    ("DOCLING_POOL_SIZE", "loader.docling_pool_size", int),
+    ("DOCLING_NUM_INSTANCES", "loader.docling_num_instances", int),
     ("DOCLING_MAX_TASKS_PER_WORKER", "loader.docling_max_tasks_per_worker", int),
     ("PARSE_TIMEOUT", "loader.parse_timeout", int),
     ("WHISPER_MODEL", "loader.local_whisper.model", str),
@@ -206,6 +206,15 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("OPENRAG_MCP_MAX_DOWNLOAD_BYTES", "mcp.max_download_bytes", int),
 ]
 
+# Renamed env vars, new name -> old name. The old name still loads, with a
+# warning, so an existing .env keeps its value; the new name wins when both are set.
+_RENAMED_ENV_VARS: dict[str, str] = {
+    "MARKER_NUM_INSTANCES": "MARKER_POOL_SIZE",
+    "MARKER_CHILD_WORKERS_PER_INSTANCE": "MARKER_MAX_PROCESSES",
+    "PYMUPDF_CHILD_WORKERS_PER_INDEXER": "PYMUPDF_POOL_SIZE",
+    "DOCLING_NUM_INSTANCES": "DOCLING_POOL_SIZE",
+}
+
 _AUDIO_EXTENSIONS = ("mp3", "flac", "ogg", "aac", "flv", "wma", "mp4")
 
 
@@ -279,12 +288,24 @@ def _parse_seed_users(raw: str) -> list[Any]:
     return parsed
 
 
+def _env_value(env_var: str) -> tuple[str, str | None]:
+    """The variable that sets ``env_var`` and its value: ``env_var`` itself, or
+    the name it was renamed from. An empty value counts as unset."""
+    old = _RENAMED_ENV_VARS.get(env_var)
+    if old and os.environ.get(old):
+        if not os.environ.get(env_var):
+            logger.warning("%s was renamed %s: rename it in your configuration", old, env_var)
+            return old, os.environ[old]
+        logger.warning("%s is ignored: it was renamed %s, which is set too. Remove it.", old, env_var)
+    return env_var, os.environ.get(env_var) or None
+
+
 def _apply_env_overrides(data: dict) -> dict:
     """Apply environment variable overrides to the config dict."""
     for env_var, dotted_path, target_type in _ENV_OVERRIDES:
-        value = os.environ.get(env_var)
-        if value is not None and value != "":
-            _set_nested(data, dotted_path, _coerce(value, target_type, env_var))
+        source, value = _env_value(env_var)
+        if value is not None:
+            _set_nested(data, dotted_path, _coerce(value, target_type, source))
 
     semaphore = os.environ.get("SEMAPHORE")
     if semaphore:

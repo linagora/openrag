@@ -192,11 +192,13 @@ class LoaderConfig(ConfigMixin):
     # serializes every PDF in a worker. More than one worker, or a memory
     # ceiling, moves parsing into child processes, which lift that and take the
     # ceiling (#997, audit A2). 1 worker / 0 MiB keeps the single thread.
-    pymupdf_pool_size: int = Field(default=1, ge=1)
+    pymupdf_child_workers_per_indexer: int = Field(default=1, ge=1)
     pymupdf_parse_memory_limit_mb: int = Field(default=0, ge=0)
     pymupdf_max_tasks_per_child: int = Field(default=20, ge=0)
-    marker_pool_size: int = 1
-    marker_max_processes: int = 2
+    # Marker instances (Ray actors, about one per machine), and the child
+    # processes each one runs, every child parsing one chunk at a time.
+    marker_num_instances: int = 1
+    marker_child_workers_per_instance: int = 2
     marker_num_gpus: float = 0.01
     # Must be > 0: it bounds the Ray actor calls below and sets the ceiling for
     # marker_child_timeout, so 0/negative would fail every parse immediately.
@@ -211,7 +213,7 @@ class LoaderConfig(ConfigMixin):
     marker_max_task_retry: int = 3
     marker_retry_base_delay: float = 2.0
     docling_num_gpus: float = Field(default=0.01, ge=0)
-    docling_pool_size: int = Field(default=1, ge=1)
+    docling_num_instances: int = Field(default=1, ge=1)
     docling_max_tasks_per_worker: int = Field(default=2, ge=1)
     docling_timeout: int = 3600
     docling_max_task_retry: int = 3

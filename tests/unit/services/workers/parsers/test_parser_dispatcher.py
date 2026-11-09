@@ -400,7 +400,7 @@ def test_building_the_dispatcher_leaves_pymupdf_on_its_thread():
 
     # A config that asks for a pool, so pushing it from here would show.
     config = _config()
-    config.loader.pymupdf_pool_size = 2
+    config.loader.pymupdf_child_workers_per_indexer = 2
     config.loader.pymupdf_parse_memory_limit_mb = 512
     config.loader.pymupdf_max_tasks_per_child = 7
     pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())
@@ -415,7 +415,9 @@ def test_configure_pymupdf_pool_pushes_the_loader_settings():
     from core.indexing.parsers.pdf import pymupdf as pymupdf_mod
     from services.workers.parsers.parser_dispatcher import configure_pymupdf_pool
 
-    loader = SimpleNamespace(pymupdf_pool_size=3, pymupdf_parse_memory_limit_mb=512, pymupdf_max_tasks_per_child=7)
+    loader = SimpleNamespace(
+        pymupdf_child_workers_per_indexer=3, pymupdf_parse_memory_limit_mb=512, pymupdf_max_tasks_per_child=7
+    )
     try:
         configure_pymupdf_pool(SimpleNamespace(loader=loader))
         assert pymupdf_mod._POOL_SETTINGS == pymupdf_mod.PyMuPDFPoolSettings(

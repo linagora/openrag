@@ -238,22 +238,24 @@ loader:
     mp4: LocalWhisperLoader
     md: MarkdownLoader
 
-  # Env: PYMUPDF_POOL_SIZE, PYMUPDF_PARSE_MEMORY_LIMIT_MB,
-  #      PYMUPDF_MAX_TASKS_PER_CHILD (indexing only; pool size 1, at least 1,
-  #      with no memory limit (0) = one thread, as before; more workers or a
-  #      ceiling parse in child processes — see env_vars.md)
-  pymupdf_pool_size: 1
+  # Env: PYMUPDF_CHILD_WORKERS_PER_INDEXER, PYMUPDF_PARSE_MEMORY_LIMIT_MB,
+  #      PYMUPDF_MAX_TASKS_PER_CHILD (indexing only; 1 child worker, at least
+  #      1, with no memory limit (0) = one thread in the indexer worker, as
+  #      before; more child workers or a ceiling parse in child processes — see
+  #      env_vars.md)
+  pymupdf_child_workers_per_indexer: 1
   pymupdf_parse_memory_limit_mb: 0
   pymupdf_max_tasks_per_child: 20
 
-  # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_POOL_SIZE, MARKER_MAX_PROCESSES,
+  # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_NUM_INSTANCES,
+  #      MARKER_CHILD_WORKERS_PER_INSTANCE (child processes per instance),
   #      MARKER_NUM_GPUS, MARKER_TIMEOUT, MARKER_CHILD_TIMEOUT_RATIO,
   #      MARKER_CHUNK_SIZE,
   #      MARKER_PARSE_MEMORY_LIMIT_MB (0 = off; per-child RLIMIT_DATA ceiling,
   #      must sit well above the child's baseline — see env_vars.md)
   marker_max_tasks_per_child: 20
-  marker_pool_size: 1
-  marker_max_processes: 2
+  marker_num_instances: 1
+  marker_child_workers_per_instance: 2
   marker_num_gpus: 0.01
   marker_timeout: 3600
   # Share of the shortest wrapping bound (marker_timeout or parse_timeout) given
@@ -268,9 +270,9 @@ loader:
   marker_max_task_retry: 3
   marker_retry_base_delay: 2.0
 
-  # Env: DOCLING_NUM_GPUS, DOCLING_POOL_SIZE, DOCLING_MAX_TASKS_PER_WORKER
+  # Env: DOCLING_NUM_GPUS, DOCLING_NUM_INSTANCES, DOCLING_MAX_TASKS_PER_WORKER
   docling_num_gpus: 0.01
-  docling_pool_size: 1
+  docling_num_instances: 1
   docling_max_tasks_per_worker: 2
   docling_timeout: 3600
   docling_max_task_retry: 3
