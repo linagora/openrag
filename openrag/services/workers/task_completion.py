@@ -43,11 +43,12 @@ class TaskCompletionTracker:
         self._namespace = namespace
         self._logger = get_logger()
         self._tracked_task_ids: set[str] = set()
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._recovery_lock = asyncio.Lock()
         self._catalog_store: Any = None
         self._catalog_lock = asyncio.Lock()
         # Outcomes Postgres has not taken yet, oldest first.
-        self._pending_settlements: OrderedDict[str, IndexationJob] = OrderedDict()
+        self._pending_settlements: OrderedDict[str, tuple[IndexationJob, bool]] = OrderedDict()
         self._settlement_retry: asyncio.Future | None = None
         self._reconcile_loop: asyncio.Future | None = None
 
@@ -63,6 +64,10 @@ class TaskCompletionTracker:
         """Identify trackers that persist canonical failure reasons."""
         return True
 
+    def supports_interrupted_stage_history(self) -> bool:
+        """Identify trackers that mark open stages after confirmed settlement."""
+        return True
+
     async def track(self, task_id: str, object_ref: dict[str, Any]) -> None:
         ref = object_ref.get("ref")
         if ref is None:
@@ -72,8 +77,12 @@ class TaskCompletionTracker:
         self._tracked_task_ids.add(task_id)
         try:
             (outcome,) = await asyncio.gather(ref, return_exceptions=True)
-            await self._await_orphaned_worker(task_id, outcome)
-            await self._record_finished_at(task_id)
+            stage_settlement_confirmed = await self._await_orphaned_worker(task_id, outcome)
+            await self._record_finished_at(
+                task_id,
+                worker_settled=True,
+                stage_settlement_confirmed=stage_settlement_confirmed,
+            )
         except Exception as exc:
             self._logger.warning(
                 "Failed to record indexing task completion time",
@@ -110,13 +119,13 @@ class TaskCompletionTracker:
                         elif info.get("worker_submitted") is True:
                             tracker.recover_refless.remote(task_id, preserve_cancelled_submission=True)
                         elif not _has_finished_at(info.get("details")):
-                            await self._record_finished_at(task_id)
+                            await self._record_finished_at(task_id, worker_settled=True)
                             await self._finish_cancellation(task_id)
                         continue
                     if _has_finished_at(info.get("details")):
                         continue
                     if state in _TERMINAL_STATES:
-                        await self._record_finished_at(task_id)
+                        self._schedule_terminal_settlement(task_id)
                         continue
                     object_ref = await self._call_task_state(
                         lambda task_id=task_id: task_state_manager.get_object_ref.remote(task_id),
@@ -129,6 +138,27 @@ class TaskCompletionTracker:
                         tracker.recover_refless.remote(task_id)
             except Exception as exc:
                 self._logger.warning("Failed to recover indexing completion tracking", error=str(exc))
+
+    def _schedule_terminal_settlement(self, task_id: str) -> None:
+        """Watch one recovered terminal task without delaying other recovery IDs."""
+        if task_id in self._tracked_task_ids:
+            return
+        self._tracked_task_ids.add(task_id)
+        task = asyncio.create_task(self._recover_terminal_settlement(task_id))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _recover_terminal_settlement(self, task_id: str) -> None:
+        try:
+            await self._record_finished_at(task_id)
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to recover terminal indexing task completion",
+                task_id=task_id,
+                error=str(exc),
+            )
+        finally:
+            self._tracked_task_ids.discard(task_id)
 
     async def recover_refless(
         self,
@@ -163,7 +193,7 @@ class TaskCompletionTracker:
                     lambda: expire_remote(task_id),
                     f"expire_refless_task_if_stale({task_id})",
                 ):
-                    await self._record_finished_at(task_id)
+                    await self._record_finished_at(task_id, worker_settled=True)
                     return
 
                 state = await self._call_task_state(
@@ -178,8 +208,12 @@ class TaskCompletionTracker:
                 if normalized_ref is not None:
                     ref = normalized_ref["ref"]
                     (outcome,) = await asyncio.gather(ref, return_exceptions=True)
-                    await self._await_orphaned_worker(task_id, outcome)
-                    await self._record_finished_at(task_id)
+                    stage_settlement_confirmed = await self._await_orphaned_worker(task_id, outcome)
+                    await self._record_finished_at(
+                        task_id,
+                        worker_settled=True,
+                        stage_settlement_confirmed=stage_settlement_confirmed,
+                    )
                     await self._finish_cancellation(task_id)
                     return
 
@@ -187,7 +221,7 @@ class TaskCompletionTracker:
                     if await self._has_unsettled_cancelled_worker(task_state_manager, task_id):
                         await asyncio.sleep(poll_interval)
                         continue
-                    await self._record_finished_at(task_id)
+                    await self._record_finished_at(task_id, worker_settled=True)
                     await self._finish_cancellation(task_id)
                     return
 
@@ -205,7 +239,7 @@ class TaskCompletionTracker:
         finally:
             self._tracked_task_ids.discard(task_id)
 
-    async def _await_orphaned_worker(self, task_id: str, outcome: Any) -> None:
+    async def _await_orphaned_worker(self, task_id: str, outcome: Any) -> bool:
         """Hold the finished stamp while a worker whose ref lost its owner may still run.
 
         ``OwnerDiedError`` means the pool actor that submitted the task died,
@@ -215,7 +249,7 @@ class TaskCompletionTracker:
         died too. An actor without that check keeps the previous behaviour.
         """
         if not isinstance(outcome, ray.exceptions.OwnerDiedError):
-            return
+            return True
         task_state_manager = self._task_state_manager()
         method = getattr(task_state_manager, "has_worker_settled", None)
         remote = getattr(method, "remote", None)
@@ -225,7 +259,7 @@ class TaskCompletionTracker:
                 + STALE_TASK_STATE_MANAGER_HINT,
                 task_id=task_id,
             )
-            return
+            return False
         started = monotonic()
         warn_at = started + _ORPHANED_WORKER_WARN_AFTER_SECONDS
         while not await self._worker_settled_or_unknown(task_id, remote):
@@ -238,6 +272,7 @@ class TaskCompletionTracker:
                 )
                 warn_at = now + _ORPHANED_WORKER_WARN_EVERY_SECONDS
             await asyncio.sleep(_ORPHANED_WORKER_POLL_SECONDS)
+        return True
 
     async def _worker_settled_or_unknown(self, task_id: str, remote: Any) -> bool:
         # This poll can run for as long as the orphaned worker does. One failed
@@ -253,7 +288,13 @@ class TaskCompletionTracker:
             )
             return False
 
-    async def _record_finished_at(self, task_id: str) -> None:
+    async def _record_finished_at(
+        self,
+        task_id: str,
+        *,
+        worker_settled: bool = False,
+        stage_settlement_confirmed: bool | None = None,
+    ) -> None:
         # Keep the handle in a variable: Ray's ActorMethod holds it weakly, so a
         # method called off an unstored handle raises "Lost reference to actor".
         task_state_manager = self._task_state_manager()
@@ -264,14 +305,50 @@ class TaskCompletionTracker:
         if not isinstance(details, dict) or _has_finished_at(details):
             return
 
+        if worker_settled:
+            settlement_confirmed = stage_settlement_confirmed is not False
+        else:
+            if not await self._wait_for_worker_settled(task_id, task_state_manager):
+                return
+            settlement_confirmed = True
+
         # Persist before stamping the actor: the stamp is what stops this method
         # running again, so a failed write must leave the task unstamped for
         # ``recover`` to pick up. Stamping regardless would strand the row at
         # whatever non-terminal status it last held, until orphan reconciliation
         # marked a completed job FAILED after a restart.
-        if not await self._record_settled_job(task_id, details):
+        if not await self._record_settled_job(
+            task_id,
+            details,
+            stage_settlement_confirmed=settlement_confirmed,
+        ):
             return
         await self._stamp_finished_at(task_id, details)
+
+    async def _wait_for_worker_settled(self, task_id: str, task_state_manager: Any) -> bool:
+        """Do not persist settlement or interruption until the worker cannot write."""
+        method = getattr(task_state_manager, "has_worker_settled", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            self._logger.warning(
+                "TaskStateManager cannot confirm worker settlement; leaving the task unstamped",
+                task_id=task_id,
+            )
+            return False
+
+        started = monotonic()
+        warn_at = started + _ORPHANED_WORKER_WARN_AFTER_SECONDS
+        while not await self._worker_settled_or_unknown(task_id, remote):
+            now = monotonic()
+            if now >= warn_at:
+                self._logger.warning(
+                    "Still waiting for indexing worker settlement before recording its final stage history",
+                    task_id=task_id,
+                    waited_seconds=round(now - started),
+                )
+                warn_at = now + _ORPHANED_WORKER_WARN_EVERY_SECONDS
+            await asyncio.sleep(_ORPHANED_WORKER_POLL_SECONDS)
+        return True
 
     async def _stamp_finished_at(self, task_id: str, details: dict[str, Any] | None = None) -> None:
         """Mark the task settled in the actor, if it still knows the task.
@@ -363,7 +440,13 @@ class TaskCompletionTracker:
                     self._catalog_store = store
         return self._catalog_store.job_repo
 
-    async def _record_settled_job(self, task_id: str, details: dict[str, Any]) -> bool:
+    async def _record_settled_job(
+        self,
+        task_id: str,
+        details: dict[str, Any],
+        *,
+        stage_settlement_confirmed: bool = True,
+    ) -> bool:
         """Persist the final state of a settled task. History must never fail indexing.
 
         Returns whether the caller may stamp the actor. ``True`` covers both a
@@ -409,21 +492,25 @@ class TaskCompletionTracker:
         except Exception as exc:
             self._logger.warning("Failed to read settled indexing job", task_id=task_id, error=str(exc))
             return False
-        if await self._write_job(job):
+        if await self._write_job(job, stage_settlement_confirmed=stage_settlement_confirmed):
             return True
-        self._queue_settlement_retry(job)
+        self._queue_settlement_retry(job, stage_settlement_confirmed=stage_settlement_confirmed)
         return False
 
-    async def _write_job(self, job: IndexationJob) -> bool:
+    async def _write_job(self, job: IndexationJob, *, stage_settlement_confirmed: bool = True) -> bool:
         try:
             repo = await self._job_repo()
             await repo.upsert_job(job)
+            if stage_settlement_confirmed and job.status.value in {"FAILED", "CANCELLED"}:
+                await repo.mark_stage_progress_interrupted(job.id)
         except Exception as exc:
-            self._logger.warning("Failed to record settled indexing job", task_id=job.id, error=str(exc))
+            self._logger.warning(
+                "Failed to record settled indexing job and stage history", task_id=job.id, error=str(exc)
+            )
             return False
         return True
 
-    def _queue_settlement_retry(self, job: IndexationJob) -> None:
+    def _queue_settlement_retry(self, job: IndexationJob, *, stage_settlement_confirmed: bool = True) -> None:
         """Hold a decided outcome until Postgres takes it.
 
         Nothing re-reads it later: ``track`` is about to forget the task and the
@@ -433,7 +520,7 @@ class TaskCompletionTracker:
         if job.id not in self._pending_settlements and len(self._pending_settlements) >= _MAX_PENDING_SETTLEMENTS:
             dropped, _ = self._pending_settlements.popitem(last=False)
             self._logger.warning("Dropped a pending indexing job settlement", task_id=dropped)
-        self._pending_settlements[job.id] = job
+        self._pending_settlements[job.id] = (job, stage_settlement_confirmed)
         if self._settlement_retry is None or self._settlement_retry.done():
             self._settlement_retry = asyncio.ensure_future(self._retry_pending_settlements())
 
@@ -441,8 +528,8 @@ class TaskCompletionTracker:
         """Re-offer held outcomes until Postgres accepts them."""
         while self._pending_settlements:
             await asyncio.sleep(delay)
-            for task_id, job in list(self._pending_settlements.items()):
-                if not await self._write_job(job):
+            for task_id, (job, stage_settlement_confirmed) in list(self._pending_settlements.items()):
+                if not await self._write_job(job, stage_settlement_confirmed=stage_settlement_confirmed):
                     continue
                 self._pending_settlements.pop(task_id, None)
                 try:
