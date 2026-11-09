@@ -524,7 +524,7 @@ def check_tokens_limit(
 
 **Request Format:**
 Accepts OpenAI-compatible chat completion requests with:
-- `messages`: Array of chat messages (last must be from user)
+- `messages`: Array of chat messages (the last one must be a non-empty user message, or a tool result the client sends back)
 - `model`: Model/partition to use
 - `stream`: Optional streaming response (true/false)
 - Standard OpenAI parameters (temperature, max_tokens, etc.)
