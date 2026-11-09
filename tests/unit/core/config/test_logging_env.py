@@ -58,3 +58,26 @@ def test_log_format_is_case_insensitive(monkeypatch, tmp_path):
     settings = load_config(config_path=tmp_path)
 
     assert settings.verbose.format == "json"
+
+
+def test_log_level_and_client_ip_default_to_the_minimal_settings(monkeypatch, tmp_path):
+    """A config without a ``verbose`` block logs at INFO with truncated client IPs."""
+    _write_minimal_config(tmp_path)
+    # Empty, not unset: the loader skips an empty value, and load_dotenv() would
+    # bring back an unset one from a developer's .env.
+    monkeypatch.setenv("LOG_LEVEL", "")
+    monkeypatch.setenv("LOG_PERSONAL_DATA", "")
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.verbose.level == "INFO"
+    assert settings.verbose.personal_data is False
+
+
+def test_log_personal_data_from_env(monkeypatch, tmp_path):
+    _write_minimal_config(tmp_path)
+    monkeypatch.setenv("LOG_PERSONAL_DATA", "true")
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.verbose.personal_data is True
