@@ -225,6 +225,57 @@ true`, delete every Ray pod, head included, as in step 4 of the
 an external Ray cluster yourself. With `ray.enabled: false` (the default) Ray runs
 inside the OpenRAG pod, so the pod restart of the upgrade recreates the actors.
 
+## Sizing indexing
+
+With `ray.enabled: false` and no `RAY_ADDRESS` (the default), the `openrag` pod
+starts its own Ray: chat, the indexer workers, the document parsers and the task
+tracker share that pod's CPU, memory and GPU. Indexing then scales **vertically
+only**, by giving that pod more resources.
+
+### What sizes indexing
+
+| Setting | What it limits | What it costs |
+|---|---|---|
+| `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER` | Files indexed at once | Each file in flight holds its parsed content and chunks in memory while it waits for the limits below |
+| `PYMUPDF_POOL_SIZE` | PDFs one worker parses at once with PyMuPDF | Above 1, one child process per slot ([figures](/openrag/documentation/env_vars/)) |
+| `MARKER_POOL_SIZE` × `MARKER_MAX_PROCESSES` | Marker parses at once | One Python and torch process per slot; each Marker worker reserves `MARKER_NUM_GPUS` of the pod's GPUs |
+| `LLM_SEMAPHORE` | Contextualization calls at once, across workers (and the map-reduce calls of chat) | Load on the LLM endpoint |
+| `VLM_SEMAPHORE` | Image-captioning calls at once | Load on the VLM endpoint |
+| `EMBEDDER_CONCURRENCY` | Embedding requests at once **within one call**: a file sends up to this many, so N files embedding at once send up to N times this many | Load on the embedder |
+
+### Scaling up
+
+1. Give the `openrag` pod more CPU and memory under `openrag.resources`, and a GPU if Marker or Docling parse your PDFs.
+2. Raise the parser pools within that budget. With the embedded Ray, `MARKER_POOL_SIZE` × `MARKER_NUM_GPUS` must not exceed the pod's GPUs: the chart refuses to render otherwise.
+3. Set `openrag.shmSize` when Marker runs or `PYMUPDF_POOL_SIZE` is above 1. Their child processes use `/dev/shm`, which Kubernetes limits to 64Mi by default; the value counts against the pod's memory limit.
+4. Raise `LLM_SEMAPHORE`, `VLM_SEMAPHORE` and `RAY_MAX_TASKS_PER_WORKER` only as far as the endpoints behind them can follow. More files in flight than the endpoints and parsers can serve only wait, in memory.
+
+### What not to do
+
+- **`openrag.replicas` above 1 with the embedded Ray.** Each pod would have its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. The chart refuses it.
+- **A Marker pool larger than the pod's GPUs.** The workers that don't fit never start, and the PDFs sent to them fail after `MARKER_TIMEOUT`. The chart refuses it too.
+
+### Large batches
+
+Files waiting for a worker live in the pod's Ray. If the pod restarts, they are
+lost and their jobs end as failed with "Indexing task was interrupted by a restart
+and no longer has a live worker." For very large batches, send the files in waves,
+watch the pod, and send the failed files again.
+
+What to watch:
+
+- `openrag_ingest_tasks` by `state` (queue depth) and `openrag_ingest_stage_duration_seconds` by `stage` (where indexing time goes), described in the [metrics reference](/openrag/documentation/metrics_reference/);
+- restarts of the `openrag` pod, and an `OOMKilled` reason in `kubectl describe pod`.
+
+### More than one replica
+
+Several `openrag` replicas need one Ray cluster shared by all of them: with
+`ray.enabled: true`, or an external cluster through `RAY_ADDRESS`. The pods then
+use the same task state. The chart's `RayCluster` runs a fixed number of workers
+(`ray.workers`), and upgrades follow
+[Upgrades that change the indexer generation](#upgrades-that-change-the-indexer-generation).
+See [Deploy a Ray cluster](/openrag/documentation/deploy_ray_cluster/).
+
 ## Notes
 
 For the default direct-API deployment, startup and liveness probes use
