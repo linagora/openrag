@@ -332,8 +332,10 @@ ray:
   indexer:
     # Env: RAY_POOL_SIZE, RAY_MAX_TASKS_PER_WORKER
     # Indexing capacity = pool_size (worker actors) × max_tasks_per_worker (files per worker).
+    # Each file in flight holds its parsed content and chunks in memory while it
+    # waits for the LLM, VLM and parser limits.
     pool_size: 1
-    max_tasks_per_worker: 50
+    max_tasks_per_worker: 10
 
   serve:
     # Env: ENABLE_RAY_SERVE, RAY_SERVE_NUM_REPLICAS, RAY_SERVE_HOST,

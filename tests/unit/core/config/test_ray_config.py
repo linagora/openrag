@@ -8,7 +8,7 @@ from pydantic import ValidationError
 def test_ray_indexer_config_defaults() -> None:
     cfg = RayIndexerConfig()
     assert cfg.pool_size == 1
-    assert cfg.max_tasks_per_worker == 50
+    assert cfg.max_tasks_per_worker == 10
 
 
 @pytest.mark.parametrize("field", ["pool_size", "max_tasks_per_worker"])

@@ -1288,7 +1288,9 @@ env:
     # RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'
     RAY_NUM_GPUS: "0.1"
     RAY_POOL_SIZE: "1"
-    RAY_MAX_TASKS_PER_WORKER: "50"
+    # Files each indexer worker processes at once. Each one holds its content in
+    # memory while it waits for the LLM, VLM and parser limits.
+    RAY_MAX_TASKS_PER_WORKER: "10"
     RAY_DASHBOARD_PORT: "8265"
     RAY_task_retry_delay_ms: "3000"
     RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
