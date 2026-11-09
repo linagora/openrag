@@ -449,7 +449,7 @@ Enable only where every API caller is already trusted with both.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory, not when the download fails. Without that access, every detection retries the download, which can block for about two minutes when the host doesn't answer, and then falls back to English. |
+| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory. When the model cannot be loaded (for example the download fails), a warning is logged once and the process uses `lite` from then on. |
 
 ### RAG Pipeline Mode
 
@@ -553,6 +553,7 @@ there too.
 | `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
 | `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and `openai` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
 | `LOG_PERSONAL_DATA` | `bool` | `false` | Personal data in logs. Off, uvicorn's request lines (`uvicorn.access`, and WebSocket handshakes on `uvicorn.error`) keep only the client's network — `/24` for IPv4, `/48` for IPv6, no port. `true` keeps full client addresses, for troubleshooting or security investigations. Query strings are replaced with `?[REDACTED]` either way, since they can carry a user's search text or an OIDC authorization code. This covers the API's own logs; the admin-ui proxy (nginx) keeps its own access log. |
+| `TQDM_DISABLE` | `str` | (unset) | Turns off tqdm progress bars, Marker's included. Any non-empty value disables them, `0` too. The logging overlay sets it to `1`, and the Helm chart does whenever `LOG_FORMAT=json` and `env.config.TQDM_DISABLE` is not set: in JSON mode every bar refresh becomes a non-JSON log line. Marker's bars are off with `LOG_FORMAT=json` whatever this is set to. |
 
 #### Text format
 ```bash title="Logging message in the terminal..."
