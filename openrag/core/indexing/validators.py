@@ -130,7 +130,7 @@ CONTENT_SNIFF_BYTES = 8192
 #: * Audio and video containers other than those above are left out until the
 #:   accepted brand variants can be checked against real samples; guessing at
 #:   them risks refusing valid media.
-#: * ``docx``/``pptx`` are **not** here: a ZIP's authoritative index is its
+#: * ``docx``/``pptx``/``xlsx`` are **not** here: a ZIP's authoritative index is its
 #:   central directory, which sits at the end of the file, so no head buffer can
 #:   settle them. They are checked by :func:`validate_ooxml_package` instead.
 _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
@@ -196,12 +196,111 @@ _TOLERANT_SIGNATURES: dict[str, frozenset[str]] = {
 _OOXML_MAIN_PARTS: dict[str, str] = {
     "docx": "word/document.xml",
     "pptx": "ppt/presentation.xml",
+    "xlsx": "xl/workbook.xml",
+    "xlsm": "xl/workbook.xml",
 }
 
 #: Parts every OPC package carries whatever its flavour: the content-type map
 #: and the package relationships. Both are mandatory, and an archive that only
 #: borrowed a document's entry names has neither.
 _OOXML_PACKAGE_PARTS = frozenset({"[Content_Types].xml", "_rels/.rels"})
+
+
+#: Compound File Binary (OLE2) signature. Office writes a password-protected
+#: OOXML document as a CFB container instead of a ZIP: the real package is the
+#: encrypted ``EncryptedPackage`` stream, described by ``EncryptionInfo``
+#: (MS-OFFCRYPTO 2.3.4).
+_OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_ENCRYPTED_OOXML_STREAMS = frozenset({"EncryptionInfo", "EncryptedPackage"})
+#: CFB sector ids at or above this value are markers (free, end of chain, FAT,
+#: DIFAT), never sectors.
+_OLE_MAX_REGULAR_SECTOR = 0xFFFFFFFA
+#: Bounds on the sectors read while looking for the stream names. An encrypted
+#: package's directory holds a handful of entries; the bound only stops a
+#: crafted chain from making a rejected upload expensive.
+_OLE_MAX_DIRECTORY_SECTORS = 64
+_OLE_MAX_DIFAT_SECTORS = 256
+
+ENCRYPTED_OFFICE_FILE_MESSAGE = "This file is password-protected or encrypted. Remove the password and upload it again."
+
+
+def _is_encrypted_office_package(stream: IO[bytes]) -> bool:
+    """Whether ``stream`` is an encrypted OOXML document (CFB with ``EncryptedPackage``).
+
+    Only the CFB header, the FAT sectors the directory chain goes through and
+    the directory sectors are read, so the cost does not grow with the
+    encrypted payload. Requiring the stream names, not just the CFB signature,
+    keeps a legacy ``.xls``/``.doc``/``.ppt`` renamed to an OOXML extension
+    on the extension-mismatch message: it is a CFB file too, but unencrypted.
+    Any malformed structure reads as "not encrypted", leaving the caller's
+    generic rejection in place. The stream position is restored.
+    """
+    position = stream.tell()
+    try:
+        stream.seek(0)
+        header = stream.read(512)
+        if len(header) < 512 or not header.startswith(_OLE_SIGNATURE):
+            return False
+        sector_shift = int.from_bytes(header[30:32], "little")
+        if sector_shift not in (9, 12):
+            return False
+        sector_size = 1 << sector_shift
+        ids_per_sector = sector_size // 4
+
+        def read_sector(sector: int) -> bytes:
+            # The header occupies sector -1, whatever the sector size.
+            stream.seek((sector + 1) * sector_size)
+            return stream.read(sector_size)
+
+        def sector_ids(data: bytes) -> list[int]:
+            return [int.from_bytes(data[i : i + 4], "little") for i in range(0, len(data) - 3, 4)]
+
+        fat_sectors = sector_ids(header[76:512])
+        difat_sector = int.from_bytes(header[68:72], "little")
+        for _ in range(_OLE_MAX_DIFAT_SECTORS):
+            if difat_sector >= _OLE_MAX_REGULAR_SECTOR:
+                break
+            data = read_sector(difat_sector)
+            if len(data) < sector_size:
+                break
+            ids = sector_ids(data)
+            fat_sectors.extend(ids[:-1])
+            difat_sector = ids[-1]
+        fat_sectors = [sector for sector in fat_sectors if sector < _OLE_MAX_REGULAR_SECTOR]
+
+        def next_sector(sector: int) -> int:
+            index, offset = divmod(sector, ids_per_sector)
+            if index >= len(fat_sectors):
+                return _OLE_MAX_REGULAR_SECTOR
+            fat = read_sector(fat_sectors[index])
+            return (
+                int.from_bytes(fat[offset * 4 : offset * 4 + 4], "little")
+                if len(fat) == sector_size
+                else (_OLE_MAX_REGULAR_SECTOR)
+            )
+
+        names: set[str] = set()
+        sector = int.from_bytes(header[48:52], "little")
+        for _ in range(_OLE_MAX_DIRECTORY_SECTORS):
+            if sector >= _OLE_MAX_REGULAR_SECTOR:
+                break
+            data = read_sector(sector)
+            if len(data) < sector_size:
+                break
+            # 128-byte entries: a UTF-16LE name of up to 32 code units including
+            # the terminator, then its byte length (terminator included).
+            for offset in range(0, sector_size, 128):
+                length = int.from_bytes(data[offset + 64 : offset + 66], "little")
+                if 2 <= length <= 64 and length % 2 == 0:
+                    names.add(data[offset : offset + length - 2].decode("utf-16-le", errors="replace"))
+            if _ENCRYPTED_OOXML_STREAMS <= names:
+                return True
+            sector = next_sector(sector)
+        return False
+    except (OSError, ValueError):
+        return False
+    finally:
+        stream.seek(position)
 
 
 def _ooxml_main_part_by_content(extension: str, stream: IO[bytes]) -> str | None:
@@ -284,7 +383,7 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
 
 
 def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
-    """Reject a ``.docx``/``.pptx`` upload that is not a real OOXML package.
+    """Reject an Office OOXML upload that is not a real package of its type.
 
     ``filetype`` cannot settle this, and was verified failing both ways: its
     matcher looks for an entry *named* ``word/`` or ``ppt/`` among the first few
@@ -327,6 +426,9 @@ def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
         with zipfile.ZipFile(stream) as package:
             names = set(package.namelist())
     except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        # The extension is right and renaming will not help: say what is wrong.
+        if _is_encrypted_office_package(stream):
+            raise ValidationError(ENCRYPTED_OFFICE_FILE_MESSAGE, status_code=422, code="ENCRYPTED_OFFICE_FILE") from exc
         raise ValidationError(
             f"Uploaded file does not match its .{extension} extension: it is not a readable "
             f"Office package. Upload it with the extension matching its actual format.",

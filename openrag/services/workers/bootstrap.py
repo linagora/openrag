@@ -5,6 +5,7 @@ detached actors the request path looks up by name:
 
 * TaskStateManager  — shared task-state actor
 * TaskCompletionTracker — durable indexing completion observer
+* TaskStageProgressManager — rollout-safe live stage snapshots
 * llmSemaphore / vlmSemaphore / audioSemaphore — cluster-wide rate limiters
 
 The GPU parser pools (MarkerPool / DoclingPool / WhisperPool / WhisperActor)
@@ -143,7 +144,7 @@ def get_task_completion_tracker(namespace: str = "openrag"):
 
     tracker = create_or_get()
     if not _supports_task_completion_recovery(tracker):
-        logger.warning("Replacing legacy TaskCompletionTracker without cancellation recovery")
+        logger.warning("Replacing legacy TaskCompletionTracker without interrupted stage history")
         ray.kill(tracker, no_restart=True)
         deadline = monotonic() + 30
         while monotonic() < deadline:
@@ -163,6 +164,18 @@ def get_task_completion_tracker(namespace: str = "openrag"):
     return tracker
 
 
+def get_stage_progress_manager():
+    from services.workers.stage_progress_manager import TASK_STAGE_PROGRESS_MANAGER_NAME, TaskStageProgressManager
+
+    return get_or_create_actor(
+        TASK_STAGE_PROGRESS_MANAGER_NAME,
+        TaskStageProgressManager,
+        lifetime="detached",
+        max_restarts=-1,
+        max_task_retries=0,
+    )
+
+
 def _supports_task_completion_recovery(actor) -> bool:
     method_names = getattr(actor, "_ray_actor_method_names", None)
     # ``reconcile_jobs`` came with durable history: a tracker that predates it
@@ -171,6 +184,7 @@ def _supports_task_completion_recovery(actor) -> bool:
         "supports_cancellation_recovery",
         "supports_degraded_stage_history",
         "supports_error_reason_history",
+        "supports_interrupted_stage_history",
         "reconcile_jobs",
     )
     if isinstance(method_names, (frozenset, list, set, tuple)) and not set(required) <= set(method_names):
@@ -184,6 +198,7 @@ def _supports_task_completion_recovery(actor) -> bool:
             "supports_cancellation_recovery",
             "supports_degraded_stage_history",
             "supports_error_reason_history",
+            "supports_interrupted_stage_history",
         ):
             method = getattr(actor, capability, None)
             remote = getattr(method, "remote", None)
@@ -286,5 +301,6 @@ def initialize_worker_bootstrap(settings: "Settings") -> None:
     init_vlm_semaphore()
     init_audio_semaphore()
     get_task_state_manager()
+    get_stage_progress_manager()
     get_task_completion_tracker()
     register_parser_pool_restart_factories()

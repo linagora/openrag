@@ -51,6 +51,10 @@ class StageTracker:
         self._phase = StageTaskPhase.PREPARING
         self._current_stage_id: str | None = None
         self._current_stage_rank: int | None = None
+        self._current_substage_id: str | None = None
+        self._current_substage_label: str | None = None
+        self._current_substage_progress: int | None = None
+        self._current_substage_total: int | None = None
         self._current_invocation_id: UUID | None = None
         self._stage_started_at: datetime | None = None
         self._stage_started_monotonic: float | None = None
@@ -71,6 +75,7 @@ class StageTracker:
         self._current_invocation_id = uuid4()
         self._current_stage_id = stage_id
         self._current_stage_rank = stage_rank
+        self._clear_substage()
         self._stage_started_at = _aware_utc(self._utcnow())
         self._stage_started_monotonic = self._monotonic()
         self._elapsed_ms = 0
@@ -106,6 +111,7 @@ class StageTracker:
             self._position_score = self._current_stage_rank * 1000 + 500
         self._current_stage_id = None
         self._current_stage_rank = None
+        self._clear_substage()
         self._current_invocation_id = None
         self._stage_started_at = None
         self._stage_started_monotonic = None
@@ -138,6 +144,39 @@ class StageTracker:
         self._revision += 1
         self._publish(None)
 
+    def set_substage(
+        self,
+        substage_id: str,
+        label: str,
+        *,
+        progress: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        """Record a real parser checkpoint without adding a stage event."""
+        if self._finished or self._current_stage_id != "parse" or self._current_invocation_id is None:
+            return
+        if (progress is None) != (total is None):
+            raise ValueError("substage progress and total must either both be set or both be null")
+        if progress is not None and total is not None and (progress < 0 or total < 1 or progress > total):
+            raise ValueError("substage progress must be between zero and its positive total")
+        value = (substage_id, label, progress, total)
+        current = (
+            self._current_substage_id,
+            self._current_substage_label,
+            self._current_substage_progress,
+            self._current_substage_total,
+        )
+        if value == current:
+            return
+        (
+            self._current_substage_id,
+            self._current_substage_label,
+            self._current_substage_progress,
+            self._current_substage_total,
+        ) = value
+        self._revision += 1
+        self._publish(None)
+
     def summary(self) -> StageProgressSummary:
         return StageProgressSummary(
             task_id=self.task_id,
@@ -147,6 +186,10 @@ class StageTracker:
             phase=self._phase,
             current_stage_id=self._current_stage_id,
             current_stage_rank=self._current_stage_rank,
+            current_substage_id=self._current_substage_id,
+            current_substage_label=self._current_substage_label,
+            current_substage_progress=self._current_substage_progress,
+            current_substage_total=self._current_substage_total,
             position_score=self._position_score,
             stage_started_at=self._stage_started_at,
             current_invocation_id=self._current_invocation_id,
@@ -226,6 +269,12 @@ class StageTracker:
         if not self._known_loss:
             self._known_loss = True
             self._revision += 1
+
+    def _clear_substage(self) -> None:
+        self._current_substage_id = None
+        self._current_substage_label = None
+        self._current_substage_progress = None
+        self._current_substage_total = None
 
 
 def _aware_utc(value: datetime) -> datetime:

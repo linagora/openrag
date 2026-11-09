@@ -201,8 +201,11 @@ async def require_task_owner(
     job_service=Depends(get_job_service),
     auth_service=Depends(get_auth_service),
 ):
-    task_details = await job_service.get_task_details(task_id)
-    if not task_details:
+    task_details = await job_service.get_task_details(
+        task_id,
+        require_owner_identity=not bool(user and user.get("is_admin", False)),
+    )
+    if task_details is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task '{task_id}' not found",

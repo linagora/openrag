@@ -401,7 +401,7 @@ class MCPService:
         user_id: int | None,
         is_admin: bool,
     ) -> dict[str, Any]:
-        details = await self._jobs.get_task_details(task_id)
+        details = await self._jobs.get_task_details(task_id, require_owner_identity=not is_admin)
         if details is None:
             raise KeyError(f"Task '{task_id}' not found")
         if not is_admin and user_id is not None and details.get("user_id") != user_id:

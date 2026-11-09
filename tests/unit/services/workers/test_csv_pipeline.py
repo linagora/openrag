@@ -4,15 +4,17 @@ import asyncio
 import threading
 from contextlib import closing
 from dataclasses import replace
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from core.chunking.structured_section import StructuredSectionChunker
 from core.config.indexation import LoaderConfig
+from core.indexing.parsers.tabular.base import TabularBatchParser
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
-from core.models.document import Document, DocumentType
+from core.models.document import Document, DocumentType, TextBlock
 from core.models.stage_progress import StageEventStatus, StageFailureEffect
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
@@ -44,6 +46,35 @@ class RecordingParser(CsvParser):
                 yield batch
         finally:
             self.closed = True
+
+
+class RecordingXlsxParser(TabularBatchParser):
+    tabular_format = "xlsx"
+
+    def supported_types(self):
+        return ["xlsx"]
+
+    async def parse(self, document):
+        raise AssertionError("XLSX indexing must consume batches")
+
+    def iter_batches(self, document):
+        yield TextBlock(
+            text="| name |\n| --- |\n| Alice |",
+            block_type="table",
+            metadata={
+                "tabular_format": "xlsx",
+                "sheet_name": "People",
+                "table_id": "sheet:0",
+                "table_columns": ["name"],
+                "table_row_start": 2,
+                "table_row_end": 2,
+                "table_row_numbers": [2],
+                "csv_columns": ["name"],
+                "csv_row_start": 2,
+                "csv_row_end": 2,
+                "csv_row_numbers": [2],
+            },
+        )
 
 
 class FakeEmbedder:
@@ -91,6 +122,43 @@ class FakeStore:
     async def delete_by_filter(self, filters):
         self.deleted_filters.append(filters)
         return 1
+
+
+def _use_workbook(pipeline, row):
+    from io import BytesIO
+
+    from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
+    from openpyxl import Workbook
+
+    class RecordingWorkbookParser(XlsxParser):
+        closed = False
+
+        async def parse(self, document):
+            raise AssertionError("Workbook ingestion must not collect all batches")
+
+        def iter_batches(self, document):
+            try:
+                with closing(super().iter_batches(document)) as batches:
+                    yield from batches
+            finally:
+                self.closed = True
+
+    workbook = Workbook()
+    workbook.active.append(["id", "name"])
+    for index in range(5):
+        workbook.active.append([index, f"Person {index}"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    row["document"] = row["document"].model_copy(
+        update={
+            "filename": "people.xlsx",
+            "content_type": DocumentType.XLSX,
+            "raw_bytes": output.getvalue(),
+            "source_path": None,
+        }
+    )
+    return replace(pipeline, parser=RecordingWorkbookParser(batch_size=2))
 
 
 @pytest.fixture
@@ -152,6 +220,67 @@ async def test_batches_are_stored_before_reading_the_next_batch(setup_pipeline):
         assert any(f"| {number} | {name} |" in chunk.text for chunk in chunks)
     assert "chunks" not in row and "processed_document" not in row
     assert pipeline.parser.closed
+
+
+async def test_xlsx_uses_the_same_streaming_pipeline_with_sheet_metadata(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    pipeline = replace(pipeline, parser=RecordingXlsxParser())
+    row["document"] = Document(
+        id="xlsx-file",
+        filename="people.xlsx",
+        content_type=DocumentType.XLSX,
+        partition="customers",
+        raw_bytes=b"unused by fake parser",
+    )
+
+    result = await pipeline.run(row)
+
+    assert result["stage"] == "stored"
+    (([chunk], _indexed_at),) = pipeline.vector_store.calls
+    assert chunk.metadata["xlsx_batch_index"] == 1
+    assert chunk.metadata["tabular_batch_index"] == 1
+    assert chunk.metadata["sheet_name"] == "People"
+    assert chunk.metadata["table_id"] == "sheet:0"
+
+
+@pytest.mark.parametrize("chunker_name", ["structured_section", "recursive_splitter"])
+async def test_xlsx_cells_outside_tables_are_chunked_as_text(setup_pipeline, chunker_name):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
+    from core.models.chunk import ChunkType
+    from openpyxl import Workbook
+
+    pipeline, row, _ = setup_pipeline
+    if chunker_name == "recursive_splitter":
+        pipeline = replace(
+            pipeline,
+            chunker=RecursiveSplitter(chunk_size=50, chunk_overlap_rate=0.0, length_function=lambda t: len(t.split())),
+        )
+    workbook = Workbook()
+    workbook.active["A1"] = "Contrat 2026-114"
+    workbook.active["A3"] = "Client"
+    workbook.active["B3"] = "ACME"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    row["document"] = Document(
+        id="form-file",
+        filename="form.xlsx",
+        content_type=DocumentType.XLSX,
+        partition="customers",
+        raw_bytes=output.getvalue(),
+    )
+
+    result = await replace(pipeline, parser=XlsxParser()).run(row)
+
+    assert result["stage"] == "stored"
+    [chunk] = [chunk for group, _ in pipeline.vector_store.calls for chunk in group]
+    assert chunk.chunk_type is ChunkType.TEXT
+    assert "Contrat 2026-114" in chunk.text
+    assert "A3:B3: Client | ACME" in chunk.text
+    assert "Worksheet: Sheet" in chunk.text
+    assert chunk.metadata["sheet_name"] == "Sheet"
+    assert chunk.metadata["cell_ranges"] == ["'Sheet'!A1", "'Sheet'!A3:B3"]
 
 
 async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
@@ -233,8 +362,11 @@ async def test_long_csv_cell_is_stored_as_labelled_continuations(setup_pipeline)
 
 
 @pytest.mark.parametrize("defer", [False, True])
-async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_pipeline, defer):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_pipeline, defer, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     pipeline = replace(pipeline, defer_replace_cleanup=defer)
     row["replace"] = True
     await pipeline.run(row)
@@ -250,8 +382,11 @@ async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_
 
 
 @pytest.mark.parametrize("failure", ["parse", "chunk", "embed", "store"])
-async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     row["replace"] = True
     if failure == "parse":
         original = pipeline.parser.iter_batches
@@ -476,10 +611,13 @@ async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline)
     assert [event.status for event in topic_events] == [StageEventStatus.STARTED, StageEventStatus.CANCELLED]
 
 
-async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_cancel_during_read_returns_promptly_and_defers_generator_close(setup_pipeline, file_format):
     pipeline, row, _ = setup_pipeline
     observed = []
     tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     started, release = threading.Event(), threading.Event()
     original = pipeline.parser.iter_batches
 
@@ -494,15 +632,50 @@ async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pi
         assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
         await asyncio.sleep(0)
-        assert not task.done()
+        assert task.done()
+        assert not pipeline.parser.closed
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+    for _ in range(100):
+        if pipeline.parser.closed:
+            break
+        await asyncio.sleep(0.01)
     assert pipeline.parser.closed
     assert pipeline.vector_store.calls == []
     parse_events = [event for event in observed if event is not None and event.stage_id == "parse"]
     assert [event.status for event in parse_events] == [StageEventStatus.STARTED, StageEventStatus.CANCELLED]
+
+
+async def test_parse_timeout_returns_promptly_and_defers_generator_close(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    started, release = threading.Event(), threading.Event()
+    original = pipeline.parser.iter_batches
+
+    def blocking_batches(document):
+        try:
+            started.set()
+            release.wait(timeout=5)
+            yield from original(document)
+        finally:
+            pipeline.parser.closed = True
+
+    pipeline.parser.iter_batches = blocking_batches
+    pipeline = replace(pipeline, timeouts=PipelineTimeouts(parse=0.01))
+
+    try:
+        with pytest.raises(TimeoutError):
+            await pipeline.run(row)
+        assert await asyncio.to_thread(started.wait, 5)
+        assert not pipeline.parser.closed
+    finally:
+        release.set()
+    for _ in range(100):
+        if pipeline.parser.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert pipeline.parser.closed
 
 
 async def test_exhausted_parse_budget_stops_before_reading(setup_pipeline):
