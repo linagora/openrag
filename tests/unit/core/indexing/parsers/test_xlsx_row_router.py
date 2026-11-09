@@ -252,3 +252,76 @@ def test_random_layouts_consumption_and_budgets_match_dedicated_scans(seed):
         expected = _reference(grid, table)
         limit = take[table.name]
         assert taken[table.name] == (expected if limit is None else expected[:limit])
+
+
+def test_a_formula_reader_longer_than_the_value_reader_is_rejected():
+    """Both orders of mismatch fail, as a dedicated scan's strict zip does."""
+    grid, tables = _side_by_side(tables=2, rows=20, formulas=True)
+    grid.values = grid.values[:10]
+    with pytest.raises(ValueError, match="disagree on the row count"):
+        _consume(grid, tables, spool_limit=1 << 30, with_formulas=True)
+
+
+def test_unusable_temporary_storage_falls_back_to_dedicated_scans(monkeypatch):
+    """A full disk or a read-only TMPDIR must not fail a valid workbook."""
+
+    def no_storage(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(router.tempfile, "TemporaryFile", no_storage)
+    monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 64)
+    grid, tables = _side_by_side(tables=4)
+    taken = _consume(grid, tables, spool_limit=1 << 30)
+
+    assert len(grid.scans) == 1 + 3
+    for table in tables:
+        assert taken[table.name] == _reference(grid, table)
+
+
+def test_a_failing_spool_close_does_not_fail_the_parse(monkeypatch):
+    class _Unclosable:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def close(self):
+            self._real.close()
+            raise OSError("close failed")
+
+    real_temporary_file = router.tempfile.TemporaryFile
+    monkeypatch.setattr(router.tempfile, "TemporaryFile", lambda **kwargs: _Unclosable(real_temporary_file(**kwargs)))
+    monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 64)
+    grid, tables = _side_by_side(tables=3)
+    taken = _consume(grid, tables, spool_limit=1 << 30)
+
+    for table in tables:
+        assert taken[table.name] == _reference(grid, table)
+
+
+def test_a_table_skipped_without_reading_is_no_longer_spooled(monkeypatch):
+    """Closing a never-started generator skips its own cleanup; the router must
+    still retire the route, or it keeps spending spool on a table nobody reads."""
+    spooled = []
+    original_spool_row = router._SharedScan._spool_row
+
+    def recording_spool_row(self, route, row):
+        spooled.append(route.table.name)
+        original_spool_row(self, route, row)
+
+    monkeypatch.setattr(router._SharedScan, "_spool_row", recording_spool_row)
+    grid, _ = _side_by_side(tables=1, rows=200, width=12)
+    first = _Table("first", 1, 50, 1, 2)
+    skipped = _Table("skipped", 1, 200, 5, 6)
+    last = _Table("last", 1, 200, 9, 10)
+    taken = {}
+    for table, rows in route_sheet_tables(
+        [first, skipped, last], grid.open_scan, _pipeline, with_formulas=False, spool_limit=1 << 30
+    ):
+        if table is not skipped:  # the skipped table's iterator is never touched
+            taken[table.name] = list(rows)
+
+    # Only the 50 rows read while serving "first", none while serving "last".
+    assert spooled.count("skipped") == 50
+    assert taken["last"] == _reference(grid, last)

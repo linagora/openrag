@@ -32,6 +32,10 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack
 from typing import Any
 
+from core.utils.logging import get_logger
+
+logger = get_logger()
+
 #: Bytes a waiting table keeps in memory before its rows are written out as one
 #: block. Bounded per table, so a sheet with many tables holds at most
 #: ``tables * _SPOOL_BLOCK_BYTES`` (plus one row) in these buffers.
@@ -134,8 +138,13 @@ class _Spool:
 
     def close(self) -> None:
         if self._file is not None:
-            self._file.close()
-            self._file = None
+            spool, self._file = self._file, None
+            try:
+                spool.close()
+            except OSError:
+                # The rows were already served; a failed close must not fail
+                # the parse. The file is unlinked, so nothing is left behind.
+                logger.warning("Could not close the XLSX row spool", exc_info=True)
 
 
 def _unpickle_rows(data: bytes) -> Iterator:
@@ -183,6 +192,10 @@ class _SharedScan:
             values = next(self.value_rows)
         except StopIteration:
             self.exhausted = True
+            if self.formula_rows is not None and next(self.formula_rows, _NO_ROW) is not _NO_ROW:
+                # A dedicated scan rejects this through its strict zip; the
+                # shared scan must not accept the shorter reader silently.
+                raise ValueError("XLSX value and formula readers disagree on the row count") from None
             return _NO_ROW
         formulas = None
         if self.formula_rows is not None:
@@ -221,7 +234,16 @@ class _SharedScan:
             return
         route.buffer += data
         if len(route.buffer) >= _SPOOL_BLOCK_BYTES:
-            route.blocks.extend(self.spool.write(route.buffer))
+            try:
+                block = self.spool.write(route.buffer)
+            except OSError:
+                # No usable temporary storage (full disk, read-only TMPDIR):
+                # the workbook is still valid, so read waiting tables the way
+                # they were read before rather than failing ingestion.
+                logger.warning("XLSX row spool unavailable; waiting tables use their own scans", exc_info=True)
+                self._stop_spooling()
+                return
+            route.blocks.extend(block)
             route.buffer = bytearray()
 
     def _stop_spooling(self) -> None:
@@ -316,4 +338,8 @@ def route_sheet_tables(
             finally:
                 # The consumer moved on: whatever it left unread is dropped,
                 # and later rows of this table are no longer routed to it.
+                # Closing a generator that never started skips its own
+                # cleanup, so retire the route here as well.
                 rows.close()
+                route.done = True
+                route.release()
