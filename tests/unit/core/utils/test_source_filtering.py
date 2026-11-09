@@ -231,22 +231,22 @@ class TestExtractAndStripSourcesBlock:
     @pytest.mark.parametrize(
         "text",
         [
-            pytest.param("*" * 20_000, id="marks"),
-            pytest.param("*_`" * 7_000 + "x", id="mixed-marks"),
-            pytest.param("[" + "*" * 20_000 + "x", id="bracket-marks"),
-            pytest.param("Sources: none" + "*" * 20_000 + "x", id="none-marks"),
-            pytest.param("Sources: 1" + " " * 20_000 + "x", id="no-break-spaces"),
-            pytest.param("Sources: 1" + "*" * 20_000 + "x", id="number-marks"),
-            pytest.param("Sources:" + "\n" * 20_000 + "x", id="label-newlines"),
-            pytest.param("[Sources: " + "**1**, " * 4_000 + "x", id="emphasized-numbers"),
-            pytest.param(" " * 20_000 + "x", id="spaces"),
-            pytest.param("\t" * 20_000 + "x", id="tabs"),
-            pytest.param(" \t" * 10_000 + "[Source 1x", id="blanks-before-marker"),
+            pytest.param("*" * 100_000, id="marks"),
+            pytest.param("*_`" * 33_000 + "x", id="mixed-marks"),
+            pytest.param("[" + "*" * 100_000 + "x", id="bracket-marks"),
+            pytest.param("Sources: none" + "*" * 100_000 + "x", id="none-marks"),
+            pytest.param("Sources: 1" + " " * 100_000 + "x", id="no-break-spaces"),
+            pytest.param("Sources: 1" + "*" * 100_000 + "x", id="number-marks"),
+            pytest.param("Sources:" + "\n" * 100_000 + "x", id="label-newlines"),
+            pytest.param("[Sources: " + "**1**, " * 20_000 + "x", id="emphasized-numbers"),
+            pytest.param(" " * 100_000 + "x", id="spaces"),
+            pytest.param("\t" * 100_000 + "x", id="tabs"),
+            pytest.param(" \t" * 50_000 + "[Source 1x", id="blanks-before-marker"),
             pytest.param("[Sources: 1]" * 4_000, id="chained-tags"),
         ],
     )
     def test_long_runs_of_marks_are_linear(self, text):
-        """Neighbouring runs that share characters made a failed search quadratic (seconds at this size)."""
+        """Neighbouring runs that share characters made a failed search quadratic: seconds at this size."""
         start = time.perf_counter()
         extract_and_strip_sources_block(text)
         assert time.perf_counter() - start < 1.0
@@ -260,7 +260,7 @@ class TestExtractAndStripSourcesBlock:
             ("[Sources: 1, 3][Source 1][Source 1][Source 1]", "", {1, 3}),
             # A no-break space ends the line like any other: the final rstrip()
             # used to expose this tag, left in the answer.
-            ("Paris. **Sources:** 1 [Sources: ][Source 2", "Paris.", {1, 2}),
+            ("Paris. [Sources: 1]\u00a0[Sources: ][Source 2", "Paris.", {1, 2}),
         ],
     )
     def test_tag_exposed_by_stripping_another_is_stripped(self, text, expected_clean, expected_citations):
@@ -295,22 +295,30 @@ class TestExtractAndStripSourcesBlock:
             ("Selon nos sources : 2 [Source 1].\n\nSuite.", "Selon nos sources : 2.\n\nSuite.", {1}),
             ("Il n'y a sources : none [Source 1]", "Il n'y a sources : none", {1}),
             ("Answer. Sources: 1, 2 [Source 3]", "Answer. Sources: 1, 2", {3}),
+            # Marks and lines of their own are no proof of a tag: answers have them too.
+            ("**Nombre de sources :** 3 [Source 1]\n\n[Sources: 1]", "**Nombre de sources :** 3", {1}),
+            ("The dataset has `sources`: 5 [Source 2]\n\n[Sources: 2]", "The dataset has `sources`: 5", {2}),
+            ("Total _sources_: 12 [Source 1]", "Total _sources_: 12", {1}),
+            ("Réponse courte.\nSources : 2 [Source 1]", "Réponse courte.\nSources : 2", {1}),
+            ("Sources : 3. [Source 1]", "Sources : 3.", {1}),
+            ("sources: 4. [Source 2]\nParis.\n\n[Sources: 2]", "sources: 4.\nParis.", {2}),
+            ("Answer.\n\n**Sources:** 1, 2 [Source 3]", "Answer.\n\n**Sources:** 1, 2", {3}),
+            ("Answer.\nSources: none [Source 1]", "Answer.\nSources: none", {1}),
         ],
     )
     def test_prose_a_removed_marker_leaves_at_the_line_end_is_kept(self, text, expected_clean, expected_citations):
-        """Without a bracket, a mark or its own line, "sources: 3" is the answer's words, not a tag."""
+        """Without a bracket, "sources: 3" is the answer's words, not a tag."""
         assert extract_and_strip_sources_block(text) == (expected_clean, expected_citations)
 
     @pytest.mark.parametrize(
         ("text", "expected_clean", "expected_citations"),
         [
-            ("Answer.\n\nSources: 1, 2 [Source 3]", "Answer.", {1, 2, 3}),
-            ("Answer.\n  Sources: 1 [Sources: 2]", "Answer.", {1, 2}),
-            ("Sources: 3 [Source 2]", "", {2, 3}),
-            ("Answer.\nSources: none [Source 1]", "Answer.", {1}),
+            ("Answer. [Sources: 1, 3] [Source 1]", "Answer.", {1, 3}),
+            ("Answer.\n**[Sources: 1, 3]** [Source 1]", "Answer.", {1, 3}),
+            ("Answer.\n[Sources: none] [Source 1]", "Answer.", {1}),
         ],
     )
-    def test_label_on_its_own_line_a_marker_exposes_is_a_tag(self, text, expected_clean, expected_citations):
+    def test_a_bracketed_tag_a_marker_exposes_is_a_tag(self, text, expected_clean, expected_citations):
         assert extract_and_strip_sources_block(text) == (expected_clean, expected_citations)
 
     def test_label_already_ending_its_line_is_still_read_as_a_tag(self):
@@ -1200,13 +1208,16 @@ class TestStreamOfLongAnswers:
     @pytest.mark.parametrize(
         ("answer", "chunk_size", "buffer_size"),
         [
-            # The start of the text the stream measures what is settled with is
-            # mid-line: read as a line's start, it emits the label too early.
+            # The end of the text, stripped on its own to measure what is settled,
+            # must read the label as the whole answer does.
             pytest.param("x sources: 4 [Sources: none]\n" + "abcd " * 8, 2, 10, id="settled-fragment"),
             # Same for the tail once its head is folded away.
             pytest.param("x" * 50 + " x sources : 3 [Source 2]\nabc", 7, 1, id="folded-tail"),
-            # The answer itself does begin a line, so this one is a tag.
             pytest.param("sources : 3 [Source 2]\n" + "m" * 12, 3, 1, id="first-line"),
+            # A cut before text not yet emitted would lose that text.
+            pytest.param("sources ,:x**[Source 1]: 3", 5, 5, id="cut-before-unemitted-text"),
+            # IGNORECASE reads "ſ" as "s", so it can be part of a tag: no cut after it.
+            pytest.param("Paris. [ſource 1]", 1, 1, id="long-s"),
         ],
     )
     async def test_stream_tells_prose_from_a_tag_as_the_batch_does(self, answer, chunk_size, buffer_size):
