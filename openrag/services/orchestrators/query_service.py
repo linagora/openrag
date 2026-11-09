@@ -536,9 +536,7 @@ class QueryService:
 
         # The results of the tools are data the app gave, not turns of the
         # conversation: they do not shape the search.
-        chat_history = "".join(
-            f"{m['role']}: {m.get('content') or ''}\n" for m in messages if m.get("role") != "tool"
-        )
+        chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages if m.get("role") != "tool")
         prompt_name = self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
