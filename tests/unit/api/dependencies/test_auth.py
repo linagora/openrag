@@ -83,8 +83,9 @@ class FakeJobService:
         self.detail_checks: list[str] = []
         self.pending_checks: list[int | None] = []
 
-    async def get_task_details(self, task_id: str):
+    async def get_task_details(self, task_id: str, *, require_owner_identity: bool = False):
         self.detail_checks.append(task_id)
+        self.require_owner_identity = require_owner_identity
         return self.details
 
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
@@ -200,6 +201,7 @@ async def test_require_task_owner_reads_task_details_through_job_service():
 
     assert details == {"user_id": 7, "filename": "a.pdf"}
     assert job_service.detail_checks == ["task-1"]
+    assert job_service.require_owner_identity is True
 
 
 @pytest.mark.asyncio
@@ -215,6 +217,22 @@ async def test_require_task_owner_allows_admin_for_another_users_task():
     )
 
     assert details == {"user_id": 2, "filename": "b.pdf"}
+    assert job_service.require_owner_identity is False
+
+
+@pytest.mark.asyncio
+async def test_require_task_owner_allows_admin_when_actor_details_have_no_owner_id():
+    job_service = FakeJobService(details={"partition": "p"})
+
+    details = await require_task_owner(
+        task_id="task-2",
+        user={"id": 1, "is_admin": True},
+        job_service=job_service,
+        auth_service=AuthService,
+    )
+
+    assert details == {"partition": "p"}
+    assert job_service.require_owner_identity is False
 
 
 @pytest.mark.asyncio

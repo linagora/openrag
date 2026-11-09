@@ -18,6 +18,7 @@ import torch
 from core.config import load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
+from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from core.utils.logging import get_logger
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
@@ -170,6 +171,7 @@ class DoclingLoader(BasePooledParser):
                 metadata=dict(document.metadata),
             )
 
+        report_parser_substage("parse.convert", "Converting PDF with Docling")
         async with document.as_temporary_file() as path:
             result: ConversionResult = await self._dispatch(str(path))
 
@@ -214,35 +216,43 @@ class DoclingLoader(BasePooledParser):
     def _build_text_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[TextBlock]:
         blocks: list[TextBlock] = []
         n_pages = len(result.pages)
+        if n_pages:
+            report_parser_substage("parse.text", "Extracting page text", progress=0, total=n_pages)
+        else:
+            report_parser_substage("parse.text", "Extracting page text")
         for i in range(1, n_pages + 1):
             if cancelled is not None and cancelled.is_set():
                 break
             text = result.document.export_to_markdown(page_no=i).strip()
             blocks.append(TextBlock(text=text, page_number=i))
+            report_parser_substage("parse.text", "Extracting page text", progress=i, total=n_pages)
         return blocks
 
     @staticmethod
     def _build_image_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[ImageBlock]:
         blocks: list[ImageBlock] = []
-        for idx, picture in enumerate(result.document.pictures):
+        pictures = result.document.pictures
+        total = len(pictures)
+        if total:
+            report_parser_substage("parse.images", "Extracting images", progress=0, total=total)
+        for idx, picture in enumerate(pictures):
             if cancelled is not None and cancelled.is_set():
                 break
             try:
                 pil_image = picture.image.pil_image
-                if pil_image is None:
-                    continue
-                png_bytes = pil_to_png_bytes(pil_image)
+                if pil_image is not None:
+                    png_bytes = pil_to_png_bytes(pil_image)
+                    ref = f"![](docling_img_{idx})"
+                    blocks.append(
+                        ImageBlock(
+                            image_bytes=png_bytes,
+                            mime_type="image/png",
+                            metadata={"markdown_ref": ref},
+                        )
+                    )
             except Exception as exc:
                 logger.warning(f"Failed to encode Docling picture {idx}: {exc}")
-                continue
-            ref = f"![](docling_img_{idx})"
-            blocks.append(
-                ImageBlock(
-                    image_bytes=png_bytes,
-                    mime_type="image/png",
-                    metadata={"markdown_ref": ref},
-                )
-            )
+            report_parser_substage("parse.images", "Extracting images", progress=idx + 1, total=total)
         return blocks
 
 

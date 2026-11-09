@@ -85,3 +85,51 @@ async def test_snapshot_lease_falls_back_to_existing_lease_method() -> None:
         await lease
     with pytest.raises(asyncio.CancelledError):
         await worker_task
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_state_manager_sends_snapshots_to_sidecar() -> None:
+    tracker = StageTracker("task-legacy")
+    tracker.start_stage("parse", 0)
+    lease_calls = []
+    snapshot_calls = []
+
+    async def renew(task_id):
+        lease_calls.append(task_id)
+        return True
+
+    async def publish(task_id, snapshot):
+        snapshot_calls.append((task_id, snapshot))
+        return True
+
+    tsm = SimpleNamespace(renew_worker_lease=SimpleNamespace(remote=renew))
+    worker_task = asyncio.create_task(asyncio.sleep(10))
+    lease = asyncio.create_task(
+        keep_worker_lease(
+            tsm,
+            "task-legacy",
+            worker_task=worker_task,
+            logger=_QuietLogger(),
+            renew_interval=0.01,
+            lease_ttl=0.05,
+            snapshot_provider=tracker.snapshot,
+            stage_progress_sink=publish,
+        )
+    )
+
+    for _ in range(20):
+        if snapshot_calls:
+            break
+        await asyncio.sleep(0.005)
+
+    assert lease_calls
+    assert snapshot_calls[0][0] == "task-legacy"
+    assert snapshot_calls[0][1].summary.current_stage_id == "parse"
+    assert snapshot_calls[0][1].event_tail[0].status.value == "started"
+
+    lease.cancel()
+    worker_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await lease
+    with pytest.raises(asyncio.CancelledError):
+        await worker_task
