@@ -134,7 +134,7 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 2. Prompt templates (`openrag/prompts/templates/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
 3. `extract_and_strip_sources_block()` (`openrag/core/utils/source_filtering.py`) strips this tag from the response before sending to the client
 4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every presented source is kept instead (a missing tag means the model didn't report citations, not that it used none)
-5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
+5. For streaming, `stream_with_source_filtering()` (same module, driven by `query_service.chat_stream`) holds back a lookahead of at least 80 chars, more with many sources, and emits only text no later chunk can change, so a tag never reaches the client. At each chunk it strips only the part of the answer it has not yet cut off and emitted; when there is nowhere to cut, it strips that part again only once it has grown by an eighth. That keeps a long stream linear
 
 The `extra` field in API responses is a JSON object with these keys. It was a
 JSON-encoded *string* up to and including v2.2.2 — a breaking change for readers
