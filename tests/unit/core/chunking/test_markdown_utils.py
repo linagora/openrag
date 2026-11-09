@@ -6,6 +6,7 @@ preserved through the move into core/.
 
 from __future__ import annotations
 
+import core.chunking.markdown_utils as markdown_utils
 import pytest
 from core.chunking.markdown_utils import (
     PAGE_RE,
@@ -24,6 +25,33 @@ from core.utils.exceptions import PipelineError
 def _mock_length(text: str) -> int:
     """Estimate token count at ~4 chars per token (matches legacy tests)."""
     return len(text) // 4
+
+
+def test_formula_truncation_marker_is_scoped_to_omitted_rows_and_columns():
+    marker = {
+        "truncated": True,
+        "omitted_cells_by_column": [{"column": "B", "row_ranges": [{"start_row": 18, "end_row": 20}]}],
+    }
+
+    assert markdown_utils._formula_truncation_marker_matches(marker, [18], {"B"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [17], {"B"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [18], {"C"})
+
+
+def test_formula_truncation_marker_pairs_rows_with_their_column():
+    # B18 and C19 were omitted; C18 and B19 were not.
+    marker = {
+        "truncated": True,
+        "omitted_cells_by_column": [
+            {"column": "B", "row_ranges": [{"start_row": 18, "end_row": 18}]},
+            {"column": "C", "row_ranges": [{"start_row": 19, "end_row": 19}]},
+        ],
+    }
+
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [18], {"C"})
+    assert markdown_utils._formula_truncation_marker_matches(marker, [19], {"C"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [19], {"B"})
+    assert markdown_utils._formula_truncation_marker_matches(marker, [18], None)
 
 
 class TestSplitMdElements:
@@ -419,8 +447,55 @@ class TestChunkTable:
             assert chunk.metadata["csv_column"] == "note"
             assert chunk.metadata["csv_part"] == part_number
             assert chunk.metadata["csv_parts_total"] == len(chunks)
+            assert chunk.metadata["csv_row_chunks_total"] == len(chunks)
             reconstructed.append(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0])
         assert "".join(reconstructed) == long_note
+
+    def test_csv_header_larger_than_budget_uses_smallest_viable_budget(self):
+        column_name = " ".join(f"header{number}" for number in range(20))
+        table = f"| {column_name} |\n| --- |\n| value |"
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": [column_name], "csv_row_start": 2},
+            ),
+            chunk_size=10,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert chunks
+        assert all(column_name in chunk.content for chunk in chunks)
+        assert all(chunk.metadata["csv_effective_chunk_size"] > 10 for chunk in chunks)
+        assert all(len(chunk.content.split()) <= chunk.metadata["csv_effective_chunk_size"] for chunk in chunks)
+
+    def test_continuation_reserves_label_separator_in_character_budget(self):
+        column = "column"
+        table = f"| {column} |\n| --- |\n| {'x' * 100} |"
+        chunks = chunk_table(
+            MDElement(type="table", content=table, metadata={"csv_columns": [column], "csv_row_start": 2}),
+            chunk_size=50,
+            length_function=len,
+        )
+        assert all(len(chunk.content) <= chunk.metadata.get("csv_effective_chunk_size", 50) for chunk in chunks)
+
+    def test_oversized_header_still_leaves_a_share_of_the_budget_for_cell_text(self):
+        column_name = " ".join(f"header{number}" for number in range(30))
+        cell = " ".join(f"word{number}" for number in range(400))
+        table = f"| {column_name} |\n| --- |\n| {cell} |"
+
+        chunks = chunk_table(
+            MDElement(type="table", content=table, metadata={"csv_columns": [column_name], "csv_row_start": 2}),
+            chunk_size=40,
+            length_function=lambda text: len(text.split()),
+        )
+
+        # Each part carries at least a quarter of the budget (10 words), so 400
+        # words need at most about 40 parts, not one part per word.
+        assert len(chunks) <= 45
+        reconstructed = "".join(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0] for chunk in chunks)
+        assert reconstructed == cell
 
     def test_csv_wide_row_is_grouped_by_columns_without_losing_values(self):
         columns = ["person_id", "legal_name", *(f"fact_{number}" for number in range(1, 9))]
@@ -461,6 +536,7 @@ class TestChunkTable:
             assert chunk.metadata["csv_row_number"] == 7
             assert chunk.metadata["csv_column_group"] == group_number
             assert chunk.metadata["csv_column_groups_total"] == len(chunks)
+            assert chunk.metadata["csv_row_chunks_total"] == len(chunks)
             assert chunk.metadata["csv_columns"] == group_columns
             assert len(chunk.content.split()) <= 35
             recovered.update(dict(zip(group_columns[2:], group_values[2:], strict=True)))
@@ -548,6 +624,32 @@ def test_split_to_budget_uses_logarithmic_whitespace_probes():
     assert "".join(pieces) == text
     assert all(len(piece.split()) <= 1_000 for piece in pieces)
     assert calls < 100
+
+
+def test_split_to_budget_bounds_tokenization_and_scans_boundaries_once(monkeypatch):
+    text = " ".join(f"word{number}" for number in range(2_000))
+    original_finditer = markdown_utils.re.finditer
+    finditer_calls = 0
+    tokenized_characters = 0
+
+    def counted_finditer(*args, **kwargs):
+        nonlocal finditer_calls
+        finditer_calls += 1
+        return original_finditer(*args, **kwargs)
+
+    def counted_length(value: str) -> int:
+        nonlocal tokenized_characters
+        tokenized_characters += len(value)
+        return len(value.split())
+
+    monkeypatch.setattr(markdown_utils.re, "finditer", counted_finditer)
+
+    pieces = _split_to_budget(text, budget=1, length_function=counted_length)
+
+    assert "".join(pieces) == text
+    assert all(len(piece.split()) <= 1 for piece in pieces)
+    assert finditer_calls == 1
+    assert tokenized_characters < len(text) * 20
 
 
 def test_split_to_budget_rejects_non_positive_budget():
