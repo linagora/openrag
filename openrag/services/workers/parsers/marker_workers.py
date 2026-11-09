@@ -194,9 +194,9 @@ class MarkerWorker:
             # parse chunks in parallel.
             "pdftext_workers": 1,
             # Surya passes disable= explicitly, which beats TQDM_DISABLE: honor
-            # it here (non-empty = off, as tqdm reads it) so its bars stay out
-            # of JSON logs (#1297).
-            "disable_tqdm": bool(os.environ.get("TQDM_DISABLE")),
+            # it here (non-empty = off, as tqdm reads it), and turn the bars
+            # off with JSON logs even when TQDM_DISABLE was not set (#1297).
+            "disable_tqdm": bool(os.environ.get("TQDM_DISABLE")) or self.config.verbose.format == "json",
         }
         if self.config.loader.marker_pdftext_workers > 1:
             self.logger.warning(
