@@ -11,6 +11,7 @@ import torch
 from core.config import load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
+from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import (
     Document,
     DocumentType,
@@ -693,6 +694,7 @@ class MarkerLoader(BasePooledParser):
                 metadata=dict(document.metadata),
             )
 
+        report_parser_substage("parse.convert", "Converting PDF with Marker")
         async with document.as_temporary_file() as path:
             markdown, images = await self._dispatch(str(path))
 
@@ -776,22 +778,26 @@ class MarkerLoader(BasePooledParser):
         gone and the result is discarded, so encoding stops early.
         """
         blocks: list[ImageBlock] = []
-        for key, pil_image in images.items():
+        total = len(images)
+        if total:
+            report_parser_substage("parse.images", "Extracting images", progress=0, total=total)
+        for index, (key, pil_image) in enumerate(images.items(), start=1):
             if cancelled is not None and cancelled.is_set():
                 break
             try:
                 png_bytes = pil_to_png_bytes(pil_image)
             except Exception as exc:
                 logger.warning(f"Failed to encode Marker image {key}: {exc}")
-                continue
-            blocks.append(
-                ImageBlock(
-                    image_bytes=png_bytes,
-                    page_number=_marker_key_to_page(str(key)),
-                    mime_type="image/png",
-                    metadata={"markdown_ref": f"![]({key})", "marker_key": str(key)},
+            else:
+                blocks.append(
+                    ImageBlock(
+                        image_bytes=png_bytes,
+                        page_number=_marker_key_to_page(str(key)),
+                        mime_type="image/png",
+                        metadata={"markdown_ref": f"![]({key})", "marker_key": str(key)},
+                    )
                 )
-            )
+            report_parser_substage("parse.images", "Extracting images", progress=index, total=total)
         return blocks
 
     @classmethod
@@ -815,18 +821,28 @@ class MarkerLoader(BasePooledParser):
             markdown = markdown.split(cls.PAGE_SEP, 1)[1]
         markdown = markdown.replace("<br>", "")
 
+        matches = list(cls._PAGE_MARKER_RE.finditer(markdown))
+        has_trailing_page = bool(markdown[matches[-1].end() :].strip()) if matches else bool(markdown.strip())
+        total_pages = len(matches) + int(has_trailing_page and bool(matches))
+        if not matches and markdown.strip():
+            total_pages = 1
+        if total_pages:
+            report_parser_substage("parse.text", "Extracting page text", progress=0, total=total_pages)
+
         pairs: list[tuple[int, str]] = []
         cursor = 0
         last_page = 0
-        for match in cls._PAGE_MARKER_RE.finditer(markdown):
+        for index, match in enumerate(matches, start=1):
             page = int(match.group(1))
             text = markdown[cursor : match.start()].strip()
             pairs.append((page, text))
             cursor = match.end()
             last_page = page
+            report_parser_substage("parse.text", "Extracting page text", progress=index, total=total_pages)
         tail = markdown[cursor:].strip()
         if tail:
             pairs.append((last_page + 1, tail))
+            report_parser_substage("parse.text", "Extracting page text", progress=len(pairs), total=total_pages)
         elif not pairs and markdown.strip():
             pairs.append((1, markdown.strip()))
         return pairs

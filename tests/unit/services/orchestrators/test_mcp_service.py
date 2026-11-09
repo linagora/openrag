@@ -127,7 +127,8 @@ class FakeJobs:
         self._details = details
         self._tasks = tasks if tasks is not None else []
 
-    async def get_task_details(self, task_id):
+    async def get_task_details(self, task_id, *, require_owner_identity=False):
+        self.require_owner_identity = require_owner_identity
         return self._details
 
     async def list_tasks(self, *, is_admin, user_id, task_status=None):
@@ -414,6 +415,20 @@ async def test_task_status_admin_bypasses_owner():
     )
     assert out["task_state"] == "COMPLETED"
     assert "error" not in out
+
+
+@pytest.mark.parametrize(("is_admin", "expected"), [(False, True), (True, False)])
+@pytest.mark.asyncio
+async def test_task_status_forwards_owner_identity_requirement(is_admin: bool, expected: bool) -> None:
+    jobs = FakeJobs(details={"user_id": 1})
+
+    await _service(jobs=jobs, indexing=FakeIndexing(state="COMPLETED")).get_task_status(
+        task_id="t1",
+        user_id=1,
+        is_admin=is_admin,
+    )
+
+    assert jobs.require_owner_identity is expected
 
 
 @pytest.mark.asyncio
