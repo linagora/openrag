@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from core.utils.exceptions import ValidationError
 
 
 class _AsyncContext:
@@ -277,6 +278,7 @@ async def test_auto_create_refuses_a_reserved_partition_name():
     pool = _FakePool()
     repo = PgDocumentRepository(pool_getter=lambda: pool)
 
-    with pytest.raises(ValueError, match="reserved"):
+    with pytest.raises(ValidationError, match="reserved") as exc:
         await repo.add_file_to_partition(file_id="f1", partition="all", user_id=42)
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
     assert pool.conn.executed == []

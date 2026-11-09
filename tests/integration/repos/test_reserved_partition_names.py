@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 from core.config.auth import OIDCConfig
 from core.models.user import User
+from core.utils.exceptions import ValidationError
 from services.orchestrators.auth_service import AuthService
 from services.storage.postgres_store import PostgresStore
 
@@ -30,8 +31,9 @@ async def _rows(store: PostgresStore, partition: str) -> tuple[int, int, int]:
 async def test_a_file_never_creates_a_reserved_partition(postgres_store: PostgresStore, partition: str):
     user_id = await _user(postgres_store)
 
-    with pytest.raises(ValueError, match="reserved"):
+    with pytest.raises(ValidationError, match="reserved") as exc:
         await postgres_store.document_repo.add_file_to_partition(file_id="f1", partition=partition, user_id=user_id)
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
 
     assert await _rows(postgres_store, partition) == (0, 0, 0)
 
@@ -48,8 +50,9 @@ async def test_a_file_creates_a_missing_partition_with_its_owner(postgres_store:
 async def test_a_member_never_creates_a_reserved_partition(postgres_store: PostgresStore, partition: str):
     user_id = await _user(postgres_store)
 
-    with pytest.raises(ValueError, match="reserved"):
+    with pytest.raises(ValidationError, match="reserved") as exc:
         await postgres_store.membership_repo.add_partition_member(partition, user_id, "owner")
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
 
     assert await _rows(postgres_store, partition) == (0, 0, 0)
 

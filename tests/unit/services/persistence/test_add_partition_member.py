@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from core.utils.exceptions import ValidationError
 
 
 class _AsyncContext:
@@ -102,6 +103,7 @@ async def test_add_member_refuses_a_reserved_partition_name(partition_exists):
     pool = _FakePool(partition_exists=partition_exists)
     repo = PgPartitionMembershipRepository(pool_getter=lambda: pool)
 
-    with pytest.raises(ValueError, match="reserved"):
+    with pytest.raises(ValidationError, match="reserved") as exc:
         await repo.add_partition_member("all", 5, "owner")
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
     assert pool.conn.executed == []
