@@ -178,7 +178,7 @@ describe("JobListPage filters", () => {
     expect(await screen.findByText("failed.pdf")).not.toBeNull();
   });
 
-  it("distinguishes completed jobs with degraded enrichment", async () => {
+  it("keeps the All tab status label for completed jobs with degraded enrichment", async () => {
     listTasksMock.mockResolvedValue({
       tasks: [
         task("degraded-task", "COMPLETED", "degraded.pdf", "docs", {
@@ -190,18 +190,56 @@ describe("JobListPage filters", () => {
 
     renderJobs();
 
-    expect(await screen.findByText("Completed with degradation")).not.toBeNull();
-    expect(screen.getByText("Caption, Topic tagging")).not.toBeNull();
+    expect(await screen.findByText("COMPLETED", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.queryByText("Completed with degradation")).toBeNull();
+    expect(screen.queryByText("Caption, Topic tagging")).toBeNull();
   });
 
-  it("shows SERIALIZING as Active in the jobs list", async () => {
-    listTasksMock.mockResolvedValue({ tasks: [task("active-task", "SERIALIZING", "active.pdf")] });
+  it("shows only lifecycle status in All and stage progress in Active", async () => {
+    const activeTask = task("active-task", "SERIALIZING", "active.pdf", "docs", {
+      stage_progress: {
+        stage_id: "parse",
+        stage_label: "Parsing",
+        phase: "stage",
+        is_currently_running: true,
+        elapsed_ms: 4_000,
+        freshness: "live",
+        history_quality: "complete",
+        persisted_through_sequence: 1,
+      },
+    });
+    const completedTask = task("degraded-task", "COMPLETED", "completed.pdf", "docs", {
+      outcome: "completed_degraded",
+      degraded_stages: ["contextualize"],
+      stage_progress: {
+        phase: "finalizing",
+        last_known_stage_label: "Contextualization",
+        freshness: "durable",
+        is_currently_running: false,
+        history_quality: "complete",
+        persisted_through_sequence: 1,
+      },
+    });
+    const queuedTask = task("queued-task", "QUEUED", "queued.pdf");
+    listTasksMock.mockImplementation(async (status) => ({
+      tasks: status === "active" ? [activeTask] : [activeTask, completedTask, queuedTask],
+    }));
 
     renderJobs();
 
     expect(await screen.findByText("active.pdf")).not.toBeNull();
     expect(screen.getByText("Active", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.getByText("COMPLETED", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.getByText("QUEUED", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.queryByText("Parsing")).toBeNull();
+    expect(screen.queryByText("Contextualization")).toBeNull();
+    expect(screen.queryByText("Completed with degradation")).toBeNull();
     expect(screen.queryByText("SERIALIZING")).toBeNull();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    const parsing = await screen.findByText("Parsing");
+    expect(parsing.closest("[data-slot='badge']")?.textContent).toMatch(/^Parsing · /);
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
   });
 
   it("shows, searches, and exports failure reasons for admins", async () => {
@@ -369,6 +407,7 @@ describe("JobListPage filters", () => {
 
     renderJobs();
 
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
     const parsing = await screen.findByText("Parsing");
     const badge = parsing.closest("[data-slot='badge']");
     expect(badge?.textContent).toBe("Parsing · <5s");
@@ -674,6 +713,8 @@ describe("JobListPage stage progress", () => {
   it("shows stage progress under State without adding a column", async () => {
     renderJobs();
 
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+
     const laterTime = await screen.findByText("10s");
     const earlierTime = screen.getByText("<5s");
     const later = laterTime.closest("[data-slot='badge']")!;
@@ -689,7 +730,7 @@ describe("JobListPage stage progress", () => {
     expect(earlier.closest("tr")?.textContent).not.toContain("SERIALIZING");
     expect(later.closest("tr")!.compareDocumentPosition(earlier.closest("tr")!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(screen.getAllByText("Saving history")).toHaveLength(2);
-    expect(screen.getAllByText("Active", { selector: "[data-slot='badge']" })).toHaveLength(2);
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
   }, 10_000);
 
   it("includes time since the backend elapsed sample when opening the Active Jobs page", async () => {
@@ -713,6 +754,7 @@ describe("JobListPage stage progress", () => {
 
     renderJobs();
 
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
     expect(await screen.findByText("30s")).not.toBeNull();
   });
 
@@ -740,6 +782,7 @@ describe("JobListPage stage progress", () => {
 
     renderJobs();
 
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
     const progress = await screen.findByText("Parsing · Extracting page text (42/578)");
     expect(progress.closest("[data-slot='badge']")?.className).toContain("bg-amber-100");
     expect(screen.getByText("12s")).not.toBeNull();
@@ -772,6 +815,7 @@ describe("JobListPage stage progress", () => {
 
     renderJobs();
 
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
     expect(await screen.findByText("Parsing · Extracting page text (42/578) · Status unconfirmed")).not.toBeNull();
     expect(screen.queryByText("<5s")).toBeNull();
     expect(screen.queryByText("12s")).toBeNull();
@@ -795,8 +839,9 @@ describe("JobListPage stage progress", () => {
 
     renderJobs();
 
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
     expect(await screen.findByText("Finalizing · Status unconfirmed")).not.toBeNull();
-    expect(screen.getByText("Active", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
   });
 
   it("labels a confirmed interrupted stage in the jobs table", async () => {
@@ -818,7 +863,8 @@ describe("JobListPage stage progress", () => {
 
     renderJobs();
 
-    expect(await screen.findByText("Interrupted: Embedding")).not.toBeNull();
+    expect(await screen.findByText("FAILED", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.queryByText("Interrupted: Embedding")).toBeNull();
   });
 
   it("shows a durable active stage as unconfirmed until live worker evidence arrives", async () => {
@@ -839,6 +885,7 @@ describe("JobListPage stage progress", () => {
 
     renderJobs();
 
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
     const unconfirmed = await screen.findByText("Embedding · Status unconfirmed");
     expect(unconfirmed.closest("[data-slot='badge']")?.className).toContain("bg-emerald-100");
     expect(screen.queryByText("<5s")).toBeNull();

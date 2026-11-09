@@ -10,7 +10,6 @@ import { usePermissions } from "@/lib/permissions";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
-import { DegradedCompletionStatus } from "@/components/shared/degraded-stages";
 import { defaultStageBadgeColor, StageElapsedTime, stageBadgeColors } from "@/components/shared/stage-progress";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -217,10 +216,8 @@ function TruncatedValue({ value, className = "max-w-[320px]" }: { value: string;
 }
 
 function TaskStateCell({ task, showActiveState }: { task: TaskListItem; showActiveState: boolean }) {
-  const state = task.outcome === "completed_degraded"
-    ? <DegradedCompletionStatus stages={task.details?.degraded_stages} />
-    : <StatusBadge status={task.state} />;
-  const progress = stageProgressDisplay(task);
+  const state = <StatusBadge status={task.state} />;
+  const progress = showActiveState ? null : stageProgressDisplay(task);
   const hideActiveState = !showActiveState && task.state === "SERIALIZING";
   const progressLabel = progress && (
     <>
