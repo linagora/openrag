@@ -120,6 +120,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MODE", "loader.marker_mode", str),
     ("MARKER_OCR_CONCURRENCY", "loader.marker_ocr_concurrency", int),
+    ("MARKER_TABLE_TOKEN_FLOOR", "loader.marker_table_token_floor", int),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),
     ("MARKER_PARSE_MEMORY_LIMIT_MB", "loader.marker_parse_memory_limit_mb", int),
     ("PYMUPDF_CHILD_WORKERS_PER_INDEXER", "loader.pymupdf_child_workers_per_indexer", int),

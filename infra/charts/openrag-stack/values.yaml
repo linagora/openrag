@@ -1353,6 +1353,9 @@ env:
     # value below its baseline fails every parse. The worker logs the baseline at
     # startup — measure there first, then set this well above it.
     # MARKER_PARSE_MEMORY_LIMIT_MB: "6144"
+    # Least OCR tokens for a table without a text layer: max(this, Marker's
+    # estimate) + 100, capped at Surya's 8192 ceiling. Default 8192.
+    # MARKER_TABLE_TOKEN_FLOOR: "8192"
     # Marker instances (Ray actors), and the child processes each runs. The
     # old names MARKER_POOL_SIZE and MARKER_MAX_PROCESSES are refused.
     MARKER_CHILD_WORKERS_PER_INSTANCE: "15"

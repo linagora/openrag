@@ -362,6 +362,7 @@ class MarkerWorker:
             # and each get a full memory ceiling (#1167). The slots already
             # parse chunks in parallel.
             "pdftext_workers": 1,
+            "ocr_table_token_floor": self.config.loader.marker_table_token_floor,
         }
         if self.config.loader.marker_pdftext_workers > 1:
             self.logger.warning(

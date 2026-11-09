@@ -254,6 +254,11 @@ loader:
   # Env: MARKER_OCR_CONCURRENCY. Requests the OCR server serves at once (vLLM
   #      --max-num-seqs, llama-server --parallel), shared by every Marker slot.
   marker_ocr_concurrency: 32
+  # Env: MARKER_TABLE_TOKEN_FLOOR. Least tokens Marker lets the OCR model spend
+  #      on a table it can't rebuild from the text layer. The budget is the larger
+  #      of this and Marker's estimate, plus 100, capped at Surya's 8192 ceiling.
+  #      A table cut by the budget is dropped whole.
+  marker_table_token_floor: 8192
 
   # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_NUM_INSTANCES,
   #      MARKER_CHILD_WORKERS_PER_INSTANCE (child processes per instance),

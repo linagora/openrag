@@ -193,6 +193,11 @@ class LoaderConfig(ConfigMixin):
     # per request, so a document alone can use all of it and the slots together
     # never send more; it doesn't depend on the number of slots.
     marker_ocr_concurrency: int = Field(default=32, ge=1)
+    # Least tokens the OCR model may spend on a table Marker can't rebuild from
+    # the text layer (Marker's ``ocr_table_token_floor``). The budget is the
+    # larger of this and Marker's estimate, plus 100, capped at Surya's 8192
+    # ceiling; a table cut by it is dropped whole.
+    marker_table_token_floor: int = Field(default=8192, ge=1)
     marker_max_tasks_per_child: int = 20
     # Hard ceiling on what one Marker parse may allocate, enforced as RLIMIT_DATA
     # in the slot's child process (#997). ``RLIMIT_DATA``, not ``RLIMIT_AS``:

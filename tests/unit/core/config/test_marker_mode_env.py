@@ -16,6 +16,7 @@ def config_dir(monkeypatch, tmp_path):
     # overrides an existing var — this shields the tests from any local .env.
     monkeypatch.setenv("MARKER_MODE", "")
     monkeypatch.setenv("MARKER_OCR_CONCURRENCY", "")
+    monkeypatch.setenv("MARKER_TABLE_TOKEN_FLOOR", "")
     return tmp_path
 
 
@@ -61,3 +62,20 @@ def test_the_shipped_config_sets_the_mode_explicitly():
     shipped = yaml.safe_load((Path(__file__).parents[4] / "conf" / "config.yaml").read_text(encoding="utf-8"))
 
     assert shipped["loader"]["marker_mode"] == "fast"
+
+
+def test_marker_table_token_floor_defaults_to_8192(config_dir):
+    assert load_config(config_path=config_dir).loader.marker_table_token_floor == 8192
+
+
+def test_marker_table_token_floor_env_sets_it(monkeypatch, config_dir):
+    monkeypatch.setenv("MARKER_TABLE_TOKEN_FLOOR", "4096")
+
+    assert load_config(config_path=config_dir).loader.marker_table_token_floor == 4096
+
+
+def test_marker_table_token_floor_must_be_positive(monkeypatch, config_dir):
+    monkeypatch.setenv("MARKER_TABLE_TOKEN_FLOOR", "0")
+
+    with pytest.raises(ValidationError, match="marker_table_token_floor"):
+        load_config(config_path=config_dir)

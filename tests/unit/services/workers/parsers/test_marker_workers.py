@@ -214,14 +214,18 @@ def test_recycling_a_slot_kills_what_its_child_started():
                 pass
 
 
-def _initialized_marker_worker(monkeypatch, pdftext_workers: int = 1, slots: int = 1):
+def _initialized_marker_worker(monkeypatch, pdftext_workers: int = 1, slots: int = 1, table_token_floor: int = 8192):
     """A MarkerWorker through its real __init__, minus the models and pools."""
     import core.config
     import core.utils.logging
 
     log = _RecordingLogger()
     config = SimpleNamespace(
-        loader=SimpleNamespace(marker_child_workers_per_instance=slots, marker_pdftext_workers=pdftext_workers)
+        loader=SimpleNamespace(
+            marker_child_workers_per_instance=slots,
+            marker_pdftext_workers=pdftext_workers,
+            marker_table_token_floor=table_token_floor,
+        )
     )
     monkeypatch.setattr(core.config, "load_config", lambda: config)
     monkeypatch.setattr(core.utils.logging, "get_logger", lambda: log)
@@ -231,6 +235,13 @@ def _initialized_marker_worker(monkeypatch, pdftext_workers: int = 1, slots: int
     worker = actor_class.__new__(actor_class)
     worker.__init__()
     return worker, log
+
+
+@pytest.mark.parametrize("floor", [8192, 4096])
+def test_marker_passes_the_table_token_floor_to_the_converter(monkeypatch, floor):
+    worker, _ = _initialized_marker_worker(monkeypatch, table_token_floor=floor)
+
+    assert worker.converter_config["ocr_table_token_floor"] == floor
 
 
 @pytest.mark.parametrize("configured", [1, 4])
