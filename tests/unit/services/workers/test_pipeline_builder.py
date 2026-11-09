@@ -1751,15 +1751,16 @@ def _image_pipeline(vlm=None, image_count: int = 6, **kwargs):
         text_blocks=[TextBlock(text="body")],
         images=[ImageBlock(image_bytes=b"\x89PNG" + b"y" * 4096, page_number=i) for i in range(image_count)],
     )
+    chunker = FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")])
     pipeline = build_indexing_pipeline(
         parser=FakeParser(processed),
-        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        chunker=chunker,
         embedder=FakeEmbedder([[1.0]]),
         vector_store=FakeVectorStore(),
         vlm=vlm,
         **kwargs,
     )
-    return pipeline, document
+    return pipeline, document, chunker
 
 
 def _row(document):
@@ -1772,7 +1773,7 @@ async def test_image_bytes_are_released_after_captioning():
     the end of ``run()`` they survive embed and store — the larger half of the
     payload ``_release_raw_bytes`` frees."""
     vlm = FakeVLM()
-    pipeline, document = _image_pipeline(vlm=vlm)
+    pipeline, document, _ = _image_pipeline(vlm=vlm)
 
     row = _row(document)
     await pipeline.run(row)
@@ -1793,7 +1794,7 @@ async def test_image_bytes_are_released_after_captioning():
 async def test_image_bytes_are_released_even_when_captioning_never_runs():
     """No VLM means nothing was ever going to read them, so holding them is pure
     waste. This is why the release sits outside the ``vlm is not None`` branch."""
-    pipeline, document = _image_pipeline(vlm=None)
+    pipeline, document, _ = _image_pipeline(vlm=None)
 
     row = _row(document)
     await pipeline.run(row)
@@ -1810,7 +1811,7 @@ async def test_image_bytes_are_released_even_when_captioning_never_runs():
 async def test_image_bytes_are_released_when_captioning_fails():
     """``_timed_enrichment`` swallows the failure and indexes the file anyway; a
     failed caption makes the bytes no more useful than a successful one."""
-    pipeline, document = _image_pipeline(vlm=FailingVLM())
+    pipeline, document, _ = _image_pipeline(vlm=FailingVLM())
 
     row = _row(document)
     await pipeline.run(row)
@@ -1819,6 +1820,41 @@ async def test_image_bytes_are_released_when_captioning_fails():
     images = row["processed_document"].images
     assert len(images) == 6, "guard: the images must survive the release"
     assert all(image.image_bytes == b"" for image in images)
+
+
+class OneFailingVLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("vlm timeout")
+        return "caption"
+
+
+@pytest.mark.asyncio
+async def test_one_failed_image_keeps_the_other_captions():
+    """#1293: one failed image used to fail the stage and drop every caption."""
+    pipeline, document, chunker = _image_pipeline(vlm=OneFailingVLM())
+
+    observed = []
+    tracker = StageTracker("task-caption", deliver=lambda event, summary, tail: observed.append(event) or True)
+
+    row = _row(document)
+    await pipeline.run(row, stage_tracker=tracker)
+
+    assert row["stage"] == "stored"
+    assert [image.caption for image in row["processed_document"].images].count("caption") == 5
+    chunked_texts = [block.text for block in chunker.calls[0][0].text_blocks]
+    assert chunked_texts.count(wrap_caption("caption")) == 5
+    assert row["degraded_stages"]["caption"].startswith("1/6 image(s) failed captioning")
+    failure = next(
+        event
+        for event in observed
+        if event is not None and event.stage_id == "caption" and event.status is StageEventStatus.FAILED
+    )
+    assert failure.failure_effect is StageFailureEffect.CONTINUED_DEGRADED
 
 
 @pytest.mark.asyncio
