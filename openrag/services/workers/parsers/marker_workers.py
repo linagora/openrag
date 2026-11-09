@@ -1,9 +1,14 @@
 import asyncio
+import functools
 import gc
+import hashlib
 import os
 import re
+import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 import pypdfium2
 import ray
@@ -21,12 +26,162 @@ from core.models.document import (
 from core.utils.child_process import kill_process_group, tie_to_parent
 from core.utils.logging import get_logger
 from core.utils.process_limits import apply_parse_memory_limit
+from core.utils.shared_permits import PermitShare, SharedPermits
 from marker.converters.pdf import PdfConverter
+from marker.models import create_model_dict
 from ray.exceptions import TaskCancelledError
+from surya.settings import settings as surya_settings
 
 from ..ray_utils import call_ray_actor_with_timeout, caused_by, retry_with_backoff
 
 logger = get_logger()
+
+
+@dataclass(frozen=True)
+class _MarkerMode:
+    #: Converter keys this mode sets.
+    converter: dict
+    #: surya's shared helper servers it calls.
+    helpers: tuple[str, ...]
+    #: Whether it calls the OCR server (``SURYA_INFERENCE_URL``).
+    needs_ocr_server: bool
+
+
+# What each mode asks of Marker. Balanced with ``disable_ocr`` is not a
+# combination: Marker then switches to the fast layout model.
+_MARKER_MODES: dict[str, _MarkerMode] = {
+    "balanced": _MarkerMode({"mode": "balanced"}, ("ocr_error",), True),
+    "fast": _MarkerMode({"mode": "fast"}, ("fast_layout", "ocr_error"), True),
+    "fast_no_ocr": _MarkerMode({"mode": "fast", "disable_ocr": True}, ("fast_layout",), False),
+}
+
+
+def _marker_mode(mode: str) -> _MarkerMode:
+    try:
+        return _MARKER_MODES[mode]
+    except KeyError:
+        raise ValueError(f"Unknown Marker mode {mode!r}; expected one of {', '.join(_MARKER_MODES)}") from None
+
+
+def _cgroup_cpu_quota(root: str = "/sys/fs/cgroup") -> int | None:
+    """The container's CPU limit in whole cores (rounded up), or ``None`` without one.
+
+    cgroup v2 keeps it in ``cpu.max``, v1 in the ``cpu`` controller's CFS files.
+    """
+    for quota_file, period_file in (
+        ("cpu.max", None),
+        ("cpu/cpu.cfs_quota_us", "cpu/cpu.cfs_period_us"),
+    ):
+        try:
+            with open(os.path.join(root, quota_file)) as f:
+                fields = f.read().split()
+            if period_file is not None:
+                with open(os.path.join(root, period_file)) as f:
+                    fields.append(f.read().strip())
+            quota, period = fields[0], int(fields[1])
+            if quota in ("max", "-1"):
+                return None
+            return max(1, -(-int(quota) // period))
+        except (OSError, ValueError, IndexError):
+            continue
+    return None
+
+
+def _helper_threads() -> int:
+    """Threads for surya's shared helpers: every core this process may use.
+
+    Bounded by the container's CPU limit: a pod still sees every core of its
+    node, and torch threads past the quota only wait for it.
+    """
+    try:
+        cores = len(os.sched_getaffinity(0))
+    except AttributeError:  # not on Linux
+        cores = os.cpu_count() or 1
+    quota = _cgroup_cpu_quota()
+    return min(cores, quota) if quota else cores
+
+
+def _start_helpers(helpers: tuple[str, ...], threads: int) -> None:
+    """Start, or attach to, surya's shared helper servers; runs in a throwaway child.
+
+    surya starts a helper the first time a client calls it, as a detached process
+    that inherits the caller's environment and limits, and every later client
+    attaches to it through a sentinel file. Called from a slot's child, the
+    helper would load torch under that child's memory ceiling and with the one
+    thread Ray gives an actor (``OMP_NUM_THREADS=1``), for every slot sharing it.
+    """
+    os.environ["OMP_NUM_THREADS"] = str(threads)
+    from PIL import Image
+    from surya.fast_layout import FastLayoutPredictor
+    from surya.ocr_error import OCRErrorPredictor
+
+    if "fast_layout" in helpers:
+        FastLayoutPredictor(use_order=False)([Image.new("RGB", (64, 64), "white")])
+    if "ocr_error" in helpers:
+        OCRErrorPredictor()(["warm-up"])
+
+
+def _ocr_permits_dir(url: str) -> str:
+    """Where this machine's Marker processes share the OCR server's requests.
+
+    One directory per server and user: the permits are that server's capacity,
+    and another user's processes could not open them.
+    """
+    server = hashlib.sha256(url.encode()).hexdigest()[:16]
+    return os.path.join(tempfile.gettempdir(), f"openrag-marker-ocr-{os.getuid()}", server)
+
+
+def _ocr_share(concurrency: int, instances: int, index: int) -> int:
+    """The OCR requests actor ``index`` of the pool adds to its machine's permits.
+
+    The actors split ``MARKER_OCR_CONCURRENCY`` evenly, the first ones taking
+    the remainder, so the shares add up to it. Actors on one machine pool their
+    shares, so a lone document there can use all of them. Each actor keeps at
+    least one, or its slots could never send a request.
+    """
+    base, extra = divmod(concurrency, instances)
+    return max(1, base + (index < extra))
+
+
+def _gate_ocr_requests(permits_dir: str) -> None:
+    """Make every OCR request this child sends hold one of its machine's permits.
+
+    Wraps surya's per-request function, which ``chat_completions_batch`` looks
+    up at each call, for both the vLLM and the llama.cpp client. The wait comes
+    before the request is sent, so it doesn't count toward surya's timeout, and
+    a retry waits again.
+    """
+    from surya.inference.backends import openai_client
+
+    send = openai_client._generate_one
+    if getattr(send, "_holds_ocr_permit", False):
+        return
+    permits = SharedPermits(permits_dir)
+
+    @functools.wraps(send)
+    def send_with_permit(*args, **kwargs):
+        with permits.acquire():
+            return send(*args, **kwargs)
+
+    send_with_permit._holds_ocr_permit = True
+    openai_client._generate_one = send_with_permit
+
+
+#: A slot child's Marker models, built by ``_worker_models``.
+worker_model_dict: dict | None = None
+
+
+def _worker_models() -> dict:
+    """This child's Marker models: thin clients of the OCR server and surya's helpers.
+
+    Built in the child, on its first parse: the clients hold locks, so they
+    can't be handed over from the actor, and a failure here fails that parse
+    rather than breaking the pool.
+    """
+    global worker_model_dict
+    if worker_model_dict is None:
+        worker_model_dict = create_model_dict()
+    return worker_model_dict
 
 
 def _force_kill_executor(executor, log) -> None:
@@ -34,9 +189,9 @@ def _force_kill_executor(executor, log) -> None:
 
     ``ProcessPoolExecutor.shutdown()`` only asks workers to exit *after* their
     current task finishes. A worker wedged on a pathological PDF never finishes,
-    so a plain shutdown leaves it running — holding its pool slot and the GPU
-    indefinitely (#659). Killing the OS processes directly is the only way to
-    reclaim a wedged worker. ``ProcessPoolExecutor`` doesn't expose which
+    so a plain shutdown leaves it running — holding its pool slot indefinitely
+    (#659). Killing the OS processes directly is the only way to reclaim a
+    wedged worker. ``ProcessPoolExecutor`` doesn't expose which
     process ran a given task, which is why ``MarkerWorker`` gives every slot its
     own single-process executor: killing one never touches another slot's parse.
 
@@ -75,6 +230,10 @@ def _marker_num_gpus(config) -> float:
     fraction. If Ray cannot report cluster resources yet, use local CUDA
     availability as the fallback so single-node startup still honors the
     configured Marker GPU request.
+
+    The workers hold no model since Marker 2.0, but the helper servers they
+    start (fast layout, OCR-error) run on whatever GPU the worker sees, and Ray
+    hides the GPUs from an actor that reserves none.
     """
     requested_gpus = config.loader.marker_num_gpus
     if requested_gpus <= 0:
@@ -143,8 +302,10 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     plausible-looking value yields 100% Marker failures with nothing saying why.
 
     ``RLIMIT_DATA`` bounds the heap and private anonymous mappings. Deliberately
-    not ``RLIMIT_AS``: that also counts file-backed mappings, so it would refuse
-    the model weights and CUDA's device maps and break the parse outright.
+    not ``RLIMIT_AS``: that also counts file-backed mappings, such as the
+    libraries torch loads, so a ceiling sized for the parse would break it
+    outright. The child holds no model since Marker 2.0: the OCR VLM and surya's
+    helpers run in servers of their own, outside the ceiling.
 
     The ceiling is per process. Marker runs pdftext with one worker, which
     extracts text inside the child instead of starting processes, so one ceiling
@@ -174,15 +335,23 @@ _RECYCLE_CANCEL_RETRY_DELAY = 0.5
 
 @ray.remote
 class MarkerWorker:
-    def __init__(self):
+    def __init__(self, index: int = 0):
         from core.config import load_config
         from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()
         self.page_sep = "[PAGE_SEP]"
+        # This actor's place in the pool, which sets its share of the OCR
+        # server's requests (``_ocr_share``).
+        self._index = index
 
         self._workers = self.config.loader.marker_child_workers_per_instance
+        # One thread per slot, each blocked on its slot's child for a whole
+        # parse. The event loop's default pool has min(32, cores + 4) threads,
+        # counted from the host's cores rather than the container's, and slots
+        # past that would wait for one.
+        self._slot_threads = ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="marker-slot")
 
         self.converter_config = {
             "output_format": "markdown",
@@ -209,19 +378,104 @@ class MarkerWorker:
         # Serializes a slot's submit vs. its teardown/rebuild: a parse timeout can
         # reset the slot from a worker thread while MarkerPool is resetting it too.
         self._executor_locks = [threading.Lock() for _ in range(self._workers)]
+        # surya's helper servers this actor has started (see _ensure_helpers).
+        self._helpers_started: set[str] = set()
+        self._helpers_lock = threading.Lock()
+        # This actor's share of the OCR server's requests, and where the slot
+        # children take them from; both unset without an OCR server.
+        self._ocr_share: PermitShare | None = None
+        self._ocr_permits_dir: str | None = None
         self.init_resources()
 
     def init_resources(self):
-        from marker.models import create_model_dict
-
-        self.model_dict = create_model_dict()
-        for v in self.model_dict.values():
-            if hasattr(v.model, "share_memory"):
-                v.model.share_memory()
-
+        # Before any child starts: the children inherit this environment, and
+        # their surya clients read it once, at import.
+        self._configure_surya_clients()
         for slot in range(self._workers):
             self.setup_mp(slot)
         self.logger.info(f"MarkerWorker initialized with {self._workers} single-process executors")
+
+    def _configure_surya_clients(self) -> None:
+        """Set how the children's surya clients reach the servers, and check the OCR one."""
+        # The fast-layout helper sizes its thread pool from this, and without it
+        # from OMP_NUM_THREADS, which Ray sets to 1 in this actor.
+        os.environ.setdefault("FAST_LAYOUT_NUM_THREADS", str(_helper_threads()))
+
+        url = surya_settings.SURYA_INFERENCE_URL
+        if not url:
+            # Unset, surya starts the OCR server itself with `docker run` at the
+            # first OCR call, which cannot work inside our containers.
+            os.environ["SURYA_INFERENCE_AUTOSTART"] = "false"
+            self.logger.warning("SURYA_INFERENCE_URL is not set: of the Marker modes, only fast_no_ocr can run")
+            return
+
+        # Every request a child sends holds one of the permits this machine's
+        # Marker actors publish (``_gate_ocr_requests``), so a child may send
+        # the server's whole capacity: alone, a document then gets all of it,
+        # and together the slots never send more. Waiting in the server's own
+        # queue instead would count toward surya's timeout.
+        concurrency = self.config.loader.marker_ocr_concurrency
+        instances = self.config.loader.marker_num_instances
+        share = _ocr_share(concurrency, instances, self._index)
+        if instances > concurrency:
+            self.logger.warning(
+                f"MARKER_NUM_INSTANCES={instances} is above MARKER_OCR_CONCURRENCY={concurrency}: each Marker "
+                f"instance still takes one request, so the OCR server can get {instances} at once."
+            )
+        permits_dir = _ocr_permits_dir(url)
+        try:
+            self._ocr_share = PermitShare(permits_dir, share)
+        except OSError:
+            # Without the permits, each slot keeps to an equal part of this
+            # actor's share, which a document alone can't exceed either.
+            parallel = max(1, share // self._workers)
+            self.logger.exception(
+                f"Could not publish Marker's OCR permits in {permits_dir}: each of this actor's "
+                f"{self._workers} slots sends at most {parallel} OCR requests at once instead"
+            )
+        else:
+            self._ocr_permits_dir = permits_dir
+            parallel = concurrency
+            self.logger.info(
+                f"Marker OCR server at {url}: {concurrency} requests at once in all. This actor's "
+                f"{self._workers} slots share its {share} with the other Marker actors on this machine"
+            )
+        os.environ.setdefault("SURYA_INFERENCE_PARALLEL", str(parallel))
+        try:
+            from surya.inference import SuryaInferenceManager
+
+            # Attaching checks /health and the model the server serves.
+            SuryaInferenceManager().start()
+        except Exception:
+            # Not fatal: the server may still be loading. Parses that need OCR
+            # fail with surya's own message until it answers.
+            self.logger.exception(f"Marker OCR server at {url} is not usable yet")
+
+    def _ensure_helpers(self, helpers: tuple[str, ...]) -> None:
+        """Start the surya helper servers a mode calls, once per actor.
+
+        Started here rather than by a slot's child (see ``_start_helpers``). A
+        child attaches to them through surya's sentinel file, and starts one
+        again itself only if it has died since.
+        """
+        if set(helpers) <= self._helpers_started:
+            return
+        from concurrent.futures import ProcessPoolExecutor
+
+        import torch.multiprocessing as mp
+
+        with self._helpers_lock:
+            missing = tuple(h for h in helpers if h not in self._helpers_started)
+            if not missing:
+                return
+            threads = int(os.environ["FAST_LAYOUT_NUM_THREADS"])
+            self.logger.info(f"Starting Marker helper servers {', '.join(missing)} with {threads} threads")
+            try:
+                with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as starter:
+                    starter.submit(_start_helpers, missing, threads).result()
+            except Exception as exc:
+                raise RuntimeError(f"Marker helper servers {', '.join(missing)} did not start: {exc}") from exc
+            self._helpers_started.update(missing)
 
     def setup_mp(self, slot: int, old_executor=None):
         """Initialize (or rebuild) the ProcessPoolExecutor backing one slot.
@@ -249,7 +503,7 @@ class MarkerWorker:
 
             if self.executors[slot] is not None:
                 # Force-kill: a wedged worker won't exit on a plain shutdown, so
-                # it would keep holding its slot and the GPU (#659).
+                # it would keep holding its slot (#659).
                 self.logger.warning(f"Resetting ProcessPoolExecutor for slot {slot} (killing its worker process)")
                 _force_kill_executor(self.executors[slot], self.logger)
                 self.executors[slot] = None
@@ -264,30 +518,30 @@ class MarkerWorker:
             self.executors[slot] = ProcessPoolExecutor(
                 max_workers=1,
                 initializer=self._worker_init,
-                initargs=(self.model_dict, self.config.loader.marker_parse_memory_limit_mb, os.getpid()),
+                initargs=(self.config.loader.marker_parse_memory_limit_mb, os.getpid(), self._ocr_permits_dir),
                 mp_context=mp.get_context("spawn"),
                 max_tasks_per_child=self.config.loader.marker_max_tasks_per_child,
             )
             self.logger.debug(f"MarkerWorker slot {slot} executor ready")
 
     @staticmethod
-    def _worker_init(model_dict, memory_limit_mb: int = 0, parent_pid: int | None = None):
+    def _worker_init(memory_limit_mb: int = 0, parent_pid: int | None = None, ocr_permits_dir: str | None = None):
         global worker_model_dict
         # First, so a child whose actor is already gone exits before loading
         # anything, and one whose actor dies later dies with it (#1167).
         if parent_pid is not None:
             tie_to_parent(parent_pid)
-        worker_model_dict = model_dict
+        worker_model_dict = None
+        if ocr_permits_dir is not None:
+            _gate_ocr_requests(ocr_permits_dir)
         # Logged before the ceiling, like `_apply_parse_memory_limit`'s own lines:
         # under a tight limit the log call's allocation could raise MemoryError,
         # and nothing catches it in the pool initializer.
-        logger.debug("Worker initialized with model dictionary")
+        logger.debug("Marker worker child initialized")
         _apply_parse_memory_limit(memory_limit_mb)
 
     @staticmethod
     def _process_pdf(file_path, config):
-        global worker_model_dict
-
         page_range = config.get("page_range")
         if page_range is not None:
             label = f"[p{page_range[0]}-{page_range[-1]}]"
@@ -297,7 +551,7 @@ class MarkerWorker:
         try:
             logger.debug("Processing PDF", path=file_path, label=label)
             converter = PdfConverter(
-                artifact_dict=worker_model_dict,
+                artifact_dict=_worker_models(),
                 config=config,
             )
             render = converter(file_path)
@@ -309,15 +563,15 @@ class MarkerWorker:
                 raise ceiling from e
             raise
         finally:
+            # No CUDA cleanup: the child holds no model, and touching CUDA would
+            # only give it a context of its own.
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
 
-    async def process_pdf(self, file_path: str, page_range: list[int] | None = None, *, slot: int):
+    async def process_pdf(self, file_path: str, page_range: list[int] | None = None, *, slot: int, mode: str):
         from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-        converter_config = self.converter_config.copy()
+        marker_mode = _marker_mode(mode)
+        converter_config = {**self.converter_config, **marker_mode.converter}
         if page_range is not None:
             converter_config["page_range"] = page_range
 
@@ -326,13 +580,14 @@ class MarkerWorker:
         # actually runs instead of being cancelled from outside (#894).
         timeout = self.config.loader.marker_child_timeout
 
-        # Runs on the event loop's default thread pool, whose threads live as
-        # long as the actor. A slot's child is started either here by
-        # ``submit``, or by the executor's manager thread when it replaces a
-        # child after ``max_tasks_per_child``; both threads outlive the child.
+        # Runs on the slot threads, which live as long as the actor. A slot's
+        # child is started either here by ``submit``, or by the executor's
+        # manager thread when it replaces a child after ``max_tasks_per_child``;
+        # both threads outlive the child.
         # The child is tied to the thread that started it (``tie_to_parent``):
         # a short-lived thread would take the child with it when it ends.
         def run_with_timeout():
+            self._ensure_helpers(marker_mode.helpers)
             with self._executor_locks[slot]:
                 current_executor = self.executors[slot]
                 future = current_executor.submit(self._process_pdf, file_path, converter_config)
@@ -340,8 +595,8 @@ class MarkerWorker:
                 result = future.result(timeout=timeout)
                 return result
             except FuturesTimeoutError:
-                # The child is still computing on the GPU and won't stop on its
-                # own; recycle this slot's executor to reclaim it so the slot
+                # The child is still parsing and won't stop on its own;
+                # recycle this slot's executor to reclaim it so the slot
                 # isn't lost forever (#659). Other slots keep parsing. Pass the
                 # executor we timed out on so a concurrent reset of this slot
                 # can't kill an executor that was already rebuilt in the meantime.
@@ -356,7 +611,7 @@ class MarkerWorker:
                 self.logger.exception("Error processing with MarkerWorker", path=file_path)
                 raise
 
-        result = await loop.run_in_executor(None, run_with_timeout)
+        result = await loop.run_in_executor(self._slot_threads, run_with_timeout)
         return result.markdown, result.images
 
     def is_pool_broken(self, slot: int):
@@ -370,7 +625,7 @@ class MarkerWorker:
         """Clean up every slot's ProcessPoolExecutor on actor destruction.
 
         Force-kill so a worker still wedged on a parse doesn't outlive the actor
-        and keep holding the GPU (#659).
+        (#659).
         """
         for executor in getattr(self, "executors", None) or []:
             if executor:
@@ -391,8 +646,8 @@ class MarkerPool:
         self.child_workers_per_instance = self.config.loader.marker_child_workers_per_instance
         self.num_instances = self.config.loader.marker_num_instances
         self.actors = [
-            MarkerWorker.options(num_gpus=_marker_num_gpus(self.config), max_restarts=5).remote()
-            for _ in range(self.num_instances)
+            MarkerWorker.options(num_gpus=_marker_num_gpus(self.config), max_restarts=5).remote(index)
+            for index in range(self.num_instances)
         ]
         # A slot is ``(actor, slot index)``: the index picks that actor's
         # single-process executor, so a slot recycle only touches its own child.
@@ -448,10 +703,10 @@ class MarkerPool:
             self.logger.warning(f"Worker ProcessPoolExecutor for slot {worker[1]} is broken. Reinitializing it...")
             await self._reset_worker_pool(worker)
 
-    async def _run_chunk(self, worker, file_path: str, page_range: list[int] | None, label: str):
+    async def _run_chunk(self, worker, file_path: str, page_range: list[int] | None, label: str, mode: str):
         actor, slot = worker
         return await call_ray_actor_with_timeout(
-            actor.process_pdf.remote(file_path, page_range=page_range, slot=slot),
+            actor.process_pdf.remote(file_path, page_range=page_range, slot=slot, mode=mode),
             timeout=self.config.loader.marker_timeout,
             task_description=f"MarkerPool PDF {label} ({file_path})",
         )
@@ -496,7 +751,7 @@ class MarkerPool:
         await self._queue.put(worker)
         self.logger.debug(f"MarkerWorker returned to pool for {label}")
 
-    async def _process_chunk(self, file_path: str, page_range: list[int] | None, label: str):
+    async def _process_chunk(self, file_path: str, page_range: list[int] | None, label: str, mode: str):
         """Acquire a worker slot, process a PDF chunk, and release the slot.
 
         A fresh worker is acquired per attempt so a flaky worker can be
@@ -511,7 +766,7 @@ class MarkerPool:
             try:
                 self.logger.info(f"MarkerWorker allocated for {label}")
                 await self.ensure_worker_pool_healthy(worker)
-                result = await self._run_chunk(worker, file_path, page_range, label)
+                result = await self._run_chunk(worker, file_path, page_range, label, mode)
                 completed = True
                 return result
             except (TimeoutError, asyncio.CancelledError, TaskCancelledError):
@@ -571,7 +826,16 @@ class MarkerPool:
                 raise
             raise MemoryError(f"Marker parse of {label} ran out of memory") from exc
 
-    async def process_pdf(self, file_path: str):
+    async def process_pdf(self, file_path: str, mode: str | None = None):
+        """Parse a PDF in Marker ``mode``; ``None`` is the global ``MARKER_MODE``."""
+        mode = mode or self.config.loader.marker_mode
+        if _marker_mode(mode).needs_ocr_server and not surya_settings.SURYA_INFERENCE_URL:
+            # Refused up front: otherwise only the files with a page that needs
+            # OCR would fail, and only once they reach it.
+            raise RuntimeError(
+                f"Marker mode {mode!r} needs the OCR server, and SURYA_INFERENCE_URL is not set. "
+                "Deploy the OCR service, or use Marker mode fast_no_ocr."
+            )
         chunk_size = self.config.loader.marker_chunk_size
 
         total_pages = self._get_page_count(file_path)
@@ -586,7 +850,7 @@ class MarkerPool:
             # When capped, restrict to the first page_count pages instead of all.
             page_range = list(range(page_count)) if capped else None
             label = f"(first {page_count}p)" if capped else "(all pages)"
-            return await self._process_chunk(file_path, page_range=page_range, label=label)
+            return await self._process_chunk(file_path, page_range=page_range, label=label, mode=mode)
 
         chunks = self._create_chunks(page_count, chunk_size)
 
@@ -595,13 +859,17 @@ class MarkerPool:
             # When capped, the single chunk only covers the first page_count pages,
             # so pass that explicit range — page_range=None would process the whole
             # file and bypass the cap. Uncapped, None means "all pages".
-            return await self._process_chunk(file_path, page_range=(page_range if capped else None), label=label)
+            return await self._process_chunk(
+                file_path, page_range=(page_range if capped else None), label=label, mode=mode
+            )
 
         self.logger.info(
             f"Splitting {page_count}-page PDF into {len(chunks)} chunks of ~{chunk_size} pages for parallel processing"
         )
 
-        tasks = [asyncio.create_task(self._process_chunk(file_path, page_range, label)) for page_range, label in chunks]
+        tasks = [
+            asyncio.create_task(self._process_chunk(file_path, page_range, label, mode)) for page_range, label in chunks
+        ]
         try:
             results = await asyncio.gather(*tasks)
         except Exception:
@@ -667,7 +935,7 @@ class MarkerLoader(BasePooledParser):
         """Look up the named ``MarkerPool`` actor; call once per dispatch.
 
         Never cached: this loader lives as long as its indexer worker, and
-        ``POST /actors/MarkerPool/restart`` replaces the pool with a new actor,
+        ``POST /actors/MarkerPool-v2/restart`` replaces the pool with a new actor,
         so a cached handle would keep dispatching to the killed one. Store the
         result before calling a method on it: Ray's ``ActorMethod`` holds its
         handle weakly, so ``self._pool().process_pdf.remote()`` raises
@@ -676,9 +944,9 @@ class MarkerLoader(BasePooledParser):
         # Lazily create the pool if bootstrap didn't (it only pre-warms the
         # globally-configured PDF backend; a preset can select marker even when
         # the global default is docling — see #569/#575).
-        from services.workers.bootstrap import get_or_create_actor
+        from services.workers.bootstrap import MARKER_POOL_ACTOR_NAME, get_or_create_actor
 
-        return get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
+        return get_or_create_actor(MARKER_POOL_ACTOR_NAME, MarkerPool, lifetime="detached")
 
     def supported_types(self) -> list[str]:
         return [DocumentType.PDF.value]

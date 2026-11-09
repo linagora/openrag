@@ -177,7 +177,7 @@ def _real_slot_executor() -> concurrent.futures.ProcessPoolExecutor:
         max_workers=1,
         mp_context=multiprocessing.get_context("fork"),
         initializer=marker_workers.MarkerWorker._worker_init,
-        initargs=({}, 0, os.getpid()),
+        initargs=(0, os.getpid()),
     )
 
 
@@ -214,14 +214,14 @@ def test_recycling_a_slot_kills_what_its_child_started():
                 pass
 
 
-def _initialized_marker_worker(monkeypatch, pdftext_workers: int):
+def _initialized_marker_worker(monkeypatch, pdftext_workers: int = 1, slots: int = 1):
     """A MarkerWorker through its real __init__, minus the models and pools."""
     import core.config
     import core.utils.logging
 
     log = _RecordingLogger()
     config = SimpleNamespace(
-        loader=SimpleNamespace(marker_child_workers_per_instance=1, marker_pdftext_workers=pdftext_workers)
+        loader=SimpleNamespace(marker_child_workers_per_instance=slots, marker_pdftext_workers=pdftext_workers)
     )
     monkeypatch.setattr(core.config, "load_config", lambda: config)
     monkeypatch.setattr(core.utils.logging, "get_logger", lambda: log)
@@ -288,11 +288,16 @@ def _bare_marker_worker(slots: int = 1):
     actor_class = marker_workers.MarkerWorker.__ray_metadata__.modified_class
     worker = actor_class.__new__(actor_class)
     worker.logger = _NullLogger()
+    worker._index = 0
     worker._workers = slots
+    worker._slot_threads = concurrent.futures.ThreadPoolExecutor(max_workers=slots)
+    worker._ocr_share = None
+    worker._ocr_permits_dir = None
     worker.executors = [None] * slots
     worker._executor_locks = [threading.Lock() for _ in range(slots)]
-    worker.model_dict = {}
     worker.converter_config = {}
+    worker._helpers_started = {"fast_layout", "ocr_error"}
+    worker._helpers_lock = threading.Lock()
     worker.config = SimpleNamespace(
         loader=SimpleNamespace(marker_max_tasks_per_child=1, marker_child_timeout=1, marker_parse_memory_limit_mb=0)
     )
@@ -378,7 +383,7 @@ def test_setup_mp_resets_only_its_own_slot(monkeypatch):
         {
             "max_workers": 1,
             "initializer": worker._worker_init,
-            "initargs": ({}, 0, os.getpid()),  # (model_dict, marker_parse_memory_limit_mb, parent_pid)
+            "initargs": (0, os.getpid(), None),  # (marker_parse_memory_limit_mb, parent_pid, ocr_permits_dir)
             "mp_context": built[0]["mp_context"],
             "max_tasks_per_child": 1,
         }
@@ -428,7 +433,7 @@ async def test_child_timeout_recycles_only_the_timed_out_slot(monkeypatch):
     from concurrent.futures import TimeoutError as FuturesTimeoutError
 
     try:
-        await worker.process_pdf("f.pdf", page_range=[0, 1], slot=1)
+        await worker.process_pdf("f.pdf", page_range=[0, 1], slot=1, mode="fast")
     except FuturesTimeoutError:
         pass
     else:
@@ -488,21 +493,21 @@ async def test_pool_helpers_address_the_slot_not_the_whole_actor(monkeypatch):
 
     await pool._check_pool_broken(worker)
     await pool._reset_worker_pool(worker)
-    await pool._run_chunk(worker, "f.pdf", [0, 1], "[p0-1]")
+    await pool._run_chunk(worker, "f.pdf", [0, 1], "[p0-1]", "fast")
 
     assert calls == [
         ("is_pool_broken", (2,), {}),
         ("setup_mp", (2,), {}),
-        ("process_pdf", ("f.pdf",), {"page_range": [0, 1], "slot": 2}),
+        ("process_pdf", ("f.pdf",), {"page_range": [0, 1], "slot": 2, "mode": "fast"}),
     ]
 
 
 async def test_process_chunk_returns_worker_to_queue_on_success(monkeypatch):
     pool = _bare_marker_pool()
     monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
-    monkeypatch.setattr(pool, "_run_chunk", lambda worker, file_path, page_range, label: _return("ok"))
+    monkeypatch.setattr(pool, "_run_chunk", lambda worker, file_path, page_range, label, mode: _return("ok"))
 
-    result = await pool._process_chunk("f.pdf", None, "(all pages)")
+    result = await pool._process_chunk("f.pdf", None, "(all pages)", "fast")
 
     assert result == "ok"
     assert pool._queue.qsize() == 1
@@ -518,7 +523,7 @@ async def test_process_chunk_recycles_before_releasing_on_cancellation(monkeypat
     async def fake_reset(worker):
         reset_calls.append(worker)
 
-    async def fake_run_chunk(worker, file_path, page_range, label):
+    async def fake_run_chunk(worker, file_path, page_range, label, mode):
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
@@ -526,7 +531,7 @@ async def test_process_chunk_recycles_before_releasing_on_cancellation(monkeypat
     monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
 
     try:
-        await pool._process_chunk("f.pdf", None, "(all pages)")
+        await pool._process_chunk("f.pdf", None, "(all pages)", "fast")
     except asyncio.CancelledError:
         pass
 
@@ -547,7 +552,7 @@ async def test_process_chunk_never_returns_worker_when_recycle_keeps_failing(mon
     hand back a worker that might still be running the previous parse."""
     pool = _bare_marker_pool()
 
-    async def fake_run_chunk(worker, file_path, page_range, label):
+    async def fake_run_chunk(worker, file_path, page_range, label, mode):
         raise TimeoutError("parse timed out")
 
     async def failing_reset(worker):
@@ -558,7 +563,7 @@ async def test_process_chunk_never_returns_worker_when_recycle_keeps_failing(mon
     monkeypatch.setattr(pool, "_reset_worker_pool", failing_reset)
 
     try:
-        await pool._process_chunk("f.pdf", None, "(all pages)")
+        await pool._process_chunk("f.pdf", None, "(all pages)", "fast")
     except Exception:
         pass
 
@@ -578,7 +583,7 @@ async def test_process_chunk_returns_worker_without_recycling_on_ordinary_except
     async def fake_reset(worker):
         reset_calls.append(worker)
 
-    async def fake_run_chunk(worker, file_path, page_range, label):
+    async def fake_run_chunk(worker, file_path, page_range, label, mode):
         raise RuntimeError("parse error")
 
     monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
@@ -586,7 +591,7 @@ async def test_process_chunk_returns_worker_without_recycling_on_ordinary_except
     monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
 
     try:
-        await pool._process_chunk("f.pdf", None, "(all pages)")
+        await pool._process_chunk("f.pdf", None, "(all pages)", "fast")
     except RuntimeError:
         pass
 
@@ -788,7 +793,7 @@ async def test_process_chunk_recycles_the_slot_after_a_memory_error(monkeypatch)
     async def fake_reset(worker):
         reset_calls.append(worker)
 
-    async def fake_run_chunk(worker, file_path, page_range, label):
+    async def fake_run_chunk(worker, file_path, page_range, label, mode):
         raise _as_production_raises_it()
 
     monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
@@ -796,7 +801,7 @@ async def test_process_chunk_recycles_the_slot_after_a_memory_error(monkeypatch)
     monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
 
     with pytest.raises(MemoryError):
-        await pool._process_chunk("f.pdf", None, "(all pages)")
+        await pool._process_chunk("f.pdf", None, "(all pages)", "fast")
 
     await asyncio.sleep(0)  # let the recycle task created in `finally` start
     await asyncio.sleep(0)
@@ -815,7 +820,7 @@ async def test_process_chunk_does_not_retry_a_memory_error(monkeypatch):
     pool.config.loader.marker_max_task_retry = 3
     attempts = []
 
-    async def fake_run_chunk(worker, file_path, page_range, label):
+    async def fake_run_chunk(worker, file_path, page_range, label, mode):
         attempts.append(1)
         raise _as_production_raises_it()
 
@@ -824,7 +829,7 @@ async def test_process_chunk_does_not_retry_a_memory_error(monkeypatch):
     monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
 
     with pytest.raises(MemoryError):
-        await pool._process_chunk("f.pdf", None, "(all pages)")
+        await pool._process_chunk("f.pdf", None, "(all pages)", "fast")
 
     assert len(attempts) == 1, f"MemoryError was retried {len(attempts)} times"
 
@@ -900,7 +905,7 @@ async def test_an_ordinary_error_still_uses_the_retry_budget(monkeypatch):
     pool.config.loader.marker_max_task_retry = 3
     attempts = []
 
-    async def fake_run_chunk(worker, file_path, page_range, label):
+    async def fake_run_chunk(worker, file_path, page_range, label, mode):
         attempts.append(1)
         raise RuntimeError("parse error")
 
@@ -909,7 +914,7 @@ async def test_an_ordinary_error_still_uses_the_retry_budget(monkeypatch):
     monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
 
     with pytest.raises(RuntimeError):
-        await pool._process_chunk("f.pdf", None, "(all pages)")
+        await pool._process_chunk("f.pdf", None, "(all pages)", "fast")
 
     assert len(attempts) == 4, f"expected 1 try + 3 retries, got {len(attempts)}"
 
@@ -1005,7 +1010,7 @@ def _child_parse(headroom_mb: int) -> str:
     set up by the real pool initializer as production does."""
     from services.workers.parsers import marker_workers as mw
 
-    mw.MarkerWorker._worker_init({}, _vmdata_mib() + headroom_mb)
+    mw.MarkerWorker._worker_init(_vmdata_mib() + headroom_mb)
     mw.MarkerWorker._process_pdf("f.pdf", {})
     return "parsed"
 
@@ -1023,10 +1028,7 @@ def test_a_ceiling_failure_reaches_the_parent_as_memory_error(monkeypatch, conve
     is pinned by ``_as_production_raises_it``.
     """
     monkeypatch.setattr(marker_workers, "PdfConverter", converter)  # inherited by the fork
-    # On a GPU host the forked child cannot touch CUDA, so the cleanup in
-    # _process_pdf's `finally` would raise and replace the MemoryError.
-    # Production starts these children with spawn, where that doesn't happen.
-    monkeypatch.setattr(marker_workers.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(marker_workers, "create_model_dict", dict)
     with pytest.raises(MemoryError):
         _in_a_forked_child(_child_parse, 256, timeout=120)
 
@@ -1102,7 +1104,7 @@ def test_worker_init_logs_before_it_applies_the_limit(monkeypatch):
     monkeypatch.setattr(mw, "logger", SimpleNamespace(debug=lambda *a, **k: order.append("log")))
     monkeypatch.setattr(mw, "_apply_parse_memory_limit", lambda _mb: order.append("limit"))
 
-    mw.MarkerWorker._worker_init({}, 2048)
+    mw.MarkerWorker._worker_init(2048)
 
     assert order == ["log", "limit"]
 
@@ -1129,7 +1131,7 @@ async def _pool_failure(monkeypatch, child_failure: BaseException) -> BaseExcept
     """Run the real `_process_chunk` over a child failure; return what the pool raises."""
     pool = _bare_marker_pool()
 
-    async def fake_run_chunk(worker, file_path, page_range, label):
+    async def fake_run_chunk(worker, file_path, page_range, label, mode):
         raise child_failure
 
     monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
@@ -1137,7 +1139,7 @@ async def _pool_failure(monkeypatch, child_failure: BaseException) -> BaseExcept
     monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
 
     with pytest.raises(Exception) as raised:
-        await pool._process_chunk("f.pdf", [10, 11], "[p10-11]")
+        await pool._process_chunk("f.pdf", [10, 11], "[p10-11]", "fast")
     await asyncio.sleep(0)  # let the recycle task created in `finally` run
     return raised.value
 
@@ -1300,3 +1302,486 @@ async def test_cancelling_parse_stops_the_image_build(monkeypatch):
     settled = encoded
     await asyncio.sleep(0.3)
     assert encoded == settled < len(images)
+
+
+# ---------------------------------------------------------------------------
+# Marker 2.0: modes, the OCR server, and surya's shared helper servers
+# ---------------------------------------------------------------------------
+
+
+def _unset_env(monkeypatch, *names: str) -> None:
+    """Unset *names* for this test, and restore them after, even when the code
+    under test writes ``os.environ`` itself."""
+    for name in names:
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
+def test_every_configured_mode_has_its_marker_config():
+    import typing
+
+    from core.config.indexation import MARKER_MODES, MarkerMode
+
+    assert typing.get_args(MarkerMode) == MARKER_MODES
+    assert {name: mode.converter for name, mode in marker_workers._MARKER_MODES.items()} == {
+        "balanced": {"mode": "balanced"},
+        "fast": {"mode": "fast"},
+        "fast_no_ocr": {"mode": "fast", "disable_ocr": True},
+    }
+
+
+def test_only_the_modes_with_ocr_call_the_ocr_server():
+    assert {name: mode.needs_ocr_server for name, mode in marker_workers._MARKER_MODES.items()} == {
+        "balanced": True,
+        "fast": True,
+        "fast_no_ocr": False,
+    }
+
+
+def test_an_unknown_mode_is_refused():
+    with pytest.raises(ValueError, match="Unknown Marker mode 'accurate'"):
+        marker_workers._marker_mode("accurate")
+
+
+class _ParsedExecutor(_FakeExecutor):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.submitted: list[tuple] = []
+
+    def submit(self, fn, *args):
+        self.submitted.append(args)
+        future = concurrent.futures.Future()
+        future.set_result(SimpleNamespace(markdown="md", images={}))
+        return future
+
+
+async def test_a_slot_parses_with_its_modes_config_and_helpers():
+    worker = _bare_marker_worker()
+    worker.converter_config = {"output_format": "markdown"}
+    executor = _ParsedExecutor()
+    worker.executors = [executor]
+    ensured = []
+    worker._ensure_helpers = ensured.append
+
+    assert await worker.process_pdf("f.pdf", page_range=[0, 1], slot=0, mode="fast_no_ocr") == ("md", {})
+
+    assert executor.submitted == [
+        ("f.pdf", {"output_format": "markdown", "mode": "fast", "disable_ocr": True, "page_range": [0, 1]})
+    ]
+    assert ensured == [("fast_layout",)]
+    assert worker.converter_config == {"output_format": "markdown"}
+
+
+def _bare_mode_pool(monkeypatch, default_mode: str, ocr_url: str | None):
+    pool = _bare_marker_pool()
+    pool.config.loader.marker_mode = default_mode
+    pool.config.loader.marker_chunk_size = 10
+    monkeypatch.setattr(marker_workers.surya_settings, "SURYA_INFERENCE_URL", ocr_url)
+    monkeypatch.setattr(pool, "_get_page_count", lambda file_path: 3)
+    chunks = []
+
+    async def fake_process_chunk(file_path, page_range, label, mode):
+        chunks.append(mode)
+        return "md", {}
+
+    monkeypatch.setattr(pool, "_process_chunk", fake_process_chunk)
+    return pool, chunks
+
+
+@pytest.mark.parametrize("mode", ["balanced", "fast"])
+async def test_a_mode_with_ocr_is_refused_without_the_ocr_server(monkeypatch, mode):
+    pool, chunks = _bare_mode_pool(monkeypatch, "fast_no_ocr", ocr_url=None)
+
+    with pytest.raises(RuntimeError, match=f"Marker mode '{mode}' needs the OCR server.*SURYA_INFERENCE_URL"):
+        await pool.process_pdf("f.pdf", mode)
+    assert chunks == []
+
+
+async def test_fast_no_ocr_runs_without_the_ocr_server(monkeypatch):
+    pool, chunks = _bare_mode_pool(monkeypatch, "balanced", ocr_url=None)
+
+    assert await pool.process_pdf("f.pdf", "fast_no_ocr") == ("md", {})
+    assert chunks == ["fast_no_ocr"]
+
+
+async def test_no_mode_means_the_global_mode(monkeypatch):
+    pool, chunks = _bare_mode_pool(monkeypatch, "fast", ocr_url="http://surya:8000/v1")
+
+    await pool.process_pdf("f.pdf")
+
+    assert chunks == ["fast"]
+
+
+class _RecordingInferenceManager:
+    started = 0
+    error: Exception | None = None
+
+    def start(self):
+        type(self).started += 1
+        if self.error is not None:
+            raise self.error
+
+
+def _client_config_worker(monkeypatch, tmp_path, ocr_url: str | None, *, instances=2, slots=4, concurrency=32, index=0):
+    import surya.inference
+
+    _unset_env(monkeypatch, "SURYA_INFERENCE_AUTOSTART", "SURYA_INFERENCE_PARALLEL", "FAST_LAYOUT_NUM_THREADS")
+    monkeypatch.setattr(marker_workers.surya_settings, "SURYA_INFERENCE_URL", ocr_url)
+    monkeypatch.setattr(marker_workers, "_ocr_permits_dir", lambda url: str(tmp_path / "permits"))
+    manager = type("Manager", (_RecordingInferenceManager,), {})
+    monkeypatch.setattr(surya.inference, "SuryaInferenceManager", manager)
+    worker = _bare_marker_worker(slots=slots)
+    worker._index = index
+    worker.config.loader.marker_num_instances = instances
+    worker.config.loader.marker_ocr_concurrency = concurrency
+    return worker, manager
+
+
+def test_without_the_ocr_server_surya_never_starts_one(monkeypatch, tmp_path):
+    """Unset, surya would `docker run` the OCR server at the first OCR call."""
+    worker, manager = _client_config_worker(monkeypatch, tmp_path, ocr_url=None)
+
+    worker._configure_surya_clients()
+
+    assert os.environ["SURYA_INFERENCE_AUTOSTART"] == "false"
+    assert "SURYA_INFERENCE_PARALLEL" not in os.environ
+    assert (worker._ocr_share, worker._ocr_permits_dir) == (None, None)
+    assert manager.started == 0
+
+
+def test_every_child_may_send_the_whole_ocr_capacity(monkeypatch, tmp_path):
+    """The permits keep the slots' total within it, not a split per slot."""
+    worker, manager = _client_config_worker(
+        monkeypatch, tmp_path, "http://surya:8000/v1", instances=2, slots=4, concurrency=32
+    )
+
+    worker._configure_surya_clients()
+
+    assert os.environ["SURYA_INFERENCE_PARALLEL"] == "32"
+    assert "SURYA_INFERENCE_AUTOSTART" not in os.environ
+    assert manager.started == 1
+
+
+@pytest.mark.parametrize(
+    ("concurrency", "instances", "index", "share"),
+    [(32, 1, 0, 32), (32, 2, 1, 16), (32, 3, 0, 11), (32, 3, 2, 10), (4, 8, 7, 1)],
+)
+def test_the_actor_publishes_its_share_of_the_ocr_capacity(monkeypatch, tmp_path, concurrency, instances, index, share):
+    from core.utils import shared_permits
+
+    worker, _ = _client_config_worker(
+        monkeypatch, tmp_path, "http://surya:8000/v1", instances=instances, concurrency=concurrency, index=index
+    )
+
+    worker._configure_surya_clients()
+
+    assert worker._ocr_permits_dir == str(tmp_path / "permits")
+    assert len(shared_permits._live_permits(worker._ocr_permits_dir)) == share
+    worker._ocr_share.close()
+
+
+@pytest.mark.parametrize("instances", [1, 2, 3, 5, 7, 31, 32])
+def test_the_actors_shares_add_up_to_the_ocr_capacity(instances):
+    assert sum(marker_workers._ocr_share(32, instances, index) for index in range(instances)) == 32
+
+
+@pytest.mark.parametrize(("instances", "slots", "warned"), [(8, 1, True), (2, 4, False), (1, 64, False)])
+def test_only_more_actors_than_ocr_requests_warn(monkeypatch, tmp_path, instances, slots, warned):
+    """Past the capacity, each actor still takes one; slots no longer count."""
+    worker, _ = _client_config_worker(
+        monkeypatch, tmp_path, "http://surya:8000/v1", instances=instances, slots=slots, concurrency=4
+    )
+    worker.logger = _RecordingLogger()
+
+    worker._configure_surya_clients()
+
+    warnings = [message.split(":")[0] for level, message in worker.logger.records if level == "warning"]
+    assert warnings == (["MARKER_NUM_INSTANCES=8 is above MARKER_OCR_CONCURRENCY=4"] if warned else [])
+    worker._ocr_share.close()
+
+
+def test_without_its_permits_each_slot_keeps_to_its_part(monkeypatch, tmp_path):
+    """A permits directory that can't be created must not stop the actor."""
+    worker, manager = _client_config_worker(
+        monkeypatch, tmp_path, "http://surya:8000/v1", instances=2, slots=4, concurrency=32
+    )
+    (tmp_path / "permits").write_text("a file where the directory should be")
+
+    worker._configure_surya_clients()
+
+    assert os.environ["SURYA_INFERENCE_PARALLEL"] == "4"
+    assert (worker._ocr_share, worker._ocr_permits_dir) == (None, None)
+    assert manager.started == 1
+
+
+def test_an_explicit_surya_parallel_is_kept(monkeypatch, tmp_path):
+    worker, _ = _client_config_worker(monkeypatch, tmp_path, "http://surya:8000/v1")
+    monkeypatch.setenv("SURYA_INFERENCE_PARALLEL", "3")
+
+    worker._configure_surya_clients()
+
+    assert os.environ["SURYA_INFERENCE_PARALLEL"] == "3"
+
+
+def test_an_ocr_server_still_loading_does_not_stop_the_worker(monkeypatch, tmp_path):
+    worker, manager = _client_config_worker(monkeypatch, tmp_path, "http://surya:8000/v1")
+    manager.error = RuntimeError("SURYA_INFERENCE_URL=http://surya:8000/v1 is not reachable at /health.")
+
+    worker._configure_surya_clients()
+
+    assert manager.started == 1
+
+
+def test_the_ocr_permits_are_per_server_and_user():
+    first = marker_workers._ocr_permits_dir("http://surya-ocr:8000/v1")
+
+    assert first == marker_workers._ocr_permits_dir("http://surya-ocr:8000/v1")
+    assert first != marker_workers._ocr_permits_dir("http://other-ocr:8000/v1")
+    assert f"openrag-marker-ocr-{os.getuid()}" in first
+
+
+def test_setup_mp_hands_the_children_the_ocr_permits(monkeypatch):
+    worker = _bare_marker_worker()
+    worker._ocr_permits_dir = "/permits"
+    built = _patch_executor_factory(monkeypatch, [_FakeExecutor([])])
+
+    worker.setup_mp(0)
+
+    assert built[0]["initargs"] == (0, os.getpid(), "/permits")
+
+
+@pytest.mark.parametrize(("permits_dir", "gated"), [("/permits", ["/permits"]), (None, [])])
+def test_a_child_gates_its_ocr_requests_only_with_an_ocr_server(monkeypatch, permits_dir, gated):
+    calls = []
+    monkeypatch.setattr(marker_workers, "_gate_ocr_requests", calls.append)
+    monkeypatch.setattr(marker_workers, "_apply_parse_memory_limit", lambda _mb: None)
+
+    marker_workers.MarkerWorker._worker_init(0, None, permits_dir)
+
+    assert calls == gated
+
+
+def test_surya_sends_every_ocr_request_with_a_permit(monkeypatch, tmp_path):
+    """Through surya's real batch client: a release that stops calling
+    ``_generate_one`` per request, or renames it, fails here."""
+    from core.utils.shared_permits import PermitShare
+    from PIL import Image
+    from surya.inference.backends import openai_client
+    from surya.inference.schema import BatchInputItem, GenerationResult
+
+    in_flight, peak, lock = 0, 0, threading.Lock()
+
+    def generate(item, **kwargs):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+        return GenerationResult(raw=item.metadata["page"], token_count=1)
+
+    monkeypatch.setattr(openai_client, "_generate_one", generate)
+    share = PermitShare(str(tmp_path), 2)
+    marker_workers._gate_ocr_requests(str(tmp_path))
+    marker_workers._gate_ocr_requests(str(tmp_path))
+    batch = [
+        BatchInputItem(image=Image.new("RGB", (8, 8)), prompt_type="block", metadata={"page": f"page {i}"})
+        for i in range(6)
+    ]
+
+    outputs = openai_client.chat_completions_batch(batch, client=None, model_name="surya", max_workers=6)
+
+    assert [output.raw for output in outputs] == [f"page {i}" for i in range(6)]
+    assert peak == 2
+    assert openai_client._generate_one.__wrapped__ is generate
+    share.close()
+
+
+async def test_every_slot_parses_on_a_thread_of_its_own(monkeypatch):
+    """More slots than the event loop's default pool has threads all run at once."""
+    slots = 40
+    worker, _ = _initialized_marker_worker(monkeypatch, slots=slots)
+    worker.config.loader.marker_child_timeout = 10
+    worker._ensure_helpers = lambda helpers: None
+    barrier = threading.Barrier(slots, timeout=10)
+
+    class _AllAtOnce:
+        def submit(self, fn, *args):
+            barrier.wait()
+            future = concurrent.futures.Future()
+            future.set_result(SimpleNamespace(markdown="md", images={}))
+            return future
+
+    worker.executors = [_AllAtOnce() for _ in range(slots)]
+
+    results = await asyncio.gather(
+        *(worker.process_pdf("f.pdf", slot=slot, mode="fast_no_ocr") for slot in range(slots))
+    )
+
+    assert results == [("md", {})] * slots
+
+
+def test_the_pool_numbers_its_actors(monkeypatch):
+    """The number sets each actor's share of the OCR capacity."""
+    import core.config
+    import core.utils.logging
+
+    created = []
+
+    class _Options:
+        def remote(self, *args):
+            created.append(args)
+            return f"actor-{len(created)}"
+
+    monkeypatch.setattr(marker_workers.MarkerWorker, "options", lambda **kwargs: _Options())
+    config = SimpleNamespace(
+        loader=SimpleNamespace(marker_child_workers_per_instance=2, marker_num_instances=3, marker_num_gpus=0)
+    )
+    monkeypatch.setattr(core.config, "load_config", lambda: config)
+    monkeypatch.setattr(core.utils.logging, "get_logger", lambda: _NullLogger())
+    pool_class = marker_workers.MarkerPool.__ray_metadata__.modified_class
+    pool = pool_class.__new__(pool_class)
+
+    pool.__init__()
+
+    assert created == [(0,), (1,), (2,)]
+
+
+@pytest.mark.parametrize("ocr_url", [None, "http://surya:8000/v1"])
+def test_the_fast_layout_helper_gets_every_core(monkeypatch, tmp_path, ocr_url):
+    """Unset, it would take OMP_NUM_THREADS, which Ray sets to 1 in the actor."""
+    worker, _ = _client_config_worker(monkeypatch, tmp_path, ocr_url)
+
+    worker._configure_surya_clients()
+
+    assert os.environ["FAST_LAYOUT_NUM_THREADS"] == str(marker_workers._helper_threads())
+
+
+def test_an_explicit_fast_layout_thread_count_is_kept(monkeypatch, tmp_path):
+    worker, _ = _client_config_worker(monkeypatch, tmp_path, None)
+    monkeypatch.setenv("FAST_LAYOUT_NUM_THREADS", "6")
+
+    worker._configure_surya_clients()
+
+    assert os.environ["FAST_LAYOUT_NUM_THREADS"] == "6"
+
+
+class _StarterExecutor:
+    """Stands in for the throwaway process that starts surya's helpers."""
+
+    started: list[tuple] = []
+    error: Exception | None = None
+
+    def __init__(self, max_workers, mp_context):
+        assert max_workers == 1 and mp_context.get_start_method() == "spawn"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def submit(self, fn, helpers, threads):
+        assert fn is marker_workers._start_helpers
+        future = concurrent.futures.Future()
+        if self.error is not None:
+            future.set_exception(self.error)
+        else:
+            type(self).started.append((helpers, threads))
+            future.set_result(None)
+        return future
+
+
+def _helper_worker(monkeypatch, error: Exception | None = None):
+    starter = type("Starter", (_StarterExecutor,), {"started": [], "error": error})
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", starter)
+    monkeypatch.setenv("FAST_LAYOUT_NUM_THREADS", "6")
+    worker = _bare_marker_worker()
+    worker._helpers_started = set()
+    return worker, starter
+
+
+def test_each_helper_is_started_once_per_actor(monkeypatch):
+    worker, starter = _helper_worker(monkeypatch)
+
+    worker._ensure_helpers(("fast_layout",))
+    worker._ensure_helpers(("fast_layout", "ocr_error"))
+    worker._ensure_helpers(("ocr_error", "fast_layout"))
+
+    assert starter.started == [(("fast_layout",), 6), (("ocr_error",), 6)]
+
+
+def test_a_helper_that_did_not_start_is_tried_again_next_time(monkeypatch):
+    worker, starter = _helper_worker(monkeypatch, error=RuntimeError("fast_layout server failed to become healthy"))
+
+    with pytest.raises(RuntimeError, match="Marker helper servers fast_layout did not start: fast_layout server"):
+        worker._ensure_helpers(("fast_layout",))
+
+    assert worker._helpers_started == set()
+
+
+@pytest.mark.parametrize(("helpers", "called"), [(("fast_layout",), ["fast_layout"]), (("ocr_error",), ["ocr_error"])])
+def test_the_helpers_start_with_the_threads_they_are_given(monkeypatch, helpers, called):
+    """Each helper inherits the environment of the process that calls it first."""
+    import surya.fast_layout
+    import surya.ocr_error
+
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    calls = []
+
+    def recorder(name):
+        class _Predictor:
+            def __init__(self, **kwargs):
+                pass
+
+            def __call__(self, items):
+                calls.append((name, os.environ["OMP_NUM_THREADS"]))
+
+        return _Predictor
+
+    monkeypatch.setattr(surya.fast_layout, "FastLayoutPredictor", recorder("fast_layout"))
+    monkeypatch.setattr(surya.ocr_error, "OCRErrorPredictor", recorder("ocr_error"))
+
+    marker_workers._start_helpers(helpers, 6)
+
+    assert calls == [(name, "6") for name in called]
+
+
+def test_a_child_builds_its_models_once(monkeypatch):
+    built = []
+    monkeypatch.setattr(marker_workers, "create_model_dict", lambda: built.append(1) or {"models": len(built)})
+    monkeypatch.setattr(marker_workers, "worker_model_dict", None)
+
+    assert marker_workers._worker_models() is marker_workers._worker_models()
+    assert built == [1]
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        ({"cpu.max": "max 100000\n"}, None),
+        ({"cpu.max": "400000 100000\n"}, 4),
+        ({"cpu.max": "150000 100000\n"}, 2),
+        ({"cpu.max": "50000 100000\n"}, 1),
+        ({"cpu/cpu.cfs_quota_us": "300000\n", "cpu/cpu.cfs_period_us": "100000\n"}, 3),
+        ({"cpu/cpu.cfs_quota_us": "-1\n", "cpu/cpu.cfs_period_us": "100000\n"}, None),
+        ({}, None),
+    ],
+    ids=["v2-unlimited", "v2-4", "v2-rounds-up", "v2-at-least-1", "v1-3", "v1-unlimited", "none"],
+)
+def test_the_cpu_quota_is_read_from_the_cgroup(tmp_path, files, expected):
+    for name, content in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(content)
+
+    assert marker_workers._cgroup_cpu_quota(str(tmp_path)) == expected
+
+
+def test_the_helpers_get_no_more_threads_than_the_cpu_quota(monkeypatch):
+    monkeypatch.setattr(marker_workers.os, "sched_getaffinity", lambda pid: set(range(64)))
+    monkeypatch.setattr(marker_workers, "_cgroup_cpu_quota", lambda: 4)
+    assert marker_workers._helper_threads() == 4
+
+    monkeypatch.setattr(marker_workers, "_cgroup_cpu_quota", lambda: None)
+    assert marker_workers._helper_threads() == 64

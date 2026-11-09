@@ -38,6 +38,12 @@ actor_creation_map: dict[str, callable] = {}
 _settings: "Settings | None" = None
 _TRACKER_PROTOCOL_TIMEOUT_SECONDS = 5
 
+# The Marker pool is named, detached and found with ``get_if_exists``, so on a
+# Ray cluster a pool from the previous release outlives the rollout and new
+# replicas would attach to it. Bump the suffix whenever ``MarkerPool``'s remote
+# contract changes (v2: Marker 2.0 and the ``mode`` argument).
+MARKER_POOL_ACTOR_NAME = "MarkerPool-v2"
+
 
 def _require_settings() -> "Settings":
     if _settings is None:
@@ -213,7 +219,7 @@ def register_parser_pool_restart_factories() -> None:
     def marker_pool():
         from services.workers.parsers.marker_workers import MarkerPool
 
-        return get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
+        return get_or_create_actor(MARKER_POOL_ACTOR_NAME, MarkerPool, lifetime="detached")
 
     def docling_pool():
         from services.workers.parsers.docling_workers import DoclingPool
@@ -231,7 +237,7 @@ def register_parser_pool_restart_factories() -> None:
         config = _require_settings()
         return get_or_create_actor("WhisperActor", WhisperActor, lifetime="detached", **whisper_actor_options(config))
 
-    actor_creation_map["MarkerPool"] = marker_pool
+    actor_creation_map[MARKER_POOL_ACTOR_NAME] = marker_pool
     actor_creation_map["DoclingPool"] = docling_pool
     actor_creation_map["WhisperPool"] = whisper_pool
     actor_creation_map["WhisperActor"] = whisper_actor

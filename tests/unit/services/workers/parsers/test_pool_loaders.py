@@ -19,7 +19,7 @@ _POOL_LOADERS = pytest.mark.parametrize(
     ("module_name", "loader_name", "pool_name", "pool_attr"),
     [
         ("services.workers.parsers.docling_workers", "DoclingLoader", "DoclingPool", "DoclingPool"),
-        ("services.workers.parsers.marker_workers", "MarkerLoader", "MarkerPool", "MarkerPool"),
+        ("services.workers.parsers.marker_workers", "MarkerLoader", "MarkerPool-v2", "MarkerPool"),
         ("services.workers.parsers.whisper_workers", "LocalWhisperLoader", "WhisperPool", "WhisperPool"),
     ],
 )

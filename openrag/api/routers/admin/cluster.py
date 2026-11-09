@@ -50,7 +50,7 @@ async def list_ray_actors():
 
 **Available Actors:**
 - `TaskStateManager`: Manages task states
-- `MarkerPool`: PDF processing actor pool
+- `MarkerPool-v2`: PDF processing actor pool (Marker)
 - `SerializerQueue`: Document serialization queue
 - `llmSemaphore`: LLM request semaphore
 - `vlmSemaphore`: Vision LM request semaphore
