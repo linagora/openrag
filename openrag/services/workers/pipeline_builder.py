@@ -14,6 +14,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
+from core.indexing.parsers.progress import bind_parser_progress
 from core.indexing.parsers.tabular.base import TabularBatchParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType, ProcessedDocument
@@ -265,7 +266,11 @@ class IndexingPipeline:
             stage_rank = STAGE_VALUES.index(name)
             _safe_tracking_call(stage_tracker, "start_stage", name, stage_rank)
             try:
-                await coro
+                if name == "parse":
+                    with bind_parser_progress(stage_tracker):
+                        await coro
+                else:
+                    await coro
             except asyncio.CancelledError:
                 _safe_tracking_call(stage_tracker, "finish_stage", cancelled=True)
                 raise

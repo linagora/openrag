@@ -51,6 +51,7 @@ def test_initialize_worker_bootstrap_registers_parser_pool_factories(monkeypatch
         "init_vlm_semaphore",
         "init_audio_semaphore",
         "get_task_state_manager",
+        "get_stage_progress_manager",
         "get_task_completion_tracker",
     ):
         monkeypatch.setattr(bootstrap, creator, lambda: None)
@@ -69,6 +70,8 @@ def test_task_state_manager_restarts_without_retrying_mutations(monkeypatch):
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
+        renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
+        get_stage_progress_snapshots=SimpleNamespace(),
     )
 
     def fake_get_or_create_actor(name, cls, **options):
@@ -98,6 +101,8 @@ def test_legacy_task_state_manager_is_replaced_before_handle_is_returned(monkeyp
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
+        renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
+        get_stage_progress_snapshots=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -109,7 +114,50 @@ def test_legacy_task_state_manager_is_replaced_before_handle_is_returned(monkeyp
     assert bootstrap.get_task_state_manager() is replacement
 
     kill.assert_called_once_with(legacy, no_restart=True)
-    assert get_or_create.call_count == 2
+
+
+def test_legacy_task_state_manager_is_reused_without_disrupting_active_workers(monkeypatch):
+    compatible_actor = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
+        set_queued_details_v2=SimpleNamespace(),
+    )
+    get_or_create = Mock(return_value=compatible_actor)
+    kill = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+
+    assert bootstrap.get_task_state_manager() is compatible_actor
+    kill.assert_not_called()
+    assert get_or_create.call_count == 1
+
+
+def test_stage_progress_manager_is_detached_and_registered_for_restart(monkeypatch):
+    from services.workers.stage_progress_manager import TASK_STAGE_PROGRESS_MANAGER_NAME, TaskStageProgressManager
+
+    actor = object()
+    calls = []
+
+    def fake_get_or_create_actor(name, cls, **options):
+        calls.append((name, cls, options))
+        return actor
+
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", fake_get_or_create_actor)
+
+    assert bootstrap.get_stage_progress_manager() is actor
+
+    assert calls == [
+        (
+            TASK_STAGE_PROGRESS_MANAGER_NAME,
+            TaskStageProgressManager,
+            {"lifetime": "detached", "max_restarts": -1, "max_task_retries": 0},
+        )
+    ]
 
 
 def test_task_state_manager_without_renewable_fences_is_replaced(monkeypatch):
@@ -121,6 +169,8 @@ def test_task_state_manager_without_renewable_fences_is_replaced(monkeypatch):
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
+        renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
+        get_stage_progress_snapshots=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -148,6 +198,8 @@ def test_task_state_manager_without_bounded_retention_is_replaced(monkeypatch):
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
+        renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
+        get_stage_progress_snapshots=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -174,6 +226,8 @@ def test_task_state_manager_without_atomic_degraded_completion_is_replaced(monke
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
+        renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
+        get_stage_progress_snapshots=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -201,6 +255,8 @@ def test_task_state_manager_without_explicit_completion_outcomes_is_replaced(mon
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
+        renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
+        get_stage_progress_snapshots=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -231,6 +287,8 @@ def test_task_state_manager_without_admission_fence_is_replaced(monkeypatch):
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
+        renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
+        get_stage_progress_snapshots=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -250,6 +308,7 @@ def test_task_completion_tracker_is_detached_and_starts_recovery(monkeypatch):
     tracker.supports_cancellation_recovery.remote.return_value = "capability-ref"
     tracker.supports_degraded_stage_history.remote.return_value = "degradation-capability-ref"
     tracker.supports_error_reason_history.remote.return_value = "error-reason-capability-ref"
+    tracker.supports_interrupted_stage_history.remote.return_value = "interrupted-stage-capability-ref"
     monkeypatch.setattr(bootstrap, "actor_creation_map", {})
     monkeypatch.setattr(ray, "get", Mock(return_value=True))
 
@@ -278,6 +337,9 @@ def test_legacy_task_completion_tracker_is_replaced_before_recovery(monkeypatch)
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
         supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
         supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_interrupted_stage_history=SimpleNamespace(
+            remote=Mock(return_value="interrupted-stage-capability-ref")
+        ),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -308,6 +370,9 @@ def test_task_completion_tracker_without_durable_history_is_replaced(monkeypatch
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
         supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
         supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_interrupted_stage_history=SimpleNamespace(
+            remote=Mock(return_value="interrupted-stage-capability-ref")
+        ),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -335,6 +400,9 @@ def test_task_completion_tracker_without_degraded_history_capability_is_replaced
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
         supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
         supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_interrupted_stage_history=SimpleNamespace(
+            remote=Mock(return_value="interrupted-stage-capability-ref")
+        ),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -363,6 +431,9 @@ def test_task_completion_tracker_without_error_reason_history_is_replaced(monkey
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
         supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
         supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_interrupted_stage_history=SimpleNamespace(
+            remote=Mock(return_value="interrupted-stage-capability-ref")
+        ),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -377,6 +448,37 @@ def test_task_completion_tracker_without_error_reason_history_is_replaced(monkey
 
     assert bootstrap.get_task_completion_tracker() is replacement
 
+    kill.assert_called_once_with(legacy, no_restart=True)
+
+
+def test_task_completion_tracker_without_interrupted_stage_history_is_replaced(monkeypatch):
+    legacy = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    replacement = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        supports_interrupted_stage_history=SimpleNamespace(
+            remote=Mock(return_value="interrupted-stage-capability-ref")
+        ),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get", Mock(return_value=True))
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_completion_tracker() is replacement
     kill.assert_called_once_with(legacy, no_restart=True)
 
 

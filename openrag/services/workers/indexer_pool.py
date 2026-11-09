@@ -19,6 +19,7 @@ from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
+from services.workers.stage_progress_manager import TASK_STAGE_PROGRESS_MANAGER_NAME
 from services.workers.worker_lease import (
     end_worker_lease,
     keep_worker_lease,
@@ -69,11 +70,15 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # replacement changes the actor id the previous generation's handles point at.
 # v14: workers emit stage history and stamp its tracking version; old detached
 # workers are reused by name and would keep settling jobs without that history.
-# v15: workers index .xlsx/.xlsm through the streaming workbook parser. New API
-# replicas accept those uploads, while a v14 worker reused by name does not know
+# v15: worker lease renewals carry compact stage snapshots; old actors cannot
+# supply fresh live progress to the TaskStateManager.
+# v16: new workers also publish snapshots to a separate short-lived store when
+# an older detached TaskStateManager is safely reused during rollout.
+# v17: workers index .xlsx/.xlsm through the streaming workbook parser. New API
+# replicas accept those uploads, while a v16 worker reused by name does not know
 # the extension: detect_content_type falls back to TEXT and decode_bytes decodes
 # the ZIP without raising, so the binary would be indexed as text.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v15"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v17"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -184,6 +189,7 @@ class IndexerWorkerActor:
         self._vector_store = MilvusVectorStore(cfg.vectordb)
         task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
         self._task_state_manager = task_state_manager
+        self._stage_progress_manager = ray.get_actor(TASK_STAGE_PROGRESS_MANAGER_NAME, namespace=self._namespace)
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -528,6 +534,12 @@ class IndexerWorkerActor:
                 logger=self._logger,
                 started=lease_started,
                 is_working=lambda: working,
+                snapshot_provider=lambda: self._worker.get_stage_progress_snapshot(task_id),
+                stage_progress_sink=getattr(
+                    getattr(getattr(self, "_stage_progress_manager", None), "set_snapshot", None),
+                    "remote",
+                    None,
+                ),
             )
         )
         try:
@@ -670,6 +682,19 @@ class IndexerWorkerActor:
                 worker_lease.cancel()
                 await asyncio.gather(worker_lease, return_exceptions=True)
                 await end_worker_lease(self._task_state_manager, task_id, logger=self._logger)
+                await self._remove_stage_progress_snapshot(task_id)
+
+    async def _remove_stage_progress_snapshot(self, task_id: str) -> None:
+        manager = getattr(self, "_stage_progress_manager", None)
+        remote = getattr(getattr(manager, "remove_snapshot", None), "remote", None)
+        if remote is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.gather(remote(task_id)), timeout=2.0)
+        except Exception as exc:  # noqa: BLE001 - expired snapshots are still bounded
+            self._logger.warning(
+                f"Failed to remove live stage progress for task {task_id}: {type(exc).__name__}: {exc}"
+            )
 
     async def close_stage_writer(self) -> None:
         """Drain this worker's bounded stage-history queue before retirement."""
