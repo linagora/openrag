@@ -78,6 +78,8 @@ class TableRegion:
     # They label the table when it has no header row or its header is unusable.
     declared_column_names: tuple[str, ...] | None = None
     data_start_row: int | None = None
+    # Data rows covered by an Excel Table's own AutoFilter (first, last).
+    filter_rows: tuple[int, int] | None = None
 
     @property
     def occupied_columns(self) -> set[int]:
@@ -99,6 +101,12 @@ class SheetInfo:
     hidden_columns: frozenset[int]
     merged_ranges: tuple[tuple[int, int, int, int], ...]
     uncached_string_formulas: frozenset[tuple[int, int]] = frozenset()
+    # Rows hidden by an active AutoFilter. They are extracted: a filter is a
+    # view of the data, not a decision to exclude rows from it.
+    filtered_rows: frozenset[int] = frozenset()
+    # Number of separate blocks detected when a worksheet had more than
+    # ``max_tables`` of them and blocks sharing columns were merged; 0 otherwise.
+    merged_table_blocks: int = 0
 
 
 def _column_runs(columns: set[int]):
@@ -397,6 +405,7 @@ def _worksheet_table_regions(archive, types, worksheet_path: str, names: set[str
             start_row if header_row_count else None,
             declared_column_names=column_names,
             data_start_row=start_row + header_row_count,
+            filter_rows=_auto_filter_rows(table.find("{*}autoFilter")),
         )
         for existing in table_regions.values():
             overlaps = not (
@@ -411,6 +420,87 @@ def _worksheet_table_regions(archive, types, worksheet_path: str, names: set[str
         if len(table_regions) > limits.max_tables:
             raise limit("XLSX table count exceeds the limit")
     return table_regions
+
+
+def _auto_filter_rows(auto_filter) -> tuple[int, int] | None:
+    """Data rows (first, last) of an ``<autoFilter ref>``: the first row holds the
+    filter buttons, i.e. the headers. ``None`` when absent or unusable."""
+    if auto_filter is None:
+        return None
+    match = CELL_RANGE.fullmatch(auto_filter.get("ref", ""))
+    if match is None:
+        return None
+    first, last = int(match[2]), int(match[4])
+    return (first + 1, last) if first < last else None
+
+
+def _rows_covered(rows: set[int], ranges: list[tuple[int, int]]) -> set[int]:
+    """The subset of ``rows`` inside any of the inclusive ``ranges``."""
+    covered: set[int] = set()
+    if not rows or not ranges:
+        return covered
+    intervals: list[tuple[int, int]] = []
+    for first, last in sorted(ranges):
+        if intervals and first <= intervals[-1][1] + 1:
+            intervals[-1] = (intervals[-1][0], max(intervals[-1][1], last))
+        else:
+            intervals.append((first, last))
+    starts = [first for first, _ in intervals]
+    for row in rows:
+        position = bisect_right(starts, row) - 1
+        if position >= 0 and row <= intervals[position][1]:
+            covered.add(row)
+    return covered
+
+
+def _rectangles_intersect(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    """Whether two (start_row, end_row, start_column, end_column) rectangles share a cell."""
+    return not (a[1] < b[0] or b[1] < a[0] or a[3] < b[2] or b[3] < a[2])
+
+
+def _bounds(region: TableRegion) -> tuple[int, int, int, int]:
+    return region.start_row, region.end_row, region.start_column, region.end_column
+
+
+def _fold_column_band(merged: list[TableRegion], region: TableRegion, barriers: list[TableRegion]) -> None:
+    """Fold a block into ``merged`` once a worksheet has more blocks than ``max_tables``.
+
+    The block joins the most recent table that shares any of its columns, so
+    repeated blocks stacked in the same columns (a block per week, per store...)
+    become one table whose later header rows are indexed as data rows. It stays
+    separate when the union would cross an Excel Table or overlap another table.
+    Blocks arrive in row order, so the union never reaches back over a block
+    that is not part of it.
+    """
+    target_index = None
+    for index, table in enumerate(merged):
+        if table.start_column <= region.end_column and region.start_column <= table.end_column:
+            if target_index is None or table.end_row > merged[target_index].end_row:
+                target_index = index
+    if target_index is not None:
+        target = merged[target_index]
+        union = (
+            min(target.start_row, region.start_row),
+            max(target.end_row, region.end_row),
+            min(target.start_column, region.start_column),
+            max(target.end_column, region.end_column),
+        )
+        crosses_table = any(_rectangles_intersect(union, _bounds(barrier)) for barrier in barriers)
+        overlaps_other = any(
+            index != target_index and _rectangles_intersect(union, _bounds(table)) for index, table in enumerate(merged)
+        )
+        if not crosses_table and not overlaps_other:
+            occupied = target.occupied_columns | region.occupied_columns
+            merged[target_index] = replace(
+                target,
+                start_row=union[0],
+                end_row=union[1],
+                start_column=union[2],
+                end_column=union[3],
+                spacer_columns=frozenset(set(range(union[2], union[3] + 1)) - occupied),
+            )
+            return
+    merged.append(region)
 
 
 def _combine_regions(
@@ -713,6 +803,18 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 hidden_rows: set[int] = set()
                 hidden_columns: set[int] = set()
                 uncached_string_formulas: set[tuple[int, int]] = set()
+                # AutoFilter. ``<sheetPr filterMode="1">`` precedes the rows, so on
+                # a filtered sheet hidden rows are only candidates while scanning;
+                # the filter's ``<autoFilter ref>`` follows the rows, and once it is
+                # known the candidates outside every filter range (hidden by hand)
+                # rejoin ``hidden_rows``. Excel Tables carry their own AutoFilter.
+                sheet_filter_active = False
+                sheet_filter_rows: tuple[int, int] | None = None
+                filter_candidate_rows: set[int] = set()
+                # Past max_tables, blocks sharing columns are merged instead of
+                # failing the workbook (see _fold_column_band).
+                merging_column_bands = False
+                detected_blocks = 0
 
                 def advance_explicit_tables(row_number: int):
                     nonlocal table_event_index, active_column_starts, active_column_ends
@@ -743,6 +845,28 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     interval = low - 1
                     return interval >= 0 and column <= active_column_ends[interval]
 
+                def fold_block(region: TableRegion) -> None:
+                    nonlocal merging_column_bands, regions, detected_blocks
+                    detected_blocks += 1
+                    if not merging_column_bands:
+                        _fold_preamble(regions, region, explicit_regions, typed_first_rows)
+                        if not visible_sheet or len(regions) <= limits.max_tables:
+                            return
+                        # Too many separate blocks for one table each: refold what
+                        # was kept so far by column band, then keep doing so.
+                        merging_column_bands = True
+                        kept, regions = regions, []
+                        for block in kept:
+                            _fold_column_band(regions, block, explicit_regions)
+                    else:
+                        _fold_column_band(regions, region, explicit_regions)
+                    # Only layouts that still exceed the limit after merging (more
+                    # than max_tables column bands, or blocks split by Excel
+                    # Tables) are rejected. The count never decreases, so failing
+                    # now matches checking after the scan.
+                    if len(regions) > limits.max_tables:
+                        raise limit("XLSX worksheet table count exceeds the limit")
+
                 def finish_band():
                     nonlocal band_start, band_end, band_columns, band_first_cells, band_column_extents
                     if band_start is not None and band_end is not None:
@@ -772,12 +896,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 typed_first_rows.add((band_start, start_column))
                             # Fold as the scan goes: a sparse sheet can produce
                             # hundreds of thousands of raw bands, but only the
-                            # merged regions are retained. The merged count never
-                            # decreases, so failing as soon as it passes the
-                            # limit matches checking it after the scan.
-                            _fold_preamble(regions, region, explicit_regions, typed_first_rows)
-                            if visible_sheet and len(regions) > limits.max_tables:
-                                raise limit("XLSX worksheet table count exceeds the limit")
+                            # merged regions are retained.
+                            fold_block(region)
                     band_start = band_end = None
                     band_columns = set()
                     band_first_cells = {}
@@ -812,7 +932,10 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 row_content_columns = set()
                                 row_typed_columns = set()
                                 if element.get("hidden", "0").lower() in {"1", "true"}:
-                                    hidden_rows.add(current_row)
+                                    if sheet_filter_active:
+                                        filter_candidate_rows.add(current_row)
+                                    else:
+                                        hidden_rows.add(current_row)
                             if element.tag.endswith("}c"):
                                 match = CELL_REF.fullmatch(element.get("r", ""))
                                 if match is None:
@@ -944,6 +1067,12 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 merged_ranges.append((start_row, end_row, start_column, end_column))
                                 if start_row == end_row and end_column > start_column:
                                     merged_columns_by_row.setdefault(start_row, []).append((start_column, end_column))
+                        if tag == "sheetPr" and len(stack) == 2:
+                            sheet_filter_active = element.get("filterMode", "0").lower() in {"1", "true"}
+                        if tag == "autoFilter" and len(stack) == 2:
+                            # Only the worksheet's own filter; custom sheet views
+                            # nest theirs and are not what the file shows.
+                            sheet_filter_rows = _auto_filter_rows(element)
                         if tag == "tablePart":
                             rel_id = next((value for key, value in element.attrib.items() if key.endswith("}id")), None)
                             if not rel_id:
@@ -956,13 +1085,24 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                 finish_band()
                 if len(set(table_part_ids)) != len(table_part_ids) or set(table_part_ids) != set(table_relationships):
                     raise invalid("XLSX table parts do not match their relationships")
+                filter_ranges = [
+                    rows for rows in [sheet_filter_rows, *(region.filter_rows for region in explicit_regions)] if rows
+                ]
+                filtered_rows = _rows_covered(filter_candidate_rows, filter_ranges)
+                # Candidates outside every filter range were hidden by hand. They
+                # counted as visible for the scan's formula counts and first-row
+                # typing, which errs towards reading more, never less.
+                hidden_rows |= filter_candidate_rows - filtered_rows
                 formulas = sum(
                     count for column, count in visible_formula_columns.items() if column not in hidden_columns
                 )
                 missing = sum(
                     count for column, count in missing_formula_columns.items() if column not in hidden_columns
                 )
-                # ``regions`` was folded during the scan (see finish_band).
+                # ``regions`` was folded during the scan (see fold_block). Column
+                # band merging can leave them out of row order; restore it.
+                if merging_column_bands:
+                    regions.sort(key=lambda region: (region.start_row, region.start_column))
                 inferred_regions = _reindexed_regions(regions) if visible_sheet else []
                 # Bound the count before combining: _combine_regions never returns
                 # fewer regions than it receives (a table absorbs at most one title
@@ -1009,6 +1149,8 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                         frozenset(hidden_columns),
                         tuple(merged_ranges),
                         frozenset(uncached_string_formulas),
+                        frozenset(filtered_rows),
+                        detected_blocks if merging_column_bands else 0,
                     )
                 )
             return infos

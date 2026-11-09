@@ -416,6 +416,22 @@ def _analyze_formula(
     return result
 
 
+def _sheet_notes(sheet: SheetInfo, max_tables: int) -> str:
+    """Searchable lines telling the reader what the worksheet's extraction left out or reshaped."""
+    notes = ""
+    if sheet.hidden_rows:
+        notes += f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} (hidden or collapsed rows)."
+    if sheet.filtered_rows:
+        notes += f"\nRows hidden by an active filter are included: {len(sheet.filtered_rows)}."
+    if sheet.merged_table_blocks:
+        notes += (
+            f"\nThis worksheet has {sheet.merged_table_blocks} separate blocks, more than the {max_tables}-table "
+            "limit: blocks sharing the same columns are indexed as one table, so their later header rows appear "
+            "as data rows."
+        )
+    return notes
+
+
 def _worksheet_context(sheet_name: str) -> str:
     """Render the worksheet identity as searchable, single-line chunk context."""
     # Chunkers strip block text, so trailing whitespace in a name such as
@@ -1351,12 +1367,7 @@ class XlsxParser(TabularBatchParser):
                         "XLSX formula text was indexed without a cached result; formulas are not recalculated"
                     )
                 header_lines = [markdown_row(header_values), markdown_row(["---"] * len(header_values))]
-                worksheet_context = _worksheet_context(sheet.name)
-                if sheet.hidden_rows:
-                    worksheet_context += (
-                        f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} "
-                        "(this may include filtered or collapsed rows)."
-                    )
+                worksheet_context = _worksheet_context(sheet.name) + _sheet_notes(sheet, self.limits.max_tables)
                 sheet_context = (
                     "\n\nWorksheet context (before column headers):\n" + "\n".join(preamble) if preamble else ""
                 )
@@ -1566,12 +1577,7 @@ class XlsxParser(TabularBatchParser):
         if not cells:
             return
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
-        worksheet_context = _worksheet_context(sheet.name)
-        if sheet.hidden_rows:
-            worksheet_context += (
-                f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} "
-                "(this may include filtered or collapsed rows)."
-            )
+        worksheet_context = _worksheet_context(sheet.name) + _sheet_notes(sheet, self.limits.max_tables)
         heading = "Worksheet cells outside tables:\n"
         overhead = len((heading + worksheet_context).encode("utf-8"))
         batches: list[list[tuple[int, str, str]]] = [[]]
@@ -1606,6 +1612,8 @@ class XlsxParser(TabularBatchParser):
                     "hidden_sheet": False,
                     "hidden_sheets_skipped": hidden_count,
                     "hidden_rows_skipped": len(sheet.hidden_rows),
+                    "filtered_rows_included": len(sheet.filtered_rows),
+                    "worksheet_blocks_merged": sheet.merged_table_blocks,
                     "hidden_columns_skipped": len(sheet.hidden_columns),
                     "spreadsheet_backend": "openpyxl",
                 },
@@ -1680,6 +1688,8 @@ class XlsxParser(TabularBatchParser):
             "hidden_sheet": False,
             "hidden_sheets_skipped": hidden_count,
             "hidden_rows_skipped": len(sheet.hidden_rows),
+            "filtered_rows_included": len(sheet.filtered_rows),
+            "worksheet_blocks_merged": sheet.merged_table_blocks,
             "hidden_columns_skipped": len(sheet.hidden_columns),
             "formula_policy": "compact_groups_and_individual_formulas",
             "sheet_formula_cells": sheet.formula_cells,

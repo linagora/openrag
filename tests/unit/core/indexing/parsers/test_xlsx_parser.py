@@ -999,17 +999,92 @@ def test_rejects_excessive_detected_table_fragmentation_before_reader_opens(monk
     assert error.value.code == "XLSX_LIMIT_EXCEEDED"
 
 
-def test_inferred_region_limit_is_enforced_during_scan(monkeypatch):
-    workbook = Workbook()
-    for row in range(1, 200, 2):
-        workbook.active.cell(row, 1, f"item-{row}")
-        workbook.active.cell(row, 4, f"other-{row}")
+def _xlsx(workbook) -> Document:
     output = BytesIO()
     workbook.save(output)
     workbook.close()
+    return Document(filename="workbook.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+def test_blocks_past_the_table_limit_are_merged_by_column_band():
+    """200 blocks in two column bands exceed a limit of 3; instead of rejecting the
+    workbook, the blocks of each band become one table."""
+    workbook = Workbook()
+    for row in range(1, 400, 2):
+        workbook.active.cell(row, 1, f"item-{row}")
+        workbook.active.cell(row, 4, f"other-{row}")
+
+    blocks = list(XlsxParser(limits={"max_tables": 3}).iter_batches(_xlsx(workbook)))
+
+    tables = {block.metadata["table_id"] for block in blocks}
+    assert len(tables) == 2
+    assert all(block.metadata["worksheet_blocks_merged"] == 400 for block in blocks)
+    text = "\n".join(block.text for block in blocks)
+    assert "item-399" in text and "other-399" in text
+    assert "more than the 3-table limit" in text
+
+
+def test_layouts_that_still_exceed_the_table_limit_after_merging_are_rejected_during_scan(monkeypatch):
+    """Five column bands cannot fit a limit of 3 even after merging."""
+    workbook = Workbook()
+    for row in range(1, 40, 2):
+        for column in (1, 4, 7, 10, 13):
+            workbook.active.cell(row, column, f"v{row}-{column}")
     monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
     with pytest.raises(PipelineError, match="table count exceeds"):
-        list(XlsxParser(limits={"max_tables": 3}).iter_batches(Document(raw_bytes=output.getvalue())))
+        list(XlsxParser(limits={"max_tables": 3}).iter_batches(_xlsx(workbook)))
+
+
+def test_repeated_blocks_with_their_own_header_index_every_row_past_the_limit():
+    """Reported on #1246: one block per week (`Day | Hours` + 3 rows, two blank
+    rows between) rejected the whole workbook once it passed the table limit, and
+    every other sheet with it."""
+    workbook = Workbook()
+    weeks = workbook.active
+    weeks.title = "Weeks"
+    row = 1
+    for week in range(300):
+        weeks.cell(row, 1, "Day")
+        weeks.cell(row, 2, "Hours")
+        for day in range(1, 4):
+            weeks.cell(row + day, 1, f"w{week}-d{day}")
+            weeks.cell(row + day, 2, week * 10 + day)
+        row += 6
+    other = workbook.create_sheet("Summary")
+    other.append(["total"])
+    other.append([42])
+
+    blocks = list(XlsxParser().iter_batches(_xlsx(workbook)))
+
+    week_blocks = [block for block in blocks if block.metadata["sheet_name"] == "Weeks"]
+    assert {block.metadata["table_id"] for block in week_blocks} == {"sheet:0:table:0"}
+    assert week_blocks[0].metadata["table_columns"] == ["Day", "Hours"]
+    assert week_blocks[0].metadata["worksheet_blocks_merged"] == 300
+    week_text = "\n".join(block.text for block in week_blocks)
+    assert all(f"| w{week}-d3 |" in week_text for week in (0, 150, 299))
+    assert any(block.metadata["sheet_name"] == "Summary" for block in blocks)
+
+
+def test_merged_blocks_never_cross_an_excel_table():
+    workbook = Workbook()
+    sheet = workbook.active
+    for top in range(1, 30, 3):  # 10 single-row blocks above the Excel Table
+        sheet.cell(top, 1, f"above {top}")
+        sheet.cell(top, 2, top)
+    sheet.cell(32, 1, "Name")
+    sheet.cell(32, 2, "Score")
+    for row in range(33, 37):
+        sheet.cell(row, 1, f"declared {row}")
+        sheet.cell(row, 2, row)
+    sheet.add_table(Table(displayName="Declared", ref="A32:B36"))
+    for top in range(40, 70, 3):  # 10 single-row blocks below it
+        sheet.cell(top, 1, f"below {top}")
+        sheet.cell(top, 2, top)
+
+    blocks = list(XlsxParser(limits={"max_tables": 4}).iter_batches(_xlsx(workbook)))
+
+    ranges = sorted({(block.metadata["table_start_row"], block.metadata["table_end_row"]) for block in blocks})
+    assert ranges == [(1, 28), (32, 36), (40, 67)]
 
 
 def test_partially_mapped_formula_range_keeps_full_reference():
@@ -3402,37 +3477,94 @@ def test_hidden_rows_and_columns_are_not_indexed():
     assert "internal_note" not in block.text
     assert "column secret" not in block.text
     assert block.metadata["hidden_rows_skipped"] == 1
-    assert "Hidden worksheet rows excluded: 1" in block.text
-    assert "filtered or collapsed rows" in block.text
+    assert "Hidden worksheet rows excluded: 1 (hidden or collapsed rows)." in block.text
+    assert block.metadata["filtered_rows_included"] == 0
     assert block.metadata["hidden_columns_skipped"] == 1
     assert block.metadata["table_worksheet_column_indices"] == [1, 3]
 
 
-def test_filtered_hidden_rows_are_disclosed_in_chunk_context():
-    from core.chunking.markdown_utils import MDElement, chunk_table
-
+def _filtered_ticket_sheet(*, filter_mode: bool = True):
+    """20 tickets saved with the filter set to Status = Open: the closed ones are hidden."""
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["id", "status"])
-    sheet.append(["T-1", "open"])
-    sheet.append(["T-2", "closed"])
-    sheet.auto_filter.ref = "A1:B3"
-    sheet.sheet_properties.filterMode = True
-    sheet.row_dimensions[3].hidden = True
-    output = BytesIO()
-    workbook.save(output)
-    workbook.close()
+    for number in range(1, 21):
+        sheet.append([f"T-{number}", "open" if number % 4 == 0 else "closed"])
+    sheet.auto_filter.ref = "A1:B21"
+    sheet.sheet_properties.filterMode = filter_mode
+    for row in range(2, 22):
+        if sheet.cell(row, 2).value == "closed":
+            sheet.row_dimensions[row].hidden = True
+    return workbook, sheet
 
-    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+def test_rows_hidden_by_an_active_filter_are_indexed():
+    """Reported on #1246: a sheet saved with a filter applied indexed only the rows
+    the filter showed, so counting closed tickets gave a confident wrong answer."""
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook, _ = _filtered_ticket_sheet()
+    [block] = list(XlsxParser().iter_batches(_xlsx(workbook)))
     chunks = chunk_table(
         MDElement(type="table", content=block.text, metadata=block.metadata),
         chunk_size=1000,
         length_function=len,
     )
 
-    assert "T-2" not in block.text
-    assert all("Hidden worksheet rows excluded: 1" in chunk.content for chunk in chunks)
-    assert all("filtered or collapsed rows" in chunk.content for chunk in chunks)
+    assert block.metadata["table_row_numbers"] == list(range(2, 22))
+    assert block.text.count("| closed |") == 15
+    assert block.metadata["filtered_rows_included"] == 15
+    assert block.metadata["hidden_rows_skipped"] == 0
+    assert all("Rows hidden by an active filter are included: 15." in chunk.content for chunk in chunks)
+
+
+def test_rows_hidden_by_hand_on_a_filtered_sheet_stay_excluded():
+    workbook, sheet = _filtered_ticket_sheet()
+    sheet.append(["T-99", "draft"])  # row 22, outside the filter range A1:B21
+    sheet.row_dimensions[22].hidden = True
+
+    [block] = list(XlsxParser().iter_batches(_xlsx(workbook)))
+
+    assert "T-99" not in block.text
+    assert block.metadata["filtered_rows_included"] == 15
+    assert block.metadata["hidden_rows_skipped"] == 1
+    assert "Hidden worksheet rows excluded: 1 (hidden or collapsed rows)." in block.text
+
+
+def test_hidden_rows_under_a_filter_excel_does_not_mark_active_stay_excluded():
+    """Without ``filterMode`` the file does not say a filter hid them; do not guess."""
+    workbook, _ = _filtered_ticket_sheet(filter_mode=False)
+
+    [block] = list(XlsxParser().iter_batches(_xlsx(workbook)))
+
+    assert block.text.count("| closed |") == 0
+    assert block.metadata["filtered_rows_included"] == 0
+    assert block.metadata["hidden_rows_skipped"] == 15
+
+
+def test_rows_hidden_by_an_excel_table_filter_are_indexed():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "status"])
+    for number in range(1, 11):
+        sheet.append([f"T-{number}", "open" if number % 2 else "closed"])
+    table = Table(displayName="Tickets", ref="A1:B11")
+    sheet.add_table(table)
+    sheet.sheet_properties.filterMode = True
+    for row in range(2, 12):
+        if sheet.cell(row, 2).value == "closed":
+            sheet.row_dimensions[row].hidden = True
+    document = _xlsx(workbook)
+    import zipfile
+
+    with zipfile.ZipFile(BytesIO(document.raw_bytes)) as archive:
+        table_xml = next(archive.read(name) for name in archive.namelist() if name.startswith("xl/tables/"))
+    assert b"<autoFilter" in table_xml  # the table's own filter, not the sheet's
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.text.count("| closed |") == 5
+    assert block.metadata["filtered_rows_included"] == 5
 
 
 def test_hidden_columns_keep_physical_cell_coordinates_after_chunking():
