@@ -19,37 +19,37 @@ const clickNextPage = () => {
 
 describe("DataTable pagination", () => {
   it("labels pagination icon buttons", () => {
-    render(<DataTable columns={columns} data={makeRows(25)} />);
+    render(<DataTable columns={columns} data={makeRows(45)} />);
 
     expect(screen.getByRole("button", { name: /previous page/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /next page/i })).toBeTruthy();
   });
 
   it("keeps the user on the current page when a row is deleted underneath them", () => {
-    const { rerender } = render(<DataTable columns={columns} data={makeRows(25)} />);
+    const { rerender } = render(<DataTable columns={columns} data={makeRows(45)} />);
     expect(screen.getByText("Page 1 of 3")).toBeTruthy();
 
     clickNextPage();
     expect(screen.getByText("Page 2 of 3")).toBeTruthy();
-    expect(screen.getByText("row-11")).toBeTruthy();
+    expect(screen.getByText("row-21")).toBeTruthy();
 
     // A delete refetches the list with one fewer row. The user must stay on
     // page 2, not snap back to page 1 (the bug).
-    rerender(<DataTable columns={columns} data={makeRows(24)} />);
+    rerender(<DataTable columns={columns} data={makeRows(44)} />);
     expect(screen.getByText("Page 2 of 3")).toBeTruthy();
-    expect(screen.getByText("row-11")).toBeTruthy();
+    expect(screen.getByText("row-21")).toBeTruthy();
   });
 
   it("clamps to the last valid page when the current page disappears entirely", async () => {
-    const { rerender } = render(<DataTable columns={columns} data={makeRows(11)} />);
+    const { rerender } = render(<DataTable columns={columns} data={makeRows(21)} />);
     clickNextPage();
     expect(screen.getByText("Page 2 of 2")).toBeTruthy();
 
     // Deleting the only row on page 2 leaves a single page; the user should be
     // pulled back to it rather than stranded on an empty page.
-    rerender(<DataTable columns={columns} data={makeRows(10)} />);
+    rerender(<DataTable columns={columns} data={makeRows(20)} />);
     expect(await screen.findByText("row-1")).toBeTruthy();
-    expect(screen.queryByText("row-11")).toBeNull();
+    expect(screen.queryByText("row-21")).toBeNull();
   });
 });
 
