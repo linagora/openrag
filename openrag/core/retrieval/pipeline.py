@@ -28,6 +28,7 @@ from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
+from core.retrieval.date_order import interleave_chunks, order_chunks_by_date
 from core.retrieval.retriever import Retriever, has_csv_row_siblings, order_csv_continuations
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.trace import RetrievalTraceBuilder, merge_child_traces
@@ -257,10 +258,13 @@ class RetrieverPipeline:
         expansion_applied = False
         if self.expansion_enabled or has_csv_row_siblings(chunks):
             limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
+            # Under a date order the seeds are the documents the user asked for,
+            # not the most similar ones; the final order is restored below.
+            chunks = order_chunks_by_date(chunks, query.date_order)
             selected = chunks[:limit]
             if not self.expansion_enabled:
                 selected = [chunk for chunk in selected if has_csv_row_siblings([chunk])]
-            preserve_ranked_candidates = has_csv_row_siblings(selected)
+            preserve_ranked_candidates = has_csv_row_siblings(selected) or bool(query.date_order)
             expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in selected}
             head = copy.deepcopy(selected)
             expanded = await self.retriever.expand_search_results(
@@ -269,9 +273,9 @@ class RetrieverPipeline:
             if len(expanded) > len(head):
                 expansion_applied = True
                 if preserve_ranked_candidates:
-                    # Automatic CSV sibling expansion supplements the ranked
-                    # list at the seed's position. Regular document expansion
-                    # keeps develop's replacement behavior.
+                    # CSV sibling expansion and expansion under a date order
+                    # supplement the ranked list at the seed's position. Other
+                    # document expansion keeps develop's replacement behavior.
                     ranked_candidate_ids = {str(_chunk_key(chunk)) for chunk in chunks}
                     expanded_chunks = order_csv_continuations(
                         [
@@ -374,6 +378,21 @@ class RetrieverPipeline:
                         )
 
                     _safe_trace(trace, "post_expansion", record_post_expansion)
+
+        # "The latest X": relevance decided which chunks made the list, the
+        # document date decides what the LLM reads first. Applied before the
+        # cut so a `top_k` keeps the newest documents, not the most similar.
+        # Chunks that only came in through expansion (related documents,
+        # ancestors) are context for the retrieved ones: they are ordered too
+        # but after them, so a newer related document never takes the place
+        # of the document the user asked for under the cut.
+        if query.date_order:
+            retrieved_ids = {str(_chunk_key(chunk)) for chunk in pre_rerank_chunks}
+            retrieved = [chunk for chunk in chunks if str(_chunk_key(chunk)) in retrieved_ids]
+            expansion_only = [chunk for chunk in chunks if str(_chunk_key(chunk)) not in retrieved_ids]
+            chunks = order_chunks_by_date(retrieved, query.date_order) + order_chunks_by_date(
+                expansion_only, query.date_order
+            )
 
         # `reranker_top_k` is NOT applied here as a final cutoff — only
         # `top_k` (an explicit caller-supplied value, e.g. map-reduce's
@@ -479,6 +498,15 @@ class RetrieverPipeline:
                 if isinstance(result, BaseException):
                     raise result
         fusion_kwargs: dict[str, Any] = {"k": self.rrf_k}
+        if any(q.date_order for q in search_queries.query_list):
+            # Each list is already in its own date order and RRF only knows
+            # ranks: it would favour chunks found by several lists over the
+            # ends the user asked for, and a global re-sort would let one
+            # sub-query's documents push another's past the cut ("the last
+            # contract with ACME and with BETA"). The fused order is replaced
+            # by an interleave of the per-list rankings instead (same chunks,
+            # so the cut and the trace stay consistent).
+            fusion_kwargs["reorder"] = lambda _: interleave_chunks(ranked_lists, _chunk_key)
         if top_k is not None:
             fusion_kwargs["top_k"] = top_k
         if trace is not None:
