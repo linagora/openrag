@@ -825,6 +825,55 @@ async def test_index_url_removes_download_when_the_content_contradicts_the_url(m
 
 
 @pytest.mark.asyncio
+async def test_index_url_downloads_an_extensionless_url_under_its_mimetype_suffix(monkeypatch):
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing()
+    svc = _service(partitions=parts, indexing=indexing)
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(_PDF_HEADER + b"data")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    await svc.index_url(
+        url="https://example.com/download",
+        partition="p1",
+        file_id="f5",
+        allowed_partitions=["p1"],
+        user_id=7,
+        extra_metadata={"mimetype": "application/pdf"},
+    )
+
+    assert downloaded_path is not None and downloaded_path.suffix == ".pdf"
+    assert indexing.added[0]["file_path"] == str(downloaded_path)
+    downloaded_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_index_url_checks_an_extensionless_url_against_its_mimetype(monkeypatch):
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+
+    async def fake_download(url, dest):
+        dest.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(ValidationError):
+        await svc.index_url(
+            url="https://example.com/download",
+            partition="p1",
+            file_id="f6",
+            allowed_partitions=["p1"],
+            user_id=7,
+            extra_metadata={"mimetype": "application/pdf"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_index_url_admin_auto_create_bypasses_partition_cap(monkeypatch):
     parts = FakePartitions(exists=False, partition_exists=False)
     indexing = FakeIndexing()
@@ -899,6 +948,37 @@ async def test_safe_download_rejects_redirect_to_private(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="disallowed"):
         await svc._safe_download("http://public.example/file.pdf", tmp_path / "out")
+
+
+@pytest.mark.asyncio
+async def test_safe_download_resolves_the_httpx_idna_hostname(monkeypatch, tmp_path):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    sent_hosts: list[str] = []
+    resolved_hosts: list[str] = []
+
+    def handler(request):
+        sent_hosts.append(request.url.raw_host.decode("ascii"))
+        return httpx.Response(200, content=_PDF_HEADER + b"data")
+
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+    svc = _service()
+
+    async def capture_resolved_host(host):
+        resolved_hosts.append(host)
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", capture_resolved_host)
+
+    await svc._safe_download("https://faß.example/file.pdf", tmp_path / "out")
+
+    assert resolved_hosts == ["xn--fa-hia.example"]
+    assert sent_hosts == ["xn--fa-hia.example"]
 
 
 # ---------------------------------------------------------------------------

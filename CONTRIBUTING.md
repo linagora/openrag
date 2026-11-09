@@ -159,7 +159,13 @@ When the release is ready:
 
 1. Merge `release/X.Y.Z` into `main`.
 2. Tag `main` with `vX.Y.Z` — this triggers the GA image build (`.github/workflows/build.yml`).
-3. Merge `release/X.Y.Z` back into `develop` so the stabilization fixes and version bump aren't lost.
+3. Once steps 1-8 of [`.github/RELEASING.md`](.github/RELEASING.md) pass, create the GitHub Release
+   (no workflow does) as a draft titled with the tag,
+   `gh release create vX.Y.Z -R linagora/openrag --verify-tag --draft --title vX.Y.Z --generate-notes`,
+   edit its notes, and publish it with `gh release edit vX.Y.Z -R linagora/openrag --draft=false`.
+   Then run step 9 of RELEASING.md. Without `--verify-tag`, a mistyped tag is silently created on
+   `develop` and a Release is created for a version that does not exist.
+4. Merge `release/X.Y.Z` back into `develop` so the stabilization fixes and version bump aren't lost.
 
 Name the branch to match the tag scheme (`release/2.1.0` → tag `v2.1.0`).
 
@@ -167,6 +173,7 @@ Name the branch to match the tag scheme (`release/2.1.0` → tag `v2.1.0`).
 
 For an urgent fix to something already in production that can't wait for the next release, branch
 `hotfix/*` off `main`, then merge it into **both** `main` (tag a new patch version) **and** `develop`.
+The new patch version is released like any other: steps 2 and 3 above.
 
 ## Rule of thumb
 

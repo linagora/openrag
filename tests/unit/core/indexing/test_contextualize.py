@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import gc
+
 import pytest
+from core.chunking import chunking_registry
+from core.indexing import contextualize as contextualize_module
 from core.indexing.contextualize import ChunkContextualizer
 from core.models.chunk import Chunk
+from core.models.document import ProcessedDocument, TextBlock
 
 
 class DictLLM:
@@ -94,3 +100,98 @@ async def test_contextualizer_reports_empty_provider_response_as_degraded():
     assert result[0].content == "chunk body"
     assert len(failures) == 1
     assert isinstance(failures[0], ValueError)
+
+
+_DOCUMENT = ProcessedDocument(
+    document_id="d1",
+    text_blocks=[TextBlock(text="# Synthèse\n\nLes dossiers sont instruits en priorité.", page_number=1)],
+    metadata={"filename": "xk29f.pdf"},
+)
+
+
+def _words(text: str) -> int:
+    return len(text.split())
+
+
+def _chunks_of(name: str) -> list[Chunk]:
+    chunker = chunking_registry.create(name, chunk_size=60, chunk_overlap_rate=0.0, length_function=_words)
+    return chunker.chunk(_DOCUMENT, partition="p")
+
+
+class _FailingLLM:
+    async def chat(self, messages, **kwargs):
+        raise RuntimeError("context provider unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("llm", [DictLLM(), _FailingLLM()], ids=["contextualized", "llm-failed"])
+@pytest.mark.parametrize("name", chunking_registry.list_registered())
+async def test_every_chunker_names_its_file_once_through_its_header(name, llm):
+    """The chunker's header names the file, so the envelope must not repeat it."""
+    contextualizer = ChunkContextualizer(llm, "System prompt")
+
+    result = await contextualizer.contextualize(_chunks_of(name), filename="xk29f.pdf")
+
+    assert result
+    for chunk in result:
+        assert chunk.text.count("xk29f") == 1
+        assert f"[CHUNK_START]\n\n{chunk.header}\n\n" in chunk.text
+        assert chunk.header.startswith("[Source: xk29f.pdf")
+        assert chunk.content.startswith(chunk.header)
+
+
+async def _unretrieved_task_errors(coro) -> list[str]:
+    """Await *coro*, then return the "Task exception was never retrieved"
+    contexts asyncio reports once the leftover tasks are garbage collected."""
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    recorded: list[str] = []
+
+    def handler(_loop, ctx):
+        if "never retrieved" in ctx["message"]:
+            recorded.append(f"{ctx['message']}: {ctx.get('future')!r}")
+
+    loop.set_exception_handler(handler)
+    try:
+        await coro
+        for _ in range(3):
+            await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    return recorded
+
+
+@pytest.mark.asyncio
+async def test_contextualizer_leaves_no_unretrieved_task_exception_when_several_chunks_fail(monkeypatch):
+    """#1299: tqdm.gather re-raises the first failure and abandons the other
+    wrapper tasks, so a second failing chunk logs "Task exception was never
+    retrieved". The semaphore failing on entry is outside _generate_context's
+    try, so it reaches the gather."""
+
+    class FailingGate:
+        async def __aenter__(self):
+            raise RuntimeError("llm semaphore unavailable")
+
+        async def __aexit__(self, *exc):
+            return None
+
+    # pytest's log capture keeps each LogRecord, and the record's ``exc`` arg
+    # holds a traceback that keeps the abandoned tasks alive past gc.collect().
+    monkeypatch.setattr(contextualize_module.logger, "disabled", True)
+    chunks = [Chunk(id=f"c{i}", text=f"chunk {i}", partition="p") for i in range(3)]
+    # Record only the type: the exception's traceback would keep the abandoned
+    # tasks alive past the gc.collect() below.
+    failures: list[type[Exception]] = []
+    results: list[list[Chunk]] = []
+    contextualizer = ChunkContextualizer(DictLLM(), "System prompt", batch_size=4, llm_semaphore=FailingGate())
+
+    async def run():
+        results.append(await contextualizer.contextualize(chunks, on_failure=lambda exc: failures.append(type(exc))))
+
+    recorded = await _unretrieved_task_errors(run())
+
+    assert results == [chunks]
+    assert failures == [RuntimeError]
+    assert recorded == []

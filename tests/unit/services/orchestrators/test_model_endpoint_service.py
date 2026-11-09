@@ -55,6 +55,9 @@ class _FakeEndpointRepo:
         # Set to a message to make the delete refuse, the way the real repo
         # does when a partition still resolves to the embedder.
         self.conflict_on_delete: str | None = None
+        # Embedders a running swap re-embeds partitions into: the real repo
+        # refuses any edit changing their vectors.
+        self.swap_targets: set[str] = set()
         for r in rows or []:
             self._store[(r.name, r.model_type)] = r
 
@@ -86,7 +89,18 @@ class _FakeEndpointRepo:
         row = self._store.get((name, model_type))
         if row is None:
             return None
-        # The real repo runs the guard on the row it just locked, before writing.
+        # The real repo checks for a running swap, then runs the guard, on the
+        # row it just locked, before writing.
+        if model_type == "embedder" and name in self.swap_targets:
+            from core.config.model_endpoints import material_embedder_changes
+            from core.utils.exceptions import ConflictError
+
+            if changed := material_embedder_changes(row, fields):
+                raise ConflictError(
+                    f"Embedder '{name}' is the target of 1 running embedder swap(s), and changing "
+                    f"{', '.join(changed)} would change the vectors they write.",
+                    code="EMBEDDER_SWAP_IN_PROGRESS",
+                )
         if guard is not None:
             await guard(row, lambda: self.indexed_file_usage(name, model_type))
         self.calls.append(("update", (name, model_type)))
@@ -163,6 +177,18 @@ async def test_seed_defaults_inserts_embedder_when_empty():
 
     creates = [c for c in repo.calls if c[0] == "create"]
     assert any(name_type[1] == "embedder" for _, name_type in creates)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("embedder", "implementation"), [({}, "vllm"), ({"provider": "tei"}, "tei")])
+async def test_seed_defaults_seeds_the_embedder_with_its_provider(embedder, implementation):
+    from core.config.root import Settings
+
+    repo = _FakeEndpointRepo()
+    await _make_service(repo, settings=Settings(embedder=embedder)).seed_defaults()
+
+    [row] = [row for (_, model_type), row in repo._store.items() if model_type == "embedder"]
+    assert row.extra["implementation"] == implementation
 
 
 @pytest.mark.asyncio
@@ -767,6 +793,34 @@ async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_in
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "env_provider", "configured", "expected"),
+    [
+        # Named by env, the vendor syncs, indexed files or not: like the URL, it
+        # is how the operator describes the server, not a change of model.
+        ("vllm", "tei", "tei", "tei"),
+        # Not named by env, the config default must not undo an admin's choice.
+        ("tei", None, "vllm", "tei"),
+        ("tei", "", "vllm", "tei"),
+    ],
+)
+async def test_seed_defaults_sync_on_boot_sets_the_embedder_vendor_only_when_env_names_it(
+    monkeypatch, stored, env_provider, configured, expected
+):
+    if env_provider is None:
+        monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("EMBEDDER_PROVIDER", env_provider)
+    _, repo = _indexed_env_managed_embedder(extra={"implementation": stored, "api_key": "old-key", "managed_by": "env"})
+    svc = _make_service(repo, settings=_sync_settings(provider=configured))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["implementation"] == expected
+    assert warnings == []
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_sync_on_boot_rotates_the_key_of_an_embedder_with_indexed_files(monkeypatch):
     """An API key cannot change a vector, so indexed files do not hold it back."""
     _, repo = _indexed_env_managed_embedder()
@@ -792,6 +846,47 @@ async def test_seed_defaults_sync_on_boot_moves_an_embedder_with_indexed_files_t
     synced = repo._store[("indexed-model", "embedder")]
     assert synced.endpoint == "http://embedder.gpu-pool:8000/v1"
     assert synced.model_name == "indexed-model"
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_holds_the_url_and_model_of_a_running_swaps_target(monkeypatch):
+    """A running swap refuses any change to its target's vectors, the URL
+    included, so the fallback that holds back only the model was refused too and
+    failed boot — before the step that resumes the swap, so every boot failed
+    the same way. The row keeps its URL and model until the swap ends, and takes
+    the rest."""
+    monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    settings = _sync_settings(
+        base_url="http://embedder.gpu-pool:8000/v1", model_name="new-model", api_key="rotated-key", batch_size=64
+    )
+    svc = _make_service(repo, settings=settings)
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.endpoint == "http://embedder:8000/v1"
+    assert synced.model_name == "indexed-model"
+    assert synced.extra["api_key"] == "rotated-key"
+    assert synced.batch_size == 64
+    [(level, warning)] = warnings
+    assert level == "WARNING"
+    assert "running embedder swap" in warning
+    assert "http://embedder.gpu-pool:8000/v1" in warning
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_key_of_a_running_swaps_target(monkeypatch):
+    """A swap holds back only what changes its vectors."""
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
     assert warnings == []
 
 
@@ -1056,6 +1151,37 @@ async def test_load_all_no_default_alias_without_is_default():
 
     assert "jina" in settings.models.embedder
     assert "default" not in settings.models.embedder
+
+
+@pytest.mark.asyncio
+async def test_load_new_registers_endpoints_created_elsewhere_and_keeps_the_loaded_ones():
+    """A partition a swap switched on another process names an endpoint created
+    there; ``load_new`` makes it resolvable here. Loaded entries stay as they are:
+    their clients are cached by name, and a rename here keeps its old-name alias."""
+    from core.config.root import Settings
+
+    repo = _FakeEndpointRepo(rows=[_make_row(name="embed-a", is_default=True)])
+    settings = Settings()
+    svc = _make_service(repo, settings=settings)
+    await svc.load_all()
+    loaded = settings.models.embedder["embed-a"]
+    settings.models.embedder["renamed-from"] = loaded
+
+    # Another process creates embed-b and a reranker, and edits embed-a.
+    repo._store[("embed-b", "embedder")] = _make_row(
+        name="embed-b", model_name="embed-model-b", is_default=False, vector_field="vector_embed_b"
+    )
+    repo._store[("rank-b", "reranker")] = _make_row(name="rank-b", model_type="reranker", is_default=False)
+    repo._store[("embed-a", "embedder")] = _make_row(name="embed-a", endpoint="http://edited:8000/v1")
+
+    await svc.load_new()
+
+    assert settings.models.embedder["embed-b"].model_name == "embed-model-b"
+    assert settings.models.embedder["embed-b"].vector_field == "vector_embed_b"
+    assert "rank-b" in settings.models.reranker
+    assert settings.models.embedder["embed-a"] is loaded
+    assert settings.models.embedder["default"] is loaded
+    assert settings.models.embedder["renamed-from"] is loaded
 
 
 # ------------------------------------------------------------------
@@ -1884,6 +2010,156 @@ async def test_validate_endpoint_reports_missing_model_on_reachable_endpoint(mon
         "reachable": True,
         "model_found": False,
         "models_served": ["other-model"],
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("served", "version_status", "model_found", "detail"),
+    [
+        # Ollama lists the tag and serves an untagged name as :latest, and only as that.
+        (["nomic-embed-text:latest"], 200, True, None),
+        (["nomic-embed-text:v1.5"], 200, False, None),
+        # vLLM accepts only the names it lists, and has no /api/version.
+        (["nomic-embed-text:latest"], 404, False, None),
+        # A failed answer is not an Ollama answer.
+        (["nomic-embed-text:latest"], "refused", False, None),
+        # No answer in time: neither served nor refused.
+        (
+            ["nomic-embed-text:latest"],
+            "timeout",
+            None,
+            'Reachable, but the endpoint did not say in time whether it serves "nomic-embed-text" '
+            'as "nomic-embed-text:latest".',
+        ),
+    ],
+)
+async def test_validate_endpoint_matches_an_untagged_model_name_to_its_latest_tag_on_ollama(
+    monkeypatch, served, version_status, model_found, detail
+):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            if url == "http://models.test:11434/api/version":
+                if version_status == "refused":
+                    raise httpx.ConnectError("connection refused")
+                if version_status == "timeout":
+                    raise httpx.ReadTimeout("timed out")
+                return FakeResponse(version_status, {"version": "0.40.1"})
+            assert url == "http://models.test:11434/v1/models"
+            return FakeResponse(200, {"data": [{"id": model_id} for model_id in served]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://models.test:11434/v1", "nomic-embed-text", model_type="embedder")
+
+    assert result == {
+        "reachable": True,
+        "model_found": model_found,
+        "models_served": served,
+        "transcription_supported": None,
+        "detail": detail,
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_checks_a_tei_embedder_on_its_health_route(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://tei.test/v1", "BAAI/bge-m3", model_type="embedder", extra={"implementation": "tei"}
+    )
+
+    # TEI has no model list: reachable, the model left unconfirmed rather than refused.
+    assert calls == ["http://tei.test/health"]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [None, "", "   "])
+async def test_validate_endpoint_leaves_model_found_unset_without_a_model_name(monkeypatch, model_name):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": []}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            assert url == "http://llm:8000/v1/models"
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", model_name)
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": [],
         "transcription_supported": None,
         "detail": None,
     }

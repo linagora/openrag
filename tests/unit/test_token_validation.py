@@ -18,6 +18,7 @@ if not ray.is_initialized():
 
 from api.routers.user.chat import validate_tokens_limit  # noqa: E402
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest  # noqa: E402
+from core.utils.exceptions import ServiceUnavailableError  # noqa: E402
 
 
 def fake_length_function(text: str) -> int:
@@ -173,13 +174,51 @@ class TestValidateTokensLimit:
         req = OpenAIChatCompletionRequest(messages=messages, max_tokens=100)
         assert validate_tokens_limit(req, max_tokens_allowed=200)[0] is False
 
-    def test_graceful_on_exception(self):
-        """When get_num_tokens raises, validation returns True (graceful skip)."""
-        with patch("api.routers.user.chat.get_num_tokens", side_effect=RuntimeError("boom")):
-            req = _chat_request("hello", max_tokens=999999)
-            is_valid, msg = validate_tokens_limit(req, max_tokens_allowed=1)
-            assert is_valid is True
-            assert msg == ""
+    @pytest.mark.parametrize("request_factory", [_chat_request, _completion_request])
+    @pytest.mark.parametrize("failure_stage", ["initialization", "invocation"])
+    def test_counter_failure_stops_validation(self, request_factory, failure_stage):
+        from api.routers.user.chat import logger
+
+        failure = RuntimeError("private request content and credentials")
+        counter = patch("api.routers.user.chat.get_num_tokens", side_effect=failure)
+        if failure_stage == "invocation":
+
+            def fail_counting(_text):
+                raise failure
+
+            counter = patch("api.routers.user.chat.get_num_tokens", return_value=fail_counting)
+
+        records = []
+        sink = logger.add(lambda message: records.append(message.record))
+        try:
+            with counter, pytest.raises(ServiceUnavailableError) as error:
+                validate_tokens_limit(request_factory("hello", max_tokens=100), max_tokens_allowed=200)
+        finally:
+            logger.remove(sink)
+
+        assert error.value.code == "TOKEN_VALIDATION_UNAVAILABLE"
+        assert error.value.status_code == 503
+        assert "Unable to validate request token limit" in error.value.message
+        assert "Try again" in error.value.message
+        assert "private" not in str(error.value)
+        assert error.value.__cause__ is failure
+        diagnostic = next(record for record in records if record["extra"].get("error_type") == "RuntimeError")
+        assert diagnostic["extra"]["traceback"]
+        assert "private" not in repr(diagnostic)
+
+    @pytest.mark.parametrize("function", ["_runtime_config", "_effective_max_output_tokens", "message_tokens"])
+    def test_unrelated_failure_is_not_reported_as_counter_unavailability(self, function):
+        failure = RuntimeError("unrelated programming or configuration error")
+        with patch(f"api.routers.user.chat.{function}", side_effect=failure), pytest.raises(RuntimeError) as error:
+            validate_tokens_limit(_chat_request("hello"), max_tokens_allowed=2000)
+        assert error.value is failure
+
+    def test_serialization_failure_is_not_reported_as_counter_unavailability(self):
+        failure = RuntimeError("serialization failure")
+        with patch.object(OpenAIChatCompletionRequest, "model_dump", side_effect=failure):
+            with pytest.raises(RuntimeError) as error:
+                validate_tokens_limit(_chat_request("hello"), max_tokens_allowed=2000)
+        assert error.value is failure
 
 
 # ---------------------------------------------------------------------------

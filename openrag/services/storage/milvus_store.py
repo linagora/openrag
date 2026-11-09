@@ -34,19 +34,27 @@ Hybrid BM25:
 from __future__ import annotations
 
 import asyncio
+import json
+import math
+import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
+import numpy as np
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk
+from core.models.retrieval_trace import RemovalReasonCode, TraceCandidate, TraceRemovalReason
+from core.retrieval.trace import TRACE_FILE_SCOPE_KIND_KEY, RetrievalTraceBuilder, candidates_from_chunks
 from core.utils.exceptions import (
     UnexpectedVDBError,
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
     VDBDeleteError,
+    VDBError,
     VDBInsertError,
     VDBSchemaMigrationRequiredError,
     VDBSearchError,
@@ -64,6 +72,7 @@ from pymilvus import (
     MilvusException,
     RRFRanker,
 )
+from pymilvus.client.entity_helper import convert_to_json
 
 logger = get_logger()
 
@@ -74,6 +83,39 @@ logger = get_logger()
 
 #: Milvus VARCHAR upper bound used for ``text`` / ``partition`` / ``file_id``.
 MAX_LENGTH = 65_535
+
+#: Default cap matching Milvus's common.JSONMaxLength. A deployment can
+#: override it through VectorDBConfig to match its server configuration.
+MAX_DYNAMIC_FIELD_BYTES = 65_536
+DEFAULT_JSON_SAFETY_MARGIN_BYTES = 1_024
+
+#: Dynamic keys shortened first when a row is over that cap: ``content``
+#: repeats the chunk body ``text`` already holds, ``context`` is a summary.
+SHRINKABLE_DYNAMIC_KEYS = ("content", "context")
+
+#: Identity, routing, cleanup, and timestamp metadata must survive fitting unchanged,
+#: including when these keys appear inside nested user metadata.
+PROTECTED_DYNAMIC_KEYS = frozenset(
+    {
+        "source",
+        "filename",
+        "original_filename",
+        "_id",
+        "id",
+        "document_id",
+        "file_id",
+        "chunk_id",
+        "partition",
+        "section_id",
+        "prev_section_id",
+        "next_section_id",
+        "chunk_type",
+        "_openrag_indexing_task_id",
+        "indexed_at",
+        "created_at",
+        "updated_at",
+    }
+)
 
 #: Custom collection property holding the schema version integer.
 SCHEMA_VERSION_PROPERTY_KEY = "openrag.schema_version"
@@ -95,10 +137,11 @@ _DENSE_VECTOR_TYPES = frozenset(
 #: Milvus caps a collection at ten vector fields, ``sparse`` included.
 MAX_VECTOR_FIELDS = 10
 
-#: Largest section ID. Section IDs live in the dynamic JSON field, where a
-#: Milvus partial upsert rewrites every number as a float64, and a float64
-#: rounds integers above 2**53 — so do JavaScript clients.
+#: Largest section ID. Keep section IDs below float64's exact-integer limit so
+#: older Milvus 3.0 builds can round-trip them without breaking neighbour
+#: links. OpenRAG keeps this folding on newer builds too, so IDs stay stable.
 MAX_SECTION_ID = 2**53 - 1
+SECTION_ID_KEYS = ("prev_section_id", "section_id", "next_section_id")
 
 
 #: Dense ANN search params for the HNSW/COSINE index on each dense field. ``ef``
@@ -131,6 +174,29 @@ RRF_K = 100
 #: *unreachable* server is already handled — ``MilvusClient`` connects eagerly in
 #: ``__init__`` and raises :class:`VDBConnectionError` before the probe runs.
 _SCHEMA_PROBE_TIMEOUT = 5.0
+
+
+def _stored_schema_version(desc: dict[str, Any]) -> int:
+    """The schema version in a ``describe_collection`` result.
+
+    Missing or unparseable values read as ``0`` so existing pre-versioning
+    collections always look out of date rather than silently passing.
+    """
+    raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
+    try:
+        return int(raw) if raw is not None else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+# Avoid serial five-second version probes when a Milvus server's management
+# endpoint is temporarily unavailable. Retry after this short cooldown.
+_SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS = 30.0
+
+#: How long :meth:`MilvusVectorStore.make_searchable` waits for a flushed field
+#: to answer, and how often it asks.
+_SEARCHABLE_TIMEOUT = 120.0
+_SEARCHABLE_POLL = 0.5
 
 #: Fallback dense-vector dimension for page sizing when the real one is
 #: unknown — i.e. a read-only process that never ran ``initialize`` AND the
@@ -194,6 +260,351 @@ def _scalar_output_fields(description: dict[str, Any]) -> list[str]:
     return fields
 
 
+_MILVUS_EXACT_DYNAMIC_INT64_BUILDS = frozenset({"3.0-20261030-af15c80751"})
+
+
+def _milvus_preserves_dynamic_int64(server_version: Any) -> bool:
+    """Whether this Milvus server build preserves large dynamic-field integers.
+
+    Milvus 3.0.5's tested build reports a date-based version string. Accept
+    normal semantic versions from 3.0.5 onward too; unrecognized build strings
+    remain conservative because intermediate or vendor builds are unverified.
+    """
+    if isinstance(server_version, Mapping):
+        server_version = server_version.get("version")
+    if not isinstance(server_version, str):
+        return False
+    if server_version in _MILVUS_EXACT_DYNAMIC_INT64_BUILDS:
+        return True
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", server_version)
+    return bool(match and tuple(map(int, match.groups())) >= (3, 0, 5))
+
+
+def _changed_by_float64(value: Any) -> bool:
+    """Whether *value*, or an integer nested in it, would change via float64.
+
+    This models the dynamic-field round trip measured on Milvus 3.0.2. Milvus
+    3.0.5 preserves these integers; callers use this only for older or
+    unverified server builds.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return int(Decimal(repr(float(value)))) != value
+    if isinstance(value, dict):
+        return any(_changed_by_float64(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_changed_by_float64(item) for item in value)
+    return False
+
+
+def _json_bytes(value: Any) -> int:
+    """Size of *value* using the serializer PyMilvus uses for dynamic fields."""
+    return len(convert_to_json(value))
+
+
+def _json_string_bytes(value: str, *, ensure_ascii: bool = False) -> int:
+    """Size of a string value as encoded inside a JSON container."""
+    if ensure_ascii:
+        return len(json.dumps(value))
+    # Wrapping avoids convert_to_json's special case for top-level JSON strings.
+    return len(convert_to_json([value])) - 2
+
+
+def _truncate_json_string(value: str, max_bytes: int, *, ensure_ascii: bool) -> str:
+    """Keep the longest prefix whose JSON encoding fits, including its quotes."""
+    if max_bytes <= 2:
+        return ""
+    if _json_string_bytes(value, ensure_ascii=ensure_ascii) == len(value.encode("utf-8")) + 2:
+        return _truncate_utf8(value, max_bytes - 2)
+
+    # Most strings use the UTF-8 fast path above. Only the partially retained
+    # escaped string needs a search; exhausted strings return immediately.
+    lower, upper = 0, min(len(value), max_bytes - 2)
+    while lower < upper:
+        middle = (lower + upper + 1) // 2
+        if _json_string_bytes(value[:middle], ensure_ascii=ensure_ascii) <= max_bytes:
+            lower = middle
+        else:
+            upper = middle - 1
+    return value[:lower]
+
+
+def _has_cyclic_json_reference(value: Any) -> bool:
+    """Return whether JSON containers in *value* refer back to an ancestor.
+
+    PyMilvus converts NumPy object arrays, mappings, and sequences before JSON
+    encoding. Its converter walks mappings and lists with a work stack, so a
+    cyclic reference can keep that stack growing instead of raising a normal
+    serialization error. Track the active traversal path to detect cycles
+    while still allowing shared but acyclic values.
+    """
+
+    def children(container: Any) -> Iterable[Any] | None:
+        if isinstance(container, dict):
+            return container.values()
+        if isinstance(container, (list, tuple)):
+            return container
+        if isinstance(container, np.ndarray) and container.dtype.hasobject:
+            return container.flat
+        return None
+
+    root_children = children(value)
+    if root_children is None:
+        return False
+
+    active = {id(value)}
+    visited: set[int] = set()
+    pending: list[tuple[Any, Iterator[Any]]] = [(value, iter(root_children))]
+    while pending:
+        container, values = pending[-1]
+        try:
+            child = next(values)
+        except StopIteration:
+            pending.pop()
+            active.remove(id(container))
+            visited.add(id(container))
+            continue
+
+        child_values = children(child)
+        if child_values is None:
+            continue
+        child_id = id(child)
+        if child_id in active:
+            return True
+        if child_id in visited:
+            continue
+        active.add(child_id)
+        pending.append((child, iter(child_values)))
+
+    return False
+
+
+def _metadata_values_match(actual: Any, expected: Any) -> bool:
+    if actual is expected:
+        return True
+    # Cycles are reported by the row fitter itself; don't ask PyMilvus's
+    # serializer to compare them while deciding which values to protect.
+    if _has_cyclic_json_reference([actual, expected]):
+        return False
+    try:
+        actual_json = json.loads(convert_to_json({"value": actual}))
+        expected_json = json.loads(convert_to_json({"value": expected}))
+        return json.dumps(actual_json, sort_keys=True, separators=(",", ":")) == json.dumps(
+            expected_json, sort_keys=True, separators=(",", ":")
+        )
+    except (MilvusException, TypeError, ValueError, RecursionError):
+        return False
+
+
+def _matching_metadata_keys(entity: dict[str, Any], metadata: Mapping[str, Any] | None) -> frozenset[str]:
+    """Return catalog keys whose serialized values match the current row."""
+    if not metadata:
+        return frozenset()
+    return frozenset(
+        key for key, expected in metadata.items() if key in entity and _metadata_values_match(entity[key], expected)
+    )
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    """*value* cut to at most *max_bytes* UTF-8 bytes, never mid-character."""
+    return value.encode("utf-8")[: max(max_bytes, 0)].decode("utf-8", errors="ignore")
+
+
+def _fit_milvus_row_limits(
+    entity: dict[str, Any],
+    *,
+    static_fields: set[str],
+    json_max_length: int = MAX_DYNAMIC_FIELD_BYTES,
+    json_safety_margin_bytes: int = DEFAULT_JSON_SAFETY_MARGIN_BYTES,
+    protected_metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Shorten *entity* in place so Milvus accepts it, instead of failing the insert.
+
+    Two per-row limits are counted in bytes: the ``text`` VARCHAR
+    (:data:`MAX_LENGTH`) and the configured JSON limit for dynamic metadata.
+    Rows already within that limit are left alone; oversized rows must fit
+    below it by the configured safety margin. A degenerate output — a caption
+    padded with whitespace up to its token budget, say — can exceed either, and
+    one such chunk used to fail its whole file. ``content`` and ``context`` are
+    shortened first, then the longest remaining strings at any nesting depth;
+    each cut is logged. If protected or non-string metadata alone still
+    exceeds the limit, fail before sending the row to Milvus.
+    """
+    fit_target_bytes = json_max_length - json_safety_margin_bytes
+    file_id = entity.get("file_id")
+    text = entity.get("text")
+    if isinstance(text, str) and len(text.encode("utf-8")) > MAX_LENGTH:
+        text_is_protected = "text" in PROTECTED_DYNAMIC_KEYS or (
+            protected_metadata is not None
+            and "text" in protected_metadata
+            and _metadata_values_match(text, protected_metadata["text"])
+        )
+        if text_is_protected:
+            raise VDBInsertError(
+                f"Protected metadata field 'text' for chunk {file_id!r} exceeds Milvus's {MAX_LENGTH}-byte limit.",
+                file_id=file_id,
+                field="text",
+                bytes=len(text.encode("utf-8")),
+                limit=MAX_LENGTH,
+            )
+        entity["text"] = _truncate_utf8(text, MAX_LENGTH)
+        logger.bind(file_id=file_id, field="text", bytes=len(text.encode("utf-8")), limit=MAX_LENGTH).warning(
+            "Chunk field over the Milvus limit; truncated."
+        )
+
+    dynamic_payload = {k: v for k, v in entity.items() if k not in static_fields}
+    if _has_cyclic_json_reference(dynamic_payload):
+        raise VDBInsertError(
+            f"Cyclic dynamic metadata for chunk {file_id!r} cannot be serialized.",
+            file_id=file_id,
+        )
+    try:
+        serialized_dynamic = convert_to_json(dynamic_payload)
+    except (MilvusException, TypeError, ValueError, RecursionError) as exc:
+        raise VDBInsertError(
+            f"Failed to serialize dynamic metadata for chunk {file_id!r}.",
+            file_id=file_id,
+        ) from exc
+    if len(serialized_dynamic) <= json_max_length:
+        return
+
+    protected_keys = PROTECTED_DYNAMIC_KEYS | _matching_metadata_keys(entity, protected_metadata)
+
+    # Work on the same JSON-shaped values PyMilvus will store. This also
+    # exposes strings nested in tuples and NumPy arrays to the truncator
+    # without mutating the source Chunk metadata.
+    entity.update(json.loads(serialized_dynamic))
+
+    def json_children(value: dict[str, Any] | list[Any]) -> Iterator[tuple[str | int, Any]]:
+        return iter(value.items()) if isinstance(value, dict) else enumerate(value)
+
+    def without_reducible_strings(value: Any) -> Any:
+        if isinstance(value, str):
+            return ""
+        if not isinstance(value, (dict, list)):
+            return value
+
+        result: Any = {} if isinstance(value, dict) else [None] * len(value)
+        pending: list[tuple[Iterator[tuple[str | int, Any]], Any]] = [(json_children(value), result)]
+        while pending:
+            children, target = pending[-1]
+            try:
+                key, child = next(children)
+            except StopIteration:
+                pending.pop()
+                continue
+
+            if key in PROTECTED_DYNAMIC_KEYS:
+                target[key] = child
+            elif isinstance(child, str):
+                target[key] = ""
+            elif isinstance(child, (dict, list)):
+                replacement: Any = {} if isinstance(child, dict) else [None] * len(child)
+                target[key] = replacement
+                pending.append((json_children(child), replacement))
+            else:
+                target[key] = child
+        return result
+
+    minimum_payload = {
+        key: value if key in protected_keys else without_reducible_strings(value)
+        for key, value in entity.items()
+        if key not in static_fields
+    }
+    serialized_minimum = convert_to_json(minimum_payload)
+    minimum_bytes = len(serialized_minimum)
+
+    def fail_oversized_metadata(actual_bytes: int) -> None:
+        raise VDBInsertError(
+            f"Dynamic metadata for chunk {file_id!r} cannot fit the {fit_target_bytes}-byte truncation target "
+            f"below Milvus's {json_max_length}-byte limit "
+            f"(current size: {actual_bytes}; size after removing reducible strings: {minimum_bytes} bytes).",
+            file_id=file_id,
+            dynamic_bytes=actual_bytes,
+            minimum_bytes=minimum_bytes,
+            limit=json_max_length,
+            target_bytes=fit_target_bytes,
+        )
+
+    if minimum_bytes > fit_target_bytes:
+        fail_oversized_metadata(len(serialized_dynamic))
+
+    # Emptying string values preserves container depth and therefore PyMilvus's
+    # serializer choice. Its standard-json fallback also escapes non-ASCII.
+    ensure_ascii = serialized_minimum == json.dumps(minimum_payload).encode("utf-8")
+
+    def nested_string_slots(parent: Any, key: str | int) -> Iterable[tuple[Any, str | int, str]]:
+        value = parent[key]
+        if isinstance(value, str):
+            yield parent, key, value
+            return
+        if not isinstance(value, (dict, list)):
+            return
+
+        # JSON normalization makes the tree acyclic and gives each nested
+        # value its own container. Keeping parent/key slots avoids copying an
+        # entire path at every level while preserving depth-first order.
+        pending = [(value, json_children(value))]
+        while pending:
+            current, children = pending[-1]
+            try:
+                child_key, child = next(children)
+            except StopIteration:
+                pending.pop()
+                continue
+            if child_key in PROTECTED_DYNAMIC_KEYS:
+                continue
+            if isinstance(child, str):
+                yield current, child_key, child
+            elif isinstance(child, (dict, list)):
+                pending.append((child, json_children(child)))
+
+    shrink_first = [
+        (entity, key, entity[key])
+        for key in SHRINKABLE_DYNAMIC_KEYS
+        if key not in static_fields and key not in protected_keys and isinstance(entity.get(key), str)
+    ]
+    shrink_first_keys = {key for _, key, _ in shrink_first}
+    remaining_strings = [
+        item
+        for key in entity
+        if key not in static_fields and key not in protected_keys and key not in shrink_first_keys
+        for item in nested_string_slots(entity, key)
+    ]
+    remaining_strings.sort(key=lambda item: -len(item[2].encode("utf-8")))
+
+    actual_bytes = len(serialized_dynamic)
+    truncated_fields = 0
+    for parent, key, original in (*shrink_first, *remaining_strings):
+        over = actual_bytes - fit_target_bytes
+        if over <= 0:
+            break
+        if not original:
+            continue
+        value = parent[key]
+        if not isinstance(value, str) or not value:
+            continue
+        string_bytes = _json_string_bytes(value, ensure_ascii=ensure_ascii)
+        value = _truncate_json_string(value, string_bytes - over, ensure_ascii=ensure_ascii)
+        actual_bytes += _json_string_bytes(value, ensure_ascii=ensure_ascii) - string_bytes
+        parent[key] = value
+        if value != original:
+            truncated_fields += 1
+
+    if actual_bytes > fit_target_bytes:
+        fail_oversized_metadata(actual_bytes)
+    if truncated_fields:
+        logger.bind(
+            file_id=file_id,
+            fields_truncated=truncated_fields,
+            dynamic_bytes_before=len(serialized_dynamic),
+            dynamic_bytes_after=actual_bytes,
+            limit=json_max_length,
+            target_bytes=fit_target_bytes,
+        ).warning("Chunk metadata over the Milvus limit; strings truncated.")
+
+
 class MilvusVectorStore(VectorStore):
     """Milvus 3.0 implementation of :class:`VectorStore`.
 
@@ -232,8 +643,15 @@ class MilvusVectorStore(VectorStore):
         self._loaded = False
         self._load_lock = asyncio.Lock()
         self._search_schema_checked = False
+        self._health_schema_confirmed = False
+        self._server_version_checked = False
+        self._server_version: str | None = None
+        self._server_version_probe_failed_at: float | None = None
+        self._server_version_lock = asyncio.Lock()
         # Serializes adding and dropping dense fields.
         self._vector_field_lock = asyncio.Lock()
+        # Dense fields this process added and has not flushed a write into yet.
+        self._unflushed_fields: set[str] = set()
         # Dense field names on the live schema, ``None`` until read.
         self._dense_fields_cache: frozenset[str] | None = None
         # Default projection of `query_chunks_by_filter`, ``None`` until read.
@@ -585,8 +1003,6 @@ class MilvusVectorStore(VectorStore):
     def _read_schema_version(self, *, timeout: float | None = None) -> int:
         """The schema version stamped on the live collection.
 
-        Missing or unparseable values read as ``0`` so existing pre-versioning
-        collections always look out of date rather than silently passing.
         ``timeout`` overrides the client default for callers that must not
         block, such as the construction-time probe.
         """
@@ -598,11 +1014,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
                 operation="describe_collection",
             ) from e
-        raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
-        try:
-            return int(raw) if raw is not None else 0
-        except (ValueError, TypeError):
-            return 0
+        return _stored_schema_version(desc)
 
     def _schema_mismatch_warning(self, stored_version: int, expected_version: int) -> str:
         """Operator-facing description of a schema-version mismatch."""
@@ -711,7 +1123,7 @@ class MilvusVectorStore(VectorStore):
     #: Filter keys with dedicated semantics, pulled out before the generic
     #: ``key == value`` loop runs. ``partition`` is the partition_key row
     #: tag; ``expr`` is a raw-expression escape hatch.
-    _SPECIAL_FILTER_KEYS = frozenset({"partition", "expr"})
+    _SPECIAL_FILTER_KEYS = frozenset({"partition", "expr", TRACE_FILE_SCOPE_KIND_KEY})
 
     #: Partition values that mean "do not filter by partition".
     _PARTITION_WILDCARDS = frozenset({"all"})
@@ -859,18 +1271,23 @@ class MilvusVectorStore(VectorStore):
         expr: str,
         output_fields: list[str],
         batch_size: int | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Drain a Milvus 3.0 ``query_iterator`` into a list.
 
         ``batch_size`` defaults to :meth:`_safe_batch_size`, which shrinks the
         page for vector-inclusive projections so one page stays under Milvus's
-        result-size limit. Total result-set size is unaffected — the iterator
-        paginates until the filter is drained.
+        result-size limit. Without ``limit`` the iterator drains the filter;
+        with it, iteration stops as soon as the requested number of rows exists.
 
         Synchronous; call via :func:`asyncio.to_thread` from async methods.
         """
         if batch_size is None:
             batch_size = self._safe_batch_size(output_fields)
+        if limit is not None:
+            if limit <= 0:
+                return []
+            batch_size = min(batch_size, limit)
         iterator = self._client.query_iterator(
             collection_name=self._collection_name,
             filter=expr,
@@ -884,9 +1301,11 @@ class MilvusVectorStore(VectorStore):
                 if not batch:
                     break
                 out.extend(batch)
+                if limit is not None and len(out) >= limit:
+                    break
         finally:
             iterator.close()
-        return out
+        return out if limit is None else out[:limit]
 
     # ------------------------------------------------------------------
     # ID round-trip (Chunk.id: str  <-->  Milvus _id: INT64 auto_id PK)
@@ -943,6 +1362,9 @@ class MilvusVectorStore(VectorStore):
         indexed_at: str,
         order: dict[str, int | None],
         vector_field: str,
+        json_max_length: int = MAX_DYNAMIC_FIELD_BYTES,
+        json_safety_margin_bytes: int = DEFAULT_JSON_SAFETY_MARGIN_BYTES,
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the Milvus insert payload for one chunk.
 
@@ -975,6 +1397,13 @@ class MilvusVectorStore(VectorStore):
         ):
             if value is not None:
                 entity[field] = value
+        _fit_milvus_row_limits(
+            entity,
+            static_fields={"text", "partition", "file_id", vector_field, *INDEXED_TIME_FIELDS},
+            json_max_length=json_max_length,
+            json_safety_margin_bytes=json_safety_margin_bytes,
+            protected_metadata=protected_metadata,
+        )
         return entity
 
     # ------------------------------------------------------------------
@@ -988,6 +1417,7 @@ class MilvusVectorStore(VectorStore):
         *,
         indexed_at: datetime | None = None,
         vector_field: str | None = None,
+        protected_metadata: Mapping[str, Any] | None = None,
     ) -> int:
         """Insert pre-embedded chunks into the backing Milvus collection.
 
@@ -1015,7 +1445,15 @@ class MilvusVectorStore(VectorStore):
         order_metadata = self._gen_chunk_order_metadata(len(chunks))
         field = resolve_vector_field(vector_field)
         entities = [
-            self._chunk_to_entity(c, indexed_at=indexed_at, order=o, vector_field=field)
+            self._chunk_to_entity(
+                c,
+                indexed_at=indexed_at,
+                order=o,
+                vector_field=field,
+                json_max_length=self._config.json_max_length,
+                json_safety_margin_bytes=self._config.json_safety_margin_bytes,
+                protected_metadata=protected_metadata,
+            )
             for c, o in zip(chunks, order_metadata, strict=True)
         ]
 
@@ -1035,6 +1473,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields([field])
         # Milvus 3.0 returns {"insert_count": N, "ids": [...], "cost": ...}.
         # Fall back to len(entities) if the server omits insert_count.
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
@@ -1063,6 +1502,470 @@ class MilvusVectorStore(VectorStore):
             record["score"] = hit.get("distance")
             out.append(record)
         return out
+
+    @staticmethod
+    def _trace_candidates(
+        rows: list[dict[str, Any]],
+        score_name: str | None,
+        *,
+        limit: int | None = None,
+    ) -> list[TraceCandidate]:
+        """Project store rows through Task 1's content-free candidate serializer."""
+        chunks: list[Chunk] = []
+        scores: list[float | None] = []
+        visible_rows = rows if limit is None else rows[: max(limit, 0)]
+        for row in visible_rows:
+            raw_id = row.get("id")
+            if raw_id is None:
+                continue
+            raw_document_id = row.get("file_id")
+            chunks.append(
+                Chunk(
+                    id=str(raw_id),
+                    document_id=str(raw_document_id) if raw_document_id is not None else "",
+                    partition=str(row["partition"]) if row.get("partition") is not None else "default",
+                )
+            )
+            raw_score = row.get("score")
+            score = float(raw_score) if isinstance(raw_score, (int, float)) else None
+            scores.append(score if score is not None and math.isfinite(score) else None)
+
+        candidates = candidates_from_chunks(chunks)
+        if score_name is None:
+            return candidates
+        return [
+            candidate.model_copy(update={"scores": {score_name: score}}) if score is not None else candidate
+            for candidate, score in zip(candidates, scores, strict=True)
+        ]
+
+    @staticmethod
+    def _row_ids(rows: list[dict[str, Any]]) -> set[str]:
+        return {str(row["id"]) for row in rows if row.get("id") is not None}
+
+    @staticmethod
+    def _mark_removed_candidates(
+        candidates: list[TraceCandidate],
+        advanced_ids: set[str],
+        code: RemovalReasonCode,
+        explanation: str,
+    ) -> list[TraceCandidate]:
+        reason = TraceRemovalReason(code=code, explanation=explanation)
+        return [
+            candidate if candidate.id in advanced_ids else candidate.model_copy(update={"removal_reason": reason})
+            for candidate in candidates
+        ]
+
+    @staticmethod
+    def _scope_relaxed_diagnostic_filters(
+        filters: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], object | None, str | None]:
+        """Relax only a recognized file scope for its own diagnostic query."""
+        relaxed = dict(filters or {})
+        file_scope_kind = relaxed.pop(TRACE_FILE_SCOPE_KIND_KEY, None)
+        candidate_scope = relaxed.get("file_id")
+        if file_scope_kind in {"workspace", "attachment", "file"} and candidate_scope:
+            file_scope = relaxed.pop("file_id", None)
+        else:
+            file_scope = None
+            file_scope_kind = None
+        return relaxed, file_scope, file_scope_kind
+
+    @staticmethod
+    def _temporal_relaxed_diagnostic_filters(filters: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        """Relax only a simple temporal filter for its own diagnostic query."""
+        relaxed = dict(filters or {})
+        relaxed.pop(TRACE_FILE_SCOPE_KIND_KEY, None)
+        raw_expr = relaxed.get("expr")
+        temporal_relaxed = isinstance(raw_expr, str) and re.fullmatch(
+            r'\s*(?:created_at|indexed_at)\s*(?:==|!=|>=|<=|>|<)\s*(?:ISO\s+)?(?:"[^"\r\n]*"|\'[^\'\r\n]*\')\s*',
+            raw_expr,
+            re.I,
+        )
+        if temporal_relaxed:
+            relaxed.pop("expr", None)
+        return relaxed, bool(temporal_relaxed)
+
+    @classmethod
+    def _relaxed_diagnostic_filters(
+        cls,
+        filters: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], object | None, bool, str | None]:
+        """Return combined relaxations for compatibility with direct callers."""
+        scope_filters, file_scope, file_scope_kind = cls._scope_relaxed_diagnostic_filters(filters)
+        _, temporal_relaxed = cls._temporal_relaxed_diagnostic_filters(filters)
+        if temporal_relaxed:
+            scope_filters.pop("expr", None)
+        return scope_filters, file_scope, temporal_relaxed, file_scope_kind
+
+    @staticmethod
+    def _merge_diagnostic_candidates(
+        results: list[tuple[list[TraceCandidate], set[str], int, float, Exception | None]],
+    ) -> tuple[list[TraceCandidate], int]:
+        """Merge result sets, prioritizing the primary scoped query for trace budget."""
+        by_id: dict[str, TraceCandidate] = {}
+        result_ids: set[str] = set()
+        for candidates, ids, _count, _duration, _error in results:
+            result_ids.update(ids)
+            for candidate in candidates:
+                by_id.setdefault(candidate.id, candidate)
+        merged = [candidate.model_copy(update={"rank": rank}) for rank, candidate in enumerate(by_id.values(), 1)]
+        return merged, len(result_ids)
+
+    @staticmethod
+    def _mark_dense_filter_removals(
+        candidates: list[TraceCandidate],
+        advanced_ids: set[str],
+        *,
+        file_scope: object | None,
+        file_scope_kind: str | None,
+        temporal_relaxed: bool,
+        similarity_threshold: float | None,
+    ) -> list[TraceCandidate]:
+        file_reasons: dict[str, tuple[RemovalReasonCode, str]] = {
+            "workspace": ("workspace_filter", "Candidate was outside the authorized workspace file scope."),
+            "attachment": ("attachment_filter", "Candidate was outside the requested attachment scope."),
+            "file": ("file_filter", "Candidate was outside the requested file scope."),
+        }
+        if file_scope is None or file_scope_kind not in file_reasons:
+            allowed_file_ids = None
+            file_reason = None
+            file_explanation = None
+        else:
+            values = file_scope if isinstance(file_scope, (list, tuple, set)) else [file_scope]
+            allowed_file_ids = {str(value) for value in values}
+            file_reason, file_explanation = file_reasons[file_scope_kind]
+
+        marked: list[TraceCandidate] = []
+        for candidate in candidates:
+            if candidate.id in advanced_ids:
+                marked.append(candidate)
+                continue
+            if (
+                allowed_file_ids is not None
+                and file_reason is not None
+                and file_explanation is not None
+                and candidate.document_id not in allowed_file_ids
+            ):
+                reason = TraceRemovalReason(code=file_reason, explanation=file_explanation)
+            elif (
+                similarity_threshold is not None
+                and candidate.scores.get("dense") is not None
+                and candidate.scores["dense"] <= similarity_threshold
+            ):
+                reason = TraceRemovalReason(
+                    code="dense_threshold",
+                    explanation="Candidate did not pass the configured dense similarity threshold.",
+                )
+            elif temporal_relaxed:
+                reason = TraceRemovalReason(
+                    code="temporal_filter",
+                    explanation="Candidate did not pass the request's temporal filter.",
+                )
+            else:
+                marked.append(candidate)
+                continue
+            marked.append(candidate.model_copy(update={"removal_reason": reason}))
+        return marked
+
+    async def _diagnostic_search(
+        self,
+        *,
+        data: list[Any],
+        anns_field: str,
+        search_params: dict[str, Any],
+        top_k: int,
+        expr: str,
+        score_name: str,
+        candidate_limit: int,
+    ) -> tuple[list[TraceCandidate], set[str], int, float, Exception | None]:
+        started = time.perf_counter()
+        try:
+            response = await self._async_client.search(
+                collection_name=self._collection_name,
+                data=data,
+                anns_field=anns_field,
+                search_params=search_params,
+                limit=top_k,
+                filter=expr,
+                output_fields=["file_id", "partition"],
+            )
+            rows = self._parse_search_response(response)
+            return (
+                self._trace_candidates(rows, score_name, limit=candidate_limit),
+                self._row_ids(rows),
+                len(rows),
+                time.perf_counter() - started,
+                None,
+            )
+        except Exception as error:
+            return [], set(), 0, time.perf_counter() - started, error
+
+    @staticmethod
+    def _record_diagnostic_stage(
+        trace: RetrievalTraceBuilder,
+        name: str,
+        candidates: list[TraceCandidate],
+        candidate_count: int,
+        duration: float,
+        error: Exception | None,
+    ) -> None:
+        if error is None:
+            trace.record_stage(
+                name,
+                status="complete",
+                candidates=candidates,
+                candidate_count=candidate_count,
+                duration_seconds=duration,
+            )
+            return
+        trace.record_stage(
+            name,
+            status="error",
+            candidates=candidates,
+            candidate_count=candidate_count,
+            duration_seconds=duration,
+            error=str(error),
+        )
+        trace.record_error(name, error)
+
+    async def _record_hybrid_diagnostics(
+        self,
+        *,
+        trace: RetrievalTraceBuilder,
+        embedding: list[float],
+        query_text: str,
+        top_k: int,
+        filters: dict[str, Any] | None,
+        similarity_threshold: float | None,
+        fused_rows: list[dict[str, Any]],
+        vector_field: str,
+    ) -> None:
+        """Run opt-in ANN legs after production ordering is already fixed."""
+        scope_filters, file_scope, file_scope_kind = self._scope_relaxed_diagnostic_filters(filters)
+        temporal_filters, temporal_relaxed = self._temporal_relaxed_diagnostic_filters(filters)
+        expr = self._build_filter_expr(filters)
+        calls = [
+            self._diagnostic_search(
+                data=[embedding],
+                anns_field=vector_field,
+                search_params=self._dense_search_params(None),
+                top_k=top_k,
+                expr=expr,
+                score_name="dense",
+                candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+            ),
+            self._diagnostic_search(
+                data=[embedding],
+                anns_field=vector_field,
+                search_params=self._dense_search_params(similarity_threshold),
+                top_k=top_k,
+                expr=expr,
+                score_name="dense",
+                candidate_limit=trace.candidate_capacity_for_stage("dense_after_threshold"),
+            ),
+            self._diagnostic_search(
+                data=[query_text],
+                anns_field="sparse",
+                search_params=DEFAULT_BM25_SEARCH_PARAMS,
+                top_k=top_k,
+                expr=expr,
+                score_name="sparse",
+                candidate_limit=trace.candidate_capacity_for_stage("sparse"),
+            ),
+        ]
+        if file_scope is not None and file_scope_kind is not None:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(scope_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        if temporal_relaxed:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(temporal_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        results = await asyncio.gather(*calls)
+        before_result, after_result, sparse_result = results[:3]
+        before_results = [before_result, *results[3:]]
+        before, before_count = self._merge_diagnostic_candidates(before_results)
+        before_duration = max(result[3] for result in before_results)
+        first_error_index = next(
+            (index for index, result in enumerate(before_results) if result[4] is not None),
+            None,
+        )
+        before_error = before_results[first_error_index][4] if first_error_index is not None else None
+        for index, result in enumerate(before_results):
+            if result[4] is not None and index != first_error_index:
+                trace.record_error("dense_before_threshold", result[4])
+        after, after_ids, after_count, after_duration, after_error = after_result
+        sparse, _sparse_ids, sparse_count, sparse_duration, sparse_error = sparse_result
+        fused_ids = self._row_ids(fused_rows)
+        fused = self._trace_candidates(
+            fused_rows,
+            "fused",
+            limit=trace.candidate_capacity_for_stage("hybrid_fused"),
+        )
+
+        if before_error is None and after_error is None:
+            before = self._mark_dense_filter_removals(
+                before,
+                after_ids,
+                file_scope=file_scope,
+                file_scope_kind=file_scope_kind,
+                temporal_relaxed=temporal_relaxed,
+                similarity_threshold=similarity_threshold,
+            )
+        if after_error is None:
+            after = self._mark_removed_candidates(
+                after,
+                fused_ids,
+                "hybrid_top_k",
+                "Candidate did not advance into the production hybrid top-k.",
+            )
+        if sparse_error is None:
+            sparse = self._mark_removed_candidates(
+                sparse,
+                fused_ids,
+                "hybrid_top_k",
+                "Candidate did not advance into the production hybrid top-k.",
+            )
+
+        trace.timings["dense_search"] = max(before_duration, after_duration)
+        trace.timings["sparse_search"] = sparse_duration
+        self._record_diagnostic_stage(
+            trace, "dense_before_threshold", before, before_count, before_duration, before_error
+        )
+        self._record_diagnostic_stage(trace, "dense_after_threshold", after, after_count, after_duration, after_error)
+        self._record_diagnostic_stage(trace, "sparse", sparse, sparse_count, sparse_duration, sparse_error)
+        trace.record_stage(
+            "hybrid_fused",
+            status="complete",
+            candidates=fused,
+            candidate_count=len(fused_rows),
+        )
+
+    async def _record_dense_diagnostics(
+        self,
+        *,
+        trace: RetrievalTraceBuilder,
+        embedding: list[float],
+        top_k: int,
+        filters: dict[str, Any] | None,
+        similarity_threshold: float | None,
+        dense_rows: list[dict[str, Any]],
+        production_duration: float,
+        vector_field: str,
+    ) -> None:
+        after = self._trace_candidates(
+            dense_rows,
+            "dense",
+            limit=trace.candidate_capacity_for_stage("dense_after_threshold"),
+        )
+        after_ids = self._row_ids(dense_rows)
+        after_count = len(dense_rows)
+        scope_filters, file_scope, file_scope_kind = self._scope_relaxed_diagnostic_filters(filters)
+        temporal_filters, temporal_relaxed = self._temporal_relaxed_diagnostic_filters(filters)
+        if similarity_threshold is None:
+            before_result = (
+                self._trace_candidates(
+                    dense_rows,
+                    "dense",
+                    limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                ),
+                after_ids,
+                after_count,
+                production_duration,
+                None,
+            )
+        else:
+            before_result = await self._diagnostic_search(
+                data=[embedding],
+                anns_field=vector_field,
+                search_params=self._dense_search_params(None),
+                top_k=top_k,
+                expr=self._build_filter_expr(filters),
+                score_name="dense",
+                candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+            )
+        before_results = [before_result]
+        calls = []
+        if file_scope is not None and file_scope_kind is not None:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(scope_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        if temporal_relaxed:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(temporal_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        extra_results = await asyncio.gather(*calls) if calls else []
+        before_results.extend(extra_results)
+        before, before_count = self._merge_diagnostic_candidates(before_results)
+        first_error_index = next(
+            (index for index, result in enumerate(before_results) if result[4] is not None),
+            None,
+        )
+        before_error = before_results[first_error_index][4] if first_error_index is not None else None
+        for index, result in enumerate(before_results):
+            if result[4] is not None and index != first_error_index:
+                trace.record_error("dense_before_threshold", result[4])
+        if similarity_threshold is None:
+            extra_duration = max((result[3] for result in extra_results), default=0.0)
+            before_duration = production_duration + extra_duration
+            dense_duration = before_duration
+        else:
+            before_duration = max(result[3] for result in before_results)
+            dense_duration = production_duration + before_duration
+        if before_error is None:
+            before = self._mark_dense_filter_removals(
+                before,
+                after_ids,
+                file_scope=file_scope,
+                file_scope_kind=file_scope_kind,
+                temporal_relaxed=temporal_relaxed,
+                similarity_threshold=similarity_threshold,
+            )
+        trace.timings["dense_search"] = dense_duration
+        self._record_diagnostic_stage(
+            trace, "dense_before_threshold", before, before_count, before_duration, before_error
+        )
+        trace.record_stage(
+            "dense_after_threshold",
+            status="complete",
+            candidates=after,
+            candidate_count=after_count,
+            duration_seconds=production_duration,
+        )
+        trace.record_stage("sparse", status="unavailable", candidates=[])
+        trace.record_stage("hybrid_fused", status="unavailable", candidates=[])
 
     def _dense_search_params(self, similarity_threshold: float | None) -> dict[str, Any]:
         """Build the dense COSINE search params, optionally range-filtered.
@@ -1157,6 +2060,7 @@ class MilvusVectorStore(VectorStore):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        trace: RetrievalTraceBuilder | None = None,
         vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search — single entry point for dense and hybrid.
@@ -1181,10 +2085,49 @@ class MilvusVectorStore(VectorStore):
             # Nothing was indexed with this embedder yet.
             return []
         if self._hybrid:
-            return await self._hybrid_search(
-                embedding, query_text, top_k, collection, filters, similarity_threshold, field
+            result = await self._hybrid_search(
+                embedding,
+                query_text,
+                top_k,
+                collection,
+                filters,
+                similarity_threshold,
+                field,
             )
-        return await self._dense_search(embedding, top_k, collection, filters, similarity_threshold, field)
+            if trace is not None and query_text is not None:
+                try:
+                    await self._record_hybrid_diagnostics(
+                        trace=trace,
+                        embedding=embedding,
+                        query_text=query_text,
+                        top_k=top_k,
+                        filters=filters,
+                        similarity_threshold=similarity_threshold,
+                        fused_rows=result,
+                        vector_field=field,
+                    )
+                except Exception as error:
+                    trace.record_error("hybrid_diagnostics", error)
+            return result
+
+        production_started = time.perf_counter() if trace is not None else None
+        result = await self._dense_search(embedding, top_k, collection, filters, similarity_threshold, field)
+        if trace is not None and production_started is not None:
+            production_duration = time.perf_counter() - production_started
+            try:
+                await self._record_dense_diagnostics(
+                    trace=trace,
+                    embedding=embedding,
+                    top_k=top_k,
+                    filters=filters,
+                    similarity_threshold=similarity_threshold,
+                    dense_rows=result,
+                    production_duration=production_duration,
+                    vector_field=field,
+                )
+            except Exception as error:
+                trace.record_error("dense_diagnostics", error)
+        return result
 
     async def _has_dense_field(self, field: str) -> bool:
         """Whether ``field`` is on the live schema.
@@ -1410,7 +2353,37 @@ class MilvusVectorStore(VectorStore):
 
         return int(result.get("delete_count", 0)) if isinstance(result, dict) else 0
 
-    async def upsert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
+    def _fit_raw_entities(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        protected_metadata: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fit dynamic metadata in raw rows before metadata updates or copies are written."""
+        static_fields = {"_id", "text", "partition", "file_id", *INDEXED_TIME_FIELDS}
+        if self._hybrid:
+            static_fields.add("sparse")
+        static_fields.update(key for entity in entities for key in entity if is_vector_field_key(key))
+        fitted_entities = []
+        for entity in entities:
+            fitted = dict(entity)
+            _fit_milvus_row_limits(
+                fitted,
+                static_fields=static_fields,
+                json_max_length=self._config.json_max_length,
+                json_safety_margin_bytes=self._config.json_safety_margin_bytes,
+                protected_metadata=protected_metadata,
+            )
+            fitted_entities.append(fitted)
+        return fitted_entities
+
+    async def upsert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        collection: str = "default",
+        *,
+        protected_metadata: Mapping[str, Any] | None = None,
+    ) -> int:
         """Upsert raw Milvus entities that already include vector data.
 
         This is intentionally narrower than the VectorStore port: it supports
@@ -1420,11 +2393,12 @@ class MilvusVectorStore(VectorStore):
         self._resolve_collection(collection)
         if not entities:
             return 0
+        fitted_entities = self._fit_raw_entities(entities, protected_metadata=protected_metadata)
 
         try:
             result = await self._async_client.upsert(
                 collection_name=self._collection_name,
-                data=entities,
+                data=fitted_entities,
             )
         except MilvusException as e:
             raise VDBInsertError(
@@ -1437,18 +2411,144 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields(fitted_entities[0])
+        return (
+            int(result.get("upsert_count", len(fitted_entities))) if isinstance(result, dict) else len(fitted_entities)
+        )
+
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        """Partial upsert of ``{_id, field}`` per chunk.
+
+        Milvus keeps every field the upsert does not name, including the
+        dynamic ones, and accepts ``None`` for a nullable vector: the chunk then
+        drops out of that field's searches. On an auto-id collection it refuses
+        the whole batch when any ``_id`` no longer exists, so a chunk deleted
+        concurrently fails the write instead of leaving a row holding only a
+        vector (all verified on Milvus 3.0.1).
+
+        Milvus 3.0.2 rewrites dynamic-field numbers through float64, which can
+        round integers beyond ±2**53, including nested values. The tested
+        Milvus 3.0.5 build preserves them. On older or unverified builds, this
+        method warns when the 3.0.2 conversion would change a value. Section
+        IDs above :data:`MAX_SECTION_ID` remain deliberately folded so chunk
+        neighbour links are stable across server versions.
+
+        A partial upsert changes only the requested vector field and preserves
+        the other row fields. Full-row upserts can also preserve the existing
+        auto-generated ``_id`` on Milvus 3.0.5, but require sending the full row.
+
+        Once Storage V3 is enabled, Milvus can generate a field from a function
+        and backfill existing rows itself (``add_function_field``). Today that
+        backfill covers BM25 and MinHash only, and embedding providers are read
+        from ``milvus.yaml`` at startup; when Milvus supports text-embedding
+        functions on existing rows, re-embedding could move there instead of
+        computing vectors client-side and writing them here.
+        """
+        if not field.startswith(VECTOR_FIELD_PREFIX):
+            raise ValueError(f"'{field}' is not a per-embedder dense vector field.")
+        if not vectors:
+            return 0
+
+        entities = {int(chunk_id): {"_id": int(chunk_id), field: vector} for chunk_id, vector in vectors.items()}
+        rounded: dict[str, set[str]] = {}
+        try:
+            rows = await asyncio.to_thread(self._iter_query, f"_id in {list(entities)}", ["file_id", "$meta"])
+            for row in rows:
+                entities[row["_id"]].update(
+                    (key, row[key] & MAX_SECTION_ID)
+                    for key in SECTION_ID_KEYS
+                    if isinstance(row.get(key), int) and not 0 <= row[key] <= MAX_SECTION_ID
+                )
+                keys = {
+                    key
+                    for key, value in row.items()
+                    if key not in ("_id", "file_id", *SECTION_ID_KEYS) and _changed_by_float64(value)
+                }
+                if keys:
+                    rounded.setdefault(str(row.get("file_id")), set()).update(keys)
+            if rounded and await self._server_preserves_dynamic_int64():
+                rounded.clear()
+            result = await self._async_client.upsert(
+                collection_name=self._collection_name,
+                data=list(entities.values()),
+                partial_update=True,
+            )
+        except MilvusException as e:
+            raise VDBInsertError(
+                f"Milvus partial upsert into `{field}` failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus partial upsert into `{field}`: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+
+        if rounded:
+            logger.bind(
+                field=field,
+                server_version=self._server_version or "unknown",
+                rounded={file_id: sorted(keys) for file_id, keys in rounded.items()},
+            ).warning(
+                "Milvus server version is older than 3.0.5 or unverified; large integers in these files' "
+                "chunk metadata may be rounded by partial upsert. Postgres keeps each file's exact upload metadata."
+            )
+        await self._flush_new_fields([field])
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
-    async def insert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
+    async def _server_preserves_dynamic_int64(self) -> bool:
+        """Probe Milvus's version; briefly cache failures to avoid serial retries."""
+        if self._server_version_checked:
+            return _milvus_preserves_dynamic_int64(self._server_version)
+        failed_at = self._server_version_probe_failed_at
+        if failed_at is not None and time.monotonic() - failed_at < _SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS:
+            return False
+
+        if not self._server_version_checked:
+            async with self._server_version_lock:
+                if self._server_version_checked:
+                    return _milvus_preserves_dynamic_int64(self._server_version)
+                failed_at = self._server_version_probe_failed_at
+                if failed_at is not None and time.monotonic() - failed_at < _SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS:
+                    return False
+                try:
+                    response = await asyncio.to_thread(
+                        self._client.get_server_version,
+                        timeout=_SCHEMA_PROBE_TIMEOUT,
+                        detail=True,
+                    )
+                except Exception:
+                    self._server_version_probe_failed_at = time.monotonic()
+                    return False
+                if isinstance(response, Mapping):
+                    version = response.get("version")
+                else:
+                    version = response
+                if not isinstance(version, str):
+                    self._server_version_probe_failed_at = time.monotonic()
+                    return False
+                self._server_version = version
+                self._server_version_checked = True
+                self._server_version_probe_failed_at = None
+        return _milvus_preserves_dynamic_int64(self._server_version)
+
+    async def insert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        collection: str = "default",
+        *,
+        protected_metadata: Mapping[str, Any] | None = None,
+    ) -> int:
         """Insert raw Milvus entities that already include vector data."""
         self._resolve_collection(collection)
         if not entities:
             return 0
+        fitted_entities = self._fit_raw_entities(entities, protected_metadata=protected_metadata)
 
         try:
             result = await self._async_client.insert(
                 collection_name=self._collection_name,
-                data=entities,
+                data=fitted_entities,
             )
         except MilvusException as e:
             raise VDBInsertError(
@@ -1461,7 +2561,54 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
-        return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
+        await self._flush_new_fields(fitted_entities[0])
+        return (
+            int(result.get("insert_count", len(fitted_entities))) if isinstance(result, dict) else len(fitted_entities)
+        )
+
+    async def make_searchable(self, field: str) -> None:
+        """Flush, then wait until ``field`` answers a search.
+
+        Milvus refuses searches on a dense field added to a loaded collection
+        until some of its data is flushed (verified on Milvus 3.0.2), and by
+        default seals a segment under 16 MB by itself only once it is a day old.
+        The flushed data then takes a moment to be indexed and loaded. After
+        that, later writes into the field are searchable at once.
+        """
+        try:
+            await asyncio.to_thread(self._client.flush, self._collection_name)
+        except MilvusException as e:
+            raise VDBInsertError(f"Milvus flush failed: {e!s}", collection_name=self._collection_name) from e
+        dimension = await self.vector_dimension(field)
+        if not dimension:
+            return
+        probe = [1.0] + [0.0] * (dimension - 1)
+        deadline = time.monotonic() + _SEARCHABLE_TIMEOUT
+        logger.bind(field=field).info("Flushed; waiting for the vector field to answer searches")
+        while True:
+            try:
+                await self._async_client.search(
+                    collection_name=self._collection_name, data=[probe], anns_field=field, limit=1
+                )
+                return
+            except MilvusException as e:
+                if time.monotonic() >= deadline:
+                    raise VDBSearchError(
+                        f"`{field}` still refuses searches {_SEARCHABLE_TIMEOUT:.0f}s after a flush: {e!s}",
+                        collection_name=self._collection_name,
+                    ) from e
+            await asyncio.sleep(_SEARCHABLE_POLL)
+
+    async def _flush_new_fields(self, fields: Iterable[str]) -> None:
+        """After the first write into a field this process added, make it searchable."""
+        for field in self._unflushed_fields.intersection(fields):
+            try:
+                await self.make_searchable(field)
+            except VDBError as e:
+                # The write itself landed; the next one into the field retries.
+                logger.bind(field=field).warning(f"New vector field not searchable yet: {e!s}")
+                continue
+            self._unflushed_fields.discard(field)
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         """Public entry point for materialising the backing collection.
@@ -1543,6 +2690,7 @@ class MilvusVectorStore(VectorStore):
                     operation="create_index",
                 ) from e
             self._dense_fields_cache = None
+            self._unflushed_fields.add(field)
             logger.bind(field=field, dimension=dimension).info("Indexed per-embedder dense vector field")
         return created
 
@@ -1666,7 +2814,25 @@ class MilvusVectorStore(VectorStore):
     async def check_health(self) -> None:
         # A missing collection is normal before the first upload. A failed RPC
         # is not. Use the async data-plane client so cancellation stops the RPC.
-        await self._async_client.has_collection(self._collection_name, timeout=2.0)
+        if not await self._async_client.has_collection(self._collection_name, timeout=2.0):
+            return
+        if self._health_schema_confirmed:
+            return
+        # Searches and uploads refuse a collection at another schema version, so
+        # neither is this replica ready (#1064). Only a match is remembered: the
+        # migration runs while the pod is up, and readiness recovers once it ends.
+        desc = await self._async_client.describe_collection(self._collection_name, timeout=2.0)
+        stored_version = _stored_schema_version(desc)
+        expected_version = self._config.schema_version
+        if stored_version != expected_version:
+            raise VDBSchemaMigrationRequiredError(
+                f"Collection `{self._collection_name}` is at schema version {stored_version}, "
+                f"but this build expects {expected_version}.",
+                collection_name=self._collection_name,
+                stored_version=stored_version,
+                expected_version=expected_version,
+            )
+        self._health_schema_confirmed = True
 
     async def vector_dimension(self, vector_field: str | None = None) -> int | None:
         """Dimension of ``vector_field`` on the live schema, or ``None`` if it is not there.
@@ -1775,8 +2941,9 @@ class MilvusVectorStore(VectorStore):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full row data for every chunk matching ``filters``.
+        """Return full row data for chunks matching ``filters``, optionally bounded.
 
         ``output_fields`` defaults to every field but the vectors. Callers that
         write the rows back need the vectors too and pass ``["*"]``, which in
@@ -1784,10 +2951,12 @@ class MilvusVectorStore(VectorStore):
         which strips them).
         """
         self._resolve_collection(collection)
+        if limit is not None and limit <= 0:
+            return []
         expr = self._build_filter_expr(filters)
         if not output_fields:
             if self._scalar_output_fields is None:
                 description = await asyncio.to_thread(self._client.describe_collection, self._collection_name)
                 self._scalar_output_fields = _scalar_output_fields(description)
             output_fields = list(self._scalar_output_fields)
-        return await asyncio.to_thread(self._iter_query, expr, output_fields)
+        return await asyncio.to_thread(self._iter_query, expr, output_fields, limit=limit)

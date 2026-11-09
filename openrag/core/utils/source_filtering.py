@@ -6,6 +6,8 @@ import asyncio
 import copy
 import json
 import re
+import unicodedata
+from collections.abc import Callable
 
 from core.utils.logging import get_logger
 
@@ -74,6 +76,21 @@ def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
     return preview
 
 
+# No source index has more digits than this, and int() refuses a string of more
+# than 4,300 digits, which a model can still write.
+_MAX_CITATION_DIGITS = 9
+
+
+def _citation_index(digits: str) -> int:
+    """The 1-based source index ``digits`` cites, or 0, which matches no source, if too long to be one."""
+    # ``\d`` matches every Unicode decimal digit, and int() reads them all, so a
+    # zero is any digit whose value is 0, not only the ASCII one.
+    significant = "".join(str(unicodedata.decimal(c)) for c in digits).lstrip("0")
+    if len(significant) > _MAX_CITATION_DIGITS:
+        return 0
+    return int(significant or "0")
+
+
 def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tuple[str, set[int], bool]:
     """Strip source tags and return citations found."""
     cited: set[int] = set()
@@ -86,7 +103,7 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
             # the regexes accept spaces, newlines and marks as well as commas
             # ([Sources: **1** **3**]), and a tag stripped with its numbers
             # unread would fall back to citing every source.
-            cited.update(int(n) for n in re.findall(r"\d+", match.group(1)))
+            cited.update(_citation_index(n) for n in re.findall(r"\d+", match.group(1)))
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)
@@ -160,6 +177,7 @@ async def stream_with_source_filtering(
     all_sources: list | None = None,
     include_all_retrieved: bool = False,
     extra_fields: dict | None = None,
+    terminal_extra_fields: dict | Callable[[], dict] | None = None,
 ):
     """Process an LLM SSE stream and, when active, strip source tags.
 
@@ -360,12 +378,31 @@ async def stream_with_source_filtering(
         tail_chunk["extra"] = extra_payload
         yield f"data: {json.dumps(tail_chunk)}\n\n"
 
+    finish_extra = None
+    if template or terminal_extra_fields:
+        finish_extra = dict(extra_payload)
+        if terminal_extra_fields:
+            try:
+                finalized_fields = terminal_extra_fields() if callable(terminal_extra_fields) else terminal_extra_fields
+                finish_extra.update(finalized_fields)
+            except Exception as error:  # noqa: BLE001 - optional telemetry must not break the answer stream
+                logger.bind(error_type=type(error).__name__).warning(
+                    "Terminal telemetry could not be finalized and was omitted."
+                )
+
     if template:
         await asyncio.sleep(0.05)
         finish_chunk = copy.deepcopy(template)
         finish_chunk["choices"][0]["delta"] = {}
         finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-        finish_chunk["extra"] = extra_payload
+        finish_chunk["extra"] = finish_extra
+        yield f"data: {json.dumps(finish_chunk)}\n\n"
+    elif finish_extra is not None:
+        finish_chunk = {
+            "model": model_name,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "extra": finish_extra,
+        }
         yield f"data: {json.dumps(finish_chunk)}\n\n"
 
     yield "data: [DONE]\n\n"

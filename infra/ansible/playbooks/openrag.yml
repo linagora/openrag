@@ -215,6 +215,6 @@
             msg:
               - "Server Type: {{ 'GPU-enabled' if inventory_hostname in groups['gpu_servers'] else 'CPU-only' }}"
               - "OpenRAG API: http://{{ ansible_default_ipv4.address }}:8080"
-              - "{{ 'Ray Dashboard: http://' + ansible_default_ipv4.address + ':8265' if inventory_hostname in groups['gpu_servers'] else 'Ray Dashboard: Not available (CPU-only mode)' }}"
+              - "Ray Dashboard: not published (open it on 127.0.0.1:8265 with: docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml{{ ' --profile cpu' if compose_profile else '' }} up -d)"
               - "Milvus: {{ ansible_default_ipv4.address }}:19530"
       become_user: "{{ project_user }}"

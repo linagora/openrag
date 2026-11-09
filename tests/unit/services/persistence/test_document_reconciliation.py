@@ -81,6 +81,8 @@ async def test_indexed_corpus_state_streams_one_consistent_ordered_snapshot():
             "chunk_count": 3,
             "relationship_id": "relationship-a",
             "parent_id": "parent-a",
+            "embedder_model_name": "model-a",
+            "embedder_vector_field": "vector_a",
         }
     ]
     connection = _StreamingConnection(rows)
@@ -92,6 +94,11 @@ async def test_indexed_corpus_state_streams_one_consistent_ordered_snapshot():
     relationship_changed = await repo.get_indexed_corpus_state("a", document_ids_limit=1)
     rows[0]["parent_id"] = "parent-b"
     parent_changed = await repo.get_indexed_corpus_state("a", document_ids_limit=1)
+    # A re-embed, a drift repair included, changes nothing else about the file.
+    rows[0]["embedder_model_name"] = "model-b"
+    reembedded = await repo.get_indexed_corpus_state("a", document_ids_limit=1)
+    rows[0]["embedder_vector_field"] = "vector_b"
+    moved = await repo.get_indexed_corpus_state("a", document_ids_limit=1)
 
     assert first.count == 1
     assert len(first.digest) == 64
@@ -99,6 +106,7 @@ async def test_indexed_corpus_state_streams_one_consistent_ordered_snapshot():
     assert first.document_ids_truncated is False
     assert first.digest != relationship_changed.digest
     assert relationship_changed.digest != parent_changed.digest
+    assert parent_changed.digest != reembedded.digest != moved.digest
     query, partition, prefetch = connection.cursor_call
     assert partition == "a"
     assert prefetch == 1000
@@ -106,6 +114,7 @@ async def test_indexed_corpus_state_streams_one_consistent_ordered_snapshot():
     assert "LIMIT" not in query
     assert "relationship_id" in query
     assert "parent_id" in query
+    assert "embedder_model_name" in query and "embedder_vector_field" in query
     assert connection.transaction_kwargs == {"isolation": "repeatable_read", "readonly": True}
 
 

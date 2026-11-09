@@ -379,6 +379,46 @@ async def test_refresh_if_stale_does_not_reload_current_presets():
 
 
 @pytest.mark.asyncio
+async def test_refresh_if_stale_loads_new_endpoints_before_what_names_them():
+    """A partition a swap switched on another process names the swap's target,
+    an endpoint this process may never have loaded: register new endpoints first,
+    so no request resolves the reloaded partition against a registry without it."""
+    from core.config.root import Settings
+    from services.orchestrators.preset_service import PresetService
+
+    order: list[str] = []
+
+    class RecordingRepo(_FakePresetRepo):
+        async def load_all_with_revision(self):
+            order.append("presets")
+            return await super().load_all_with_revision()
+
+    class RecordingPartitionService:
+        async def load_partitions(self) -> None:
+            order.append("partitions")
+
+    async def load_new_endpoints() -> None:
+        order.append("endpoints")
+
+    repo = RecordingRepo(rows=[_make_row("audio", "indexation")])
+    svc = PresetService(
+        preset_repo=repo,
+        config=Settings(),
+        partition_service=RecordingPartitionService(),
+        load_new_endpoints=load_new_endpoints,
+    )
+    await svc.load_all()
+    order.clear()
+
+    assert await svc.refresh_if_stale() is False
+    assert order == []
+
+    repo._revision += 1
+    assert await svc.refresh_if_stale() is True
+    assert order == ["endpoints", "presets", "partitions"]
+
+
+@pytest.mark.asyncio
 async def test_refresh_if_stale_keeps_revision_unadvanced_when_partition_reload_fails():
     from core.config.root import Settings
 
@@ -398,6 +438,28 @@ async def test_refresh_if_stale_keeps_revision_unadvanced_when_partition_reload_
         await svc.refresh_if_stale()
 
     assert svc._loaded_revision == 0
+
+
+@pytest.mark.asyncio
+async def test_try_refresh_if_stale_reloads_or_keeps_the_cache_when_the_probe_fails():
+    from core.config.root import Settings
+
+    repo = _FakePresetRepo(rows=[_make_row("audio", "indexation", {"stt": "old-stt"})])
+    settings = Settings()
+    partition_service = _FakePartitionService()
+    svc = _make_service(repo, settings=settings, partition_service=partition_service)
+    await svc.load_all()
+    repo._revision += 1
+
+    await svc.try_refresh_if_stale()
+    assert partition_service.load_calls == 1
+
+    async def unavailable() -> int:
+        raise RuntimeError("database unavailable")
+
+    repo.latest_revision = unavailable
+    await svc.try_refresh_if_stale()
+    assert partition_service.load_calls == 1
 
 
 # ------------------------------------------------------------------

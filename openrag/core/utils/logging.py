@@ -1,4 +1,5 @@
 import inspect
+import ipaddress
 import json
 import logging
 import sys
@@ -26,6 +27,102 @@ def mask_email(email: str | None) -> str:
     local, _, domain = email.partition("@")
     masked_local = f"{local[0]}***" if local else "***"
     return f"{masked_local}@{domain}"
+
+
+def truncate_client_addr(client_addr: object) -> str:
+    """Reduce uvicorn's ``host:port`` client address to its network.
+
+    IPv4 keeps its /24 (``203.0.113.42:51234`` -> ``203.0.113.0``) and IPv6
+    its /48; the port is dropped. That is enough to spot a misbehaving network
+    without the log identifying one subscriber. An empty address stays empty;
+    anything that is not an IP address becomes ``-``. A ``(host, port)``
+    tuple, as some WebSocket implementations pass it, is read the same way, and
+    an IPv4-mapped IPv6 address is truncated as the IPv4 address it carries.
+    """
+    if isinstance(client_addr, tuple) and client_addr:
+        client_addr = f"{client_addr[0]}:0"
+    if not isinstance(client_addr, str):
+        return "-"
+    if not client_addr:
+        return client_addr
+    # uvicorn always appends ``:port`` (``"%s:%d" % scope["client"]``), so the
+    # last colon is the port separator for IPv6 too: ``::1:5678`` -> ``::1``.
+    for candidate in (client_addr.rsplit(":", 1)[0], client_addr):
+        try:
+            address = ipaddress.ip_address(candidate.strip("[]"))
+        except ValueError:
+            continue
+        if address.version == 6 and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        prefix = 24 if address.version == 4 else 48
+        return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False).network_address)
+    return "-"
+
+
+def _strip_query_string(path: str) -> str:
+    path, separator, _ = path.partition("?")
+    return f"{path}?[REDACTED]" if separator else path
+
+
+class AccessLogMinimiser(logging.Filter):
+    """Keep personal data out of uvicorn's request lines.
+
+    uvicorn logs ``<client ip:port> - "<METHOD> <path?query> HTTP/x" <status>``
+    for every request (on ``uvicorn.access``) and the same shape for WebSocket
+    handshakes (on ``uvicorn.error``). Behind a proxy with ``--proxy-headers``
+    the address is the end user's, and the query string carries whatever the
+    caller sent: the question in ``GET /search?text=…``, the OIDC ``code`` on
+    ``/auth/callback``. This filter rewrites the record's arguments:
+
+    - every query string becomes ``?[REDACTED]``; the path is kept;
+    - the client address is truncated by :func:`truncate_client_addr`, unless
+      ``personal_data`` is set (``LOG_PERSONAL_DATA=true``), the switch an
+      operator turns on to keep personal data in logs for troubleshooting or
+      security investigations.
+
+    It sits on the loggers themselves, so it applies in text mode (uvicorn's
+    own handlers) and in JSON mode (the root interceptor) alike, and survives
+    uvicorn's ``dictConfig``, which replaces a logger's handlers but never
+    removes its filters.
+    """
+
+    def __init__(self, personal_data: bool = False) -> None:
+        super().__init__()
+        self.personal_data = personal_data
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not (isinstance(record.msg, str) and record.msg.startswith('%s - "') and isinstance(args, tuple) and args):
+            return True
+        client_addr, *rest = args
+        if not self.personal_data:
+            client_addr = truncate_client_addr(client_addr)
+        # Every string argument but the client is the method, the request
+        # target or the HTTP version; only a target has a ``?``, and it may be
+        # absolute (``http://host/search?text=…``) rather than start with ``/``.
+        rest = [_strip_query_string(arg) if isinstance(arg, str) else arg for arg in rest]
+        record.args = (client_addr, *rest)
+        return True
+
+
+# uvicorn's request lines go to ``uvicorn.access``; its WebSocket handshake
+# lines, same shape, to ``uvicorn.error``.
+_ACCESS_LOG_LOGGERS = ("uvicorn.access", "uvicorn.error")
+
+
+def install_access_log_minimiser(personal_data: bool = False) -> None:
+    """Attach one :class:`AccessLogMinimiser` to each uvicorn logger.
+
+    Idempotent, like :func:`intercept_stdlib_logging`: ``get_logger()`` runs at
+    import in many modules, so an existing filter is updated, never doubled.
+    """
+    for name in _ACCESS_LOG_LOGGERS:
+        std_logger = logging.getLogger(name)
+        existing = [f for f in std_logger.filters if isinstance(f, AccessLogMinimiser)]
+        if existing:
+            existing[0].personal_data = personal_data
+        else:
+            std_logger.addFilter(AccessLogMinimiser(personal_data))
 
 
 def terminal_formatter(record) -> str:
@@ -223,16 +320,23 @@ def get_logger(config=None):
 
     logger.remove()
 
+    # ``diagnose=False`` on every sink: loguru's default annotates each
+    # traceback frame with its variables' values, which writes whatever a
+    # frame holds (tokens, settings, request bodies, prompts) to the log.
     if getattr(config.verbose, "format", "text") == "json":
         # Machine format for collectors: Docker / the kubelet capture stderr
         # and Alloy/Promtail parse each line (docs: loki_logs.md).
-        logger.add(json_sink, level=config.verbose.level)
+        logger.add(json_sink, level=config.verbose.level, diagnose=False)
         intercept_stdlib_logging(config.verbose.level)
     else:
         # Pretty, colorized logs to the terminal (stderr): the level label is
         # colored by severity via loguru's <level> tag and the call site is
         # cyan. colorize=True forces ANSI on even when stderr isn't a TTY
         # (e.g. under ``docker compose up``).
-        logger.add(sys.stderr, format=terminal_formatter, level=config.verbose.level, colorize=True)
+        logger.add(sys.stderr, format=terminal_formatter, level=config.verbose.level, colorize=True, diagnose=False)
+
+    # Both formats: uvicorn's request lines are personal data (client address,
+    # query string) whichever handler ends up printing them.
+    install_access_log_minimiser(getattr(config.verbose, "personal_data", False))
 
     return logger

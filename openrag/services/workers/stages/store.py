@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,6 +18,7 @@ async def store_stage(
     timeout: float | None = None,
     per_chunk_timeout: float = 0.0,
     vector_field: str | None = None,
+    indexed_at: datetime | None = None,
 ) -> MutableMapping[str, Any]:
     """Upsert ``row["chunks"]`` into the configured vector collection.
 
@@ -49,11 +50,19 @@ async def store_stage(
         # arg below) and the Postgres catalog row (read back from the row in the
         # orchestrator). Keep it a ``datetime``: the catalog write binds it to a
         # ``timestamptz`` column and asyncpg rejects a pre-stringified value.
-        indexed_at = datetime.now(UTC)
+        indexed_at = indexed_at if indexed_at is not None else datetime.now(UTC)
         row["indexed_at"] = indexed_at
 
+        document = row.get("document")
+        protected_metadata = getattr(document, "metadata", None)
+        if not isinstance(protected_metadata, Mapping) or not protected_metadata:
+            protected_metadata = None
+        upsert_kwargs = {"indexed_at": indexed_at, "vector_field": vector_field}
+        if protected_metadata is not None:
+            upsert_kwargs["protected_metadata"] = protected_metadata
+
         row["stored_count"] = await run_with_optional_timeout(
-            lambda: vector_store.upsert(chunks, indexed_at=indexed_at, vector_field=vector_field),
+            lambda: vector_store.upsert(chunks, **upsert_kwargs),
             effective_timeout,
         )
         row["stage"] = "stored"

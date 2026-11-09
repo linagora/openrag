@@ -26,6 +26,7 @@ from api.schemas.admin.model_endpoint_schemas import (
     ValidateEndpointResponse,
     validate_llm_token_extra,
     validate_stt_fields,
+    validate_vlm_extra,
 )
 from core.config.model_endpoints import ModelEndpointRow
 from core.utils.exceptions import ValidationError
@@ -126,6 +127,16 @@ def _reject_non_llm_token_budgets(model_type: str, extra: dict | None) -> None:
         raise ValidationError(str(exc)) from exc
 
 
+def _reject_invalid_vlm_extra(model_type: str, extra: dict | None) -> None:
+    """Apply the VLM ``extra`` rules on update, scoped from the path like the LLM ones."""
+    if model_type != "vlm":
+        return
+    try:
+        validate_vlm_extra(extra)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
 async def _reject_invalid_stt_fields(model_type: str, name: str, fields: dict, service) -> None:
     """Validate STT-only fields, including the model retained by a partial update."""
     if model_type != "stt":
@@ -221,11 +232,14 @@ async def update_model_endpoint(
 
     Returns 409 ``EMBEDDER_EDIT_AFFECTS_INDEXED_DATA`` when an embedder's URL,
     model, ``implementation`` or ``max_model_len`` changes while partitions hold
-    files indexed with it, unless ``acknowledge_indexed_data`` is true.
+    files indexed with it, unless ``acknowledge_indexed_data`` is true. The same
+    change on the target of a running embedder swap returns 409
+    ``EMBEDDER_SWAP_IN_PROGRESS``, acknowledged or not.
     """
     fields = body.model_dump(exclude_unset=True)
     acknowledge_indexed_data = bool(fields.pop("acknowledge_indexed_data", False))
     _reject_non_llm_token_budgets(model_type, fields.get("extra"))
+    _reject_invalid_vlm_extra(model_type, fields.get("extra"))
     await _reject_invalid_stt_fields(model_type, name, fields, service)
     if "name" in fields:
         fields["new_name"] = fields.pop("name")

@@ -163,7 +163,9 @@ class PgDocumentRepository(DocumentRepository):
                 rows = conn.cursor(
                     """
                     SELECT file_id, indexed_at, content_sha256, chunk_count,
-                           relationship_id, parent_id
+                           relationship_id, parent_id,
+                           indexation_config->>'embedder_model_name' AS embedder_model_name,
+                           indexation_config->>'embedder_vector_field' AS embedder_vector_field
                     FROM files
                     WHERE partition_name = $1
                     ORDER BY file_id COLLATE "C"
@@ -180,6 +182,9 @@ class PgDocumentRepository(DocumentRepository):
                         row["chunk_count"],
                         row["relationship_id"],
                         row["parent_id"],
+                        # A re-embed changes the vectors and only these.
+                        row["embedder_model_name"],
+                        row["embedder_vector_field"],
                     ]
                     digest.update(json.dumps(identity, separators=(",", ":"), ensure_ascii=False).encode())
                     digest.update(b"\n")
@@ -405,12 +410,21 @@ class PgDocumentRepository(DocumentRepository):
         )
 
     async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
-        metadata = await self.pool.fetchval(
-            "SELECT file_metadata FROM files WHERE file_id = $1 AND partition_name = $2",
+        row = await self.pool.fetchrow(
+            "SELECT file_metadata, partition_name, indexed_at FROM files WHERE file_id = $1 AND partition_name = $2",
             file_id,
             partition,
         )
-        return dict(metadata) if isinstance(metadata, dict) else None
+        if row is None:
+            return None
+        indexed_at = row["indexed_at"]
+        # These fields are catalog columns, not upload metadata. Keep them
+        # authoritative even when copied metadata contains stale values.
+        return {
+            **(row["file_metadata"] or {}),
+            "partition": row["partition_name"],
+            "indexed_at": indexed_at.isoformat() if indexed_at else None,
+        }
 
     async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
         config = await self.pool.fetchval(
@@ -905,6 +919,33 @@ class PgDocumentRepository(DocumentRepository):
             return {}
         return {"files": [self._row_to_dict(r) for r in rows]}
 
+    async def list_file_embedders(self, partition: str) -> list[dict]:
+        rows = await self.pool.fetch(
+            """
+            SELECT file_id,
+                   indexation_config->>'embedder_model_name'   AS embedder_model_name,
+                   indexation_config->>'embedder_vector_field' AS embedder_vector_field
+            FROM files
+            WHERE partition_name = $1
+            ORDER BY file_id
+            """,
+            partition,
+        )
+        return [dict(r) for r in rows]
+
+    async def record_file_embedder(self, file_id: str, partition: str, provenance: dict) -> bool:
+        result = await self.pool.execute(
+            """
+            UPDATE files
+            SET indexation_config = COALESCE(indexation_config, '{}'::jsonb) || $3::jsonb
+            WHERE file_id = $1 AND partition_name = $2
+            """,
+            file_id,
+            partition,
+            provenance,
+        )
+        return result.split()[-1] != "0"
+
     async def count_files_by_embedder(self, partition: str) -> list[dict]:
         """How many files in *partition* were indexed with each embedder.
 
@@ -917,13 +958,14 @@ class PgDocumentRepository(DocumentRepository):
         """
         rows = await self.pool.fetch(
             """
-            SELECT indexation_config->>'embedder'            AS embedder,
-                   indexation_config->>'embedder_model_name' AS model_name,
+            SELECT indexation_config->>'embedder'             AS embedder,
+                   indexation_config->>'embedder_model_name'  AS model_name,
                    (indexation_config->>'embedder_dimension')::int AS dimension,
-                   COUNT(*)::int                             AS file_count
+                   indexation_config->>'embedder_vector_field' AS vector_field,
+                   COUNT(*)::int                              AS file_count
             FROM files
             WHERE partition_name = $1
-            GROUP BY 1, 2, 3
+            GROUP BY 1, 2, 3, 4
             ORDER BY file_count DESC, embedder NULLS LAST
             """,
             partition,
@@ -933,6 +975,7 @@ class PgDocumentRepository(DocumentRepository):
                 "embedder": r["embedder"],
                 "model_name": r["model_name"],
                 "dimension": r["dimension"],
+                "vector_field": r["vector_field"],
                 "file_count": r["file_count"],
             }
             for r in rows

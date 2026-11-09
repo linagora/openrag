@@ -19,8 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from itertools import chain as ichain
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.llm.llm import LLM, chat_content
 from core.models.chunk import Chunk
@@ -34,6 +33,12 @@ from core.utils.registry import Registry
 
 logger = logging.getLogger(__name__)
 
+MAX_EXPANSION_CONCURRENCY = 16
+
+
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
+
 
 class Retriever(ABC):
     """Common surface for all retrieval strategies."""
@@ -45,17 +50,25 @@ class Retriever(ABC):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run the strategy and return scored chunks."""
         ...
 
     @abstractmethod
-    async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
+    async def expand_search_results(
+        self,
+        results: list[Chunk],
+        filter_params: dict | None = None,
+        filter: str | None = None,
+    ) -> list[Chunk]:
         """Optionally enrich a result set with related/ancestor chunks.
 
         ``filter_params`` carries the same restriction (e.g. a workspace's
         ``file_id`` allowlist) the initial search was scoped by — expansion
         must never surface a chunk that restriction would have excluded.
+        ``filter`` is the expression that search used, so a temporal or caller
+        filter is not dropped when related chunks are added (#953).
         """
         ...
 
@@ -91,7 +104,11 @@ class BaseRetriever(Retriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.search(
             query=query,
             partition=partition,
@@ -100,9 +117,12 @@ class BaseRetriever(Retriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
-    async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
+    async def expand_search_results(
+        self, results: list[Chunk], filter_params: dict | None = None, filter: str | None = None
+    ) -> list[Chunk]:
         return await _expand_with_related_chunks(
             searcher=self.searcher,
             results=results,
@@ -111,6 +131,7 @@ class BaseRetriever(Retriever):
             related_limit=self.related_limit,
             max_ancestor_depth=self.max_ancestor_depth,
             filter_params=filter_params,
+            filter=filter,
         )
 
 
@@ -150,8 +171,12 @@ class MultiQueryRetriever(BaseRetriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         queries = await self._generate_queries(query)
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -160,6 +185,7 @@ class MultiQueryRetriever(BaseRetriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
 
@@ -196,12 +222,16 @@ class HyDeRetriever(BaseRetriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         hyde = (await self.get_hyde(query)).strip()
         if not hyde:
             queries = [query]
         else:
             queries = [hyde, query] if self.combine else [hyde]
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -210,6 +240,7 @@ class HyDeRetriever(BaseRetriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
 
@@ -221,8 +252,9 @@ async def _expand_with_related_chunks(
     related_limit: int = 10,
     max_ancestor_depth: int | None = None,
     filter_params: dict | None = None,
+    filter: str | None = None,
 ) -> list[Chunk]:
-    """Append related and/or ancestor chunks to a result set, deduplicated by id.
+    """Expand results with related, ancestor, and CSV continuation chunks.
 
     Failures on individual related/ancestor lookups are logged and treated
     as empty results, matching legacy behavior so retrieval remains
@@ -231,17 +263,26 @@ async def _expand_with_related_chunks(
     ``filter_params`` carries the same restriction the initial search was
     scoped by (e.g. a workspace's ``file_id`` allowlist) — passed through so
     related/ancestor expansion cannot surface a chunk outside that scope
-    (#706).
+    (#706). ``filter`` is that search's expression, so expansion cannot pull
+    in chunks the caller excluded (#953).
     """
-    if not results or (not include_related and not include_ancestors):
+    if not results:
+        return results
+    has_csv_row_siblings = any(_csv_row_sibling_ref(chunk) is not None for chunk in results)
+    if not include_related and not include_ancestors and not has_csv_row_siblings:
+        return results
+
+    if related_limit == 0:
         return results
 
     allowed_file_ids = file_id_restriction(filter_params)
     seen_ids = {c.id for c in results if c.id}
     expanded: list[Chunk] = list(results)
+    semaphore = asyncio.Semaphore(MAX_EXPANSION_CONCURRENCY)
 
     relationship_ids: set[tuple[str, str]] = set()
     file_infos: set[tuple[str, str]] = set()
+    csv_rows: set[tuple[str, str, int]] = set()
 
     for c in results:
         if include_related:
@@ -250,27 +291,56 @@ async def _expand_with_related_chunks(
                 relationship_ids.add((c.partition, rel_id))
         if include_ancestors and c.partition and c.document_id:
             file_infos.add((c.partition, c.document_id))
+        csv_ref = _csv_row_sibling_ref(c)
+        if csv_ref is not None:
+            csv_rows.add((c.partition, c.document_id, csv_ref))
 
     async def _safe_related(part: str, rel_id: str) -> list[Chunk]:
         try:
-            return await searcher.get_related_chunks(
-                partition=part, relationship_id=rel_id, limit=related_limit, allowed_file_ids=allowed_file_ids
-            )
+            async with semaphore:
+                return await searcher.get_related_chunks(
+                    partition=part,
+                    relationship_id=rel_id,
+                    limit=related_limit,
+                    allowed_file_ids=allowed_file_ids,
+                    filter=filter,
+                )
         except Exception:
             logger.warning("get_related_chunks failed (partition=%s, relationship_id=%s)", part, rel_id, exc_info=True)
             return []
 
     async def _safe_ancestors(part: str, file_id: str) -> list[Chunk]:
         try:
-            return await searcher.get_ancestor_chunks(
+            async with semaphore:
+                return await searcher.get_ancestor_chunks(
+                    partition=part,
+                    file_id=file_id,
+                    limit=related_limit,
+                    max_ancestor_depth=max_ancestor_depth,
+                    allowed_file_ids=allowed_file_ids,
+                    filter=filter,
+                )
+        except Exception:
+            logger.warning("get_ancestor_chunks failed (partition=%s, file_id=%s)", part, file_id, exc_info=True)
+            return []
+
+    async def _safe_csv_row(part: str, file_id: str, row_number: int) -> list[Chunk]:
+        try:
+            return await searcher.get_csv_row_chunks(
                 partition=part,
                 file_id=file_id,
+                row_number=row_number,
                 limit=related_limit,
-                max_ancestor_depth=max_ancestor_depth,
                 allowed_file_ids=allowed_file_ids,
             )
         except Exception:
-            logger.warning("get_ancestor_chunks failed (partition=%s, file_id=%s)", part, file_id, exc_info=True)
+            logger.warning(
+                "get_csv_row_chunks failed (partition=%s, file_id=%s, row_number=%s)",
+                part,
+                file_id,
+                row_number,
+                exc_info=True,
+            )
             return []
 
     tasks: list[asyncio.Future] = []
@@ -278,17 +348,98 @@ async def _expand_with_related_chunks(
         tasks.extend(_safe_related(part, rid) for part, rid in relationship_ids)
     if include_ancestors:
         tasks.extend(_safe_ancestors(part, fid) for part, fid in file_infos if part and fid)
+    tasks.extend(_safe_csv_row(part, fid, row) for part, fid, row in csv_rows if part and fid)
 
     if tasks:
         all_results = await asyncio.gather(*tasks)
-        for chunk in ichain.from_iterable(all_results):
-            if chunk.id and chunk.id in seen_ids:
-                continue
-            if chunk.id:
-                seen_ids.add(chunk.id)
-            expanded.append(chunk)
+        for result_group in all_results:
+            for chunk in result_group:
+                if chunk.id and chunk.id in seen_ids:
+                    continue
+                if chunk.id:
+                    seen_ids.add(chunk.id)
+                expanded.append(chunk)
 
-    return expanded
+    return order_csv_row_siblings(expanded)
+
+
+def _csv_row_sibling_ref(chunk: Chunk) -> int | None:
+    """Return a logical CSV-row number when the row has sibling chunks.
+
+    A row can be represented by several labelled cell continuations or by
+    several vertical column groups. Both shapes need one retrieval lookup so
+    an answer sees every value from the logical CSV record.
+    """
+    metadata = chunk.metadata
+    try:
+        row_number = int(metadata["csv_row_number"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    for number_key, total_key in (
+        ("csv_part", "csv_parts_total"),
+        ("csv_column_group", "csv_column_groups_total"),
+    ):
+        try:
+            if int(metadata.get(total_key, 0)) >= 2 and int(metadata[number_key]) >= 1:
+                return row_number
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def has_csv_row_siblings(chunks: list[Chunk]) -> bool:
+    """Whether any result identifies a logical CSV row split into chunks."""
+    return any(_csv_row_sibling_ref(chunk) is not None for chunk in chunks)
+
+
+def order_csv_row_siblings(chunks: list[Chunk]) -> list[Chunk]:
+    """Keep all retrieved pieces of a CSV row together in their source order.
+
+    Retrieval and reranking rank chunks independently. A question that needs
+    a value from a split cell or a distant column group must instead receive
+    the complete logical row. Column groups come first, then cell parts within
+    each group.
+    """
+    groups: dict[tuple[str, str, int], list[Chunk]] = {}
+    for chunk in chunks:
+        row_number = _csv_row_sibling_ref(chunk)
+        if row_number is not None and chunk.partition and chunk.document_id:
+            groups.setdefault((chunk.partition, chunk.document_id, row_number), []).append(chunk)
+
+    ordered: list[Chunk] = []
+    emitted: set[tuple[str, str, int]] = set()
+    for chunk in chunks:
+        row_number = _csv_row_sibling_ref(chunk)
+        key = (
+            (chunk.partition, chunk.document_id, row_number)
+            if row_number is not None and chunk.partition and chunk.document_id
+            else None
+        )
+        if key is None:
+            ordered.append(chunk)
+        elif key not in emitted:
+            ordered.extend(sorted(groups[key], key=_csv_sibling_sort_key))
+            emitted.add(key)
+    return ordered
+
+
+def _csv_sibling_sort_key(chunk: Chunk) -> tuple[int, int, str]:
+    """Sort column groups, then continuations within each group."""
+    metadata = chunk.metadata
+    try:
+        column_group = int(metadata.get("csv_column_group", 1))
+    except (TypeError, ValueError):
+        column_group = 1
+    try:
+        cell_part = int(metadata.get("csv_part", 1))
+    except (TypeError, ValueError):
+        cell_part = 1
+    return column_group, cell_part, chunk.id
+
+
+def order_csv_continuations(chunks: list[Chunk]) -> list[Chunk]:
+    """Backward-compatible name for ordering all CSV row siblings."""
+    return order_csv_row_siblings(chunks)
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ handed to the service as a callable), and ``StreamingResponse`` /
 
 import asyncio
 import json
+import traceback
 from typing import TYPE_CHECKING
 
 from api.dependencies.auth import (
@@ -25,6 +26,7 @@ from api.dependencies.llm import (
     get_partition_name,
     truncate,
 )
+from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
 from api.routers.user.source_links import build_document_source_link
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from core.config import load_config
@@ -32,7 +34,7 @@ from core.config.endpoints import client_llm_override, custom_endpoint_override_
 from core.models.preset import resolve_partition_chat_llm
 from core.prompts import message_tokens, tool_definition_tokens
 from core.utils import consts
-from core.utils.exceptions import OpenRAGError
+from core.utils.exceptions import OpenRAGError, ServiceUnavailableError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text
 from core.utils.web_url import normalize_web_url
@@ -130,7 +132,7 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
     deprecated ``@router.on_event("startup")`` hook), after the model-endpoint
     registry is loaded. Probes every registered LLM endpoint's ``/v1/models``
     for ``max_model_len`` — not just the default — so a partition's
-    ``chat_llm`` preset gets its own auto-probed budget instead of silently
+    ``chat_llm`` endpoint gets its own auto-probed budget instead of silently
     falling back to the global ``llm_context`` default. Endpoints that alias
     the same underlying config (the ``"default"`` name always points at
     whichever endpoint is ``is_default``) are probed once and the result
@@ -323,11 +325,11 @@ def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None)
     the request — so the token preflight is checked against the budget of the
     model that will really be called, not always the global default. Falls
     back to the ``"default"`` alias (see ``ModelEndpointService``) when no
-    single partition-scoped preset applies.
+    single partition-scoped endpoint applies.
 
     A partition's ``chat_llm`` can also go **stale** — the endpoint it names
     may have been deleted or renamed after assignment (nothing cascades the
-    preset). ``QueryService._resolve_llm`` handles that by catching the
+    reference). ``QueryService._resolve_llm`` handles that by catching the
     factory ``KeyError`` and answering with the catalog default; the preflight
     must converge on the same endpoint, otherwise it would check the request
     against the global budget while a differently-sized default endpoint
@@ -351,7 +353,7 @@ def get_max_model_tokens(partitions: list[str] | None = None, settings: "Setting
 
     Precedence: the resolved LLM endpoint's admin-configured
     ``max_llm_context_size`` (editable in the admin UI; resolved from the
-    partition's ``chat_llm`` preset when the request is scoped to partitions
+    partition's ``chat_llm`` endpoint when the request is scoped to partitions
     that agree on one, else the "default" endpoint) > the value auto-probed
     from that same endpoint's ``/v1/models`` at startup (see
     ``prime_max_model_tokens`` — cached per endpoint name, not just the
@@ -366,53 +368,74 @@ def get_max_model_tokens(partitions: list[str] | None = None, settings: "Setting
     return probed or int(config.llm_context.max_llm_context_size)
 
 
+def _token_validation_unavailable(error: Exception) -> ServiceUnavailableError:
+    # Counter exceptions can contain input text or credentials. Log only the
+    # type and stack locations; the raised error chains the original cause.
+    logger.warning(
+        "Token validation unavailable",
+        error_type=type(error).__name__,
+        traceback=[
+            f"{frame.filename}:{frame.lineno} in {frame.name}" for frame in traceback.extract_tb(error.__traceback__)
+        ],
+    )
+    return ServiceUnavailableError(
+        "Unable to validate request token limit. Try again.",
+        code="TOKEN_VALIDATION_UNAVAILABLE",
+    )
+
+
 def validate_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     max_tokens_allowed: int,
     settings: "Settings | None" = None,
     partitions: list[str] | None = None,
 ) -> tuple[bool, str]:
-    """Validate if the request respects the maximum token limit."""
+    """Validate the token budget, raising 503 if counting is unavailable."""
+    config = _runtime_config(settings)
     try:
-        config = _runtime_config(settings)
-        _length_function = get_num_tokens()
+        counter = get_num_tokens()
+    except Exception as error:
+        raise _token_validation_unavailable(error) from error
 
-        if isinstance(request, OpenAIChatCompletionRequest):
-            body = request.model_dump(exclude_none=True)
-            messages_tokens = sum(message_tokens(m, _length_function) for m in body["messages"])
-            tools_tokens = tool_definition_tokens(body, _length_function)
-            default_output_tokens = _effective_max_output_tokens(config, partitions)
-            requested_tokens = request.max_tokens or default_output_tokens
-            total_tokens_needed = messages_tokens + tools_tokens + requested_tokens
-            if total_tokens_needed > max_tokens_allowed:
-                tools_part = f"Tool definitions: {tools_tokens} tokens + " if tools_tokens else ""
-                return False, (
-                    f"Request exceeds maximum token limit. "
-                    f"Messages: {messages_tokens} tokens + "
-                    f"{tools_part}"
-                    f"Requested output: {requested_tokens} tokens = "
-                    f"{total_tokens_needed} tokens. "
-                    f"Maximum allowed: {max_tokens_allowed} tokens."
-                )
+    def _length_function(text: str) -> int:
+        try:
+            return counter(text)
+        except Exception as error:
+            raise _token_validation_unavailable(error) from error
 
-        elif isinstance(request, OpenAICompletionRequest):
-            prompt_tokens = _length_function(request.prompt)
-            default_output_tokens = _effective_max_output_tokens(config, partitions)
-            requested_tokens = request.max_tokens or default_output_tokens
-            total_tokens_needed = prompt_tokens + requested_tokens
-            if total_tokens_needed > max_tokens_allowed:
-                return False, (
-                    f"Request exceeds maximum token limit. "
-                    f"Prompt: {prompt_tokens} tokens + "
-                    f"Requested output: {requested_tokens} tokens = "
-                    f"{total_tokens_needed} tokens. "
-                    f"Maximum allowed: {max_tokens_allowed} tokens."
-                )
+    if isinstance(request, OpenAIChatCompletionRequest):
+        body = request.model_dump(exclude_none=True)
+        messages_tokens = sum(message_tokens(m, _length_function) for m in body["messages"])
+        tools_tokens = tool_definition_tokens(body, _length_function)
+        default_output_tokens = _effective_max_output_tokens(config, partitions)
+        requested_tokens = request.max_tokens or default_output_tokens
+        total_tokens_needed = messages_tokens + tools_tokens + requested_tokens
+        if total_tokens_needed > max_tokens_allowed:
+            tools_part = f"Tool definitions: {tools_tokens} tokens + " if tools_tokens else ""
+            return False, (
+                f"Request exceeds maximum token limit. "
+                f"Messages: {messages_tokens} tokens + "
+                f"{tools_part}"
+                f"Requested output: {requested_tokens} tokens = "
+                f"{total_tokens_needed} tokens. "
+                f"Maximum allowed: {max_tokens_allowed} tokens."
+            )
 
-        return True, ""
-    except Exception as e:
-        logger.warning("Error during token validation, skipping check", error=str(e))
-        return True, ""
+    elif isinstance(request, OpenAICompletionRequest):
+        prompt_tokens = _length_function(request.prompt)
+        default_output_tokens = _effective_max_output_tokens(config, partitions)
+        requested_tokens = request.max_tokens or default_output_tokens
+        total_tokens_needed = prompt_tokens + requested_tokens
+        if total_tokens_needed > max_tokens_allowed:
+            return False, (
+                f"Request exceeds maximum token limit. "
+                f"Prompt: {prompt_tokens} tokens + "
+                f"Requested output: {requested_tokens} tokens = "
+                f"{total_tokens_needed} tokens. "
+                f"Maximum allowed: {max_tokens_allowed} tokens."
+            )
+
+    return True, ""
 
 
 def _apply_default_max_tokens(
@@ -424,7 +447,7 @@ def _apply_default_max_tokens(
 
     The request schema leaves ``max_tokens`` unset because it is parsed before
     the partition is resolved; defaulting it there could only ever read the
-    *default* endpoint's budget, so a partition whose ``chat_llm`` preset
+    *default* endpoint's budget, so a partition whose ``chat_llm`` endpoint
     allows more output would still be capped at the default endpoint's value
     (and that value was then sent downstream, since the payload forwards
     ``max_tokens`` verbatim). Resolving it here — once the partition, and
@@ -541,6 +564,7 @@ async def openai_chat_completion(
     service=Depends(get_query_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/chat/completions")
@@ -551,6 +575,14 @@ async def openai_chat_completion(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The last message must be a non-empty user message",
         )
+
+    metadata = request.metadata or {}
+    if (
+        metadata.get("include_retrieval_trace") is True
+        or metadata.get("compare_original_query") is True
+        or metadata.get("bypass_query_contextualization") is True
+    ):
+        await diagnostics_guard.authorize(user)
 
     log.debug("Received chat completion request with messages: {}", truncate(str(request.messages)))
 
@@ -563,10 +595,11 @@ async def openai_chat_completion(
             partition_service=partition_service,
             is_admin=user["is_admin"],
         )
+        await service.refresh_partition_configs()
         log.debug(f"Using partitions: {partitions}")
 
     # Bound the caller's input size in every mode, against the resolved
-    # partition's chat_llm preset budget when one applies (else the default
+    # partition's chat_llm endpoint budget when one applies (else the default
     # LLM endpoint). RAG-injected context is added server-side and separately
     # capped (top_n, and max_prompt_tokens below), but the user's own messages
     # must be limited regardless of direct-LLM vs RAG.
@@ -589,6 +622,7 @@ async def openai_chat_completion(
                     payload=request.model_dump(exclude_none=True),
                     prepare_sources=prep,
                     model_name=model_name,
+                    request_id=getattr(request2.state, "request_id", None),
                     max_prompt_tokens=max_prompt_tokens,
                 ):
                     yield sse_line
@@ -612,6 +646,7 @@ async def openai_chat_completion(
         payload=request.model_dump(exclude_none=True),
         prepare_sources=prep,
         model_name=model_name,
+        request_id=getattr(request2.state, "request_id", None),
         max_prompt_tokens=max_prompt_tokens,
     )
     log.debug("Returning non-streaming completion chunk.")
@@ -683,6 +718,17 @@ async def openai_completion(
             detail="Streaming is not supported for this endpoint",
         )
 
+    metadata = request.metadata or {}
+    if (
+        metadata.get("include_retrieval_trace") is True
+        or metadata.get("compare_original_query") is True
+        or metadata.get("bypass_query_contextualization") is True
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Retrieval diagnostics are supported only by chat completions",
+        )
+
     if is_direct_llm_model(request, config):
         partitions = None
     else:
@@ -692,9 +738,10 @@ async def openai_completion(
             partition_service=partition_service,
             is_admin=user["is_admin"],
         )
+        await service.refresh_partition_configs()
 
     # Bound the caller's input size in every mode (RAG context is capped
-    # separately), against the resolved partition's chat_llm preset budget
+    # separately), against the resolved partition's chat_llm endpoint budget
     # when one applies.
     # Resolve the output budget now that the answering endpoint is known, so the
     # preflight below and the payload sent downstream both use the resolved

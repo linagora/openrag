@@ -12,6 +12,28 @@ from core.config.indexation import (
 from pydantic import ValidationError
 
 
+@pytest.mark.parametrize("batch_size", [0, -1, True, 1.5, "10000"])
+def test_csv_batch_size_must_be_a_positive_integer(batch_size):
+    with pytest.raises(ValidationError):
+        LoaderConfig(csv_batch_size=batch_size)
+
+
+@pytest.mark.parametrize("delimiter", ["", "||", "\n"])
+def test_csv_delimiter_must_be_one_character(delimiter):
+    with pytest.raises(ValidationError):
+        LoaderConfig(csv_delimiter=delimiter)
+
+
+def test_csv_loader_settings_can_be_overridden_by_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("CSV_BATCH_SIZE", "250")
+    monkeypatch.setenv("CSV_DELIMITER", ";")
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.loader.csv_batch_size == 250
+    assert settings.loader.csv_delimiter == ";"
+
+
 def test_transcriber_config_default_direct_upload_suffixes():
     cfg = TranscriberConfig()
     assert cfg.direct_upload_suffixes == set(_DEFAULT_DIRECT_UPLOAD_SUFFIXES)
@@ -94,3 +116,8 @@ def test_marker_timeout_rejects_zero_and_negative_values():
     for bad in (0, -1):
         with pytest.raises(ValidationError):
             LoaderConfig(marker_timeout=bad)
+
+
+def test_removed_image_captioning_url_key_is_ignored():
+    # Removed in #1294: configs that still set it must keep loading.
+    assert not hasattr(LoaderConfig(image_captioning_url=True), "image_captioning_url")

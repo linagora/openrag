@@ -24,6 +24,7 @@ TraceStageName = Literal[
     "partition_fused",
     "pre_rerank",
     "post_rerank",
+    "post_expansion",
     "final",
 ]
 TraceTimingName = (
@@ -44,6 +45,7 @@ RemovalReasonCode = Literal[
     "dense_threshold",
     "hybrid_top_k",
     "reranker_top_n",
+    "expansion_top_n",
     "final_top_n",
     "duplicate",
     "partition_filter",
@@ -51,6 +53,8 @@ RemovalReasonCode = Literal[
     "attachment_filter",
     "file_filter",
     "temporal_filter",
+    "partition_top_k",
+    "catalog_filter",
 ]
 
 
@@ -107,7 +111,7 @@ class TraceError(_TraceModel):
 
 
 class QueryRetrievalTrace(_TraceModel):
-    """Content-free retrieval stages produced for one partition or query."""
+    """Retrieval stages for one query; candidate records omit document content."""
 
     query: str | None = None
     partition: str | None = None

@@ -24,6 +24,7 @@ def test_redact_secrets_fully_hides_known_secret_keys_without_false_token_matche
                 "token_encryption_key": "fernet-secret",
             }
         ],
+        "headers": {"X-API-Key": "header-api-key", "X-Auth-Token": "header-token", "X-Request-Id": "req-1"},
     }
 
     redacted = redact_secrets(payload)
@@ -42,6 +43,7 @@ def test_redact_secrets_fully_hides_known_secret_keys_without_false_token_matche
     assert redacted["nested"][0]["refresh_token"] == "<redacted>"
     assert redacted["nested"][0]["signing_key"] == "<redacted>"
     assert redacted["nested"][0]["token_encryption_key"] == "<redacted>"
+    assert redacted["headers"] == {"X-API-Key": "<redacted>", "X-Auth-Token": "<redacted>", "X-Request-Id": "req-1"}
     assert payload["llm"]["api_key"] == "sk-llm-secret"
 
 
@@ -149,3 +151,50 @@ def test_preserve_existing_secrets_drops_unmatched_list_placeholders_without_ide
     )
 
     assert merged == {"headers": [{}]}
+
+
+def _endpoint_models_holding_a_key():
+    from api.schemas.admin.model_endpoint_schemas import (
+        CreateModelEndpointRequest,
+        RevealApiKeyResponse,
+        UpdateModelEndpointRequest,
+        ValidateEndpointRequest,
+    )
+    from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow
+
+    extra = {
+        "api_key": "sk-endpoint-secret",
+        "headers": {"Authorization": "Bearer sk-header-secret", "X-API-Key": "sk-hyphen-header-secret"},
+        "implementation": "vllm",
+    }
+    now = "2026-10-08T00:00:00+00:00"
+    return [
+        ModelEndpointConfig(endpoint="http://llm:8000/v1", extra=extra),
+        ModelEndpointRow(
+            name="llm", model_type="llm", endpoint="http://llm:8000/v1", extra=extra, created_at=now, updated_at=now
+        ),
+        CreateModelEndpointRequest(name="llm", model_type="llm", endpoint="http://llm:8000/v1", extra=extra),
+        UpdateModelEndpointRequest(extra=extra),
+        ValidateEndpointRequest(endpoint="http://llm:8000/v1", extra=extra, api_key="sk-endpoint-secret"),
+        RevealApiKeyResponse(api_key="sk-endpoint-secret"),
+    ]
+
+
+def test_endpoint_models_keep_their_api_key_out_of_repr_and_str():
+    """A traceback, an f-string or a log line prints these with repr/str (#1101).
+    The key lives inside ``extra``, where ``Field(repr=False)`` cannot reach it."""
+    for model in _endpoint_models_holding_a_key():
+        assert "sk-endpoint-secret" not in repr(model), type(model).__name__
+        assert "sk-endpoint-secret" not in str(model), type(model).__name__
+        assert "sk-header-secret" not in repr(model), type(model).__name__
+        assert "sk-header-secret" not in str(model), type(model).__name__
+        assert "sk-hyphen-header-secret" not in repr(model), type(model).__name__
+        assert "sk-hyphen-header-secret" not in str(model), type(model).__name__
+
+
+def test_endpoint_models_still_show_their_other_settings_and_keep_the_key():
+    model = _endpoint_models_holding_a_key()[0]
+
+    assert "'implementation': 'vllm'" in repr(model)
+    assert model.extra["api_key"] == "sk-endpoint-secret"
+    assert model.model_dump()["extra"]["api_key"] == "sk-endpoint-secret"

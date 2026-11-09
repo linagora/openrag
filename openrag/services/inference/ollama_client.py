@@ -214,6 +214,7 @@ class OllamaEmbedder(Embedder):
         *,
         dimension: int | None = None,
         timeout: float = 60.0,
+        batch_size: int = 32,
         **_kwargs,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
@@ -221,12 +222,25 @@ class OllamaEmbedder(Embedder):
             self._endpoint = f"{self._endpoint}/v1"
         self._model = model_name
         self._dimension: int | None = dimension
+        # The OpenAI-compatible endpoint rejects sufficiently large input
+        # arrays.  Indexing one parser batch can produce hundreds of chunks,
+        # so respect the endpoint's configured batch size here too.
+        self._batch_size = max(1, batch_size)
         self._client = httpx.AsyncClient(timeout=timeout)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self._batch_size):
+            vectors.extend(await self._embed_batch(texts[start : start + self._batch_size]))
+        return vectors
 
     @with_inference_metrics("embed")
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         body = {"model": self._model, "input": texts}
         try:
             resp = await self._client.post(f"{self._endpoint}/embeddings", json=body)

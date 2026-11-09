@@ -1,7 +1,21 @@
+{{- /*
+The env ConfigMap, rendered from one definition twice: here as an ordinary
+release resource, and in postgres-migration-job.yaml as a copy the migration
+hook reads. A pre-install hook runs before Helm creates any ordinary resource,
+so on a fresh install the hook cannot read this one.
+
+Called with the release context plus `configMapName`, and `hookAnnotations`
+for the hook copy.
+*/}}
+{{- define "openrag-stack.envConfigMap" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "openrag-stack.fullname" . }}-env
+  name: {{ .configMapName }}
+  {{- with .hookAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 data:
 {{- range $key, $value := .Values.env.config }}
   {{ $key }}: "{{ tpl (printf "%v" $value) $ }}"
@@ -14,6 +28,42 @@ data:
   # the Ray pods' labels (the "(Actor pid=N)" prefix is not added on this path).
   # Set env.config.RAY_LOG_TO_STDERR yourself to override.
   RAY_LOG_TO_STDERR: "1"
+{{- end }}
+{{- with .Values.openrag.seedUsers }}
+{{- if hasKey $.Values.env.config "SEED_USERS" }}
+{{- fail "openrag.seedUsers is set and env.config also defines SEED_USERS: keep one of the two." }}
+{{- end }}
+{{- /* Only the documented keys reach the ConfigMap: anything else could be a
+     secret. Errors name the entry by index and the key, never a value. */}}
+{{- $hint := "Tokens never go here: put the token in the chart's Secret and name its env var in token_env." }}
+{{- $seedKeys := list "external_user_id" "display_name" "token_env" "is_admin" "partitions" }}
+{{- range $i, $seed := . }}
+{{- if not (kindIs "map" $seed) }}
+{{- fail (printf "openrag.seedUsers[%d] must be a map. %s" $i $hint) }}
+{{- end }}
+{{- range $key, $_ := $seed }}
+{{- if not (has $key $seedKeys) }}
+{{- fail (printf "openrag.seedUsers[%d] has unsupported key %q (allowed: %s). %s" $i $key (join ", " $seedKeys) $hint) }}
+{{- end }}
+{{- end }}
+{{- if hasKey $seed "partitions" }}
+{{- if not (kindIs "slice" $seed.partitions) }}
+{{- fail (printf "openrag.seedUsers[%d].partitions must be a list. %s" $i $hint) }}
+{{- end }}
+{{- range $j, $membership := $seed.partitions }}
+{{- if not (kindIs "map" $membership) }}
+{{- fail (printf "openrag.seedUsers[%d].partitions[%d] must be a map. %s" $i $j $hint) }}
+{{- end }}
+{{- range $key, $_ := $membership }}
+{{- if not (has $key (list "name" "role")) }}
+{{- fail (printf "openrag.seedUsers[%d].partitions[%d] has unsupported key %q (allowed: name, role). %s" $i $j $key $hint) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+  # auth.seed_users (openrag.seedUsers): env var names only, no token.
+  SEED_USERS: {{ toJson . | quote }}
 {{- end }}
 {{- if .Values.proxy.enabled }}
 {{- if or (empty .Values.proxy.url) (eq .Values.proxy.url "http://192.168.100.100:80") }}
@@ -32,3 +82,6 @@ data:
   NO_PROXY: {{ .Values.proxy.noProxy | quote }}
   no_proxy: {{ .Values.proxy.noProxy | quote }}
 {{- end }}
+{{- end }}
+{{- include "openrag-stack.validateMigrationSettings" . }}
+{{- include "openrag-stack.envConfigMap" (merge (dict "configMapName" (printf "%s-env" (include "openrag-stack.fullname" .))) .) }}

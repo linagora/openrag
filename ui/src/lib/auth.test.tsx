@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { renderHook, waitFor, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { AuthProvider, useAuth } from "./auth";
+import { ApiError } from "./api/client";
 
 // Identity is resolved from /users/info; mock that call.
 vi.mock("./api/account", () => ({ getMyInfo: vi.fn() }));
@@ -68,6 +69,38 @@ describe("useAuth (token model)", () => {
     expect(localStorage.getItem("openrag_token")).toBe("or-abc123");
     expect(result.current.isAuthenticated).toBe(true);
     expect(result.current.isAdmin).toBe(true);
+  });
+
+  it.each([
+    { name: "a 503 response", error: new ApiError(503, { detail: "Service unavailable" }) },
+    { name: "a network failure", error: new TypeError("Failed to fetch") },
+  ])("keeps the entered token after $name", async ({ error }) => {
+    mockInfo.mockRejectedValueOnce(new Error("Not signed in"));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    mockInfo.mockRejectedValueOnce(error);
+    await act(async () => {
+      await expect(result.current.loginWithToken("or-retryable-token")).rejects.toBe(error);
+    });
+
+    expect(localStorage.getItem("openrag_token")).toBe("or-retryable-token");
+    expect(result.current.isAuthenticated).toBe(false);
+  });
+
+  it("clears a legacy token rejected with 403 Invalid token", async () => {
+    mockInfo.mockRejectedValueOnce(new Error("Not signed in"));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const error = new ApiError(403, { detail: "Invalid token" });
+    mockInfo.mockRejectedValueOnce(error);
+    await act(async () => {
+      await expect(result.current.loginWithToken("or-invalid-token")).rejects.toBe(error);
+    });
+
+    expect(localStorage.getItem("openrag_token")).toBeNull();
+    expect(result.current.isAuthenticated).toBe(false);
   });
 
   it("logout clears the token and user", async () => {

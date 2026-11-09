@@ -92,12 +92,32 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
-        """Return authoritative file metadata for one partition-scoped catalog row."""
+        """Return file metadata with authoritative partition and ISO indexed_at columns."""
         ...
 
     @abstractmethod
     async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
         """Return the config snapshot, embedder included, one catalog row was indexed with."""
+        ...
+
+    @abstractmethod
+    async def list_file_embedders(self, partition: str) -> list[dict]:
+        """Where each file of *partition* was embedded, ordered by ``file_id``.
+
+        ``[{"file_id", "embedder_model_name", "embedder_vector_field"}]``, read
+        from the per-file ``indexation_config`` snapshot; either value is
+        ``None`` when the file predates it being recorded.
+        """
+        ...
+
+    @abstractmethod
+    async def record_file_embedder(self, file_id: str, partition: str, provenance: dict) -> bool:
+        """Merge *provenance* into the file's ``indexation_config`` snapshot.
+
+        Only the embedder keys change; the rest of the snapshot describes how
+        the file was parsed and chunked, which a re-embed does not redo.
+        Returns ``False`` when the file no longer exists.
+        """
         ...
 
     @abstractmethod

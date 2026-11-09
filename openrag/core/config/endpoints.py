@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .base import ConfigMixin
 
@@ -76,7 +77,9 @@ class VLMConfig(LLMParamsConfig):
 class EmbedderConfig(ConfigMixin):
     """Embedding model endpoint configuration."""
 
-    provider: str = "openai"
+    # The client the env-seeded embedder endpoint runs, its ``implementation``.
+    # Env: EMBEDDER_PROVIDER.
+    provider: Literal["vllm", "ollama", "tei"] = "vllm"
     model_name: str = "Qwen/Qwen3-Embedding-0.6B"
     base_url: str = "http://vllm:8000/v1"
     api_key: str = Field(default="EMPTY", repr=False)
@@ -94,12 +97,30 @@ class EmbedderConfig(ConfigMixin):
     batch_size: int = Field(default=32, gt=0)
     embed_concurrency: int = Field(default=4, gt=0)
 
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _openai_is_vllm(cls, value: object) -> object:
+        # ``openai`` was this field's default while nothing read it; a config
+        # that still says so means the OpenAI-compatible client, ``vllm``.
+        return "vllm" if value == "openai" else value
+
 
 class SemaphoreConfig(ConfigMixin):
     """Concurrency limits for LLM and VLM calls."""
 
     llm_semaphore: int = 10
     vlm_semaphore: int = 10
+
+
+class LanguageDetectionConfig(ConfigMixin):
+    """fast-langdetect model used to detect the language of queries and documents.
+
+    ``lite`` ships inside the package and needs no network access. ``full``
+    and ``auto`` download the larger model on first use; it is more accurate
+    than ``lite`` on very short text.
+    """
+
+    model: Literal["lite", "full", "auto"] = "lite"
 
 
 class LLMContextConfig(ConfigMixin):
