@@ -74,9 +74,13 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # supply fresh live progress to the TaskStateManager.
 # v16: new workers also publish snapshots to a separate short-lived store when
 # an older detached TaskStateManager is safely reused during rollout.
-# v17: preserve unsettled terminal outcomes in the replacement TaskStateManager;
+# v17: workers index .xlsx/.xlsm through the streaming workbook parser. New API
+# replicas accept those uploads, while a v16 worker reused by name does not know
+# the extension: detect_content_type falls back to TEXT and decode_bytes decodes
+# the ZIP without raising, so the binary would be indexed as text.
+# v18: preserve unsettled terminal outcomes in the replacement TaskStateManager;
 # pools must not keep handles to the generation that predates that contract.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v17"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v18"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -703,6 +707,14 @@ class IndexerWorkerActor:
         try:
             manager = ray.get_actor(TASK_STAGE_PROGRESS_MANAGER_NAME, namespace=self._namespace)
         except ValueError:
+            return None
+        except Exception as exc:  # noqa: BLE001 - live progress is an optional sidecar
+            logger = getattr(self, "_logger", None)
+            if logger is None:
+                from core.utils.logging import get_logger
+
+                logger = get_logger()
+            logger.warning(f"Failed to connect to optional stage progress sidecar: {type(exc).__name__}: {exc}")
             return None
         self._stage_progress_manager = manager
         return manager

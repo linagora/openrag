@@ -36,6 +36,7 @@ import { formatDate } from "@/lib/utils";
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
 const JOB_SEARCH_DEBOUNCE_MS = 250;
+const ACTIVE_JOBS_PAGE_SIZE = 10;
 const ALL_PARTITIONS_FILTER = "__openrag/all_partitions__";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
@@ -348,7 +349,7 @@ export default function JobListPage() {
   const requestServerPage =
     statusTab === "ACTIVE" && !debouncedSearch.trim() && partitionFilter === ALL_PARTITIONS_FILTER;
   const requestedPage = requestServerPage
-    ? { limit: 10, offset: activePageIndex * 10 }
+    ? { limit: ACTIVE_JOBS_PAGE_SIZE, offset: activePageIndex * ACTIVE_JOBS_PAGE_SIZE }
     : undefined;
   const userId = user?.id ?? 0;
   const queryScope = { userId, isAdmin };
@@ -578,6 +579,7 @@ export default function JobListPage() {
               // Remounting resets pagination for a new tab/search context; sort state resets with it.
               <DataTable
                 key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
+                pageSize={statusTab === "ACTIVE" ? ACTIVE_JOBS_PAGE_SIZE : undefined}
                 columns={statusTab === "ACTIVE"
                   ? (isAdmin ? adminActiveColumns : activeColumns)
                   : (isAdmin ? adminColumns : columns)}

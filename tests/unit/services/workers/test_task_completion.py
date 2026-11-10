@@ -24,6 +24,7 @@ def _stub_periodic_reconcile(request, monkeypatch):
     if request.node.name in {
         "test_periodic_reconcile_keeps_sweeping_until_cancelled",
         "test_periodic_reconcile_retries_unrecorded_terminal_outcomes",
+        "test_periodic_reconcile_retries_cancelled_worker_fence_cleanup",
     }:
         return
     from services.workers import task_completion
@@ -812,6 +813,31 @@ async def test_a_held_settlement_is_retried_until_postgres_takes_it() -> None:
 
 
 @pytest.mark.asyncio
+async def test_held_cancelled_settlement_retries_worker_fence_cleanup() -> None:
+    repo = _FakeJobRepo()
+    repo.upsert_job = AsyncMock(side_effect=[RuntimeError("postgres is unavailable"), None])
+    tsm = _task_state_manager(state="CANCELLED")
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 42,
+    }
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+        assert list(tracker._pending_settlements) == ["task-1"]
+
+        tracker._settlement_retry.cancel()
+        await tracker._retry_pending_settlements(delay=0)
+
+    assert tracker._pending_settlements == {}
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
 async def test_a_held_settlement_is_not_reconciled_as_an_orphan() -> None:
     from core.models.catalog import DocumentStatus, IndexationJob
 
@@ -922,6 +948,47 @@ async def test_periodic_reconcile_retries_unrecorded_terminal_outcomes() -> None
         await tracker._periodic_reconcile(interval=0)
 
     assert scheduled == ["task-pending"]
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconcile_retries_cancelled_worker_fence_cleanup() -> None:
+    tracker = _tracker_with_repo(_FakeJobRepo())
+    tracker._task_state_manager = MagicMock()
+    tracker._call_task_state = AsyncMock(
+        return_value={
+            "task-cancel-cleanup": {
+                "state": "CANCELLED",
+                "details": {"metadata": {"_openrag_job_finished_at": "2026-11-09T12:00:00+00:00"}},
+                "worker_submitted": True,
+            }
+        }
+    )
+    scheduled = []
+
+    def schedule(task_id):
+        scheduled.append(task_id)
+        raise asyncio.CancelledError()
+
+    tracker._schedule_terminal_settlement = schedule
+
+    with pytest.raises(asyncio.CancelledError):
+        await tracker._periodic_reconcile(interval=0)
+
+    assert scheduled == ["task-cancel-cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_recovered_terminal_settlement_retries_cancellation_cleanup() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    tracker = TaskCompletionTracker()
+    tracker._record_finished_at = AsyncMock(return_value=True)
+    tracker._finish_cancellation = AsyncMock()
+
+    await tracker._recover_terminal_settlement("task-1")
+
+    tracker._record_finished_at.assert_awaited_once_with("task-1")
+    tracker._finish_cancellation.assert_awaited_once_with("task-1")
 
 
 @pytest.mark.asyncio

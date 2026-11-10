@@ -56,13 +56,17 @@ def test_stage_progress_sidecar_is_optional_at_startup_and_reconnected_later(mon
     actor = object.__new__(actor_class)
     actor._namespace = "custom-workers"
     actor._stage_progress_manager = None
+    actor._logger = MagicMock()
     manager = object()
-    get_actor = MagicMock(side_effect=[ValueError("actor not found"), manager])
+    get_actor = MagicMock(side_effect=[ValueError("actor not found"), TimeoutError("lookup timed out"), manager])
     monkeypatch.setattr("services.workers.indexer_pool.ray.get_actor", get_actor)
 
     assert actor._get_stage_progress_manager() is None
+    assert actor._get_stage_progress_manager() is None
     assert actor._get_stage_progress_manager() is manager
+    actor._logger.warning.assert_called_once()
     assert get_actor.call_args_list == [
+        ((TASK_STAGE_PROGRESS_MANAGER_NAME,), {"namespace": "custom-workers"}),
         ((TASK_STAGE_PROGRESS_MANAGER_NAME,), {"namespace": "custom-workers"}),
         ((TASK_STAGE_PROGRESS_MANAGER_NAME,), {"namespace": "custom-workers"}),
     ]
@@ -193,7 +197,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v17"
+    assert opts["name"] == "IndexerPoolDispatcher-v18"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -234,9 +238,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v17-0",
-        "IndexerWorker-v17-1",
-        "IndexerWorker-v17-2",
+        "IndexerWorker-v18-0",
+        "IndexerWorker-v18-1",
+        "IndexerWorker-v18-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -1352,7 +1356,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v17",
+        "protocol_version": "v18",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1385,7 +1389,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v17",
+        "protocol_version": "v18",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1420,7 +1424,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v17",
+        "protocol_version": "v18",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1435,7 +1439,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v17"
+    assert await pool.protocol_version() == "v18"
 
 
 @pytest.mark.asyncio

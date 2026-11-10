@@ -13,7 +13,7 @@ from core.models.document import Document, DocumentType, ImageBlock, ProcessedDo
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
-from services.workers.stages import _common as common_module
+from services.inference import runtime as runtime_module
 from services.workers.stages import caption as caption_module
 from services.workers.stages._common import resolve_language
 from services.workers.stages.caption import caption_stage
@@ -24,7 +24,7 @@ from services.workers.stages.store import store_stage
 
 
 @pytest.fixture(autouse=True)
-def _noop_vlm_semaphore(monkeypatch):
+async def _noop_vlm_semaphore(monkeypatch):
     """Stub the cluster-wide VLM semaphore so caption tests don't boot Ray."""
 
     @asynccontextmanager
@@ -455,58 +455,90 @@ async def test_caption_stage_captions_images_concurrently_and_in_order():
 
 
 @pytest.mark.asyncio
-async def test_caption_stage_cancels_sibling_captions_on_failure():
-    """Do not leave background VLM calls running after one caption fails."""
+async def test_caption_stage_keeps_other_captions_when_one_image_fails():
+    """One failed image must not drop the captions of the others (#1293)."""
 
-    class FailingVLM(VLM):
-        def __init__(self) -> None:
-            self.started: set[bytes] = set()
-            self.cancelled: set[bytes] = set()
-            self.completed: set[bytes] = set()
-            self.all_started = asyncio.Event()
-            self.release = asyncio.Event()
-
+    class OneFailingVLM(VLM):
         async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
-            self.started.add(image_bytes)
-            if len(self.started) == 3:
-                self.all_started.set()
-
             if image_bytes == b"fail":
-                await self.all_started.wait()
                 raise RuntimeError("caption failed")
-
-            try:
-                await self.release.wait()
-            except asyncio.CancelledError:
-                self.cancelled.add(image_bytes)
-                raise
-            self.completed.add(image_bytes)
-            return image_bytes.decode()
+            await asyncio.sleep(0.01)
+            return f"caption:{image_bytes.decode()}"
 
         async def caption_images_batch(self, images: list[bytes], prompt: str | None = None) -> list[str]:
             return [await self.caption_image(image, prompt=prompt) for image in images]
 
     processed = ProcessedDocument(
         document_id="doc-1",
-        text_blocks=[TextBlock(text="body", page_number=1)],
+        text_blocks=[TextBlock(text="a ![](ref-ok) b ![](ref-fail)", page_number=1)],
         images=[
-            ImageBlock(image_bytes=b"slow-1", page_number=1),
-            ImageBlock(image_bytes=b"fail", page_number=1),
-            ImageBlock(image_bytes=b"slow-2", page_number=1),
+            ImageBlock(image_bytes=b"ok", page_number=1, metadata={"markdown_ref": "![](ref-ok)"}),
+            ImageBlock(image_bytes=b"fail", page_number=1, metadata={"markdown_ref": "![](ref-fail)"}),
+            ImageBlock(image_bytes=b"standalone", page_number=2),
         ],
     )
     row = {"processed_document": processed}
-    vlm = FailingVLM()
 
-    try:
-        with pytest.raises(RuntimeError, match="caption failed"):
-            await caption_stage(row, vlm)
+    await caption_stage(row, OneFailingVLM())
 
-        assert vlm.cancelled == {b"slow-1", b"slow-2"}
-        assert vlm.completed == set()
-    finally:
-        vlm.release.set()
-        await asyncio.sleep(0)
+    out = row["processed_document"]
+    assert [img.caption for img in out.images] == ["caption:ok", None, "caption:standalone"]
+    assert "caption:ok" in out.text_blocks[0].text
+    assert "![](ref-fail)" in out.text_blocks[0].text
+    assert "caption:standalone" in out.text_blocks[1].text
+    assert row["stage"] == "captioned"
+    assert row["degraded_stages"]["caption"].startswith("1/3 image(s) failed")
+    assert "caption failed" in row["degraded_stages"]["caption"]
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_raises_when_every_image_fails():
+    """All images failed: the stage fails as a whole so the #702 fallback applies."""
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        images=[ImageBlock(image_bytes=b"a", page_number=1), ImageBlock(image_bytes=b"b", page_number=1)],
+    )
+    row = {"processed_document": processed}
+
+    with pytest.raises(RuntimeError, match="caption failed"):
+        await caption_stage(row, FakeVLM([], error=RuntimeError("caption failed")))
+
+    assert row["stage"] == "caption_failed"
+    assert "degraded_stages" not in row
+    assert row["processed_document"] is processed
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_cancels_in_flight_captions_on_timeout():
+    """Do not leave background VLM calls running after the stage times out."""
+
+    class HangingVLM(VLM):
+        def __init__(self) -> None:
+            self.cancelled: set[bytes] = set()
+
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.add(image_bytes)
+                raise
+            return ""
+
+        async def caption_images_batch(self, images: list[bytes], prompt: str | None = None) -> list[str]:
+            return [await self.caption_image(image, prompt=prompt) for image in images]
+
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        images=[ImageBlock(image_bytes=b"a", page_number=1), ImageBlock(image_bytes=b"b", page_number=1)],
+    )
+    row = {"processed_document": processed}
+    vlm = HangingVLM()
+
+    with pytest.raises(TimeoutError):
+        await caption_stage(row, vlm, timeout=0.05)
+
+    assert vlm.cancelled == {b"a", b"b"}
+    assert row["stage"] == "caption_failed"
 
 
 @pytest.mark.asyncio
@@ -549,7 +581,7 @@ async def test_contextualize_stage_detects_the_language_when_the_upload_names_no
         seen["text"] = text
         return "fr"
 
-    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    monkeypatch.setattr(runtime_module, "detect_language", fake_detect)
     chunks = [Chunk(id="c1", text="La préfecture de région répartit les crédits.")]
     contextualizer = FakeContextualizer([Chunk(id="c1", text="ctx", context="ctx")])
     row = {"chunks": chunks, "filename": "note.pdf", "language": None}
@@ -561,15 +593,38 @@ async def test_contextualize_stage_detects_the_language_when_the_upload_names_no
     assert "préfecture" in seen["text"]
 
 
-def test_resolve_language_prefers_the_upload_metadata(monkeypatch):
-    monkeypatch.setattr(common_module, "detect_language", lambda *a, **k: pytest.fail("must not detect"))
-    assert resolve_language({"language": "de", "chunks": []}) == "de"
+async def test_resolve_language_prefers_the_upload_metadata(monkeypatch):
+    monkeypatch.setattr(runtime_module, "detect_language", lambda *a, **k: pytest.fail("must not detect"))
+    assert await resolve_language({"language": "de", "chunks": []}) == "de"
 
 
-def test_resolve_language_falls_back_to_english_when_detection_is_unsure(monkeypatch):
-    monkeypatch.setattr(common_module, "detect_language", lambda *a, **k: None)
+async def test_resolve_language_detects_off_the_event_loop(monkeypatch):
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def blocking_detect(text, *, min_confidence=0.0):
+        release.wait(2)
+        return "fr"
+
+    monkeypatch.setattr(runtime_module, "detect_language", blocking_detect)
+    task = asyncio.create_task(resolve_language({"chunks": [Chunk(id="c1", text="Les dossiers sont instruits.")]}))
+    ticks = 0
+    deadline = time.monotonic() + 1
+    while ticks < 5 and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+        ticks += 1
+    release.set()
+
+    assert ticks == 5
+    assert await task == "fr"
+
+
+async def test_resolve_language_falls_back_to_english_when_detection_is_unsure(monkeypatch):
+    monkeypatch.setattr(runtime_module, "detect_language", lambda *a, **k: None)
     row = {"chunks": [Chunk(id="c1", text="12 34 56")]}
-    assert resolve_language(row) == "en"
+    assert await resolve_language(row) == "en"
     assert row["language"] == "en"
 
 
@@ -794,27 +849,29 @@ async def test_store_stage_provisions_the_partitions_field_then_writes_to_it():
     assert store.upsert_vector_fields == ["vector_bge_m3"]
 
 
-def test_resolve_language_ignores_digits_and_table_markup(monkeypatch):
+async def test_resolve_language_ignores_digits_and_table_markup(monkeypatch):
     seen: dict = {}
 
     def fake_detect(text, *, min_confidence=0.0):
         seen["text"] = text
         return "fr"
 
-    monkeypatch.setattr(common_module, "detect_language", fake_detect)
-    resolve_language({"chunks": [Chunk(id="c1", text="| Montant | 58.3M |\n|---|---|\n| Dossiers acceptés | 22 |")]})
+    monkeypatch.setattr(runtime_module, "detect_language", fake_detect)
+    await resolve_language(
+        {"chunks": [Chunk(id="c1", text="| Montant | 58.3M |\n|---|---|\n| Dossiers acceptés | 22 |")]}
+    )
     assert seen["text"] == "Montant . M Dossiers acceptés"
 
 
-def _detected_sample(monkeypatch, *chunks: Chunk | str) -> str:
+async def _detected_sample(monkeypatch, *chunks: Chunk | str) -> str:
     seen: dict = {}
 
     def fake_detect(sample, *, min_confidence=0.0):
         seen["text"] = sample
         return "fr"
 
-    monkeypatch.setattr(common_module, "detect_language", fake_detect)
-    resolve_language(
+    monkeypatch.setattr(runtime_module, "detect_language", fake_detect)
+    await resolve_language(
         {
             "chunks": [
                 chunk if isinstance(chunk, Chunk) else Chunk(id=f"c{i}", text=chunk) for i, chunk in enumerate(chunks)
@@ -824,7 +881,7 @@ def _detected_sample(monkeypatch, *chunks: Chunk | str) -> str:
     return seen["text"]
 
 
-def test_resolve_language_leaves_image_captions_and_placeholders_out(monkeypatch):
+async def test_resolve_language_leaves_image_captions_and_placeholders_out(monkeypatch):
     text = (
         "La préfecture répartit les crédits.\n\n"
         "<image_description>\n\nA bar chart of the yearly budget.\n\n</image_description>\n\n"
@@ -832,106 +889,110 @@ def test_resolve_language_leaves_image_captions_and_placeholders_out(monkeypatch
         "Les dossiers sont instruits en mars."
     )
     assert (
-        _detected_sample(monkeypatch, text)
+        await _detected_sample(monkeypatch, text)
         == "La préfecture répartit les crédits. Les dossiers sont instruits en mars."
     )
 
 
-def test_resolve_language_leaves_out_a_caption_cut_by_a_chunk_boundary(monkeypatch):
+async def test_resolve_language_leaves_out_a_caption_cut_by_a_chunk_boundary(monkeypatch):
     first = "Les dossiers sont instruits.\n\n<image_description>\n\nA bar chart"
     second = "of the yearly budget.\n\n</image_description>\n\nIls sont payés en mai."
-    assert _detected_sample(monkeypatch, first, second) == "Les dossiers sont instruits. Ils sont payés en mai."
+    assert await _detected_sample(monkeypatch, first, second) == "Les dossiers sont instruits. Ils sont payés en mai."
 
 
-def test_resolve_language_leaves_out_the_middle_of_a_caption_split_across_chunks(monkeypatch):
+async def test_resolve_language_leaves_out_the_middle_of_a_caption_split_across_chunks(monkeypatch):
     pieces = [
         "<image_description>\n\nA bar chart of the yearly budget,",
         "broken down by department and by programme,",
         "with the totals in the last column.\n\n</image_description>",
     ]
     captions = [Chunk(id=f"c{i}", text=text, chunk_type=ChunkType.IMAGE_CAPTION) for i, text in enumerate(pieces)]
-    assert _detected_sample(monkeypatch, *captions, "Les dossiers sont instruits.") == "Les dossiers sont instruits."
+    assert (
+        await _detected_sample(monkeypatch, *captions, "Les dossiers sont instruits.") == "Les dossiers sont instruits."
+    )
 
 
-def test_resolve_language_keeps_the_text_after_a_caption_in_a_caption_chunk(monkeypatch):
+async def test_resolve_language_keeps_the_text_after_a_caption_in_a_caption_chunk(monkeypatch):
     chunk = Chunk(
         id="c1",
         text="<image_description>\n\nA bar chart.\n\n</image_description>\n\nSource : les services de la préfecture.",
         chunk_type=ChunkType.IMAGE_CAPTION,
     )
-    assert _detected_sample(monkeypatch, chunk) == "Source : les services de la préfecture."
+    assert await _detected_sample(monkeypatch, chunk) == "Source : les services de la préfecture."
 
 
-def test_resolve_language_decodes_html_entities(monkeypatch):
-    assert _detected_sample(monkeypatch, "| Dupont &amp; fils &#124; Montant |") == "Dupont & fils Montant"
+async def test_resolve_language_decodes_html_entities(monkeypatch):
+    assert await _detected_sample(monkeypatch, "| Dupont &amp; fils &#124; Montant |") == "Dupont & fils Montant"
 
 
-def test_resolve_language_ignores_html_tags(monkeypatch):
+async def test_resolve_language_ignores_html_tags(monkeypatch):
     text = '<table class="data"><tr><td>Dossiers acceptés</td><td>vingt</td></tr></table><br/>'
-    assert _detected_sample(monkeypatch, text) == "Dossiers acceptés vingt"
+    assert await _detected_sample(monkeypatch, text) == "Dossiers acceptés vingt"
 
 
-def test_resolve_language_ignores_page_markers_and_uncaptioned_image_references(monkeypatch):
+async def test_resolve_language_ignores_page_markers_and_uncaptioned_image_references(monkeypatch):
     text = "Les dossiers [PAGE_3] sont instruits ![](docling_img_3) en mars ![logo](_page_0_Picture_1.jpeg)."
-    assert _detected_sample(monkeypatch, text) == "Les dossiers sont instruits en mars ."
+    assert await _detected_sample(monkeypatch, text) == "Les dossiers sont instruits en mars ."
 
 
-def test_resolve_language_ignores_the_chunk_header(monkeypatch):
+async def test_resolve_language_ignores_the_chunk_header(monkeypatch):
     chunk = Chunk(
         id="c1",
         text="[Source: Annual_Report.pdf | Page: 1 | Section: Synthèse]\n\nLes dossiers sont instruits.",
         header="[Source: Annual_Report.pdf | Page: 1 | Section: Synthèse]",
         content="Les dossiers sont instruits.",
     )
-    assert _detected_sample(monkeypatch, chunk) == "Les dossiers sont instruits."
+    assert await _detected_sample(monkeypatch, chunk) == "Les dossiers sont instruits."
 
 
-def test_resolve_language_samples_the_text_after_the_opening_figures(monkeypatch):
+async def test_resolve_language_samples_the_text_after_the_opening_figures(monkeypatch):
     figures = [f"<image_description>\n\nFigure {i} of the report.\n\n</image_description>" for i in range(8)]
-    assert _detected_sample(monkeypatch, *figures, "Les dossiers sont instruits.") == "Les dossiers sont instruits."
+    assert (
+        await _detected_sample(monkeypatch, *figures, "Les dossiers sont instruits.") == "Les dossiers sont instruits."
+    )
 
 
-def test_resolve_language_samples_the_captions_when_the_text_is_only_images(monkeypatch):
+async def test_resolve_language_samples_the_captions_when_the_text_is_only_images(monkeypatch):
     text = "<image_description>\n\nUn schéma du circuit de validation.\n\n</image_description>"
-    assert _detected_sample(monkeypatch, text) == "Un schéma du circuit de validation."
+    assert await _detected_sample(monkeypatch, text) == "Un schéma du circuit de validation."
 
 
-def test_resolve_language_samples_the_captions_when_the_text_is_unclassified(monkeypatch):
+async def test_resolve_language_samples_the_captions_when_the_text_is_unclassified(monkeypatch):
     samples: list[str] = []
 
     def fake_detect(sample, *, min_confidence=0.0):
         samples.append(sample)
         return "fr" if "schéma" in sample else None
 
-    monkeypatch.setattr(common_module, "detect_language", fake_detect)
+    monkeypatch.setattr(runtime_module, "detect_language", fake_detect)
     text = "<image_description>\n\nUn schéma du circuit.\n\n</image_description>\n\nAnnexe technique jointe."
-    assert resolve_language({"chunks": [Chunk(id="c1", text=text)]}) == "fr"
+    assert await resolve_language({"chunks": [Chunk(id="c1", text=text)]}) == "fr"
     assert samples == ["Annexe technique jointe.", "Un schéma du circuit. Annexe technique jointe."]
 
 
-def test_resolve_language_sample_is_capped(monkeypatch):
-    assert len(_detected_sample(monkeypatch, *["Les dossiers sont instruits en mars."] * 100)) == 1000
+async def test_resolve_language_sample_is_capped(monkeypatch):
+    assert len(await _detected_sample(monkeypatch, *["Les dossiers sont instruits en mars."] * 100)) == 1000
 
 
-def test_resolve_language_samples_chunks_spread_through_the_file(monkeypatch):
+async def test_resolve_language_samples_chunks_spread_through_the_file(monkeypatch):
     # The opening alone (here a long English abstract) is not the file's language.
     chunks = ["Abstract " * 120] + [f"Chapitre {i} : les dossiers sont instruits. " * 10 for i in range(19)]
-    sample = _detected_sample(monkeypatch, *chunks)
+    sample = await _detected_sample(monkeypatch, *chunks)
     assert sample.count("Abstract") < 30
     assert "Chapitre" in sample
 
 
-def test_resolve_language_keeps_the_spread_when_a_spread_chunk_is_short(monkeypatch):
+async def test_resolve_language_keeps_the_spread_when_a_spread_chunk_is_short(monkeypatch):
     # The short title leaves room in the budget; filling it with the whole
     # abstract that follows used to push every later spread slice out.
     body = ["Les dossiers sont instruits en mars. " * 10] * 13
     ending = ["Conclusion : les dossiers sont clos. " * 10] * 5
-    sample = _detected_sample(monkeypatch, "Rapport", "Abstract " * 120, *body, *ending)
+    sample = await _detected_sample(monkeypatch, "Rapport", "Abstract " * 120, *body, *ending)
     assert sample.count("Abstract") < 30
     assert "Conclusion" in sample
 
 
-def test_resolve_language_spreads_the_sample_over_the_chunks_that_have_text(monkeypatch):
+async def test_resolve_language_spreads_the_sample_over_the_chunks_that_have_text(monkeypatch):
     # Chunks that clean to nothing (captions, a table of figures) used to take
     # spread slots, and the abstract after the title filled what they left.
     caption = "<image_description>\n\nA bar chart of the yearly budget.\n\n</image_description>"
@@ -939,28 +1000,28 @@ def test_resolve_language_spreads_the_sample_over_the_chunks_that_have_text(monk
     body = "Les dossiers sont instruits en mars. " * 10
     ending = "Conclusion : les dossiers sont clos. " * 10
     chunks = ["Rapport", "Abstract " * 120, caption, body, caption, body, caption, body, ending, figures]
-    sample = _detected_sample(monkeypatch, *chunks)
+    sample = await _detected_sample(monkeypatch, *chunks)
     assert sample.count("Abstract") < 30
     assert "Conclusion" in sample
 
 
 @pytest.mark.parametrize("count", [5, 7, 9, 12, 20])
-def test_resolve_language_samples_the_first_and_last_chunks(monkeypatch, count):
+async def test_resolve_language_samples_the_first_and_last_chunks(monkeypatch, count):
     body = ["Les dossiers sont instruits en mars. " * 10] * (count - 2)
     chunks = ["Ouverture du rapport.", *body, "Conclusion."]
-    sample = _detected_sample(monkeypatch, *chunks)
+    sample = await _detected_sample(monkeypatch, *chunks)
     assert sample.startswith("Ouverture")
     assert sample.endswith("Conclusion.")
 
 
 @pytest.mark.parametrize("count", [1, 2, 3])
-def test_resolve_language_sample_uses_the_budget_on_a_file_of_few_chunks(monkeypatch, count):
-    assert len(_detected_sample(monkeypatch, *["Les dossiers sont instruits en mars. " * 50] * count)) == 1000
+async def test_resolve_language_sample_uses_the_budget_on_a_file_of_few_chunks(monkeypatch, count):
+    assert len(await _detected_sample(monkeypatch, *["Les dossiers sont instruits en mars. " * 50] * count)) == 1000
 
 
-def test_resolve_language_sample_reads_on_where_a_short_chunk_leaves_room(monkeypatch):
+async def test_resolve_language_sample_reads_on_where_a_short_chunk_leaves_room(monkeypatch):
     long = "Les dossiers sont instruits en mars. " * 20 + "Conclusion du rapport. " * 10
-    assert "Conclusion" in _detected_sample(monkeypatch, "Rapport", long)
+    assert "Conclusion" in await _detected_sample(monkeypatch, "Rapport", long)
 
 
 @pytest.fixture
@@ -983,13 +1044,13 @@ def _structured_chunks(*pages: str, filename: str = "Annual_Report.pdf") -> list
     return StructuredSectionChunker(chunk_size=256, length_function=lambda text: len(text.split())).chunk(document)
 
 
-def test_resolve_language_detects_a_short_document_despite_the_chunk_header(bundled_lang_detector):
+async def test_resolve_language_detects_a_short_document_despite_the_chunk_header(bundled_lang_detector):
     chunks = _structured_chunks("Réduire les délais d'instruction.", filename="Meeting_Notes_Final.docx")
     assert chunks[0].text.startswith("[Source: Meeting_Notes_Final.docx")
-    assert resolve_language({"chunks": chunks}) == "fr"
+    assert await resolve_language({"chunks": chunks}) == "fr"
 
 
-def test_resolve_language_detects_french_after_opening_figures(bundled_lang_detector):
+async def test_resolve_language_detects_french_after_opening_figures(bundled_lang_detector):
     caption = wrap_caption(
         "The chart shows the yearly budget allocated to each department, broken down by programme. " * 12
     )
@@ -998,11 +1059,11 @@ def test_resolve_language_detects_french_after_opening_figures(bundled_lang_dete
         "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés.",
     )
     assert [chunk.chunk_type.value for chunk in chunks[:5]] == ["image_caption"] * 5
-    assert resolve_language({"chunks": chunks}) == "fr"
+    assert await resolve_language({"chunks": chunks}) == "fr"
 
 
 @pytest.mark.parametrize("opening", [[], ["Rapport d'activité 2025"]], ids=["abstract-first", "title-first"])
-def test_resolve_language_detects_french_after_an_english_abstract(bundled_lang_detector, opening):
+async def test_resolve_language_detects_french_after_an_english_abstract(bundled_lang_detector, opening):
     abstract = (
         "This report reviews how regional budgets were allocated in 2025 and what the audit found. "
         "It summarises the main findings and the recommendations made to each department. "
@@ -1010,29 +1071,31 @@ def test_resolve_language_detects_french_after_an_english_abstract(bundled_lang_
     body = "La préfecture de région répartit les crédits entre les départements selon les besoins exprimés. " * 6
     texts = [*opening, abstract] + [body] * 9
     chunks = [Chunk(id=f"c{i}", text=text) for i, text in enumerate(texts)]
-    assert resolve_language({"chunks": chunks}) == "fr"
+    assert await resolve_language({"chunks": chunks}) == "fr"
 
 
 @pytest.mark.parametrize("label", ["1 / {}", "— {} —", "Figure {}", "Fig. {}"])
-def test_resolve_language_samples_the_captions_when_the_text_is_only_labels(bundled_lang_detector, label):
+async def test_resolve_language_samples_the_captions_when_the_text_is_only_labels(bundled_lang_detector, label):
     caption = wrap_caption(
         "Le graphique montre l'évolution des ventes annuelles dans les différentes régions, "
         "avec une forte hausse en Bretagne."
     )
     chunks = [Chunk(id=f"c{page}", text=f"{caption}\n\n{label.format(page)}") for page in range(1, 7)]
-    assert resolve_language({"chunks": chunks}) == "fr"
+    assert await resolve_language({"chunks": chunks}) == "fr"
 
 
 @pytest.mark.parametrize(
     ("text", "language"),
     [("政府将在三月审查所有申请文件。", "zh"), ("申請書類はすべて三月に審査されます。", "ja")],
 )
-def test_resolve_language_counts_the_words_of_scripts_written_without_spaces(bundled_lang_detector, text, language):
+async def test_resolve_language_counts_the_words_of_scripts_written_without_spaces(
+    bundled_lang_detector, text, language
+):
     caption = wrap_caption(
         "A bar chart showing the yearly budget allocated to each department, broken down by programme, "
         "with the totals in the last column."
     )
-    assert resolve_language({"chunks": [Chunk(id="c1", text=f"{caption}\n\n{text}")]}) == language
+    assert await resolve_language({"chunks": [Chunk(id="c1", text=f"{caption}\n\n{text}")]}) == language
 
 
 _TINY_PNG = base64.b64decode(
@@ -1069,3 +1132,59 @@ async def test_caption_stage_skips_remote_markdown_image_without_bytes():
     assert remote_ref in text
     remote = next(image for image in row["processed_document"].images if image.source_url)
     assert remote.caption is None
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_raises_when_every_image_sent_fails_next_to_a_remote_image():
+    class FailingVLM(FakeVLM):
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            raise RuntimeError("VLM down")
+
+    encoded = base64.b64encode(_TINY_PNG).decode()
+    source = f"![chart](data:image/png;base64,{encoded}) ![logo](https://example.com/logo.png)"
+    processed = await MarkdownParser().parse(
+        Document(filename="readme.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+    row = {"processed_document": processed}
+
+    with pytest.raises(RuntimeError, match="VLM down"):
+        await caption_stage(row, FailingVLM([]))
+
+    assert row["stage"] == "caption_failed"
+    assert "degraded_stages" not in row
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_counts_only_images_sent_when_one_fails_next_to_a_remote_image():
+    class OneFailingVLM(FakeVLM):
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            if image_bytes == b"bad":
+                raise RuntimeError("VLM 400")
+            return "a chart"
+
+    remote = ImageBlock(source_url="https://example.com/logo.png")
+    processed = ProcessedDocument(
+        document_id="doc",
+        images=[ImageBlock(image_bytes=b"good"), ImageBlock(image_bytes=b"bad"), remote],
+    )
+    row = {"processed_document": processed}
+
+    await caption_stage(row, OneFailingVLM([]))
+
+    assert row["degraded_stages"]["caption"].startswith("1/2 image(s) failed captioning")
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_succeeds_on_a_document_with_only_remote_images():
+    source = "See ![logo](https://example.com/logo.png)"
+    processed = await MarkdownParser().parse(
+        Document(filename="readme.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+    row = {"processed_document": processed}
+    vlm = FakeVLM([])
+
+    await caption_stage(row, vlm)
+
+    assert vlm.calls == []
+    assert row["stage"] == "captioned"
+    assert "degraded_stages" not in row

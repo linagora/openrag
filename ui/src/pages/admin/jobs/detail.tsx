@@ -191,6 +191,7 @@ export default function JobDetailPage() {
     identity: historyIdentity,
     at: null,
   });
+  const terminalSummaryRefreshIdentity = useRef<string | null>(null);
 
   // Admins see every user's tasks, but opening a file still needs a role on its
   // partition (or SUPER_ADMIN_MODE), so the file is only linked when the API will
@@ -247,8 +248,34 @@ export default function JobDetailPage() {
     queryKey: ["task-stage-progress-current", id, userId, authorizationScope],
     queryFn: () => getTaskStageProgress(id!, null, 1),
     enabled: !!id && !!user,
-    refetchInterval: () => isActiveState(taskQuery.data?.task_state ?? "") ? 3000 : false,
+    refetchInterval: (query) => {
+      const state = taskQuery.data?.task_state ?? "";
+      if (isActiveState(state)) return 3000;
+
+      const taskFinished = isTerminalState(state);
+      const persistencePending =
+        query.state.data?.history_quality === "pending_persistence" ||
+        stageQuery.data?.history_quality === "pending_persistence";
+      if (!taskFinished || !persistencePending) return false;
+
+      const deadline = terminalHistoryPollDeadline.current.identity === historyIdentity
+        ? terminalHistoryPollDeadline.current.at
+        : null;
+      return deadline === null || Date.now() < deadline ? 3000 : false;
+    },
   });
+
+  useEffect(() => {
+    const state = taskQuery.data?.task_state ?? "";
+    if (!isTerminalState(state)) {
+      terminalSummaryRefreshIdentity.current = null;
+      return;
+    }
+    const refreshIdentity = `${historyIdentity}:${state}`;
+    if (terminalSummaryRefreshIdentity.current === refreshIdentity) return;
+    terminalSummaryRefreshIdentity.current = refreshIdentity;
+    void currentProgressQuery.refetch();
+  }, [currentProgressQuery.refetch, historyIdentity, taskQuery.data?.task_state]);
 
   useEffect(() => {
     const taskFinished = isTerminalState(taskQuery.data?.task_state ?? "");

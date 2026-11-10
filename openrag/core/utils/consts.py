@@ -115,3 +115,9 @@ RETRIEVAL_SCORE_KEYS: tuple[str, ...] = ("vector_score", "rerank_score", "combin
 # reranker calls. Same ceiling as a retrieval preset's ``top_k``, the candidate
 # count an admin can already give the chat pipeline.
 MAX_RERANK_CANDIDATES = 1000
+
+
+# XLSX display formats worth stating in chunk text. Dates are readable in the
+# cells and plain or scientific number formats only restate the raw value, so
+# those groups stay in metadata (number_format_groups) only.
+XLSX_TEXT_NUMBER_FORMAT_KINDS = frozenset({"percentage", "currency"})

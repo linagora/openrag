@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
@@ -154,6 +155,44 @@ def test_expired_terminal_outcome_without_finished_stamp_survives_recovery(monke
     assert recovered["task-1"].state == "COMPLETED"
     assert expiries["task-1"] == 99.0
     assert deleted == []
+
+
+@pytest.mark.asyncio
+async def test_pending_terminal_outcome_is_saved_for_actor_recovery(monkeypatch) -> None:
+    import ray.cloudpickle as cloudpickle
+    from ray.experimental import internal_kv
+
+    key = task_state_module._recoverable_task_key("task-1")
+    storage: dict[bytes, bytes] = {}
+    monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
+    monkeypatch.setattr(task_state_module, "_task_state_kv_namespace", lambda: b"test")
+    monkeypatch.setattr(internal_kv, "_internal_kv_list", lambda *_args, **_kwargs: list(storage))
+    monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda candidate, **_kwargs: storage.get(candidate))
+    monkeypatch.setattr(
+        internal_kv,
+        "_internal_kv_put",
+        lambda candidate, payload, **_kwargs: storage.__setitem__(candidate, payload),
+    )
+    monkeypatch.setattr(internal_kv, "_internal_kv_del", lambda candidate, **_kwargs: storage.pop(candidate, None))
+
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"filename": "report.pdf"},
+        user_id=42,
+    )
+    assert await manager.set_state("task-1", "COMPLETED") is True
+
+    saved_id, saved_info, _expires_at = cloudpickle.loads(storage[key])
+    assert saved_id == "task-1"
+    assert saved_info.state == "COMPLETED"
+    assert task_state_module._job_outcome_pending(saved_info)
+
+    recovered, _expiries = task_state_module._load_recoverable_tasks()
+    assert recovered["task-1"].state == "COMPLETED"
+    assert task_state_module._job_outcome_pending(recovered["task-1"])
 
 
 @pytest.mark.asyncio
@@ -1096,7 +1135,38 @@ async def test_rejected_submission_is_only_unfenced_after_worker_settlement(monk
     assert info.state == "FAILED"
     assert info.worker_submitted is False
     assert info.object_ref is None
+    assert task_state_module._job_outcome_pending(info)
     assert saved[-1] is info
+
+
+@pytest.mark.asyncio
+async def test_queue_admission_backpressures_before_unsettled_outcomes_exceed_limit(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_MAX_UNSETTLED_JOB_OUTCOMES", 1)
+    manager = _task_state_manager()
+
+    admitted = await manager.set_queued_details_v2(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    refused = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-2",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+
+    assert admitted["accepted"] is True
+    assert refused == {
+        "accepted": False,
+        "reason": task_state_module.QUEUE_REFUSED_OUTCOME_BACKLOG,
+        "existing_task_id": None,
+    }
+    assert await manager.get_state("task-2") is None
+    assert set(await manager.get_all_info()) == {"task-1"}
 
 
 @pytest.mark.asyncio
@@ -2489,3 +2559,150 @@ async def test_a_queued_orphan_picked_up_before_the_restart_is_read_keeps_runnin
     assert await manager.has_worker_settled("task-1") is False
     assert await manager.get_state("task-1") == "QUEUED"
     assert await manager.renew_worker_lease("task-1") is True
+
+
+class _StalledGcs:
+    """Stands in for a GCS whose actor-table reads hang until released."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        # Reads of these actors wait on their own event instead of ``release``.
+        self.release_actor: dict[str, threading.Event] = {}
+        self.started = threading.Event()
+        self.reads: list[str] = []
+        self.running = 0
+        self.idle = threading.Condition()
+
+    def __call__(self, actor_id: str) -> dict[str, Any]:
+        with self.idle:
+            self.reads.append(actor_id)
+            self.running += 1
+        self.started.set()
+        try:
+            # Bounded, so a read the code under test waits on does not hang the suite.
+            self.release_actor.get(actor_id, self.release).wait(timeout=10)
+        finally:
+            with self.idle:
+                self.running -= 1
+                self.idle.notify_all()
+        return {"State": "ALIVE", "NumRestarts": 3}
+
+    def release_all(self) -> None:
+        self.release.set()
+        for event in self.release_actor.values():
+            event.set()
+
+    def wait_idle(self) -> None:
+        with self.idle:
+            assert self.idle.wait_for(lambda: self.running == 0, timeout=5)
+
+
+@pytest.fixture
+def stalled_gcs(monkeypatch):
+    from ray._private import state as ray_state
+
+    gcs = _StalledGcs()
+    monkeypatch.setattr(ray_state, "actors", lambda actor_id: gcs(actor_id))
+    monkeypatch.setattr(task_state_module, "_WORKER_ACTOR_STATE_READ_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(task_state_module, "_stalled_worker_actor_state_reads", set())
+    monkeypatch.setattr(task_state_module, "_worker_actor_states", {})
+    yield gcs
+    gcs.release_all()
+    gcs.wait_idle()
+
+
+def test_a_stalled_gcs_read_holds_after_the_timeout(stalled_gcs) -> None:
+    """Read under the lock lease renewals take, so it must give up long before a worker's lease lapses."""
+    started = time.monotonic()
+
+    assert task_state_module._worker_actor_state("w1", fresh=True) is None
+
+    assert time.monotonic() - started < 2
+    assert task_state_module._worker_actor_states == {}
+
+
+def test_reads_hold_at_once_while_a_stalled_gcs_read_is_outstanding(stalled_gcs) -> None:
+    """One stall costs one timeout, not one per orphaned task in a fence pass."""
+    assert task_state_module.read_worker_actor_state("w1") is None
+
+    started = time.monotonic()
+    assert task_state_module.read_worker_actor_state("w2") is None
+    assert task_state_module._worker_actor_state("w3", fresh=True) is None
+
+    assert time.monotonic() - started < 0.1
+    assert stalled_gcs.reads == ["w1"]
+
+
+def test_reads_resume_once_the_stalled_gcs_read_returns(stalled_gcs) -> None:
+    assert task_state_module.read_worker_actor_state("w1") is None
+
+    stalled_gcs.release.set()
+    stalled_gcs.wait_idle()
+
+    assert task_state_module._worker_actor_state("w1", fresh=True) == (True, 3)
+    assert stalled_gcs.reads == ["w1", "w1"]
+
+
+@pytest.mark.asyncio
+async def test_lease_renewals_are_answered_while_an_orphan_check_hits_a_stalled_gcs(stalled_gcs) -> None:
+    """A worker whose renewals go unanswered stops itself, so a stalled read must not hold the lock."""
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+
+    settle_check = asyncio.create_task(asyncio.to_thread(asyncio.run, manager.has_worker_settled("task-1")))
+    assert await asyncio.to_thread(stalled_gcs.started.wait, 5)
+
+    started = time.monotonic()
+    assert await manager.renew_worker_lease("task-1") is True
+    assert time.monotonic() - started < 2
+    assert await settle_check is False
+
+
+def test_concurrent_reads_during_a_stall_neither_pile_up_nor_run_late(stalled_gcs) -> None:
+    """The pool actor checks registrations from many threads at once; a stall must cost at most the executor's threads."""
+    results: list[tuple[bool, int] | None] = []
+    callers = [
+        threading.Thread(target=lambda i=i: results.append(task_state_module.read_worker_actor_state(f"w{i}")))
+        for i in range(6)
+    ]
+
+    started = time.monotonic()
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=5)
+
+    assert time.monotonic() - started < 1
+    assert results == [None] * 6
+    assert len(stalled_gcs.reads) <= 2
+
+    # Reads whose callers gave up while they were still queued must never reach the GCS.
+    reads_during_stall = len(stalled_gcs.reads)
+    stalled_gcs.release.set()
+    stalled_gcs.wait_idle()
+    time.sleep(0.1)
+    assert len(stalled_gcs.reads) == reads_during_stall
+
+    assert task_state_module.read_worker_actor_state("w0") == (True, 3)
+
+
+def test_reads_hold_while_any_timed_out_read_is_still_running(stalled_gcs) -> None:
+    """Two reads stall; the gate must not reopen when only one of them returns."""
+    stalled_gcs.release_actor = {"w1": threading.Event(), "w2": threading.Event()}
+    first = threading.Thread(target=task_state_module.read_worker_actor_state, args=("w1",))
+    second = threading.Thread(target=task_state_module.read_worker_actor_state, args=("w2",))
+    # Staggered within one timeout, so both pass the gate and the later one times out last.
+    first.start()
+    time.sleep(0.05)
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert stalled_gcs.reads == ["w1", "w2"]
+
+    stalled_gcs.release_actor["w2"].set()
+    with stalled_gcs.idle:
+        assert stalled_gcs.idle.wait_for(lambda: stalled_gcs.running == 1, timeout=5)
+    time.sleep(0.05)  # lets the released read's future settle as done
+
+    assert task_state_module.read_worker_actor_state("w3") is None
+    assert stalled_gcs.reads == ["w1", "w2"]

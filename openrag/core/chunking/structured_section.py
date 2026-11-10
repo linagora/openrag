@@ -288,6 +288,9 @@ class StructuredSectionChunker(BaseChunker):
     # ChunkingStrategy contract
     # ------------------------------------------------------------------
     def chunk(self, document: ProcessedDocument, partition: str = "default") -> list[Chunk]:
+        workbook_chunks = self._chunk_workbook_blocks(document, partition)
+        if workbook_chunks is not None:
+            return workbook_chunks
         content = self._content_from(document)
         if not content.strip():
             return []
@@ -296,7 +299,10 @@ class StructuredSectionChunker(BaseChunker):
         filename = str(metadata.get("filename") or metadata.get("source") or "")
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
-        units = self._page_units(content) if paginated else self._build_units(content)
+        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells":
+            units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
+        else:
+            units = self._page_units(content) if paginated else self._build_units(content)
         csv_metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
         if csv_metadata:
             for unit in units:
@@ -313,8 +319,15 @@ class StructuredSectionChunker(BaseChunker):
             if not paginated:
                 candidates = self._merge_small(candidates, filename)
 
+        # An XLSX table unit's metadata is a complete copy of the block's that
+        # chunk_table scoped to the unit's rows and columns. Spreading the block
+        # metadata under it would bring back keys the unit dropped (whole-table
+        # formula/format groups, a detached worksheet context, table columns on
+        # a worksheet-note chunk).
+        xlsx_table = metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells"
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
+            base = unit.metadata if xlsx_table and unit.metadata else metadata
             header = self._build_header(filename, unit.heading_path, unit.pages)
             body = unit.text.strip()
             text = f"{header}\n\n{body}" if header else body
@@ -330,11 +343,11 @@ class StructuredSectionChunker(BaseChunker):
                     header=header or None,
                     content=body,
                     metadata={
-                        **{k: v for k, v in metadata.items() if k not in ("file_id", "partition")},
+                        **{k: v for k, v in base.items() if k not in ("file_id", "partition")},
                         "hierarchy_path": list(unit.heading_path),
                         "section_title": unit.heading_path[-1] if unit.heading_path else "",
                         "page_range": _page_range(unit.pages),
-                        **unit.metadata,
+                        **({} if base is unit.metadata else unit.metadata),
                     },
                 )
             )
@@ -752,7 +765,8 @@ class StructuredSectionChunker(BaseChunker):
                     text=f"{caption}{s.content.strip()}",
                     tokens=self.length_function(f"{caption}{s.content}"),
                     pages={s.page_number} if s.page_number else set(unit.pages),
-                    chunk_type=ChunkType.TABLE,
+                    # XLSX worksheet notes split from a table are prose.
+                    chunk_type=ChunkType.TEXT if s.type == "text" else ChunkType.TABLE,
                     atomic=True,
                     metadata=dict(s.metadata or {}),
                 )

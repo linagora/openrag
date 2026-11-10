@@ -142,6 +142,13 @@ class TestMimetypePicksTheType:
         [
             ("minutes.cozy-note", "text/markdown", DocumentType.MARKDOWN),
             ("report", "application/pdf", DocumentType.PDF),
+            (
+                "workbook",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                DocumentType.XLSX,
+            ),
+            ("workbook", "application/vnd.ms-excel.sheet.macroEnabled.12", DocumentType.XLSX),
+            ("workbook.xlsm", None, DocumentType.XLSX),
             ("minutes.cozy-note", "application/x-unknown", DocumentType.TEXT),
             ("report", None, DocumentType.TEXT),
         ],
@@ -158,6 +165,8 @@ class TestMimetypePicksTheType:
             ("notes.md", "text/plain", DocumentType.MARKDOWN),
             ("report.pdf", None, DocumentType.PDF),
             ("report.pdf", "application/x-unknown", DocumentType.PDF),
+            ("report.xlsx", "text/plain", DocumentType.XLSX),
+            ("report.xlsm", "text/plain", DocumentType.XLSX),
         ],
     )
     def test_a_recognised_extension_is_never_overridden(self, filename, mimetype, expected):
@@ -172,6 +181,9 @@ class TestMimetypePicksTheType:
             ("minutes.cozy-note", "text/markdown", ".md"),
             ("minutes.cozy-note", None, ".cozy-note"),
             ("notes", None, ""),
+            ("workbook", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+            ("workbook", "application/vnd.ms-excel.sheet.macroEnabled.12", ".xlsm"),
+            ("workbook.xlsm", None, ".xlsm"),
         ],
     )
     def test_type_suffix_follows_the_resolved_extension(self, filename, mimetype, expected):

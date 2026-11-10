@@ -21,20 +21,24 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 # [Sources: **1**, **3**]). So emphasis/code marks are accepted at every
 # boundary of the tag, and are part of it when it is stripped.
 #
-# Every run of marks or whitespace below is possessive, so a failed search never
-# retries the ways of splitting a run between neighbours (a long run of marks or
-# spaces after the value made it quadratic). That loses no match: what follows a
-# run either cannot start with one of its characters or is another run that
-# would take the same ones, so giving any back could not help. The lookbehinds
-# enter the leading whitespace and mark runs only at their first character, for
-# the same reason: a match starting mid-run is never needed, starting at the run
-# covers it. After the value, whitespace stays on the tag's line unless a
-# closing bracket follows, which is what the end-of-line lookahead needs anyway.
+# Every run of marks or whitespace in the [Sources: ...] regexes below is
+# possessive, and so is the whitespace before an inline marker, so a failed
+# search never retries the ways of splitting a run between neighbours (a long
+# run of marks or spaces after the value made it quadratic). That loses no
+# match: what follows a run either cannot start with one of its characters or
+# is another run that would take the same ones, so giving any back could not
+# help. The lookbehinds enter the leading whitespace and mark runs only at their
+# first character, for the same reason: a match starting mid-run is never
+# needed, starting at the run covers it. After the value, whitespace stays on
+# the tag's line unless a closing bracket follows, which is what the
+# end-of-line lookahead needs anyway.
 #
 # The label up to its colon, with marks allowed before and after each bracket
 # and around "Sources".
 _SOURCES_LABEL = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+:\s*+[*_`]*+\[?[ \t]*+"
-_SOURCES_TAG_TAIL = r"[.*_` \t\r]*+(?=\n|$)"
+# Any whitespace but a newline may end the line, as the final rstrip() removes
+# all of it: a no-break space after a tag must not hide the tag from the strip.
+_SOURCES_TAG_TAIL = r"(?:[.*_`]|[^\S\n])*+(?=\n|$)"
 # The closing bracket may sit on the next line ([Sources: 1, 3,\n]); without
 # one, the tag ends on its own line.
 _SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
@@ -58,15 +62,19 @@ _SOURCES_EMPTY_RE = re.compile(
     _SOURCES_LABEL + _SOURCES_TAG_CLOSE + _SOURCES_TAG_TAIL,
     re.IGNORECASE,
 )
+# Inline markers ([Source 2], [Sources 1, 3]) take the whitespace before them,
+# entered at its first character like the label above. The runs inside the
+# bracket need not be possessive: each lies between characters it cannot take
+# (the bracket, "Sources", a digit, a comma), so it matches in one way only.
 _INLINE_SOURCE_NUMS_RE = re.compile(
-    r"[ \t]*\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*\]",
+    r"(?<![ \t])[ \t]*+\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*\]",
     re.IGNORECASE,
 )
 _UNCLOSED_SOURCE_NUMS_RE = re.compile(
-    r"[ \t]*\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*(?=\n|$)",
+    r"(?<![ \t])[ \t]*+\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*(?=\n|$)",
     re.IGNORECASE,
 )
-_DANGLING_SOURCE_RE = re.compile(r"[ \t]*\[\s*Sources?\s*(?=\n|$)", re.IGNORECASE)
+_DANGLING_SOURCE_RE = re.compile(r"(?<![ \t])[ \t]*+\[\s*Sources?\s*(?=\n|$)", re.IGNORECASE)
 
 
 def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
@@ -91,27 +99,74 @@ def _citation_index(digits: str) -> int:
     return int(significant or "0")
 
 
-def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tuple[str, set[int], bool]:
+# Removing a tag can expose another: once an inline marker or a trailing
+# [Sources: none] is gone, the [Sources: 1, 3] before it ends its line
+# ("... [Sources: 1, 3][Source 1]"). So stripping repeats until nothing changes.
+# Each round scans the whole text and a chain of k adjacent tags takes k rounds,
+# so the rounds are capped: past the cap, the first tags of a longer chain stay.
+_MAX_STRIP_ROUNDS = 4
+
+
+def _reads_as_a_tag(match: re.Match[str]) -> bool:
+    """Whether a label that a removed tag left at the end of its line is a tag, not prose.
+
+    Only a bracket makes it one ("[Sources: 1]"): the answer's own words never
+    have one, but they do have marks and lines of their own ("**Nombre de
+    sources :** 3 [Source 2]", "Réponse.\nSources : 2 [Source 1]"). Those stay,
+    their number uncounted.
+    """
+    tag = match.group(0)
+    return "[" in tag or "]" in tag
+
+
+def _strip_sources_tags(
+    text: str,
+    *,
+    include_inline_markers: bool = True,
+) -> tuple[str, set[int], bool]:
     """Strip source tags and return citations found."""
     cited: set[int] = set()
-    patterns = [_SOURCES_NUMS_RE]
+    saw_none = False
+    exposed = False
+
+    def take_inline_numbers(match: re.Match[str]) -> str:
+        # Every number the tag holds is a citation, whatever separates them:
+        # the regexes accept spaces, newlines and marks as well as commas
+        # ([Sources: **1** **3**]), and a tag stripped with its numbers
+        # unread would fall back to citing every source.
+        cited.update(_citation_index(n) for n in re.findall(r"\d+", match.group(1)))
+        return ""
+
+    def take_numbers(match: re.Match[str]) -> str:
+        if exposed and not _reads_as_a_tag(match):
+            return match.group(0)
+        return take_inline_numbers(match)
+
+    def take_none(match: re.Match[str]) -> str:
+        nonlocal saw_none
+        if exposed and not _reads_as_a_tag(match):
+            return match.group(0)
+        saw_none = True
+        return ""
+
+    # Citations are read from the text each pattern is applied to, so a tag
+    # exposed by an earlier substitution is both stripped and counted.
+    substitutions = [(_SOURCES_NUMS_RE, take_numbers), (_SOURCES_NONE_RE, take_none), (_SOURCES_EMPTY_RE, "")]
     if include_inline_markers:
-        patterns.extend((_INLINE_SOURCE_NUMS_RE, _UNCLOSED_SOURCE_NUMS_RE))
-    for pattern in patterns:
-        for match in pattern.finditer(text):
-            # Every number the tag holds is a citation, whatever separates them:
-            # the regexes accept spaces, newlines and marks as well as commas
-            # ([Sources: **1** **3**]), and a tag stripped with its numbers
-            # unread would fall back to citing every source.
-            cited.update(_citation_index(n) for n in re.findall(r"\d+", match.group(1)))
-    saw_none = bool(_SOURCES_NONE_RE.search(text))
-    cleaned = _SOURCES_NUMS_RE.sub("", text)
-    cleaned = _SOURCES_NONE_RE.sub("", cleaned)
-    cleaned = _SOURCES_EMPTY_RE.sub("", cleaned)
-    if include_inline_markers:
-        cleaned = _INLINE_SOURCE_NUMS_RE.sub("", cleaned)
-        cleaned = _UNCLOSED_SOURCE_NUMS_RE.sub("", cleaned)
-        cleaned = _DANGLING_SOURCE_RE.sub("", cleaned)
+        substitutions += [
+            (_INLINE_SOURCE_NUMS_RE, take_inline_numbers),
+            (_UNCLOSED_SOURCE_NUMS_RE, take_inline_numbers),
+            (_DANGLING_SOURCE_RE, ""),
+        ]
+    cleaned = text
+    for _ in range(_MAX_STRIP_ROUNDS):
+        stripped = cleaned
+        for pattern, replacement in substitutions:
+            stripped = pattern.sub(replacement, stripped)
+        if stripped == cleaned:
+            break
+        cleaned = stripped
+        exposed = True
     return cleaned, cited, saw_none
 
 
@@ -166,6 +221,54 @@ def _min_sources_tag_buffer_size(n_sources: int) -> int:
 
 _MIN_STREAM_LOOKAHEAD = 80
 
+# Up to its last character that no tag or marker can contain: no character of
+# the regexes above, no letter of "sources" or "none". Stripping never removes
+# such a character and no lookbehind rejects it, so stripping the text up to it
+# and the text after it separately gives the same result as stripping the whole.
+# Outside ASCII that is any character but a space or a digit (\s and \d match
+# them) and "ſ", which IGNORECASE matches as "s": without them, an answer in
+# another script has no such character and streams in bursts.
+_LAST_TAG_FREE_CHAR_RE = re.compile(
+    r".*(?:[abdf-mpqtv-zABDF-MPQTV-Z!\"#$%&'()+\-/;<=>?@^{|}~]|(?![\s\d\u017f])[^\x00-\x7f])",
+    re.DOTALL,
+)
+
+
+def _settled_length(tail: str, cleaned: str, include_inline_markers: bool) -> int:
+    """How much of the stripped ``tail`` stays the same whatever text follows.
+
+    That is the stripped text up to the last tag-free character. Past it, more
+    text can still change the result: a blank run or a chain of tags at the end
+    of the text is stripped while it ends the line and kept once the line goes on.
+    """
+    match = _LAST_TAG_FREE_CHAR_RE.match(tail)
+    if match is None:
+        return 0
+    rest, _, _ = _strip_sources_tags(tail[match.end() :], include_inline_markers=include_inline_markers)
+    return len(cleaned) - len(rest)
+
+
+def _fold_point(
+    tail: str,
+    cleaned: str,
+    emitted: int,
+    keep: int,
+    include_inline_markers: bool,
+) -> tuple[int, int] | None:
+    """Where the streamed ``tail`` can be cut, keeping at least ``keep`` characters.
+
+    Returns the cut and the length of the stripped text before it, or None when
+    there is no such character or the text before it is not all emitted yet.
+    """
+    match = _LAST_TAG_FREE_CHAR_RE.match(tail, 0, max(0, len(tail) - keep))
+    if match is None:
+        return None
+    rest, _, _ = _strip_sources_tags(tail[match.end() :], include_inline_markers=include_inline_markers)
+    folded = len(cleaned) - len(rest)
+    if folded > emitted:
+        return None
+    return match.end(), folded
+
 
 async def stream_with_source_filtering(
     llm_stream,
@@ -215,6 +318,17 @@ async def stream_with_source_filtering(
         buffer_size = max(_MIN_STREAM_LOOKAHEAD, _min_sources_tag_buffer_size(len(sources)))
     include_inline_markers = citation_protocol_active and bool(sources)
     pending = ""
+    # Stripping all of `pending` at every delta would be quadratic in the answer
+    # length. Only `tail`, its end, is stripped: what is cut off its front (at a
+    # `_fold_point`, once emitted) is counted in `folded_len`. Where there is
+    # nowhere to cut, or the text before the cut is not emitted yet, `tail` is
+    # stripped again only once it has grown by an eighth, which keeps the total
+    # linear. Each delta still strips a tail a few lookaheads long, and the
+    # lookahead grows with the number of sources, so the cost per delta does too.
+    tail = ""
+    folded_len = 0
+    stripped_len = 0
+    stuck = False
     emitted_len = 0
     chunk_template = None
     # Fallback template for the truncated-finish chunk when the stream dies
@@ -266,18 +380,22 @@ async def stream_with_source_filtering(
             if content:
                 chunk_template = data
                 pending += content
+                tail += content
 
                 if len(pending) <= buffer_size:
                     continue
 
                 if citation_protocol_active:
-                    cleaned, _, _ = _strip_sources_tags(
-                        pending,
-                        include_inline_markers=include_inline_markers,
-                    )
+                    if stuck and len(tail) - stripped_len < len(tail) // 8:
+                        continue
+                    cleaned, _, _ = _strip_sources_tags(tail, include_inline_markers=include_inline_markers)
+                    stripped_len = len(tail)
+                    # Emitted text cannot be taken back, so only what is settled is emitted.
+                    settled = _settled_length(tail, cleaned, include_inline_markers)
                 else:
-                    cleaned = pending
-                safe_end = max(0, len(cleaned) - buffer_size)
+                    cleaned = tail
+                    settled = len(cleaned)
+                safe_end = max(0, folded_len + min(settled, len(cleaned) - buffer_size))
                 if safe_end > emitted_len:
                     out = {
                         **data,
@@ -286,7 +404,7 @@ async def stream_with_source_filtering(
                                 **choice,
                                 "delta": {
                                     **choice.get("delta", {}),
-                                    "content": cleaned[emitted_len:safe_end],
+                                    "content": cleaned[emitted_len - folded_len : safe_end - folded_len],
                                 },
                                 # `choice` may carry finish_reason (a provider can pack
                                 # the last token + finish_reason into one chunk). Clear
@@ -300,6 +418,20 @@ async def stream_with_source_filtering(
                     }
                     yield f"data: {json.dumps(out)}\n\n"
                     emitted_len = safe_end
+                if citation_protocol_active and len(tail) > 4 * buffer_size:
+                    fold = _fold_point(
+                        tail,
+                        cleaned,
+                        emitted_len - folded_len,
+                        2 * buffer_size,
+                        include_inline_markers,
+                    )
+                    stuck = fold is None
+                    if fold is not None:
+                        cut, folded = fold
+                        tail = tail[cut:]
+                        folded_len += folded
+                        stripped_len = len(tail)
             elif not finish_reason:
                 # Neither content nor finish_reason (role preamble, usage-only or
                 # keep-alive chunk): pass it through untouched. A finish-only chunk

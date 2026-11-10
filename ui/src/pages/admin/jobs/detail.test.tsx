@@ -519,6 +519,42 @@ describe("JobDetailPage", () => {
     });
   });
 
+  it("refreshes the current stage summary when the task becomes terminal", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "SERIALIZING",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "transition.pdf" }, user_id: 1 },
+    });
+    getTaskStageProgressMock.mockResolvedValue({
+      freshness: "durable",
+      history_quality: "complete",
+      is_currently_running: false,
+      persisted_through_sequence: 1,
+      events: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    const { queryClient } = renderJobDetail();
+    await waitFor(() => {
+      expect(getTaskStageProgressMock.mock.calls.filter(([, , limit]) => limit === 1).length).toBeGreaterThan(0);
+    });
+    const currentQueryCallsBeforeTerminal = getTaskStageProgressMock.mock.calls.filter(([, , limit]) => limit === 1)
+      .length;
+
+    queryClient.setQueryData(["task", "task-1", 7, "admin"], {
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: { file_id: "file-1", partition: "docs", metadata: { filename: "transition.pdf" }, user_id: 1 },
+    });
+
+    await waitFor(() => {
+      expect(getTaskStageProgressMock.mock.calls.filter(([, , limit]) => limit === 1).length).toBe(
+        currentQueryCallsBeforeTerminal + 1,
+      );
+    });
+  });
+
   it("labels an open stage interrupted only when worker loss was confirmed", async () => {
     getTaskStatusMock.mockResolvedValue({
       task_id: "task-1",
@@ -780,8 +816,19 @@ describe("JobDetailPage", () => {
       expect(typeof interval).toBe("function");
       const getInterval = interval as (query: unknown) => number | false;
       expect(getInterval(stageQuery)).toBe(3000);
+
+      const currentQuery = queryClient.getQueryCache().find({
+        queryKey: ["task-stage-progress-current", "task-1", 7, "admin"],
+      });
+      if (!currentQuery) throw new Error("Current stage summary query was not created");
+      const currentInterval = (currentQuery.options as unknown as { refetchInterval?: unknown }).refetchInterval;
+      expect(typeof currentInterval).toBe("function");
+      const getCurrentInterval = currentInterval as (query: unknown) => number | false;
+      expect(getCurrentInterval(currentQuery)).toBe(3000);
+
       now.mockReturnValue(1_031_000);
       expect(getInterval(stageQuery)).toBe(false);
+      expect(getCurrentInterval(currentQuery)).toBe(false);
     } finally {
       now.mockRestore();
     }

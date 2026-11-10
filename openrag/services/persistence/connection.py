@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import asyncpg
-from core.utils.logging import get_logger
+from core.utils.logging import InterceptHandler, get_logger
 
 if TYPE_CHECKING:
     from core.config.infrastructure import RDBConfig
@@ -238,6 +239,7 @@ class ConnectionManager:
         # %(here)s, so this resolves to services/persistence/migrations/alembic/.
         cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
         cfg.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
+        _route_alembic_logs()
         logger.info(f"Running Alembic migrations against {self._dsn_log}")
         try:
             command.upgrade(cfg, "head")
@@ -245,6 +247,22 @@ class ConnectionManager:
             logger.error(f"Alembic migration failed for {self._dsn_log}: {exc}")
             raise RuntimeError(f"Failed to run Alembic migrations against {self._dsn_log}: {exc}") from exc
         logger.info(f"Alembic migrations completed for {self._dsn_log}")
+
+
+def _route_alembic_logs() -> None:
+    """Send Alembic's progress to the app's log, in text and JSON mode alike.
+
+    Run from a program, env.py leaves logging alone, so nothing would print
+    ``Running upgrade …`` or a migration's own notes (``alembic.runtime.migration``):
+    the stdlib root has no handler in text mode. alembic.ini logs them at INFO
+    for the CLI; this does the same through loguru. ``propagate`` is off so JSON
+    mode, whose root also forwards to loguru, does not log them twice.
+    """
+    alembic_logger = logging.getLogger("alembic")
+    alembic_logger.setLevel(logging.INFO)
+    if not any(isinstance(handler, InterceptHandler) for handler in alembic_logger.handlers):
+        alembic_logger.addHandler(InterceptHandler())
+    alembic_logger.propagate = False
 
 
 __all__ = ["ConnectionManager"]

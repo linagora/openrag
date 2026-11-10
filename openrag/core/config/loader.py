@@ -94,6 +94,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     # Verbose
     ("LOG_LEVEL", "verbose.level", str),
     ("LOG_FORMAT", "verbose.format", str),
+    ("LOG_PERSONAL_DATA", "verbose.personal_data", bool),
     # Server
     ("PREFERRED_URL_SCHEME", "server.preferred_url_scheme", str),
     ("METRICS_TOKEN", "server.metrics_token", str),
@@ -113,6 +114,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
     ("CSV_BATCH_SIZE", "loader.csv_batch_size", int),
     ("CSV_DELIMITER", "loader.csv_delimiter", str),
+    ("XLSX_BATCH_SIZE", "loader.xlsx_batch_size", int),
     # Indexing callback
     ("INDEXING_CALLBACK_ALLOW_PRIVATE_URLS", "indexing_callback.allow_private_urls", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),

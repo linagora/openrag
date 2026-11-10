@@ -323,11 +323,7 @@ class JobService:
         stage_progress_tasks = (
             dict(filtered)
             if pagination_requested
-            else {
-                task_id: info
-                for task_id, info in filtered
-                if info.get("state") == "SERIALIZING" or info.get("state") in _TERMINAL_STATES
-            }
+            else {task_id: info for task_id, info in filtered if info.get("state") == "SERIALIZING"}
         )
         stage_progress = await self._stage_progress_for_tasks(
             stage_progress_tasks,
@@ -648,6 +644,13 @@ class JobService:
                 latest_stage_ids = await get_latest_stage_ids(task_ids)
             except Exception as exc:
                 logger.warning("Failed to read latest stage IDs", error=str(exc))
+                if require_ordering_metadata and any(
+                    view.get("last_known_stage_id") is None for view in result.values()
+                ):
+                    raise ServiceUnavailableError(
+                        "Task stage history is temporarily unavailable.",
+                        code="TASK_LIST_PAGINATION_UNAVAILABLE",
+                    ) from exc
             else:
                 for task_id, stage_id in latest_stage_ids.items():
                     view = result.get(task_id)
@@ -900,6 +903,29 @@ def _merge_live_stage_progress(
         summary.attempt < durable.attempt
         or (summary.attempt == durable.attempt and summary.snapshot_revision < durable.snapshot_revision)
     ):
+        if (
+            summary.attempt == durable.attempt
+            and durable.phase is StageTaskPhase.STAGE
+            and durable.has_open_invocation
+            and durable.current_invocation_id is not None
+            and durable.interrupted_invocation_id is None
+        ):
+            # The snapshot is fresh enough to prove the worker lease is live,
+            # but PostgreSQL already has a newer stage transition. Keep the
+            # durable stage fields and use the lease only as the running signal.
+            sampled_at = datetime.now(UTC)
+            elapsed_ms = None
+            elapsed_sampled_at = None
+            if durable.stage_started_at is not None:
+                elapsed_ms = max(0, int((sampled_at - durable.stage_started_at).total_seconds() * 1000))
+                elapsed_sampled_at = sampled_at.isoformat()
+            return {
+                **view,
+                "is_currently_running": True,
+                "elapsed_ms": elapsed_ms,
+                "elapsed_sampled_at": elapsed_sampled_at,
+                "freshness": "live",
+            }
         return view
 
     active_invocation = (

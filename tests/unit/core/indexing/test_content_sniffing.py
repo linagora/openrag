@@ -21,6 +21,7 @@ from core.indexing.validators import (
     CONTENT_SNIFF_BYTES,
     _ooxml_main_part_by_content,
     validate_content_matches_extension,
+    validate_file_format,
     validate_ooxml_package,
 )
 from core.utils.exceptions import ValidationError
@@ -51,6 +52,7 @@ def _ooxml(main_part: str, *extra: str) -> bytes:
 
 DOCX = _ooxml("word/document.xml")
 PPTX = _ooxml("ppt/presentation.xml")
+XLSX = _ooxml("xl/workbook.xml")
 
 
 @pytest.mark.parametrize(
@@ -61,10 +63,10 @@ def test_matching_content_is_accepted(extension, head):
     validate_content_matches_extension(extension, head)
 
 
-@pytest.mark.parametrize("extension", ["docx", "pptx"])
+@pytest.mark.parametrize("extension", ["docx", "pptx", "xlsx"])
 def test_the_head_check_does_not_judge_ooxml(extension):
     """A ZIP is settled by its central directory, at the end of the file, so the
-    head check must stay silent on docx/pptx rather than guess either way."""
+    head check must stay silent on OOXML formats rather than guess either way."""
     validate_content_matches_extension(extension, PDF)
     validate_content_matches_extension(extension, DOCX)
 
@@ -184,9 +186,36 @@ def _real_pptx() -> bytes:
     return buf.getvalue()
 
 
+def _real_xlsx() -> bytes:
+    openpyxl = pytest.importorskip("openpyxl")
+    buf = io.BytesIO()
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["hello"])
+    workbook.save(buf)
+    workbook.close()
+    return buf.getvalue()
+
+
 def test_documents_from_a_real_producer_are_accepted():
     validate_ooxml_package("docx", io.BytesIO(_real_docx()))
     validate_ooxml_package("pptx", io.BytesIO(_real_pptx()))
+    validate_ooxml_package("xlsx", io.BytesIO(_real_xlsx()))
+    validate_ooxml_package("xlsm", io.BytesIO(_real_xlsx()))
+
+
+@pytest.mark.parametrize("extension", ["xls", "xlsb", "ods"])
+def test_legacy_spreadsheet_formats_remain_rejected_by_the_xlsx_route(extension):
+    with pytest.raises(ValidationError) as error:
+        validate_file_format(
+            f"workbook.{extension}",
+            accepted_formats={"xlsx", "xlsm"},
+            accepted_mimetypes={
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel.sheet.macroEnabled.12",
+            },
+        )
+
+    assert error.value.status_code == 415
 
 
 def test_a_package_that_writes_the_content_type_map_last_is_accepted():
@@ -230,6 +259,9 @@ def test_a_zip_named_like_a_document_is_rejected():
         ("docx", PDF, "a PDF renamed .docx"),
         ("pptx", DOCX, "a docx renamed .pptx"),
         ("docx", PPTX, "a pptx renamed .docx"),
+        ("xlsx", DOCX, "a docx renamed .xlsx"),
+        ("xlsx", PPTX, "a pptx renamed .xlsx"),
+        ("docx", XLSX, "an xlsx renamed .docx"),
     ],
 )
 def test_contradicting_content_is_refused_by_the_package_check(extension, payload, reason):
@@ -285,6 +317,104 @@ def test_the_stream_position_is_restored_on_success_and_on_rejection():
     with pytest.raises(ValidationError):
         validate_ooxml_package("docx", bad)
     assert bad.tell() == 0
+
+
+# ---------------------------------------------------------------------------
+# Password-protected OOXML: a CFB container, not a ZIP
+# ---------------------------------------------------------------------------
+
+_FREE, _END_OF_CHAIN, _FAT_SECTOR = 0xFFFFFFFF, 0xFFFFFFFE, 0xFFFFFFFD
+
+
+def _cfb(*stream_names: str, directory_chain: list[int] | None = None) -> bytes:
+    """A minimal version-3 Compound File: sector 0 is the FAT, then directory sectors.
+
+    It carries only what the encryption check reads (header, FAT, directory),
+    laid out as Excel and msoffcrypto-tool write an encrypted workbook: a root
+    entry plus ``EncryptionInfo``/``EncryptedPackage``. ``directory_chain``
+    overrides the FAT links of the directory sectors, to build a broken chain.
+    """
+    sector_size = 512
+
+    def entry(name: str) -> bytes:
+        encoded = (name + "\0").encode("utf-16-le")
+        return encoded.ljust(64, b"\0") + len(encoded).to_bytes(2, "little") + b"\0" * 62
+
+    entries = [entry("Root Entry"), *(entry(name) for name in stream_names)]
+    entries += [b"\0" * 128] * (-len(entries) % 4)
+    directory = b"".join(entries)
+    directory_sectors = len(directory) // sector_size
+    links = directory_chain or [*range(2, directory_sectors + 1), _END_OF_CHAIN]
+    fat = [_FAT_SECTOR, *links]
+    fat += [_FREE] * (128 - len(fat))
+
+    header = bytearray(sector_size)
+    header[0:8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    header[24:26] = (0x3E).to_bytes(2, "little")
+    header[26:28] = (3).to_bytes(2, "little")
+    header[28:30] = (0xFFFE).to_bytes(2, "little")
+    header[30:32] = (9).to_bytes(2, "little")
+    header[32:34] = (6).to_bytes(2, "little")
+    header[44:48] = (1).to_bytes(4, "little")
+    header[48:52] = (1).to_bytes(4, "little")
+    header[56:60] = (4096).to_bytes(4, "little")
+    header[60:64] = _END_OF_CHAIN.to_bytes(4, "little")
+    header[68:72] = _END_OF_CHAIN.to_bytes(4, "little")
+    header[76:80] = (0).to_bytes(4, "little")
+    header[80:512] = b"\xff" * 432
+    return bytes(header) + b"".join(sector.to_bytes(4, "little") for sector in fat) + directory
+
+
+ENCRYPTED_OOXML = _cfb("\x06DataSpaces", "EncryptionInfo", "EncryptedPackage")
+
+
+@pytest.mark.parametrize("extension", ["xlsx", "xlsm", "docx", "pptx"])
+def test_a_password_protected_document_is_reported_as_encrypted(extension):
+    """The extension is right and renaming will not help, so the message must
+    not tell the user to change it (reported on #1246)."""
+    with pytest.raises(ValidationError) as exc_info:
+        validate_ooxml_package(extension, io.BytesIO(ENCRYPTED_OOXML))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "ENCRYPTED_OFFICE_FILE"
+    assert "password-protected or encrypted" in str(exc_info.value)
+    assert "extension" not in str(exc_info.value)
+
+
+def test_encryption_streams_past_the_first_directory_sector_are_found():
+    """The directory is a sector chain; following it through the FAT matters once
+    a producer writes more entries than one sector holds."""
+    fillers = ["\x06DataSpaces", "\x05SummaryInformation", "\x05DocumentSummaryInformation"]
+    workbook = _cfb(*fillers, "EncryptionInfo", "EncryptedPackage")
+    assert len(workbook) == 512 * 4  # header, FAT, two directory sectors
+
+    with pytest.raises(ValidationError) as exc_info:
+        validate_ooxml_package("xlsx", io.BytesIO(workbook))
+    assert exc_info.value.code == "ENCRYPTED_OFFICE_FILE"
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (_cfb("Workbook", "\x05SummaryInformation"), "a legacy .xls renamed .xlsx is a CFB file too"),
+        (_cfb("EncryptedPackage"), "both encryption streams are required"),
+        (ENCRYPTED_OOXML[:512], "a truncated container"),
+        (_cfb("A", "B", "C", "D", "E", directory_chain=[1, 1]), "a directory chain that loops"),
+    ],
+)
+def test_unencrypted_or_malformed_containers_keep_the_extension_message(payload, reason):
+    with pytest.raises(ValidationError) as exc_info:
+        validate_ooxml_package("xlsx", io.BytesIO(payload))
+
+    assert exc_info.value.status_code == 415, reason
+    assert "does not match its .xlsx extension" in str(exc_info.value), reason
+
+
+def test_the_stream_position_is_restored_after_an_encrypted_rejection():
+    stream = io.BytesIO(ENCRYPTED_OOXML)
+    with pytest.raises(ValidationError):
+        validate_ooxml_package("xlsx", stream)
+    assert stream.tell() == 0
 
 
 # ---------------------------------------------------------------------------

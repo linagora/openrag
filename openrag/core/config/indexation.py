@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator
 
@@ -87,6 +87,8 @@ class FileLoadersConfig(ConfigMixin):
     eml: str = "EmlLoader"
     docx: str = "DocxLoader"
     pptx: str = "PPTXLoader"
+    xlsx: str = "XlsxParser"
+    xlsm: str = "XlsxParser"
     doc: str = "DocLoader"
     png: str = "ImageLoader"
     jpeg: str = "ImageLoader"
@@ -127,6 +129,14 @@ class MimetypesConfig(ConfigMixin):
         default=".pptx",
         alias="application/vnd.openxmlformats-officedocument.presentationml.presentation",
     )
+    application_xlsx: str = Field(
+        default=".xlsx",
+        alias="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    application_xlsm: str = Field(
+        default=".xlsm",
+        alias="application/vnd.ms-excel.sheet.macroEnabled.12",
+    )
     application_msword: str = Field(default=".doc", alias="application/msword")
     image_png: str = Field(default=".png", alias="image/png")
     image_jpeg: str = Field(default=".jpeg", alias="image/jpeg")
@@ -160,6 +170,21 @@ class MimetypesConfig(ConfigMixin):
 class LoaderConfig(ConfigMixin):
     csv_batch_size: int = Field(default=10_000, gt=0, strict=True)
     csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
+    xlsx_batch_size: int = Field(default=10_000, gt=0, strict=True)
+    xlsx_limits: dict[str, Annotated[int, Field(gt=0, strict=True)]] = Field(default_factory=dict)
+
+    @field_validator("xlsx_limits")
+    @classmethod
+    def _validate_xlsx_limits(cls, value: dict[str, int]) -> dict[str, int]:
+        from dataclasses import fields
+
+        from core.indexing.parsers.tabular.xlsx_validation import XlsxLimits
+
+        unknown = set(value) - {field.name for field in fields(XlsxLimits)}
+        if unknown:
+            raise ValueError(f"Unknown xlsx_limits keys: {sorted(unknown)}")
+        return value
+
     image_captioning: bool = True
     save_markdown: bool = False
     # Keep the raw uploaded file in ``paths.data_dir`` after indexation. Default

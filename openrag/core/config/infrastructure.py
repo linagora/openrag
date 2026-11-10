@@ -133,10 +133,16 @@ class ServerConfig(ConfigMixin):
 
 
 class VerboseConfig(ConfigMixin):
-    level: str = "DEBUG"
+    # INFO, like conf/config.yaml: DEBUG logs user queries and LLM prompts.
+    level: str = "INFO"
     # ``text``: colorized human format on stderr. ``json``: one flat JSON
     # object per line, no ANSI, for log collectors (Loki). Env: LOG_FORMAT.
     format: Literal["text", "json"] = "text"
+    # Off: logs keep personal data out where operations don't need it; today,
+    # uvicorn's request lines keep only the client's /24 (IPv4) or /48 (IPv6)
+    # network. On: full client addresses, for troubleshooting or security
+    # investigations. Query strings are never logged. Env: LOG_PERSONAL_DATA.
+    personal_data: bool = False
 
     @field_validator("format", mode="before")
     @classmethod

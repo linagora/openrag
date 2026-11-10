@@ -906,6 +906,38 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_returns_service_unavailable_for_outcome_backlog() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("outcome_backlog"))
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ServiceUnavailableError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=["ws-1"],
+            replace=True,
+        )
+
+    assert caught.value.code == "INDEXING_OUTCOME_BACKLOG"
+    pool.submit.remote.assert_not_called()
+    tsm.set_object_ref.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_refuses_a_duplicate_submission_for_a_file_being_indexed() -> None:
     """A retried POST must be turned away before the parse, not after it (#1046)."""
     from core.utils.exceptions import ConflictError
