@@ -1529,13 +1529,15 @@ def _build_topic_tagger_factory(cfg: Settings) -> Any:
     DB-hydrated ``cfg.models.llm`` registry, global fallback for ``default``,
     a ``KeyError`` on an unresolvable name (skipped by the pipeline), a
     one-entry-per-name client cache replaced on endpoint change, and a lazily
-    loaded prompt.
+    loaded prompt. Every tagger shares the cluster-wide ``llmSemaphore``, like
+    the contextualizers, so topic tagging counts against the same LLM limit.
     """
     import services.inference.ollama_client  # noqa: F401
     import services.inference.vllm_client  # noqa: F401
     from core.indexing.topic_tags import TopicTagger
     from core.llm import llm_registry
     from core.prompts import load_template_by_key
+    from services.inference.distributed_semaphore import DistributedSemaphore
 
     models = getattr(cfg, "models", None)
     named_llms = models.llm if models is not None else {}
@@ -1561,7 +1563,14 @@ def _build_topic_tagger_factory(cfg: Settings) -> Any:
             if entry is not None and entry[0] == identity:
                 return entry[1]
             if "system_prompt" not in shared:
-                shared["system_prompt"] = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
+                # Both built before publishing to `shared`, as in
+                # _build_contextualizer_factory.
+                system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
+                llm_semaphore = DistributedSemaphore(
+                    name="llmSemaphore", max_concurrent_ops=cfg.semaphore.llm_semaphore
+                )
+                shared["system_prompt"] = system_prompt
+                shared["llm_semaphore"] = llm_semaphore
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             llm = set_provider_name(
@@ -1574,7 +1583,12 @@ def _build_topic_tagger_factory(cfg: Settings) -> Any:
                 ),
                 name,
             )
-            tagger = TopicTagger(llm, shared["system_prompt"], timeout_seconds=model_cfg.timeout)
+            tagger = TopicTagger(
+                llm,
+                shared["system_prompt"],
+                timeout_seconds=model_cfg.timeout,
+                llm_semaphore=shared["llm_semaphore"],
+            )
             cache[name] = (identity, tagger)
             return tagger
 
