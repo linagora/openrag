@@ -6,6 +6,7 @@ from .chat_prompt_builder import (
     EMPTY_CONTEXT_MESSAGE,
     SOURCE_SEPARATOR,
     WebSourceLike,
+    describe_source,
     format_context,
     format_web_context,
     message_tokens,
@@ -45,6 +46,7 @@ __all__ = [
     "load_template",
     "load_template_by_key",
     # chat
+    "describe_source",
     "format_context",
     "format_web_context",
     "message_tokens",

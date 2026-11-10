@@ -190,7 +190,7 @@ those keys along with `score`, and `ScoredChunk.to_langchain()` clears them from
 metadata before stamping its typed fields. A score in an API response was set by *that*
 retrieval, never by whoever uploaded the file.
 
-Three caveats:
+Four caveats:
 
 - The key is **absent**, not null, when no reranker ran (reranker disabled, or a web
   source — web results are built separately and never reranked). Such chunks stay plain
@@ -202,6 +202,45 @@ Three caveats:
   reranks each sub-query's list separately and then fuses them with RRF, so the final
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
+- Under a `date_order` ("the last X", see Temporal Queries) the sources are in document-date
+  order, not score order.
+
+### Temporal Queries
+
+Dates are handled from the user's wording, never from a request parameter. The query
+contextualizer (`openrag/prompts/templates/query_contextualizer_tmpl.txt`, rendered with the
+pre-computed `calendar_anchors`) emits per sub-query a `temporal_filters` list (Milvus predicates
+on `created_at`, e.g. "last week") and/or a `date_order` (`"newest"` / `"oldest"`, e.g. "the
+last meeting I had"; an unknown value is read as no order, with a warning, so the rest of the
+answer stays usable). `Query.to_milvus_filter()` (`core/models/query.py`) renders the predicates;
+`order_chunks_by_date` (`core/retrieval/date_order.py`) orders the sources the answering LLM
+reads, stable within a document and with undated (or future-dated) chunks last. The date never
+decides *which* sources the model gets: retrieval, the `top_k` cut, the context-budget fit
+(`_fit_sources`) and the drop-until-it-fits loop all stay relevance-ranked, exactly as without a
+date order, and only the chunks that made it in are re-sorted, in `_prepare_chat` and
+`_prepare_completions` right before rendering. Selecting by date instead let recent, loosely
+matching documents (invitations, agendas) crowd the asked-for report out of the context (review
+on PR #1317); with the dates shown, the model picks the newest relevant source itself. The
+returned `docs` (hence `extra.sources` and the citation numbers) follow the rendered order.
+`SearchQueries.date_order` is the order all sub-queries share; with different ones ("my first
+and last invoice") the sources keep their relevance order. `describe_source`
+(`core/prompts/chat_prompt_builder.py`) puts a `Created: ... UTC | File: ...` line under each
+`[Source N]` marker so the answering LLM can see the dates; the answer templates tell it to use
+that line for "when" questions. The `Created:` field comes first and is always there when a file
+name is shown (`Created: unknown` without a date), and the name is flattened, stripped of `|` and
+capped, because the name is upload metadata: it must not be able to add a line or a `Created:`
+ahead of the real one under the trusted marker.
+
+`created_at` is the only temporal field and is client-supplied at upload (`TEMPORAL_FIELDS` in
+`indexing_service.py`, a TIMESTAMPTZ column in Milvus); cozy-stack sends the Cozy file creation
+date. A chunk without it is neither filtered in nor sorted first. `_QUERY_JSON_HINT`
+(`query_service.py`) must keep `temporal_filters` / `date_order` open ("per the rules above"): a
+literal `null` there is copied verbatim by the model.
+
+Known limits: `retriever.allow_filterless_fallback` (default `true`) retries without the filter
+when a period matches nothing, and the model is not told — it then summarizes out-of-period
+documents; and "the last X" only finds the newest X if it is among the `top_n` best matches, so
+with many equally relevant documents (weekly reports) an older one can be presented as the last.
 
 ### Prometheus Metrics
 
