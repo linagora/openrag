@@ -64,6 +64,7 @@ class _Feed:
         self._rows: deque = deque()
 
     def push(self, row) -> None:
+        """Queue one raw row slice for the pipeline to read."""
         self._rows.append(row)
 
     def __iter__(self) -> _Feed:
@@ -97,6 +98,7 @@ class _Route:
         self.rescan = False
 
     def release(self) -> None:
+        """Drop the pipeline and any spooled rows once the table is done or rescanned."""
         self.pipeline = None
         self.values = self.formulas = None
         self.blocks = array("Q")
@@ -120,6 +122,7 @@ class _Spool:
         return True
 
     def write(self, data: bytes | bytearray) -> tuple[int, int]:
+        """Append one block, creating the file on first use; return its (offset, length)."""
         if self._file is None:
             # Unlinked on creation on POSIX: nothing is left behind even if the
             # worker dies mid-parse. Honours TMPDIR like every tempfile user.
@@ -131,6 +134,7 @@ class _Spool:
         return offset, len(data)
 
     def read(self, offset: int, length: int) -> bytes:
+        """Read back one block written by :meth:`write`."""
         self._file.seek(offset)
         data = self._file.read(length)
         if len(data) != length:
@@ -138,6 +142,7 @@ class _Spool:
         return data
 
     def close(self) -> None:
+        """Close (and so delete) the file, if one was created."""
         if self._file is not None:
             spool, self._file = self._file, None
             try:
@@ -149,6 +154,7 @@ class _Spool:
 
 
 def _unpickle_rows(data: bytes) -> Iterator:
+    """Yield the rows pickled back to back in one spooled block."""
     stream = io.BytesIO(data)
     while stream.tell() < len(data):
         yield pickle.load(stream)
@@ -177,6 +183,7 @@ class _SharedScan:
         self._active: list[_Route] = []
 
     def _covering(self, row_number: int) -> list[_Route]:
+        """Return the routes still collecting rows that cover ``row_number``."""
         # Tables enter when the scan reaches their first row and leave after
         # their last, so each row costs only the tables that actually cover it.
         while self._pending < len(self.routes) and self.routes[self._pending].table.start_row <= row_number:
@@ -223,6 +230,7 @@ class _SharedScan:
         return current_row
 
     def _spool_row(self, route: _Route, row) -> None:
+        """Keep one output row of a waiting table until its turn, within the spool budget."""
         if not self.spooling:
             return
         try:
@@ -256,6 +264,7 @@ class _SharedScan:
                 route.release()
 
     def replay(self, route: _Route) -> Iterator:
+        """Yield a table's spooled rows in order, then forget them."""
         blocks = route.blocks
         for index in range(0, len(blocks), 2):
             yield from _unpickle_rows(self.spool.read(blocks[index], blocks[index + 1]))
@@ -300,6 +309,7 @@ def route_sheet_tables(
     last_column = max(table.end_column for table in routed)
 
     def own_scan(table) -> Iterator:
+        """Read one table with a dedicated scan of its own rectangle, as before the router."""
         bounds = (table.start_row, table.end_row, table.start_column, table.end_column)
         with open_scan(*bounds) as (own_values, own_formulas):
             yield from make_pipeline(table, iter(own_values), iter(own_formulas) if with_formulas else None)
@@ -333,6 +343,7 @@ def route_sheet_tables(
         )
 
         def table_rows(route: _Route) -> Iterator:
+            """Yield one table's rows: spooled ones first, then live ones from the shared scan."""
             scan.current = route
             try:
                 if route.rescan:

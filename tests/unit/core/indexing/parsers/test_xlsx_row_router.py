@@ -94,11 +94,23 @@ def _side_by_side(tables=3, rows=200, width=2, gap=2, formulas=False) -> tuple[_
     return grid, layout
 
 
-def test_side_by_side_tables_share_one_scan_and_match_dedicated_scans():
+def test_side_by_side_tables_share_one_scan_and_match_dedicated_scans(monkeypatch):
+    # Small blocks force waiting rows through the file and back, so a spool that
+    # lost them on disk could not pass by replaying only the in-memory buffer.
+    reads = []
+    original_read = router._Spool.read
+
+    def read(self, offset, length):
+        reads.append(length)
+        return original_read(self, offset, length)
+
+    monkeypatch.setattr(router._Spool, "read", read)
+    monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 256)
     grid, tables = _side_by_side(tables=8)
     taken = _consume(grid, tables, spool_limit=1 << 30)
 
     assert len(grid.scans) == 1
+    assert reads
     for table in tables:
         assert taken[table.name] == _reference(grid, table)
 

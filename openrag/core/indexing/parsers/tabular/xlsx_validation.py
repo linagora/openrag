@@ -184,6 +184,7 @@ def _merge_preambles(
 
 
 def _reindexed_regions(merged: list[TableRegion]) -> list[TableRegion]:
+    """Number regions in order and drop header hints that merging may have invalidated."""
     return [replace(region, index=index, header_row_hint=None) for index, region in enumerate(merged)]
 
 
@@ -459,6 +460,7 @@ def _rectangles_intersect(a: tuple[int, int, int, int], b: tuple[int, int, int, 
 
 
 def _bounds(region: TableRegion) -> tuple[int, int, int, int]:
+    """The region's (start_row, end_row, start_column, end_column) rectangle."""
     return region.start_row, region.end_row, region.start_column, region.end_column
 
 
@@ -846,6 +848,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     return interval >= 0 and column <= active_column_ends[interval]
 
                 def fold_block(region: TableRegion) -> None:
+                    """Fold one detected block into ``regions``, merging by column band past the table limit."""
                     nonlocal merging_column_bands, regions, detected_blocks
                     detected_blocks += 1
                     if not merging_column_bands:

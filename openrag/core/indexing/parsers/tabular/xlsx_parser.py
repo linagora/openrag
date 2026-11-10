@@ -1095,6 +1095,7 @@ def _worksheet_scan(sheet, formula_sheet):
 
     @contextmanager
     def open_scan(min_row: int, max_row: int, min_column: int, max_column: int):
+        """Yield the value and formula row iterators over one rectangle."""
         window = {
             "min_row": min_row,
             "max_row": max_row,
@@ -1119,6 +1120,7 @@ def _table_row_pipeline(info: SheetInfo):
     """
 
     def make_pipeline(table: TableRegion, value_rows, formula_rows):
+        """Return the table's row pipeline over the given raw row iterators."""
         visible_rows = _value_rows(_visible_rows(value_rows, table, info), info.uncached_string_formulas)
         if formula_rows is None:
             return _without_calculated_empty(visible_rows)
