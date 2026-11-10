@@ -6,7 +6,7 @@ title: ✨ Key Features
 [OpenRag](https://open-rag.ai/) supports a comprehensive range of file formats for seamless document ingestion:
 
 * **Text Files**: `txt`, `md`
-* **Tabular Data**: `csv`, `xlsx`, `xlsm` - Row-preserving batch ingestion with independent table extraction (each worksheet read in one pass, however its tables are laid out), worksheet context, and formula metadata. Rows hidden by an active filter are indexed; rows and columns hidden by hand are not. Macros are never executed. See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/)
+* **Tabular Data**: `csv`, `xlsx`, `xlsm` - Row-preserving batch ingestion with independent table extraction (each worksheet read in one pass, however its tables are laid out), worksheet context, and formula metadata. Hidden columns are skipped; hidden rows are skipped too, except in the range of an active filter, where they are indexed. Macros are never executed. See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/)
 * **Document Files**: `pdf`, `docx`, `doc`, `pptx` - Advanced PDF parsing with OCR support and Office document processing
 * **E-mail**: `eml` - Message body and headers, with attachments parsed through their own format's pipeline
 * **Audio Files**: `wav`, `mp3`, `flac`, `ogg`, `aac`, `wma` - Audio transcription and content extraction

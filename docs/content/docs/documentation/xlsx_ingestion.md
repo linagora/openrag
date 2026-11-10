@@ -22,7 +22,7 @@ Rows are emitted incrementally as bounded Markdown table batches. Chunk metadata
 
 Retrieval limits row-sibling expansion to `related_limit` chunks; setting it to zero disables expansion. A row split into more chunks than the limit can therefore be incomplete, and the cap is logged.
 
-Hidden and `veryHidden` worksheets are skipped. Inside a visible worksheet, hidden columns and rows hidden by hand or in collapsed outline groups are excluded.
+Hidden and `veryHidden` worksheets are skipped. Inside a visible worksheet, hidden columns are excluded. Rows hidden by hand or in collapsed outline groups are excluded too, except on a worksheet whose filter is active: there, every hidden data row in a filter range is indexed (see below).
 
 Rows hidden by an active filter are **included**. A workbook saved with a filter applied (for example `Status = Open`) still contains the rows the filter hides, and a filter is a view of the data, not a decision to remove rows from it: indexing only the visible rows would make a question such as "how many tickets are closed?" return a confident wrong answer. A row counts as filtered when the worksheet marks its filter as active (`<sheetPr filterMode="1">`) and the row lies in the data rows of the worksheet's AutoFilter range or of an Excel Table's own filter. Rows hidden outside those ranges stay excluded, and so do hidden rows on a worksheet whose filter is not marked active, since the file then does not say a filter hid them.
 
@@ -253,8 +253,8 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Merged column-header groups | Consecutive source-backed levels are flattened and retained as hierarchy metadata; arbitrary visual layouts without merged ranges remain ambiguous | Use actual merged ranges or a single explicit header row |
 | Merged row headers | Vertically merged single-column values are expanded through their covered data rows and recorded as per-row hierarchy metadata | No action is required for ordinary vertical row-header merges |
 | Headerless worksheet | The first nonempty row is conservatively treated as the header | Add a header row, or define the range as an Excel Table |
-| Row hidden by hand inside an active filter's range | Excel stores it exactly like a filtered row (`hidden="1"`), so it is treated as filtered and indexed. Filter criteria are not re-evaluated | Delete the row, or move it outside the filtered range, if it must not be indexed |
-| Rows in a collapsed outline group | Excluded, like rows hidden by hand: folded detail is a different intent from a filter | Expand the group before saving if those rows should be indexed |
+| Row hidden by hand or in a collapsed group inside an active filter's range | A workbook does not record why a row is hidden (LibreOffice writes `hidden="true" outlineLevel="0"` for a filtered row and a row hidden by hand alike), so every hidden data row in the range is treated as filtered and indexed. Filter criteria are not re-evaluated | Delete the row, or move it outside the filtered range, if it must not be indexed |
+| Rows in a collapsed outline group outside any active filter range | Excluded, like rows hidden by hand: folded detail is a different intent from a filter | Expand the group before saving if those rows should be indexed |
 | More than 256 blocks in one worksheet | Blocks sharing columns are merged into one table per column band; later header rows appear as data rows | Spread the blocks over several worksheets, or combine them into one table with a column naming the block (week, store), when that matters |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
@@ -270,4 +270,4 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 - Macros are never executed during ingestion. `.xlsm` support reads only its OOXML worksheet data with VBA retention disabled.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
 - Use a fresh partition when comparing ingestion behavior across parser versions.
-- Hidden columns and rows hidden by hand are excluded, but rows hidden by an active filter are indexed, and workbook visibility should never be treated as an authorization mechanism: remove data that must not be indexed instead of hiding it.
+- Hidden columns are excluded. Hidden rows are excluded too, except on a worksheet whose filter is active: there, every hidden data row in the worksheet's AutoFilter range or in an Excel Table's filter range is indexed, whether the filter, a collapsed group or the user hid it. Workbook visibility should never be treated as an authorization mechanism: remove data that must not be indexed instead of hiding it.
