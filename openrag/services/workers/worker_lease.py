@@ -142,9 +142,7 @@ async def keep_worker_lease(
                     renewal = remote(task_id, stage_snapshot)
                 else:
                     renewal = remote(task_id)
-                (renewed,) = await asyncio.wait_for(
-                    asyncio.gather(renewal), timeout=min(interval, stop_at - sent_at)
-                )
+                (renewed,) = await asyncio.wait_for(asyncio.gather(renewal), timeout=min(interval, stop_at - sent_at))
             except Exception as exc:  # noqa: BLE001 - one missed renewal must not fail the file
                 logger.warning(f"Failed to renew the worker lease of task {task_id}: {type(exc).__name__}: {exc}")
                 await asyncio.sleep(max(0.0, min(_LEASE_RETRY_SECONDS, interval, stop_at - loop.time())))
