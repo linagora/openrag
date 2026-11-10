@@ -62,6 +62,35 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+## OpenRAG 2.3.5 on Kubernetes: recreate the Ray pods
+
+With `LOG_FORMAT=json` (the chart's default), the chart now sets
+`TQDM_DISABLE=1`, unless `env.config.TQDM_DISABLE` is set, so progress bars stop
+breaking the JSON log stream. With `ray.enabled: true`, KubeRay does not
+recreate Ray pods when the chart changes, and the pods already running keep
+their bars. After `helm upgrade`, at a time when no indexing is running, scale
+OpenRAG down, delete every Ray pod, head included, and scale OpenRAG back up once
+the new pods are Ready: an OpenRAG pod connected to the old Ray head does not
+reconnect on its own.
+
+```bash
+NS=openrag            # the release namespace
+FULLNAME=openrag      # fullnameOverride; `kubectl get raycluster -n $NS` shows it as <FULLNAME>-raycluster
+REPLICAS=$(kubectl get deploy -n "$NS" "$FULLNAME-openrag" -o jsonpath='{.spec.replicas}')
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
+kubectl wait -n "$NS" pod -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance="$FULLNAME" \
+  --for=delete --timeout=10m
+kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
+# Wait for KubeRay to create the new pods, then for them to be Ready (fails after 10m).
+until kubectl get pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster" -o name | grep -q .; do sleep 5; done
+kubectl wait -n "$NS" pod -l ray.io/cluster="$FULLNAME-raycluster" --for=condition=Ready --timeout=10m
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas="$REPLICAS"
+kubectl rollout status -n "$NS" deploy/"$FULLNAME-openrag"   # before resuming indexing
+```
+
+The same applies after any upgrade that changes an `env.config` value read by
+Ray: the Ray containers read it only when they start.
+
 ## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
 
 With `ray.enabled: true`, the Ray head installs the Python dependencies into the
