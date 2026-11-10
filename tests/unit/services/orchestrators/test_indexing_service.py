@@ -773,6 +773,23 @@ async def test_update_metadata_naming_the_file_partition_is_an_update():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+async def test_a_file_in_a_reserved_partition_is_neither_updated_nor_deleted(partition):
+    """The store reads `all` as every partition: file X there is file X everywhere."""
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+
+    with pytest.raises(ValidationError) as update:
+        await svc.update_metadata("f1", {"author": "bob"}, partition, {"id": 1})
+    with pytest.raises(ValidationError) as delete:
+        await svc.delete_file("f1", partition)
+
+    for exc in (update, delete):
+        assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
+    assert (disp.updated, disp.deleted) == ([], [])
+
+
+@pytest.mark.asyncio
 async def test_update_metadata_cannot_override_content_hash():
     disp = FakeDispatcher()
     svc = _service(disp=disp)
