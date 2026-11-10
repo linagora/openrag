@@ -2,8 +2,10 @@
 
 With ``ray.enabled: false`` and no ``RAY_ADDRESS``, each openrag pod starts its
 own Ray. Two settings then break indexing without any error at install time:
-several replicas (each with its own task state), and a Marker pool reserving
-more GPU than the pod has. The chart refuses both.
+several replicas (each with its own task state), and parser workers (Marker,
+Docling, Whisper) reserving more GPU than the pod's cards can place. The chart
+refuses both, and replaces the pod instead of rolling it, which would briefly
+run two.
 """
 
 from __future__ import annotations
@@ -85,28 +87,91 @@ def test_several_replicas_sharing_a_ray_cluster_render(tmp_path: Path, shared_ra
     assert result.returncode == 0, result.stderr
 
 
+def _gpus(count: int) -> tuple[str, ...]:
+    return ("--set-json", f'openrag.resources={{"limits":{{"nvidia.com/gpu":{count}}}}}')
+
+
 @requires_helm
-def test_a_marker_pool_larger_than_the_pod_gpus_is_refused(tmp_path: Path) -> None:
-    # 2 x 0.6 (the chart's MARKER_NUM_GPUS) = 1.2 GPU on a 1-GPU pod.
-    result = _render(tmp_path, "--set-string", "env.config.MARKER_POOL_SIZE=2")
+@pytest.mark.parametrize(
+    ("args", "worker"),
+    [
+        # 2 x 0.6 (the chart's MARKER_NUM_GPUS) on a 1-GPU pod.
+        (("--set-string", "env.config.MARKER_POOL_SIZE=2"), "Marker"),
+        # 1.8 GPU in total, but only one 0.6 fits on each card: the third never starts.
+        (("--set-string", "env.config.MARKER_POOL_SIZE=3", *_gpus(2)), "Marker"),
+        # Marker takes the whole card, and Docling and Whisper reserve 0.01 each.
+        (("--set-string", "env.config.MARKER_NUM_GPUS=1"), "Docling"),
+        (("--set-string", "env.config.MARKER_NUM_GPUS=1", "--set-string", "env.config.DOCLING_NUM_GPUS=0"), "Whisper"),
+        # env.secrets wins over env.config at runtime.
+        (("--set-string", "env.secrets.MARKER_POOL_SIZE=2"), "Marker"),
+        # Fits if Docling starts first (0.6 + 0.4 on each card), but not if Marker
+        # does: both 0.4 land on the first card and the second 0.6 has no room.
+        (
+            (
+                *("--set-string", "env.config.MARKER_POOL_SIZE=2", "--set-string", "env.config.MARKER_NUM_GPUS=0.4"),
+                *("--set-string", "env.config.DOCLING_POOL_SIZE=2", "--set-string", "env.config.DOCLING_NUM_GPUS=0.6"),
+                *("--set-string", "env.config.WHISPER_NUM_GPUS=0", *_gpus(2)),
+            ),
+            "Docling",
+        ),
+    ],
+    ids=[
+        "pool-over-one-gpu",
+        "fraction-per-card",
+        "docling-counts",
+        "whisper-counts",
+        "pool-from-secrets",
+        "start-order",
+    ],
+)
+def test_gpu_workers_that_do_not_fit_the_pod_are_refused(tmp_path: Path, args: tuple[str, ...], worker: str) -> None:
+    result = _render(tmp_path, *args)
     assert result.returncode != 0
-    assert "MARKER_POOL_SIZE (2) x MARKER_NUM_GPUS (0.6) reserves 1.2 GPU, but the openrag pod has 1" in result.stderr
+    assert "The GPU workers do not fit the openrag pod's" in result.stderr
+    assert f"a {worker} worker never starts" in result.stderr
+
+
+@requires_helm
+def test_a_fractional_reservation_above_one_gpu_is_refused(tmp_path: Path) -> None:
+    result = _render(tmp_path, "--set-string", "env.config.MARKER_NUM_GPUS=1.5", *_gpus(2))
+    assert result.returncode != 0
+    assert "MARKER_NUM_GPUS=1.5: Ray accepts a GPU reservation above 1 only as a whole number" in result.stderr
 
 
 @requires_helm
 @pytest.mark.parametrize(
     "args",
     [
-        # 2 x 0.5 fits a 1-GPU pod exactly.
-        ("--set-string", "env.config.MARKER_POOL_SIZE=2", "--set-string", "env.config.MARKER_NUM_GPUS=0.5"),
-        # Without a GPU in the pod, Marker reserves none.
+        # 0.9 for Marker and 0.03 for Docling and Whisper on one card.
+        ("--set-string", "env.config.MARKER_POOL_SIZE=2", "--set-string", "env.config.MARKER_NUM_GPUS=0.45"),
+        # One 0.6 on each card.
+        ("--set-string", "env.config.MARKER_POOL_SIZE=2", *_gpus(2)),
+        # A whole card for Marker, the other for Docling and Whisper.
+        ("--set-string", "env.config.MARKER_NUM_GPUS=1", *_gpus(2)),
+        # Without a GPU in the pod, the workers reserve none.
         ("--set-string", "env.config.MARKER_POOL_SIZE=3", "--set-json", f"openrag.resources={NO_GPU_RESOURCES}"),
-        # On a shared Ray cluster, Marker runs on the Ray worker pods.
+        # On a shared Ray cluster, the workers run on the Ray worker pods.
         ("--set-string", "env.config.MARKER_POOL_SIZE=3", *SHARED_RAY),
         ("--set-string", "env.config.MARKER_POOL_SIZE=3", "--set", "ray.externalCluster=true"),
     ],
-    ids=["fits-exactly", "no-gpu-in-pod", "shared-ray", "external-ray-from-secret"],
+    ids=["fits-one-card", "one-per-card", "whole-card-each", "no-gpu-in-pod", "shared-ray", "external-ray-from-secret"],
 )
-def test_marker_pools_that_fit_render(tmp_path: Path, args: tuple[str, ...]) -> None:
+def test_gpu_workers_that_fit_render(tmp_path: Path, args: tuple[str, ...]) -> None:
     result = _render(tmp_path, *args)
     assert result.returncode == 0, result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("args", "recreate"),
+    [((), True), (SHARED_RAY, False)],
+    ids=["embedded-ray", "shared-ray"],
+)
+def test_the_embedded_ray_never_runs_two_pods_during_a_rollout(
+    tmp_path: Path, args: tuple[str, ...], recreate: bool
+) -> None:
+    """A rolling update would run two pods, each with its own Ray and job reconciler."""
+    result = _render(tmp_path, *args)
+    assert result.returncode == 0, result.stderr
+    (deployment,) = [doc for doc in yaml.safe_load_all(result.stdout) if doc and doc["kind"] == "Deployment"]
+    assert (deployment["spec"].get("strategy") == {"type": "Recreate"}) is recreate

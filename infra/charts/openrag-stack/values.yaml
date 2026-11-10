@@ -1283,8 +1283,9 @@ env:
     # Conservative defaults: every Marker process is a separate Python + torch
     # process sharing the pod's memory and GPU. Raise per deployment once the
     # headroom is known (up to MARKER_POOL_SIZE x MARKER_MAX_PROCESSES processes).
-    # With the embedded Ray, MARKER_POOL_SIZE x MARKER_NUM_GPUS must not exceed
-    # the openrag pod's GPUs: the chart refuses to render otherwise.
+    # With the embedded Ray, the Marker, Docling and Whisper workers' GPU
+    # reservations must fit the openrag pod's cards (a fraction of a GPU stays
+    # on one card): the chart refuses to render otherwise.
     MARKER_MAX_PROCESSES: "4"
     MARKER_POOL_SIZE: "1"
     MARKER_NUM_GPUS: "0.6"

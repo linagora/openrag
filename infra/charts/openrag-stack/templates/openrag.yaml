@@ -20,21 +20,70 @@
 {{- if and $embeddedRay (gt (int .Values.openrag.replicas) 1) -}}
 {{- fail (printf "openrag.replicas=%v with the embedded Ray (ray.enabled=false, no RAY_ADDRESS, ray.externalCluster=false): each openrag pod would run its own Ray and task state, so each pod's job reconciler marks the jobs still queued on the other pods FAILED, and cancel and the quota's pending count only see the pod that receives the request. Keep openrag.replicas: 1, or share one Ray cluster: ray.enabled=true together with env.config.RAY_ADDRESS or env.config.ENABLE_RAY_SERVE=true, or an external cluster through env.config.RAY_ADDRESS (ray.externalCluster=true when RAY_ADDRESS comes from a Secret the chart cannot read)." .Values.openrag.replicas) -}}
 {{- end -}}
-{{- /* Every Marker worker reserves MARKER_NUM_GPUS of the Ray node it runs on.
-   With the embedded Ray that node is this pod, so a pool larger than the pod's
-   GPUs leaves workers that never start, and PDFs sent to them fail after
-   marker_timeout. Any preset can select Marker at runtime, whatever PDFLOADER
-   says, so this holds for every deployment. Without a GPU in the pod the
-   reservation is dropped (marker_workers._marker_num_gpus). The defaults are
-   the app's (conf/config.yaml). */ -}}
+{{- /* Every Marker, Docling and Whisper worker reserves its *_NUM_GPUS of the
+   Ray node it runs on. With the embedded Ray that node is this pod, so a worker
+   that does not fit never starts, and the files sent to it fail after the
+   parser's timeout. Any preset can select Marker or Docling at runtime,
+   whatever PDFLOADER says, and Whisper is the default loader for audio, so all
+   three are counted. Ray puts a fractional reservation on a single GPU and a
+   reservation of 1 or more on whole GPUs, so the workers are placed card by
+   card (first fit), not summed. The pools start lazily, in whatever order
+   files first need them, so the workers must fit in every order the three
+   pools can start in. Without a GPU in the pod the reservations
+   are dropped (marker_workers._marker_num_gpus and its Docling and Whisper
+   twins). env.secrets is read too: envFrom loads it after the ConfigMap, so its
+   copy wins. The defaults are the app's (conf/config.yaml). */ -}}
 {{- if $embeddedRay -}}
 {{- $resources := .Values.openrag.resources | default dict -}}
-{{- $podGpus := float64 (dig "limits" "nvidia.com/gpu" (dig "requests" "nvidia.com/gpu" 0 $resources) $resources) -}}
-{{- $markerPool := float64 (dig "MARKER_POOL_SIZE" "1" (.Values.env.config | default dict)) -}}
-{{- $markerGpus := float64 (dig "MARKER_NUM_GPUS" "0.01" (.Values.env.config | default dict)) -}}
-{{- $markerTotal := mulf $markerPool $markerGpus -}}
-{{- if and (gt $podGpus 0.0) (gt $markerTotal $podGpus) -}}
-{{- fail (printf "MARKER_POOL_SIZE (%v) x MARKER_NUM_GPUS (%v) reserves %v GPU, but the openrag pod has %v and runs the embedded Ray: the Marker workers past the pod's GPUs never start, and PDFs sent to them fail after marker_timeout. Lower MARKER_POOL_SIZE or MARKER_NUM_GPUS, or give the pod more GPUs." $markerPool $markerGpus $markerTotal $podGpus) -}}
+{{- $podGpus := int (dig "limits" "nvidia.com/gpu" (dig "requests" "nvidia.com/gpu" 0 $resources) $resources) -}}
+{{- if gt $podGpus 0 -}}
+{{- $env := mergeOverwrite (deepCopy (.Values.env.config | default dict)) (.Values.env.secrets | default dict) -}}
+{{- $pools := list
+  (dict "name" "Marker" "poolKey" "MARKER_POOL_SIZE" "gpusKey" "MARKER_NUM_GPUS" "count" (int (dig "MARKER_POOL_SIZE" "1" $env)) "size" (float64 (dig "MARKER_NUM_GPUS" "0.01" $env)))
+  (dict "name" "Docling" "poolKey" "DOCLING_POOL_SIZE" "gpusKey" "DOCLING_NUM_GPUS" "count" (int (dig "DOCLING_POOL_SIZE" "1" $env)) "size" (float64 (dig "DOCLING_NUM_GPUS" "0.01" $env)))
+  (dict "name" "Whisper" "poolKey" "WHISPER_N_WORKERS" "gpusKey" "WHISPER_NUM_GPUS" "count" (int (dig "WHISPER_N_WORKERS" "2" $env)) "size" (float64 (dig "WHISPER_NUM_GPUS" "0.01" $env)))
+-}}
+{{- $summary := list -}}
+{{- range $pool := $pools -}}
+{{- $summary = append $summary (printf "%s %v x %v" $pool.name $pool.count $pool.size) -}}
+{{- if and (gt $pool.size 1.0) (ne $pool.size (floor $pool.size)) -}}
+{{- fail (printf "%s=%v: Ray accepts a GPU reservation above 1 only as a whole number, so the %s workers would never start. Use a whole number, or a fraction of one GPU." $pool.gpusKey $pool.size $pool.name) -}}
+{{- end -}}
+{{- end -}}
+{{- range $order := list (list 0 1 2) (list 0 2 1) (list 1 0 2) (list 1 2 0) (list 2 0 1) (list 2 1 0) -}}
+{{- $startOrder := list -}}
+{{- range $i := $order -}}{{- $startOrder = append $startOrder (index $pools $i).name -}}{{- end -}}
+{{- $free := dict -}}
+{{- range $card := until $podGpus -}}{{- $_ := set $free (toString $card) 1.0 -}}{{- end -}}
+{{- range $i := $order -}}
+{{- $pool := index $pools $i -}}
+{{- if gt $pool.size 0.0 -}}
+{{- range $_ := until $pool.count -}}
+{{- $placed := false -}}
+{{- if ge $pool.size 1.0 -}}
+{{- $whole := list -}}
+{{- range $card := until $podGpus -}}
+{{- if and (lt (len $whole) (int $pool.size)) (ge (index $free (toString $card)) 0.999999) -}}{{- $whole = append $whole (toString $card) -}}{{- end -}}
+{{- end -}}
+{{- if eq (len $whole) (int $pool.size) -}}
+{{- range $card := $whole -}}{{- $_ := set $free $card 0.0 -}}{{- end -}}
+{{- $placed = true -}}
+{{- end -}}
+{{- else -}}
+{{- range $card := until $podGpus -}}
+{{- if and (not $placed) (ge (index $free (toString $card)) (subf $pool.size 0.000001)) -}}
+{{- $_ := set $free (toString $card) (subf (index $free (toString $card)) $pool.size) -}}
+{{- $placed = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not $placed -}}
+{{- fail (printf "The GPU workers do not fit the openrag pod's %d GPU(s), which runs the embedded Ray: %s. Ray puts a fractional reservation on a single GPU and a reservation of 1 or more on whole GPUs, so if the pools start in the order %s, a %s worker never starts, and the files sent to it fail after the parser's timeout. Lower %s or %s (or those of the other workers), or give the pod more GPUs." $podGpus (join ", " $summary) (join ", " $startOrder) $pool.name $pool.poolKey $pool.gpusKey) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 apiVersion: apps/v1
@@ -45,6 +94,13 @@ metadata:
     {{- include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.openrag.replicas }}
+  {{- if $embeddedRay }}
+  # A rolling update would run the new pod beside the old one, each with its own
+  # Ray: the new pod's job reconciler marks the old pod's queued jobs FAILED,
+  # for good. Stop the old pod first.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 6 }}
