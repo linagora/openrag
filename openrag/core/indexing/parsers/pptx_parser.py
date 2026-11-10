@@ -125,8 +125,9 @@ class PptxParser(DocumentParser):
                         chart = shape.chart
                     except (InvalidXmlError, KeyError) as exc:
                         logger.warning("Skipping PPTX chart with unresolvable relationship: %s", exc)
-                        continue
-                    md += self._chart_to_markdown(chart)
+                        md += "\n\n[unsupported chart]\n\n"
+                    else:
+                        md += self._chart_to_markdown(chart)
                 elif getattr(shape, "has_text_frame", False):
                     if shape == title:
                         md += "# " + shape.text.lstrip() + "\n"

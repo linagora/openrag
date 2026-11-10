@@ -223,9 +223,9 @@ def _deck_with_broken_chart(tmp_path, break_chart):
         pytest.param(lambda chart: chart.set(_R_ID, "rId99"), id="dangling-r-id"),
     ],
 )
-def test_a_chart_with_an_unresolvable_relationship_is_skipped(tmp_path, break_chart):
+def test_a_chart_with_an_unresolvable_relationship_becomes_a_placeholder(tmp_path, break_chart):
     deck = _deck_with_broken_chart(tmp_path, break_chart)
 
     _, slides, _ = PptxParser()._convert(str(deck))
 
-    assert slides == [(1, "Quarterly revenue")]
+    assert slides == [(1, "Quarterly revenue\n\n\n[unsupported chart]")]
