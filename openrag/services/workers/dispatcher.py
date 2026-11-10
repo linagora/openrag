@@ -38,6 +38,7 @@ from services.workers.task_state import (
     QUEUE_REFUSED_CANCELLED,
     QUEUE_REFUSED_FILE_INDEXING,
     QUEUE_REFUSED_OUTCOME_BACKLOG,
+    TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
 )
 
 logger = get_logger()
@@ -354,7 +355,14 @@ class WorkerDispatcher(IndexingDispatcher):
         user_metadata = {
             key: value
             for key, value in metadata.items()
-            if key not in {"file_id", "source", TASK_CREATED_AT_METADATA_KEY, TASK_FINISHED_AT_METADATA_KEY}
+            if key
+            not in {
+                "file_id",
+                "source",
+                TASK_CREATED_AT_METADATA_KEY,
+                TASK_FINISHED_AT_METADATA_KEY,
+                TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
+            }
         }
         user_metadata[TASK_CREATED_AT_METADATA_KEY] = _utc_now_iso()
         task_details = {

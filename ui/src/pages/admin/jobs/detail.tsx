@@ -31,6 +31,7 @@ import {
   isActiveState,
   isTerminalState,
   type StageProgressSummary,
+  type TaskStatus,
 } from "@/lib/api/jobs";
 import { listPartitions } from "@/lib/api/partitions";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
@@ -204,8 +205,9 @@ export default function JobDetailPage() {
   });
 
   // OpenRag has no task SSE — poll status until it reaches a terminal state.
+  const taskQueryKey = ["task", id, userId, authorizationScope] as const;
   const taskQuery = useQuery({
-    queryKey: ["task", id, userId, authorizationScope],
+    queryKey: taskQueryKey,
     queryFn: () => getTaskStatus(id!),
     enabled: !!id && !!user,
     refetchInterval: (query) => {
@@ -213,7 +215,6 @@ export default function JobDetailPage() {
       return state && isTerminalState(state) ? false : 3000;
     },
   });
-
   const stageQuery = useQuery({
     queryKey: [
       "task-stage-progress",
@@ -225,20 +226,17 @@ export default function JobDetailPage() {
     ],
     queryFn: () => getTaskStageProgress(id!, historyCursor, 50),
     enabled: !!id && !!user,
-    refetchInterval: (query) => {
-      const taskActive = isActiveState(taskQuery.data?.task_state ?? "");
-      const persistencePending = query.state.data?.history_quality === "pending_persistence";
+    refetchInterval: () => {
+      const state = queryClient.getQueryData<TaskStatus>(taskQueryKey)?.task_state ?? "";
+      const taskActive = isActiveState(state);
       if (historyCursors.length !== 1) return false;
       if (taskActive) return 3000;
-      const taskFinished = isTerminalState(taskQuery.data?.task_state ?? "");
+      const taskFinished = isTerminalState(state);
       const deadline = terminalHistoryPollDeadline.current.identity === historyIdentity
         ? terminalHistoryPollDeadline.current.at
         : null;
-      const handoffPending =
-        taskFinished &&
-        persistencePending &&
-        (deadline === null || Date.now() < deadline);
-      return handoffPending ? 3000 : false;
+      const terminalRefreshOpen = taskFinished && (deadline === null || Date.now() < deadline);
+      return terminalRefreshOpen ? 3000 : false;
     },
   });
 
@@ -248,15 +246,12 @@ export default function JobDetailPage() {
     queryKey: ["task-stage-progress-current", id, userId, authorizationScope],
     queryFn: () => getTaskStageProgress(id!, null, 1),
     enabled: !!id && !!user,
-    refetchInterval: (query) => {
-      const state = taskQuery.data?.task_state ?? "";
+    refetchInterval: () => {
+      const state = queryClient.getQueryData<TaskStatus>(taskQueryKey)?.task_state ?? "";
       if (isActiveState(state)) return 3000;
 
       const taskFinished = isTerminalState(state);
-      const persistencePending =
-        query.state.data?.history_quality === "pending_persistence" ||
-        stageQuery.data?.history_quality === "pending_persistence";
-      if (!taskFinished || !persistencePending) return false;
+      if (!taskFinished) return false;
 
       const deadline = terminalHistoryPollDeadline.current.identity === historyIdentity
         ? terminalHistoryPollDeadline.current.at
@@ -279,16 +274,15 @@ export default function JobDetailPage() {
 
   useEffect(() => {
     const taskFinished = isTerminalState(taskQuery.data?.task_state ?? "");
-    const persistencePending = stageQuery.data?.history_quality === "pending_persistence";
     if (terminalHistoryPollDeadline.current.identity !== historyIdentity) {
       terminalHistoryPollDeadline.current = { identity: historyIdentity, at: null };
     }
-    if (!taskFinished || !persistencePending) {
+    if (!taskFinished) {
       terminalHistoryPollDeadline.current.at = null;
       return;
     }
     terminalHistoryPollDeadline.current.at ??= Date.now() + TERMINAL_HISTORY_POLL_WINDOW_MS;
-  }, [historyIdentity, stageQuery.data?.history_quality, taskQuery.data?.task_state]);
+  }, [historyIdentity, taskQuery.data?.task_state]);
 
   const state = taskQuery.data?.task_state;
   const active = !!state && isActiveState(state);

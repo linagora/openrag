@@ -157,6 +157,20 @@ def test_expired_terminal_outcome_without_finished_stamp_survives_recovery(monke
     assert deleted == []
 
 
+def test_finished_task_does_not_keep_pending_outcome_marker() -> None:
+    info = TaskInfo(
+        state="FAILED",
+        details={
+            "metadata": {
+                task_state_module.TASK_JOB_OUTCOME_PENDING_METADATA_KEY: True,
+                TASK_FINISHED_AT_METADATA_KEY: "2026-11-10T09:00:00+00:00",
+            }
+        },
+    )
+
+    assert task_state_module._job_outcome_pending(info) is False
+
+
 @pytest.mark.asyncio
 async def test_pending_terminal_outcome_is_saved_for_actor_recovery(monkeypatch) -> None:
     import ray.cloudpickle as cloudpickle

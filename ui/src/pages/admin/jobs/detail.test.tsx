@@ -787,7 +787,7 @@ describe("JobDetailPage", () => {
     expect(screen.queryByText(/skipped/i)).toBeNull();
   });
 
-  it("keeps polling terminal tasks while stage history is pending persistence", async () => {
+  it("refreshes terminal stage history for a bounded window", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
     try {
       getTaskStatusMock.mockResolvedValue({
@@ -797,7 +797,7 @@ describe("JobDetailPage", () => {
       });
       getTaskStageProgressMock.mockResolvedValue({
         freshness: "durable",
-        history_quality: "pending_persistence",
+        history_quality: "complete",
         is_currently_running: false,
         persisted_through_sequence: 1,
         events: [],
@@ -807,7 +807,7 @@ describe("JobDetailPage", () => {
 
       const { queryClient } = renderJobDetail();
 
-      expect(await screen.findByText("Recent stage updates may still be saving.")).not.toBeNull();
+      expect(await screen.findByText("All observed stage events are saved.")).not.toBeNull();
       const stageQuery = queryClient.getQueryCache().find({
         queryKey: ["task-stage-progress", "task-1", 7, "admin", null, null],
       });
@@ -834,44 +834,54 @@ describe("JobDetailPage", () => {
     }
   });
 
-  it("stops the terminal history poll when persistence completes", async () => {
-    getTaskStatusMock.mockResolvedValue({
-      task_id: "task-1",
-      task_state: "COMPLETED",
-      details: { file_id: "file-1", partition: "docs", metadata: { filename: "done.pdf" }, user_id: 1 },
-    });
-    getTaskStageProgressMock.mockResolvedValue({
-      freshness: "durable",
-      history_quality: "pending_persistence",
-      is_currently_running: false,
-      persisted_through_sequence: 1,
-      events: [],
-      has_more: false,
-      next_cursor: null,
-    });
+  it("keeps the terminal refresh window open if history becomes complete early", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      getTaskStatusMock.mockResolvedValue({
+        task_id: "task-1",
+        task_state: "COMPLETED",
+        details: { file_id: "file-1", partition: "docs", metadata: { filename: "done.pdf" }, user_id: 1 },
+      });
+      getTaskStageProgressMock.mockResolvedValue({
+        freshness: "durable",
+        history_quality: "unknown",
+        is_currently_running: false,
+        persisted_through_sequence: 1,
+        events: [],
+        has_more: false,
+        next_cursor: null,
+      });
 
-    const { queryClient } = renderJobDetail();
-    expect(await screen.findByText("Recent stage updates may still be saving.")).not.toBeNull();
-    const stageQuery = queryClient.getQueryCache().find({
-      queryKey: ["task-stage-progress", "task-1", 7, "admin", null, null],
-    });
-    if (!stageQuery) throw new Error("Stage history query was not created");
-    const interval = (stageQuery.options as unknown as { refetchInterval?: unknown }).refetchInterval;
-    if (typeof interval !== "function") throw new Error("Stage history polling interval was not configured");
-    expect((interval as (query: unknown) => number | false)(stageQuery)).toBe(3000);
+      const { queryClient } = renderJobDetail();
+      const stageQuery = queryClient.getQueryCache().find({
+        queryKey: ["task-stage-progress", "task-1", 7, "admin", null, null],
+      });
+      if (!stageQuery) throw new Error("Stage history query was not created");
+      const interval = (stageQuery.options as unknown as { refetchInterval?: unknown }).refetchInterval;
+      if (typeof interval !== "function") throw new Error("Stage history polling interval was not configured");
+      const getInterval = interval as (query: unknown) => number | false;
+      expect(await screen.findByText("Stage history completeness is unknown.")).not.toBeNull();
+      expect((await screen.findAllByText("COMPLETED")).length).toBeGreaterThan(0);
+      expect(getInterval(stageQuery)).toBe(3000);
 
-    queryClient.setQueryData(stageQuery.queryKey, {
-      freshness: "durable",
-      history_quality: "complete",
-      is_currently_running: false,
-      persisted_through_sequence: 2,
-      events: [],
-      has_more: false,
-      next_cursor: null,
-    });
+      queryClient.setQueryData(stageQuery.queryKey, {
+        freshness: "durable",
+        history_quality: "complete",
+        is_currently_running: false,
+        persisted_through_sequence: 2,
+        events: [],
+        has_more: false,
+        next_cursor: null,
+      });
 
-    expect((interval as (query: unknown) => number | false)(stageQuery)).toBe(false);
-    expect(await screen.findByText("All observed stage events are saved.")).not.toBeNull();
+      expect(getInterval(stageQuery)).toBe(3000);
+      expect(await screen.findByText("All observed stage events are saved.")).not.toBeNull();
+
+      now.mockReturnValue(1_031_000);
+      expect(getInterval(stageQuery)).toBe(false);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("labels events from a retried attempt in the stage timeline", async () => {

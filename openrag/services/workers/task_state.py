@@ -361,7 +361,11 @@ class TaskInfo:
 
 def _job_outcome_pending(info: TaskInfo) -> bool:
     metadata = info.details.get("metadata") if isinstance(info.details, dict) else None
-    return isinstance(metadata, dict) and metadata.get(TASK_JOB_OUTCOME_PENDING_METADATA_KEY) is True
+    return (
+        isinstance(metadata, dict)
+        and metadata.get(TASK_JOB_OUTCOME_PENDING_METADATA_KEY) is True
+        and TASK_FINISHED_AT_METADATA_KEY not in metadata
+    )
 
 
 def _job_outcome_requires_persistence(info: TaskInfo) -> bool:
