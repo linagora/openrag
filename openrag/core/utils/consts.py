@@ -5,6 +5,16 @@ LEGACY_PARTITION_PREFIX = "ragondin-"
 # one partition and the in-memory partition cache is never empty.
 DEFAULT_PARTITION_NAME = "default"
 
+# Names no partition may take, because they already mean something when
+# partitions are selected (``openrag-all``, ``?partitions=all``). Matched
+# case-insensitively.
+RESERVED_PARTITION_NAMES = frozenset({"all"})
+
+
+def is_reserved_partition_name(name: str) -> bool:
+    return name.strip().lower() in RESERVED_PARTITION_NAMES
+
+
 # The admin account seeded at startup: undeletable, cannot lose admin rights,
 # and the owner the default partition is seeded with.
 DEFAULT_ADMIN_USER_ID = 1
