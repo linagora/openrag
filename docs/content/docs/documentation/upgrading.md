@@ -62,6 +62,18 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
+
+The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any
+earlier 2.3.x. Workers of the old release keep a handle to the replaced actor, so
+a file they are still indexing loses its state writes and stays `SERIALIZING`.
+On a shared Ray cluster (`ray.enabled: true`, or an external cluster), stop
+traffic and wait until no indexing task is active before the first 2.3.5 replica
+starts, as in
+[Upgrades that change the indexer generation](/openrag/documentation/kubernetes/#upgrades-that-change-the-indexer-generation).
+On an external cluster, retire the `v13` generation there. With Ray inside the
+OpenRAG pod or container, nothing extra is needed.
+
 ## OpenRAG 2.3.5 on Kubernetes: recreate the Ray pods
 
 With `LOG_FORMAT=json` (the chart's default), the chart now sets
