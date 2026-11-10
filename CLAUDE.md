@@ -190,7 +190,7 @@ those keys along with `score`, and `ScoredChunk.to_langchain()` clears them from
 metadata before stamping its typed fields. A score in an API response was set by *that*
 retrieval, never by whoever uploaded the file.
 
-Three caveats:
+Four caveats:
 
 - The key is **absent**, not null, when no reranker ran (reranker disabled, or a web
   source — web results are built separately and never reranked). Such chunks stay plain
@@ -202,6 +202,8 @@ Three caveats:
   reranks each sub-query's list separately and then fuses them with RRF, so the final
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
+- Under a `date_order` ("the last X", see Temporal Queries) the sources are in document-date
+  order, not score order.
 
 ### Temporal Queries
 

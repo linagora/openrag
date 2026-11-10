@@ -29,6 +29,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
+from core.retrieval.date_order import FUTURE_TOLERANCE
 from core.utils.text import neutralize_prompt_control_tokens, sanitize_text
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
@@ -95,8 +96,9 @@ def _format_created_at(value: object) -> str:
             return ""
     else:
         return ""
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(UTC)
+    parsed = parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    if parsed > datetime.now(UTC) + FUTURE_TOLERANCE:
+        return ""
     return parsed.strftime("%Y-%m-%d %H:%M UTC")
 
 

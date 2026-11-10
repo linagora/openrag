@@ -17,7 +17,7 @@ an unknown date is never mistaken for the newest or the oldest.
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import zip_longest
 from typing import Any
 
@@ -28,15 +28,23 @@ from core.models.query import DateOrder
 #: field the indexer accepts, see ``indexing_service.TEMPORAL_FIELDS``).
 CREATED_AT_KEY = "created_at"
 
+#: A ``created_at`` further ahead than this is upload metadata no clock produced;
+#: the margin covers a client whose clock or timezone is off by hours.
+FUTURE_TOLERANCE = timedelta(days=1)
+
 
 def chunk_created_at(chunk: Chunk) -> datetime | None:
-    """The chunk's document creation date, or ``None`` when absent or unparseable.
+    """The chunk's document creation date, or ``None`` when absent, unparseable or in the future.
 
     Milvus returns the TIMESTAMPTZ column as an ISO 8601 string; a chunk built
     elsewhere may carry a ``datetime`` already. A naive value is read as UTC,
-    matching the upload-time normalisation in ``extract_temporal_fields``.
+    matching the upload-time normalisation in ``extract_temporal_fields``. A
+    future date would otherwise always sort as the newest document.
     """
-    return _parse_datetime(chunk.metadata.get(CREATED_AT_KEY))
+    parsed = _parse_datetime(chunk.metadata.get(CREATED_AT_KEY))
+    if parsed is not None and parsed > datetime.now(UTC) + FUTURE_TOLERANCE:
+        return None
+    return parsed
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -89,4 +97,4 @@ def interleave_chunks(ranked_lists: Sequence[Sequence[Chunk]], key_fn: Callable[
     return list(merged.values())
 
 
-__all__ = ["CREATED_AT_KEY", "chunk_created_at", "interleave_chunks", "order_chunks_by_date"]
+__all__ = ["CREATED_AT_KEY", "FUTURE_TOLERANCE", "chunk_created_at", "interleave_chunks", "order_chunks_by_date"]
