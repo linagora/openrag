@@ -55,7 +55,36 @@ Every detected table is extracted and chunked independently. Its metadata includ
 - `sheet_name` and `sheet_index`, preserved on every batch and chunk;
 - exact `table_header_range`, data-row numbers, and chunk `cell_range` citations.
 
-An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Worksheet context is repeated on every chunk of its table while it stays small. A context larger than a quarter of the chunk budget (and longer than the short pointer that replaces it) would crowd out the rows, so when the table needs splitting it is indexed once, with the table's first batch, as its own text chunks (`xlsx_content_kind: sheet_context`). The table chunks then keep the worksheet name and a line such as `Worksheet context (rows 1-3) is indexed in separate chunks.`, drop the context text from their metadata, and set `sheet_context_indexed_separately: true`. Table batches report `table_batch_index`, their one-based position within the table. Every worksheet is read in one forward pass per worksheet reader (cell values, plus formula text when the sheet has formulas), however its tables are arranged: stacked, side by side, or staggered. Tables are still indexed one after another; rows of a table whose turn has not come yet are kept until it does: in memory up to `max_spool_memory_bytes` (32 MiB, enough for typical worksheets, so these never touch the disk), and past that in an anonymous temporary file in `TMPDIR`, deleted when the worksheet is done. Both together are bounded by `max_spool_bytes`. A worksheet that would need more falls back to reading each waiting table separately, which is slower but produces the same rows. The same fallback applies when the temporary file cannot be written or read back (full disk, read-only or missing `TMPDIR`), and when the rectangle around the worksheet's tables is larger than `max_sheet_area` (for example a tall declared Excel Table beside a wide one), because one pass would then read mostly empty cells. Each visible worksheet is indexed as at most `max_tables` (256) separate tables; hidden worksheets are skipped and do not count. A worksheet with more separate blocks than that, such as one block per week or per store, each with its own header, is not rejected: blocks sharing the same columns are merged into one table per column band, so every row is indexed. The first block's header names the columns and the later blocks' header rows appear as data rows. Merged blocks never cross an Excel Table. The worksheet context says so (`This worksheet has 300 separate blocks, more than the 256-table limit: …`) and `worksheet_blocks_merged` records the number of blocks detected (0 when nothing was merged). Only a worksheet that still has more than `max_tables` tables after merging, for example more than 256 column bands side by side, fails with `XLSX_LIMIT_EXCEEDED`.
+An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Worksheet context is repeated on every chunk of its table while it stays small. A context larger than a quarter of the chunk budget (and longer than the short pointer that replaces it) would crowd out the rows, so when the table needs splitting it is indexed once, with the table's first batch, as its own text chunks (`xlsx_content_kind: sheet_context`). The table chunks then keep the worksheet name and a line such as `Worksheet context (rows 1-3) is indexed in separate chunks.`, drop the context text from their metadata, and set `sheet_context_indexed_separately: true`. Table batches report `table_batch_index`, their one-based position within the table.
+
+### One pass per worksheet
+
+OpenPyXL's read-only mode parses every cell of a row, even when only a few columns are requested, so reading each table separately would parse a worksheet with N side-by-side tables N times. OpenRAG instead reads every worksheet in one forward pass per worksheet reader (cell values, plus formula text when the sheet has formulas), however its tables are arranged: stacked, side by side, or staggered. A worksheet with 256 side-by-side tables is parsed in seconds rather than minutes.
+
+Tables are still indexed one after another, so header detection, batching, and formula handling are unchanged. Rows of a table whose turn has not come yet wait until it does:
+
+- in memory, up to `max_spool_memory_bytes` (32 MiB). This is enough for typical worksheets, which therefore never touch the disk;
+- past that, in an anonymous temporary file in `TMPDIR`, deleted when the worksheet is done;
+- memory and temporary file together are bounded by `max_spool_bytes` (256 MiB).
+
+A worksheet falls back to reading each waiting table separately, as earlier versions did, when:
+
+- the waiting rows would exceed `max_spool_bytes`;
+- the temporary file cannot be written or read back (full disk, read-only or missing `TMPDIR`);
+- the rectangle around the worksheet's tables is larger than `max_sheet_area` (for example a tall Excel Table beside a wide one), because one pass would then read mostly empty cells.
+
+The fallback is slower but produces exactly the same rows, so neither the limits nor the deployment environment change what is indexed.
+
+### Worksheets with many blocks
+
+Each visible worksheet is indexed as at most `max_tables` (256) separate tables; hidden worksheets are skipped and do not count. A worksheet with more separate blocks than that, such as one block per week or per store, each with its own header, is not rejected. Instead, all of its blocks are merged by column band: each block joins the most recent table that shares any of its columns, so every row is indexed.
+
+- The first block's header names the columns; the later blocks' header rows appear as data rows.
+- A merge never crosses an Excel Table and never overlaps another table; such a block stays separate.
+- The worksheet context says so (`This worksheet has 300 separate blocks, more than the 256-table limit: …`), and `worksheet_blocks_merged` records the number of blocks detected (0 when nothing was merged).
+- Merging happens during the preflight scan, and the `max_sheet_area` limit is checked before each block is merged, so an oversized worksheet is rejected before merging costs any work.
+
+Only a worksheet that still has more than `max_tables` tables after merging, for example more than 256 column bands side by side, fails with `XLSX_LIMIT_EXCEEDED`.
 
 ## Merged and hierarchical headers
 
@@ -224,6 +253,9 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Merged column-header groups | Consecutive source-backed levels are flattened and retained as hierarchy metadata; arbitrary visual layouts without merged ranges remain ambiguous | Use actual merged ranges or a single explicit header row |
 | Merged row headers | Vertically merged single-column values are expanded through their covered data rows and recorded as per-row hierarchy metadata | No action is required for ordinary vertical row-header merges |
 | Headerless worksheet | The first nonempty row is conservatively treated as the header | Add a header row, or define the range as an Excel Table |
+| Row hidden by hand inside an active filter's range | Excel stores it exactly like a filtered row (`hidden="1"`), so it is treated as filtered and indexed. Filter criteria are not re-evaluated | Delete the row, or move it outside the filtered range, if it must not be indexed |
+| Rows in a collapsed outline group | Excluded, like rows hidden by hand: folded detail is a different intent from a filter | Expand the group before saving if those rows should be indexed |
+| More than 256 blocks in one worksheet | Blocks sharing columns are merged into one table per column band; later header rows appear as data rows | Spread the blocks over several worksheets, or combine them into one table with a column naming the block (week, store), when that matters |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
 | Password-protected or encrypted workbook | Rejected at upload with HTTP 422 `ENCRYPTED_OFFICE_FILE` ("This file is password-protected or encrypted"); encrypted `.docx` and `.pptx` uploads get the same response | Remove the password and upload it again |
