@@ -75,6 +75,7 @@ class PptxParser(DocumentParser):
         try:
             import pptx
             from PIL import Image
+            from pptx.exc import InvalidXmlError
         except ImportError:
             logger.warning("python-pptx or PIL not available; cannot parse PPTX")
             return 0, [], []
@@ -119,7 +120,13 @@ class PptxParser(DocumentParser):
                 elif self._is_table(shape):
                     md += "\n" + self._table_to_markdown(shape.table) + "\n"
                 elif getattr(shape, "has_chart", False):
-                    md += self._chart_to_markdown(shape.chart)
+                    # A missing r:id raises InvalidXmlError, a dangling one KeyError.
+                    try:
+                        chart = shape.chart
+                    except (InvalidXmlError, KeyError) as exc:
+                        logger.warning("Skipping PPTX chart with unresolvable relationship: %s", exc)
+                        continue
+                    md += self._chart_to_markdown(chart)
                 elif getattr(shape, "has_text_frame", False):
                     if shape == title:
                         md += "# " + shape.text.lstrip() + "\n"

@@ -5,6 +5,7 @@ message contained "unsupported plot type"; any other ValueError fell through
 and the function returned None implicitly, causing TypeError in the caller.
 """
 
+import pytest
 from core.indexing.parsers.pptx_parser import PptxParser
 
 
@@ -186,3 +187,45 @@ def test_a_picture_in_another_format_is_skipped(tmp_path, psd_bytes, encoded_ima
     _, _, images = PptxParser()._convert(str(deck))
 
     assert [image.page_number for image in images] == [2]
+
+
+# ---------------------------------------------------------------------------
+# A chart whose relationship cannot be resolved is skipped (#1374)
+# ---------------------------------------------------------------------------
+
+_R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+
+def _deck_with_broken_chart(tmp_path, break_chart):
+    """Build a real .pptx with a text box and a chart, then break the chart's r:id."""
+    import pptx
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.util import Inches
+
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = "Quarterly revenue"
+    data = CategoryChartData()
+    data.categories = ["Q1", "Q2"]
+    data.add_series("Revenue", (1.0, 2.0))
+    frame = slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(2), Inches(4), Inches(3), data)
+    break_chart(frame._element.chart)
+    deck = tmp_path / "deck.pptx"
+    presentation.save(deck)
+    return deck
+
+
+@pytest.mark.parametrize(
+    "break_chart",
+    [
+        pytest.param(lambda chart: chart.attrib.pop(_R_ID), id="missing-r-id"),
+        pytest.param(lambda chart: chart.set(_R_ID, "rId99"), id="dangling-r-id"),
+    ],
+)
+def test_a_chart_with_an_unresolvable_relationship_is_skipped(tmp_path, break_chart):
+    deck = _deck_with_broken_chart(tmp_path, break_chart)
+
+    _, slides, _ = PptxParser()._convert(str(deck))
+
+    assert slides == [(1, "Quarterly revenue")]
