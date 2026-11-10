@@ -220,8 +220,11 @@ cut and the trace — RRF only knows ranks, so the order has to be re-applied af
 Across sub-queries the per-query lists (each already in its order) are interleaved rather than
 re-sorted (`interleave_chunks`): a global sort would let one sub-query's documents push
 another's past the cut ("the last contract with ACME and with BETA"), and with different orders
-("my first and last invoice") neither end must fall past it; the cross-partition fusion keeps a
-single re-sort when the sub-queries share an order and plain RRF otherwise. Under a date order
+("my first and last invoice") neither end must fall past it. Across partition groups,
+`retrieve_multi` therefore fuses each sub-query across the groups before interleaving the
+sub-queries (`_retrieve_dated_queries_in_groups`): fusing the groups' already-interleaved lists
+would rank by RRF, and a larger group's results for one sub-query would push another's past the
+cut. Under a date order
 the expansion supplements the ranked candidates instead of replacing them with the seeds (the
 CSV sibling path), chunks that only came in through expansion are ordered after the retrieved
 ones so a newer related document never takes the asked-for document's place under the cut, and

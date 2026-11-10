@@ -1699,3 +1699,39 @@ async def test_retrieve_multi_reapplies_order_and_then_applies_top_k():
     sq = SearchQueries(query_list=[Query(query="meeting", date_order="newest")])
     out = await svc.retrieve_multi(partitions=["p1", "p2"], search_queries=sq, top_k=1)
     assert [c.id for c in out] == ["p2-new"]
+
+
+class _PerQuerySearcher(FakeSearcher):
+    def __init__(self, by_partition_and_query: dict[tuple[str, str], list[Chunk]]):
+        super().__init__()
+        self._results = by_partition_and_query
+
+    async def search(self, **kwargs):
+        self.search_calls.append(kwargs)
+        return list(self._results.get((kwargs["partition"][0], kwargs["query"]), []))
+
+
+@pytest.mark.parametrize("beta_order", ["oldest", "newest"])
+@pytest.mark.asyncio
+async def test_retrieve_multi_keeps_every_dated_sub_query_across_partition_groups(beta_order):
+    acme = [_dated_chunk(f"acme-{day}", f"2026-09-{day}T10:00:00Z") for day in (20, 19, 18)]
+    searcher = _PerQuerySearcher(
+        {("big-1", "ACME contract"): acme, ("small", "BETA contract"): [_dated_chunk("beta", "2026-01-05T10:00:00Z")]}
+    )
+    svc = _svc(searcher)
+    pipeline = svc._pipeline
+
+    async def groups(partitions, **_kwargs):
+        # A three-partition group: RRF divides its ranks by three, which let
+        # its ACME results outrank BETA's only one in the fused list.
+        return [(["big-1", "big-2", "big-3"], pipeline, None), (["small"], pipeline, None)]
+
+    svc._pipeline_groups_for_partitions = groups
+    sq = SearchQueries(
+        query_list=[
+            Query(query="ACME contract", date_order="newest"),
+            Query(query="BETA contract", date_order=beta_order),
+        ]
+    )
+    out = await svc.retrieve_multi(partitions=["big-1", "big-2", "big-3", "small"], search_queries=sq, top_k=2)
+    assert [c.id for c in out] == ["acme-20", "beta"]

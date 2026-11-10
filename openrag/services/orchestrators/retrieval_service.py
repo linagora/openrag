@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 from core.models.preset import resolve_partition_chat_llm
 from core.models.retrieval_trace import TraceRemovalReason
 from core.prompts import load_template_by_key
-from core.retrieval.date_order import order_chunks_by_date
+from core.retrieval.date_order import interleave_chunks, order_chunks_by_date
 from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks, _safe_trace, _with_removal_reasons
 from core.retrieval.retriever import (
     HyDeRetriever,
@@ -1490,6 +1490,17 @@ class RetrievalService:
             )
         else:
             groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
+        return await self._retrieve_in_groups(groups, query, top_k=top_k, filter_params=filter_params, trace=trace)
+
+    async def _retrieve_in_groups(
+        self,
+        groups: list[tuple[list[str], RetrieverPipeline, int | None]],
+        query: Query,
+        *,
+        top_k: int | None,
+        filter_params: dict | None,
+        trace: RetrievalTraceBuilder | None,
+    ) -> list[Chunk]:
         child_traces = (
             [
                 RetrievalTraceBuilder(
@@ -1562,6 +1573,14 @@ class RetrievalService:
             )
         else:
             groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
+        if (
+            len(groups) > 1
+            and len(search_queries.query_list) > 1
+            and any(q.date_order for q in search_queries.query_list)
+        ):
+            return await self._retrieve_dated_queries_in_groups(
+                groups, search_queries.query_list, top_k=top_k, filter_params=filter_params, trace=trace
+            )
         child_traces = (
             [
                 RetrievalTraceBuilder(
@@ -1608,6 +1627,56 @@ class RetrievalService:
             partition_counts=[len(names) for names, _chunks in ranked_groups],
             date_order=search_queries.date_order,
         )
+
+    async def _retrieve_dated_queries_in_groups(
+        self,
+        groups: list[tuple[list[str], RetrieverPipeline, int | None]],
+        queries: list[Query],
+        *,
+        top_k: int | None,
+        filter_params: dict | None,
+        trace: RetrievalTraceBuilder | None,
+    ) -> list[Chunk]:
+        """Fuse each sub-query across the groups, then interleave the sub-queries.
+
+        Fusing the groups' already-interleaved lists would rank them by RRF, so a
+        larger group's results for one sub-query ("the newest ACME contract")
+        could push another's ("the oldest BETA one") past the cut.
+        """
+        child_traces = (
+            [
+                RetrievalTraceBuilder(f"{trace.request_id}:query:{index}", query.query, diagnostics=trace.diagnostics)
+                for index, query in enumerate(queries)
+            ]
+            if trace is not None
+            else None
+        )
+        try:
+            ranked_lists = await asyncio.gather(
+                *(
+                    self._retrieve_in_groups(
+                        groups,
+                        query,
+                        top_k=top_k,
+                        filter_params=filter_params,
+                        trace=child_traces[index] if child_traces is not None else None,
+                    )
+                    for index, query in enumerate(queries)
+                )
+            )
+        finally:
+            if trace is not None and child_traces is not None:
+                self._safe_merge_child_traces(trace, child_traces)
+        fused = rrf_reranking(
+            ranked_lists,
+            key_fn=_chunk_key,
+            top_k=top_k,
+            trace=trace,
+            trace_stage="multi_query_fused",
+            reorder=lambda _: interleave_chunks(ranked_lists, _chunk_key),
+        )
+        self._record_degraded_final(trace, fused)
+        return fused
 
     async def retrieve_per_query(
         self,
