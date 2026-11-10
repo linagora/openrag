@@ -262,7 +262,7 @@ def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.Monke
     assert tagger._llm.kwargs["temperature"] == 0.1
     # Topic tagging counts against the same cluster-wide LLM limit as
     # contextualization (#1364).
-    assert tagger._semaphore._name == "llmSemaphore"
+    assert (tagger._semaphore._name, tagger._semaphore._namespace) == ("llmSemaphore", "openrag")
     assert tagger._semaphore._max_concurrent_ops == 7
 
 
