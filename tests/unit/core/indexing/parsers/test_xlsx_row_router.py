@@ -64,7 +64,7 @@ def _reference(grid: _Grid, table: _Table) -> list:
         return list(_pipeline(table, values, formulas))
 
 
-def _consume(grid, tables, *, spool_limit, take=None, with_formulas=False, has_columns=None):
+def _consume(grid, tables, *, spool_limit, take=None, with_formulas=False, has_columns=None, max_scan_area=None):
     grid.scans.clear()
     taken = {}
     for table, rows in route_sheet_tables(
@@ -73,6 +73,7 @@ def _consume(grid, tables, *, spool_limit, take=None, with_formulas=False, has_c
         _pipeline,
         with_formulas=with_formulas,
         spool_limit=spool_limit,
+        max_scan_area=max_scan_area,
         **({"has_columns": has_columns} if has_columns else {}),
     ):
         limit = None if take is None else take.get(table.name)
@@ -325,3 +326,45 @@ def test_a_table_skipped_without_reading_is_no_longer_spooled(monkeypatch):
     # Only the 50 rows read while serving "first", none while serving "last".
     assert spooled.count("skipped") == 50
     assert taken["last"] == _reference(grid, last)
+
+
+def test_a_bounding_box_past_the_scan_budget_falls_back_to_dedicated_scans():
+    """A scanned row is as wide as the tables' bounding box: a tall declared table
+    beside a wide one would make the shared scan build mostly empty cells."""
+    grid = _Grid([[(r * 100 + c) for c in range(40)] for r in range(300)])
+    tall = _Table("tall", 1, 300, 1, 1)
+    wide = _Table("wide", 1, 2, 3, 40)
+    budget = 300 + 2 * 38  # what the two dedicated scans cost, far below 300 x 40
+
+    taken = _consume(grid, [tall, wide], spool_limit=1 << 30, max_scan_area=budget)
+
+    assert grid.scans == [(1, 300, 1, 1), (1, 2, 3, 40)]
+    assert taken["tall"] == _reference(grid, tall)
+    assert taken["wide"] == _reference(grid, wide)
+
+
+def test_a_bounding_box_within_the_scan_budget_is_shared():
+    grid, tables = _side_by_side(tables=3, rows=50)
+    _consume(grid, tables, spool_limit=1 << 30, max_scan_area=50 * 12)
+    assert len(grid.scans) == 1
+
+
+def test_an_unreadable_spool_resumes_with_a_dedicated_scan_without_duplicates(monkeypatch):
+    reads = 0
+    original_read = router._Spool.read
+
+    def failing_read(self, offset, length):
+        nonlocal reads
+        reads += 1
+        if reads == 2:  # the first block replays, the second cannot be read back
+            raise OSError(5, "Input/output error")
+        return original_read(self, offset, length)
+
+    monkeypatch.setattr(router._Spool, "read", failing_read)
+    monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 128)
+    grid, tables = _side_by_side(tables=4, rows=200)
+    taken = _consume(grid, tables, spool_limit=1 << 30)
+
+    assert reads == 2
+    for table in tables:
+        assert taken[table.name] == _reference(grid, table)

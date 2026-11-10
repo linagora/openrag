@@ -30,6 +30,7 @@ from array import array
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack
+from itertools import islice
 from typing import Any
 
 from core.utils.logging import get_logger
@@ -271,6 +272,7 @@ def route_sheet_tables(
     *,
     with_formulas: bool,
     spool_limit: int,
+    max_scan_area: int | None = None,
     has_columns: Callable[[Any], bool] = lambda table: True,
 ) -> Iterator[tuple[Any, Iterator]]:
     """Yield ``(table, rows)`` for each table, in order, from one shared scan.
@@ -280,6 +282,11 @@ def route_sheet_tables(
     the next pair is requested, which is how the parser reads tables. A table
     for which ``has_columns`` is false gets an empty iterator and is never
     scanned.
+
+    A scanned row is as wide as the tables' bounding box, empty cells included.
+    When that box is larger than ``max_scan_area`` (a tall declared table beside
+    a wide one), sharing would cost more than it saves, so every table is read
+    with its own scan instead, as before.
     """
     routed = [table for table in tables if has_columns(table)]
     if not routed:
@@ -291,6 +298,25 @@ def route_sheet_tables(
     last_row = max(table.end_row for table in routed)
     first_column = min(table.start_column for table in routed)
     last_column = max(table.end_column for table in routed)
+
+    def own_scan(table) -> Iterator:
+        bounds = (table.start_row, table.end_row, table.start_column, table.end_column)
+        with open_scan(*bounds) as (own_values, own_formulas):
+            yield from make_pipeline(table, iter(own_values), iter(own_formulas) if with_formulas else None)
+
+    area = (last_row - first_row + 1) * (last_column - first_column + 1)
+    if max_scan_area is not None and area > max_scan_area:
+        shared_tables = {id(table) for table in routed}
+        for table in tables:
+            rows = own_scan(table) if id(table) in shared_tables else iter(())
+            try:
+                yield table, rows
+            finally:
+                close = getattr(rows, "close", None)
+                if close is not None:
+                    close()
+        return
+
     spool = _Spool(spool_limit)
     with ExitStack() as stack:
         stack.callback(spool.close)
@@ -306,18 +332,27 @@ def route_sheet_tables(
             spool,
         )
 
-        def own_scan(table) -> Iterator:
-            bounds = (table.start_row, table.end_row, table.start_column, table.end_column)
-            with open_scan(*bounds) as (own_values, own_formulas):
-                yield from make_pipeline(table, iter(own_values), iter(own_formulas) if with_formulas else None)
-
         def table_rows(route: _Route) -> Iterator:
             scan.current = route
             try:
                 if route.rescan:
                     yield from own_scan(route.table)
                     return
-                yield from scan.replay(route)
+                emitted = 0
+                try:
+                    for row in scan.replay(route):
+                        yield row
+                        emitted += 1
+                except OSError:
+                    # The spool was written but cannot be read back. The table's
+                    # rows are deterministic, so a dedicated scan resumes after
+                    # the rows already emitted; waiting tables do the same.
+                    logger.warning("XLSX row spool unreadable; falling back to dedicated scans", exc_info=True)
+                    scan._stop_spooling()
+                    route.rescan = True
+                    route.release()
+                    yield from islice(own_scan(route.table), emitted, None)
+                    return
                 while not scan.exhausted and scan.next_row <= route.table.end_row:
                     row = scan.advance()
                     if row is not _NO_ROW:

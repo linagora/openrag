@@ -1127,7 +1127,7 @@ def _table_row_pipeline(info: SheetInfo):
     return make_pipeline
 
 
-def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo], spool_limit: int):
+def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo], limits: XlsxLimits):
     from openpyxl import load_workbook
 
     # OpenPyXL parses cells only here: disabling VBA retention makes the safety
@@ -1170,7 +1170,9 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo], spool_l
                         _worksheet_scan(sheet, formula_sheet),
                         _table_row_pipeline(info),
                         with_formulas=formula_sheet is not None,
-                        spool_limit=spool_limit,
+                        spool_limit=limits.max_spool_bytes,
+                        # The same traversal budget preflight applies to a sheet.
+                        max_scan_area=limits.max_sheet_area,
                         has_columns=lambda table, info=info: bool(_table_columns(table, info)),
                     ):
                         yield info, table, rows
@@ -1241,7 +1243,7 @@ class XlsxParser(TabularBatchParser):
         pending_cells: list[tuple[int, str, str]] = []
         pending_sheet = None
         hidden_count = sum(info.hidden for info in infos)
-        with closing(_openpyxl_sheets(document, source, infos, self.limits.max_spool_bytes)) as sheets:
+        with closing(_openpyxl_sheets(document, source, infos, self.limits)) as sheets:
             for sheet, table, row_iterator in sheets:
                 if pending_cells and sheet is not pending_sheet:
                     for cells_block in self._cell_blocks(document, pending_sheet, hidden_count, pending_cells):
