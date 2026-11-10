@@ -1239,29 +1239,29 @@ async def test_other_failures_cross_both_hops_unchanged(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_parse_builds_image_blocks_off_the_event_loop(monkeypatch):
-    """PNG-encoding a figure-heavy PDF must not starve other coroutines
-    (worker lease renewals) running on the same loop."""
+async def test_parse_splits_the_pages_off_the_event_loop(monkeypatch):
+    """Post-processing a long PDF must not starve other coroutines (worker lease
+    renewals) running on the same loop."""
     from core.models.document import Document, DocumentType
 
     loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
 
     ticks = 0
-    # Ticks seen when the build starts and ends: only that span counts, not the
+    # Ticks seen when the split starts and ends: only that span counts, not the
     # temporary-file write around the dispatch.
     window: list[int] = []
 
     async def _fake_dispatch(path):
         return "<page1>{1}[PAGE_SEP]text", {"_page_1_Picture_0.png": object()}
 
-    def _slow_build(images, cancelled):
+    def _slow_split(markdown):
         window.append(ticks)
         time.sleep(0.5)
         window.append(ticks)
-        return []
+        return [(1, "text")]
 
     monkeypatch.setattr(loader, "_dispatch", _fake_dispatch)
-    monkeypatch.setattr(loader, "_build_image_blocks", _slow_build)
+    monkeypatch.setattr(loader, "_split_pages", _slow_split)
 
     document = Document(id="d", filename="f.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF")
 
@@ -1277,52 +1277,31 @@ async def test_parse_builds_image_blocks_off_the_event_loop(monkeypatch):
     finally:
         task.cancel()
 
-    during_build = window[1] - window[0]
-    assert during_build >= 20, f"event loop was blocked while building image blocks (ticks={during_build})"
+    during_split = window[1] - window[0]
+    assert during_split >= 20, f"event loop was blocked while splitting the pages (ticks={during_split})"
 
 
-async def test_cancelling_parse_stops_the_image_build(monkeypatch):
-    """A cancelled parse must not leave the worker thread encoding every
-    remaining figure."""
+async def test_parse_hands_the_figures_over_unencoded(monkeypatch):
+    """Only the caption stage reads the bytes, and a partition may not caption:
+    the figures stay decoded for it to encode if it runs."""
     from core.models.document import Document, DocumentType
 
     loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
-    images = {f"_page_1_Picture_{i}.png": object() for i in range(50)}
+    # Not images at all: encoding either of them would fail and drop its block.
+    figures = {"_page_0_Picture_0.png": object(), "_page_2_Figure_1.jpeg": object()}
 
     async def _fake_dispatch(path):
-        return "<page1>{1}[PAGE_SEP]text", images
-
-    encoded = 0
-    started = threading.Event()
-
-    def _slow_encode(pil_image):
-        nonlocal encoded
-        encoded += 1
-        started.set()
-        time.sleep(0.02)
-        return b"png"
+        return "<page1>{1}[PAGE_SEP]text", figures
 
     monkeypatch.setattr(loader, "_dispatch", _fake_dispatch)
-    monkeypatch.setattr(marker_workers, "pil_to_png_bytes", _slow_encode)
 
     document = Document(id="d", filename="f.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF")
+    parsed = await loader.parse(document)
 
-    task = asyncio.create_task(loader.parse(document))
-    deadline = time.monotonic() + 5
-    while not started.is_set():
-        if task.done():
-            await task  # surfaces the parse error, if any
-            pytest.fail("parse returned before encoding any image")
-        assert time.monotonic() < deadline, "image encoding never started"
-        await asyncio.sleep(0.005)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    await asyncio.sleep(0.1)  # let the thread reach its next check
-    settled = encoded
-    await asyncio.sleep(0.3)
-    assert encoded == settled < len(images)
+    assert [image.pil_image for image in parsed.images] == list(figures.values())
+    assert all(image.image_bytes == b"" for image in parsed.images)
+    assert [image.metadata["markdown_ref"] for image in parsed.images] == [f"![]({key})" for key in figures]
+    assert [image.page_number for image in parsed.images] == [1, 3]
 
 
 def test_a_page_separator_too_long_to_be_a_page_stays_text():
