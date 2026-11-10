@@ -8,6 +8,7 @@ fuzzy ranking, task assembly and URL-indexation guards in isolation.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -994,6 +995,98 @@ async def test_safe_download_resolves_the_httpx_idna_hostname(monkeypatch, tmp_p
 
     assert resolved_hosts == ["xn--fa-hia.example"]
     assert sent_hosts == ["xn--fa-hia.example"]
+
+
+@pytest.mark.asyncio
+async def test_index_url_keeps_file_io_off_the_event_loop(monkeypatch):
+    """Creating the temp file, opening it, writing each chunk and the content
+    sniff must all run in a worker thread, where no event loop is running."""
+    from services.orchestrators import mcp_service as mcp_mod
+
+    calls: list[tuple[str, bool]] = []
+
+    def on_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return True
+
+    class RecordingHandle:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+        def __getattr__(self, name):
+            return getattr(self._fh, name)
+
+        def read(self, *args):
+            calls.append(("read", on_loop()))
+            return self._fh.read(*args)
+
+        def write(self, data):
+            calls.append(("write", on_loop()))
+            return self._fh.write(data)
+
+        def close(self):
+            calls.append(("close", on_loop()))
+            self._fh.close()
+
+    real_named_temporary_file = mcp_mod.tempfile.NamedTemporaryFile
+    real_path_open = Path.open
+
+    def recording_named_temporary_file(*args, **kwargs):
+        calls.append(("NamedTemporaryFile", on_loop()))
+        return real_named_temporary_file(*args, **kwargs)
+
+    def recording_path_open(self, *args, **kwargs):
+        calls.append(("open", on_loop()))
+        return RecordingHandle(real_path_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(mcp_mod.tempfile, "NamedTemporaryFile", recording_named_temporary_file)
+    monkeypatch.setattr(Path, "open", recording_path_open)
+
+    def handler(request):
+        return httpx.Response(200, content=_PDF_HEADER + b"data")
+
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing()
+    svc = _service(partitions=parts, indexing=indexing)
+
+    async def _resolves_ok(host):
+        return None
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", _resolves_ok)
+
+    await svc.index_url(
+        url="https://example.com/report.pdf",
+        partition="p1",
+        file_id="f7",
+        allowed_partitions=["p1"],
+        user_id=7,
+    )
+    index_url_calls = list(calls)
+    monkeypatch.undo()
+    downloaded = Path(indexing.added[0]["file_path"])
+    assert downloaded.read_bytes() == _PDF_HEADER + b"data"
+    downloaded.unlink(missing_ok=True)
+
+    recorded = {name for name, _ in index_url_calls}
+    assert {"NamedTemporaryFile", "open", "write", "read", "close"} <= recorded
+    assert [call for call in index_url_calls if call[1]] == []
 
 
 # ---------------------------------------------------------------------------

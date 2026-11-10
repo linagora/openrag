@@ -587,8 +587,7 @@ class MCPService:
         # Downloaded under the suffix it is parsed as, like an upload, so the
         # path-based parsers read this file rather than a second copy.
         suffix = Document.type_suffix(filename, metadata.get("mimetype"))
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = Path(tmp.name)
+        tmp_path = await asyncio.to_thread(_create_download_target, suffix)
         download_complete = False
         try:
             await self._safe_download(url, tmp_path)
@@ -606,9 +605,7 @@ class MCPService:
         content_verified = False
         try:
             extension = Document.type_extension(filename, metadata.get("mimetype"))
-            with tmp_path.open("rb") as downloaded:
-                validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
-                await asyncio.to_thread(validate_ooxml_package, extension, downloaded)
+            await asyncio.to_thread(_check_downloaded_content, extension, tmp_path)
             content_verified = True
         finally:
             # `finally`, not `except Exception`, and for the same reason as the
@@ -699,17 +696,38 @@ class MCPService:
                         continue
                     response.raise_for_status()
                     written = 0
-                    with dest.open("wb") as fh:
+                    # File I/O runs in a worker thread so slow storage never
+                    # stalls the event loop.
+                    fh = await asyncio.to_thread(dest.open, "wb")
+                    try:
                         async for chunk in response.aiter_bytes():
                             written += len(chunk)
                             if written > self.max_download_bytes:
                                 raise ValueError(f"download exceeds {self.max_download_bytes} bytes")
-                            fh.write(chunk)
+                            await asyncio.to_thread(fh.write, chunk)
+                    finally:
+                        await asyncio.to_thread(fh.close)
                     return
         raise ValueError("too many redirects")
 
 
 __all__ = ["MCPService"]
+
+
+def _create_download_target(suffix: str) -> Path:
+    """Create an empty temp file for ``index_url`` to download into (blocking; run in a thread)."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        return Path(tmp.name)
+
+
+def _check_downloaded_content(extension: str, path: Path) -> None:
+    """Check the downloaded bytes match *extension* (blocking; run in a thread).
+
+    The sniff and the package check share one handle, as for an upload.
+    """
+    with path.open("rb") as downloaded:
+        validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
+        validate_ooxml_package(extension, downloaded)
 
 
 def _public_chunk_metadata(row: dict[str, Any], *, exclude: tuple[str, ...]) -> dict[str, Any]:
