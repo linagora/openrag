@@ -182,9 +182,21 @@ describe("PartitionListPage bulk actions", () => {
     expect(deletePartitionMock).not.toHaveBeenCalledWith("default");
   });
 
-  it("paginates partitions with 10 rows per page", async () => {
+  it("sorts partitions by name by default", async () => {
     listPartitionsMock.mockResolvedValue({
-      partitions: Array.from({ length: 11 }, (_, i) =>
+      partitions: ["zeta", "alpha", "mid"].map((name) => makePartition(name)),
+    });
+
+    renderPartitions();
+
+    expect(await screen.findByText("alpha")).not.toBeNull();
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(rows.map((row) => row.textContent?.match(/alpha|mid|zeta/)?.[0])).toEqual(["alpha", "mid", "zeta"]);
+  });
+
+  it("paginates partitions with 20 rows per page", async () => {
+    listPartitionsMock.mockResolvedValue({
+      partitions: Array.from({ length: 21 }, (_, i) =>
         makePartition(`partition-${String(i + 1).padStart(2, "0")}`),
       ),
     });
@@ -192,20 +204,20 @@ describe("PartitionListPage bulk actions", () => {
     renderPartitions();
 
     expect(await screen.findByText("partition-01")).not.toBeNull();
-    expect(screen.getByText("partition-10")).not.toBeNull();
-    expect(screen.queryByText("partition-11")).toBeNull();
+    expect(screen.getByText("partition-20")).not.toBeNull();
+    expect(screen.queryByText("partition-21")).toBeNull();
     expect(screen.getByText("Page 1 of 2")).not.toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: /next page/i }));
 
-    expect(await screen.findByText("partition-11")).not.toBeNull();
+    expect(await screen.findByText("partition-21")).not.toBeNull();
     expect(screen.queryByText("partition-01")).toBeNull();
     expect(screen.getByText("Page 2 of 2")).not.toBeNull();
   });
 
   it("selects only visible partitions from the table header", async () => {
     listPartitionsMock.mockResolvedValue({
-      partitions: Array.from({ length: 11 }, (_, i) =>
+      partitions: Array.from({ length: 21 }, (_, i) =>
         makePartition(`partition-${String(i + 1).padStart(2, "0")}`),
       ),
     });
@@ -215,12 +227,12 @@ describe("PartitionListPage bulk actions", () => {
     expect(await screen.findByText("partition-01")).not.toBeNull();
     await userEvent.click(screen.getByRole("checkbox", { name: /select visible deletable partitions/i }));
 
-    expect(screen.getByText("10 selected")).not.toBeNull();
+    expect(screen.getByText("20 selected")).not.toBeNull();
     await userEvent.click(screen.getByRole("button", { name: /delete selected partitions/i }));
     await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
 
     await waitFor(() => expect(deletePartitionMock).toHaveBeenCalledWith("partition-01"));
-    expect(deletePartitionMock).toHaveBeenCalledTimes(10);
-    expect(deletePartitionMock).not.toHaveBeenCalledWith("partition-11");
+    expect(deletePartitionMock).toHaveBeenCalledTimes(20);
+    expect(deletePartitionMock).not.toHaveBeenCalledWith("partition-21");
   });
 });

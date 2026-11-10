@@ -83,7 +83,7 @@ describe("UserListPage", () => {
   });
 
   it("searches visible identifiers across paginated rows", async () => {
-    const users = Array.from({ length: 10 }, (_, index) =>
+    const users = Array.from({ length: 20 }, (_, index) =>
       makeUser({
         id: index + 2,
         display_name: `User ${index + 2}`,
@@ -93,7 +93,7 @@ describe("UserListPage", () => {
     );
     users.push(
       makeUser({
-        id: 12,
+        id: 22,
         display_name: "Zara Operator",
         external_user_id: "oidc-zara",
         email: "zara@example.test",
@@ -109,7 +109,7 @@ describe("UserListPage", () => {
     await userEvent.type(search, "ZARA@EXAMPLE.TEST");
 
     expect(await screen.findByText("Zara Operator")).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toBe("1 of 11 users");
+    expect(screen.getByRole("status").textContent).toBe("1 of 21 users");
     expect(listUsersMock).toHaveBeenCalledTimes(1);
 
     await userEvent.click(screen.getByRole("button", { name: "Clear user search" }));
@@ -123,10 +123,10 @@ describe("UserListPage", () => {
     expect(await screen.findByText("Zara Operator")).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Clear user search" }));
-    await userEvent.type(search, "User #12");
+    await userEvent.type(search, "User #22");
 
     expect(await screen.findByText("Zara Operator")).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toBe("1 of 11 users");
+    expect(screen.getByRole("status").textContent).toBe("1 of 21 users");
   });
 
   it("shows a clear no-result state and restores the list when search is cleared", async () => {
@@ -144,7 +144,7 @@ describe("UserListPage", () => {
   });
 
   it("returns to the first page when search changes or is cleared", async () => {
-    const users = Array.from({ length: 30 }, (_, index) =>
+    const users = Array.from({ length: 60 }, (_, index) =>
       makeUser({
         id: index + 2,
         display_name: `Match ${index + 1}`,
