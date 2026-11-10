@@ -6,6 +6,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -78,6 +79,11 @@ STALE_TASK_STATE_MANAGER_HINT = (
 # How long a GCS read of a worker actor's state is reused, so a fence pass over
 # many orphaned tasks costs one read per worker actor rather than one per task.
 _WORKER_ACTOR_STATE_CACHE_SECONDS = 1.0
+# How long to wait for that GCS read. The TaskStateManager reads under the lock
+# its lease renewals take, and a worker whose renewals go unanswered for
+# TTL - renew interval stops, so a stalled GCS (whose own request timeout is
+# far longer) must not hold the lock for anywhere near that.
+_WORKER_ACTOR_STATE_READ_TIMEOUT_SECONDS = 2.0
 # Terminal task records are progress receipts, not the system of record: the
 # durable per-file state lives in the Postgres catalog. They are kept only long
 # enough to answer the reads that follow a job settling, then dropped, with a
@@ -394,23 +400,58 @@ def _worker_lease_is_live(info: TaskInfo, *, now: float | None = None) -> bool:
 _worker_actor_states: dict[str, tuple[float, tuple[bool, int]]] = {}
 
 
+# Runs the GCS reads so a caller can stop waiting on one. While any read that
+# timed out is still running, the GCS is presumed stalled: later reads hold at
+# once rather than each waiting out the timeout, which also keeps a hung GCS
+# from piling up threads. Callers can read concurrently (the pool actor checks
+# worker registrations from several threads), so every such read is tracked.
+_worker_actor_state_reader = ThreadPoolExecutor(max_workers=2, thread_name_prefix="worker-actor-state")
+_stalled_worker_actor_state_reads: set[Future] = set()
+_stalled_worker_actor_state_read_lock = threading.Lock()
+
+
+def _gcs_actor_entry(actor_id: str) -> dict | None:
+    from ray._private import state as ray_state
+
+    return ray_state.actors(actor_id=actor_id)
+
+
+def _hold_worker_actor_state(actor_id: str, reason: str, **fields: Any) -> None:
+    from core.utils.logging import get_logger
+
+    get_logger().bind(worker_actor_id=actor_id).warning(reason, **fields)
+
+
 def read_worker_actor_state(actor_id: str) -> tuple[bool, int] | None:
     """Whether the worker actor is alive, and its restart count, from the GCS.
 
     Read from the GCS actor table rather than by calling the worker, which
     would queue the call behind the very work in question. ``None`` when the
-    read failed: the caller must then hold the task.
+    read failed, timed out, or an earlier read is still stalled: the caller
+    must then hold the task.
     """
+    with _stalled_worker_actor_state_read_lock:
+        if any(not read.done() for read in _stalled_worker_actor_state_reads):
+            return None
+        _stalled_worker_actor_state_reads.clear()
+        future = _worker_actor_state_reader.submit(_gcs_actor_entry, actor_id)
     try:
-        from ray._private import state as ray_state
-
-        actor = ray_state.actors(actor_id=actor_id)
+        actor = future.result(timeout=_WORKER_ACTOR_STATE_READ_TIMEOUT_SECONDS)
+    except TimeoutError:
+        # A read still queued behind hung ones is dropped, so it cannot reach
+        # the GCS after its caller has given up; one already running is tracked.
+        if not future.cancel():
+            with _stalled_worker_actor_state_read_lock:
+                _stalled_worker_actor_state_reads.add(future)
+        _hold_worker_actor_state(
+            actor_id,
+            "The GCS did not answer a read of the worker actor's state in time; holding its orphaned task.",
+            timeout_seconds=_WORKER_ACTOR_STATE_READ_TIMEOUT_SECONDS,
+        )
+        return None
     except Exception as exc:  # noqa: BLE001 - an unreadable GCS must hold, never release
-        from core.utils.logging import get_logger
-
-        get_logger().bind(worker_actor_id=actor_id).warning(
-            "Could not read the worker actor's state; holding its orphaned task.",
-            error=str(exc),
+        _hold_worker_actor_state(
+            actor_id, "Could not read the worker actor's state; holding its orphaned task.", error=str(exc)
         )
         return None
     if not actor:
@@ -534,6 +575,21 @@ def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
     return datetime.now(UTC) >= created + timedelta(seconds=_CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS)
 
 
+def read_ref_when_settled(object_ref: Any) -> None:
+    """Have Ray read a registered worker ref once its task settles.
+
+    Holding the ref makes this process a borrower of the task's result. A failed
+    result dropped unread (eviction, a refused registration) makes Ray print
+    the failure again as an ``Unhandled error`` without its file or task
+    (#1296). Reading it on receipt covers every way the ref is dropped. Ray
+    keeps the future's callback alive until the task settles, and an unread
+    ``concurrent.futures.Future`` exception warns nothing.
+    """
+    ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+    if isinstance(ref, ray.ObjectRef):
+        ref.future()
+
+
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
     def __init__(self, worker_lease_ttl_seconds: float = _WORKER_LEASE_TTL_SECONDS) -> None:
@@ -548,6 +604,7 @@ class TaskStateManager:
         now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
+            read_ref_when_settled(info.object_ref)
             info.worker_lease_expires_at = now + worker_lease_ttl_seconds
             if info.state not in TERMINAL_TASK_STATES:
                 continue
@@ -1175,6 +1232,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
+        read_ref_when_settled(object_ref)
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None:
@@ -1368,6 +1426,21 @@ class TaskStateManager:
         with self.lock:
             info = self.tasks.get(task_id)
             return info.object_ref if info else None
+
+    @ray.method(concurrency_group="get")
+    async def has_object_ref(self, task_id: str) -> bool:
+        """Whether a worker ref is registered, without shipping the ref itself.
+
+        The worker polls this before it starts. Fetched with ``get_object_ref``,
+        its own task's ref would be borrowed and dropped unread, and Ray would
+        print every failure of that task as an ``Unhandled error`` (#1296).
+        """
+        with self.lock:
+            info = self.tasks.get(task_id)
+            ref = info.object_ref if info else None
+        if isinstance(ref, dict):
+            ref = ref.get("ref")
+        return ref is not None
 
     @ray.method(concurrency_group="get")
     async def get_matching_active_task_refs(

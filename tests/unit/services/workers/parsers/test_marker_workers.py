@@ -214,13 +214,16 @@ def test_recycling_a_slot_kills_what_its_child_started():
                 pass
 
 
-def _initialized_marker_worker(monkeypatch, pdftext_workers: int):
+def _initialized_marker_worker(monkeypatch, pdftext_workers: int, log_format: str = "text"):
     """A MarkerWorker through its real __init__, minus the models and pools."""
     import core.config
     import core.utils.logging
 
     log = _RecordingLogger()
-    config = SimpleNamespace(loader=SimpleNamespace(marker_max_processes=1, marker_pdftext_workers=pdftext_workers))
+    config = SimpleNamespace(
+        loader=SimpleNamespace(marker_max_processes=1, marker_pdftext_workers=pdftext_workers),
+        verbose=SimpleNamespace(format=log_format),
+    )
     monkeypatch.setattr(core.config, "load_config", lambda: config)
     monkeypatch.setattr(core.utils.logging, "get_logger", lambda: log)
     monkeypatch.setenv("RAY_ADDRESS", "")
@@ -245,6 +248,28 @@ def test_marker_runs_pdftext_with_one_worker_whatever_is_configured(monkeypatch,
             ("warning", "MARKER_PDFTEXT_WORKERS=4 is ignored: Marker runs pdftext with one worker. Remove the setting.")
         ]
     )
+
+
+@pytest.mark.parametrize(("env", "disabled"), [(None, False), ("", False), ("1", True), ("0", True)])
+def test_marker_bars_follow_tqdm_disable(monkeypatch, env, disabled):
+    """Surya passes disable= explicitly, which beats TQDM_DISABLE, so the actor
+    maps it to Marker's own switch with tqdm's reading: non-empty = off (#1297)."""
+    if env is None:
+        monkeypatch.delenv("TQDM_DISABLE", raising=False)
+    else:
+        monkeypatch.setenv("TQDM_DISABLE", env)
+    worker, _ = _initialized_marker_worker(monkeypatch, 1)
+
+    assert worker.converter_config["disable_tqdm"] is disabled
+
+
+def test_marker_bars_are_off_with_json_logs_without_tqdm_disable(monkeypatch):
+    """A deployment that sets LOG_FORMAT=json itself, without TQDM_DISABLE,
+    still keeps Marker's bars out of the JSON stream (#1297)."""
+    monkeypatch.delenv("TQDM_DISABLE", raising=False)
+    worker, _ = _initialized_marker_worker(monkeypatch, 1, log_format="json")
+
+    assert worker.converter_config["disable_tqdm"] is True
 
 
 def test_pdftext_with_one_worker_starts_no_process(monkeypatch, tmp_path):
