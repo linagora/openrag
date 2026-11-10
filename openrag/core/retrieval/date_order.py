@@ -1,12 +1,13 @@
-"""Reorder retrieved chunks by their document's creation date.
+"""Order the sources shown to the answering LLM by their document's creation date.
 
-Retrieval ranks by relevance (similarity, reranker, RRF). A request such as
-"summarize the last meeting I had" is not answered by the most *similar*
-meeting but by the most *recent* one, and the answering LLM only sees the
-sources that fit its token budget, in order. So when the query contextualizer
-flags a request as ``date_order="newest"`` / ``"oldest"``, the relevance-ranked
-list is reordered here before the budget cut, so the document the user means
-is the first thing the model reads.
+A request such as "summarize the last meeting I had" is answered by the most
+*recent* meeting, not the most similar one. The date only decides the order the
+model reads the sources in, never which sources it gets: retrieval, the
+``top_k`` cut and the context-budget fit all stay relevance-ranked, so the
+model sees what it would without a date order, newest (or oldest) first and
+each with its ``Created:`` line to pick from. Letting the date select sources
+instead lets recent, loosely matching documents (invitations, agendas) crowd
+out the one asked for.
 
 The sort is stable: chunks of one document share a ``created_at`` and therefore
 keep their relevance order relative to each other, and chunks without a date
@@ -16,13 +17,18 @@ an unknown date is never mistaken for the newest or the oldest.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from itertools import zip_longest
-from typing import Any
+from typing import Any, Protocol
 
-from core.models.chunk import Chunk
 from core.models.query import DateOrder
+
+
+class _HasMetadata(Protocol):
+    """A ``Chunk`` or the LangChain ``Document`` built from it."""
+
+    metadata: dict
+
 
 #: Chunk metadata key carrying the document's creation date (the one temporal
 #: field the indexer accepts, see ``indexing_service.TEMPORAL_FIELDS``).
@@ -33,7 +39,7 @@ CREATED_AT_KEY = "created_at"
 FUTURE_TOLERANCE = timedelta(days=1)
 
 
-def chunk_created_at(chunk: Chunk) -> datetime | None:
+def chunk_created_at(chunk: _HasMetadata) -> datetime | None:
     """The chunk's document creation date, or ``None`` when absent, unparseable or in the future.
 
     Milvus returns the TIMESTAMPTZ column as an ISO 8601 string; a chunk built
@@ -62,16 +68,16 @@ def _parse_datetime(value: Any) -> datetime | None:
     return parsed
 
 
-def order_chunks_by_date(chunks: list[Chunk], order: DateOrder | None) -> list[Chunk]:
+def order_chunks_by_date[T: _HasMetadata](chunks: Sequence[T], order: DateOrder | None) -> list[T]:
     """Return ``chunks`` reordered by document date; ``order=None`` is the identity.
 
     Dated chunks come first, newest or oldest first per ``order``; undated
     chunks follow in their incoming order. Stable within equal dates.
     """
     if not order or not chunks:
-        return chunks
-    dated: list[tuple[datetime, int, Chunk]] = []
-    undated: list[Chunk] = []
+        return list(chunks)
+    dated: list[tuple[datetime, int, T]] = []
+    undated: list[T] = []
     for position, chunk in enumerate(chunks):
         stamp = chunk_created_at(chunk)
         if stamp is None:
@@ -87,14 +93,4 @@ def order_chunks_by_date(chunks: list[Chunk], order: DateOrder | None) -> list[C
     return [chunk for _, _, chunk in dated] + undated
 
 
-def interleave_chunks(ranked_lists: Sequence[Sequence[Chunk]], key_fn: Callable[[Chunk], Hashable]) -> list[Chunk]:
-    """Take from each list in turn, skipping repeats, so every list's top comes first."""
-    merged: dict[Hashable, Chunk] = {}
-    for row in zip_longest(*ranked_lists):
-        for chunk in row:
-            if chunk is not None:
-                merged.setdefault(key_fn(chunk), chunk)
-    return list(merged.values())
-
-
-__all__ = ["CREATED_AT_KEY", "FUTURE_TOLERANCE", "chunk_created_at", "interleave_chunks", "order_chunks_by_date"]
+__all__ = ["CREATED_AT_KEY", "FUTURE_TOLERANCE", "chunk_created_at", "order_chunks_by_date"]

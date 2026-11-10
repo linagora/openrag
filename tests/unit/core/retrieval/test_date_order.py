@@ -19,7 +19,7 @@ def _ids(chunks):
 
 def test_none_order_is_the_identity():
     chunks = [_chunk("b", "2026-09-22T14:51:30Z"), _chunk("a", "2026-09-04T10:00:00Z")]
-    assert order_chunks_by_date(chunks, None) is chunks
+    assert order_chunks_by_date(chunks, None) == chunks
 
 
 def test_newest_first_then_oldest_first():

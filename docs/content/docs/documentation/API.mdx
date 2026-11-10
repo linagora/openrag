@@ -185,10 +185,11 @@ the default `RAG_MODE=ChatBotRag`; `SimpleRag` skips query generation and gets n
   and can return out-of-period sources; `RETRIEVER_ALLOW_FILTERLESS_FALLBACK=false` makes
   the period strict and returns no source instead.
 * **Date ordering** — "the last meeting I had", "my latest invoice", "the first contract
-  with ACME": the relevance-ranked chunks are reordered by `created_at` (newest or oldest
-  first) before the context budget is applied, so the document the user means is the
-  first one the model reads. Chunks without a `created_at`, or with one later than the
-  current time, are placed last. The sources in the response's `extra` follow the same
+  with ACME": the sources are selected by relevance as usual, then shown to the model
+  ordered by `created_at` (newest or oldest first), each with its date, so it can pick the
+  one the user means. The date never decides which sources are kept: the newest document
+  has to be among the best matches. Chunks without a `created_at`, or with one later than
+  the current time, are placed last. The sources in the response's `extra` follow the same
   order, so under a date order they are not sorted by `rerank_score`.
 * **Provenance line** — a document source block in the prompt carries a
   `Created: <date> UTC | File: <filename>` line under its `[Source N]` marker, so the

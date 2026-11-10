@@ -65,6 +65,7 @@ from core.prompts import (
     prepend_system_prompt,
     tool_definition_tokens,
 )
+from core.retrieval.date_order import order_chunks_by_date
 from core.retrieval.trace import (
     TRACE_FILE_SCOPE_KIND_KEY,
     RetrievalDiagnosticsContext,
@@ -729,12 +730,12 @@ class QueryService:
                 logger.error("Error during chunk relevancy inference", error=str(e))
                 return False, ""
 
-    async def _map_reduce(self, query: str, docs: list, *, early_stop: bool = True) -> list:
+    async def _map_reduce(self, query: str, docs: list) -> list:
         """LLM relevancy filter + summarisation, batched with early stop."""
 
         async def _batch(chunks: list, summaries: list) -> bool:
             outputs = await asyncio.gather(*[self._infer_relevancy(query, c) for c in chunks])
-            terminate = early_stop and all(not rel for rel, _ in outputs[-self._mr_expansion :])
+            terminate = all(not rel for rel, _ in outputs[-self._mr_expansion :])
             for (rel, summary), chunk in zip(outputs, chunks, strict=True):
                 if rel:
                     summaries.append(_summary_doc(chunk, summary))
@@ -1010,12 +1011,7 @@ class QueryService:
                 raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
 
         if use_map_reduce and docs:
-            # The early stop assumes a relevance-ranked list, which a date order isn't.
-            docs = await self._map_reduce(
-                " ".join(q.query for q in queries.query_list),
-                docs,
-                early_stop=not any(q.date_order for q in queries.query_list),
-            )
+            docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
 
         # Web results come out of the same room, so they can't take more than it either.
         web_max_tokens = self._web.max_tokens if room is None else min(self._web.max_tokens, room)
@@ -1034,7 +1030,7 @@ class QueryService:
 
         def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
             """The answer messages with *docs*, then the *web_candidates* that fit after them."""
-            context = _documents_context(docs, any_retrieved=bool(candidates))
+            context = _documents_context(order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(candidates))
             web_shown: list = []
             if web_candidates:
                 start = len(docs) + 1
@@ -1069,7 +1065,8 @@ class QueryService:
         payload["messages"] = new_messages
         return _PrepareChatResult(
             payload,
-            docs,
+            # The order they were rendered in: citation numbers index into it.
+            order_chunks_by_date(docs, queries.date_order),
             web_results,
             retrieved_docs,
             retrieved_web_results,
@@ -1312,7 +1309,9 @@ class QueryService:
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
             docs = [docs[i] for i in self._fit_sources(docs, partition, room)]
-            context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
+            context = _documents_context(
+                order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(retrieved_docs)
+            )
             # Sized part by part: measure what is sent and drop documents until
             # it fits. With none left, the no-document message can still overflow.
             while max_prompt_tokens is not None:
@@ -1322,7 +1321,10 @@ class QueryService:
                 if not docs:
                     raise ContextWindowExceededError(sent, max_prompt_tokens)
                 docs = docs[:-1]
-                context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
+                context = _documents_context(
+                    order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(retrieved_docs)
+                )
+            docs = order_chunks_by_date(docs, queries.date_order)
 
         payload["prompt"] = render(context)
         return payload, docs, retrieved_docs

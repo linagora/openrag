@@ -4227,38 +4227,54 @@ def test_query_json_hint_leaves_the_temporal_fields_open():
     assert '"date_order"' in qs._QUERY_JSON_HINT
 
 
-@pytest.mark.asyncio
-async def test_map_reduce_without_early_stop_reaches_relevant_chunks_after_an_irrelevant_batch():
-    rel = json.dumps({"relevancy": True, "summary": "older but relevant"})
-    irr = json.dumps({"relevancy": False, "summary": ""})
-    docs = [Chunk(id=str(i), text=str(i), metadata={"_id": str(i)}).to_langchain() for i in range(3)]
-
-    def service():
-        svc = _svc(llm=FakeLLM(chat_responses=[irr, irr, rel]))
-        svc._mr_initial, svc._mr_expansion, svc._mr_max = 2, 1, 10
-        return svc
-
-    assert await service()._map_reduce("q", docs) == []
-    kept = await service()._map_reduce("q", docs, early_stop=False)
-    assert [doc.page_content for doc in kept] == ["older but relevant"]
+def _dated(cid: str, created_at: str) -> Chunk:
+    return Chunk(id=cid, text=f"text of {cid}", metadata={"_id": cid, "created_at": created_at})
 
 
-@pytest.mark.parametrize(("date_order", "early_stop"), [("newest", False), (None, True)])
-@pytest.mark.asyncio
-async def test_prepare_chat_turns_off_map_reduce_early_stop_under_a_date_order(date_order, early_stop):
-    svc = _svc(retrieval=FakeRetrieval(chunks=[Chunk(id="c", text="t", metadata={"_id": "c"})]))
-    seen = []
+# In relevance order: the best match is the oldest, the loosest one the newest.
+_BY_RELEVANCE = [
+    _dated("best", "2026-01-10T00:00:00Z"),
+    _dated("mid", "2026-06-10T00:00:00Z"),
+    _dated("loose", "2026-10-01T00:00:00Z"),
+]
+
+
+def _service_with_orders(orders):
+    svc = _svc(retrieval=FakeRetrieval(chunks=_BY_RELEVANCE))
+    svc._config.partitions = {"p": _partition_cfg(top_n=2)}
 
     async def generate_query(*_args, **_kwargs):
-        return SearchQueries(query_list=[Query(query="q", date_order=date_order)])
-
-    async def map_reduce(_query, docs, *, early_stop):
-        seen.append(early_stop)
-        return docs
+        return SearchQueries(query_list=[Query(query=f"q{i}", date_order=order) for i, order in enumerate(orders)])
 
     svc.generate_query = generate_query
-    svc._map_reduce = map_reduce
-    await svc._prepare_chat(
-        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"use_map_reduce": True}}
+    return svc
+
+
+def _in_reading_order(text: str, ids: list[str]) -> bool:
+    positions = [text.index(f"text of {cid}") for cid in ids]
+    return positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    ("orders", "shown"),
+    [(["newest"], ["mid", "best"]), (["oldest"], ["best", "mid"]), (["newest", "oldest"], ["best", "mid"])],
+)
+@pytest.mark.asyncio
+async def test_prepare_chat_selects_sources_by_relevance_and_shows_them_by_date(orders, shown):
+    out = await _service_with_orders(orders)._prepare_chat(
+        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
     )
-    assert seen == [early_stop]
+    assert [doc.metadata["_id"] for doc in out.docs] == shown, "the citation numbers index into this order"
+    system = out.payload["messages"][0]["content"]
+    assert _in_reading_order(system, shown)
+    assert "text of loose" not in system, "a newer but looser match never takes a better one's place"
+
+
+@pytest.mark.asyncio
+async def test_prepare_completions_selects_sources_by_relevance_and_shows_them_by_date():
+    payload, docs, _retrieved = await _service_with_orders(["newest"])._prepare_completions(
+        ["p"], {"prompt": "q", "metadata": {}}
+    )
+    assert [doc.metadata["_id"] for doc in docs] == ["mid", "best"]
+    assert _in_reading_order(payload["prompt"], ["mid", "best"])
+    assert "text of loose" not in payload["prompt"]

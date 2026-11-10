@@ -28,8 +28,8 @@ class RetrievalQuery(BaseModel):
 
 
 #: How the retrieved chunks are reordered by their document's ``created_at``.
-#: Set by the query contextualizer for "the latest X" / "the first X" requests,
-#: applied after relevance ranking (see ``core.retrieval.date_order``).
+#: Set by the query contextualizer for "the latest X" / "the first X" requests;
+#: orders the sources once they are selected (see ``core.retrieval.date_order``).
 DateOrder = Literal["newest", "oldest"]
 
 
@@ -140,10 +140,10 @@ class SearchQueries(BaseModel):
 
     @property
     def date_order(self) -> DateOrder | None:
-        """The date ordering to re-apply after RRF fusion, if all sub-queries share one.
+        """The order the selected sources are shown in, if all sub-queries share one.
 
-        Otherwise ("my first and last invoice") one order would push a sub-query's
-        results past the cut, so the lists are interleaved instead.
+        Otherwise ("my first and last invoice") no single order fits, and the
+        sources keep their relevance order; the model still sees their dates.
         """
         orders = {q.date_order for q in self.query_list}
         return orders.pop() if len(orders) == 1 else None
