@@ -528,13 +528,15 @@ class QueryService:
         trace: RetrievalTraceBuilder | None = None,
     ) -> SearchQueries:
         llm = llm or self._llm
-        last_user = messages[-1]["content"]
+        last_user = _latest_user_query(messages) or (messages[-1].get("content") or "")
         if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
             queries = SearchQueries(query_list=[Query(query=last_user)])
             self._record_contextualization(trace, queries, original_query=last_user)
             return queries
 
-        chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages)
+        # The results of the tools are data the app gave, not turns of the
+        # conversation: they do not shape the search.
+        chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages if m.get("role") != "tool")
         prompt_name = self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
@@ -752,7 +754,7 @@ class QueryService:
         trace: RetrievalTraceBuilder | None = None,
         max_prompt_tokens: int | None = None,
     ):
-        messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
+        messages = _history_window(payload["messages"], self._resolve_chat_history_depth(partition))
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         if not messages:
             raise ValidationError("Request must contain at least one non-system message")
@@ -799,7 +801,7 @@ class QueryService:
             if trace is not None:
                 filter_params[TRACE_FILE_SCOPE_KIND_KEY] = "attachment"
 
-        last_user_message = messages[-1].get("content") or ""
+        last_user_message = _latest_user_query(messages)
         casual_policy = casual_message_policy(last_user_message)
         normalized_last_user = normalize_casual_message(last_user_message)
         acknowledgement_reaction = _is_thumbs_up_reaction(last_user_message)
@@ -811,6 +813,11 @@ class QueryService:
             # Short acknowledgements need the full history: they can be thanks
             # after a social question or acceptance of a factual offer.
             casual_policy = None
+        if messages[-1].get("role") == "tool":
+            # The LLM goes on with the result of its tool call: the request of
+            # the user it serves is answered in full, however short it is.
+            casual_policy = None
+            acknowledgement_candidate = False
         explicitly_required = metadata.get("require_retrieval") is True
         existing_force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
 
@@ -1833,6 +1840,23 @@ def _json_slice(text: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
     return text[start : end + 1] if start != -1 and end > start else text
+
+
+def _history_window(messages: list[dict], depth: int) -> list[dict]:
+    """The last *depth* messages, widened to the latest message of the user.
+
+    A conversation may end with the results of tool calls (an agentic loop):
+    the request of the user they serve stays in the window, and the window
+    never opens on a ``tool`` message cut from the assistant turn that called
+    it.
+    """
+    start = max(0, len(messages) - depth)
+    latest_user = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None)
+    if latest_user is not None and latest_user < start:
+        start = latest_user
+    while start < len(messages) and messages[start].get("role") == "tool":
+        start += 1
+    return messages[start:]
 
 
 def _latest_user_query(messages: list[dict]) -> str:
