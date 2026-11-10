@@ -1079,8 +1079,15 @@ def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
 
 
 def _split_leading_headings(text: str) -> tuple[str, str]:
-    """Separate a block's leading heading lines from its content."""
-    lines = text.splitlines()
+    """Separate a block's leading heading lines from its content.
+
+    Lines are split on ``\\n`` only (a ``\\r\\n`` ending counts as one), as
+    ``TABLE_RE`` and ``_build_units`` read them. ``str.splitlines()`` also
+    breaks on a lone ``\\r``, ``\\x0b``, ``\\x0c``, ``\\x1c``-``\\x1e``,
+    ``\\x85``, ``\\u2028`` and ``\\u2029``: inside a table cell that cut the row
+    in two, and the table parser then dropped both halves' text (#1375).
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
     cut = 0
     lead: list[str] = []
     while cut < len(lines) and (not lines[cut].strip() or _HEADING_LINE_RE.match(lines[cut])):

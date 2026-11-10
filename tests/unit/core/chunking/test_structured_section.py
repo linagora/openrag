@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from core.chunking.registry import chunking_registry
 from core.chunking.structured_section import StructuredSectionChunker, _Unit
 from core.models.chunk import ChunkType
@@ -790,3 +791,60 @@ def test_split_table_keeps_its_column_header_on_every_piece():
     for piece in tables:
         assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
     assert "Regional breakdown" in tables[0].text, "the heading should lead the first piece"
+
+
+# A lone ``\r`` and the other characters ``str.splitlines()`` breaks on
+# (vertical tab, form feed, record separator, Unicode line separator) can sit
+# inside a table cell of converted documents. Splitting an oversize table must
+# not cut the row there, or the table parser drops the half-rows' text (#1375).
+@pytest.mark.parametrize("sep", ["\r", "\x0b", "\x0c", "\x1e", " "])
+def test_oversize_table_keeps_cell_text_around_a_line_break_character(sep):
+    rows = "\n".join(f"| r{i} | v{i} |" for i in range(20))
+    table = f"## Results\n\n| Name | Value |\n| --- | --- |\n| alpha{sep}beta | gamma |\n{rows}\n"
+    chunks = _chunker(chunk_size=8, inline_threshold=0, layout="flowing").chunk(_doc(table))
+    tables = [c for c in chunks if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    body = " ".join(c.content for c in chunks)
+    for word in ("alpha", "beta", "gamma", "r0", "v19"):
+        assert word in body, word
+
+
+_CRLF_DOC = """# Rapport annuel
+
+Introduction paragraph describing the scope of the report in a few words.
+
+## Contexte
+
+- first point of the list
+- second point of the list
+- third point of the list
+
+Chapitre 2 : Budget
+
+| Poste | Montant |
+| --- | --- |
+| Personnel | 120 |
+| Loyer | 40 |
+
+## Annexe détaillée
+
+{big}
+
+Closing paragraph after the large table.
+"""
+
+
+def test_crlf_document_chunks_like_the_lf_document():
+    big = "| Region | Q1 | Q2 |\n| --- | --- | --- |\n" + "\n".join(f"| R{i} | {i} | {i * 2} |" for i in range(60))
+    lf = _CRLF_DOC.format(big=big)
+    crlf = lf.replace("\n", "\r\n")
+    chunker = _chunker(chunk_size=60)
+    lf_chunks = chunker.chunk(_doc(lf))
+    crlf_chunks = chunker.chunk(_doc(crlf))
+    assert sum(c.chunk_type == ChunkType.TABLE for c in lf_chunks) > 1, "the big table must split"
+
+    def norm(text: str) -> str:
+        return text.replace("\r\n", "\n")
+
+    assert [norm(c.text) for c in crlf_chunks] == [c.text for c in lf_chunks]
+    assert [c.chunk_type for c in crlf_chunks] == [c.chunk_type for c in lf_chunks]
