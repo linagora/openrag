@@ -15,7 +15,6 @@ from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.parsers.progress import bind_parser_progress
-from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.parsers.tabular.base import TabularBatchParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType, ProcessedDocument
