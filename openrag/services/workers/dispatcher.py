@@ -37,7 +37,7 @@ from services.workers.task_cancellation import cancel_active_indexing_tasks
 from services.workers.task_state import (
     QUEUE_REFUSED_CANCELLED,
     QUEUE_REFUSED_FILE_INDEXING,
-    QUEUE_REFUSED_OUTCOME_BACKLOG,
+    QUEUE_REFUSED_INDEXING_CAPACITY,
     TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
 )
 
@@ -399,9 +399,11 @@ class WorkerDispatcher(IndexingDispatcher):
                 raise _indexing_in_progress(file_id, partition, busy_task_id)
             if reason == QUEUE_REFUSED_CANCELLED:
                 raise RuntimeError(f"Task {task_id} was cancelled before it queued")
-            if reason == QUEUE_REFUSED_OUTCOME_BACKLOG:
+            if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
                 raise ServiceUnavailableError(
-                    "Indexing is temporarily paused while completed jobs are saved. Please retry shortly.",
+                    "Indexing is temporarily paused because task capacity is full "
+                    "(queued or running work and unsaved job outcomes). Please retry shortly.",
+                    # Preserve this API code so existing clients keep retrying it.
                     code="INDEXING_OUTCOME_BACKLOG",
                 )
             raise RuntimeError(

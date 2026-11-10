@@ -35,7 +35,7 @@ def _prepare_script(monkeypatch, directory: Path, post, *, sleep=None) -> None:
     )
 
 
-def test_data_indexer_retries_the_same_file_after_outcome_backlog(monkeypatch, tmp_path: Path) -> None:
+def test_data_indexer_retries_the_same_file_after_capacity_response(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "documents"
     source.mkdir()
     (source / "report.pdf").write_bytes(b"pdf contents")
@@ -59,7 +59,7 @@ def test_data_indexer_retries_the_same_file_after_outcome_backlog(monkeypatch, t
     assert uploads == [("report.pdf", b"pdf contents"), ("report.pdf", b"pdf contents")]
 
 
-def test_data_indexer_stops_with_error_when_backlog_does_not_clear(monkeypatch, tmp_path: Path) -> None:
+def test_data_indexer_stops_with_error_when_capacity_does_not_clear(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "documents"
     source.mkdir()
     (source / "first.pdf").write_bytes(b"first")

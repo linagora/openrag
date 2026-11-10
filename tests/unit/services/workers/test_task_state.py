@@ -1154,8 +1154,8 @@ async def test_rejected_submission_is_only_unfenced_after_worker_settlement(monk
 
 
 @pytest.mark.asyncio
-async def test_queue_admission_backpressures_before_unsettled_outcomes_exceed_limit(monkeypatch) -> None:
-    monkeypatch.setattr(task_state_module, "_MAX_UNSETTLED_JOB_OUTCOMES", 1)
+async def test_queue_admission_reserves_capacity_for_active_tasks(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_MAX_RESERVED_JOB_OUTCOMES", 1)
     manager = _task_state_manager()
 
     admitted = await manager.set_queued_details_v2(
@@ -1176,7 +1176,7 @@ async def test_queue_admission_backpressures_before_unsettled_outcomes_exceed_li
     assert admitted["accepted"] is True
     assert refused == {
         "accepted": False,
-        "reason": task_state_module.QUEUE_REFUSED_OUTCOME_BACKLOG,
+        "reason": task_state_module.QUEUE_REFUSED_INDEXING_CAPACITY,
         "existing_task_id": None,
     }
     assert await manager.get_state("task-2") is None

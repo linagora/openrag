@@ -908,7 +908,7 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
 
 
 @pytest.mark.asyncio
-async def test_dispatch_indexing_returns_service_unavailable_for_outcome_backlog() -> None:
+async def test_dispatch_indexing_returns_service_unavailable_when_capacity_is_full() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     pool = _pool_with_ref(object())
@@ -935,6 +935,10 @@ async def test_dispatch_indexing_returns_service_unavailable_for_outcome_backlog
         )
 
     assert caught.value.code == "INDEXING_OUTCOME_BACKLOG"
+    assert caught.value.message == (
+        "Indexing is temporarily paused because task capacity is full "
+        "(queued or running work and unsaved job outcomes). Please retry shortly."
+    )
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
 

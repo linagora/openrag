@@ -43,12 +43,13 @@ TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 _TERMINAL_STATE_NAMES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
 # Reasons ``set_queued_details_v2`` can turn a submission away. Shared with
-# the dispatcher, which maps FILE_INDEXING to a 409 and outcome backpressure
-# to a retryable 503.
+# the dispatcher, which maps FILE_INDEXING to a 409 and indexing-capacity
+# backpressure to a retryable 503.
 QUEUE_REFUSED_CANCELLED = "cancelled"
 QUEUE_REFUSED_FILE_DELETING = "file_deleting"
 QUEUE_REFUSED_FILE_INDEXING = "file_indexing"
-QUEUE_REFUSED_OUTCOME_BACKLOG = "outcome_backlog"
+# Keep the Ray actor payload stable while detached actors roll forward.
+QUEUE_REFUSED_INDEXING_CAPACITY = "outcome_backlog"
 SUBMITTED_TASK_WITHOUT_REF = "__openrag_submitted_task_without_ref__"
 _FENCE_KV_KEY = b"file-delete-fences-v1"
 _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
@@ -95,9 +96,10 @@ _WORKER_ACTOR_STATE_READ_TIMEOUT_SECONDS = 2.0
 # window never cuts a fence short and a fence never extends a receipt.
 _TERMINAL_TASK_RETENTION_SECONDS = 60 * 60
 _MAX_TERMINAL_TASKS = 2_000
-# Active tasks reserve outcome capacity too, so an indexing burst cannot finish
-# into an unbounded backlog while the catalog is unavailable.
-_MAX_UNSETTLED_JOB_OUTCOMES = 2_000
+# Active tasks reserve one slot each; terminal tasks keep their slot until the
+# outcome is durable. This bounds queued Ray work and the possible outcome
+# backlog if catalog persistence stops after tasks have been admitted.
+_MAX_RESERVED_JOB_OUTCOMES = 2_000
 _MAX_TASK_ERROR_CHARS = 8_000
 STALE_REFLESS_TASK_ERROR = (
     "Indexing task never exposed a worker reference within the registration grace period; marking it failed as stale."
@@ -1187,16 +1189,16 @@ class TaskStateManager:
         already_reserved = previous is not None and (
             previous.state in CANCELLABLE_INDEXING_STATES or _job_outcome_requires_persistence(previous)
         )
-        unsettled_outcomes = sum(
+        reserved_outcomes = sum(
             1
             for existing in self.tasks.values()
             if existing.state in CANCELLABLE_INDEXING_STATES or _job_outcome_requires_persistence(existing)
         )
-        if not already_reserved and unsettled_outcomes >= _MAX_UNSETTLED_JOB_OUTCOMES:
+        if not already_reserved and reserved_outcomes >= _MAX_RESERVED_JOB_OUTCOMES:
             if info is not previous:
                 self.tasks.pop(task_id, None)
                 self.terminal_tasks.pop(task_id, None)
-            return _queue_refused(QUEUE_REFUSED_OUTCOME_BACKLOG)
+            return _queue_refused(QUEUE_REFUSED_INDEXING_CAPACITY)
         self._record_details(
             task_id,
             info,

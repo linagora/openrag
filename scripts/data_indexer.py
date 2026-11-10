@@ -7,9 +7,9 @@ from pathlib import Path
 import httpx
 from loguru import logger
 
-_MAX_OUTCOME_BACKLOG_RETRIES = 8
-_INITIAL_OUTCOME_BACKLOG_RETRY_SECONDS = 2.0
-_MAX_OUTCOME_BACKLOG_RETRY_SECONDS = 30.0
+_MAX_INDEXING_CAPACITY_RETRIES = 8
+_INITIAL_INDEXING_CAPACITY_RETRY_SECONDS = 2.0
+_MAX_INDEXING_CAPACITY_RETRY_SECONDS = 30.0
 
 parser = argparse.ArgumentParser(description="Index documents from local file system")
 parser.add_argument(
@@ -61,7 +61,8 @@ def __check_file_exists(base_url, partition, file_name, headers):
     return False
 
 
-def __is_outcome_backlog(response):
+def __is_indexing_capacity_full(response):
+    """Return whether the API response asks the uploader to retry capacity pressure."""
     if response.status_code != 503:
         return False
     try:
@@ -69,11 +70,13 @@ def __is_outcome_backlog(response):
     except ValueError:
         return False
     detail = body.get("detail") if isinstance(body, dict) else None
+    # Keep matching the legacy API code while it covers active queue capacity too.
     return isinstance(detail, str) and detail.startswith("[INDEXING_OUTCOME_BACKLOG]")
 
 
-def __upload_with_backlog_retry(url, filename, file_ext, file_handle, headers):
-    for retry in range(_MAX_OUTCOME_BACKLOG_RETRIES + 1):
+def __upload_with_indexing_capacity_retry(url, filename, file_ext, file_handle, headers):
+    """Retry capacity responses without skipping the current file."""
+    for retry in range(_MAX_INDEXING_CAPACITY_RETRIES + 1):
         file_handle.seek(0)
         response = httpx.post(
             url,
@@ -85,16 +88,19 @@ def __upload_with_backlog_retry(url, filename, file_ext, file_handle, headers):
             timeout=60,
         )
         print(f"Uploaded {filename}: {response.status_code} - {response.text}")
-        if not __is_outcome_backlog(response):
+        if not __is_indexing_capacity_full(response):
             return response
-        if retry == _MAX_OUTCOME_BACKLOG_RETRIES:
+        if retry == _MAX_INDEXING_CAPACITY_RETRIES:
             logger.error(
-                f"Stopped before skipping {filename}: indexing outcome backlog remained full after "
-                f"{_MAX_OUTCOME_BACKLOG_RETRIES} retries"
+                f"Stopped before skipping {filename}: indexing capacity remained full after "
+                f"{_MAX_INDEXING_CAPACITY_RETRIES} retries"
             )
             raise SystemExit(1)
-        delay = min(_INITIAL_OUTCOME_BACKLOG_RETRY_SECONDS * (2**retry), _MAX_OUTCOME_BACKLOG_RETRY_SECONDS)
-        logger.warning(f"Indexing outcome backlog is full; retrying {filename} in {delay:g}s")
+        delay = min(
+            _INITIAL_INDEXING_CAPACITY_RETRY_SECONDS * (2**retry),
+            _MAX_INDEXING_CAPACITY_RETRY_SECONDS,
+        )
+        logger.warning(f"Indexing capacity is full; retrying {filename} in {delay:g}s")
         time.sleep(delay)
     return None
 
@@ -123,7 +129,7 @@ for file_path in dir_path.glob("**/*"):
         url = url_template.format(partition_name=args.partition, file_id=file_id)
 
         with open(file_path, "rb") as f:
-            __upload_with_backlog_retry(url, filename, file_ext, f, headers)
+            __upload_with_indexing_capacity_retry(url, filename, file_ext, f, headers)
 
 
 # How to run this code:
