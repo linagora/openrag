@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 
 import argparse
+import time
 from pathlib import Path
 
 import httpx
 from loguru import logger
+
+_MAX_OUTCOME_BACKLOG_RETRIES = 8
+_INITIAL_OUTCOME_BACKLOG_RETRY_SECONDS = 2.0
+_MAX_OUTCOME_BACKLOG_RETRY_SECONDS = 30.0
 
 parser = argparse.ArgumentParser(description="Index documents from local file system")
 parser.add_argument(
@@ -56,6 +61,44 @@ def __check_file_exists(base_url, partition, file_name, headers):
     return False
 
 
+def __is_outcome_backlog(response):
+    if response.status_code != 503:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return isinstance(detail, str) and detail.startswith("[INDEXING_OUTCOME_BACKLOG]")
+
+
+def __upload_with_backlog_retry(url, filename, file_ext, file_handle, headers):
+    for retry in range(_MAX_OUTCOME_BACKLOG_RETRIES + 1):
+        file_handle.seek(0)
+        response = httpx.post(
+            url,
+            files={
+                "file": (filename, file_handle, f"application/{file_ext}"),
+                "metadata": (None, ""),
+            },
+            headers=headers,
+            timeout=60,
+        )
+        print(f"Uploaded {filename}: {response.status_code} - {response.text}")
+        if not __is_outcome_backlog(response):
+            return response
+        if retry == _MAX_OUTCOME_BACKLOG_RETRIES:
+            logger.error(
+                f"Stopped before skipping {filename}: indexing outcome backlog remained full after "
+                f"{_MAX_OUTCOME_BACKLOG_RETRIES} retries"
+            )
+            raise SystemExit(1)
+        delay = min(_INITIAL_OUTCOME_BACKLOG_RETRY_SECONDS * (2**retry), _MAX_OUTCOME_BACKLOG_RETRY_SECONDS)
+        logger.warning(f"Indexing outcome backlog is full; retrying {filename} in {delay:g}s")
+        time.sleep(delay)
+    return None
+
+
 __check_api(args.url)
 
 print(dir_path.is_dir())
@@ -80,13 +123,7 @@ for file_path in dir_path.glob("**/*"):
         url = url_template.format(partition_name=args.partition, file_id=file_id)
 
         with open(file_path, "rb") as f:
-            files = {
-                "file": (filename, f, f"application/{file_ext}"),
-                "metadata": (None, ""),
-            }
-
-            response = httpx.post(url, files=files, headers=headers, timeout=60)
-            print(f"Uploaded {filename}: {response.status_code} - {response.text}")
+            __upload_with_backlog_retry(url, filename, file_ext, f, headers)
 
 
 # How to run this code:

@@ -26,6 +26,8 @@ from services.workers.task_state import (
 
 # How soon a renewal that failed is tried again, capped by the renewal interval.
 _LEASE_RETRY_SECONDS = 2.0
+# Poll a missing first progress snapshot promptly, then use the normal lease cadence.
+_INITIAL_STAGE_SNAPSHOT_RETRY_SECONDS = 1.0
 
 
 class WorkerLeaseLostError(RuntimeError):
@@ -109,6 +111,10 @@ async def keep_worker_lease(
         return
     interval = WORKER_LEASE_RENEW_INTERVAL_SECONDS if renew_interval is None else renew_interval
     ttl = _WORKER_LEASE_TTL_SECONDS if lease_ttl is None else lease_ttl
+    stage_snapshot_pending = snapshot_provider is not None and (
+        snapshot_remote is not None or stage_progress_sink is not None
+    )
+    stage_snapshot_retry_interval = min(_INITIAL_STAGE_SNAPSHOT_RETRY_SECONDS, interval)
     # Counted from when a renewal was sent, never later than the
     # TaskStateManager started its TTL; the interval left over is for the
     # cancellation to land.
@@ -128,6 +134,7 @@ async def keep_worker_lease(
                 logger.warning(f"Task {task_id} could not renew its worker lease; stopping its worker before it lapses")
                 worker_task.cancel()
                 raise WorkerLeaseLostError(f"Task {task_id} lost its worker lease")
+            stage_snapshot: StageProgressWorkerSnapshot | None = None
             try:
                 # Awaited directly: the shared timeout helper ray.cancel()s the
                 # call when this loop is cancelled, and a renewal needs no undo.
@@ -149,6 +156,8 @@ async def keep_worker_lease(
                 continue
             answered = True
             stop_at = sent_at + stop_after
+            if snapshot_remote is not None and stage_snapshot is not None:
+                stage_snapshot_pending = False
             if renewed is False and (is_working is None or is_working()):
                 logger.warning(f"Task {task_id} was cancelled or abandoned; stopping its worker")
                 worker_task.cancel()
@@ -165,6 +174,7 @@ async def keep_worker_lease(
                         )
                     delivery_timeout = min(interval, max(0.0, stop_at - loop.time()))
                     if stage_snapshot is not None and delivery_timeout > 0:
+                        stage_snapshot_pending = False
                         snapshot_delivery_task = asyncio.create_task(
                             _publish_stage_snapshot(
                                 stage_progress_sink,
@@ -178,7 +188,11 @@ async def keep_worker_lease(
                 if snapshot_delivery_task is not None:
                     await asyncio.gather(snapshot_delivery_task, return_exceptions=True)
                 return
-            await asyncio.sleep(interval)
+            if stage_snapshot_pending:
+                await asyncio.sleep(stage_snapshot_retry_interval)
+                stage_snapshot_retry_interval = min(stage_snapshot_retry_interval * 2, interval)
+            else:
+                await asyncio.sleep(interval)
     finally:
         if snapshot_delivery_task is not None and not snapshot_delivery_task.done():
             snapshot_delivery_task.cancel()
