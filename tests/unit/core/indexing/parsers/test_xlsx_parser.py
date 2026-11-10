@@ -3890,3 +3890,31 @@ def test_shared_scan_output_matches_one_scan_per_table():
     assert [group["range"] for group in formulas] == ["H2:H14", "H17:H39", "H41:H61"]
     assert "| group 12 | m13 | 130 |" in by_table["sheet:0:table:0"].text
     assert {15, 16, 40}.isdisjoint(by_table["sheet:0:table:2"].metadata["table_row_numbers"])
+
+
+def test_a_sheet_outside_the_traversal_budget_is_rejected_before_merging_blocks(monkeypatch):
+    """A wide first row followed by many one-cell blocks passes the row and cell
+    limits, but each column-band merge costs the table width: the area limit
+    must stop the scan before that work adds up, not after it."""
+    from core.indexing.parsers.tabular import xlsx_validation
+
+    merges = 0
+    original_fold = xlsx_validation._fold_column_band
+
+    def counting_fold(*args, **kwargs):
+        nonlocal merges
+        merges += 1
+        return original_fold(*args, **kwargs)
+
+    monkeypatch.setattr(xlsx_validation, "_fold_column_band", counting_fold)
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    workbook = Workbook()
+    sheet = workbook.active
+    for column in range(1, 41):
+        sheet.cell(1, column, f"h{column}")
+    for row in range(3, 2001, 2):
+        sheet.cell(row, 1 + row % 4 // 2, f"v{row}")
+
+    with pytest.raises(PipelineError, match="traversal limit"):
+        list(XlsxParser(limits={"max_tables": 2, "max_sheet_area": 1000}).iter_batches(_xlsx(workbook)))
+    assert merges < 30  # stopped near row 25 (25 x 40 > 1000), not after ~1,000 blocks

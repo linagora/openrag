@@ -851,6 +851,13 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                     """Fold one detected block into ``regions``, merging by column band past the table limit."""
                     nonlocal merging_column_bands, regions, detected_blocks
                     detected_blocks += 1
+                    # Folding a block costs up to the table width (column sets).
+                    # The traversal rectangle only grows, so reject now what the
+                    # check after the scan would reject anyway, before a wide
+                    # sheet of many small blocks makes that cost add up. Within
+                    # the budget, total folding work is bounded by the area.
+                    if max_row * max_col > limits.max_sheet_area:
+                        raise limit("XLSX worksheet rectangle exceeds the traversal limit")
                     if not merging_column_bands:
                         _fold_preamble(regions, region, explicit_regions, typed_first_rows)
                         if not visible_sheet or len(regions) <= limits.max_tables:
