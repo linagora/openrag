@@ -68,3 +68,9 @@ def test_offsets_are_compared_as_instants_not_as_strings():
     string sorts after it."""
     chunks = [_chunk("paris", "2026-09-22T16:00:00+02:00"), _chunk("utc", "2026-09-22T15:00:00Z")]
     assert _ids(order_chunks_by_date(chunks, "newest")) == ["utc", "paris"]
+
+
+def test_a_future_creation_date_is_read_as_no_date():
+    chunks = [_chunk("future", "2099-01-01T00:00:00Z"), _chunk("real", "2026-09-22T14:51:30Z"), _chunk("none")]
+    assert chunk_created_at(chunks[0]) is None
+    assert _ids(order_chunks_by_date(chunks, "newest")) == ["real", "future", "none"]

@@ -249,6 +249,7 @@ def test_describe_source_omits_what_is_missing_and_is_empty_without_anything():
     assert describe_source({"created_at": "2026-09-22T14:51:30Z"}) == "Created: 2026-09-22 14:51 UTC"
     assert describe_source({"original_filename": "orig.pdf", "created_at": ""}) == "File: orig.pdf"
     assert describe_source({"created_at": "not a date"}) == ""
+    assert describe_source({"filename": "a.pdf", "created_at": "2099-01-01T00:00:00Z"}) == "File: a.pdf"
     assert describe_source({}) == ""
     assert describe_source(None) == ""
 

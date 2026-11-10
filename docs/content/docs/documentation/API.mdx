@@ -187,7 +187,9 @@ the default `RAG_MODE=ChatBotRag`; `SimpleRag` skips query generation and gets n
 * **Date ordering** — "the last meeting I had", "my latest invoice", "the first contract
   with ACME": the relevance-ranked chunks are reordered by `created_at` (newest or oldest
   first) before the context budget is applied, so the document the user means is the
-  first one the model reads. Chunks without a `created_at` are placed last.
+  first one the model reads. Chunks without a `created_at`, or with one later than the
+  current time, are placed last. The sources in the response's `extra` follow the same
+  order, so under a date order they are not sorted by `rerank_score`.
 * **Provenance line** — a document source block in the prompt carries a
   `Created: <date> UTC | File: <filename>` line under its `[Source N]` marker, so the
   model can name the date it relied on and tell documents apart. A field the chunk's
