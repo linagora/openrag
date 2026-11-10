@@ -53,6 +53,9 @@ class XlsxLimits:
     # turn in the single shared scan (see xlsx_row_router). Past it, waiting
     # tables fall back to their own scan: slower, never more disk.
     max_spool_bytes: int = 256 * 1024 * 1024
+    # Part of max_spool_bytes kept in memory before the temporary file is used.
+    # Typical side-by-side sheets fit, so they never depend on a usable TMPDIR.
+    max_spool_memory_bytes: int = 32 * 1024 * 1024
 
     def __post_init__(self):
         for field in fields(self):

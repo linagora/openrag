@@ -1173,6 +1173,7 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo], limits:
                         _table_row_pipeline(info),
                         with_formulas=formula_sheet is not None,
                         spool_limit=limits.max_spool_bytes,
+                        spool_memory_limit=limits.max_spool_memory_bytes,
                         # The same traversal budget preflight applies to a sheet.
                         max_scan_area=limits.max_sheet_area,
                         has_columns=lambda table, info=info: bool(_table_columns(table, info)),

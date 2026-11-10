@@ -12,13 +12,15 @@ table. Rows that belong to a table whose turn has not come yet are therefore
 kept until it does. They are first converted to plain values by that table's
 own row pipeline, fed one row at a time so its state (hidden rows, expanded
 row-header merges) carries across rows exactly as in a dedicated scan, then
-written to one anonymous temporary file per sheet. Memory stays bounded by a
-small buffer per table whatever the layout.
+spooled: kept in memory up to ``spool_memory_limit`` bytes, and past that in one
+anonymous temporary file per sheet. Typical sheets never touch the disk, so the
+single scan does not depend on a usable ``TMPDIR``.
 
-The temporary file is bounded by ``spool_limit`` bytes. When a sheet would need
-more, spooling stops and every table still waiting gets its own windowed scan
-when its turn comes, which is the previous behaviour: the worst case costs what
-the parser cost before, and never more disk than the limit.
+The spool as a whole is bounded by ``spool_limit`` bytes. When a sheet would
+need more, or the temporary file cannot be written or read, spooling stops and
+every table still waiting gets its own windowed scan when its turn comes, which
+is the previous behaviour: the worst case costs what the parser cost before,
+and never more memory or disk than the limits.
 """
 
 from __future__ import annotations
@@ -42,6 +44,10 @@ logger = get_logger()
 #: ``tables * _SPOOL_BLOCK_BYTES`` (plus one row) in these buffers.
 _SPOOL_BLOCK_BYTES = 64 * 1024
 _PICKLE_PROTOCOL = pickle.HIGHEST_PROTOCOL
+#: Default bytes of spooled blocks kept in memory before the temporary file is
+#: used. Waiting rows measured on side-by-side workbooks of up to 5M cells took
+#: 8 to 29 MB, so the common case stays off the disk.
+DEFAULT_SPOOL_MEMORY_BYTES = 32 * 1024 * 1024
 
 #: ``open_scan(min_row, max_row, min_column, max_column)`` returns a context
 #: manager yielding ``(value_rows, formula_rows)``: two row iterators over the
@@ -91,7 +97,7 @@ class _Route:
         self.values: _Feed | None = _Feed()
         self.formulas: _Feed | None = _Feed() if with_formulas else None
         self.pipeline: Iterator | None = make_pipeline(table, self.values, self.formulas)
-        # Flattened (offset, length) pairs of the spooled blocks, in row order.
+        # Spool handles of this table's blocks, in row order.
         self.blocks = array("Q")
         self.buffer = bytearray()
         self.done = False
@@ -106,13 +112,20 @@ class _Route:
 
 
 class _Spool:
-    """One anonymous temporary file shared by every waiting table of a sheet."""
+    """Blocks of rows waiting for their table's turn: in memory first, then on disk.
 
-    def __init__(self, limit: int) -> None:
+    Each block gets an integer handle. Blocks are read back once, in order, and
+    a block read back from memory frees that memory for later tables.
+    """
+
+    def __init__(self, limit: int, memory_limit: int = DEFAULT_SPOOL_MEMORY_BYTES) -> None:
         self.limit = limit
+        self.memory_limit = memory_limit
         self.reserved = 0
+        self.in_memory = 0
+        self.on_disk = 0
+        self._blocks: list[bytes | tuple[int, int] | None] = []
         self._file = None
-        self._end = 0
 
     def reserve(self, size: int) -> bool:
         """Account ``size`` bytes against the limit; ``False`` when they do not fit."""
@@ -121,28 +134,54 @@ class _Spool:
         self.reserved += size
         return True
 
-    def write(self, data: bytes | bytearray) -> tuple[int, int]:
-        """Append one block, creating the file on first use; return its (offset, length)."""
+    def write(self, data: bytes | bytearray) -> int:
+        """Store one block, in memory while it fits, and return its handle.
+
+        Past the memory limit the block goes to the temporary file, created on
+        first use; an ``OSError`` there leaves nothing half-recorded.
+        """
+        if self.in_memory + len(data) <= self.memory_limit:
+            self._blocks.append(bytes(data))
+            self.in_memory += len(data)
+            return len(self._blocks) - 1
         if self._file is None:
             # Unlinked on creation on POSIX: nothing is left behind even if the
             # worker dies mid-parse. Honours TMPDIR like every tempfile user.
             self._file = tempfile.TemporaryFile(prefix="openrag-xlsx-")
-        self._file.seek(self._end)
+        self._file.seek(self.on_disk)
         self._file.write(data)
-        offset = self._end
-        self._end += len(data)
-        return offset, len(data)
+        self._blocks.append((self.on_disk, len(data)))
+        self.on_disk += len(data)
+        return len(self._blocks) - 1
 
-    def read(self, offset: int, length: int) -> bytes:
-        """Read back one block written by :meth:`write`."""
+    def read(self, handle: int) -> bytes:
+        """Return one block written by :meth:`write` and forget it."""
+        block = self._blocks[handle]
+        self._blocks[handle] = None
+        if isinstance(block, bytes):
+            self.in_memory -= len(block)
+            return block
+        if block is None:
+            raise RuntimeError("XLSX row spool block was read twice")
+        offset, length = block
         self._file.seek(offset)
         data = self._file.read(length)
         if len(data) != length:
             raise OSError("XLSX row spool was truncated")
         return data
 
+    def discard(self, handles) -> None:
+        """Forget blocks that will never be read, freeing the memory they hold."""
+        for handle in handles:
+            block = self._blocks[handle]
+            if isinstance(block, bytes):
+                self.in_memory -= len(block)
+            self._blocks[handle] = None
+
     def close(self) -> None:
         """Close (and so delete) the file, if one was created."""
+        self._blocks = []
+        self.in_memory = 0
         if self._file is not None:
             spool, self._file = self._file, None
             try:
@@ -244,7 +283,7 @@ class _SharedScan:
         route.buffer += data
         if len(route.buffer) >= _SPOOL_BLOCK_BYTES:
             try:
-                block = self.spool.write(route.buffer)
+                handle = self.spool.write(route.buffer)
             except OSError:
                 # No usable temporary storage (full disk, read-only TMPDIR):
                 # the workbook is still valid, so read waiting tables the way
@@ -252,22 +291,33 @@ class _SharedScan:
                 logger.warning("XLSX row spool unavailable; waiting tables use their own scans", exc_info=True)
                 self._stop_spooling()
                 return
-            route.blocks.extend(block)
+            route.blocks.append(handle)
             route.buffer = bytearray()
 
+    def retire(self, route: _Route) -> None:
+        """Release a route and the spooled blocks it will never read."""
+        self.spool.discard(route.blocks)
+        route.release()
+
     def _stop_spooling(self) -> None:
-        """Hand every waiting table back to its own scan; disk stays within the limit."""
+        """Hand every waiting table back to its own scan; the spool stays within its limits."""
         self.spooling = False
         for route in self.routes:
             if route is not self.current and not route.done:
                 route.rescan = True
-                route.release()
+                self.retire(route)
 
     def replay(self, route: _Route) -> Iterator:
         """Yield a table's spooled rows in order, then forget them."""
         blocks = route.blocks
-        for index in range(0, len(blocks), 2):
-            yield from _unpickle_rows(self.spool.read(blocks[index], blocks[index + 1]))
+        for position, handle in enumerate(blocks):
+            try:
+                data = self.spool.read(handle)
+            except OSError:
+                # Blocks not read yet are dropped with the route by the caller.
+                route.blocks = blocks[position + 1 :]
+                raise
+            yield from _unpickle_rows(data)
         buffered = bytes(route.buffer)
         route.blocks = array("Q")
         route.buffer = bytearray()
@@ -281,6 +331,7 @@ def route_sheet_tables(
     *,
     with_formulas: bool,
     spool_limit: int,
+    spool_memory_limit: int = DEFAULT_SPOOL_MEMORY_BYTES,
     max_scan_area: int | None = None,
     has_columns: Callable[[Any], bool] = lambda table: True,
 ) -> Iterator[tuple[Any, Iterator]]:
@@ -327,7 +378,7 @@ def route_sheet_tables(
                     close()
         return
 
-    spool = _Spool(spool_limit)
+    spool = _Spool(spool_limit, spool_memory_limit)
     with ExitStack() as stack:
         stack.callback(spool.close)
         value_rows, formula_rows = stack.enter_context(open_scan(first_row, last_row, first_column, last_column))
@@ -361,7 +412,7 @@ def route_sheet_tables(
                     logger.warning("XLSX row spool unreadable; falling back to dedicated scans", exc_info=True)
                     scan._stop_spooling()
                     route.rescan = True
-                    route.release()
+                    scan.retire(route)
                     yield from islice(own_scan(route.table), emitted, None)
                     return
                 while not scan.exhausted and scan.next_row <= route.table.end_row:
@@ -370,7 +421,7 @@ def route_sheet_tables(
                         yield row
             finally:
                 route.done = True
-                route.release()
+                scan.retire(route)
                 scan.current = None
 
         for table in tables:
@@ -388,4 +439,4 @@ def route_sheet_tables(
                 # cleanup, so retire the route here as well.
                 rows.close()
                 route.done = True
-                route.release()
+                scan.retire(route)

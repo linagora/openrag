@@ -64,7 +64,17 @@ def _reference(grid: _Grid, table: _Table) -> list:
         return list(_pipeline(table, values, formulas))
 
 
-def _consume(grid, tables, *, spool_limit, take=None, with_formulas=False, has_columns=None, max_scan_area=None):
+def _consume(
+    grid,
+    tables,
+    *,
+    spool_limit,
+    spool_memory_limit=router.DEFAULT_SPOOL_MEMORY_BYTES,
+    take=None,
+    with_formulas=False,
+    has_columns=None,
+    max_scan_area=None,
+):
     grid.scans.clear()
     taken = {}
     for table, rows in route_sheet_tables(
@@ -73,6 +83,7 @@ def _consume(grid, tables, *, spool_limit, take=None, with_formulas=False, has_c
         _pipeline,
         with_formulas=with_formulas,
         spool_limit=spool_limit,
+        spool_memory_limit=spool_memory_limit,
         max_scan_area=max_scan_area,
         **({"has_columns": has_columns} if has_columns else {}),
     ):
@@ -95,19 +106,20 @@ def _side_by_side(tables=3, rows=200, width=2, gap=2, formulas=False) -> tuple[_
 
 
 def test_side_by_side_tables_share_one_scan_and_match_dedicated_scans(monkeypatch):
-    # Small blocks force waiting rows through the file and back, so a spool that
-    # lost them on disk could not pass by replaying only the in-memory buffer.
+    # Small blocks and no memory tier force waiting rows through the file and
+    # back, so a spool losing them on disk could not pass on in-memory buffers.
     reads = []
     original_read = router._Spool.read
 
-    def read(self, offset, length):
-        reads.append(length)
-        return original_read(self, offset, length)
+    def read(self, handle):
+        data = original_read(self, handle)
+        reads.append(len(data))
+        return data
 
     monkeypatch.setattr(router._Spool, "read", read)
     monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 256)
     grid, tables = _side_by_side(tables=8)
-    taken = _consume(grid, tables, spool_limit=1 << 30)
+    taken = _consume(grid, tables, spool_limit=1 << 30, spool_memory_limit=0)
 
     assert len(grid.scans) == 1
     assert reads
@@ -156,23 +168,26 @@ def test_budget_exhausted_while_routing_a_row_skips_tables_released_in_that_row(
             assert taken[table.name] == _reference(grid, table), limit
 
 
-def test_spool_never_writes_past_its_budget(monkeypatch):
-    peak = 0
+@pytest.mark.parametrize("memory_limit", [0, 3_000, 1 << 30])
+def test_spool_never_holds_more_than_its_limits(monkeypatch, memory_limit):
+    peak_total = peak_memory = 0
     original_write = router._Spool.write
 
     def write(self, data):
-        nonlocal peak
+        nonlocal peak_total, peak_memory
         result = original_write(self, data)
-        peak = max(peak, self._end)
+        peak_total = max(peak_total, self.on_disk + self.in_memory)
+        peak_memory = max(peak_memory, self.in_memory)
         return result
 
     monkeypatch.setattr(router._Spool, "write", write)
     monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 256)
     grid, tables = _side_by_side(tables=6, rows=400)
     for limit in (512, 5_000, 50_000):
-        peak = 0
-        taken = _consume(grid, tables, spool_limit=limit)
-        assert peak <= limit
+        peak_total = peak_memory = 0
+        taken = _consume(grid, tables, spool_limit=limit, spool_memory_limit=memory_limit)
+        assert peak_total <= limit
+        assert peak_memory <= memory_limit
         for table in tables:
             assert taken[table.name] == _reference(grid, table)
 
@@ -226,7 +241,9 @@ def test_the_spool_file_is_closed_when_the_consumer_stops_early(monkeypatch):
     monkeypatch.setattr(router._Spool, "close", close)
     monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 64)
     grid, tables = _side_by_side(tables=3)
-    pairs = route_sheet_tables(tables, grid.open_scan, _pipeline, with_formulas=False, spool_limit=1 << 30)
+    pairs = route_sheet_tables(
+        tables, grid.open_scan, _pipeline, with_formulas=False, spool_limit=1 << 30, spool_memory_limit=0
+    )
     _, rows = next(pairs)
     list(rows)  # spools the other two tables to the file
     pairs.close()
@@ -235,7 +252,7 @@ def test_the_spool_file_is_closed_when_the_consumer_stops_early(monkeypatch):
 
 
 @pytest.mark.parametrize("seed", range(40))
-def test_random_layouts_consumption_and_budgets_match_dedicated_scans(seed):
+def test_random_layouts_consumption_and_budgets_match_dedicated_scans(seed, monkeypatch):
     rng = random.Random(seed)
     rows, columns = rng.randint(5, 120), rng.randint(4, 30)
     values = [[rng.choice([None, rng.randint(0, 99), f"s{r}{c}"]) for c in range(columns)] for r in range(rows)]
@@ -258,8 +275,13 @@ def test_random_layouts_consumption_and_budgets_match_dedicated_scans(seed):
         table.name: rng.choice([None, None, 0, rng.randint(0, table.end_row - table.start_row + 1)]) for table in tables
     }
     spool_limit = rng.choice([1, 50, 2_000, 1 << 30])
+    memory_limit = rng.choice([0, 300, 1 << 30])
+    if rng.random() < 0.5:
+        monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", rng.choice([16, 128]))
 
-    taken = _consume(grid, tables, spool_limit=spool_limit, take=take, with_formulas=with_formulas)
+    taken = _consume(
+        grid, tables, spool_limit=spool_limit, spool_memory_limit=memory_limit, take=take, with_formulas=with_formulas
+    )
 
     for table in tables:
         expected = _reference(grid, table)
@@ -276,7 +298,7 @@ def test_a_formula_reader_longer_than_the_value_reader_is_rejected():
 
 
 def test_unusable_temporary_storage_falls_back_to_dedicated_scans(monkeypatch):
-    """A full disk or a read-only TMPDIR must not fail a valid workbook."""
+    """Past the memory tier, a full disk or a read-only TMPDIR must not fail a valid workbook."""
 
     def no_storage(*args, **kwargs):
         raise OSError(28, "No space left on device")
@@ -284,7 +306,7 @@ def test_unusable_temporary_storage_falls_back_to_dedicated_scans(monkeypatch):
     monkeypatch.setattr(router.tempfile, "TemporaryFile", no_storage)
     monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 64)
     grid, tables = _side_by_side(tables=4)
-    taken = _consume(grid, tables, spool_limit=1 << 30)
+    taken = _consume(grid, tables, spool_limit=1 << 30, spool_memory_limit=0)
 
     assert len(grid.scans) == 1 + 3
     for table in tables:
@@ -307,7 +329,7 @@ def test_a_failing_spool_close_does_not_fail_the_parse(monkeypatch):
     monkeypatch.setattr(router.tempfile, "TemporaryFile", lambda **kwargs: _Unclosable(real_temporary_file(**kwargs)))
     monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 64)
     grid, tables = _side_by_side(tables=3)
-    taken = _consume(grid, tables, spool_limit=1 << 30)
+    taken = _consume(grid, tables, spool_limit=1 << 30, spool_memory_limit=0)
 
     for table in tables:
         assert taken[table.name] == _reference(grid, table)
@@ -365,18 +387,82 @@ def test_an_unreadable_spool_resumes_with_a_dedicated_scan_without_duplicates(mo
     reads = 0
     original_read = router._Spool.read
 
-    def failing_read(self, offset, length):
+    def failing_read(self, handle):
         nonlocal reads
         reads += 1
         if reads == 2:  # the first block replays, the second cannot be read back
             raise OSError(5, "Input/output error")
-        return original_read(self, offset, length)
+        return original_read(self, handle)
 
     monkeypatch.setattr(router._Spool, "read", failing_read)
     monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 128)
     grid, tables = _side_by_side(tables=4, rows=200)
-    taken = _consume(grid, tables, spool_limit=1 << 30)
+    taken = _consume(grid, tables, spool_limit=1 << 30, spool_memory_limit=0)
 
     assert reads == 2
+    for table in tables:
+        assert taken[table.name] == _reference(grid, table)
+
+
+def test_typical_sheets_never_touch_the_disk(monkeypatch):
+    """The memory tier keeps the single scan working where TMPDIR is unusable."""
+
+    def no_storage(*args, **kwargs):
+        raise AssertionError("the temporary file must not be needed")
+
+    monkeypatch.setattr(router.tempfile, "TemporaryFile", no_storage)
+    monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 64)
+    grid, tables = _side_by_side(tables=8)
+    taken = _consume(grid, tables, spool_limit=1 << 30)
+
+    assert len(grid.scans) == 1
+    for table in tables:
+        assert taken[table.name] == _reference(grid, table)
+
+
+def test_memory_read_back_is_reused_by_later_tables(monkeypatch):
+    """Replaying a table frees its blocks, so a memory tier smaller than the sum
+    of all waiting rows still serves tables one after another without the disk."""
+    peak_memory = written = 0
+    original_write = router._Spool.write
+
+    def write(self, data):
+        nonlocal peak_memory, written
+        result = original_write(self, data)
+        written += len(data)
+        peak_memory = max(peak_memory, self.in_memory)
+        return result
+
+    def no_storage(*args, **kwargs):
+        raise AssertionError("the temporary file must not be needed")
+
+    monkeypatch.setattr(router._Spool, "write", write)
+    monkeypatch.setattr(router.tempfile, "TemporaryFile", no_storage)
+    monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 64)
+    # Staggered tables: each one's waiting rows are read back before the next
+    # table's rows pile up, so memory is freed and reused in between.
+    grid = _Grid([[(r * 100 + c) for c in range(12)] for r in range(300)])
+    tables = [_Table(f"t{index}", 1 + index * 60, 120 + index * 60, 1 + index * 3, 2 + index * 3) for index in range(3)]
+    _consume(grid, tables, spool_limit=1 << 30, spool_memory_limit=1 << 30)
+    assert peak_memory < written  # memory was freed between tables
+
+    needed, peak_memory = peak_memory, 0
+    taken = _consume(grid, tables, spool_limit=1 << 30, spool_memory_limit=needed)
+
+    assert len(grid.scans) == 1
+    for table in tables:
+        assert taken[table.name] == _reference(grid, table)
+
+
+def test_rows_past_the_memory_tier_with_unusable_disk_fall_back(monkeypatch):
+    def no_storage(*args, **kwargs):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(router.tempfile, "TemporaryFile", no_storage)
+    monkeypatch.setattr(router, "_SPOOL_BLOCK_BYTES", 64)
+    grid, tables = _side_by_side(tables=4)
+    taken = _consume(grid, tables, spool_limit=1 << 30, spool_memory_limit=1_000)
+
+    assert len(grid.scans) == 1 + 3
     for table in tables:
         assert taken[table.name] == _reference(grid, table)
