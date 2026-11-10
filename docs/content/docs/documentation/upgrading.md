@@ -103,6 +103,27 @@ kubectl rollout status -n "$NS" deploy/"$FULLNAME-openrag"   # before resuming i
 The same applies after any upgrade that changes an `env.config` value read by
 Ray: the Ray containers read it only when they start.
 
+## OpenRAG 2.3.5 on Kubernetes: settings the chart refuses with the embedded Ray
+
+With `ray.enabled: false`, no `RAY_ADDRESS` and `ray.externalCluster: false` (the
+default), each OpenRAG pod starts its own Ray. From OpenRAG 2.3.5, the chart refuses two kinds of settings that break
+indexing in that mode. `helm upgrade` then stops before it changes anything, and
+the error names the setting.
+
+| The chart refuses | Why | What to change |
+|---|---|---|
+| `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. | Keep `openrag.replicas: 1`, or share one Ray cluster: `ray.enabled: true` together with `env.config.RAY_ADDRESS` or `env.config.ENABLE_RAY_SERVE=true` (see [Notes](/openrag/documentation/kubernetes/#notes)), or an external cluster through `env.config.RAY_ADDRESS`, with `ray.externalCluster: true` when `RAY_ADDRESS` comes from a Secret the chart cannot read. |
+| Marker, Docling and Whisper workers that don't fit the OpenRAG pod's GPUs | Each worker reserves its `*_NUM_GPUS` of the pod's GPUs (`MARKER_POOL_SIZE` × `MARKER_NUM_GPUS`, `DOCLING_POOL_SIZE` × `DOCLING_NUM_GPUS`, `WHISPER_N_WORKERS` × `WHISPER_NUM_GPUS`). Ray keeps a fraction of a GPU on a single card, and takes a reservation of 1 or more as whole cards, so three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and files sent to them fail after the parser's timeout. A preset can select Marker or Docling even when `PDFLOADER` names another parser, and Whisper transcribes audio by default, so the check applies to every deployment with a GPU in the pod, whatever order the workers start in. | Lower the pool sizes or the `*_NUM_GPUS` values, or give the pod more GPUs. A reservation above 1 must be a whole number. |
+
+The chart also drops `RAY_NUM_GPUS` from its defaults: OpenRAG never read it, so a
+copy in your values does nothing.
+
+With the embedded Ray, the OpenRAG Deployment now uses the `Recreate` strategy: an
+upgrade stops the old pod before it starts the new one. A rolling update ran both
+for a moment, each with its own Ray, and the new pod's job reconciler could mark
+the old pod's queued jobs failed for good. Expect the API to be unavailable while
+the new pod starts. With a shared Ray cluster, the rolling update is unchanged.
+
 ## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
 
 With `ray.enabled: true`, the Ray head installs the Python dependencies into the
