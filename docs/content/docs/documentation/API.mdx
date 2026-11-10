@@ -193,8 +193,8 @@ the default `RAG_MODE=ChatBotRag`; `SimpleRag` skips query generation and gets n
   order, so under a date order they are not sorted by `rerank_score`.
 * **Provenance line** — a document source block in the prompt carries a
   `Created: <date> UTC | File: <filename>` line under its `[Source N]` marker, so the
-  model can name the date it relied on and tell documents apart. A field the chunk's
-  metadata lacks is omitted, and a source with neither a date nor a file name has no
+  model can name the date it relied on and tell documents apart. A missing date reads
+  `Created: unknown`, a missing file name is omitted, and a source with neither has no
   line; web sources keep their own title and URL format.
 
 A file uploaded without `created_at` is never filtered in and never sorted first: to get

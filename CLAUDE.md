@@ -226,9 +226,10 @@ returned `docs` (hence `extra.sources` and the citation numbers) follow the rend
 and last invoice") the sources keep their relevance order. `describe_source`
 (`core/prompts/chat_prompt_builder.py`) puts a `Created: ... UTC | File: ...` line under each
 `[Source N]` marker so the answering LLM can see the dates; the answer templates tell it to use
-that line for "when" questions. The date comes first and the file name is flattened, stripped of
-`|` and capped, because the name is upload metadata: it must not be able to add a line or a
-second `Created:` ahead of the real one under the trusted marker.
+that line for "when" questions. The `Created:` field comes first and is always there when a file
+name is shown (`Created: unknown` without a date), and the name is flattened, stripped of `|` and
+capped, because the name is upload metadata: it must not be able to add a line or a `Created:`
+ahead of the real one under the trusted marker.
 
 `created_at` is the only temporal field and is client-supplied at upload (`TEMPORAL_FIELDS` in
 `indexing_service.py`, a TIMESTAMPTZ column in Milvus); cozy-stack sends the Cozy file creation

@@ -61,24 +61,20 @@ def describe_source(metadata: dict | None) -> str:
     The chunk text itself carries no date, so without this line the answering
     LLM cannot tell yesterday's meeting notes from last year's, and "summarize
     the last meeting" is answered from whichever one ranked first. Returns
-    ``""`` when the metadata carries neither, so undated sources render as
-    before. The values are untrusted (upload metadata): the date is rendered
-    first, so a file name that spells its own ``Created:`` can only follow the
-    real one, and the name is flattened to one line, stripped of the field
-    separator and capped, so it cannot add lines under the trusted marker.
+    ``""`` when the metadata carries neither. The values are untrusted (upload
+    metadata): the ``Created:`` field always comes first, ``unknown`` when the
+    date is missing, so a file name that spells its own ``Created:`` can only
+    follow the real one, and the name is flattened to one line, stripped of the
+    field separator and capped, so it cannot add lines under the trusted marker.
     """
     if not metadata:
         return ""
-    parts: list[str] = []
     created_at = _format_created_at(metadata.get("created_at"))
-    if created_at:
-        parts.append(f"Created: {created_at}")
     filename = metadata.get("filename") or metadata.get("original_filename")
-    if filename:
-        flat = " ".join(str(filename).replace("|", " ").split())[:_MAX_FILENAME_CHARS]
-        if flat:
-            parts.append(f"File: {flat}")
-    return neutralize_prompt_control_tokens(" | ".join(parts))
+    flat = " ".join(str(filename).replace("|", " ").split())[:_MAX_FILENAME_CHARS] if filename else ""
+    if not flat:
+        return f"Created: {created_at}" if created_at else ""
+    return neutralize_prompt_control_tokens(f"Created: {created_at or 'unknown'} | File: {flat}")
 
 
 def _format_created_at(value: object) -> str:

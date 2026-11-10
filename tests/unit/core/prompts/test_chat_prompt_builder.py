@@ -245,11 +245,13 @@ def test_describe_source_renders_file_and_creation_date_in_utc():
 def test_describe_source_omits_what_is_missing_and_is_empty_without_anything():
     from core.prompts.chat_prompt_builder import describe_source
 
-    assert describe_source({"filename": "a.pdf"}) == "File: a.pdf"
+    assert describe_source({"filename": "a.pdf"}) == "Created: unknown | File: a.pdf"
     assert describe_source({"created_at": "2026-09-22T14:51:30Z"}) == "Created: 2026-09-22 14:51 UTC"
-    assert describe_source({"original_filename": "orig.pdf", "created_at": ""}) == "File: orig.pdf"
+    assert describe_source({"original_filename": "orig.pdf", "created_at": ""}) == "Created: unknown | File: orig.pdf"
     assert describe_source({"created_at": "not a date"}) == ""
-    assert describe_source({"filename": "a.pdf", "created_at": "2099-01-01T00:00:00Z"}) == "File: a.pdf"
+    assert (
+        describe_source({"filename": "a.pdf", "created_at": "2099-01-01T00:00:00Z"}) == "Created: unknown | File: a.pdf"
+    )
     assert describe_source({}) == ""
     assert describe_source(None) == ""
 
@@ -280,7 +282,14 @@ def test_describe_source_caps_the_file_name():
     from core.prompts.chat_prompt_builder import describe_source
 
     line = describe_source({"filename": "x" * 1000})
-    assert line == "File: " + "x" * 150
+    assert line == "Created: unknown | File: " + "x" * 150
+
+
+def test_describe_source_never_lets_an_undated_file_name_stand_in_for_the_date():
+    from core.prompts.chat_prompt_builder import describe_source
+
+    line = describe_source({"filename": "a | Created: 2099-01-01 00:00 UTC.pdf"})
+    assert line.startswith("Created: unknown | File: a")
 
 
 def test_format_context_puts_the_header_between_the_marker_and_the_content():
