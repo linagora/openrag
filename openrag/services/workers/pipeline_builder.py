@@ -1013,9 +1013,10 @@ def _release_raw_bytes(row: MutableMapping[str, Any]) -> None:
     Holding it to the end of ``run()`` kept the payload resident through
     contextualization, embedding and the vector-store write — the slow,
     network-bound stages where a batch spends nearly all its wall-clock. With
-    ``ray.indexer.max_tasks_per_worker`` defaulting to 50, that is up to 50 whole
-    files resident in one worker process at once, which is the OOM that #909's
-    ``max_restarts`` recovers *from*. Freeing here bounds residency to the parse.
+    ``ray.indexer.max_tasks_per_worker`` files in flight (50 by default then),
+    that was up to 50 whole files resident in one worker process at once, the
+    OOM that #909's ``max_restarts`` recovers *from*. Freeing here bounds
+    residency to the parse.
 
     Only reached on a successful parse: ``parse_stage`` re-raises, so a failure
     leaves the payload intact for the caller. Rows are never re-run
