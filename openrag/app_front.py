@@ -587,6 +587,7 @@ def _chunk_field(source: dict, key: str):
 
 
 async def _format_sources(metadata_sources, only_txt=False, api_key=None):
+    """Format retrieved web and file sources as Chainlit elements."""
     if not isinstance(metadata_sources, list) or not metadata_sources:
         return [], []
 

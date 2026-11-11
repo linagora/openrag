@@ -658,6 +658,7 @@ async def test_chainlit_keeps_valid_web_sources(monkeypatch):
 )
 @pytest.mark.asyncio
 async def test_chainlit_web_title_cannot_split_the_citation_link(monkeypatch, title, expected_title):
+    """Ensure multiline web titles remain a single bold citation link."""
     module = _load_app_front(
         monkeypatch,
         auth_mode="token",
