@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from markdown_it import MarkdownIt
 from starlette.responses import Response
 
 _FIX_SOURCE = Path(__file__).resolve().parents[2] / "openrag" / "app_front.py"
@@ -644,6 +645,60 @@ async def test_chainlit_keeps_valid_web_sources(monkeypatch):
     assert source_names == ["Example reference"]
     assert elements[0].name == "Example reference"
     assert elements[0].content == ("**[Example reference](https://example.test/reference)**\n\nSupporting evidence")
+
+
+@pytest.mark.parametrize(
+    ("title", "expected_title"),
+    [
+        ("Report\n\n annex", "Report annex"),
+        ("Report\n\n    indented", "Report indented"),
+        ("Report\r\n\r\n annex", "Report annex"),
+        ("+ \n\nhttps://", "+ https://"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_chainlit_web_title_cannot_split_the_citation_link(monkeypatch, title, expected_title):
+    module = _load_app_front(
+        monkeypatch,
+        auth_mode="token",
+        module_name="app_front_web_title_blank_line_test",
+    )
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, _ = await module._format_sources(
+        [
+            {
+                "source_type": "web",
+                "title": title,
+                "url": "https://example.test/a",
+            }
+        ]
+    )
+
+    assert len(elements) == 1
+
+    tokens = MarkdownIt("commonmark").parse(elements[0].content)
+
+    # The citation must remain exactly one Markdown paragraph.
+    assert [token.type for token in tokens] == [
+        "paragraph_open",
+        "inline",
+        "paragraph_close",
+    ]
+
+    children = tokens[1].children
+
+    # The paragraph must contain one bold link.
+    kinds = [child.type for child in children if child.type != "text" or child.content]
+    assert kinds[:2] == ["strong_open", "link_open"]
+    assert kinds[-2:] == ["link_close", "strong_close"]
+
+    # Verify the normalized title and destination.
+    assert "".join(child.content for child in children if child.type == "text") == expected_title
+
+    link = next(child for child in children if child.type == "link_open")
+    assert link.attrGet("href") == "https://example.test/a"
 
 
 @pytest.mark.asyncio
