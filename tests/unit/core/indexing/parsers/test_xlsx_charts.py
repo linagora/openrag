@@ -2811,3 +2811,39 @@ def test_required_chart_values_are_read_before_optional_format_lookups():
     assert "| May | 9 |" in far.text
     assert far.metadata["chart_ranges_not_read"] == 0
     assert near.metadata["workbook_chart_extraction"] == "partial"
+
+
+# --- review round 2: held charts' required reads, deep drawing nesting --------
+
+
+def test_a_held_chart_reads_its_values_before_optional_lookups():
+    """Cached date categories (a format lookup) over uncached values: the chart
+    is held for its formats, but its values are still read first."""
+    raw = _general_dates_workbook()
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        chart = archive.read("xl/charts/chart1.xml").decode()
+    uncached = chart.replace(
+        _num_cache_ref("Data!$B$2:$B$3", [5, 7], "General"), "<c:numRef><c:f>Data!$B$2:$B$3</c:f></c:numRef>"
+    )
+    assert uncached != chart
+    raw = _replace_parts(raw, {"xl/charts/chart1.xml": uncached})
+
+    (chart,) = _charts(raw, max_chart_scan_rows=4)
+
+    assert chart.metadata["chart_ranges_not_read"] == 0
+    assert "| 5 |" in chart.text and "| 7 |" in chart.text
+
+
+def test_a_drawing_nested_thousands_of_groups_deep_is_read_without_recursion():
+    shape = _text_box("Deep note")
+    start = shape.index("<sp ")
+    end = shape.index("</sp>") + len("</sp>")
+    depth = 3000
+    group = "<grpSp><nvGrpSpPr><cNvPr id='8' name='G'/><cNvGrpSpPr/></nvGrpSpPr><grpSpPr/>"
+    nested = shape[:start] + group * depth + shape[start:end] + "</grpSp>" * depth + shape[end:]
+    raw = _with_text_boxes(_workbook_with_chart(_monthly_revenue()), nested)
+
+    blocks = _blocks(raw)
+
+    assert "Deep note" in _text_boxes(blocks)[0].text
+    assert blocks[0].metadata["workbook_chart_extraction"] == "complete"

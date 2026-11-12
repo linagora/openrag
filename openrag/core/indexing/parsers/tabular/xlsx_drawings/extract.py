@@ -772,6 +772,7 @@ class WorkbookCharts:
             slots: list[_Entry | _Deferred | tuple[ChartPlacement, tuple[Chart, tuple[str, ...]] | None]] = []
             wanted_formats: list[CellRange] = []
             wanted_headers: list[CellRange] = []
+            prefetch: list[CellRange] = []
             held = 0
             for placement in inventory.placements:
                 if self._withhold and placement.hidden:
@@ -796,6 +797,14 @@ class WorkbookCharts:
                 keep = held + points <= _MAX_HELD_POINTS
                 held += points if keep else 0
                 slots.append((placement, loaded if keep else None))
+                # Its values are required too: read them with the other
+                # required reads when their cells fit the held-memory bound,
+                # rather than after the optional lookups.
+                required = _uncached(chart, resolve)
+                cells = sum(min(cell_range.area, limits.max_points) for cell_range in required)
+                if required and held + cells <= _MAX_HELD_POINTS:
+                    held += cells
+                    prefetch.extend(required)
             # Required reads first: the values and categories of charts that
             # store none. Number formats and header labels only refine a
             # chart, so they get what the read budget has left.
@@ -805,11 +814,13 @@ class WorkbookCharts:
                 if isinstance(slot, (_Entry, _Deferred))
                 and (slot.entry if isinstance(slot, _Deferred) else slot).rendered is None
             ]
-            for (index, _), entry in zip(
-                early,
-                self._fill([entry for _, entry in early], resolve, hidden_cells, read_rows, cell_text),
-                strict=True,
-            ):
+            early_entries, early_cells = self._fill(
+                [entry for _, entry in early], resolve, hidden_cells, read_rows, cell_text, prefetch=prefetch
+            )
+            # Only the prefetched cells wait for the charts finished later.
+            prefetched = {cell_range: early_cells[cell_range] for cell_range in prefetch if cell_range in early_cells}
+            del early_cells
+            for (index, _), entry in zip(early, early_entries, strict=True):
                 slots[index] = _Deferred(entry) if isinstance(slots[index], _Deferred) else entry
             found = _LookedUp(
                 first_cell_formats(wanted_formats, read_rows, budget=self._scan) if wanted_formats else {},
@@ -833,11 +844,15 @@ class WorkbookCharts:
         # Charts known to need their cells only once their formats were read
         # (a cached category axis over uncached values) are read last.
         late = [index for index, entry in enumerate(self._pending) if entry.rendered is None and not entry.filled]
-        for index, entry in zip(
-            late,
-            self._fill([self._pending[index] for index in late], resolve, hidden_cells, read_rows, cell_text),
-            strict=True,
-        ):
+        late_entries, _ = self._fill(
+            [self._pending[index] for index in late],
+            resolve,
+            hidden_cells,
+            read_rows,
+            cell_text,
+            known=prefetched,
+        )
+        for index, entry in zip(late, late_entries, strict=True):
             self._pending[index] = entry
         if self.skipped:
             logger.bind(filename=workbook_filename).warning(
@@ -845,13 +860,29 @@ class WorkbookCharts:
             )
 
     def _fill(
-        self, entries: list[_Entry], resolve: Resolver, hidden_cells: HiddenCells, read_rows: RowReader, cell_text
-    ) -> list[_Entry]:
-        """Read the cells of charts that store references, in bounded windows."""
-        wanted = [cell_range for entry in entries for cell_range in _uncached(entry.chart, resolve)]
-        if not wanted:
-            return [replace(entry, filled=True) for entry in entries]
-        resolved = resolve_ranges(wanted, read_rows, cell_text, max_cells=self._limits.max_points, budget=self._scan)
+        self,
+        entries: list[_Entry],
+        resolve: Resolver,
+        hidden_cells: HiddenCells,
+        read_rows: RowReader,
+        cell_text,
+        *,
+        prefetch: list[CellRange] = (),
+        known: dict[CellRange, list[list[str]]] | None = None,
+    ) -> tuple[list[_Entry], dict[CellRange, list[list[str]]]]:
+        """Read the cells of charts that store references, in bounded windows.
+
+        ``prefetch`` ranges are read with them for charts finished later;
+        ``known`` cells, read earlier, are not read again. Returns the filled
+        entries and every grid read, for a later call.
+        """
+        known = dict(known or {})
+        wanted = [cell_range for entry in entries for cell_range in _uncached(entry.chart, resolve)] + list(prefetch)
+        missing = [cell_range for cell_range in wanted if cell_range not in known]
+        if missing:
+            known.update(
+                resolve_ranges(missing, read_rows, cell_text, max_cells=self._limits.max_points, budget=self._scan)
+            )
         filled_entries = []
         for entry in entries:
             # Counted apart from references that cannot be read: these could
@@ -859,14 +890,14 @@ class WorkbookCharts:
             not_read = sum(1 for cell_range in _uncached(entry.chart, resolve) if cell_range in self._scan.omitted)
             filled, unresolved = _filled(
                 entry.chart,
-                resolved,
+                known,
                 hidden_cells,
                 resolve,
                 drop_hidden_cells=self._withhold or entry.chart.plot_visible_only,
                 omitted=self._scan.omitted,
             )
             filled_entries.append(replace(entry, chart=filled, unresolved=unresolved, not_read=not_read, filled=True))
-        return filled_entries
+        return filled_entries, known
 
     def _load(
         self,

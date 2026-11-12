@@ -1411,7 +1411,7 @@ class XlsxParser(TabularBatchParser):
                     mode=self.charts,
                 )
                 return charts, None
-        except (OSError, KeyError, IndexError, TypeError, ValueError, zipfile.BadZipFile) as exc:
+        except (OSError, KeyError, IndexError, TypeError, ValueError, RecursionError, zipfile.BadZipFile) as exc:
             logger.bind(filename=document.filename).warning(f"XLSX charts were not extracted: {exc!r}")
             # Only the exception type reaches chunk metadata, never its text.
             return None, f"Chart extraction failed ({type(exc).__name__})"
