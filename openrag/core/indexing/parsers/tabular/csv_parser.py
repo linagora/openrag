@@ -149,7 +149,8 @@ class CsvParser(TabularBatchParser):
             )
         raw = document.raw_bytes or b""
         encoding, errors = _detect_bytes_encoding(raw)
-        return io.StringIO(raw.decode(encoding, errors=errors).removeprefix("\ufeff"), newline="")
+        text = codecs.getincrementaldecoder(encoding)(errors).decode(raw, final=True)
+        return io.StringIO(text.removeprefix("\ufeff"), newline="")
 
     def _delimiter_for(self, stream) -> str:
         if self.delimiter is not None:
