@@ -22,7 +22,10 @@ Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
 This module finds the sources and renders them into the prompt;
 ``AnswerService`` (``answer_service.py``) then calls the model, strips the
 ``[Sources: N]`` tag, retries an empty answer and builds ``extra``, the same
-way for ``chat``, ``chat_stream`` and ``complete``. The rules with no I/O live
+way for ``chat``, ``chat_stream`` and ``complete``. Finding the sources is a
+sequence of steps in ``services.capabilities``: the scope, the contextualized
+queries, the documents and web results, the map-reduce summaries; this module
+decides which of them run. The rules with no I/O live
 in ``core``: small talk (``core.chat.smalltalk``), the history window
 (``core.chat.history``), fitting the sources into the window
 (``core.chat.budget``), the route (``core.chat.routing``), shaping the answer
@@ -38,18 +41,15 @@ LangChain ``Document`` via ``Chunk.to_langchain()`` at the boundary so the
 
 from __future__ import annotations
 
-import asyncio
-import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
-from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from core.chat.budget import fit_prompt, fit_sources
 from core.chat.history import history_window, latest_user_query, sanitize_messages, split_leading_system_prompt
-from core.chat.routing import Route, resolve_route
+from core.chat.routing import resolve_route
 from core.chat.smalltalk import (
     CasualMessagePolicy,
     acknowledgement_language,
@@ -58,39 +58,34 @@ from core.chat.smalltalk import (
 from core.models.chat import ChatOptions
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
-from core.models.retrieval_trace import (
-    ContextualizationTrace,
-    ContextualizedSubqueryTrace,
-    PromptTrace,
-    TemporalFilterTrace,
-    TraceError,
-)
+from core.models.retrieval_trace import ContextualizationTrace, PromptTrace
 from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
-    build_map_messages,
     documents_context,
     format_web_context,
     message_tokens,
     prepend_system_prompt,
     tool_definition_tokens,
 )
-from core.prompts.query_contextualizer import build_contextualizer_messages, parse_search_queries
 from core.retrieval.date_order import order_chunks_by_date
-from core.retrieval.trace import (
-    TRACE_FILE_SCOPE_KIND_KEY,
-    RetrievalDiagnosticsContext,
-    RetrievalTraceBuilder,
-    canonical_fingerprint,
-)
-from core.utils.exceptions import ContextWindowExceededError, ValidationError, WorkspaceNotFoundError
+from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder, canonical_fingerprint
+from core.utils.exceptions import ContextWindowExceededError, ValidationError
 from core.utils.logging import get_logger
-from core.utils.string_utils import json_object_slice
 from core.utils.text import get_num_tokens
-from core.utils.web_url import normalize_web_url
+from services.capabilities.contextualize import (
+    QueryContextualizer,
+    mark_fallback,
+    record_bypass,
+    record_contextualization,
+    record_not_run,
+)
+from services.capabilities.retrieve import SourceRetriever
+from services.capabilities.scope import ScopeResolver
+from services.capabilities.summarize import Summarizer
+from services.capabilities.web_search import WebSearch
 from services.inference.runtime import detect_language, get_llm_semaphore
 from services.orchestrators.answer_service import AnswerService, PreparedAnswer
-from services.orchestrators.prompt_service import ResolvedPrompt
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -118,11 +113,6 @@ class _PrepareChatResult(NamedTuple):
     retry_empty_response: bool = True
 
 
-class RAGMODE(Enum):
-    SIMPLERAG = "SimpleRag"
-    CHATBOTRAG = "ChatBotRag"
-
-
 class QueryService:
     """End-to-end RAG: query-gen → retrieve (+web) → map-reduce → answer."""
 
@@ -146,17 +136,25 @@ class QueryService:
         self._answer = answer_service or AnswerService(detect_language=detect_language)
         self._llm = llm
         self._llm_factory = llm_factory
-        self._web = web_search_service
-        self._workspace = workspace_service
         # Prompts resolve request-time (override → default → disk seed) so an
         # admin's edit takes effect on the next chat without a restart.
         self._prompt_service = prompt_service
+        self._contextualizer = QueryContextualizer(
+            config=config,
+            prompt_service=prompt_service,
+            llm=llm,
+            detect_language=detect_language,
+            clock=lambda: datetime.now(UTC),
+        )
+        self._scope = ScopeResolver(workspace_service)
+        self._web = WebSearch(web_search_service)
+        self._retriever = SourceRetriever(retrieval_service=retrieval_service, web_search=self._web)
+        self._summarizer = Summarizer(llm=llm, config=config, semaphore=get_llm_semaphore)
 
         # Keep a live reference so per-partition config (resolved into
         # ``config.partitions`` and refreshed on every preset change) can be
         # read at request time, not snapshotted once at startup.
         self._config = config
-        self._rag_mode = config.rag.mode
         # RAGConfig.chat_history_depth carries no lower bound, so a deployment may
         # configure it to 0 (or negative). Left unclamped, messages[-0:] would keep
         # the *entire* history instead of none — the opposite of what this depth
@@ -165,12 +163,6 @@ class QueryService:
         self._default_chat_history_depth = (
             config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
         )
-        self._max_contextualized_query_len = config.rag.max_contextualized_query_len
-
-        mr = config.map_reduce
-        self._mr_initial = mr.initial_batch_size
-        self._mr_expansion = mr.expansion_batch_size
-        self._mr_max = mr.max_total_documents
 
     async def refresh_partition_configs(self) -> None:
         await self._retrieval.refresh_partition_configs()
@@ -255,7 +247,7 @@ class QueryService:
            request (``chat`` / ``chat_stream`` / ``complete``) and used for
            both the query-contextualization call and the final answer.
            Map-reduce is the exception: its relevancy/summarisation passes
-           stay pinned to the static ``self._llm`` (see ``_infer_relevancy``),
+           stay pinned to the static ``self._llm`` (see ``Summarizer``),
            so with a non-env default endpoint a map-reduce request's sub-calls
            run on a different model than its answer, until that post-release
            refactor lands.
@@ -358,10 +350,6 @@ class QueryService:
                     return name
         return "default"
 
-    # ------------------------------------------------------------------
-    # Query generation (was RagPipeline.generate_query — no LangChain)
-    # ------------------------------------------------------------------
-
     def _generation_prompt_name(self, prompt_type: str, partition: list[str] | None) -> str | None:
         """The library prompt this request's partition names for a generation type.
 
@@ -377,229 +365,6 @@ class QueryService:
         if cfg is None:
             return None
         return getattr(cfg, "generation_prompt_names", {}).get(prompt_type)
-
-    def _retrieval_prompt_name(self, field: str, partition: list[str] | None) -> str | None:
-        """The library prompt this request's partition names on its retrieval
-        preset (the query-side prompt: query_contextualizer).
-
-        Same single-owning-partition rule as generation prompts; multi-partition
-        and ``"all"`` resolve the global default.
-        """
-        if not partition or "all" in partition or len(partition) != 1:
-            return None
-        cfg = self._config.partitions.get(partition[0])
-        if cfg is None:
-            return None
-        return getattr(getattr(cfg, "retrieval", None), field, None)
-
-    async def generate_query(
-        self,
-        messages: list[dict],
-        llm: LLM | None = None,
-        partition: list[str] | None = None,
-        trace: RetrievalTraceBuilder | None = None,
-    ) -> SearchQueries:
-        llm = llm or self._llm
-        last_user = latest_user_query(messages) or (messages[-1].get("content") or "")
-        if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
-            queries = SearchQueries(query_list=[Query(query=last_user)])
-            self._record_contextualization(trace, queries, original_query=last_user)
-            return queries
-
-        prompt_name = self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)
-        resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
-        if resolve_with_identity is not None:
-            contextualizer = await resolve_with_identity("query_contextualizer", names=[prompt_name])
-        else:
-            content = await self._prompt_service.resolve_prompt("query_contextualizer", names=[prompt_name])
-            contextualizer = ResolvedPrompt.create(
-                content, name=prompt_name, source="named" if prompt_name else "default"
-            )
-        llm_messages = build_contextualizer_messages(
-            contextualizer.content,
-            messages=messages,
-            query_language=detect_language(last_user),
-            # UTC, not the host clock: see build_contextualizer_messages.
-            now=datetime.now(UTC),
-        )
-        params = {
-            "max_completion_tokens": self._max_contextualized_query_len,
-            "response_format": {"type": "json_object"},
-            # Structured extraction, not generation: sampling made the same
-            # question flip between a date filter and none across requests.
-            "temperature": 0,
-        }
-        started = time.perf_counter()
-        last_error: Exception | None = None
-        for attempt in (1, 2):
-            try:
-                resp = await llm.chat(llm_messages, **params)
-                content = resp["choices"][0]["message"]["content"]
-                queries = parse_search_queries(content)
-                self._record_contextualization(
-                    trace,
-                    queries,
-                    original_query=last_user,
-                    duration_seconds=time.perf_counter() - started,
-                    llm=llm,
-                    prompt=contextualizer,
-                )
-                return queries
-            except Exception as exc:
-                last_error = exc
-                if attempt == 1:
-                    logger.warning("Query generation parse error — retrying", error=str(exc))
-                else:
-                    logger.warning(
-                        "Query generation failed twice — falling back to raw user query",
-                        error=str(exc),
-                    )
-        queries = SearchQueries(query_list=[Query(query=last_user)])
-        self._record_contextualization(
-            trace,
-            queries,
-            original_query=last_user,
-            duration_seconds=time.perf_counter() - started,
-            llm=llm,
-            prompt=contextualizer,
-            fallback_used=True,
-            error=last_error,
-        )
-        return queries
-
-    @staticmethod
-    def _record_contextualization(
-        trace: RetrievalTraceBuilder | None,
-        queries: SearchQueries,
-        *,
-        original_query: str,
-        duration_seconds: float = 0.0,
-        llm: LLM | None = None,
-        prompt: ResolvedPrompt | None = None,
-        fallback_used: bool = False,
-        error: Exception | None = None,
-    ) -> None:
-        if trace is None:
-            return
-        try:
-            trace.contextualization = ContextualizationTrace(
-                original_query=original_query,
-                subqueries=[
-                    ContextualizedSubqueryTrace(
-                        query=query.query,
-                        temporal_filters=[
-                            TemporalFilterTrace(operator=item.operator, value=item.value)
-                            for item in (query.temporal_filters or [])
-                        ],
-                        date_order=query.date_order,
-                    )
-                    for query in queries.query_list
-                ],
-                intent=queries.intent,
-                requires_retrieval=queries.requires_retrieval,
-                fallback_used=fallback_used,
-                error=(
-                    TraceError(stage="contextualization", message="redacted", kind=type(error).__name__)
-                    if error is not None
-                    else None
-                ),
-                duration_seconds=duration_seconds,
-                model=getattr(llm, "_model", None),
-                prompt=(
-                    PromptTrace(content_hash=prompt.content_hash, name=prompt.name, source=prompt.source)
-                    if prompt is not None
-                    else None
-                ),
-            )
-            trace.timings["contextualization"] = duration_seconds
-            trace.record_stage("original_query", status="complete", candidates=[])
-            trace.record_stage("contextualized_query", status="complete", candidates=[])
-        except Exception as trace_error:
-            trace.record_error("contextualization", trace_error)
-
-    @staticmethod
-    def _record_contextualization_bypass(
-        trace: RetrievalTraceBuilder | None,
-        *,
-        original_query: str,
-    ) -> None:
-        if trace is None:
-            return
-        try:
-            trace.contextualization = ContextualizationTrace(
-                original_query=original_query,
-                bypassed=True,
-            )
-            trace.record_stage("original_query", status="complete", candidates=[])
-            trace.record_stage("contextualized_query", status="not_run", candidates=[])
-        except Exception as trace_error:
-            trace.record_error("contextualization", trace_error)
-
-    @staticmethod
-    def _record_contextualization_not_run(
-        trace: RetrievalTraceBuilder | None,
-        *,
-        original_query: str,
-    ) -> None:
-        if trace is None:
-            return
-        try:
-            trace.contextualization = ContextualizationTrace(original_query=original_query)
-            trace.record_stage("original_query", status="complete", candidates=[])
-            trace.record_stage("contextualized_query", status="not_run", candidates=[])
-        except Exception as trace_error:
-            trace.record_error("contextualization", trace_error)
-
-    # ------------------------------------------------------------------
-    # Map-reduce (was map_reduce.RAGMapReduce — no LangChain)
-    # ------------------------------------------------------------------
-
-    async def _infer_relevancy(self, query: str, doc) -> tuple[bool, str]:
-        # Deliberately pinned to the static ``self._llm`` (the settings.llm env
-        # client) — NOT the resolved catalog default the answer uses, so a
-        # map-reduce request's sub-calls may run on a different model than its
-        # answer. Map-reduce is slated for a full post-release refactor; routing
-        # it through the resolved chat_llm is part of that work.
-        async with get_llm_semaphore():
-            try:
-                resp = await self._llm.chat(
-                    build_map_messages(query=query, content=doc.page_content),
-                    max_tokens=512,
-                    temperature=0.3,
-                    response_format={"type": "json_object"},
-                )
-                data = json.loads(json_object_slice(resp["choices"][0]["message"]["content"]))
-                return bool(data.get("relevancy", False)), str(data.get("summary", "") or "")
-            except Exception as e:
-                logger.error("Error during chunk relevancy inference", error=str(e))
-                return False, ""
-
-    async def _map_reduce(self, query: str, docs: list) -> list:
-        """LLM relevancy filter + summarisation, batched with early stop."""
-
-        async def _batch(chunks: list, summaries: list) -> bool:
-            outputs = await asyncio.gather(*[self._infer_relevancy(query, c) for c in chunks])
-            terminate = all(not rel for rel, _ in outputs[-self._mr_expansion :])
-            for (rel, summary), chunk in zip(outputs, chunks, strict=True):
-                if rel:
-                    summaries.append(_summary_doc(chunk, summary))
-            return terminate
-
-        summaries: list = []
-        initial, remaining = docs[: self._mr_initial], docs[self._mr_initial :]
-        terminate = await _batch(initial, summaries)
-        if terminate or not remaining or len(summaries) >= self._mr_max:
-            return summaries
-
-        for i in range(0, len(remaining), self._mr_expansion):
-            n = min(self._mr_expansion, self._mr_max - len(summaries))
-            if n <= 0:
-                break
-            terminate = await _batch(remaining[i : i + n], summaries)
-            if terminate or len(summaries) >= self._mr_max:
-                break
-        logger.debug("Map reduce completed", relevant_chunks_count=len(summaries))
-        return summaries
 
     # ------------------------------------------------------------------
     # Preparation (was RagPipeline._prepare_for_chat_completion)
@@ -621,47 +386,21 @@ class QueryService:
         options = ChatOptions.from_metadata(payload.get("metadata"))
         # Taken before a workspace narrows the partitions: narrowing never empties them.
         route = resolve_route(partition, options)
-        workspace = options.workspace
-        attachment_ids = list(options.attachment_ids)
 
         effective_retrieval_options = options.retrieval.as_options()
         retrieval_top_k = effective_retrieval_options.get("top_k")
-        top_k = self._mr_max if options.use_map_reduce else None
+        top_k = self._summarizer.max_total_documents if options.use_map_reduce else None
         retrieval_overrides = {key: value for key, value in effective_retrieval_options.items() if key != "top_k"}
 
-        filter_params = None
-        indexed_attachment_ids: list[str] = []
-        if workspace and partition:
-            scope = await self._workspace.resolve_scope(workspace, partition)
-            if scope is None:
-                raise WorkspaceNotFoundError(f"Workspace '{workspace}' not found.")
-            # A workspace belongs to exactly one partition — narrow retrieval to
-            # it even for an "openrag-all" / multi-partition request, otherwise
-            # file_id-only filtering could match a same-named file in another
-            # partition the caller also has access to (#706).
-            partition = [scope.partition]
-            if attachment_ids:
-                # Attachments narrow the workspace, never widen it: only the
-                # attached files that belong to it are searched.
-                indexed_attachment_ids = _within_workspace(attachment_ids, scope.file_ids)
-                filter_params = {"file_id": indexed_attachment_ids}
-                scope_kind = "attachment"
-            else:
-                filter_params = {"file_id": scope.file_ids}
-                scope_kind = "workspace"
-            if trace is not None:
-                filter_params[TRACE_FILE_SCOPE_KIND_KEY] = scope_kind
-        elif attachment_ids and partition:
-            # No ownership check needed: file_id is ANDed with the server-fixed
-            # partition (or, for the "all" wildcard, SUPER_ADMIN_MODE-only).
-            indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
-            filter_params = {"file_id": indexed_attachment_ids}
-            if trace is not None:
-                filter_params[TRACE_FILE_SCOPE_KIND_KEY] = "attachment"
+        scope = await self._scope.resolve(
+            partition, workspace=options.workspace, attachment_ids=list(options.attachment_ids)
+        )
+        partition = scope.partitions
+        indexed_attachment_ids = scope.attachment_ids
 
         last_user_message = latest_user_query(messages)
         casual_policy, acknowledgement_candidate = classify_latest_message(
-            messages, last_user_message, query_rewrite=self._rag_mode == RAGMODE.CHATBOTRAG.value
+            messages, last_user_message, query_rewrite=self._contextualizer.rewrites_queries
         )
         retrieval_forced = (
             options.require_retrieval or options.websearch or options.use_map_reduce or bool(indexed_attachment_ids)
@@ -672,9 +411,9 @@ class QueryService:
 
         if options.bypass_query_contextualization:
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
-            self._record_contextualization_bypass(trace, original_query=last_user_message)
+            record_bypass(trace, original_query=last_user_message)
         elif casual_policy is None or retrieval_forced:
-            queries = await self.generate_query(messages, llm=llm, partition=partition, trace=trace)
+            queries = await self._contextualizer.contextualize(messages, llm=llm, partitions=partition, trace=trace)
             usable_queries = [query for query in queries.query_list if query.query.strip()]
             if (
                 acknowledgement_candidate
@@ -688,7 +427,7 @@ class QueryService:
                 )
             elif not usable_queries:
                 queries = SearchQueries(query_list=[Query(query=last_user_message)])
-                self._mark_contextualization_fallback(trace, queries)
+                mark_fallback(trace, queries)
             elif len(usable_queries) != len(queries.query_list):
                 queries = queries.model_copy(update={"query_list": usable_queries})
 
@@ -754,46 +493,27 @@ class QueryService:
         if queries is None:  # pragma: no cover - guarded by the casual return above
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
 
-        web_results: list = []
-        if route is Route.DOCUMENTS_AND_WEB:
-            chunks, web_lists = await self._gather_rag_and_web(
-                queries,
-                partition,
-                top_k,
-                filter_params,
-                retrieval_top_k=retrieval_top_k,
-                trace=trace,
-                resolved_plan=resolved_retrieval_plan,
-                **retrieval_overrides,
-            )
-            web_results = _dedupe_web(web_lists)
-        elif route is Route.DOCUMENTS:
-            trace_kwargs = {"trace": trace} if trace is not None else {}
-            chunks = await self._retrieval.retrieve_multi(
-                partitions=partition,
-                search_queries=queries,
-                top_k=top_k,
-                retrieval_top_k=retrieval_top_k,
-                filter_params=filter_params,
-                **retrieval_overrides,
-                **trace_kwargs,
-                **({"resolved_plan": resolved_retrieval_plan} if resolved_retrieval_plan is not None else {}),
-            )
-        else:
-            web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
-            chunks = []
+        chunks, web_results = await self._retriever.retrieve(
+            queries,
+            route=route,
+            scope=scope,
+            top_k=top_k,
+            retrieval_top_k=retrieval_top_k,
+            overrides=retrieval_overrides,
+            trace=trace,
+            resolved_plan=resolved_retrieval_plan,
+        )
 
         if trace is not None and route.has_documents and options.compare_original_query:
-            await self._compare_original_query(
+            await self._retriever.compare_original_query(
                 trace,
                 original_query=last_user_message,
-                partition=partition,
+                scope=scope,
                 top_k=top_k,
                 retrieval_top_k=retrieval_top_k,
-                filter_params=filter_params,
+                overrides=retrieval_overrides,
                 configuration_fingerprint=configuration_fingerprint,
                 resolved_plan=resolved_retrieval_plan,
-                **retrieval_overrides,
             )
 
         if not chunks and not web_results and not route.has_documents:
@@ -839,7 +559,7 @@ class QueryService:
                 raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
 
         if options.use_map_reduce and docs:
-            docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
+            docs = await self._summarizer.summarize(" ".join(q.query for q in queries.query_list), docs)
 
         # Web results come out of the same room, so they can't take more than it either.
         web_max_tokens = self._web.max_tokens if room is None else min(self._web.max_tokens, room)
@@ -899,132 +619,6 @@ class QueryService:
             configuration_fingerprint,
         )
 
-    async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
-        """Order-preserving, deduplicated subset of ``file_ids`` indexed in ``partitions``.
-
-        ``"all"`` (``SUPER_ADMIN_MODE`` wildcard) takes an unscoped lookup instead
-        of a per-partition one.
-        """
-        if "all" in partitions:
-            if len(partitions) > 1:
-                raise ValueError("`partitions` cannot mix the wildcard with explicit values.")
-            found = set(await self._workspace.get_existing_file_ids_any_partition(file_ids))
-        else:
-            results = await asyncio.gather(*(self._workspace.get_existing_file_ids(p, file_ids) for p in partitions))
-            found = {fid for r in results for fid in r}
-        return [fid for fid in dict.fromkeys(file_ids) if fid in found]
-
-    async def _gather_rag_and_web(
-        self,
-        queries,
-        partition,
-        top_k,
-        filter_params,
-        retrieval_top_k=None,
-        trace=None,
-        resolved_plan=None,
-        **retrieval_overrides,
-    ):
-        # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
-        # its sub-query fusion here too (#707). Previously this used
-        # retrieve_per_query + fuse() at the hardcoded 60, so enabling websearch
-        # silently ignored rrf_k and the same preset fused differently depending
-        # on the websearch toggle.
-        trace_kwargs = {"trace": trace} if trace is not None else {}
-        rag = self._retrieval.retrieve_multi(
-            partitions=partition,
-            search_queries=queries,
-            top_k=top_k,
-            retrieval_top_k=retrieval_top_k,
-            filter_params=filter_params,
-            **retrieval_overrides,
-            **trace_kwargs,
-            **({"resolved_plan": resolved_plan} if resolved_plan is not None else {}),
-        )
-        web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
-        chunks, web_lists = await asyncio.gather(rag, web)
-        return chunks, web_lists
-
-    @staticmethod
-    def _mark_contextualization_fallback(
-        trace: RetrievalTraceBuilder | None,
-        queries: SearchQueries,
-    ) -> None:
-        if trace is None or trace.contextualization is None:
-            return
-        trace.contextualization = trace.contextualization.model_copy(
-            update={
-                "fallback_used": True,
-                "subqueries": [
-                    ContextualizedSubqueryTrace(query=query.query, temporal_filters=[]) for query in queries.query_list
-                ],
-            }
-        )
-
-    async def _compare_original_query(
-        self,
-        trace: RetrievalTraceBuilder,
-        *,
-        original_query: str,
-        partition: list[str],
-        top_k: int | None,
-        retrieval_top_k: int | None,
-        filter_params: dict | None,
-        configuration_fingerprint: str,
-        resolved_plan=None,
-        **retrieval_overrides,
-    ) -> None:
-        """Run an isolated diagnostic retrieval that cannot alter the answer."""
-        diagnostics = trace.diagnostics
-        shadow = RetrievalTraceBuilder(
-            request_id=f"{trace.request_id}:original",
-            original_query=original_query,
-            diagnostics=RetrievalDiagnosticsContext(
-                candidate_limit=diagnostics.candidate_limit,
-                query_mode=diagnostics.query_mode,
-                compare_original_query=diagnostics.compare_original_query,
-                effective_options=diagnostics.effective_options,
-            ),
-        )
-        started = time.perf_counter()
-        status = "complete"
-        try:
-            await self._retrieval.retrieve_multi(
-                partitions=partition,
-                search_queries=SearchQueries(query_list=[Query(query=original_query)]),
-                top_k=top_k,
-                retrieval_top_k=retrieval_top_k,
-                filter_params=filter_params,
-                trace=shadow,
-                **retrieval_overrides,
-                **({"resolved_plan": resolved_plan} if resolved_plan is not None else {}),
-            )
-        except Exception as error:  # noqa: BLE001 - comparison is optional telemetry
-            status = "error"
-            shadow.record_error("original_query", error)
-        shadow.timings["total"] = time.perf_counter() - started
-        finished = shadow.finish(configuration_fingerprint=configuration_fingerprint)
-        trace.comparisons["original_query"] = {
-            "status": status,
-            "stages": finished["stages"],
-            "timings": finished["timings"],
-            "errors": finished["errors"],
-            "query_traces": finished.get("query_traces", []),
-            "configuration_fingerprint": finished["configuration_fingerprint"],
-            **{
-                key: finished[key]
-                for key in (
-                    "candidate_limit",
-                    "candidates_truncated",
-                    "query_trace_limit",
-                    "query_traces_truncated",
-                    "trace_truncated",
-                    "serialized_size_limit",
-                )
-                if key in finished
-            },
-        }
-
     @staticmethod
     def _retrieval_diagnostics_context(options: ChatOptions) -> RetrievalDiagnosticsContext:
         return RetrievalDiagnosticsContext(
@@ -1081,7 +675,9 @@ class QueryService:
         options = ChatOptions.from_metadata(payload.get("metadata"))
         # partition= is ours: the retrieval preset's query_contextualizer is
         # resolved per partition. The skip below is from #807.
-        queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm, partition=partition)
+        queries = await self._contextualizer.contextualize(
+            [{"role": "user", "content": prompt}], llm=llm, partitions=partition
+        )
         prompt_type = "spoken_style_answer" if options.spoken_style_answer else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
@@ -1216,7 +812,7 @@ class QueryService:
         if not resolve_route(partitions, options).searches:
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
-            self._record_contextualization_not_run(trace, original_query=original_query)
+            record_not_run(trace, original_query=original_query)
         else:
             result = await self._prepare_chat(
                 partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens
@@ -1240,7 +836,7 @@ class QueryService:
         finish_trace = None
         if trace is not None:
             if trace.contextualization is None:
-                self._record_contextualization(
+                record_contextualization(
                     trace,
                     SearchQueries(query_list=[Query(query=original_query)]),
                     original_query=original_query,
@@ -1352,33 +948,10 @@ class QueryService:
 # --------------------------------------------------------------------------- #
 
 
-def _summary_doc(chunk, summary: str):
-    """A summarised copy of a LangChain Document (page_content replaced)."""
-    return chunk.__class__(page_content=summary, metadata=chunk.metadata)
-
-
-def _within_workspace(attachment_ids: list[str], workspace_file_ids: list[str]) -> list[str]:
-    """Order-preserving, deduplicated subset of ``attachment_ids`` allowed by the workspace."""
-    allowed = set(workspace_file_ids)
-    return list(dict.fromkeys(fid for fid in attachment_ids if fid in allowed))
-
-
-def _dedupe_web(web_lists: list[list]) -> list:
-    seen: set[str] = set()
-    out: list = []
-    for r in (r for lst in web_lists for r in lst):
-        url = normalize_web_url(r.url)
-        if url is not None and url not in seen:
-            r.url = url
-            seen.add(url)
-            out.append(r)
-    return out
-
-
 def _messages_tokens(messages: list[dict]) -> int:
     """Tokens a chat message list takes, counted as the router's preflight does."""
     length_function = get_num_tokens()
     return sum(message_tokens(message, length_function) for message in messages)
 
 
-__all__ = ["QueryService", "RAGMODE"]
+__all__ = ["QueryService"]

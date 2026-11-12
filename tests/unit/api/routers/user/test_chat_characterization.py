@@ -48,11 +48,11 @@ from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.retrieval_result import ScoredChunk
 from core.models.workspace import WorkspaceScope
+from core.websearch import WebResult
 from di.providers import get_config, get_partition_service, get_query_service
 from fastapi import FastAPI
 from services.orchestrators.prompt_service import PromptService
 from services.orchestrators.query_service import QueryService
-from services.websearch.base import WebResult
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "chat_characterization"
 UPDATE_SNAPSHOTS = os.environ.get("UPDATE_CHAT_SNAPSHOTS") == "1"

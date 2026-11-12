@@ -91,9 +91,9 @@ The main application entry point is `openrag/api/main.py` which creates a FastAP
 - `MarkerPool` / `MarkerWorker` (`openrag/services/workers/parsers/marker_workers.py`) - Pool of workers for PDF processing with Marker
 
 **Pipeline Classes**:
-- `RagPipeline` (`openrag/services/orchestrators/query_service.py`) - Orchestrates retrieval and LLM generation
+- `QueryService` (`openrag/services/orchestrators/query_service.py`) - Orchestrates retrieval and LLM generation, calling the steps in `openrag/services/capabilities/` (contextualize, scope, retrieve, web search, summarize) and then `AnswerService`
 - `RetrieverPipeline` (`openrag/core/retrieval/pipeline.py`) - Handles document retrieval and reranking
-- `RAGMapReduce` (`openrag/services/orchestrators/query_service.py`) - Map-reduce for processing large document sets
+- `Summarizer` (`openrag/services/capabilities/summarize.py`) - Map-reduce for processing large document sets
 
 ### Document Processing Flow
 
@@ -350,9 +350,10 @@ Optional web search augmentation via the Staan API, allowing the LLM to combine 
 - Source entries include `source_type: "document"` or `source_type: "web"` in the `extra.sources` response
 
 **Key files:**
-- `openrag/services/websearch/` — `WebSearchService` (`service.py`), `BaseWebSearchProvider` (`base.py`), `StaanProvider` (`providers/staan.py`)
+- `openrag/core/websearch/` — the provider port `WebSearcher` and `WebResult` (`searcher.py`)
+- `openrag/services/websearch/` — `WebSearchService` (`service.py`), `StaanProvider` (`providers/staan.py`)
 - `openrag/core/prompts/chat_prompt_builder.py` — `format_web_context()` formats web results as numbered source blocks
-- `openrag/services/orchestrators/query_service.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
+- `openrag/services/capabilities/retrieve.py` — documents and web results searched in parallel; `web_search.py` searches every sub-query and dedupes by URL
 - `openrag/api/routers/user/chat.py` — `__prepare_sources()` merges document and web sources
 
 ### Indexing Status Callbacks
