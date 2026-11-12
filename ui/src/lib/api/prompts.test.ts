@@ -64,11 +64,11 @@ describe("CRUD verbs and paths", () => {
 
   it("createPrompt → POST /prompts/ with a JSON body", async () => {
     fetchMock.mockResolvedValue(fakeResponse({ status: 201, body: '{"id":"new"}' }));
-    await createPrompt({ prompt_type: "hyde", name: "x", content: "c" });
+    await createPrompt({ prompt_type: "topic_tagger", name: "x", content: "c" });
     const { url, init } = lastCall();
     expect(url).toBe("/prompts/");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({ prompt_type: "hyde", name: "x", content: "c" });
+    expect(JSON.parse(init.body as string)).toEqual({ prompt_type: "topic_tagger", name: "x", content: "c" });
   });
 
   it("updatePrompt → PATCH /prompts/{id}", async () => {

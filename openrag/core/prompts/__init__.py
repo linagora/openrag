@@ -29,12 +29,6 @@ from .map_reduce_builder import (
     USER_PROMPT_TEMPLATE,
     build_map_messages,
 )
-from .query_rewriter import (
-    MULTI_QUERY_SEPARATOR,
-    build_hyde_prompt,
-    build_multi_query_prompt,
-    split_multi_query_response,
-)
 from .template_loader import load_template, load_template_by_key
 from .vlm_prompt_builder import (
     build_caption_messages,
@@ -64,11 +58,6 @@ __all__ = [
     "wrap_chunk_with_context",
     # calendar anchors
     "calendar_anchors",
-    # query rewriter
-    "MULTI_QUERY_SEPARATOR",
-    "build_hyde_prompt",
-    "build_multi_query_prompt",
-    "split_multi_query_response",
     # map-reduce
     "build_map_messages",
     "SYSTEM_PROMPT_MAP",

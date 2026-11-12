@@ -23,7 +23,6 @@ vi.mock("@/lib/api/presets", async () => {
     getPresetOptions: vi.fn().mockResolvedValue({
       chunking_strategies: [],
       parsing_strategies: [],
-      retrieval_types: [],
       reranker_providers: [],
     }),
   };
@@ -311,7 +310,6 @@ describe("PresetsPage top_n change asks to check the LLM's context size", () => 
     vi.mocked(getPresetOptions).mockResolvedValue({
       chunking_strategies: [],
       parsing_strategies: [],
-      retrieval_types: ["single"],
       reranker_providers: [],
       default_top_n: 10,
     });

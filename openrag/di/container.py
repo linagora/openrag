@@ -618,17 +618,6 @@ class ServiceContainer:
                     self.document_repo,
                 )
 
-            llm_cfg = settings.llm.model_dump()
-            llm = set_provider_name(
-                self.create_llm(
-                    "vllm",
-                    endpoint=llm_cfg["base_url"],
-                    model_name=llm_cfg["model"],
-                    api_key=llm_cfg.get("api_key", ""),
-                    **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
-                ),
-                DEFAULT_PROVIDER,
-            )
             reranker = None
             rcfg = settings.reranker
             if rcfg.enabled:
@@ -645,7 +634,6 @@ class ServiceContainer:
             self._retrieval_service = RetrievalService(
                 searcher=searcher,
                 reranker=reranker,
-                llm=llm,
                 config=settings,
                 searcher_factory=searcher_factory,
                 reranker_factory=self.reranker_factory,

@@ -160,13 +160,39 @@ async def test_list_presets_defaults_to_zero_when_unused():
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_inserts_six_presets_when_empty():
+async def test_seed_defaults_inserts_four_presets_when_empty():
     repo = _FakePresetRepo()
     svc = _make_service(repo)
     await svc.seed_defaults()
 
     upserts = [c for c in repo.calls if c[0] == "upsert"]
-    assert len(upserts) == 6  # 3 indexation + 3 retrieval
+    assert len(upserts) == 4  # 3 indexation + 1 retrieval
+
+
+@pytest.mark.asyncio
+async def test_seeded_retrieval_preset_has_no_retriever_type():
+    repo = _FakePresetRepo()
+    await _make_service(repo).seed_defaults()
+
+    retrieval = {name: row["config"] for (name, kind), row in repo._store.items() if kind == "retrieval"}
+    assert list(retrieval) == ["default"]
+    assert "type" not in retrieval["default"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", ["create", "update"])
+async def test_retrieval_preset_is_stored_without_the_removed_retriever_fields(write):
+    """A client may still send them, and the admin UI sends back what an older preset stored."""
+    legacy = {"type": "hyde", "llm": "rewriter", "hyde_prompt_name": "h", "multi_query_prompt_name": "m", "top_k": 20}
+    repo = _FakePresetRepo()
+    svc = _make_service(repo)
+    if write == "create":
+        await svc.create_preset("old", "retrieval", legacy)
+    else:
+        await repo.upsert("old", "retrieval", dict(legacy))
+        await svc.update_preset("old", "retrieval", config=legacy)
+
+    assert repo._store[("old", "retrieval")]["config"] == {"top_k": 20}
 
 
 @pytest.mark.asyncio

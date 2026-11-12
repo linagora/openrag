@@ -52,7 +52,13 @@ def _default_reranker_config() -> InfinityRerankerConfig:
 # ---------------------------------------------------------------------------
 
 
-class _BaseRetrieverConfig(ConfigMixin):
+class RetrieverConfig(ConfigMixin):
+    """Static retriever settings that no retrieval preset carries.
+
+    ``type``, ``k_queries`` and ``combine`` (the removed ``multiQuery`` and
+    ``hyde`` strategies) are ignored when a config file still sets them.
+    """
+
     top_k: int = 50
     similarity_threshold: float = 0.6
     with_surrounding_chunks: bool = False
@@ -75,26 +81,6 @@ class _BaseRetrieverConfig(ConfigMixin):
     # exhaust the Milvus/embedder pools from one request. Small fan-outs (the
     # common case) stay fully parallel — the cap only engages past it.
     max_partition_concurrency: int = Field(default=16, gt=0)
-
-
-class SingleRetrieverConfig(_BaseRetrieverConfig):
-    type: Literal["single"] = "single"
-
-
-class MultiQueryRetrieverConfig(_BaseRetrieverConfig):
-    type: Literal["multiQuery"] = "multiQuery"
-    k_queries: int = 3
-
-
-class HydeRetrieverConfig(_BaseRetrieverConfig):
-    type: Literal["hyde"] = "hyde"
-    combine: bool = False
-
-
-RetrieverConfig = Annotated[
-    SingleRetrieverConfig | MultiQueryRetrieverConfig | HydeRetrieverConfig,
-    Field(discriminator="type"),
-]
 
 
 # ---------------------------------------------------------------------------

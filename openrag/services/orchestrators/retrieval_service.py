@@ -29,12 +29,7 @@ from core.models.preset import resolve_partition_chat_llm
 from core.models.retrieval_trace import TraceRemovalReason
 from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks, _safe_trace, _with_removal_reasons
-from core.retrieval.retriever import (
-    HyDeRetriever,
-    MultiQueryRetriever,
-    SingleRetriever,
-    _expand_with_related_chunks,
-)
+from core.retrieval.retriever import SingleRetriever, _expand_with_related_chunks
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.searcher import file_id_restriction
 from core.retrieval.trace import (
@@ -86,9 +81,6 @@ class _PipelineSettings:
     pipeline, so they are retrieved together.
     """
 
-    type: str
-    expansion_llm: str | None
-    expansion_prompt_name: str | None
     rerank: bool
     reranker: str | None
     top_k: int
@@ -107,7 +99,6 @@ class RetrievalService:
         *,
         searcher: RetrievalSearcher,
         reranker: Reranker | None = None,
-        llm: LLM | None = None,
         config: Settings,
         searcher_factory: Callable[[str], RetrievalSearcher] | None = None,
         reranker_factory: Callable[[str], Reranker] | None = None,
@@ -118,86 +109,20 @@ class RetrievalService:
         self._searcher = searcher
         self._config = config
         self._legacy_reranker = reranker
-        self._legacy_llm = llm
         self._searcher_factory = searcher_factory
         self._reranker_factory = reranker_factory
         self._llm_factory = llm_factory
-        # Resolves a preset's hyde/multi_query prompt by name (named -> default ->
-        # disk). Optional: when absent (e.g. unit tests, no DB), we fall back to
-        # the on-disk seed via load_template_by_key, preserving prior behaviour.
+        # Resolves the contextualizer prompt for the trace's configuration
+        # identity. Optional: when absent (e.g. unit tests, no DB), the on-disk
+        # seed is read via load_template_by_key.
         self._prompt_service = prompt_service
         self._preset_service = preset_service
 
         logger.debug(
             "RetrievalService ready",
-            retriever=config.retriever.type,
             reranker_enabled=config.reranker.enabled and reranker is not None,
             partition_configs=len(getattr(config, "partitions", {}) or {}),
         )
-
-    def _build_retriever(
-        self,
-        *,
-        rtype: str,
-        common: dict[str, Any],
-        llm: LLM | None,
-        k_queries: int,
-        combine: bool,
-        template: str | None = None,
-    ):
-        # ``template`` is the already-resolved query-expansion prompt for this
-        # strategy (resolved from the preset's *_prompt_name in _pipeline_from_settings).
-        if rtype == "multiQuery":
-            return MultiQueryRetriever(
-                llm=llm,
-                multi_query_template=template,
-                k_queries=k_queries,
-                **common,
-            )
-        if rtype == "hyde":
-            return HyDeRetriever(
-                llm=llm,
-                hyde_template=template,
-                combine=combine,
-                **common,
-            )
-        return SingleRetriever(**common)
-
-    async def _resolve_query_prompt(
-        self,
-        prompt_type: str,
-        name: str | None,
-        disk_key: str,
-        *,
-        strict: bool = False,
-    ) -> tuple[str, dict[str, str | None]]:
-        """Resolve a query-side prompt to its text and content-free identity.
-
-        Prefers the library (named preset prompt -> type default) via
-        PromptService; falls back to the on-disk seed when no PromptService is
-        wired (unit tests / DB-less runs), so behaviour matches the pre-DB path.
-        """
-        resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
-        if resolve_with_identity is not None:
-            resolved = await resolve_with_identity(prompt_type, names=[name], strict_errors=strict)
-            return resolved.content, self._public_prompt_identity(resolved)
-        if self._prompt_service is not None:
-            content = await self._prompt_service.resolve_prompt(prompt_type, names=[name])
-            name = None
-            source = None
-        else:
-            content = load_template_by_key(self._config.paths.prompts_dir, self._config.prompts, disk_key)
-            source = "disk-seed"
-            name = None
-        return content, {
-            "name": name,
-            "source": source,
-            "content_hash": hashlib.sha256(content.encode()).hexdigest(),
-        }
-
-    async def _resolve_query_template(self, prompt_type: str, name: str | None, disk_key: str) -> str:
-        content, _identity = await self._resolve_query_prompt(prompt_type, name, disk_key)
-        return content
 
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
@@ -259,21 +184,6 @@ class RetrievalService:
             partition = configured_partitions.get(partition_name)
             retrieval = partition.retrieval if partition is not None else self._config.retriever
             embedder_name = partition.embedder if partition is not None else "default"
-            query_expansion_llm = None
-            if getattr(retrieval, "type", None) in {"multiQuery", "hyde"}:
-                if self._llm_factory is None:
-                    query_expansion_llm = {
-                        "name": "default",
-                        "model": getattr(getattr(self._config, "llm", None), "model", None),
-                    }
-                else:
-                    query_expansion_llm = self._public_endpoint(
-                        self._config,
-                        "llm",
-                        getattr(retrieval, "llm", None)
-                        or (getattr(partition, "chat_llm", None) if partition is not None else None)
-                        or "default",
-                    )
             reranker_enabled = bool(
                 getattr(
                     retrieval,
@@ -306,17 +216,11 @@ class RetrievalService:
                     "name": partition_name,
                     "embedder": self._public_endpoint(self._config, "embedder", embedder_name),
                     "retrieval": {
-                        "type": getattr(retrieval, "type", None),
                         "top_k": getattr(retrieval, "top_k", None),
                         "similarity_threshold": getattr(retrieval, "similarity_threshold", None),
                         "rrf_k": getattr(retrieval, "rrf_k", 60),
-                        "k_queries": self._legacy_retriever_value("k_queries", 3),
-                        "combine": self._legacy_retriever_value("combine", False),
                         "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),
                         "allow_filterless_fallback": self._legacy_retriever_value("allow_filterless_fallback", True),
-                        "hyde_prompt_name": getattr(retrieval, "hyde_prompt_name", None),
-                        "multi_query_prompt_name": getattr(retrieval, "multi_query_prompt_name", None),
-                        "query_expansion_llm": query_expansion_llm,
                     },
                     "reranker": {
                         **reranker_endpoint,
@@ -491,29 +395,6 @@ class RetrievalService:
             "content_hash": field("content_hash"),
         }
 
-    async def _query_expansion_prompt_identity(
-        self,
-        retrieval: object,
-        *,
-        strict: bool = False,
-    ) -> dict[str, str | None] | None:
-        retrieval_type = getattr(retrieval, "type", None)
-        if retrieval_type == "hyde":
-            prompt_type = "hyde"
-            prompt_name = getattr(retrieval, "hyde_prompt_name", None)
-        elif retrieval_type == "multiQuery":
-            prompt_type = "multi_query"
-            prompt_name = getattr(retrieval, "multi_query_prompt_name", None)
-        else:
-            return None
-        _content, identity = await self._resolve_query_prompt(
-            prompt_type,
-            prompt_name,
-            prompt_type,
-            strict=strict,
-        )
-        return {"type": prompt_type, **identity}
-
     async def resolved_public_retrieval_configuration(
         self,
         partitions: Sequence[str],
@@ -625,7 +506,7 @@ class RetrievalService:
         partition: str,
         embedder: str,
         settings: _PipelineSettings,
-    ) -> tuple[RetrieverPipeline, int | None, dict[str, str | None] | None, dict[str, object] | None]:
+    ) -> tuple[RetrieverPipeline, int | None, dict[str, object] | None]:
         """The pipeline *settings* describe, searching *embedder*'s vectors.
 
         It reads no partition config, so a group's pipeline is the one it was
@@ -634,44 +515,20 @@ class RetrievalService:
         """
         searcher = self._searcher_factory(embedder) if self._searcher_factory is not None else self._searcher
 
-        llm = self._legacy_llm
-        if settings.expansion_llm is not None and self._llm_factory is not None:
-            llm = self._llm_factory(settings.expansion_llm)
-
-        # Only the expansion strategies need a prompt; type="single" (the common
-        # case) resolves nothing, so the DB is never touched on that path.
-        template = None
-        prompt_identity = None
-        if settings.type == "multiQuery":
-            template, prompt_identity = await self._resolve_query_prompt(
-                "multi_query", settings.expansion_prompt_name, "multi_query"
-            )
-            prompt_identity = {"type": "multi_query", **prompt_identity}
-        elif settings.type == "hyde":
-            template, prompt_identity = await self._resolve_query_prompt("hyde", settings.expansion_prompt_name, "hyde")
-            prompt_identity = {"type": "hyde", **prompt_identity}
-
         reranker = None
         reranker_identity = None
         if settings.rerank:
             reranker, reranker_identity = self._resolve_reranker_with_identity(settings.reranker, partition)
 
-        retriever = self._build_retriever(
-            rtype=settings.type,
-            template=template,
-            common={
-                "searcher": searcher,
-                "top_k": settings.top_k,
-                "similarity_threshold": settings.similarity_threshold,
-                "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),
-                "include_related": settings.include_related,
-                "include_ancestors": settings.include_ancestors,
-                "related_limit": self._legacy_retriever_value("related_limit", 10),
-                "max_ancestor_depth": self._legacy_retriever_value("max_ancestor_depth", None),
-            },
-            llm=llm,
-            k_queries=self._legacy_retriever_value("k_queries", 3),
-            combine=self._legacy_retriever_value("combine", False),
+        retriever = SingleRetriever(
+            searcher=searcher,
+            top_k=settings.top_k,
+            similarity_threshold=settings.similarity_threshold,
+            with_surrounding_chunks=self._legacy_retriever_value("with_surrounding_chunks", False),
+            include_related=settings.include_related,
+            include_ancestors=settings.include_ancestors,
+            related_limit=self._legacy_retriever_value("related_limit", 10),
+            max_ancestor_depth=self._legacy_retriever_value("max_ancestor_depth", None),
         )
         pipeline = RetrieverPipeline(
             retriever=retriever,
@@ -680,7 +537,7 @@ class RetrievalService:
             allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
             rrf_k=settings.rrf_k,
         )
-        return pipeline, settings.top_n, prompt_identity, reranker_identity
+        return pipeline, settings.top_n, reranker_identity
 
     def _pipeline_settings(
         self,
@@ -694,20 +551,13 @@ class RetrievalService:
         """The settings *partition_cfg*'s pipeline is built from, after the caller's overrides.
 
         Only what the pipeline reads: a preset field it ignores (the reranker
-        when reranking is off, the query-rewriting LLM and prompts of a
-        ``single`` preset, the contextualizer prompt, which QueryService reads,
-        a value the caller overrides) cannot split partitions into separate
-        retrievals.
+        when reranking is off, the contextualizer prompt, which QueryService
+        reads, a value the caller overrides) cannot split partitions into
+        separate retrievals.
         """
         cfg = partition_cfg.retrieval
         rerank = cfg.enable_reranker and not disable_reranker
-        expansion_prompt_names = {"multiQuery": cfg.multi_query_prompt_name, "hyde": cfg.hyde_prompt_name}
-        expands = cfg.type in expansion_prompt_names
         return _PipelineSettings(
-            type=cfg.type,
-            # multiQuery and hyde rewrite the query with the preset's LLM, else the partition's chat LLM.
-            expansion_llm=(cfg.llm or partition_cfg.chat_llm or "default") if expands else None,
-            expansion_prompt_name=expansion_prompt_names.get(cfg.type),
             rerank=rerank,
             reranker=cfg.reranker if rerank else None,
             top_k=top_k if top_k is not None else cfg.top_k,
@@ -735,7 +585,7 @@ class RetrievalService:
             disable_reranker=disable_reranker,
             disable_expansion=disable_expansion,
         )
-        pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._pipeline_from_settings(
+        pipeline, default_top_k, _reranker_identity = await self._pipeline_from_settings(
             partition, partition_cfg.embedder, settings
         )
         return pipeline, default_top_k
@@ -757,7 +607,6 @@ class RetrievalService:
         requested = list(partitions)
         configs = self._partition_configs()
         selected = list(configs) if "all" in requested else list(dict.fromkeys(requested))
-        prompt_identities: dict[str, dict[str, str | None] | None] = {}
         reranker_identities: dict[str, dict[str, object]] = {}
         groups: list[ResolvedRetrievalGroup] = []
 
@@ -765,9 +614,6 @@ class RetrievalService:
             for partition_name in selected:
                 partition = configs.get(partition_name)
                 retrieval = partition.retrieval if partition is not None else self._config.retriever
-                prompt_identities[partition_name] = await self._query_expansion_prompt_identity(
-                    retrieval, strict=strict_prompt_resolution
-                )
                 reranker_enabled = getattr(
                     retrieval,
                     "enable_reranker",
@@ -788,17 +634,13 @@ class RetrievalService:
                 disable_expansion=disable_expansion,
             )
             for names, embedder, settings in partition_groups:
-                # Every partition of a group shares the pipeline, prompt and reranker it was grouped by.
-                (
-                    pipeline,
-                    default_top_k,
-                    prompt_identity,
-                    reranker_identity,
-                ) = await self._pipeline_from_settings(names[0], embedder, settings)
+                # Every partition of a group shares the pipeline and reranker it was grouped by.
+                pipeline, default_top_k, reranker_identity = await self._pipeline_from_settings(
+                    names[0], embedder, settings
+                )
                 groups.append(ResolvedRetrievalGroup(tuple(names), pipeline, default_top_k))
-                for partition_name in names:
-                    prompt_identities[partition_name] = prompt_identity
-                    if reranker_identity is not None:
+                if reranker_identity is not None:
+                    for partition_name in names:
                         reranker_identities[partition_name] = reranker_identity
             if len(groups) == 1:
                 # Keep the requested scope, so "all" stays unscoped, as in _pipeline_groups_for_partitions.
@@ -813,7 +655,6 @@ class RetrievalService:
         for public_partition in public["partitions"]:
             public_retrieval = public_partition["retrieval"]
             partition_name = public_partition["name"]
-            public_retrieval["query_expansion_prompt"] = prompt_identities.get(partition_name)
             if partition_name in reranker_identities:
                 public_partition["reranker"].update(reranker_identities[partition_name])
             if top_k is not None:
@@ -871,7 +712,7 @@ class RetrievalService:
         )
         for names, embedder, settings in partition_groups:
             # Every partition of a group shares the pipeline it was grouped by.
-            pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._pipeline_from_settings(
+            pipeline, default_top_k, _reranker_identity = await self._pipeline_from_settings(
                 names[0], embedder, settings
             )
             groups.append((names, pipeline, default_top_k))

@@ -44,9 +44,6 @@ class FakeSearcher:
             raise self.search_error
         return list(self.search_result)
 
-    async def multi_query_search(self, **kwargs):
-        return list(self.search_result)
-
     async def get_surrounding_chunks(self, **kwargs):
         self.surrounding_calls.append(kwargs)
         return list(self.surrounding_result)
@@ -70,8 +67,6 @@ def _config(rtype: str = "single", reranker_enabled: bool = False) -> SimpleName
             related_limit=10,
             max_ancestor_depth=None,
             allow_filterless_fallback=True,
-            k_queries=3,
-            combine=False,
             max_partition_concurrency=16,
         ),
         reranker=SimpleNamespace(enabled=reranker_enabled, top_k=5),
@@ -109,7 +104,6 @@ def _svc(searcher, *, rtype="single", reranker_enabled=False) -> RetrievalServic
     return RetrievalService(
         searcher=searcher,
         reranker=None,
-        llm=None,
         config=_config(rtype, reranker_enabled),
     )
 
@@ -118,7 +112,7 @@ def _svc_with_partition_p(searcher) -> RetrievalService:
     """A service whose partition cache holds ``p``, retrieved with the default searcher."""
     cfg = _config()
     cfg.partitions = {"p": _partition(name="p", embedder="default")}
-    return RetrievalService(searcher=searcher, reranker=None, llm=None, config=cfg)
+    return RetrievalService(searcher=searcher, reranker=None, config=cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -193,7 +187,6 @@ def _embedder_svc(partitions: dict[str, str], fields: dict[str, str], *, reranke
     svc = RetrievalService(
         searcher=default_searcher,
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=lambda name: searchers.setdefault(name, FakeSearcher()),
     )
@@ -441,7 +434,7 @@ async def test_search_rerank_fetches_candidates_reorders_and_cuts_to_top_k():
     s = FakeSearcher()
     s.search_result = [_chunk("1", "one"), _chunk("2", "two"), _chunk("3", "three")]
     reranker = ReversingReranker()
-    svc = RetrievalService(searcher=s, reranker=reranker, llm=None, config=_config(reranker_enabled=True))
+    svc = RetrievalService(searcher=s, reranker=reranker, config=_config(reranker_enabled=True))
 
     out = await svc.search(
         text="hello", partitions="p1", top_k=2, similarity_threshold=0.5, rerank=True, rerank_candidates=30
@@ -460,7 +453,7 @@ async def test_search_rerank_fetches_candidates_reorders_and_cuts_to_top_k():
 async def test_search_rerank_records_the_rerank_stages_in_the_trace():
     s = FakeSearcher()
     s.search_result = [_chunk("1", "one"), _chunk("2", "two"), _chunk("3", "three")]
-    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), config=_config(reranker_enabled=True))
     trace = RetrievalTraceBuilder("request-1", "hello")
 
     out = await svc.search(
@@ -488,7 +481,7 @@ async def test_search_rerank_records_the_rerank_stages_in_the_trace():
 async def test_search_rerank_survives_a_trace_failure():
     s = FakeSearcher()
     s.search_result = [_chunk("1", "one"), _chunk("2", "two")]
-    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), config=_config(reranker_enabled=True))
     trace = RetrievalTraceBuilder("request-1", "hello")
     original = trace.record_stage
 
@@ -508,7 +501,7 @@ async def test_search_rerank_survives_a_trace_failure():
 @pytest.mark.asyncio
 async def test_search_rerank_candidates_default_to_retriever_top_k_and_never_below_top_k():
     s = FakeSearcher()
-    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), config=_config(reranker_enabled=True))
 
     await svc.search(text="q", partitions=["p1", "p2"], top_k=2, similarity_threshold=0.5, rerank=True)
     await svc.search(text="q", partitions=["p1"], top_k=40, similarity_threshold=0.5, rerank=True, rerank_candidates=10)
@@ -519,7 +512,7 @@ async def test_search_rerank_candidates_default_to_retriever_top_k_and_never_bel
 @pytest.mark.asyncio
 async def test_search_rerank_candidates_are_capped():
     s = FakeSearcher()
-    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), config=_config(reranker_enabled=True))
 
     # A direct caller bypasses the router's bound, and a top_k above the cap
     # would otherwise raise the candidate count past it.
@@ -555,7 +548,6 @@ async def test_search_rerank_uses_single_partition_preset():
     svc = RetrievalService(
         searcher=s,
         reranker=None,
-        llm=None,
         config=cfg,
         reranker_factory=lambda name: reranker_calls.append(name) or ReversingReranker(),
     )
@@ -576,7 +568,7 @@ async def test_search_rerank_keeps_expansion_after_the_cut():
         Chunk(id="2", text="t", partition="p", metadata={"_id": "2", "relationship_id": "r1"}),
     ]
     s.related_result = [_chunk("rel")]
-    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), config=_config(reranker_enabled=True))
 
     out = await svc.search(
         text="q", partitions=["p"], top_k=1, similarity_threshold=0.5, rerank=True, include_related=True
@@ -611,7 +603,7 @@ async def test_search_rerank_with_reranker_disabled_is_rejected_even_if_the_cata
     # Seeded retrieval presets inherit reranker.enabled, so neither partition opts in.
     off = RetrievalPipelineConfig(enable_reranker=False)
     cfg.partitions = {"tenant-a": _partition(retrieval=off), "tenant-b": _partition(name="tenant-b", retrieval=off)}
-    svc = RetrievalService(searcher=s, reranker=None, llm=None, config=cfg, reranker_factory=lambda name: reranker)
+    svc = RetrievalService(searcher=s, reranker=None, config=cfg, reranker_factory=lambda name: reranker)
 
     for partitions in (["tenant-a"], ["tenant-a", "tenant-b"], ["unknown"]):
         with pytest.raises(ServiceUnavailableError) as exc:
@@ -635,7 +627,6 @@ async def test_search_rerank_with_reranker_disabled_honours_the_partition_opt_in
     svc = RetrievalService(
         searcher=s,
         reranker=None,
-        llm=None,
         config=cfg,
         reranker_factory=lambda name: reranker_calls.append(name) or ReversingReranker(),
     )
@@ -763,7 +754,6 @@ async def test_retrieve_uses_partition_retrieval_config_and_named_reranker():
     svc = RetrievalService(
         searcher=s,
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=lambda name: searcher_calls.append(name) or s,
         reranker_factory=lambda name: reranker_calls.append(name) or reranker,
@@ -806,7 +796,6 @@ async def test_retrieve_falls_back_to_default_reranker_when_preset_stale():
     svc = RetrievalService(
         searcher=s,
         reranker=None,
-        llm=None,
         config=cfg,
         reranker_factory=factory,
     )
@@ -832,7 +821,6 @@ async def test_retrieve_falls_back_to_legacy_reranker_when_no_catalog_default():
     svc = RetrievalService(
         searcher=s,
         reranker=legacy_reranker,
-        llm=None,
         config=cfg,
         reranker_factory=lambda name: (_ for _ in ()).throw(KeyError(name)),
     )
@@ -855,7 +843,6 @@ async def test_retrieve_uses_partition_searcher_factory_for_named_embedder():
     svc = RetrievalService(
         searcher=default_searcher,
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=lambda name: searcher_names.append(name) or tenant_searcher,
     )
@@ -872,7 +859,7 @@ async def test_retrieve_uses_partition_searcher_factory_for_named_embedder():
 async def test_retrieve_rejects_unknown_partition_when_partition_configs_exist():
     cfg = _config()
     cfg.partitions = {"tenant-a": _partition()}
-    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg)
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, config=cfg)
 
     with pytest.raises(PartitionNotFoundError, match="tenant-b"):
         await svc.retrieve(partitions=["tenant-b"], query=Query(query="hello"))
@@ -907,7 +894,6 @@ async def test_retrieve_all_expands_to_per_partition_embedders():
     svc = RetrievalService(
         searcher=default_searcher,
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=factory,
     )
@@ -940,7 +926,6 @@ async def test_retrieve_all_applies_partition_top_n():
     svc = RetrievalService(
         searcher=s,
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=lambda name: s,
         reranker_factory=lambda name: reranker,
@@ -967,7 +952,7 @@ async def test_unset_top_n_follows_global_reranker_top_k():
             ),
         )
     }
-    svc = RetrievalService(searcher=s, reranker=None, llm=None, config=cfg, searcher_factory=lambda name: s)
+    svc = RetrievalService(searcher=s, reranker=None, config=cfg, searcher_factory=lambda name: s)
 
     out = await svc.retrieve(partitions=["solo"], query=Query(query="hello"))
 
@@ -994,7 +979,6 @@ async def test_retrieval_depth_override_preserves_preset_final_top_n():
     service = RetrievalService(
         searcher=searcher,
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=lambda _name: searcher,
     )
@@ -1014,7 +998,7 @@ async def test_retrieve_all_searches_nothing_when_no_partition_exists():
     """With no partition config loaded, "all" names no partition: nothing is searched."""
     searcher = FakeSearcher()
     searcher.search_result = [_chunk("x")]
-    svc = RetrievalService(searcher=searcher, reranker=None, llm=None, config=_config())
+    svc = RetrievalService(searcher=searcher, reranker=None, config=_config())
 
     out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
 
@@ -1026,7 +1010,7 @@ async def test_retrieve_all_searches_nothing_when_no_partition_exists():
 async def test_retrieve_a_partition_without_config_is_not_found():
     """A partition missing from the config cache is not searched with static settings."""
     searcher = FakeSearcher()
-    svc = RetrievalService(searcher=searcher, reranker=None, llm=None, config=_config())
+    svc = RetrievalService(searcher=searcher, reranker=None, config=_config())
 
     with pytest.raises(PartitionNotFoundError):
         await svc.retrieve(partitions=["p"], query=Query(query="hello"))
@@ -1050,7 +1034,6 @@ def _grouping_svc(partitions: list[PartitionConfig], fields: dict[str, str], **k
     svc = RetrievalService(
         searcher=FakeSearcher(),
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=lambda name: searchers.setdefault(name, FakeSearcher()),
         **kwargs,
@@ -1149,35 +1132,6 @@ async def test_retrieve_splits_one_embedder_by_retrieval_preset():
 
 
 @pytest.mark.asyncio
-async def test_expansion_presets_split_by_the_llm_that_rewrites_the_query():
-    """A hyde or multiQuery preset without its own ``llm`` rewrites the query
-    with the partition's chat LLM, so partitions on different chat LLMs cannot
-    share a pipeline. A single-query preset uses no LLM, so its chat LLM does
-    not matter."""
-    hyde = RetrievalPipelineConfig(type="hyde")
-    llm_names: list[str] = []
-    svc, _ = _grouping_svc(
-        [
-            _partition(name="h1", retrieval=hyde, chat_llm="llm-1"),
-            _partition(name="h2", retrieval=hyde, chat_llm="llm-1"),
-            _partition(name="h3", retrieval=hyde, chat_llm="llm-2"),
-            _partition(name="s1", chat_llm="llm-2"),
-            _partition(name="s2"),
-        ],
-        {"embed-a": "vector_embed_a"},
-        llm_factory=lambda name: llm_names.append(name) or object(),
-        prompt_service=_RecordingPromptService("HYDE {question}"),
-    )
-
-    hyde_groups = await svc._pipeline_groups_for_partitions(["h1", "h2", "h3"])
-    single_groups = await svc._pipeline_groups_for_partitions(["s1", "s2"])
-
-    assert [names for names, _, _ in hyde_groups] == [["h1", "h2"], ["h3"]]
-    assert llm_names == ["llm-1", "llm-2"]
-    assert [names for names, _, _ in single_groups] == [["s1", "s2"]]
-
-
-@pytest.mark.asyncio
 async def test_preset_fields_the_pipeline_does_not_read_do_not_split_partitions():
     no_rerank = {"enable_reranker": False}
     svc, _ = _grouping_svc(
@@ -1185,11 +1139,11 @@ async def test_preset_fields_the_pipeline_does_not_read_do_not_split_partitions(
             _partition(name="p1", retrieval=RetrievalPipelineConfig(**no_rerank)),
             # Reranking is off, so which reranker is named does not matter.
             _partition(name="p2", retrieval=RetrievalPipelineConfig(**no_rerank, reranker="r")),
-            # A single-query preset rewrites nothing.
+            # A stored preset of the removed hyde retriever retrieves like any other.
             _partition(
                 name="p3",
                 retrieval=RetrievalPipelineConfig(
-                    **no_rerank, llm="llm-1", hyde_prompt_name="h", multi_query_prompt_name="m"
+                    **no_rerank, type="hyde", llm="llm-1", hyde_prompt_name="h", multi_query_prompt_name="m"
                 ),
             ),
             # QueryService reads the contextualizer prompt, the pipeline does not.
@@ -1286,53 +1240,6 @@ async def test_resolved_plan_for_all_on_one_pipeline_stays_unscoped():
     assert group.partitions == ("all",)
 
 
-class _RefreshingPromptService:
-    """A prompt service during whose lookup another request refreshes the partition configs."""
-
-    def __init__(self, resolved: str):
-        self._resolved = resolved
-        self.refresh = lambda: None
-
-    async def resolve_prompt(self, prompt_type, names=None):
-        self.refresh()
-        return self._resolved
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["groups", "plan"])
-async def test_a_group_is_built_from_the_settings_it_was_grouped_by(path):
-    """Building the hyde group's pipeline waits on its prompt, and a config
-    refresh can land meanwhile. The next group is still built from what it was
-    grouped by, not from a fresh read of its first partition's config."""
-    prompt_service = _RefreshingPromptService("HYDE {question}")
-    svc, searchers = _grouping_svc(
-        [
-            _partition(name="h1", retrieval=RetrievalPipelineConfig(type="hyde")),
-            _partition(name="p1"),
-            _partition(name="p2"),
-        ],
-        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
-        llm_factory=lambda name: object(),
-        prompt_service=prompt_service,
-    )
-    # The refresh moves p1 to another embedder and rrf_k.
-    prompt_service.refresh = lambda: svc._config.partitions.update(
-        p1=_partition(name="p1", embedder="embed-b", retrieval=RetrievalPipelineConfig(rrf_k=7))
-    )
-
-    if path == "groups":
-        groups = [
-            (names, pipeline) for names, pipeline, _ in await svc._pipeline_groups_for_partitions(["h1", "p1", "p2"])
-        ]
-    else:
-        plan = await svc.resolve_retrieval_plan(["h1", "p1", "p2"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
-        groups = [(list(group.partitions), group.pipeline) for group in plan.groups]
-
-    assert [names for names, _ in groups] == [["h1"], ["p1", "p2"]]
-    assert groups[1][1].rrf_k == RetrievalPipelineConfig().rrf_k
-    assert "embed-b" not in searchers
-
-
 # --- #708: the "all" fan-out must be concurrency-bounded (production safety) ---
 
 
@@ -1367,7 +1274,6 @@ async def test_retrieve_all_bounds_partition_fanout():
     svc = RetrievalService(
         searcher=FakeSearcher(),
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=_tracking_factory(state),
     )
@@ -1390,7 +1296,6 @@ async def test_retrieve_small_fanout_stays_fully_parallel():
     svc = RetrievalService(
         searcher=FakeSearcher(),
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=_tracking_factory(state),
     )
@@ -1405,7 +1310,7 @@ async def test_pipeline_for_partition_threads_rrf_k():
     """A partition's rrf_k must reach its RetrieverPipeline (#707)."""
     cfg = _config()
     cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(rrf_k=42))}
-    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg)
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, config=cfg)
     pipeline, _ = await svc._pipeline_for_partition("tenant-a")
     assert pipeline.rrf_k == 42
 
@@ -1421,38 +1326,12 @@ class _RecordingPromptService:
 
 
 @pytest.mark.asyncio
-async def test_hyde_template_resolved_from_preset_via_prompt_service():
-    """A hyde preset's hyde_prompt_name is resolved through PromptService and
-    threaded into the HyDeRetriever (the #13 retrieval-prompt seam)."""
+async def test_building_a_pipeline_resolves_no_prompt():
+    """The retriever rewrites nothing, so building its pipeline never calls PromptService."""
     cfg = _config()
-    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="hyde", hyde_prompt_name="myhyde"))}
-    rec = _RecordingPromptService("HYDE {question}")
-    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=object(), config=cfg, prompt_service=rec)
-    pipeline, _ = await svc._pipeline_for_partition("tenant-a")
-    assert pipeline.retriever.hyde_template == "HYDE {question}"
-    assert ("hyde", ("myhyde",)) in rec.calls
-
-
-@pytest.mark.asyncio
-async def test_multi_query_template_resolved_from_preset_via_prompt_service():
-    cfg = _config()
-    cfg.partitions = {
-        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="multiQuery", multi_query_prompt_name="mymq"))
-    }
-    rec = _RecordingPromptService("MQ {query} {k_queries}")
-    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=object(), config=cfg, prompt_service=rec)
-    pipeline, _ = await svc._pipeline_for_partition("tenant-a")
-    assert pipeline.retriever.multi_query_template == "MQ {query} {k_queries}"
-    assert ("multi_query", ("mymq",)) in rec.calls
-
-
-@pytest.mark.asyncio
-async def test_single_strategy_resolves_no_prompt():
-    """type=single needs no expansion prompt — PromptService is never called."""
-    cfg = _config()
-    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="single"))}
+    cfg.partitions = {"tenant-a": _partition()}
     rec = _RecordingPromptService("unused")
-    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg, prompt_service=rec)
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, config=cfg, prompt_service=rec)
     await svc._pipeline_for_partition("tenant-a")
     assert rec.calls == []
 
@@ -1502,7 +1381,6 @@ async def test_retrieve_survives_one_failing_partition():
     svc = RetrievalService(
         searcher=FakeSearcher(),
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=_mixed_factory({"embed-bad"}),
     )
@@ -1523,7 +1401,6 @@ async def test_retrieve_multi_survives_one_failing_partition():
     svc = RetrievalService(
         searcher=FakeSearcher(),
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=_mixed_factory({"embed-bad"}),
     )
@@ -1550,7 +1427,6 @@ async def test_retrieve_raises_when_every_partition_fails():
     svc = RetrievalService(
         searcher=FakeSearcher(),
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=_mixed_factory({"embed-a", "embed-b"}),
     )
@@ -1584,7 +1460,7 @@ async def test_retrieve_propagates_cancellation_rather_than_degrading():
         "good": _partition(name="good", embedder="embed-good"),
         "gone": _partition(name="gone", embedder="embed-cancel"),
     }
-    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg, searcher_factory=factory)
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, config=cfg, searcher_factory=factory)
 
     with pytest.raises(asyncio.CancelledError):
         await svc.retrieve(partitions=["all"], query=Query(query="hello"))
@@ -1604,7 +1480,6 @@ async def test_bounded_fanout_also_degrades_per_partition():
     svc = RetrievalService(
         searcher=FakeSearcher(),
         reranker=None,
-        llm=None,
         config=cfg,
         searcher_factory=_mixed_factory({"e1", "e3"}),
     )
@@ -1632,7 +1507,6 @@ async def test_dropped_partition_is_named_in_the_log():
         svc = RetrievalService(
             searcher=FakeSearcher(),
             reranker=None,
-            llm=None,
             config=cfg,
             searcher_factory=_mixed_factory({"embed-bad"}),
         )

@@ -463,7 +463,6 @@ The retriever fetches relevant documents from the vector database based on query
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
 | `RETRIEVER_TOP_K` | int | 50 | Number of documents to retrieve before reranking.|
 | `SIMILARITY_THRESHOLD` | float | 0.6 | Minimum similarity score (0.0-1.0) for document retrieval. Documents below this threshold are filtered out |
 | `WITH_SURROUNDING_CHUNKS` | `bool` | false | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
@@ -472,15 +471,9 @@ The retriever fetches relevant documents from the vector database based on query
 | `RELATED_LIMIT` | `int` | 10 | Maximum number of related/ancestor chunks fetched per matched result when expansion is enabled. |
 | `MAX_DEPTH` | `int` | 10 | Maximum ancestor depth traversed when `INCLUDE_ANCESTORS` is enabled. |
 | `RETRIEVER_ALLOW_FILTERLESS_FALLBACK` | `bool` | true | When a temporally-filtered retrieval returns no documents, re-run the query without the filter. Set to `false` for strict temporal retrieval. |
-| `RETRIEVER_MAX_PARTITION_CONCURRENCY` | `int` | 16 | Upper bound on how many partition-group retrievals run concurrently **per retrieval call**. Partitions sharing an embedder (and, for chat, a retrieval preset) are retrieved together, so a multi-partition / `openrag-all` search fans out one retrieval per group; small fan-outs stay fully parallel. Note: a multi-query request (multiQuery/hyde) issues one such call per sub-query, so peak concurrency can reach `N × this value`, not a flat per-request cap. |
+| `RETRIEVER_MAX_PARTITION_CONCURRENCY` | `int` | 16 | Upper bound on how many partition-group retrievals run concurrently **per retrieval call**. Partitions sharing an embedder (and, for chat, a retrieval preset) are retrieved together, so a multi-partition / `openrag-all` search fans out one retrieval per group; small fan-outs stay fully parallel. Note: a chat request whose question the contextualizer splits into N sub-queries issues one such call per sub-query, so peak concurrency can reach `N × this value`, not a flat per-request cap. |
 
-#### Retrieval Strategies
-
-| Strategy | Description |
-|----------|-------------|
-| **single** | Standard semantic search using the original query. Fast and efficient for most queries |
-| **multiQuery** | Generates multiple query variations to improve recall. Better coverage for ambiguous or complex questions |
-| **hyde** | [Hypothetical Document Embeddings](https://arxiv.org/pdf/2212.10496) - generates a hypothetical answer then searches for similar documents|
+`RETRIEVER_TYPE` was removed along with the `multiQuery` and `hyde` retrievers: retrieval searches each query once. A deployment that still sets it gets a warning at startup and can drop it.
 
 ### Reranker Configuration
 
@@ -520,8 +513,6 @@ The RAG pipeline ships with preconfigured prompts bundled inside the package at 
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
 | `asr_transcription_tmpl.txt` | Empty by default so external transcription keeps the provider's native behavior. Configure it in Prompt Library and select it on an indexation preset when `AUDIOLOADER=OpenAIAudioLoader`. |
-| `hyde.txt` | Hypothetical Document Embeddings (HyDE) query expansion template |
-| `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
 
 To customize prompt:
 1. **Copy the bundled templates**: Copy `openrag/prompts/templates` to a folder of your choice

@@ -6,6 +6,7 @@ from here for backward compatibility.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 from pathlib import Path
@@ -171,7 +172,6 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("CHUNK_SIZE", "chunker.chunk_size", int),
     ("CHUNK_OVERLAP_RATE", "chunker.chunk_overlap_rate", float),
     # Retriever
-    ("RETRIEVER_TYPE", "retriever.type", str),
     ("RETRIEVER_TOP_K", "retriever.top_k", int),
     ("SIMILARITY_THRESHOLD", "retriever.similarity_threshold", float),
     ("WITH_SURROUNDING_CHUNKS", "retriever.with_surrounding_chunks", bool),
@@ -280,8 +280,23 @@ def _parse_seed_users(raw: str) -> list[Any]:
     return parsed
 
 
+#: Environment variables that are no longer read, with what to tell an operator who still sets one.
+_RETIRED_ENV_VARS: dict[str, str] = {
+    "RETRIEVER_TYPE": ("the multiQuery and hyde retrievers were removed and retrieval always searches each query once"),
+}
+
+
+@functools.cache
+def _warn_retired_env_vars() -> None:
+    """Warn once per process: ``load_config`` runs more than once."""
+    for env_var, reason in _RETIRED_ENV_VARS.items():
+        if os.environ.get(env_var, "").strip():
+            logger.warning("%s is set but no longer used: %s. Remove it from the environment.", env_var, reason)
+
+
 def _apply_env_overrides(data: dict) -> dict:
     """Apply environment variable overrides to the config dict."""
+    _warn_retired_env_vars()
     for env_var, dotted_path, target_type in _ENV_OVERRIDES:
         value = os.environ.get(env_var)
         if value is not None and value != "":

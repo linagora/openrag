@@ -15,7 +15,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from core.config.indexation_pipeline import IndexationPipelineConfig
-from core.config.retrieval_pipeline import RetrievalPipelineConfig
+from core.config.retrieval_pipeline import REMOVED_FIELDS, RetrievalPipelineConfig
 from core.utils.exceptions import NotFoundError, ValidationError
 from core.utils.logging import get_logger
 from services.orchestrators.partition_service import PartitionService
@@ -83,17 +83,8 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
     # (RERANKER_TOP_K) at query time rather than freezing it at seed time.
     "retrieval": {
         "default": {
-            "type": "single",
             "top_k": 50,
             "similarity_threshold": 0.6,
-        },
-        "multiquery": {
-            "type": "multiQuery",
-            "top_k": 50,
-        },
-        "hyde": {
-            "type": "hyde",
-            "top_k": 50,
         },
     },
 }
@@ -269,7 +260,7 @@ class PresetService:
                 code="PRESET_EXISTS",
             )
         self._validate_config(preset_type, config)
-        result = await self._repo.upsert(name, preset_type, config)
+        result = await self._repo.upsert(name, preset_type, self._without_removed_fields(preset_type, config))
         await self.load_all()
         return result
 
@@ -305,6 +296,7 @@ class PresetService:
 
         if new_config is not None:
             self._validate_config(preset_type, new_config)
+            new_config = self._without_removed_fields(preset_type, new_config)
 
         effective_config = new_config if new_config is not None else existing["config"]
         effective_name = name
@@ -351,6 +343,22 @@ class PresetService:
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _without_removed_fields(preset_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        """*config* without the fields of the removed ``multiQuery`` and ``hyde`` retrievers.
+
+        A client may still send them, and the admin UI sends back what an older
+        preset stored. Retrieval ignores them, so they are dropped rather than
+        rejected, and the row is stored clean.
+        """
+        if preset_type != "retrieval":
+            return config
+        removed = sorted(REMOVED_FIELDS.intersection(config))
+        if not removed:
+            return config
+        logger.bind(fields=removed).info("Dropping removed retrieval preset fields")
+        return {key: value for key, value in config.items() if key not in REMOVED_FIELDS}
 
     def _validate_config(self, preset_type: str, config: dict[str, Any]) -> None:
         """Instantiate the Pydantic pipeline model to validate the config dict."""

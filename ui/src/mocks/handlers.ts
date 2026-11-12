@@ -17,7 +17,7 @@ const partitions = [
     indexation_overrides: {},
     retrieval_overrides: {},
     indexation_pipeline: { chunking: { strategy: "recursive", chunk_size: 512, chunk_overlap: 50 }, embedder: "bge-m3", image_captioning: false },
-    retrieval_pipeline: { type: "multiquery", embedder: "bge-m3", reranker: "bge-reranker-v2", llm: "llama-3.1", top_k: 10 },
+    retrieval_pipeline: { embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 10 },
     created_at: "2024-11-20T09:00:00Z",
   },
   {
@@ -32,7 +32,7 @@ const partitions = [
     indexation_overrides: { contextualization: true },
     retrieval_overrides: {},
     indexation_pipeline: { chunking: { strategy: "sentence", chunk_size: 256, chunk_overlap: 30 }, embedder: "bge-m3", image_captioning: true, vlm: "qwen-vl" },
-    retrieval_pipeline: { type: "hyde", embedder: "bge-m3", reranker: "bge-reranker-v2", llm: "llama-3.1", top_k: 15 },
+    retrieval_pipeline: { embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 15 },
     created_at: "2024-12-05T14:30:00Z",
   },
   {
@@ -47,7 +47,7 @@ const partitions = [
     indexation_overrides: {},
     retrieval_overrides: {},
     indexation_pipeline: { chunking: { strategy: "fixed", chunk_size: 400, chunk_overlap: 40 }, embedder: "bge-m3" },
-    retrieval_pipeline: { type: "simple", embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 5 },
+    retrieval_pipeline: { embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 5 },
     created_at: "2025-01-10T11:15:00Z",
   },
 ];
@@ -80,7 +80,7 @@ const presets = [
   { name: "default", preset_type: "indexation", config: { chunking_strategy: "recursive", chunk_size: 512, chunk_overlap: 50, embedder: "bge-m3", image_captioning: false, contextualization: false, batch_size: 16 }, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
   { name: "high-quality", preset_type: "indexation", config: { chunking_strategy: "sentence", chunk_size: 256, chunk_overlap: 30, embedder: "bge-m3", image_captioning: true, vlm: "qwen-vl", contextualization: true, batch_size: 8 }, created_at: "2025-01-02T00:00:00Z", updated_at: "2025-01-14T00:00:00Z" },
   { name: "default", preset_type: "retrieval", config: { type: "simple", embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 10, rerank_top_k: 5 }, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
-  { name: "precise", preset_type: "retrieval", config: { type: "multiquery", embedder: "bge-m3", reranker: "bge-reranker-v2", llm: "llama-3.1", top_k: 15, rerank_top_k: 5, num_queries: 3 }, created_at: "2025-01-03T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
+  { name: "precise", preset_type: "retrieval", config: { embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 15, rerank_top_k: 5 }, created_at: "2025-01-03T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
 ];
 
 const prompts = [
@@ -509,7 +509,6 @@ export const handlers = [
   http.get(`${API}/presets/options`, () =>
     HttpResponse.json({
       chunking_strategies: ["recursive", "sentence", "semantic", "markdown"],
-      retrieval_types: ["simple", "multiquery", "hyde"],
       reranker_providers: ["infinity", "openai", "none"],
       default_top_n: 10,
     }),

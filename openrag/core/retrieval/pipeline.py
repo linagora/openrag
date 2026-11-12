@@ -89,7 +89,7 @@ class RetrieverPipeline:
     """Orchestrates retrieval + reranking + expansion for a list of sub-queries.
 
     Args:
-        retriever: Concrete retrieval strategy (Single / MultiQuery / HyDe).
+        retriever: The retriever that searches for each sub-query.
         reranker: Reranker implementation, or ``None`` to skip reranking.
         reranker_top_k: When expansion is enabled, the top-K size used to
                         decide which results to expand.
@@ -111,7 +111,7 @@ class RetrieverPipeline:
         self.reranker = reranker
         self.reranker_top_k = reranker_top_k
         self.allow_filterless_fallback = allow_filterless_fallback
-        # RRF dampening for fusing this pipeline's multiQuery sub-query rankings
+        # RRF dampening for fusing this pipeline's sub-query rankings
         # (see get_relevant_docs). 60 is canonical; a preset can tune it via
         # RetrievalPipelineConfig.rrf_k. Fusion across partition groups happens a
         # layer up in RetrievalService.fuse, which is not preset-scoped.
@@ -123,8 +123,8 @@ class RetrieverPipeline:
 
     @property
     def expansion_enabled(self) -> bool:
-        # The retriever's BaseRetriever sets this; non-Base implementations
-        # may not. Treat absent attribute as no expansion.
+        # SingleRetriever sets this; another Retriever may not. Treat an absent
+        # attribute as no expansion.
         return getattr(self.retriever, "expansion_enabled", False)
 
     async def retrieve_docs(

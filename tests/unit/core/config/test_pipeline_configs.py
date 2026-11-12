@@ -9,7 +9,7 @@ from core.chunking.factory import create_chunker
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.presets import PresetsConfig
 from core.config.retrieval import InfinityRerankerConfig, OpenAIRerankerConfig, TEIRerankerConfig
-from core.config.retrieval_pipeline import RetrievalPipelineConfig
+from core.config.retrieval_pipeline import REMOVED_FIELDS, RetrievalPipelineConfig
 from core.models.document import ProcessedDocument, TextBlock
 from pydantic import ValidationError
 
@@ -61,10 +61,11 @@ def test_indexation_pipeline_accepts_preset_scoped_stt_and_asr_prompt():
     assert cfg.asr_transcription_prompt_name == "meeting-diarization"
 
 
-def test_retrieval_pipeline_rejects_unknown_type():
-    """Retrieval presets reject unsupported retrieval modes."""
-    with pytest.raises(ValidationError):
-        RetrievalPipelineConfig(type="unknown")
+def test_retrieval_pipeline_ignores_the_removed_retriever_fields():
+    """A preset stored for the removed multiQuery / hyde retrievers still loads, without those fields."""
+    config = RetrievalPipelineConfig(type="hyde", llm="rewriter", hyde_prompt_name="h", multi_query_prompt_name="m")
+
+    assert REMOVED_FIELDS.isdisjoint(config.model_dump())
 
 
 @pytest.mark.parametrize("provider", [InfinityRerankerConfig, OpenAIRerankerConfig, TEIRerankerConfig])

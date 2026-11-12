@@ -23,10 +23,6 @@ class _Searcher:
         self.calls.append(kwargs)
         return list(self.results)
 
-    async def multi_query_search(self, **kwargs):
-        self.calls.append(kwargs)
-        return list(self.results)
-
     async def get_related_chunks(self, **_kwargs):
         return []
 
@@ -87,7 +83,6 @@ def _service(searcher=None, *, config=None, searcher_factory=None) -> RetrievalS
     return RetrievalService(
         searcher=searcher or _Searcher(),
         reranker=None,
-        llm=None,
         config=config or _config(),
         searcher_factory=searcher_factory,
     )

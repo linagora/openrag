@@ -1,13 +1,11 @@
 """Per-partition retrieval pipeline configuration.
 
 Stored as JSONB in the ``pipeline_presets`` table (preset_type='retrieval').
-Endpoint name fields (``reranker``, ``llm``) are resolved at query time by
-the component factories registered in the DI container.
+The ``reranker`` endpoint name is resolved at query time by the component
+factories registered in the DI container.
 """
 
 from __future__ import annotations
-
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,11 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field
 class RetrievalPipelineConfig(BaseModel):
     """Retrieval pipeline settings for one partition preset."""
 
+    # Stored presets may still carry REMOVED_FIELDS; they are ignored on load.
     model_config = ConfigDict(extra="ignore")
 
-    type: Literal["single", "multiQuery", "hyde"] = "single"
     reranker: str | None = None  # endpoint name; None = use default
-    llm: str | None = None  # endpoint name for multiQuery / hyde expansion
 
     top_k: int = Field(default=50, gt=0, le=1000)  # vector candidates fetched
     # Final results after reranking: the chunks the LLM gets to answer.
@@ -31,15 +28,10 @@ class RetrievalPipelineConfig(BaseModel):
     include_ancestors: bool = True
     rrf_k: int = Field(default=60, gt=0, le=1000)  # Reciprocal Rank Fusion constant
 
-    # Prompt selection: name a library prompt for this preset's query-side
-    # prompts (None = the type's global default, then the disk seed). hyde /
-    # multi_query drive the query-expansion strategies (resolved per request in
-    # RetrievalService); query_contextualizer rewrites the user's query before
-    # retrieval (resolved in QueryService.generate_query). All three are
-    # query-side concerns, so they live on the retrieval preset rather than the
-    # partition's generation prompts.
-    hyde_prompt_name: str | None = None
-    multi_query_prompt_name: str | None = None
+    # The library prompt that rewrites the user's query before retrieval
+    # (None = the type's global default, then the disk seed), resolved in
+    # QueryService.generate_query. A query-side concern, so it lives on the
+    # retrieval preset rather than with the partition's generation prompts.
     query_contextualizer_prompt_name: str | None = None
 
     def effective_top_n(self, default: int) -> int:
@@ -47,4 +39,10 @@ class RetrievalPipelineConfig(BaseModel):
         return self.top_n if self.top_n is not None else default
 
 
-__all__ = ["RetrievalPipelineConfig"]
+#: Fields of the removed ``multiQuery`` and ``hyde`` retrievers. Stored presets
+#: still holding them load as before (the fields are ignored); a preset written
+#: through the API is stored without them.
+REMOVED_FIELDS = frozenset({"type", "llm", "hyde_prompt_name", "multi_query_prompt_name"})
+
+
+__all__ = ["REMOVED_FIELDS", "RetrievalPipelineConfig"]
