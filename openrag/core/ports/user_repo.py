@@ -103,8 +103,12 @@ class UserRepository(ABC):
         """
 
     @abstractmethod
-    async def count_file_slot_reservations(self, user_id: int) -> int:
-        """How many of the user's slots are held by uploads still in flight."""
+    async def count_indexed_files(self, user_id: int) -> int | None:
+        """``users.file_count`` minus the slots held by uploads still in flight.
+
+        Read in one statement, so both come from the same snapshot. ``None``
+        when the user does not exist.
+        """
 
     # ── API keys ──────────────────────────────────────────────────────
 

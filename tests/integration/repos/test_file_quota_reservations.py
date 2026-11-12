@@ -70,7 +70,10 @@ async def _file_count(store: PostgresStore, user_id: int) -> int:
 
 
 async def _reservations(store: PostgresStore, user_id: int) -> int:
-    return await store.user_repo.count_file_slot_reservations(user_id)
+    return await store.pool.fetchval(
+        "SELECT COUNT(*)::int FROM file_quota_reservations WHERE user_id = $1",
+        user_id,
+    )
 
 
 async def _assert_counter_matches(store: PostgresStore, user_id: int, *, baseline: int = 0) -> None:
@@ -372,3 +375,24 @@ async def test_the_sweep_with_nothing_to_release_changes_nothing(postgres_store)
 
     assert released == 0
     assert await _file_count(postgres_store, user_id) == 3
+
+
+# ── Reading the indexed count ────────────────────────────────────────
+
+
+async def test_count_indexed_files_leaves_out_held_slots(postgres_store):
+    user_id = await _create_user(postgres_store, file_quota=10, file_count=2)
+    repo = postgres_store.user_repo
+    await repo.try_reserve_file_slot(user_id, "r-1", default_quota=-1)
+    await repo.try_reserve_file_slot(user_id, "r-2", default_quota=-1)
+
+    assert await _file_count(postgres_store, user_id) == 4
+    assert await repo.count_indexed_files(user_id) == 2
+
+    await _add_file(postgres_store, "f-1", user_id, "r-1")
+
+    assert await repo.count_indexed_files(user_id) == 3
+
+
+async def test_count_indexed_files_of_an_unknown_user_is_none(postgres_store):
+    assert await postgres_store.user_repo.count_indexed_files(987654321) is None

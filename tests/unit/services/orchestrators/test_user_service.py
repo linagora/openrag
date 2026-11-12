@@ -18,15 +18,15 @@ class FakeUserRepo:
         self.regen_results: dict[int, dict] = {}
         self.updated: list[tuple[int, dict]] = []
         self._users: dict[int, User] = {}
-        self.held_slots: dict[int, int] = {}
-        self.held_slot_reads: list[int] = []
+        self.indexed_files: dict[int, int] = {}
+        self.indexed_file_reads: list[int] = []
 
     async def user_exists(self, user_id: int) -> bool:
         return user_id in self._existing
 
-    async def count_file_slot_reservations(self, user_id: int) -> int:
-        self.held_slot_reads.append(user_id)
-        return self.held_slots.get(user_id, 0)
+    async def count_indexed_files(self, user_id: int) -> int | None:
+        self.indexed_file_reads.append(user_id)
+        return self.indexed_files.get(user_id)
 
     async def create_legacy_user(self, *, display_name, external_user_id, email, is_admin, file_quota):
         rec = {
@@ -607,7 +607,7 @@ async def test_current_user_info_specific_quota_and_pending():
 async def test_current_user_info_does_not_count_an_in_flight_upload_twice():
     """``users.file_count`` already holds the slots of uploads still indexing (#664)."""
     repo = FakeUserRepo()
-    repo.held_slots[7] = 3
+    repo.indexed_files[7] = 4
     svc = _svc(repo, default_quota=10, job_service=FakeJobService(pending=3))
 
     out = await svc.get_current_user_info({"id": 7, "is_admin": False, "file_quota": 10, "file_count": 7})
@@ -615,19 +615,32 @@ async def test_current_user_info_does_not_count_an_in_flight_upload_twice():
     assert out["file_count"] == 4
     assert out["pending_files"] == 3
     assert out["total_files"] == 7
-    assert repo.held_slot_reads == [7]
+    assert repo.indexed_file_reads == [7]
 
 
 @pytest.mark.asyncio
-async def test_current_user_info_skips_the_slot_read_for_an_unlimited_user():
+async def test_current_user_info_subtracts_held_slots_once_the_quota_is_lifted():
+    """Slots reserved while capped stay held after the quota goes unlimited."""
     repo = FakeUserRepo()
+    repo.indexed_files[7] = 3
     svc = _svc(repo, default_quota=-1, job_service=FakeJobService(pending=2))
 
     out = await svc.get_current_user_info({"id": 7, "is_admin": False, "file_quota": None, "file_count": 5})
 
+    assert out["file_quota"] == -1
+    assert out["file_count"] == 3
+    assert out["total_files"] == 5
+    assert repo.indexed_file_reads == [7]
+
+
+@pytest.mark.asyncio
+async def test_current_user_info_keeps_the_request_count_for_an_unknown_user():
+    svc = _svc(FakeUserRepo(), default_quota=10, job_service=FakeJobService(pending=1))
+
+    out = await svc.get_current_user_info({"id": 7, "is_admin": False, "file_quota": 10, "file_count": 5})
+
     assert out["file_count"] == 5
-    assert out["total_files"] == 7
-    assert repo.held_slot_reads == []
+    assert out["total_files"] == 6
 
 
 @pytest.mark.asyncio

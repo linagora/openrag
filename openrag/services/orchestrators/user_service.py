@@ -153,13 +153,15 @@ class UserService:
 
         # ``users.file_count`` also holds the slots of uploads still in flight
         # (#664), which ``pending_files`` already reports. Take them out so
-        # ``file_count`` stays the indexed files. Only a capped user can hold
-        # a slot, so an unlimited one skips the read.
+        # ``file_count`` stays the indexed files. Whatever the quota now: a
+        # user can still hold slots reserved before it was lifted. Both come
+        # from one read, so a slot consumed in between is never counted twice.
         file_count = user.get("file_count", 0) or 0
         user_id = user.get("id")
-        if user_quota != float("inf") and user_id is not None:
-            held = await self._user_repo.count_file_slot_reservations(user_id)
-            file_count = max(file_count - held, 0)
+        if user_id is not None:
+            indexed = await self._user_repo.count_indexed_files(user_id)
+            if indexed is not None:
+                file_count = max(indexed, 0)
         pending_count = await self._job_service.get_user_pending_task_count(user_id)
         total = file_count + pending_count
 

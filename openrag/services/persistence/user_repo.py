@@ -390,9 +390,15 @@ class PgUserRepository(UserRepository):
             created_before,
         )
 
-    async def count_file_slot_reservations(self, user_id: int) -> int:
+    async def count_indexed_files(self, user_id: int) -> int | None:
         return await self.pool.fetchval(
-            "SELECT COUNT(*)::int FROM file_quota_reservations WHERE user_id = $1",
+            """
+            SELECT u.file_count - (
+                SELECT COUNT(*)::int FROM file_quota_reservations r WHERE r.user_id = u.id
+            )
+            FROM users u
+            WHERE u.id = $1
+            """,
             user_id,
         )
 
