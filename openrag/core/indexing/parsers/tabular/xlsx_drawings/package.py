@@ -89,9 +89,15 @@ class ChartInventory:
     text_boxes_capped: bool = False
 
 
+# Excel's grid: columns A to XFD, rows 1 to 1,048,576.
+_MAX_COLUMNS = 16_384
+_MAX_ROWS = 1_048_576
+
+
 def _column_name(number: int) -> str:
     name = ""
-    while number:
+    # Strictly positive: divmod keeps a negative number negative forever.
+    while number > 0:
         number, remainder = divmod(number - 1, 26)
         name = chr(65 + remainder) + name
     return name
@@ -104,9 +110,13 @@ def _cell(marker: Element | None) -> str | None:
     column = marker.find("{*}col")
     row = marker.find("{*}row")
     try:
-        return f"{_column_name(int(column.text) + 1)}{int(row.text) + 1}"
+        column_index, row_index = int(column.text), int(row.text)
     except (AttributeError, TypeError, ValueError):
         return None
+    # Markers are untrusted: only a cell of Excel's grid names a range.
+    if not (0 <= column_index < _MAX_COLUMNS and 0 <= row_index < _MAX_ROWS):
+        return None
+    return f"{_column_name(column_index + 1)}{row_index + 1}"
 
 
 def _anchor_range(anchor: Element) -> str | None:

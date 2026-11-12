@@ -2519,3 +2519,22 @@ def test_a_chart_section_longer_than_a_chunk_is_split_with_the_chart_context():
     )
     assert all(words(piece) <= 40 for piece in pieces)
     assert "| a | 1 |" in pieces[-1]
+
+
+@pytest.mark.parametrize("column", ["-2", "-1", "16384", "99999999999"])
+def test_a_drawing_marker_outside_the_grid_names_no_cells(column):
+    """A negative column made the column-name loop spin forever; now the anchor
+    is simply unknown and the text box is still indexed."""
+    import signal
+
+    box = _text_box("Note").replace("<col>5</col>", f"<col>{column}</col>", 1)
+    raw = _with_text_boxes(_workbook_with_chart(_monthly_revenue()), box)
+    signal.signal(signal.SIGALRM, lambda *_: pytest.fail("drawing discovery did not terminate"))
+    signal.alarm(5)
+    try:
+        (found,) = _text_boxes(_blocks(raw))
+    finally:
+        signal.alarm(0)
+
+    assert "Note" in found.text
+    assert found.metadata["text_box_anchors"] == []
