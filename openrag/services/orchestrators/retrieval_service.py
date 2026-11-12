@@ -4,8 +4,10 @@ Builds one ``core.retrieval`` pipeline (retriever, optional reranker,
 related/ancestor expansion) per group of partitions that share an embedder
 and retrieval settings, from the partition configs cached in
 ``Settings.partitions``, and fuses the groups' results with RRF. It also
-serves the raw ``/search`` endpoint and describes the retrieval settings for
-the trace and its fingerprints.
+serves the raw ``/search`` endpoint. The description of the retrieval
+settings for the trace and its fingerprints is ``RetrievalIdentity``
+(``retrieval_identity.py``); this service adds what resolving the pipelines
+tells.
 
 The core retriever talks to the ``RetrievalSearcher`` port, implemented by
 ``services.storage.vector_store_searcher.VectorStoreSearcher`` (query
@@ -19,15 +21,12 @@ from the static ``settings.retriever`` config.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from core.models.preset import resolve_partition_chat_llm
 from core.models.retrieval_trace import TraceRemovalReason
-from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks, _safe_trace, _with_removal_reasons
 from core.retrieval.retriever import SingleRetriever, _expand_with_related_chunks
 from core.retrieval.rrf import rrf_reranking
@@ -42,6 +41,7 @@ from core.retrieval.trace import (
 from core.utils.consts import MAX_RERANK_CANDIDATES
 from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
 from core.utils.logging import get_logger
+from services.orchestrators.retrieval_identity import RetrievalIdentity, partition_search_identity, public_endpoint
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -111,12 +111,18 @@ class RetrievalService:
         self._legacy_reranker = reranker
         self._searcher_factory = searcher_factory
         self._reranker_factory = reranker_factory
-        self._llm_factory = llm_factory
-        # Resolves the contextualizer prompt for the trace's configuration
-        # identity. Optional: when absent (e.g. unit tests, no DB), the on-disk
-        # seed is read via load_template_by_key.
-        self._prompt_service = prompt_service
         self._preset_service = preset_service
+        # The LLM factory and the prompt service only describe the
+        # contextualizer: the trace's configuration identity. Without a prompt
+        # service (unit tests, no DB) the on-disk seed is read.
+        self._identity = RetrievalIdentity(
+            config=config,
+            prompt_service=prompt_service,
+            catalog_llms=llm_factory is not None,
+            catalog_rerankers=reranker_factory is not None,
+            catalog_embedders=searcher_factory is not None,
+            static_reranker=reranker is not None,
+        )
 
         logger.debug(
             "RetrievalService ready",
@@ -136,125 +142,13 @@ class RetrievalService:
         """Return whether this process has resolved retrieval settings for a partition."""
         return partition in self._partition_configs()
 
-    def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
-        """Mirror QueryService's partition LLM resolution for public metadata."""
-        if self._llm_factory is None:
-            return "default"
-        name = resolve_partition_chat_llm(list(partitions), self._partition_configs())
-        registered = getattr(getattr(self._config, "models", None), "llm", {}) or {}
-        return name if name is not None and name in registered else "default"
-
-    @staticmethod
-    def _public_endpoint(config: Settings, endpoint_type: str, name: str | None) -> dict[str, object]:
-        """Return endpoint identity only, excluding URLs, keys, and arbitrary extras."""
-        registry = getattr(getattr(config, "models", None), endpoint_type, {}) or {}
-        endpoint = registry.get(name) if name is not None else None
-        return {
-            "name": name,
-            "model": getattr(endpoint, "model_name", None),
-        }
-
-    def _legacy_reranker_identity(self) -> dict[str, object]:
-        """Describe the static reranker built at startup from ``settings.reranker``."""
-        if self._legacy_reranker is None:
-            return {"name": None, "model": None}
-        return {
-            "name": "default",
-            "model": getattr(getattr(self._config, "reranker", None), "model_name", None),
-        }
-
     def public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
         """Build the stable public retrieval-setting subset used for fingerprints."""
-        configured_partitions = self._partition_configs()
-        public_partitions: list[dict[str, object]] = []
-        selected_partitions = (
-            list(configured_partitions) if "all" in partitions and configured_partitions else partitions
-        )
-        contextualizer_name = self._effective_contextualizer_name(partitions)
-        llm_registry = getattr(getattr(self._config, "models", None), "llm", {}) or {}
-        contextualizer_endpoint = (
-            {
-                "name": "default",
-                "model": getattr(getattr(self._config, "llm", None), "model", None),
-            }
-            if self._llm_factory is None or (contextualizer_name == "default" and "default" not in llm_registry)
-            else self._public_endpoint(self._config, "llm", contextualizer_name)
-        )
-        for partition_name in sorted(set(selected_partitions)):
-            partition = configured_partitions.get(partition_name)
-            retrieval = partition.retrieval if partition is not None else self._config.retriever
-            embedder_name = partition.embedder if partition is not None else "default"
-            reranker_enabled = bool(
-                getattr(
-                    retrieval,
-                    "enable_reranker",
-                    getattr(getattr(self._config, "reranker", None), "enabled", False),
-                )
-            )
-            reranker_name = getattr(retrieval, "reranker", None) or ("default" if reranker_enabled else None)
-            reranker_endpoint = (
-                self._legacy_reranker_identity()
-                if partition is None or self._reranker_factory is None
-                else self._public_endpoint(self._config, "reranker", reranker_name)
-            )
-            related_limit = getattr(
-                retrieval,
-                "related_limit",
-                self._legacy_retriever_value("related_limit", 10),
-            )
-            max_ancestor_depth = getattr(
-                retrieval,
-                "max_ancestor_depth",
-                self._legacy_retriever_value("max_ancestor_depth", None),
-            )
-            # top_n as it applies: a preset that leaves it unset follows RERANKER_TOP_K.
-            top_n = getattr(retrieval, "top_n", None)
-            if top_n is None:
-                top_n = getattr(getattr(self._config, "reranker", None), "top_k", None)
-            public_partitions.append(
-                {
-                    "name": partition_name,
-                    "embedder": self._public_endpoint(self._config, "embedder", embedder_name),
-                    "retrieval": {
-                        "top_k": getattr(retrieval, "top_k", None),
-                        "similarity_threshold": getattr(retrieval, "similarity_threshold", None),
-                        "rrf_k": getattr(retrieval, "rrf_k", 60),
-                        "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),
-                        "allow_filterless_fallback": self._legacy_retriever_value("allow_filterless_fallback", True),
-                    },
-                    "reranker": {
-                        **reranker_endpoint,
-                        "enabled": reranker_enabled,
-                        "top_n": top_n,
-                    },
-                    "contextualizer": {
-                        **contextualizer_endpoint,
-                        "prompt_name": getattr(retrieval, "query_contextualizer_prompt_name", None),
-                        "mode": getattr(getattr(self._config, "rag", None), "mode", None),
-                        "max_contextualized_query_len": getattr(
-                            getattr(self._config, "rag", None), "max_contextualized_query_len", None
-                        ),
-                    },
-                    "expansion": {
-                        "include_related": getattr(retrieval, "include_related", False),
-                        "include_ancestors": getattr(retrieval, "include_ancestors", False),
-                        "related_limit": related_limit,
-                        "max_ancestor_depth": max_ancestor_depth,
-                    },
-                }
-            )
-        hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
-        return {
-            "hybrid": {
-                "enabled": hybrid_enabled,
-                "fusion": "rrf" if hybrid_enabled else None,
-            },
-            "partitions": public_partitions,
-        }
+        return self._identity.public_configuration(partitions)
 
     def configuration_fingerprint(self, partitions: Sequence[str]) -> str:
         """Fingerprint only allowlisted public settings for the authorized scope."""
-        return canonical_fingerprint(self.public_retrieval_configuration(partitions))
+        return self._identity.fingerprint(partitions)
 
     def public_search_configuration(
         self,
@@ -262,60 +156,19 @@ class RetrievalService:
         effective_options: Mapping[str, object],
     ) -> dict[str, object]:
         """Return only settings that can affect the raw search endpoint."""
-        configured_partitions = self._partition_configs()
-        selected_partitions = (
-            list(configured_partitions) if "all" in partitions and configured_partitions else partitions
-        )
-        default_embedder = (getattr(getattr(self._config, "models", None), "embedder", {}) or {}).get("default")
-        raw_search_embedder = {
-            "name": "default",
-            "model": getattr(getattr(self._config, "embedder", None), "model_name", None),
-            "vector_field": getattr(default_embedder, "vector_field", None),
-        }
-        if self._searcher_factory is None or not configured_partitions:
-            public_partitions = [
-                {"name": partition_name, "embedder": raw_search_embedder}
-                for partition_name in sorted(set(selected_partitions))
-            ]
-        else:
-            endpoints = getattr(getattr(self._config, "models", None), "embedder", {}) or {}
-            public_partitions = []
-            for partition_name in sorted(set(selected_partitions)):
-                embedder_name, endpoint, vector_field, _group_key = self._partition_search_identity(
-                    partition_name, configured_partitions, endpoints
-                )
-                public_partitions.append(
-                    {
-                        "name": partition_name,
-                        "embedder": {
-                            "name": embedder_name,
-                            "model": getattr(endpoint, "model_name", None),
-                            "vector_field": vector_field,
-                        },
-                    }
-                )
-        hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
-        configuration: dict[str, object] = {
-            "operation": "raw_search",
-            "hybrid": {
-                "enabled": hybrid_enabled,
-                "fusion": "rrf" if hybrid_enabled else None,
-            },
-            "partitions": public_partitions,
-            "request": dict(effective_options),
-        }
+        rerank = None
         if effective_options.get("rerank"):
             # What the rerank ran with, resolved as search() does: the request
             # holds rerank_candidates as sent (None when it follows the preset).
             rerank_partitions = list(partitions)
             _reranker, reranker_identity = self._search_reranker(rerank_partitions)
-            configuration["rerank"] = {
+            rerank = {
                 "reranker": reranker_identity,
                 "candidates": self._search_rerank_candidates(
                     rerank_partitions, effective_options["top_k"], effective_options.get("rerank_candidates")
                 ),
             }
-        return configuration
+        return self._identity.public_search_configuration(partitions, effective_options, rerank=rerank)
 
     def search_configuration_fingerprint(
         self,
@@ -324,76 +177,6 @@ class RetrievalService:
     ) -> str:
         """Fingerprint the effective raw-search path without chat-only settings."""
         return canonical_fingerprint(self.public_search_configuration(partitions, effective_options))
-
-    @staticmethod
-    def _partition_search_identity(
-        partition_name: str,
-        configured_partitions: Mapping[str, Any],
-        endpoints: Mapping[str, Any],
-    ) -> tuple[str, Any | None, str | None, str]:
-        """Resolve a partition to the embedder and vector field used by search."""
-        partition = configured_partitions.get(partition_name)
-        embedder_name = partition.embedder if partition is not None else "default"
-        endpoint = endpoints.get(embedder_name)
-        vector_field = getattr(endpoint, "vector_field", None) if endpoint is not None else None
-        group_key = vector_field or embedder_name
-        return embedder_name, endpoint, vector_field, group_key
-
-    def _contextualizer_prompt_name(self, partitions: Sequence[str]) -> str | None:
-        selected = list(dict.fromkeys(partitions))
-        if len(selected) != 1 or "all" in selected:
-            return None
-        partition = self._partition_configs().get(selected[0])
-        return getattr(getattr(partition, "retrieval", None), "query_contextualizer_prompt_name", None)
-
-    async def _contextualizer_prompt_identity(
-        self,
-        partitions: Sequence[str],
-        *,
-        strict: bool = False,
-    ) -> dict[str, str | None]:
-        prompt_name = self._contextualizer_prompt_name(partitions)
-        resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
-        if resolve_with_identity is not None:
-            resolved = await resolve_with_identity(
-                "query_contextualizer",
-                names=[prompt_name],
-                strict_errors=strict,
-            )
-            return {
-                "name": resolved.name,
-                "source": resolved.source,
-                "content_hash": resolved.content_hash,
-            }
-
-        if self._prompt_service is not None:
-            content = await self._prompt_service.resolve_prompt("query_contextualizer", names=[prompt_name])
-            prompt_name = None
-            source = None
-        else:
-            content = load_template_by_key(
-                self._config.paths.prompts_dir,
-                self._config.prompts,
-                "query_contextualizer",
-            )
-            source = "disk-seed"
-            prompt_name = None
-        return {
-            "name": prompt_name,
-            "source": source,
-            "content_hash": hashlib.sha256(content.encode()).hexdigest(),
-        }
-
-    @staticmethod
-    def _public_prompt_identity(prompt: object) -> dict[str, str | None]:
-        def field(key: str) -> str | None:
-            return prompt.get(key) if isinstance(prompt, Mapping) else getattr(prompt, key, None)
-
-        return {
-            "name": field("name"),
-            "source": field("source"),
-            "content_hash": field("content_hash"),
-        }
 
     async def resolved_public_retrieval_configuration(
         self,
@@ -457,7 +240,7 @@ class RetrievalService:
         the default, so "which reranker ran?" is answerable from the logs.
         """
         if self._reranker_factory is None:
-            return self._legacy_reranker, self._legacy_reranker_identity()
+            return self._legacy_reranker, self._identity.static_reranker_identity()
         if reranker_name:
             try:
                 reranker = self._reranker_factory(reranker_name)
@@ -470,7 +253,7 @@ class RetrievalService:
                 logger.bind(reranker=reranker_name, partition=partition).debug(
                     "Reranking with the partition's reranker endpoint"
                 )
-                return reranker, self._public_endpoint(self._config, "reranker", reranker_name)
+                return reranker, public_endpoint(self._config, "reranker", reranker_name)
         try:
             reranker = self._reranker_factory("default")
         except KeyError:
@@ -479,11 +262,11 @@ class RetrievalService:
             logger.bind(reranker=self._default_reranker_name(), partition=partition).debug(
                 "Reranking with the default reranker endpoint"
             )
-            return reranker, self._public_endpoint(self._config, "reranker", "default")
+            return reranker, public_endpoint(self._config, "reranker", "default")
         logger.bind(partition=partition).debug(
             "Reranking with the static default reranker (no catalog default endpoint)"
         )
-        return self._legacy_reranker, self._legacy_reranker_identity()
+        return self._legacy_reranker, self._identity.static_reranker_identity()
 
     def _default_reranker_name(self) -> str:
         """Real endpoint name behind the catalog reranker ``"default"`` alias, for logging.
@@ -651,30 +434,20 @@ class RetrievalService:
                     )
                 ]
 
-        public = self.public_retrieval_configuration(requested)
-        for public_partition in public["partitions"]:
-            public_retrieval = public_partition["retrieval"]
-            partition_name = public_partition["name"]
-            if partition_name in reranker_identities:
-                public_partition["reranker"].update(reranker_identities[partition_name])
-            if top_k is not None:
-                public_retrieval["top_k"] = top_k
-            if similarity_threshold is not None:
-                public_retrieval["similarity_threshold"] = similarity_threshold
-            if disable_reranker:
-                public_partition["reranker"]["enabled"] = False
-            if disable_expansion:
-                public_partition["expansion"]["include_related"] = False
-                public_partition["expansion"]["include_ancestors"] = False
-        public["contextualizer_prompt"] = (
-            self._public_prompt_identity(contextualizer_prompt)
-            if contextualizer_prompt is not None
-            else await self._contextualizer_prompt_identity(requested, strict=strict_prompt_resolution)
+        public, fingerprint = await self._identity.resolved_configuration(
+            requested,
+            reranker_identities=reranker_identities,
+            top_k=top_k,
+            similarity_threshold=similarity_threshold,
+            disable_reranker=disable_reranker,
+            disable_expansion=disable_expansion,
+            contextualizer_prompt=contextualizer_prompt,
+            strict_prompt_resolution=strict_prompt_resolution,
         )
         return ResolvedRetrievalPlan(
             groups=tuple(groups),
             public_configuration=public,
-            configuration_fingerprint=canonical_fingerprint(public),
+            configuration_fingerprint=fingerprint,
         )
 
     async def _pipeline_groups_for_partitions(
@@ -747,9 +520,7 @@ class RetrievalService:
         grouped: dict[tuple[str, _PipelineSettings], tuple[str, list[str]]] = {}
         for partition in partitions:
             partition_cfg = self._require_partition_config(partition)
-            embedder, _endpoint, _vector_field, search_key = self._partition_search_identity(
-                partition, configs, endpoints
-            )
+            embedder, _endpoint, _vector_field, search_key = partition_search_identity(partition, configs, endpoints)
             settings = self._pipeline_settings(
                 partition_cfg,
                 top_k=top_k,
@@ -777,9 +548,7 @@ class RetrievalService:
         endpoints = getattr(self._config.models, "embedder", None) or {}
         groups: dict[str, tuple[str, list[str]]] = {}
         for partition in expanded:
-            embedder, _endpoint, _vector_field, group_key = self._partition_search_identity(
-                partition, configs, endpoints
-            )
+            embedder, _endpoint, _vector_field, group_key = partition_search_identity(partition, configs, endpoints)
             groups.setdefault(group_key, (embedder, []))[1].append(partition)
         if len(groups) == 1:
             # Keep the caller's partitions, so "all" stays unscoped.
