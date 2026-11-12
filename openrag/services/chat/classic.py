@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from core.chat.budget import fit_prompt
 from core.chat.history import sanitize_messages
@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from services.capabilities.retrieve import SourceRetriever
     from services.capabilities.summarize import Summarizer
     from services.capabilities.web_search import WebSearch
+    from services.chat.prompt_settings import PartitionPromptSettings
     from services.orchestrators.prompt_service import PromptService
     from services.orchestrators.retrieval_service import RetrievalService
 
@@ -73,6 +74,12 @@ class ChatContext:
     max_prompt_tokens: int | None = None
 
 
+class ClassicGraph(Protocol):
+    """The compiled ``classic`` graph (``services.chat.graphs.classic``), as ``ChatService`` runs it."""
+
+    async def ainvoke(self, input: ClassicState, *, context: ChatContext) -> ClassicState: ...
+
+
 def messages_tokens(messages: list[dict]) -> int:
     """Tokens a chat message list takes, counted as the router's preflight does."""
     length_function = get_num_tokens()
@@ -82,9 +89,9 @@ def messages_tokens(messages: list[dict]) -> int:
 class ClassicSteps:
     """The bodies of the ``classic`` graph's nodes.
 
-    *fit_sources* and *generation_prompt_name* are ``ChatService``'s, shared
-    with the completions endpoint; *clock* gives the date the prompts show and
-    *detect_language* the language of an acknowledgement.
+    *prompt_settings* is shared with the completions endpoint; *clock* gives
+    the date the prompts show and *detect_language* the language of an
+    acknowledgement.
     """
 
     def __init__(
@@ -97,8 +104,7 @@ class ClassicSteps:
         retriever: SourceRetriever,
         web_search: WebSearch,
         summarizer: Summarizer,
-        fit_sources: Callable[[list, list[str] | None, int | None], list[int]],
-        generation_prompt_name: Callable[[str, list[str] | None], str | None],
+        prompt_settings: PartitionPromptSettings,
         clock: Callable[[], datetime],
         detect_language: Callable[..., str | None],
     ) -> None:
@@ -110,8 +116,7 @@ class ClassicSteps:
         self._retriever = retriever
         self._web = web_search
         self._summarizer = summarizer
-        self._fit_sources = fit_sources
-        self._generation_prompt_name = generation_prompt_name
+        self._prompt_settings = prompt_settings
         self._clock = clock
         self._detect_language = detect_language
 
@@ -341,7 +346,7 @@ class ClassicSteps:
         docs = [chunk.to_langchain() for chunk in state["chunks"]]
         prompt_type = "spoken_style_answer" if ctx.options.spoken_style_answer else "sys_prompt"
         template = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partitions)]
+            prompt_type, names=[self._prompt_settings.generation_prompt_name(prompt_type, partitions)]
         )
         current_date = self._clock().strftime(_DATE_FORMAT)
         custom_prompt = state.get("custom_prompt")
@@ -406,7 +411,7 @@ class ClassicSteps:
             )
         headroom = None if room is None else room - web_tokens
         candidates = docs
-        docs = [docs[i] for i in self._fit_sources(docs, ctx.scope.partitions, headroom)]
+        docs = [docs[i] for i in self._prompt_settings.fit_sources(docs, ctx.scope.partitions, headroom)]
 
         def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
             """The answer messages with *docs*, then the *web_candidates* that fit after them."""

@@ -7,11 +7,13 @@ transport), and wraps ``StreamingResponse`` / ``JSONResponse``.
 This module finds the sources and renders them into the prompt;
 ``AnswerService`` (``answer_service.py``) then calls the model, strips the
 ``[Sources: N]`` tag, retries an empty answer and builds ``extra``, the same
-way for ``chat``, ``chat_stream`` and ``complete``. Finding the sources is a
-sequence of steps in ``services.capabilities``: the scope, the contextualized
-queries, the documents and web results, the map-reduce summaries; this module
-decides which of them run. The rules with no I/O live
-in ``core``: small talk (``core.chat.smalltalk``), the history window
+way for ``chat``, ``chat_stream`` and ``complete``. A chat request's sources
+are found by the ``classic`` graph (``services.chat``), whose steps call the
+capabilities in ``services.capabilities``: the scope, the contextualized
+queries, the documents and web results, the map-reduce summaries. This module
+settles the history, the route and the scope, runs the graph, and prepares
+completions itself; ``di.chat`` builds it and compiles the graph. The rules
+with no I/O live in ``core``: small talk (``core.chat.smalltalk``), the history window
 (``core.chat.history``), fitting the sources into the window
 (``core.chat.budget``), the route (``core.chat.routing``), shaping the answer
 (``core.chat.answer``), the request's metadata flags
@@ -29,10 +31,10 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, NamedTuple
+from datetime import datetime
+from typing import TYPE_CHECKING, NamedTuple
 
-from core.chat.budget import fit_prompt, fit_sources
+from core.chat.budget import fit_prompt
 from core.chat.history import history_window, latest_user_query, split_leading_system_prompt
 from core.chat.routing import Route, resolve_route
 from core.chat.scope import Scope
@@ -45,26 +47,21 @@ from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuil
 from core.utils.exceptions import ContextWindowExceededError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens
-from services.capabilities.contextualize import (
-    QueryContextualizer,
-    record_contextualization,
-    record_not_run,
-)
-from services.capabilities.retrieve import SourceRetriever
-from services.capabilities.scope import ScopeResolver
-from services.capabilities.summarize import Summarizer
-from services.capabilities.web_search import WebSearch
-from services.chat.classic import ChatContext, ClassicSteps
-from services.chat.graphs.classic import build_classic_graph
-from services.inference.runtime import detect_language, get_llm_semaphore
-from services.orchestrators.answer_service import AnswerService, PreparedAnswer
+from services.capabilities.contextualize import record_contextualization, record_not_run
+from services.chat.classic import ChatContext
+from services.orchestrators.answer_service import PreparedAnswer
 
 if TYPE_CHECKING:
     from core.config.root import Settings
     from core.llm.llm import LLM
+    from services.capabilities.contextualize import QueryContextualizer
+    from services.capabilities.retrieve import SourceRetriever
+    from services.capabilities.scope import ScopeResolver
+    from services.chat.classic import ClassicGraph
+    from services.chat.prompt_settings import PartitionPromptSettings
+    from services.orchestrators.answer_service import AnswerService
     from services.orchestrators.prompt_service import PromptService
     from services.orchestrators.retrieval_service import RetrievalService
-    from services.orchestrators.workspace_service import WorkspaceService
 
 logger = get_logger()
 
@@ -95,48 +92,35 @@ class ChatService:
     def __init__(
         self,
         *,
-        retrieval_service: RetrievalService,
-        llm: LLM,
         config: Settings,
-        web_search_service: Any | None,
-        workspace_service: WorkspaceService,
+        llm: LLM,
+        retrieval_service: RetrievalService,
         prompt_service: PromptService,
+        contextualizer: QueryContextualizer,
+        scope_resolver: ScopeResolver,
+        retriever: SourceRetriever,
+        prompt_settings: PartitionPromptSettings,
+        classic: ClassicGraph,
+        answer_service: AnswerService,
         llm_factory: Callable[[str], LLM] | None = None,
-        answer_service: AnswerService | None = None,
     ) -> None:
+        """Built by ``di.chat.create_chat_service``, which compiles the *classic* graph.
+
+        The graph's steps share *contextualizer*, *retriever* and
+        *prompt_settings* with the completions endpoint, which runs outside it.
+        """
         self._retrieval = retrieval_service
-        self._answer = answer_service or AnswerService(detect_language=detect_language)
+        self._answer = answer_service
         self._llm = llm
         self._llm_factory = llm_factory
         # Prompts resolve request-time (override → default → disk seed) so an
         # admin's edit takes effect on the next chat without a restart.
         self._prompt_service = prompt_service
-        self._contextualizer = QueryContextualizer(
-            config=config,
-            prompt_service=prompt_service,
-            llm=llm,
-            detect_language=detect_language,
-            clock=lambda: datetime.now(UTC),
-        )
-        self._scope = ScopeResolver(workspace_service)
-        self._web = WebSearch(web_search_service)
-        self._retriever = SourceRetriever(retrieval_service=retrieval_service, web_search=self._web)
-        self._summarizer = Summarizer(llm=llm, config=config, semaphore=get_llm_semaphore)
-        self._steps = ClassicSteps(
-            config=config,
-            retrieval_service=retrieval_service,
-            prompt_service=prompt_service,
-            contextualizer=self._contextualizer,
-            retriever=self._retriever,
-            web_search=self._web,
-            summarizer=self._summarizer,
-            fit_sources=self._fit_sources,
-            generation_prompt_name=self._generation_prompt_name,
-            # Looked up when called, so a patched clock or detector applies.
-            clock=lambda: datetime.now(),
-            detect_language=lambda text, **kwargs: detect_language(text, **kwargs),
-        )
-        self._classic = build_classic_graph(self._steps)
+        self._contextualizer = contextualizer
+        self._scope = scope_resolver
+        self._retriever = retriever
+        self._prompt_settings = prompt_settings
+        self._classic = classic
 
         # Keep a live reference so per-partition config (resolved into
         # ``config.partitions`` and refreshed on every preset change) can be
@@ -184,44 +168,6 @@ class ChatService:
             if explicit:
                 return max(explicit)
         return self._default_chat_history_depth
-
-    def _resolve_top_n(self, partition: list[str] | None) -> int:
-        """How many sources this request's prompt takes: the retrieval preset's ``top_n``.
-
-        ``reranker.top_k`` when the preset leaves it unset. Retrieval already
-        cuts each group of partitions it retrieves together (one embedder, the
-        same retrieval settings) to the group's ``top_n``; this matters for a
-        request whose partitions, or ``"all"``, span several groups, whose fused
-        results can hold up to the *sum* of them. It takes the largest ``top_n``
-        among the partitions, so about one group's worth (in RRF order) reaches
-        the prompt.
-        """
-        default = self._config.reranker.top_k
-        configs = self._config.partitions
-        if partition and configs:
-            names = list(configs) if "all" in partition else partition
-            top_ns = [
-                cfg.retrieval.effective_top_n(default) for name in names if (cfg := configs.get(name)) is not None
-            ]
-            if top_ns:
-                return max(top_ns)
-        return default
-
-    def _fit_sources(self, docs: list, partition: list[str] | None, headroom: int | None) -> list[int]:
-        """Positions of up to ``top_n`` of *docs*, within the *headroom* the answering model's window leaves.
-
-        See ``core.chat.budget.fit_sources``. The window comes from the LLM
-        endpoint's context size (admin-set, else probed from vLLM, else
-        ``MAX_LLM_CONTEXT_SIZE``), so a too-small value there shows up here as
-        fewer sources than ``top_n``: logged, because nothing else surfaces it.
-        """
-        top_n = self._resolve_top_n(partition)
-        included = fit_sources(docs, top_n=top_n, headroom=headroom, length_function=get_num_tokens())
-        if len(included) < min(len(docs), top_n):
-            logger.bind(partition=partition, top_n=top_n, presented=len(included), headroom=headroom).info(
-                "Sources left out: they don't fit in the answering model's context window"
-            )
-        return included
 
     def _resolve_llm(self, partition: list[str] | None) -> LLM:
         """Effective LLM for this request — query generation and answering.
@@ -337,22 +283,6 @@ class ChatService:
                     return name
         return "default"
 
-    def _generation_prompt_name(self, prompt_type: str, partition: list[str] | None) -> str | None:
-        """The library prompt this request's partition names for a generation type.
-
-        Honoured only for a single owning partition (same rule as chat_llm /
-        chat_history_depth); multi-partition and the ``"all"`` sentinel resolve
-        the global default. Returned as the sole candidate name for
-        ``PromptService.resolve_prompt`` — a future per-user tier prepends ahead
-        of it.
-        """
-        if not partition or "all" in partition or len(partition) != 1:
-            return None
-        cfg = self._config.partitions.get(partition[0])
-        if cfg is None:
-            return None
-        return getattr(cfg, "generation_prompt_names", {}).get(prompt_type)
-
     # ------------------------------------------------------------------
     # Preparation (was RagPipeline._prepare_for_chat_completion)
     # ------------------------------------------------------------------
@@ -438,7 +368,7 @@ class ChatService:
         )
         prompt_type = "spoken_style_answer" if options.spoken_style_answer else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+            prompt_type, names=[self._prompt_settings.generation_prompt_name(prompt_type, partition)]
         )
         current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
 
@@ -475,7 +405,7 @@ class ChatService:
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
-            docs = [docs[i] for i in self._fit_sources(docs, partition, room)]
+            docs = [docs[i] for i in self._prompt_settings.fit_sources(docs, partition, room)]
 
             def assemble(docs: list, _web: list) -> tuple[str, list]:
                 context = documents_context(

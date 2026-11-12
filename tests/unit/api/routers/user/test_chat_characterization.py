@@ -32,6 +32,7 @@ from typing import Any
 
 import core.prompts.chat_prompt_builder as chat_prompt_builder
 import core.utils.text as text_utils
+import di.chat as chat_factory
 import pytest
 import services.inference.runtime as inference_runtime
 import services.orchestrators.chat_service as qs
@@ -49,6 +50,7 @@ from core.models.preset import PartitionConfig
 from core.models.retrieval_result import ScoredChunk
 from core.models.workspace import WorkspaceScope
 from core.websearch import WebResult
+from di.chat import create_chat_service
 from di.providers import get_chat_service, get_config, get_partition_service
 from fastapi import FastAPI
 from services.orchestrators.chat_service import ChatService
@@ -86,10 +88,10 @@ def _word_count(text: str) -> int:
 
 @pytest.fixture(autouse=True)
 def _deterministic(monkeypatch):
-    for module in (qs, chat_prompt_builder):
+    for module in (qs, chat_factory, chat_prompt_builder):
         monkeypatch.setattr(module, "datetime", _FrozenDatetime)
     monkeypatch.setattr(text_utils, "_cached_length_function", _word_count)
-    for module in (qs, inference_runtime):
+    for module in (chat_factory, inference_runtime):
         monkeypatch.setattr(module, "detect_language", lambda _text, **_kwargs: "en")
         monkeypatch.setattr(module, "get_llm_semaphore", _no_semaphore)
     monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
@@ -658,7 +660,7 @@ def _build_chat_service(settings: Settings, scenario: Scenario, calls: dict[str,
             raise KeyError(name)
         return llms[name]
 
-    return ChatService(
+    return create_chat_service(
         retrieval_service=FakeRetrieval(calls["retrieval"], list(scenario.chunks)),
         llm=llms["static"],
         config=settings,

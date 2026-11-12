@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import core.utils.text as text_utils
+import di.chat as chat_factory
 import pytest
 import services.chat.classic as classic_steps
 import services.orchestrators.chat_service as qs
@@ -26,6 +27,7 @@ from core.models.query import Query, SearchQueries
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
 from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
+from di.chat import create_chat_service
 from services.orchestrators.chat_service import ChatService
 
 # Real prompt-template config (dir + key->filename mapping) so ChatService
@@ -56,8 +58,8 @@ def _patch_infra(monkeypatch):
     async def _noop_sem():
         yield
 
-    monkeypatch.setattr(qs, "get_llm_semaphore", _noop_sem)
-    monkeypatch.setattr(qs, "detect_language", lambda _t, **_kwargs: "en")
+    monkeypatch.setattr(chat_factory, "get_llm_semaphore", _noop_sem)
+    monkeypatch.setattr(chat_factory, "detect_language", lambda _t, **_kwargs: "en")
 
 
 class FakeLLM:
@@ -172,7 +174,7 @@ def _config(mode="SimpleRag"):
 def _svc(
     *, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None, prompt_service=None
 ) -> ChatService:
-    return ChatService(
+    return create_chat_service(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
         config=_config(mode),
@@ -203,7 +205,7 @@ def test_resolve_chat_history_depth_zero_inherits_global_default():
 
 
 # --------------------------------------------------------------------------- #
-# sources: the retrieval preset's top_n, within the model window
+# a partition's config, as the chat path reads it
 # --------------------------------------------------------------------------- #
 
 
@@ -211,32 +213,6 @@ def _partition_cfg(top_n: int | None = None, **fields) -> SimpleNamespace:
     """A partition config stand-in carrying what the source count and the chat path read, plus *fields*."""
     defaults = {"chat_llm": None, "chat_history_depth": 4, "generation_prompt_names": {}}
     return SimpleNamespace(retrieval=RetrievalPipelineConfig(top_n=top_n), **{**defaults, **fields})
-
-
-def test_top_n_follows_the_partition_preset():
-    svc = _svc()  # reranker.top_k = 5
-    svc._config.partitions = {"p": _partition_cfg(top_n=15)}
-    assert svc._resolve_top_n(["p"]) == 15
-
-
-def test_unset_top_n_follows_reranker_top_k():
-    svc = _svc()
-    svc._config.partitions = {"p": _partition_cfg(top_n=None)}
-    assert svc._resolve_top_n(["p"]) == 5
-
-
-def test_top_n_takes_the_largest_across_partitions():
-    svc = _svc()
-    svc._config.partitions = {"small": _partition_cfg(top_n=15), "unset": _partition_cfg(top_n=None)}
-    assert svc._resolve_top_n(["small", "unset"]) == 15
-    assert svc._resolve_top_n(["all"]) == 15
-
-
-def test_top_n_falls_back_to_reranker_top_k():
-    svc = _svc()
-    svc._config.partitions = {"p": _partition_cfg(top_n=15)}
-    assert svc._resolve_top_n(None) == 5
-    assert svc._resolve_top_n(["unknown"]) == 5
 
 
 def test_acknowledgement_prompt_does_not_assume_the_user_expressed_gratitude():
@@ -281,7 +257,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
     of what this depth is meant to limit."""
     config = _config()
     config.rag.chat_history_depth = global_depth
-    svc = ChatService(
+    svc = create_chat_service(
         retrieval_service=FakeRetrieval(),
         llm=FakeLLM(),
         config=config,
@@ -1827,7 +1803,6 @@ async def test_empty_contextualized_casual_answer_retries_in_the_same_language(o
         ],
     )
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
     def detect_test_language(text, **_kwargs):
         if text.startswith("Voici"):
@@ -1836,7 +1811,8 @@ async def test_empty_contextualized_casual_answer_retries_in_the_same_language(o
             return "en"
         return None
 
-    monkeypatch.setattr(qs, "detect_language", detect_test_language)
+    monkeypatch.setattr(chat_factory, "detect_language", detect_test_language)
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
     kwargs = {
         "partitions": ["p"],
         "payload": {
@@ -2440,7 +2416,7 @@ async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
 
     assert len(retrieval.retrieve_multi_calls) == 1
     assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == "Merci!"
-    assert retrieval.retrieve_multi_calls[0]["top_k"] == svc._summarizer.max_total_documents
+    assert retrieval.retrieve_multi_calls[0]["top_k"] == svc._config.map_reduce.max_total_documents
     assert retrieval.retrieve_multi_calls[0]["retrieval_top_k"] is None
 
 
@@ -3500,7 +3476,7 @@ async def test_the_contextualizer_reads_the_clock_in_utc(monkeypatch):
                 raise AssertionError("the contextualizer must read the UTC clock")
             return instant
 
-    monkeypatch.setattr(qs, "datetime", FrozenDatetime)
+    monkeypatch.setattr(chat_factory, "datetime", FrozenDatetime)
     payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
     llm = FakeLLM(chat_responses=[payload])
     svc = _svc(llm=llm, mode="ChatBotRag")
@@ -3591,14 +3567,11 @@ def _service_with_orders(orders):
     svc = _svc(retrieval=FakeRetrieval(chunks=_BY_RELEVANCE))
     svc._config.partitions = {"p": _partition_cfg(top_n=2)}
 
-    class FixedQueries:
-        rewrites_queries = False
+    async def contextualize(*_args, **_kwargs):
+        return SearchQueries(query_list=[Query(query=f"q{i}", date_order=order) for i, order in enumerate(orders)])
 
-        async def contextualize(self, *_args, **_kwargs):
-            return SearchQueries(query_list=[Query(query=f"q{i}", date_order=order) for i, order in enumerate(orders)])
-
-    # Chat reads it in the graph's steps, completions in the service.
-    svc._contextualizer = svc._steps._contextualizer = FixedQueries()
+    # One contextualizer: chat reads it in the graph's steps, completions in the service.
+    svc._contextualizer.contextualize = contextualize
     return svc
 
 

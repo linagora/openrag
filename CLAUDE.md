@@ -91,7 +91,7 @@ The main application entry point is `openrag/api/main.py` which creates a FastAP
 - `MarkerPool` / `MarkerWorker` (`openrag/services/workers/parsers/marker_workers.py`) - Pool of workers for PDF processing with Marker
 
 **Pipeline Classes**:
-- `ChatService` (`openrag/services/orchestrators/chat_service.py`) - Orchestrates retrieval and LLM generation. A chat request runs through the `classic` LangGraph graph (wiring in `openrag/services/chat/graphs/classic.py`, the only module importing `langgraph`; node bodies in `openrag/services/chat/classic.py`), whose steps call the capabilities in `openrag/services/capabilities/` (contextualize, scope, retrieve, web search, summarize); `AnswerService` then answers, outside the graph
+- `ChatService` (`openrag/services/orchestrators/chat_service.py`) - Orchestrates retrieval and LLM generation. A chat request runs through the `classic` LangGraph graph (wiring in `openrag/services/chat/graphs/classic.py`, the only module importing `langgraph`; node bodies in `openrag/services/chat/classic.py`), whose steps call the capabilities in `openrag/services/capabilities/` (contextualize, scope, retrieve, web search, summarize); `AnswerService` then answers, outside the graph. `create_chat_service` (`openrag/di/chat.py`) builds the capabilities, compiles the graph once and builds the service
 - `RetrieverPipeline` (`openrag/core/retrieval/pipeline.py`) - Handles document retrieval and reranking
 - `Summarizer` (`openrag/services/capabilities/summarize.py`) - Map-reduce for processing large document sets
 
