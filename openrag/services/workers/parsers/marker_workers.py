@@ -9,7 +9,6 @@ import pypdfium2
 import ray
 import torch
 from core.config import load_config
-from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import (
@@ -194,6 +193,10 @@ class MarkerWorker:
             # and each get a full memory ceiling (#1167). The slots already
             # parse chunks in parallel.
             "pdftext_workers": 1,
+            # Surya passes disable= explicitly, which beats TQDM_DISABLE: honor
+            # it here (non-empty = off, as tqdm reads it), and turn the bars
+            # off with JSON logs even when TQDM_DISABLE was not set (#1297).
+            "disable_tqdm": bool(os.environ.get("TQDM_DISABLE")) or self.config.verbose.format == "json",
         }
         if self.config.loader.marker_pdftext_workers > 1:
             self.logger.warning(
@@ -698,15 +701,10 @@ class MarkerLoader(BasePooledParser):
         async with document.as_temporary_file() as path:
             markdown, images = await self._dispatch(str(path))
 
-        # PNG-encoding every figure of a large PDF takes seconds of pure CPU; on
-        # the loop it starves the lease renewals of every other file on this worker.
-        # A timeout or cancel cannot interrupt the thread; the event tells it to stop.
-        cancelled = threading.Event()
-        try:
-            pages, image_blocks = await asyncio.to_thread(self._postprocess, markdown, images, cancelled)
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
+        # The figures are handed over unencoded (see ``_build_image_blocks``);
+        # splitting the markdown of a long PDF still runs off the loop, which
+        # also renews the leases of every other file on this worker.
+        pages, image_blocks = await asyncio.to_thread(self._postprocess, markdown, images)
         text_blocks = [TextBlock(text=text, page_number=page) for page, text in pages]
 
         return ProcessedDocument(
@@ -719,10 +717,8 @@ class MarkerLoader(BasePooledParser):
 
     # ----- helpers -----
 
-    def _postprocess(
-        self, markdown: str, images: dict, cancelled: threading.Event
-    ) -> tuple[list[tuple[int, str]], list[ImageBlock]]:
-        return self._split_pages(markdown), self._build_image_blocks(images, cancelled)
+    def _postprocess(self, markdown: str, images: dict) -> tuple[list[tuple[int, str]], list[ImageBlock]]:
+        return self._split_pages(markdown), self._build_image_blocks(images)
 
     async def _convert_pdf(self, file_path: str):
         pool = self._pool()
@@ -764,7 +760,7 @@ class MarkerLoader(BasePooledParser):
             raise
 
     @staticmethod
-    def _build_image_blocks(images: dict, cancelled: threading.Event | None = None) -> list[ImageBlock]:
+    def _build_image_blocks(images: dict) -> list[ImageBlock]:
         """Convert Marker's ``{key: PIL_image}`` dict into ``ImageBlock``s.
 
         Each block records the ``![](key)`` markdown ref in
@@ -774,30 +770,20 @@ class MarkerLoader(BasePooledParser):
         (``_page_{N}_Picture_{i}.{ext}``) and stored 1-indexed to match
         the ``[PAGE_N]`` markers in the post-processed markdown.
 
-        ``cancelled`` is checked before each image: once set, the caller has
-        gone and the result is discarded, so encoding stops early.
+        Each image is kept decoded in ``pil_image``: the caption stage
+        PNG-encodes it only when it captions the document, so a partition
+        without captioning never pays for it.
         """
         blocks: list[ImageBlock] = []
-        total = len(images)
-        if total:
-            report_parser_substage("parse.images", "Extracting images", progress=0, total=total)
-        for index, (key, pil_image) in enumerate(images.items(), start=1):
-            if cancelled is not None and cancelled.is_set():
-                break
-            try:
-                png_bytes = pil_to_png_bytes(pil_image)
-            except Exception as exc:
-                logger.warning(f"Failed to encode Marker image {key}: {exc}")
-            else:
-                blocks.append(
-                    ImageBlock(
-                        image_bytes=png_bytes,
-                        page_number=_marker_key_to_page(str(key)),
-                        mime_type="image/png",
-                        metadata={"markdown_ref": f"![]({key})", "marker_key": str(key)},
-                    )
+        for key, pil_image in images.items():
+            blocks.append(
+                ImageBlock(
+                    pil_image=pil_image,
+                    page_number=_marker_key_to_page(str(key)),
+                    mime_type="image/png",
+                    metadata={"markdown_ref": f"![]({key})", "marker_key": str(key)},
                 )
-            report_parser_substage("parse.images", "Extracting images", progress=index, total=total)
+            )
         return blocks
 
     @classmethod

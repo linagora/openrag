@@ -1007,6 +1007,10 @@ openrag:
       cpu: "4"
       memory: "16Gi"
       nvidia.com/gpu: 1
+  # More than 1 needs a Ray cluster shared by the pods: ray.enabled: true with
+  # RAY_ADDRESS or ENABLE_RAY_SERVE=true, or an external cluster through
+  # RAY_ADDRESS (or ray.externalCluster). With the embedded Ray each pod has its
+  # own task state, and the chart refuses to render (see upgrading.md).
   replicas: 1
   # Size of the /dev/shm emptyDir volume. Ray's plasma object store and Python
   # multiprocessing both use /dev/shm for POSIX semaphores and shared memory.
@@ -1186,6 +1190,11 @@ env:
     # "(Actor pid=N)" relay prefix is ANSI-colorized even on a pipe. Both off.
     RAY_DEDUP_LOGS: "0"
     RAY_COLOR_PREFIX: "0"
+    # With LOG_FORMAT=json the chart also sets TQDM_DISABLE=1 (see
+    # configmap-env.yaml): tqdm progress bars are not JSON and each refresh
+    # becomes a log line. Only when TQDM_DISABLE is not set here: any
+    # non-empty value disables them ("0" too), "" brings them back except
+    # Marker's, which stay off while LOG_FORMAT is json.
     # With ray.enabled=true the chart also sets RAY_LOG_TO_STDERR=1 (see
     # configmap-env.yaml): worker lines are then written to the Ray pods' own
     # stderr for the DaemonSet, instead of being relayed to the API driver —
@@ -1274,6 +1283,9 @@ env:
     # Conservative defaults: every Marker process is a separate Python + torch
     # process sharing the pod's memory and GPU. Raise per deployment once the
     # headroom is known (up to MARKER_POOL_SIZE x MARKER_MAX_PROCESSES processes).
+    # With the embedded Ray, the Marker, Docling and Whisper workers' GPU
+    # reservations must fit the openrag pod's cards (a fraction of a GPU stays
+    # on one card): the chart refuses to render otherwise.
     MARKER_MAX_PROCESSES: "4"
     MARKER_POOL_SIZE: "1"
     MARKER_NUM_GPUS: "0.6"
@@ -1281,7 +1293,6 @@ env:
 
     # Ray
     # RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'
-    RAY_NUM_GPUS: "0.1"
     RAY_POOL_SIZE: "1"
     RAY_MAX_TASKS_PER_WORKER: "50"
     RAY_DASHBOARD_PORT: "8265"

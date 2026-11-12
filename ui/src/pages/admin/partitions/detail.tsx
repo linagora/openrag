@@ -308,23 +308,26 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
 
   // Preset/model registries are admin-only — only fetch them for admins so a
   // non-admin member's view doesn't fire requests the API answers with 403.
-  const { data: presetsData } = useQuery({
+  const presetsQuery = useQuery({
     queryKey: ["presets"],
     queryFn: () => listPresets(),
     enabled: isAdmin,
   });
+  const { data: presetsData } = presetsQuery;
 
-  const { data: llmEndpoints } = useQuery({
+  const llmEndpointsQuery = useQuery({
     queryKey: ["model-endpoints", "llm"],
     queryFn: () => listModelEndpoints("llm"),
     enabled: isAdmin,
   });
+  const { data: llmEndpoints } = llmEndpointsQuery;
 
-  const { data: embedderEndpoints } = useQuery({
+  const embedderEndpointsQuery = useQuery({
     queryKey: ["model-endpoints", "embedder"],
     queryFn: () => listModelEndpoints("embedder"),
     enabled: isAdmin,
   });
+  const { data: embedderEndpoints } = embedderEndpointsQuery;
 
   // Computed once and handed to both the panel and the dialog, so a partition
   // can never be flagged in one and clean in the other.
@@ -345,11 +348,19 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   // the files recorded with another model or vector field are redone.
   const reembedDrifted = canSwapEmbedder ? () => setSwapTarget(currentEmbedderName) : undefined;
 
-  const { data: promptsData } = useQuery({
+  const promptsQuery = useQuery({
     queryKey: ["prompts-library"],
     queryFn: () => listAllPrompts(),
     enabled: isAdmin,
   });
+  const { data: promptsData } = promptsQuery;
+  const optionQueries = [presetsQuery, llmEndpointsQuery, embedderEndpointsQuery, promptsQuery];
+  const optionLoading = isAdmin && optionQueries.some((query) => query.isLoading);
+  const optionReadFailed = isAdmin && optionQueries.some((query) => query.isError);
+  const optionInitialLoadFailed = isAdmin && optionQueries.some((query) => query.isLoadingError);
+  const retryOptionReads = () => {
+    optionQueries.filter((query) => query.isError).forEach((query) => void query.refetch());
+  };
   const promptsByType = (type: string): PromptResponse[] =>
     (promptsData ?? []).filter((p) => p.prompt_type === type);
 
@@ -436,6 +447,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (partitionsQuery.isLoadingError || optionLoading || optionInitialLoadFailed) return;
     if (!indexationPreset.trim() || !retrievalPreset.trim()) {
       toast.error("Presets are required");
       return;
@@ -447,12 +459,67 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     mutation.mutate();
   };
 
+  if (partitionsQuery.isLoading) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">General Settings</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground" role="status">
+            Checking your partition permissions…
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (partitionsQuery.isLoadingError) {
+    return (
+      <QueryErrorNotice
+        title="Partition permissions could not be checked"
+        message="We can't confirm whether you can edit these settings. Retry before making changes."
+        isRetrying={partitionsQuery.isFetching}
+        onRetry={() => void partitionsQuery.refetch()}
+      />
+    );
+  }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">General Settings</CardTitle>
       </CardHeader>
       <CardContent>
+        {partitionsQuery.isRefetchError && (
+          <div className="mb-4">
+            <QueryErrorNotice
+              title="Partition permissions could not be refreshed"
+              message="Using the last known permission. It may be out of date."
+              isRetrying={partitionsQuery.isFetching}
+              onRetry={() => void partitionsQuery.refetch()}
+              stale
+            />
+          </div>
+        )}
+        {isAdmin && optionLoading && (
+          <p className="mb-4 text-sm text-muted-foreground" role="status">
+            Loading preset, model, and prompt options…
+          </p>
+        )}
+        {optionReadFailed && (
+          <div className="mb-4">
+            <QueryErrorNotice
+              title={optionInitialLoadFailed ? "Settings options could not be loaded" : "Settings options could not be refreshed"}
+              message={optionInitialLoadFailed
+                ? "Some preset, model, or prompt choices are unavailable. Retry before saving."
+                : "Showing previously loaded choices. They may be out of date."}
+              isRetrying={optionQueries.some((query) => query.isFetching)}
+              onRetry={retryOptionReads}
+              stale={!optionInitialLoadFailed}
+            />
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-6 max-w-5xl">
           {!canEdit && (
             <p className="rounded-md border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
@@ -645,7 +712,12 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             <Button
               type="submit"
               disabled={
-                mutation.isPending || llmValidating || llmValidated === false || intOr(chatHistoryDepth, 0) < 1
+                mutation.isPending ||
+                llmValidating ||
+                llmValidated === false ||
+                intOr(chatHistoryDepth, 0) < 1 ||
+                optionLoading ||
+                optionInitialLoadFailed
               }
             >
               <Save className="h-4 w-4" />
@@ -738,6 +810,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     queryKey: ["partition", partitionName, "users"],
     queryFn: () => listPartitionMembers(partitionName),
   });
+  const usersAccessDenied = usersQuery.error instanceof ApiError && usersQuery.error.status === 403;
 
   // Only a partition owner (or a platform admin) can manage members; the caller's
   // role comes from the membership-scoped partition list. Mirrors the server's
@@ -894,21 +967,27 @@ function UsersTab({ partitionName }: { partitionName: string }) {
             title={usersQuery.error instanceof ApiError && usersQuery.error.status === 403
               ? "Partition users are not available to your role"
               : "Partition users could not be loaded"}
-            message={usersQuery.error instanceof ApiError && usersQuery.error.status === 403
+            message={usersAccessDenied
               ? "Only partition owners can view its members. Ask an owner to check this list."
               : "The member list is unavailable. Try again to reload it."}
             isRetrying={usersQuery.isFetching}
-            onRetry={() => void usersQuery.refetch()}
+            onRetry={usersAccessDenied ? undefined : () => void usersQuery.refetch()}
+            variant={usersAccessDenied ? "default" : undefined}
           />
         ) : (
           <>
             {usersQuery.isRefetchError && (
               <div className="mb-3">
                 <QueryErrorNotice
-                  title="Partition users could not be refreshed"
-                  message="Showing the previously loaded members. They may be out of date."
+                  title={usersAccessDenied
+                    ? "Partition users are no longer available to your role"
+                    : "Partition users could not be refreshed"}
+                  message={usersAccessDenied
+                    ? "Only partition owners can view its members. Ask an owner to check this list."
+                    : "Showing the previously loaded members. They may be out of date."}
                   isRetrying={usersQuery.isFetching}
-                  onRetry={() => void usersQuery.refetch()}
+                  onRetry={usersAccessDenied ? undefined : () => void usersQuery.refetch()}
+                  variant={usersAccessDenied ? "default" : undefined}
                   stale
                 />
               </div>
@@ -1102,6 +1181,7 @@ export default function PartitionDetailPage() {
     queryFn: () => getPartitionConfig(name!),
     enabled: !!name,
   });
+  const partitionAccessDenied = partitionQuery.error instanceof ApiError && partitionQuery.error.status === 403;
 
   if (!name) {
     return (
@@ -1129,7 +1209,7 @@ export default function PartitionDetailPage() {
     );
   }
 
-  if (partitionQuery.isError && partitionQuery.error instanceof ApiError && partitionQuery.error.status === 404) {
+  if (partitionQuery.isLoadingError && partitionQuery.error instanceof ApiError && partitionQuery.error.status === 404) {
     return (
       <div className="text-center py-12">
         <p className="text-destructive mb-4">Partition not found.</p>
@@ -1147,10 +1227,13 @@ export default function PartitionDetailPage() {
     return (
       <div className="space-y-4">
         <QueryErrorNotice
-          title="Partition could not be loaded"
-          message="The partition details are unavailable. Try again to reload them."
+          title={partitionAccessDenied ? "Partition is not available to your role" : "Partition could not be loaded"}
+          message={partitionAccessDenied
+            ? "You don't have access to this partition. Ask an owner to grant access."
+            : "The partition details are unavailable. Try again to reload them."}
           isRetrying={partitionQuery.isFetching}
-          onRetry={() => void partitionQuery.refetch()}
+          onRetry={partitionAccessDenied ? undefined : () => void partitionQuery.refetch()}
+          variant={partitionAccessDenied ? "default" : undefined}
         />
         <Button variant="outline" asChild>
           <Link to="/partitions"><ArrowLeft className="h-4 w-4" />Back to Partitions</Link>
@@ -1181,10 +1264,15 @@ export default function PartitionDetailPage() {
       {partitionQuery.isRefetchError && (
         <div className="mb-4">
           <QueryErrorNotice
-            title="Partition could not be refreshed"
-            message="Showing the previously loaded partition. It may be out of date."
+            title={partitionAccessDenied
+              ? "Partition is no longer available to your role"
+              : "Partition could not be refreshed"}
+            message={partitionAccessDenied
+              ? "You don't have access to this partition. Ask an owner to grant access."
+              : "Showing the previously loaded partition. It may be out of date."}
             isRetrying={partitionQuery.isFetching}
-            onRetry={() => void partitionQuery.refetch()}
+            onRetry={partitionAccessDenied ? undefined : () => void partitionQuery.refetch()}
+            variant={partitionAccessDenied ? "default" : undefined}
             stale
           />
         </div>

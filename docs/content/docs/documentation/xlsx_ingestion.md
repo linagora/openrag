@@ -22,7 +22,11 @@ Rows are emitted incrementally as bounded Markdown table batches. Chunk metadata
 
 Retrieval limits row-sibling expansion to `related_limit` chunks; setting it to zero disables expansion. A row split into more chunks than the limit can therefore be incomplete, and the cap is logged.
 
-Hidden and `veryHidden` worksheets are skipped. Hidden rows and columns inside a visible worksheet are also excluded. Excel may mark filtered or collapsed rows as hidden, so those rows are also excluded. When rows are hidden, the worksheet context included in extracted chunks reports the count and warns that filtered or collapsed rows may be missing. Counts are also recorded in chunk metadata, and removing hidden columns does not change physical worksheet citations.
+Hidden and `veryHidden` worksheets are skipped. Inside a visible worksheet, hidden columns are excluded. Rows hidden by hand or in collapsed outline groups are excluded too, except on a worksheet whose filter is active: there, every hidden data row in a filter range is indexed (see below).
+
+Rows hidden by an active filter are **included**. A workbook saved with a filter applied (for example `Status = Open`) still contains the rows the filter hides, and a filter is a view of the data, not a decision to remove rows from it: indexing only the visible rows would make a question such as "how many tickets are closed?" return a confident wrong answer. A row counts as filtered when the worksheet marks its filter as active (`<sheetPr filterMode="1">`) and the row lies in the data rows of the worksheet's AutoFilter range or of an Excel Table's own filter. Rows hidden outside those ranges stay excluded, and so do hidden rows on a worksheet whose filter is not marked active, since the file then does not say a filter hid them.
+
+The worksheet context in every extracted chunk states what happened, for example `Hidden worksheet rows excluded: 2 (hidden or collapsed rows).` and `Rows hidden by an active filter are included: 15.`, and chunk metadata records `hidden_rows_skipped`, `filtered_rows_included` and `hidden_columns_skipped`. Removing hidden columns does not change physical worksheet citations.
 
 ## Table detection
 
@@ -51,7 +55,36 @@ Every detected table is extracted and chunked independently. Its metadata includ
 - `sheet_name` and `sheet_index`, preserved on every batch and chunk;
 - exact `table_header_range`, data-row numbers, and chunk `cell_range` citations.
 
-An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Worksheet context is repeated on every chunk of its table while it stays small. A context larger than a quarter of the chunk budget (and longer than the short pointer that replaces it) would crowd out the rows, so when the table needs splitting it is indexed once, with the table's first batch, as its own text chunks (`xlsx_content_kind: sheet_context`). The table chunks then keep the worksheet name and a line such as `Worksheet context (rows 1-3) is indexed in separate chunks.`, drop the context text from their metadata, and set `sheet_context_indexed_separately: true`. Table batches report `table_batch_index`, their one-based position within the table. Vertically disjoint tables are read in one forward pass per worksheet reader; overlapping table rows still require separate scans. The default safety limit permits at most 256 detected tables per visible worksheet; hidden worksheets are skipped and do not count.
+An obvious merged title row immediately above a table is retained as searchable worksheet context rather than used as the column header. Context remains attached only to its originating table and worksheet. Worksheet context is repeated on every chunk of its table while it stays small. A context larger than a quarter of the chunk budget (and longer than the short pointer that replaces it) would crowd out the rows, so when the table needs splitting it is indexed once, with the table's first batch, as its own text chunks (`xlsx_content_kind: sheet_context`). The table chunks then keep the worksheet name and a line such as `Worksheet context (rows 1-3) is indexed in separate chunks.`, drop the context text from their metadata, and set `sheet_context_indexed_separately: true`. Table batches report `table_batch_index`, their one-based position within the table.
+
+### One pass per worksheet
+
+OpenPyXL's read-only mode parses every cell of a row, even when only a few columns are requested, so reading each table separately would parse a worksheet with N side-by-side tables N times. OpenRAG instead reads every worksheet in one forward pass per worksheet reader (cell values, plus formula text when the sheet has formulas), however its tables are arranged: stacked, side by side, or staggered. A worksheet with 256 side-by-side tables is parsed in seconds rather than minutes.
+
+Tables are still indexed one after another, so header detection, batching, and formula handling are unchanged. Rows of a table whose turn has not come yet wait until it does:
+
+- in memory, up to `max_spool_memory_bytes` (32 MiB). This is enough for typical worksheets, which therefore never touch the disk;
+- past that, in an anonymous temporary file in `TMPDIR`, deleted when the worksheet is done;
+- memory and temporary file together are bounded by `max_spool_bytes` (256 MiB).
+
+A worksheet falls back to reading each waiting table separately, as earlier versions did, when:
+
+- the waiting rows would exceed `max_spool_bytes`;
+- the temporary file cannot be written or read back (full disk, read-only or missing `TMPDIR`);
+- the rectangle around the worksheet's tables is larger than `max_sheet_area` (for example a tall Excel Table beside a wide one), because one pass would then read mostly empty cells.
+
+The fallback is slower but produces exactly the same rows, so neither the limits nor the deployment environment change what is indexed.
+
+### Worksheets with many blocks
+
+Each visible worksheet is indexed as at most `max_tables` (256) separate tables; hidden worksheets are skipped and do not count. A worksheet with more separate blocks than that, such as one block per week or per store, each with its own header, is not rejected. Instead, all of its blocks are merged by column band: each block joins the most recent table that shares any of its columns, so every row is indexed.
+
+- The first block's header names the columns; the later blocks' header rows appear as data rows.
+- A merge never crosses an Excel Table and never overlaps another table; such a block stays separate.
+- The worksheet context says so (`This worksheet has 300 separate blocks, more than the 256-table limit: …`), and `worksheet_blocks_merged` records the number of blocks detected (0 when nothing was merged).
+- Merging happens during the preflight scan, and the `max_sheet_area` limit is checked before each block is merged, so an oversized worksheet is rejected before merging costs any work.
+
+Only a worksheet that still has more than `max_tables` tables after merging, for example more than 256 column bands side by side, fails with `XLSX_LIMIT_EXCEEDED`.
 
 ## Merged and hierarchical headers
 
@@ -167,7 +200,7 @@ loader:
   xlsx_batch_size: 10000
   xlsx_limits:
     max_batch_bytes: 2097152
-    max_shared_strings: 250000
+    max_shared_strings: 1000000
     max_tables: 256
 ```
 
@@ -187,17 +220,19 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_entry_bytes` | Individual ZIP entry | 256 MiB |
 | `max_compression_ratio` | Compression ratio per entry | 200 |
 | `max_metadata_bytes` | Total size of the parts the reader loads whole: workbook, styles, theme, document properties, worksheet relationships, and chart sheets with their drawings, charts, and images. Pivot caches, comments, and worksheet drawings or media are never loaded and only count toward the archive limits | 8 MiB |
-| `max_shared_strings_bytes` | Shared-string XML | 32 MiB |
-| `max_shared_strings` | Shared-string entries | 250,000 |
+| `max_shared_strings_bytes` | Shared-string XML. OpenPyXL keeps the whole table in memory, about 4–5 times this size, so this is the limit that bounds that memory | 32 MiB |
+| `max_shared_strings` | Shared-string entries. Distinct text values in a workbook usually reach the byte limit first; 60,000 rows of 5 unique text columns is 300,000 entries and about 11 MB of XML | 1,000,000 |
 | `max_sheets` | Worksheets, including hidden sheets | 128 |
 | `max_rows` | Row coordinate of a cell with content | 1,048,576 |
 | `max_columns` | Column coordinate of a cell with content | 4,096 |
 | `max_cells` | Physical cells across worksheets, empty styled cells included | 5,000,000 |
 | `max_sheet_area` | Traversal rectangle from `A1` to the last content-bearing cell or a declared Excel Table's bottom-right corner, including leading space and gaps | 5,000,000 positions |
-| `max_tables` | Detected table regions per visible worksheet, and Excel Tables per worksheet | 256 |
+| `max_tables` | Tables per visible worksheet, and Excel Tables per worksheet. Past it, detected blocks sharing columns are merged instead of rejecting the workbook | 256 |
 | `max_merged_ranges` | Merged-cell ranges across the workbook | 100,000 |
 | `max_cell_chars` | Characters in one cell | 32,767 |
 | `max_batch_bytes` | Rendered batch size | 2 MiB |
+| `max_spool_bytes` | Memory plus temporary-file space per worksheet for rows of tables waiting for their turn in the single worksheet pass. Past it, waiting tables are read separately; output is unchanged | 256 MiB |
+| `max_spool_memory_bytes` | Part of `max_spool_bytes` kept in memory before the temporary file is used | 32 MiB |
 
 Empty cells that only carry formatting, such as a stray styled cell at `XFD1` or `E1048576`, do not count toward the coordinate or area limits; merged ranges are clipped to them. Coordinates outside the Excel grid are rejected as invalid.
 
@@ -218,6 +253,9 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Merged column-header groups | Consecutive source-backed levels are flattened and retained as hierarchy metadata; arbitrary visual layouts without merged ranges remain ambiguous | Use actual merged ranges or a single explicit header row |
 | Merged row headers | Vertically merged single-column values are expanded through their covered data rows and recorded as per-row hierarchy metadata | No action is required for ordinary vertical row-header merges |
 | Headerless worksheet | The first nonempty row is conservatively treated as the header | Add a header row, or define the range as an Excel Table |
+| Row hidden by hand or in a collapsed group inside an active filter's range | A workbook does not record why a row is hidden (LibreOffice writes `hidden="true" outlineLevel="0"` for a filtered row and a row hidden by hand alike), so every hidden data row in the range is treated as filtered and indexed. Filter criteria are not re-evaluated | Delete the row, or move it outside the filtered range, if it must not be indexed |
+| Rows in a collapsed outline group outside any active filter range | Excluded, like rows hidden by hand: folded detail is a different intent from a filter | Expand the group before saving if those rows should be indexed |
+| More than 256 blocks in one worksheet | Blocks sharing columns are merged into one table per column band; later header rows appear as data rows | Spread the blocks over several worksheets, or combine them into one table with a column naming the block (week, store), when that matters |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
 | Password-protected or encrypted workbook | Rejected at upload with HTTP 422 `ENCRYPTED_OFFICE_FILE` ("This file is password-protected or encrypted"); encrypted `.docx` and `.pptx` uploads get the same response | Remove the password and upload it again |
@@ -232,4 +270,4 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 - Macros are never executed during ingestion. `.xlsm` support reads only its OOXML worksheet data with VBA retention disabled.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
 - Use a fresh partition when comparing ingestion behavior across parser versions.
-- Hidden rows and columns are excluded, but workbook visibility should still not be treated as a general authorization mechanism outside OpenRAG ingestion.
+- Hidden columns are excluded. Hidden rows are excluded too, except on a worksheet whose filter is active: there, every hidden data row in the worksheet's AutoFilter range or in an Excel Table's filter range is indexed, whether the filter, a collapsed group or the user hid it. Workbook visibility should never be treated as an authorization mechanism: remove data that must not be indexed instead of hiding it.

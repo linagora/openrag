@@ -83,10 +83,11 @@ function makePreset(overrides: Partial<PresetResponse> = {}): PresetResponse {
   };
 }
 
-function renderPage() {
+function renderPage(cachedPresets?: PresetResponse[]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  if (cachedPresets) queryClient.setQueryData(["presets"], cachedPresets, { updatedAt: 0 });
   return render(
     <QueryClientProvider client={queryClient}>
       <PresetsPage />
@@ -163,6 +164,14 @@ describe("PresetsPage read errors", () => {
     expect(screen.queryByText("No indexation presets configured.")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("No indexation presets configured.")).not.toBeNull();
+  });
+
+  it("keeps the last loaded presets visible when a refresh fails", async () => {
+    listPresetsMock.mockRejectedValueOnce(new Error("service unavailable"));
+    renderPage([makePreset({ name: "cached-legal" })]);
+
+    expect(await screen.findByText("Presets could not be refreshed")).not.toBeNull();
+    expect(screen.getByText("cached-legal")).not.toBeNull();
   });
 
   it("shows a retryable error when preset form options fail to load", async () => {

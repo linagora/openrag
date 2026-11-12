@@ -12,7 +12,9 @@ import {
   type TaskOutcome,
   type TaskState,
 } from "@/lib/api/jobs";
+import { ApiError } from "@/lib/api/client";
 import { downloadCsv } from "@/lib/csv";
+import { ACTIVE_JOBS_REFETCH_INTERVAL_MS } from "@/lib/jobs-queries";
 import JobListPage from "./list";
 
 vi.mock("sonner", () => ({
@@ -83,6 +85,7 @@ const task = (
     outcome?: "completed" | "completed_degraded" | "failed" | "cancelled" | "active";
     degraded_stages?: string[];
     error_summary?: string;
+    stage_progress?: TaskListItem["stage_progress"];
   } = {},
 ): TaskListItem => ({
   task_id,
@@ -96,6 +99,7 @@ const task = (
   },
   created_at: timing.created_at,
   duration_ms: timing.duration_ms,
+  stage_progress: timing.stage_progress,
   error_summary: timing.error_summary,
   outcome:
     timing.outcome ??
@@ -116,7 +120,7 @@ function renderJobs(cachedTasks?: TaskListItem[]) {
     },
   });
   if (cachedTasks) {
-    queryClient.setQueryData(["tasks", 7, "admin", "all"], { tasks: cachedTasks }, { updatedAt: 0 });
+    queryClient.setQueryData(["tasks", 7, "admin", "all", "unpaged"], { tasks: cachedTasks }, { updatedAt: 0 });
   }
 
   const rendered = render(
@@ -180,7 +184,7 @@ describe("JobListPage filters", () => {
     expect(await screen.findByText("failed.pdf")).not.toBeNull();
   });
 
-  it("distinguishes completed jobs with degraded enrichment", async () => {
+  it("keeps the All tab status label for completed jobs with degraded enrichment", async () => {
     listTasksMock.mockResolvedValue({
       tasks: [
         task("degraded-task", "COMPLETED", "degraded.pdf", "docs", {
@@ -192,8 +196,56 @@ describe("JobListPage filters", () => {
 
     renderJobs();
 
-    expect(await screen.findByText("Completed with degradation")).not.toBeNull();
-    expect(screen.getByText("Caption, Topic tagging")).not.toBeNull();
+    expect(await screen.findByText("COMPLETED", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.queryByText("Completed with degradation")).toBeNull();
+    expect(screen.queryByText("Caption, Topic tagging")).toBeNull();
+  });
+
+  it("shows only lifecycle status in All and stage progress in Active", async () => {
+    const activeTask = task("active-task", "SERIALIZING", "active.pdf", "docs", {
+      stage_progress: {
+        stage_id: "parse",
+        stage_label: "Parsing",
+        phase: "stage",
+        is_currently_running: true,
+        elapsed_ms: 4_000,
+        freshness: "live",
+        history_quality: "complete",
+        persisted_through_sequence: 1,
+      },
+    });
+    const completedTask = task("degraded-task", "COMPLETED", "completed.pdf", "docs", {
+      outcome: "completed_degraded",
+      degraded_stages: ["contextualize"],
+      stage_progress: {
+        phase: "finalizing",
+        last_known_stage_label: "Contextualization",
+        freshness: "durable",
+        is_currently_running: false,
+        history_quality: "complete",
+        persisted_through_sequence: 1,
+      },
+    });
+    const queuedTask = task("queued-task", "QUEUED", "queued.pdf");
+    listTasksMock.mockImplementation(async (status) => ({
+      tasks: status === "active" ? [activeTask] : [activeTask, completedTask, queuedTask],
+    }));
+
+    renderJobs();
+
+    expect(await screen.findByText("active.pdf")).not.toBeNull();
+    expect(screen.getByText("Active", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.getByText("COMPLETED", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.getByText("QUEUED", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.queryByText("Parsing")).toBeNull();
+    expect(screen.queryByText("Contextualization")).toBeNull();
+    expect(screen.queryByText("Completed with degradation")).toBeNull();
+    expect(screen.queryByText("SERIALIZING")).toBeNull();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    const parsing = await screen.findByText("Parsing");
+    expect(parsing.closest("[data-slot='badge']")?.textContent).toMatch(/^Parsing · /);
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
   });
 
   it("shows, searches, and exports failure reasons for admins", async () => {
@@ -256,10 +308,116 @@ describe("JobListPage filters", () => {
       .findAll()
       .map((query) => query.queryKey);
 
-    expect(queryKeys).toContainEqual(["tasks", 7, "admin", "all"]);
+    expect(queryKeys).toContainEqual(["tasks", 7, "admin", "all", "unpaged"]);
     expect(queryKeys).toContainEqual(["queue-info", 7, "admin"]);
-    expect(queryRefetchInterval(queryClient, ["tasks", 7, "admin", "all"])).toBe(5_000);
+    expect(queryRefetchInterval(queryClient, ["tasks", 7, "admin", "all", "unpaged"])).toBe(5_000);
     expect(queryRefetchInterval(queryClient, ["queue-info", 7, "admin"])).toBe(5_000);
+  });
+
+  it("polls the active jobs list frequently enough to show stage changes", async () => {
+    const parsing = task("polling-task", "SERIALIZING", "polling.pdf", "docs", {
+      stage_progress: {
+        stage_id: "parse",
+        stage_label: "Parsing",
+        phase: "stage",
+        is_currently_running: true,
+        elapsed_ms: 4_000,
+        freshness: "live",
+        history_quality: "complete",
+        persisted_through_sequence: 1,
+      },
+    });
+    const embedding = task("polling-task", "SERIALIZING", "polling.pdf", "docs", {
+      stage_progress: {
+        stage_id: "embed",
+        stage_label: "Embedding",
+        phase: "stage",
+        is_currently_running: true,
+        elapsed_ms: 2_000,
+        freshness: "live",
+        history_quality: "complete",
+        persisted_through_sequence: 3,
+      },
+    });
+    let activePollCount = 0;
+    listTasksMock.mockImplementation(async (status) => {
+      if (status !== "active") return { tasks: [task("completed", "COMPLETED", "completed.pdf")] };
+      activePollCount += 1;
+      return {
+        tasks: [activePollCount === 1 ? parsing : embedding],
+        pagination: {
+          offset: 0,
+          limit: 10,
+          total: 1,
+          has_more: false,
+          available_partitions: ["docs"],
+        },
+      };
+    });
+
+    const { queryClient } = renderJobs();
+
+    expect(await screen.findByText("completed.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    const parsingTime = await screen.findByText("<5s");
+    expect(parsingTime.closest("[data-slot='badge']")?.textContent).toBe("Parsing · <5s");
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
+
+    await waitFor(() => {
+      expect(
+        queryRefetchInterval(queryClient, ["tasks", 7, "admin", "active", { limit: 10, offset: 0 }]),
+      ).toBe(ACTIVE_JOBS_REFETCH_INTERVAL_MS);
+    }, { timeout: 2_500 });
+    const embeddingLabel = await screen.findByText("Embedding", {}, { timeout: 7_000 });
+    expect(embeddingLabel.closest("[data-slot='badge']")?.textContent).toBe("Embedding · <5s");
+  }, 10_000);
+
+  it("waits for a stage update when an active task has no stage data", async () => {
+    listTasksMock.mockImplementation(async (status) => status === "active"
+      ? {
+          tasks: [task("unknown-stage", "SERIALIZING", "unknown.pdf")],
+          pagination: {
+            offset: 0,
+            limit: 10,
+            total: 1,
+            has_more: false,
+            available_partitions: ["docs"],
+          },
+        }
+      : { tasks: [task("completed", "COMPLETED", "completed.pdf")] });
+
+    renderJobs();
+
+    await screen.findByText("completed.pdf");
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    expect(await screen.findByText("Waiting for stage update…")).not.toBeNull();
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
+  });
+
+  it("uses a known stage ID when the API omits its label", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("parsing-without-label", "SERIALIZING", "parsing.pdf", "docs", {
+          stage_progress: {
+            stage_id: "parse",
+            phase: "stage",
+            is_currently_running: true,
+            elapsed_ms: 4_000,
+            freshness: "live",
+            history_quality: "complete",
+            persisted_through_sequence: 1,
+          },
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    const parsing = await screen.findByText("Parsing");
+    const badge = parsing.closest("[data-slot='badge']");
+    expect(badge?.textContent).toBe("Parsing · <5s");
+    expect(badge?.className).toContain("bg-amber-100");
   });
 
   it("bulk-cancels only selected active jobs", async () => {
@@ -546,5 +704,354 @@ describe("JobListPage filters", () => {
 
     await waitFor(() => expect(listTasksMock.mock.calls.length).toBeGreaterThan(initialTaskRequests));
     expect(getQueueInfoMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("JobListPage stage progress", () => {
+  beforeEach(() => {
+    permissions.isAdmin = true;
+    auth.user = { id: 7, is_admin: true };
+    vi.clearAllMocks();
+    getQueueInfoMock.mockResolvedValue({
+      workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
+      tasks: {
+        active: 2,
+        active_statuses: { QUEUED: 0, SERIALIZING: 2 },
+        total_completed: 0,
+        total_cancelled: 0,
+        total_failed: 0,
+      },
+    });
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("later-embed", "SERIALIZING", "later.pdf", "docs", {
+          stage_progress: {
+            stage_id: "embed",
+            stage_label: "Embedding",
+            phase: "stage",
+            is_currently_running: true,
+            elapsed_ms: 10_000,
+            freshness: "live",
+            history_quality: "pending_persistence",
+            persisted_through_sequence: 1,
+          },
+        }),
+        task("earlier-parse", "SERIALIZING", "earlier.pdf", "docs", {
+          stage_progress: {
+            stage_id: "parse",
+            stage_label: "Parsing",
+            phase: "stage",
+            is_currently_running: true,
+            elapsed_ms: 4_000,
+            freshness: "live",
+            history_quality: "pending_persistence",
+            persisted_through_sequence: 1,
+          },
+        }),
+      ],
+    });
+  });
+
+  it("shows stage progress under State without adding a column", async () => {
+    renderJobs();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+
+    const laterTime = await screen.findByText("10s");
+    const earlierTime = screen.getByText("<5s");
+    const later = laterTime.closest("[data-slot='badge']")!;
+    const earlier = earlierTime.closest("[data-slot='badge']")!;
+    const stateHeader = screen.getByRole("columnheader", { name: "State" });
+    const stateColumnIndex = Array.from(stateHeader.parentElement!.children).indexOf(stateHeader);
+    expect(screen.queryByRole("columnheader", { name: "Indexing stage" })).toBeNull();
+    expect(later.closest("td")).toBe(later.closest("tr")!.children[stateColumnIndex]);
+    expect(earlier.closest("td")).toBe(earlier.closest("tr")!.children[stateColumnIndex]);
+    expect(later.className).toContain("bg-emerald-100");
+    expect(earlier.className).toContain("bg-amber-100");
+    expect(later.closest("tr")?.textContent).not.toContain("SERIALIZING");
+    expect(earlier.closest("tr")?.textContent).not.toContain("SERIALIZING");
+    expect(later.closest("tr")!.compareDocumentPosition(earlier.closest("tr")!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(screen.getAllByText("Saving history")).toHaveLength(2);
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
+  }, 10_000);
+
+  it("includes time since the backend elapsed sample when opening the Active Jobs page", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("resumed-timer", "SERIALIZING", "resumed.pdf", "docs", {
+          stage_progress: {
+            stage_id: "parse",
+            stage_label: "Parsing",
+            phase: "stage",
+            is_currently_running: true,
+            elapsed_ms: 10_000,
+            elapsed_sampled_at: new Date(Date.now() - 20_000).toISOString(),
+            freshness: "live",
+            history_quality: "complete",
+            persisted_through_sequence: 1,
+          },
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    expect(await screen.findByText("30s")).not.toBeNull();
+  });
+
+  it("shows an actual page extraction count within the Parsing state", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("parsing-pages", "SERIALIZING", "renault.pdf", "docs", {
+          stage_progress: {
+            stage_id: "parse",
+            stage_label: "Parsing",
+            current_substage_id: "parse.text",
+            current_substage_label: "Extracting page text",
+            current_substage_progress: 42,
+            current_substage_total: 578,
+            phase: "stage",
+            is_currently_running: true,
+            elapsed_ms: 12_000,
+            freshness: "live",
+            history_quality: "pending_persistence",
+            persisted_through_sequence: 1,
+          },
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    const progress = await screen.findByText("Parsing · Extracting page text (42/578)");
+    expect(progress.closest("[data-slot='badge']")?.className).toContain("bg-amber-100");
+    expect(screen.getByText("12s")).not.toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "Indexing stage" })).toBeNull();
+  });
+
+  it("shows a durable parser checkpoint with unconfirmed status and no running timer", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("stale-parsing", "SERIALIZING", "stale-renault.pdf", "docs", {
+          stage_progress: {
+            stage_id: "parse",
+            stage_label: "Parsing",
+            last_known_stage_id: "parse",
+            last_known_stage_label: "Parsing",
+            current_substage_id: "parse.text",
+            current_substage_label: "Extracting page text",
+            current_substage_progress: 42,
+            current_substage_total: 578,
+            phase: "stage",
+            is_currently_running: false,
+            elapsed_ms: null,
+            freshness: "durable",
+            history_quality: "incomplete",
+            persisted_through_sequence: 1,
+          },
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    expect(await screen.findByText("Parsing · Extracting page text (42/578) · Status unconfirmed")).not.toBeNull();
+    expect(screen.queryByText("<5s")).toBeNull();
+    expect(screen.queryByText("12s")).toBeNull();
+  });
+
+  it("labels a durable finalizing phase as status unconfirmed", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("stale-finalizer", "SERIALIZING", "stale.pdf", "docs", {
+          stage_progress: {
+            phase: "finalizing",
+            position_score: 7000,
+            is_currently_running: false,
+            freshness: "durable",
+            history_quality: "unknown",
+            persisted_through_sequence: 4,
+          },
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    expect(await screen.findByText("Finalizing · Status unconfirmed")).not.toBeNull();
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
+  });
+
+  it("labels a confirmed interrupted stage in the jobs table", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("interrupted", "FAILED", "interrupted.pdf", "docs", {
+          stage_progress: {
+            freshness: "durable",
+            history_quality: "incomplete",
+            is_currently_running: false,
+            current_invocation_id: "invocation-1",
+            interrupted_invocation_id: "invocation-1",
+            last_known_stage_label: "Embedding",
+            persisted_through_sequence: 1,
+          },
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("FAILED", { selector: "[data-slot='badge']" })).not.toBeNull();
+    expect(screen.queryByText("Interrupted: Embedding")).toBeNull();
+  });
+
+  it("shows a durable active stage as unconfirmed until live worker evidence arrives", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("stale-running", "SERIALIZING", "stale.pdf", "docs", {
+          stage_progress: {
+            freshness: "durable",
+            history_quality: "unknown",
+            is_currently_running: true,
+            current_invocation_id: "invocation-1",
+            last_known_stage_label: "Embedding",
+            persisted_through_sequence: 1,
+          },
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    const unconfirmed = await screen.findByText("Embedding · Status unconfirmed");
+    expect(unconfirmed.closest("[data-slot='badge']")?.className).toContain("bg-emerald-100");
+    expect(screen.queryByText("<5s")).toBeNull();
+  });
+
+  it("uses server pagination for active tasks while preserving the global stage order", async () => {
+    const firstPageTask = task("embed-first", "SERIALIZING", "embed-first.pdf", "docs", {
+      stage_progress: {
+        stage_id: "embed",
+        stage_label: "Embedding",
+        phase: "stage",
+        position_score: 5000,
+        is_currently_running: true,
+        freshness: "live",
+        history_quality: "pending_persistence",
+        persisted_through_sequence: 0,
+      },
+    });
+    const secondPageTask = task("parse-next", "SERIALIZING", "parse-next.pdf", "archive", {
+      stage_progress: {
+        stage_id: "parse",
+        stage_label: "Parsing",
+        phase: "stage",
+        position_score: 0,
+        is_currently_running: true,
+        freshness: "live",
+        history_quality: "pending_persistence",
+        persisted_through_sequence: 0,
+      },
+    });
+    listTasksMock.mockImplementation(async (status, pagination) => {
+      if (status !== "active") return { tasks: [] };
+      if (pagination?.offset === 0) {
+        return {
+          tasks: [firstPageTask],
+          pagination: {
+            offset: 0,
+            limit: 10,
+            total: 11,
+            has_more: true,
+            available_partitions: ["archive", "docs"],
+          },
+        };
+      }
+      if (pagination?.offset === 10) {
+        return {
+          tasks: [secondPageTask],
+          pagination: {
+            offset: 10,
+            limit: 10,
+            total: 11,
+            has_more: false,
+            available_partitions: ["archive", "docs"],
+          },
+        };
+      }
+      return { tasks: [firstPageTask, secondPageTask] };
+    });
+
+    const { queryClient } = renderJobs();
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+
+    expect(await screen.findByText("embed-first.pdf")).not.toBeNull();
+    expect(screen.getByText("11 jobs")).not.toBeNull();
+    expect(screen.getByText("Page 1 of 2")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "File" }).hasAttribute("disabled")).toBe(true);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /select row/i }));
+    expect(screen.getByText("1 selected")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+    expect(listTasksMock).toHaveBeenCalledWith("active");
+    expect(downloadCsvMock).toHaveBeenCalledWith(
+      "openrag-jobs.csv",
+      expect.any(Array),
+      [firstPageTask, secondPageTask],
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+
+    expect(listTasksMock).toHaveBeenCalledWith("active", { limit: 10, offset: 10 });
+    await waitFor(() => {
+      expect(queryClient.getQueryData(["tasks", 7, "admin", "active", { limit: 10, offset: 10 }])).toMatchObject({
+        tasks: [expect.objectContaining({ task_id: "parse-next" })],
+      });
+    });
+    expect(await screen.findByText("parse-next.pdf")).not.toBeNull();
+    expect(screen.queryByText("embed-first.pdf")).toBeNull();
+    expect(screen.queryByText("1 selected")).toBeNull();
+
+    await userEvent.click(screen.getByRole("combobox", { name: /filter jobs by partition/i }));
+    expect(await screen.findByRole("option", { name: "archive" })).not.toBeNull();
+  });
+
+  it("falls back to local pagination when an older server omits pagination metadata", async () => {
+    const tasks = Array.from({ length: 11 }, (_, index) =>
+      task(`queued-${index}`, "QUEUED", `queued-${index}.pdf`),
+    );
+    listTasksMock.mockImplementation(async (status) => ({ tasks: status === "active" ? tasks : [] }));
+
+    renderJobs();
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+
+    expect(await screen.findByText("Page 1 of 2")).not.toBeNull();
+    expect(screen.getByText("11 jobs")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(await screen.findByText("queued-10.pdf")).not.toBeNull();
+  });
+
+  it("falls back to an unpaginated active-task request when the API reports unsupported paging", async () => {
+    const activeTasks = Array.from({ length: 11 }, (_, index) =>
+      task(`active-${index}`, "SERIALIZING", `active-${index}.pdf`),
+    );
+    listTasksMock.mockImplementation(async (status, pagination) => {
+      if (status === "active" && pagination) {
+        throw new ApiError(503, { detail: "[TASK_LIST_PAGINATION_UNAVAILABLE]: older API" });
+      }
+      return { tasks: status === "active" ? activeTasks : [] };
+    });
+
+    renderJobs();
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+
+    expect(await screen.findByText("Page 1 of 2")).not.toBeNull();
+    expect(listTasksMock).toHaveBeenCalledWith("active", { limit: 10, offset: 0 });
+    expect(listTasksMock).toHaveBeenCalledWith("active");
   });
 });

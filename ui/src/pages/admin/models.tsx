@@ -320,106 +320,106 @@ export default function ModelsPage() {
                   </div>
                 )}
                 <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {endpoints
-                    .filter((ep) => ep.model_type === type)
-                    .map((ep) => {
-                      const isDefault = ep.is_default;
-                      const usedBy = ep.used_by_partitions ?? 0;
-                      return (
-                        <Card key={`${ep.model_type}-${ep.name}`}>
-                          <CardHeader className="pb-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <CardTitle className="text-base truncate min-w-0">
-                                {ep.name}
-                              </CardTitle>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                {usedBy > 0 && (
-                                  <Badge
-                                    variant="outline"
-                                    className="shrink-0 text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
-                                  >
-                                    {`used by ${usedBy} partition${usedBy === 1 ? "" : "s"}`}
-                                  </Badge>
-                                )}
-                                {isDefault && (
-                                  <Badge className="shrink-0 bg-green-600 text-xs hover:bg-green-700">Default</Badge>
-                                )}
-                              </div>
-                            </div>
-                            {ep.model_name && (
-                              <CardDescription className="font-mono text-xs truncate">
-                                {ep.model_name}
-                              </CardDescription>
-                            )}
-                          </CardHeader>
-                          <CardContent className="space-y-2 text-sm">
-                            <div className="flex justify-between">
-                              <span className="text-muted-foreground">Endpoint</span>
-                              <span className="truncate ml-2 max-w-[200px] text-right" title={ep.endpoint}>{ep.endpoint}</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-muted-foreground">
-                                {ep.model_type === "stt" ? "Concurrency per worker" : "Batch Size"}
-                              </span>
-                              <span>{ep.batch_size}</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-muted-foreground">Timeout</span>
-                              <span>{ep.timeout}s</span>
-                            </div>
-                            {ep.model_type === "llm" && (
-                              <>
-                                <div className="flex justify-between">
-                                  <span className="text-muted-foreground">Context size</span>
-                                  <span>{formatLlmBudget(llmContextSize(ep))}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span className="text-muted-foreground">Max output tokens</span>
-                                  <span>{formatLlmBudget(llmOutputTokens(ep))}</span>
-                                </div>
-                              </>
-                            )}
-                            <div className="text-xs text-muted-foreground">
-                              Updated {formatDate(ep.updated_at)}
-                            </div>
-                            <div className="flex flex-wrap gap-2 pt-2">
-                              {!isDefault && (
-                                <Button
-                                  size="sm"
+                {endpoints
+                  .filter((ep) => ep.model_type === type)
+                  .map((ep) => {
+                    const isDefault = ep.is_default;
+                    const usedBy = ep.used_by_partitions ?? 0;
+                    return (
+                      <Card key={`${ep.model_type}-${ep.name}`}>
+                        <CardHeader className="pb-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2 min-w-0">
+                            <CardTitle className="text-base truncate min-w-0" title={ep.name}>
+                              {ep.name}
+                            </CardTitle>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {usedBy > 0 && (
+                                <Badge
                                   variant="outline"
-                                  onClick={() =>
-                                    // Only an embedder's default decides where vectors live.
-                                    ep.model_type === "embedder"
-                                      ? setPendingDefault(ep)
-                                      : setDefaultMut.mutate({ type: ep.model_type, name: ep.name })
-                                  }
-                                  disabled={setDefaultMut.isPending}
+                                  className="shrink-0 text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
                                 >
-                                  <Star className="mr-1 h-3 w-3" /> Set Default
-                                </Button>
+                                  {`used by ${usedBy} partition${usedBy === 1 ? "" : "s"}`}
+                                </Badge>
                               )}
-                              <Button size="sm" variant="outline" onClick={() => handleOpenEdit(ep)}>
-                                <Pencil className="mr-1 h-3 w-3" /> Edit
-                              </Button>
-                              <ConfirmDialog
-                                title="Delete endpoint?"
-                                description={describeDelete(ep)}
-                                onConfirm={() => deleteMut.mutate({ type: ep.model_type, name: ep.name })}
-                              >
-                                <Button size="sm" variant="outline" className="text-destructive">
-                                  <Trash2 className="mr-1 h-3 w-3" /> Delete
-                                </Button>
-                              </ConfirmDialog>
+                              {isDefault && (
+                                <Badge className="shrink-0 bg-green-600 text-xs hover:bg-green-700">Default</Badge>
+                              )}
                             </div>
-                          </CardContent>
-                        </Card>
-                      );
-                    })}
-                  {endpoints.filter((ep) => ep.model_type === type).length === 0 && (
-                    <p className="col-span-full text-center py-8 text-muted-foreground">
-                      No {type} endpoints configured.
-                    </p>
-                  )}
+                          </div>
+                          {ep.model_name && (
+                            <CardDescription className="font-mono text-xs truncate" title={ep.model_name}>
+                              {ep.model_name}
+                            </CardDescription>
+                          )}
+                        </CardHeader>
+                        <CardContent className="space-y-2 text-sm">
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">Endpoint</span>
+                            <span className="truncate ml-2 max-w-[200px] text-right" title={ep.endpoint}>{ep.endpoint}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">
+                              {ep.model_type === "stt" ? "Concurrency per worker" : "Batch Size"}
+                            </span>
+                            <span>{ep.batch_size}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">Timeout</span>
+                            <span>{ep.timeout}s</span>
+                          </div>
+                          {ep.model_type === "llm" && (
+                            <>
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Context size</span>
+                                <span>{formatLlmBudget(llmContextSize(ep))}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Max output tokens</span>
+                                <span>{formatLlmBudget(llmOutputTokens(ep))}</span>
+                              </div>
+                            </>
+                          )}
+                          <div className="text-xs text-muted-foreground">
+                            Updated {formatDate(ep.updated_at)}
+                          </div>
+                          <div className="flex flex-wrap gap-2 pt-2">
+                            {!isDefault && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  // Only an embedder's default decides where vectors live.
+                                  ep.model_type === "embedder"
+                                    ? setPendingDefault(ep)
+                                    : setDefaultMut.mutate({ type: ep.model_type, name: ep.name })
+                                }
+                                disabled={setDefaultMut.isPending}
+                              >
+                                <Star className="mr-1 h-3 w-3" /> Set Default
+                              </Button>
+                            )}
+                            <Button size="sm" variant="outline" onClick={() => handleOpenEdit(ep)}>
+                              <Pencil className="mr-1 h-3 w-3" /> Edit
+                            </Button>
+                            <ConfirmDialog
+                              title="Delete endpoint?"
+                              description={describeDelete(ep)}
+                              onConfirm={() => deleteMut.mutate({ type: ep.model_type, name: ep.name })}
+                            >
+                              <Button size="sm" variant="outline" className="text-destructive">
+                                <Trash2 className="mr-1 h-3 w-3" /> Delete
+                              </Button>
+                            </ConfirmDialog>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+                {endpoints.filter((ep) => ep.model_type === type).length === 0 && (
+                  <p className="col-span-full text-center py-8 text-muted-foreground">
+                    No {type} endpoints configured.
+                  </p>
+                )}
                 </div>
               </>
             )}

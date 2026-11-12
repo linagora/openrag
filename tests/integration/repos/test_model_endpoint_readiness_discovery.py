@@ -126,8 +126,8 @@ async def test_discovery_follows_only_defaults_and_references_used_by_partitions
                 await conn.executemany(
                     """
                     INSERT INTO partitions
-                        (id, partition, embedder, indexation_preset, retrieval_preset, chat_llm)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                        (id, partition, embedder, indexation_preset, retrieval_preset, chat_llm, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
                     """,
                     partition_rows,
                 )

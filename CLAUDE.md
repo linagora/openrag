@@ -134,7 +134,7 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 2. Prompt templates (`openrag/prompts/templates/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
 3. `extract_and_strip_sources_block()` (`openrag/core/utils/source_filtering.py`) strips this tag from the response before sending to the client
 4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every presented source is kept instead (a missing tag means the model didn't report citations, not that it used none)
-5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
+5. For streaming, `stream_with_source_filtering()` (same module, driven by `query_service.chat_stream`) holds back a lookahead of at least 80 chars, more with many sources, and emits only text no later chunk can change, so a tag never reaches the client. At each chunk it strips only the part of the answer it has not yet cut off and emitted; when there is nowhere to cut, it strips that part again only once it has grown by an eighth. That keeps a long stream linear
 
 The `extra` field in API responses is a JSON object with these keys. It was a
 JSON-encoded *string* up to and including v2.2.2 — a breaking change for readers
@@ -190,7 +190,7 @@ those keys along with `score`, and `ScoredChunk.to_langchain()` clears them from
 metadata before stamping its typed fields. A score in an API response was set by *that*
 retrieval, never by whoever uploaded the file.
 
-Three caveats:
+Four caveats:
 
 - The key is **absent**, not null, when no reranker ran (reranker disabled, or a web
   source — web results are built separately and never reranked). Such chunks stay plain
@@ -202,6 +202,45 @@ Three caveats:
   reranks each sub-query's list separately and then fuses them with RRF, so the final
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
+- Under a `date_order` ("the last X", see Temporal Queries) the sources are in document-date
+  order, not score order.
+
+### Temporal Queries
+
+Dates are handled from the user's wording, never from a request parameter. The query
+contextualizer (`openrag/prompts/templates/query_contextualizer_tmpl.txt`, rendered with the
+pre-computed `calendar_anchors`) emits per sub-query a `temporal_filters` list (Milvus predicates
+on `created_at`, e.g. "last week") and/or a `date_order` (`"newest"` / `"oldest"`, e.g. "the
+last meeting I had"; an unknown value is read as no order, with a warning, so the rest of the
+answer stays usable). `Query.to_milvus_filter()` (`core/models/query.py`) renders the predicates;
+`order_chunks_by_date` (`core/retrieval/date_order.py`) orders the sources the answering LLM
+reads, stable within a document and with undated (or future-dated) chunks last. The date never
+decides *which* sources the model gets: retrieval, the `top_k` cut, the context-budget fit
+(`_fit_sources`) and the drop-until-it-fits loop all stay relevance-ranked, exactly as without a
+date order, and only the chunks that made it in are re-sorted, in `_prepare_chat` and
+`_prepare_completions` right before rendering. Selecting by date instead let recent, loosely
+matching documents (invitations, agendas) crowd the asked-for report out of the context (review
+on PR #1317); with the dates shown, the model picks the newest relevant source itself. The
+returned `docs` (hence `extra.sources` and the citation numbers) follow the rendered order.
+`SearchQueries.date_order` is the order all sub-queries share; with different ones ("my first
+and last invoice") the sources keep their relevance order. `describe_source`
+(`core/prompts/chat_prompt_builder.py`) puts a `Created: ... UTC | File: ...` line under each
+`[Source N]` marker so the answering LLM can see the dates; the answer templates tell it to use
+that line for "when" questions. The `Created:` field comes first and is always there when a file
+name is shown (`Created: unknown` without a date), and the name is flattened, stripped of `|` and
+capped, because the name is upload metadata: it must not be able to add a line or a `Created:`
+ahead of the real one under the trusted marker.
+
+`created_at` is the only temporal field and is client-supplied at upload (`TEMPORAL_FIELDS` in
+`indexing_service.py`, a TIMESTAMPTZ column in Milvus); cozy-stack sends the Cozy file creation
+date. A chunk without it is neither filtered in nor sorted first. `_QUERY_JSON_HINT`
+(`query_service.py`) must keep `temporal_filters` / `date_order` open ("per the rules above"): a
+literal `null` there is copied verbatim by the model.
+
+Known limits: `retriever.allow_filterless_fallback` (default `true`) retries without the filter
+when a period matches nothing, and the model is not told — it then summarizes out-of-period
+documents; and "the last X" only finds the newest X if it is among the `top_n` best matches, so
+with many equally relevant documents (weekly reports) an older one can be presented as the last.
 
 ### Prometheus Metrics
 
@@ -366,7 +405,12 @@ dispatcher and workers, since Ray only applies actor options when it creates the
 (this branch, independently) covers `TaskStateManager` bounding its in-memory retention and being
 replaced during bootstrap when an older actor lacks that support — that replacement changes the
 `TaskStateManager` actor id, which strands the dispatcher's and workers' cached handles to it unless
-the whole generation rolls together; v9 folds in both independent v8 lineages). Without the bump, new
+the whole generation rolls together; v9 folds in both independent v8 lineages; v14 (develop)
+makes workers emit stage history, and v15 to v17 (develop) add stage snapshots and the streaming
+workbook parser; v18 on this branch preserves unsettled terminal outcomes, while independent v18
+on `develop` added worker-ref ownership through `has_object_ref` and replaces older task-state
+actors (#1296). v19 combines both contracts because the two v18 actor generations cannot be safely
+reused under the same detached actor names. Without the bump, new
 replicas attach to the previous release's actors and every submit raises `TypeError`. Old generations
 are retired with `services/workers/retire_indexer_generation.py`.
 
@@ -488,7 +532,7 @@ logger = get_logger()
 logger.bind(file_id=file_id, partition=partition).info("Message")
 ```
 
-stderr is the **only** sink (`core/utils/logging.py`); there is no log file. `LOG_FORMAT=text` (default) is the colorized terminal format, `LOG_FORMAT=json` writes one flat JSON object per line (`json_record`/`json_sink`: `ts`, `level`, `logger`, `function`, `line`, `msg`, `exception`, then every bound `extra` at the top level, collisions prefixed `extra_`) and routes stdlib logging (uvicorn, Ray) through loguru via `InterceptHandler` (idempotent `intercept_stdlib_logging(level)`: one interceptor on the root, foreign handlers detached not closed, root at loguru's numeric level so libraries' `isEnabledFor(DEBUG)` guards hold, chatty loggers capped at WARNING only while still at NOTSET). `RequestIdMiddleware` binds `request_id` into the loguru context for the whole request; the unhandled-500 handler binds it explicitly because it runs after that scope unwinds. Ray relays worker output onto the API stream with a `(Actor pid=N) ` prefix that the collector strips; `RAY_DEDUP_LOGS=0` and `RAY_COLOR_PREFIX=0` are required for that relay to carry valid JSON (overlay and chart set them), and with `ray.enabled=true` the chart sets `RAY_LOG_TO_STDERR=1` so workers write to their own pod's stderr (the relay only carries the current driver job's actors). Shipping: compose `infra/compose/logging.docker-compose.yaml` (Alloy, `infra/compose/alloy/config.alloy`), Helm sets `LOG_FORMAT=json` and relies on the platform DaemonSet. Docs: `docs/content/docs/documentation/loki_logs.md`.
+stderr is the **only** sink (`core/utils/logging.py`); there is no log file. `LOG_FORMAT=text` (default) is the colorized terminal format, `LOG_FORMAT=json` writes one flat JSON object per line (`json_record`/`json_sink`: `ts`, `level`, `logger`, `function`, `line`, `msg`, `exception`, then every bound `extra` at the top level, collisions prefixed `extra_`) and routes stdlib logging (uvicorn, Ray) through loguru via `InterceptHandler` (idempotent `intercept_stdlib_logging(level)`: one interceptor on the root, foreign handlers detached not closed, root at loguru's numeric level so libraries' `isEnabledFor(DEBUG)` guards hold, chatty loggers capped at WARNING only while still at NOTSET). `RequestIdMiddleware` binds `request_id` into the loguru context for the whole request; the unhandled-500 handler binds it explicitly because it runs after that scope unwinds. Ray relays worker output onto the API stream with a `(Actor pid=N) ` prefix that the collector strips; `RAY_DEDUP_LOGS=0` and `RAY_COLOR_PREFIX=0` are required for that relay to carry valid JSON (overlay and chart set them; tqdm bars aren't JSON either, so the overlay sets `TQDM_DISABLE=1` and the chart derives it in `configmap-env.yaml` whenever `LOG_FORMAT=json`; Marker passes `disable=` explicitly, so `MarkerWorker` sets its `disable_tqdm` config from that variable or from `LOG_FORMAT=json`), and with `ray.enabled=true` the chart sets `RAY_LOG_TO_STDERR=1` so workers write to their own pod's stderr (the relay only carries the current driver job's actors). Shipping: compose `infra/compose/logging.docker-compose.yaml` (Alloy, `infra/compose/alloy/config.alloy`), Helm sets `LOG_FORMAT=json` and relies on the platform DaemonSet. Docs: `docs/content/docs/documentation/loki_logs.md`.
 
 ### Import Conventions
 

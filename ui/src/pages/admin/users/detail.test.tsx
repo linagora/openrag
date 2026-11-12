@@ -113,11 +113,34 @@ describe("UserDetailPage read errors", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
+  it("disables Grant access when the user's memberships could not be loaded", async () => {
+    getUserMock.mockResolvedValue(makeUser());
+    listUserMembershipsMock.mockRejectedValueOnce(new Error("service unavailable"));
+    listPartitionsMock.mockResolvedValue({
+      partitions: [{ partition: "docs", role: "owner" }],
+    } as never);
+    const user = userEvent.setup();
+    renderUserDetail();
+
+    await user.click(await screen.findByRole("tab", { name: "Partitions" }));
+    expect(await screen.findByText("Partition access could not be loaded")).not.toBeNull();
+    expect((screen.getByRole("button", { name: "Grant access" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("keeps the loaded user visible and labels the profile stale after refresh fails", async () => {
     getUserMock.mockRejectedValue(new Error("service unavailable"));
     renderUserDetail(true);
 
     expect(await screen.findByText("User could not be refreshed")).not.toBeNull();
     expect(screen.getByRole("heading", { name: "Ada Lovelace" })).not.toBeNull();
+  });
+
+  it("keeps the cached user visible when a background refresh returns 404", async () => {
+    getUserMock.mockRejectedValueOnce(new ApiError(404, { detail: "User not found" }));
+    renderUserDetail(true);
+
+    expect(await screen.findByText("User could not be refreshed")).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Ada Lovelace" })).not.toBeNull();
+    expect(screen.queryByText("User not found.")).toBeNull();
   });
 });

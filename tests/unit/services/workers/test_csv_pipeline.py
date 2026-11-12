@@ -16,18 +16,18 @@ from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType, TextBlock
 from core.models.stage_progress import StageEventStatus, StageFailureEffect
+from services.inference import runtime as runtime_module
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
 from services.workers.pipeline_builder import IndexingPipeline, PipelineTimeouts
 from services.workers.stage_tracker import StageTracker
-from services.workers.stages import _common as common_module
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
 
 @pytest.fixture(autouse=True)
 def _stub_language_detector(monkeypatch):
     """Keep these tests off the real language detector and its model download."""
-    monkeypatch.setattr(common_module, "detect_language", lambda _text, **_kwargs: "en")
+    monkeypatch.setattr(runtime_module, "detect_language", lambda _text, **_kwargs: "en")
 
 
 class RecordingParser(CsvParser):
@@ -307,7 +307,7 @@ async def test_csv_detects_language_once_after_all_batches(setup_pipeline, monke
         detected_samples.append(text)
         return "fr"
 
-    monkeypatch.setattr(common_module, "detect_language", detect_language)
+    monkeypatch.setattr(runtime_module, "detect_language", detect_language)
 
     async def tag_after_storing(messages):
         assert len(pipeline.vector_store.calls) == 3

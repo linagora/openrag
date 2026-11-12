@@ -62,6 +62,68 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
+
+The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any
+earlier 2.3.x. Workers of the old release keep a handle to the replaced actor, so
+a file they are still indexing loses its state writes and stays `SERIALIZING`.
+On a shared Ray cluster (`ray.enabled: true`, or an external cluster), stop
+traffic and wait until no indexing task is active before the first 2.3.5 replica
+starts, as in
+[Upgrades that change the indexer generation](/openrag/documentation/kubernetes/#upgrades-that-change-the-indexer-generation).
+On an external cluster, retire the `v13` generation there. With Ray inside the
+OpenRAG pod or container, nothing extra is needed.
+
+## OpenRAG 2.3.5 on Kubernetes: recreate the Ray pods
+
+With `LOG_FORMAT=json` (the chart's default), the chart now sets
+`TQDM_DISABLE=1`, unless `env.config.TQDM_DISABLE` is set, so progress bars stop
+breaking the JSON log stream. With `ray.enabled: true`, KubeRay does not
+recreate Ray pods when the chart changes, and the pods already running keep
+their bars. After `helm upgrade`, at a time when no indexing is running, scale
+OpenRAG down, delete every Ray pod, head included, and scale OpenRAG back up once
+the new pods are Ready: an OpenRAG pod connected to the old Ray head does not
+reconnect on its own.
+
+```bash
+NS=openrag            # the release namespace
+FULLNAME=openrag      # fullnameOverride; `kubectl get raycluster -n $NS` shows it as <FULLNAME>-raycluster
+REPLICAS=$(kubectl get deploy -n "$NS" "$FULLNAME-openrag" -o jsonpath='{.spec.replicas}')
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
+kubectl wait -n "$NS" pod -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance="$FULLNAME" \
+  --for=delete --timeout=10m
+kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
+# Wait for KubeRay to create the new pods, then for them to be Ready (fails after 10m).
+until kubectl get pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster" -o name | grep -q .; do sleep 5; done
+kubectl wait -n "$NS" pod -l ray.io/cluster="$FULLNAME-raycluster" --for=condition=Ready --timeout=10m
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas="$REPLICAS"
+kubectl rollout status -n "$NS" deploy/"$FULLNAME-openrag"   # before resuming indexing
+```
+
+The same applies after any upgrade that changes an `env.config` value read by
+Ray: the Ray containers read it only when they start.
+
+## OpenRAG 2.3.5 on Kubernetes: settings the chart refuses with the embedded Ray
+
+With `ray.enabled: false`, no `RAY_ADDRESS` and `ray.externalCluster: false` (the
+default), each OpenRAG pod starts its own Ray. From OpenRAG 2.3.5, the chart refuses two kinds of settings that break
+indexing in that mode. `helm upgrade` then stops before it changes anything, and
+the error names the setting.
+
+| The chart refuses | Why | What to change |
+|---|---|---|
+| `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. | Keep `openrag.replicas: 1`, or share one Ray cluster: `ray.enabled: true` together with `env.config.RAY_ADDRESS` or `env.config.ENABLE_RAY_SERVE=true` (see [Notes](/openrag/documentation/kubernetes/#notes)), or an external cluster through `env.config.RAY_ADDRESS`, with `ray.externalCluster: true` when `RAY_ADDRESS` comes from a Secret the chart cannot read. |
+| Marker, Docling and Whisper workers that don't fit the OpenRAG pod's GPUs | Each worker reserves its `*_NUM_GPUS` of the pod's GPUs (`MARKER_POOL_SIZE` × `MARKER_NUM_GPUS`, `DOCLING_POOL_SIZE` × `DOCLING_NUM_GPUS`, `WHISPER_N_WORKERS` × `WHISPER_NUM_GPUS`). Ray keeps a fraction of a GPU on a single card, and takes a reservation of 1 or more as whole cards, so three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and files sent to them fail after the parser's timeout. A preset can select Marker or Docling even when `PDFLOADER` names another parser, and Whisper transcribes audio by default, so the check applies to every deployment with a GPU in the pod, whatever order the workers start in. | Lower the pool sizes or the `*_NUM_GPUS` values, or give the pod more GPUs. A reservation above 1 must be a whole number. |
+
+The chart also drops `RAY_NUM_GPUS` from its defaults: OpenRAG never read it, so a
+copy in your values does nothing.
+
+With the embedded Ray, the OpenRAG Deployment now uses the `Recreate` strategy: an
+upgrade stops the old pod before it starts the new one. A rolling update ran both
+for a moment, each with its own Ray, and the new pod's job reconciler could mark
+the old pod's queued jobs failed for good. Expect the API to be unavailable while
+the new pod starts. With a shared Ray cluster, the rolling update is unchanged.
+
 ## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
 
 With `ray.enabled: true`, the Ray head installs the Python dependencies into the

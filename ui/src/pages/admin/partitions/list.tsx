@@ -36,6 +36,7 @@ import {
 import { PageHeader } from "@/components/shared/page-header";
 import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { DEFAULT_PAGE_SIZE } from "@/components/shared/data-table";
 import {
   listPartitions,
   createPartition,
@@ -54,7 +55,6 @@ import { intOr } from "@/lib/utils";
 import { partitionDetailPath } from "@/lib/routes";
 
 type SortDir = "asc" | "desc" | null;
-const PARTITIONS_PAGE_SIZE = 10;
 const PARTITIONS_REFETCH_INTERVAL_MS = 5000;
 // Seeded at startup; the API refuses to delete it.
 const DEFAULT_PARTITION_NAME = "default";
@@ -179,8 +179,8 @@ export default function PartitionListPage() {
   const [llmValidating, setLlmValidating] = useState(false);
 
   const [search, setSearch] = useState("");
-  const [sortDir, setSortDir] = useState<SortDir>(null);
-  const [sortColumn, setSortColumn] = useState<"name" | "created_at">("created_at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sortColumn, setSortColumn] = useState<"name" | "created_at">("name");
   const [selectedPartitionNames, setSelectedPartitionNames] = useState<string[]>([]);
   const [pageIndex, setPageIndex] = useState(0);
   const [manualRefreshing, setManualRefreshing] = useState(false);
@@ -279,21 +279,16 @@ export default function PartitionListPage() {
       );
     }
 
-    // Sort
-    if (sortDir) {
-      const dir = sortDir === "asc" ? 1 : -1;
-      items = [...items].sort((a, b) => {
-        if (sortColumn === "name") {
-          return a.name.localeCompare(b.name) * dir;
-        }
-        // created_at
-        const aDate = a.created_at ?? "";
-        const bDate = b.created_at ?? "";
-        return aDate.localeCompare(bDate) * dir;
-      });
-    }
-
-    return items;
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      if (sortColumn === "name") {
+        return a.name.localeCompare(b.name) * dir;
+      }
+      // created_at
+      const aDate = a.created_at ?? "";
+      const bDate = b.created_at ?? "";
+      return aDate.localeCompare(bDate) * dir;
+    });
   }, [partitionsQuery.data, search, sortDir, sortColumn]);
 
   // Show the actions column whenever the row has at least one available row
@@ -302,7 +297,7 @@ export default function PartitionListPage() {
     canManagePartitions ||
     filteredAndSorted.some((p) => canWrite(p.role) || canConfigurePartition(p.role));
 
-  const pageCount = Math.ceil(filteredAndSorted.length / PARTITIONS_PAGE_SIZE);
+  const pageCount = Math.ceil(filteredAndSorted.length / DEFAULT_PAGE_SIZE);
   useEffect(() => {
     if (pageIndex > 0 && pageIndex > pageCount - 1) {
       setPageIndex(Math.max(0, pageCount - 1));
@@ -310,8 +305,8 @@ export default function PartitionListPage() {
   }, [pageCount, pageIndex]);
 
   const visiblePartitions = useMemo(() => {
-    const start = pageIndex * PARTITIONS_PAGE_SIZE;
-    return filteredAndSorted.slice(start, start + PARTITIONS_PAGE_SIZE);
+    const start = pageIndex * DEFAULT_PAGE_SIZE;
+    return filteredAndSorted.slice(start, start + DEFAULT_PAGE_SIZE);
   }, [filteredAndSorted, pageIndex]);
   const visibleDeletablePartitionNames = useMemo(
     () => visiblePartitions.filter(canDeletePartition).map((p) => p.name),
@@ -354,12 +349,8 @@ export default function PartitionListPage() {
     if (sortColumn !== column) {
       setSortColumn(column);
       setSortDir("asc");
-    } else if (sortDir === null) {
-      setSortDir("asc");
-    } else if (sortDir === "asc") {
-      setSortDir("desc");
     } else {
-      setSortDir(null);
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
     }
   };
 

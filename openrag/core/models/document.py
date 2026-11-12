@@ -105,16 +105,24 @@ class ImageBlock(BaseModel):
       a ``data:`` URI built from the bytes when present, otherwise the
       ``source_url`` as-is.
 
-    Lifetime of ``image_bytes`` during indexing:
-    - ``IndexingPipeline`` clears it (``_release_image_bytes``) as soon as the
+    Deferred encoding:
+    - A parser that holds a decoded PIL image may set ``pil_image`` and leave
+      ``image_bytes`` empty. PNG-encoding a large figure costs up to a quarter
+      of a second of CPU, and the caption stage is the only reader of the
+      bytes, so it encodes ``pil_image`` into ``image_bytes`` only when it
+      captions the document.
+
+    Lifetime of ``image_bytes`` and ``pil_image`` during indexing:
+    - ``IndexingPipeline`` clears both (``_release_image_bytes``) as soon as the
       caption decision resolves — whether captioning ran, was skipped or
       failed — because the payloads outlast the file itself and survived embed
-      and store. A stage added after that point reads ``b""``, not the image.
-      Everything else on this block survives: ``caption``, ``page_number``,
-      ``mime_type``, ``source_url`` and ``metadata``.
+      and store. A stage added after that point reads ``b""`` and ``None``, not
+      the image. Everything else on this block survives: ``caption``,
+      ``page_number``, ``mime_type``, ``source_url`` and ``metadata``.
     """
 
     image_bytes: bytes = Field(default=b"", exclude=True, repr=False)
+    pil_image: Any = Field(default=None, exclude=True, repr=False)
     source_url: str | None = None
     page_number: int | None = None
     caption: str | None = None

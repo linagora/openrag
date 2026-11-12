@@ -13,6 +13,7 @@ row from hiding a terminal result in the live actor.
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -43,6 +44,7 @@ _DURABLE_TASK_LIMIT = 500
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _MAX_STAGE_HISTORY_PAGE = 200
 _MAX_PAGINATION_OFFSET = 2**63 - 1
+_OPTIONAL_STAGE_PROGRESS_SIDECAR_TIMEOUT_SECONDS = 2.0
 _STAGE_LABELS = {
     "parse": "Parsing",
     "caption": "Image captioning",
@@ -671,11 +673,18 @@ class JobService:
             return {}
         snapshots: dict[str, Any] = {}
         if self._stage_progress_manager is not None:
-            sidecar_snapshots = await self._optional_actor_call(
-                "get_stage_progress_snapshots",
-                active_task_ids,
-                actor=self._stage_progress_manager,
-            )
+            try:
+                sidecar_snapshots = await asyncio.wait_for(
+                    self._optional_actor_call(
+                        "get_stage_progress_snapshots",
+                        active_task_ids,
+                        actor=self._stage_progress_manager,
+                    ),
+                    timeout=_OPTIONAL_STAGE_PROGRESS_SIDECAR_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning("Timed out reading optional live stage progress sidecar")
+                sidecar_snapshots = None
             if isinstance(sidecar_snapshots, dict):
                 snapshots.update(sidecar_snapshots)
         task_state_snapshots = await self._optional_actor_call("get_stage_progress_snapshots", active_task_ids)

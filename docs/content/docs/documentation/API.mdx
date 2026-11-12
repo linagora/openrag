@@ -175,6 +175,31 @@ The client can include the temporal field to allow temporal-aware search in sear
 This is a first iteration — additional temporal fields (e.g. `updated_at`) may be added in future releases as needed.
 :::
 
+On the chat endpoint, `created_at` drives three behaviours. The first two are derived from
+the user's wording by the query contextualizer (no request parameter), so they only apply in
+the default `RAG_MODE=ChatBotRag`; `SimpleRag` skips query generation and gets neither.
+
+* **Period filters** — "last week", "in March 2026", "since January": the retrieval is
+  restricted to documents whose `created_at` falls in the period (Milvus predicates). When
+  the filtered search returns nothing, the default configuration retries without the filter
+  and can return out-of-period sources; `RETRIEVER_ALLOW_FILTERLESS_FALLBACK=false` makes
+  the period strict and returns no source instead.
+* **Date ordering** — "the last meeting I had", "my latest invoice", "the first contract
+  with ACME": the sources are selected by relevance as usual, then shown to the model
+  ordered by `created_at` (newest or oldest first), each with its date, so it can pick the
+  one the user means. The date never decides which sources are kept: the newest document
+  has to be among the best matches. Chunks without a `created_at`, or with one later than
+  the current time, are placed last. The sources in the response's `extra` follow the same
+  order, so under a date order they are not sorted by `rerank_score`.
+* **Provenance line** — a document source block in the prompt carries a
+  `Created: <date> UTC | File: <filename>` line under its `[Source N]` marker, so the
+  model can name the date it relied on and tell documents apart. A missing date reads
+  `Created: unknown`, a missing file name is omitted, and a source with neither has no
+  line; web sources keep their own title and URL format.
+
+A file uploaded without `created_at` is never filtered in and never sorted first: to get
+these behaviours on an existing corpus, re-upload (or re-index) the files with the field.
+
 
 ##### Upload files while modeling relations between them
 

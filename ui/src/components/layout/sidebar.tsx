@@ -114,7 +114,7 @@ export function AppSidebar() {
                   : badgeCount}
             </Badge>
           )}
-          {active && badgeCount === 0 && (
+          {active && !hasActiveJobs && !jobsCountUnavailable && (
             <span className="absolute right-3 h-1.5 w-1.5 rounded-full bg-sidebar-primary shrink-0 group-data-[collapsible=icon]:hidden" />
           )}
         </Link>

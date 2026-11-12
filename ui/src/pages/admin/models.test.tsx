@@ -6,6 +6,7 @@ import {
   createModelEndpoint,
   getModelEndpointIndexedUsage,
   listModelEndpoints,
+  type ModelEndpointResponse,
   setDefaultModelEndpoint,
   updateModelEndpoint,
   validateModelEndpoint,
@@ -55,10 +56,11 @@ beforeAll(() => {
   });
 });
 
-function renderPage() {
+function renderPage(cachedEndpoints?: ModelEndpointResponse[]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  if (cachedEndpoints) queryClient.setQueryData(["model-endpoints"], cachedEndpoints, { updatedAt: 0 });
   return render(
     <QueryClientProvider client={queryClient}>
       <ModelsPage />
@@ -527,6 +529,14 @@ describe("ModelsPage read errors", () => {
     expect(screen.queryByText("No embedder endpoints configured.")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("No embedder endpoints configured.")).not.toBeNull();
+  });
+
+  it("keeps the last loaded endpoints visible when a refresh fails", async () => {
+    listModelEndpointsMock.mockRejectedValueOnce(new Error("service unavailable"));
+    renderPage([]);
+
+    expect(await screen.findByText("Model endpoints could not be refreshed")).not.toBeNull();
+    expect(screen.getByText("No embedder endpoints configured.")).not.toBeNull();
   });
 
 });

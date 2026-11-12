@@ -18,6 +18,7 @@ from typing import Any
 
 from core.indexing.parsers.registry import parser_registry
 from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row, normalize_headers
+from core.indexing.parsers.tabular.xlsx_row_router import route_sheet_tables
 from core.indexing.parsers.tabular.xlsx_validation import SheetInfo, TableRegion, XlsxLimits, limit, validate_ooxml
 from core.models.document import Document, ProcessedDocument, TextBlock
 from core.utils.consts import XLSX_TEXT_NUMBER_FORMAT_KINDS
@@ -413,6 +414,22 @@ def _analyze_formula(
     if unresolved:
         result["unresolved_references"] = list(dict.fromkeys(unresolved))
     return result
+
+
+def _sheet_notes(sheet: SheetInfo, max_tables: int) -> str:
+    """Searchable lines telling the reader what the worksheet's extraction left out or reshaped."""
+    notes = ""
+    if sheet.hidden_rows:
+        notes += f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} (hidden or collapsed rows)."
+    if sheet.filtered_rows:
+        notes += f"\nRows hidden by an active filter are included: {len(sheet.filtered_rows)}."
+    if sheet.merged_table_blocks:
+        notes += (
+            f"\nThis worksheet has {sheet.merged_table_blocks} separate blocks, more than the {max_tables}-table "
+            "limit: blocks sharing the same columns are indexed as one table, so their later header rows appear "
+            "as data rows."
+        )
+    return notes
 
 
 def _worksheet_context(sheet_name: str) -> str:
@@ -1073,7 +1090,46 @@ def _column_header_hierarchy(
     return flattened, hierarchy, hierarchy_rows
 
 
-def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
+def _worksheet_scan(sheet, formula_sheet):
+    """``open_scan`` for :func:`route_sheet_tables` over one worksheet's two readers."""
+
+    @contextmanager
+    def open_scan(min_row: int, max_row: int, min_column: int, max_column: int):
+        """Yield the value and formula row iterators over one rectangle."""
+        window = {
+            "min_row": min_row,
+            "max_row": max_row,
+            "min_col": min_column,
+            "max_col": max_column,
+            "values_only": False,
+        }
+        with closing(sheet.iter_rows(**window)) as value_rows:
+            if formula_sheet is None:
+                yield value_rows, None
+                return
+            with closing(formula_sheet.iter_rows(**window)) as formula_rows:
+                yield value_rows, formula_rows
+
+    return open_scan
+
+
+def _table_row_pipeline(info: SheetInfo):
+    """``make_pipeline`` for :func:`route_sheet_tables`: raw cells to row values.
+
+    Maps one input row to one output row; the router relies on that.
+    """
+
+    def make_pipeline(table: TableRegion, value_rows, formula_rows):
+        """Return the table's row pipeline over the given raw row iterators."""
+        visible_rows = _value_rows(_visible_rows(value_rows, table, info), info.uncached_string_formulas)
+        if formula_rows is None:
+            return _without_calculated_empty(visible_rows)
+        return _rows_with_formulas(visible_rows, _visible_rows(formula_rows, table, info))
+
+    return make_pipeline
+
+
+def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo], limits: XlsxLimits):
     from openpyxl import load_workbook
 
     # OpenPyXL parses cells only here: disabling VBA retention makes the safety
@@ -1103,102 +1159,26 @@ def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo]):
                     sheet = workbook[info.name]
                     # Exporters may declare A1:A1 or a huge dimension. Use inspected cells.
                     sheet.reset_dimensions()
-                    # Vertically disjoint regions can share one forward-only
-                    # worksheet scan. Overlapping regions still use separate
-                    # scans so their rows never need unbounded buffering.
-                    if len(info.tables) > 1 and all(
-                        left.end_row < right.start_row for left, right in zip(info.tables, info.tables[1:])
+                    formula_sheet = None
+                    if info.formula_cells:
+                        if formula_workbook is None:
+                            raise PipelineError("XLSX formula reader is unavailable", code="INVALID_XLSX")
+                        formula_sheet = formula_workbook[info.name]
+                        formula_sheet.reset_dimensions()
+                    # One scan of each reader serves every table of the sheet,
+                    # whether the tables are stacked, side by side or interleaved.
+                    for table, rows in route_sheet_tables(
+                        list(info.tables),
+                        _worksheet_scan(sheet, formula_sheet),
+                        _table_row_pipeline(info),
+                        with_formulas=formula_sheet is not None,
+                        spool_limit=limits.max_spool_bytes,
+                        spool_memory_limit=limits.max_spool_memory_bytes,
+                        # The same traversal budget preflight applies to a sheet.
+                        max_scan_area=limits.max_sheet_area,
+                        has_columns=lambda table, info=info: bool(_table_columns(table, info)),
                     ):
-                        first_column = min(table.start_column for table in info.tables)
-                        last_column = max(table.end_column for table in info.tables)
-                        with closing(
-                            sheet.iter_rows(
-                                min_row=info.tables[0].start_row,
-                                max_row=info.tables[-1].end_row,
-                                min_col=first_column,
-                                max_col=last_column,
-                                values_only=False,
-                            )
-                        ) as all_rows:
-                            formula_sheet = formula_workbook[info.name] if info.formula_cells else None
-                            if formula_sheet is not None:
-                                formula_sheet.reset_dimensions()
-                            formula_iter = (
-                                closing(
-                                    formula_sheet.iter_rows(
-                                        min_row=info.tables[0].start_row,
-                                        max_row=info.tables[-1].end_row,
-                                        min_col=first_column,
-                                        max_col=last_column,
-                                        values_only=False,
-                                    )
-                                )
-                                if formula_sheet is not None
-                                else nullcontext(None)
-                            )
-                            with formula_iter as all_formula_rows:
-                                previous_end = info.tables[0].start_row - 1
-                                for table in info.tables:
-                                    gap = table.start_row - previous_end - 1
-                                    for _ in islice(all_rows, gap):
-                                        pass
-                                    if all_formula_rows is not None:
-                                        for _ in islice(all_formula_rows, gap):
-                                            pass
-                                    count = table.end_row - table.start_row + 1
-                                    row_window = islice(all_rows, count)
-                                    formula_window = islice(all_formula_rows, count) if all_formula_rows else None
-                                    start = table.start_column - first_column
-                                    end = table.end_column - first_column + 1
-                                    visible_rows = _value_rows(
-                                        _visible_rows((row[start:end] for row in row_window), table, info),
-                                        info.uncached_string_formulas,
-                                    )
-                                    if formula_window is None:
-                                        yield info, table, _without_calculated_empty(visible_rows)
-                                    else:
-                                        visible_formulas = _visible_rows(
-                                            (row[start:end] for row in formula_window), table, info
-                                        )
-                                        yield info, table, _rows_with_formulas(visible_rows, visible_formulas)
-                                    # A table with no visible columns may not consume
-                                    # its iterator; advance both streams regardless.
-                                    for _ in row_window:
-                                        pass
-                                    if formula_window is not None:
-                                        for _ in formula_window:
-                                            pass
-                                    previous_end = table.end_row
-                        continue
-                    for table in info.tables:
-                        with closing(
-                            sheet.iter_rows(
-                                min_row=table.start_row,
-                                max_row=table.end_row,
-                                min_col=table.start_column,
-                                max_col=table.end_column,
-                                values_only=False,
-                            )
-                        ) as rows:
-                            visible_rows = _value_rows(_visible_rows(rows, table, info), info.uncached_string_formulas)
-                            if not info.formula_cells:
-                                yield info, table, _without_calculated_empty(visible_rows)
-                                continue
-                            if formula_workbook is None:
-                                raise PipelineError("XLSX formula reader is unavailable", code="INVALID_XLSX")
-                            formula_sheet = formula_workbook[info.name]
-                            formula_sheet.reset_dimensions()
-                            with closing(
-                                formula_sheet.iter_rows(
-                                    min_row=table.start_row,
-                                    max_row=table.end_row,
-                                    min_col=table.start_column,
-                                    max_col=table.end_column,
-                                    values_only=False,
-                                )
-                            ) as formula_rows:
-                                visible_formula_rows = _visible_rows(formula_rows, table, info)
-                                yield info, table, _rows_with_formulas(visible_rows, visible_formula_rows)
+                        yield info, table, rows
             finally:
                 if formula_workbook is not None:
                     formula_workbook.close()
@@ -1266,7 +1246,7 @@ class XlsxParser(TabularBatchParser):
         pending_cells: list[tuple[int, str, str]] = []
         pending_sheet = None
         hidden_count = sum(info.hidden for info in infos)
-        with closing(_openpyxl_sheets(document, source, infos)) as sheets:
+        with closing(_openpyxl_sheets(document, source, infos, self.limits)) as sheets:
             for sheet, table, row_iterator in sheets:
                 if pending_cells and sheet is not pending_sheet:
                     for cells_block in self._cell_blocks(document, pending_sheet, hidden_count, pending_cells):
@@ -1392,12 +1372,7 @@ class XlsxParser(TabularBatchParser):
                         "XLSX formula text was indexed without a cached result; formulas are not recalculated"
                     )
                 header_lines = [markdown_row(header_values), markdown_row(["---"] * len(header_values))]
-                worksheet_context = _worksheet_context(sheet.name)
-                if sheet.hidden_rows:
-                    worksheet_context += (
-                        f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} "
-                        "(this may include filtered or collapsed rows)."
-                    )
+                worksheet_context = _worksheet_context(sheet.name) + _sheet_notes(sheet, self.limits.max_tables)
                 sheet_context = (
                     "\n\nWorksheet context (before column headers):\n" + "\n".join(preamble) if preamble else ""
                 )
@@ -1607,12 +1582,7 @@ class XlsxParser(TabularBatchParser):
         if not cells:
             return
         sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
-        worksheet_context = _worksheet_context(sheet.name)
-        if sheet.hidden_rows:
-            worksheet_context += (
-                f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} "
-                "(this may include filtered or collapsed rows)."
-            )
+        worksheet_context = _worksheet_context(sheet.name) + _sheet_notes(sheet, self.limits.max_tables)
         heading = "Worksheet cells outside tables:\n"
         overhead = len((heading + worksheet_context).encode("utf-8"))
         batches: list[list[tuple[int, str, str]]] = [[]]
@@ -1647,6 +1617,8 @@ class XlsxParser(TabularBatchParser):
                     "hidden_sheet": False,
                     "hidden_sheets_skipped": hidden_count,
                     "hidden_rows_skipped": len(sheet.hidden_rows),
+                    "filtered_rows_included": len(sheet.filtered_rows),
+                    "worksheet_blocks_merged": sheet.merged_table_blocks,
                     "hidden_columns_skipped": len(sheet.hidden_columns),
                     "spreadsheet_backend": "openpyxl",
                 },
@@ -1721,6 +1693,8 @@ class XlsxParser(TabularBatchParser):
             "hidden_sheet": False,
             "hidden_sheets_skipped": hidden_count,
             "hidden_rows_skipped": len(sheet.hidden_rows),
+            "filtered_rows_included": len(sheet.filtered_rows),
+            "worksheet_blocks_merged": sheet.merged_table_blocks,
             "hidden_columns_skipped": len(sheet.hidden_columns),
             "formula_policy": "compact_groups_and_individual_formulas",
             "sheet_formula_cells": sheet.formula_cells,

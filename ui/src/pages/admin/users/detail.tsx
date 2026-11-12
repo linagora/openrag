@@ -120,7 +120,7 @@ function UserDetail() {
   });
 
   if (userQuery.isLoading) return <Skeleton className="h-96" />;
-  if (userQuery.isError && userQuery.error instanceof ApiError && userQuery.error.status === 404) {
+  if (userQuery.isLoadingError && userQuery.error instanceof ApiError && userQuery.error.status === 404) {
     return (
       <div className="space-y-4 py-8">
         <p>User not found.</p>
@@ -285,7 +285,10 @@ function PartitionsTab({ userId }: { userId: number }) {
 
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
   const assigned = new Set(memberships.map((m) => m.partition));
-  const available = (partitionsQuery.data?.partitions ?? []).filter((p) => !assigned.has(p.name));
+  const unavailable = new Set(membershipsQuery.data?.unavailablePartitions ?? []);
+  const available = (partitionsQuery.data?.partitions ?? []).filter(
+    (p) => !assigned.has(p.name) && !unavailable.has(p.name),
+  );
 
   const grantMut = useMutation({
     mutationFn: () => grantMembership(partition, userId, role),
@@ -325,7 +328,11 @@ function PartitionsTab({ userId }: { userId: number }) {
           <CardTitle className="text-base">Partition access</CardTitle>
           <CardDescription>Grant this user a role on specific partitions.</CardDescription>
         </div>
-        <Button size="sm" onClick={() => setDialogOpen(true)}>
+        <Button
+          size="sm"
+          onClick={() => setDialogOpen(true)}
+          disabled={membershipsQuery.isPending || membershipsQuery.isError}
+        >
           <Plus className="mr-1 h-3 w-3" /> Grant access
         </Button>
       </CardHeader>

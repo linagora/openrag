@@ -113,6 +113,15 @@ describe("AppSidebar Jobs badge", () => {
     expect(screen.getByRole("link", { name: "Jobs" })).toBe(screen.getByTitle("Jobs"));
   });
 
+  it("keeps the active dot visible while the count is loading on the Jobs page", () => {
+    activeJobs.count = undefined;
+    renderSidebar("/jobs");
+
+    const jobsLink = screen.getByTitle("Jobs");
+    expect(jobsBadge()).toBeNull();
+    expect(jobsLink.querySelector(".bg-sidebar-primary")).not.toBeNull();
+  });
+
   it("hands the right edge to the badge while it is showing", () => {
     renderSidebar("/jobs");
 
