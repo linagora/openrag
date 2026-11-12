@@ -48,7 +48,8 @@ class CellRange:
 
 def _column_name(number: int) -> str:
     name = ""
-    while number:
+    # Strictly positive: divmod keeps a negative number negative forever.
+    while number > 0:
         number, remainder = divmod(number - 1, 26)
         name = chr(65 + remainder) + name
     return name
