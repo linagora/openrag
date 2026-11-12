@@ -1,9 +1,10 @@
 import { queryOptions, useQuery, type QueryClient } from "@tanstack/react-query";
 import { getMyInfo } from "@/lib/api/account";
-import { getQueueInfo, listTasks } from "@/lib/api/jobs";
+import { getQueueInfo, listTasks, type TaskListPagination } from "@/lib/api/jobs";
 import { useAuth } from "@/lib/auth";
 
 export const JOBS_REFETCH_INTERVAL_MS = 5_000;
+export const ACTIVE_JOBS_REFETCH_INTERVAL_MS = 5_000;
 
 export interface JobsQueryScope {
   userId: number;
@@ -19,8 +20,17 @@ export const jobsQueryKeys = {
   allTasks: ["tasks"] as const,
   activeCount: (scope: JobsQueryScope) =>
     ["tasks", "active-count", ...scopeKey(scope)] as const,
-  tasks: (scope: JobsQueryScope, taskStatus?: string) =>
-    ["tasks", ...scopeKey(scope), taskStatus?.toLowerCase() ?? "all"] as const,
+  tasks: (
+    scope: JobsQueryScope,
+    taskStatus?: string,
+    pagination?: Pick<TaskListPagination, "limit" | "offset">,
+  ) =>
+    [
+      "tasks",
+      ...scopeKey(scope),
+      taskStatus?.toLowerCase() ?? "all",
+      pagination ? { limit: pagination.limit, offset: pagination.offset } : "unpaged",
+    ] as const,
   allQueueInfo: ["queue-info"] as const,
   queueInfo: (scope: JobsQueryScope) => ["queue-info", ...scopeKey(scope)] as const,
 };
@@ -32,12 +42,19 @@ export function invalidateJobsQueries(queryClient: QueryClient) {
   ]);
 }
 
-export function jobsTaskListQueryOptions(scope: JobsQueryScope, taskStatus?: string) {
+export function jobsTaskListQueryOptions(
+  scope: JobsQueryScope,
+  taskStatus?: string,
+  pagination?: Pick<TaskListPagination, "limit" | "offset">,
+) {
+  const refetchInterval = taskStatus?.toLowerCase() === "active"
+    ? ACTIVE_JOBS_REFETCH_INTERVAL_MS
+    : JOBS_REFETCH_INTERVAL_MS;
   return queryOptions({
-    queryKey: jobsQueryKeys.tasks(scope, taskStatus),
-    queryFn: () => listTasks(taskStatus),
-    refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
-    staleTime: JOBS_REFETCH_INTERVAL_MS,
+    queryKey: jobsQueryKeys.tasks(scope, taskStatus, pagination),
+    queryFn: () => listTasks(taskStatus, pagination),
+    refetchInterval, // poll — OpenRag has no task SSE
+    staleTime: refetchInterval,
   });
 }
 
