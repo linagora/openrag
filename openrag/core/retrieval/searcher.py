@@ -1,21 +1,16 @@
-"""Transitional port for chunk-level retrieval operations.
+"""Port for chunk-level retrieval operations.
 
-The strict ``VectorStore`` ABC in ``core/vector_stores`` is intentionally
-narrow — ``search(embedding, top_k, ...)``. Phase 5 retrievers, however,
-still go through the legacy Milvus Ray actor which exposes higher-level
-operations:
+The ``VectorStore`` ABC is deliberately narrow: ``search(embedding, top_k, ...)``.
+Retrievers need higher-level operations, which this port groups:
 
-  * search by query string (embedding done internally, plus BM25)
-  * multi-query search (one round per query, dedup at the bottom)
-  * related-chunk lookup by ``relationship_id``
-  * ancestor lookup by ``file_id`` with depth bound
+  * search by query string (the query is embedded, plus BM25 when the
+    collection is hybrid)
+  * multi-query search (one round per query, deduplicated)
+  * surrounding, CSV-row, related (``relationship_id``) and ancestor
+    (``file_id``, depth-bounded) chunk lookups
 
-Defining these on a dedicated port lets the retriever depend on a clean
-interface from day one, while a small shim in ``services/storage/``
-adapts the Ray actor to it. When the god object is decomposed in Phase 7
-this port either retires (operations move to ``VectorStore`` +
-``ChunkRepository``) or evolves into the shape MilvusVectorStore exposes
-directly.
+``services.storage.vector_store_searcher.VectorStoreSearcher`` implements it
+over an embedder and the ``VectorStore``.
 
 Returns are domain ``Chunk`` objects throughout — no LangChain types
 leak across this boundary.

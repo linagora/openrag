@@ -1,9 +1,8 @@
 """Map-reduce prompt builder.
 
-The orchestrator (Phase 8) loops over chunks, calls the LLM with these
-messages, and reduces the structured outputs. The system + user-template
-strings live here so they're testable in isolation and can be evolved
-without touching pipeline code.
+The chat service loops over the retrieved chunks, calls the LLM once per chunk
+with these messages, and keeps the chunks it judges relevant, replaced by their
+summaries. The LLM answers in JSON: ``{"relevancy": bool, "summary": str}``.
 """
 
 from __future__ import annotations
@@ -13,21 +12,17 @@ SYSTEM_PROMPT_MAP = """You are an AI assistant specialized in extracting and syn
 Your task:
 1. Analyze the provided text in relation to the user's question
 2. Extract only the essential information that directly addresses the query
-3. Preserve necessary context (Key words, project names or initiatives, dates, etc.) to maintain accuracy and clarity of the summary for it to be self-understandable
+3. Preserve necessary context (key words, project names, dates) so the summary is self-understandable
 
-Guidelines:
-- Present information clearly and concisely without unnecessary rephrasing or commentary
-- Focus on precision: include what matters, exclude what doesn't.
-- If a document does not have any relevant content with respect to the query, classify it as irrelevant without providing a `synthesis`.
-"""
+Respond with a JSON object exactly matching this schema:
+{"relevancy": <true|false>, "summary": "<summary text, empty string if not relevant>"}
+Set relevancy=false (and summary="") if the text has no relevant content for the query."""
 
-USER_PROMPT_TEMPLATE = """
-Here is a text:
+USER_PROMPT_TEMPLATE = """Here is a text:
 {content}
 
 From this document, identify and comprehensively summarize the information useful for answering the following question:
-{query}
-"""
+{query}"""
 
 
 def build_map_messages(query: str, content: str) -> list[dict[str, str]]:

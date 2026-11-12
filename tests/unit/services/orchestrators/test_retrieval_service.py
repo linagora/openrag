@@ -1,8 +1,8 @@
 """Unit tests for :class:`RetrievalService` (Phase 8C.1).
 
-The Ray-backed searcher is faked (the service is constructed with a
-``RetrievalSearcher`` stub, exactly as the container will inject
-``MilvusRayShim``). Default config uses the ``single`` retriever with
+The searcher is faked (the service is constructed with a
+``RetrievalSearcher`` stub, where the container injects a
+``VectorStoreSearcher``). Default config uses the ``single`` retriever with
 the reranker disabled, so the core pipeline path is exercised end-to-end
 without inference services.
 """
@@ -112,6 +112,13 @@ def _svc(searcher, *, rtype="single", reranker_enabled=False) -> RetrievalServic
         llm=None,
         config=_config(rtype, reranker_enabled),
     )
+
+
+def _svc_with_partition_p(searcher) -> RetrievalService:
+    """A service whose partition cache holds ``p``, retrieved with the default searcher."""
+    cfg = _config()
+    cfg.partitions = {"p": _partition(name="p", embedder="default")}
+    return RetrievalService(searcher=searcher, reranker=None, llm=None, config=cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -689,7 +696,7 @@ async def test_search_rerank_across_embedders_reranks_the_fused_candidates(trace
 async def test_retrieve_single_query_via_pipeline():
     s = FakeSearcher()
     s.search_result = [_chunk("a"), _chunk("b")]
-    out = await _svc(s).retrieve(partitions=["p"], query=Query(query="hi"))
+    out = await _svc_with_partition_p(s).retrieve(partitions=["p"], query=Query(query="hi"))
     assert [c.id for c in out] == ["a", "b"]
 
 
@@ -698,7 +705,7 @@ async def test_retrieve_multi_fuses_subqueries():
     s = FakeSearcher()
     s.search_result = [_chunk("a"), _chunk("b")]
     sq = SearchQueries(query_list=[Query(query="q1"), Query(query="q2")])
-    out = await _svc(s).retrieve_multi(partitions=["p"], search_queries=sq)
+    out = await _svc_with_partition_p(s).retrieve_multi(partitions=["p"], search_queries=sq)
     assert {c.id for c in out} == {"a", "b"}
 
 
@@ -706,7 +713,9 @@ async def test_retrieve_multi_fuses_subqueries():
 async def test_retrieve_per_query_returns_unfused_lists():
     s = FakeSearcher()
     s.search_result = [_chunk("a")]
-    out = await _svc(s).retrieve_per_query(partitions=["p"], queries=[Query(query="q1"), Query(query="q2")])
+    out = await _svc_with_partition_p(s).retrieve_per_query(
+        partitions=["p"], queries=[Query(query="q1"), Query(query="q2")]
+    )
     assert len(out) == 2
     assert all(lst[0].id == "a" for lst in out)
 
@@ -1001,25 +1010,27 @@ async def test_retrieval_depth_override_preserves_preset_final_top_n():
 
 
 @pytest.mark.asyncio
-async def test_retrieve_all_falls_back_to_legacy_when_no_partitions_exist():
-    """On a fresh system with zero hydrated partitions there is nothing to
-    expand — keep the single legacy pipeline searching ["all"]."""
-    default_searcher = FakeSearcher()
-    default_searcher.search_result = [_chunk("x")]
-    cfg = _config()
-    cfg.partitions = {}
-    svc = RetrievalService(
-        searcher=default_searcher,
-        reranker=None,
-        llm=None,
-        config=cfg,
-        searcher_factory=lambda name: (_ for _ in ()).throw(AssertionError("factory must not be used")),
-    )
+async def test_retrieve_all_searches_nothing_when_no_partition_exists():
+    """With no partition config loaded, "all" names no partition: nothing is searched."""
+    searcher = FakeSearcher()
+    searcher.search_result = [_chunk("x")]
+    svc = RetrievalService(searcher=searcher, reranker=None, llm=None, config=_config())
 
     out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
 
-    assert [c.id for c in out] == ["x"]
-    assert default_searcher.search_calls[0]["partition"] == ["all"]
+    assert out == []
+    assert searcher.search_calls == []
+
+
+@pytest.mark.asyncio
+async def test_retrieve_a_partition_without_config_is_not_found():
+    """A partition missing from the config cache is not searched with static settings."""
+    searcher = FakeSearcher()
+    svc = RetrievalService(searcher=searcher, reranker=None, llm=None, config=_config())
+
+    with pytest.raises(PartitionNotFoundError):
+        await svc.retrieve(partitions=["p"], query=Query(query="hello"))
+    assert searcher.search_calls == []
 
 
 # --- partitions on one embedder and one retrieval preset share a pipeline ---

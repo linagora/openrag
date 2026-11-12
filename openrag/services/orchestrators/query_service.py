@@ -24,12 +24,9 @@ Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
   callable — keeps ``request.url_for`` in transport), and wraps
   ``StreamingResponse`` / ``JSONResponse``.
 
-Imports from ``components.*`` (prompt shims) are
-allowed during the Phase-8 shim (legacy layer, unchecked by the guard;
-no LangChain symbol is imported into this file → 8H clean). ``Chunk`` is
-converted to LangChain ``Document`` via ``Chunk.to_langchain()`` at the
-boundary so the existing ``format_context`` / source helpers are reused
-verbatim (no langchain import in this module).
+No LangChain symbol is imported into this module. ``Chunk`` is converted to a
+LangChain ``Document`` via ``Chunk.to_langchain()`` at the boundary so the
+``format_context`` and source helpers are reused as they are.
 """
 
 from __future__ import annotations
@@ -57,6 +54,7 @@ from core.models.retrieval_trace import (
 from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
+    build_map_messages,
     calendar_anchors,
     describe_source,
     format_context,
@@ -212,23 +210,6 @@ class _PrepareChatResult(NamedTuple):
     configuration_fingerprint: str
     retry_empty_response: bool = True
 
-
-_MAP_SYSTEM_PROMPT = """You are an AI assistant specialized in extracting and synthesizing relevant information from text.
-
-Your task:
-1. Analyze the provided text in relation to the user's question
-2. Extract only the essential information that directly addresses the query
-3. Preserve necessary context (key words, project names, dates) so the summary is self-understandable
-
-Respond with a JSON object exactly matching this schema:
-{"relevancy": <true|false>, "summary": "<summary text, empty string if not relevant>"}
-Set relevancy=false (and summary="") if the text has no relevant content for the query."""
-
-_MAP_USER_PROMPT = """Here is a text:
-{content}
-
-From this document, identify and comprehensively summarize the information useful for answering the following question:
-{query}"""
 
 # Appended to the contextualizer prompt as a last reminder of the output shape.
 # It must leave every rule-driven field open: an earlier version showed
@@ -716,10 +697,7 @@ class QueryService:
         async with get_llm_semaphore():
             try:
                 resp = await self._llm.chat(
-                    [
-                        {"role": "system", "content": _MAP_SYSTEM_PROMPT},
-                        {"role": "user", "content": _MAP_USER_PROMPT.format(query=query, content=doc.page_content)},
-                    ],
+                    build_map_messages(query=query, content=doc.page_content),
                     max_tokens=512,
                     temperature=0.3,
                     response_format={"type": "json_object"},
