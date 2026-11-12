@@ -74,7 +74,7 @@ def test_partitions_share_a_pipeline_only_with_the_same_vector_field_and_setting
 
     groups = factory.pipeline_groups(["a1", "a2", "a3", "b1"])
 
-    assert [group.partitions for group in groups] == [["a1", "a2"], ["a3"], ["b1"]]
+    assert [group.partitions for group in groups] == [("a1", "a2"), ("a3",), ("b1",)]
     assert [group.pipeline.retriever.searcher.name for group in groups] == ["embed-a", "embed-a", "embed-b"]
     assert [group.pipeline.rrf_k for group in groups] == [60, 42, 60]
 
@@ -99,7 +99,7 @@ def test_the_callers_overrides_decide_the_grouping():
 
     assert len(factory.pipeline_groups(["p1", "p2"])) == 2
     (group,) = factory.pipeline_groups(["p1", "p2"], top_k=10, disable_reranker=True)
-    assert group.partitions == ["p1", "p2"]
+    assert group.partitions == ("p1", "p2")
     assert group.pipeline.retriever.top_k == 10
     assert group.default_top_k == 5
 

@@ -27,7 +27,7 @@ class PipelineGroup:
     it runs, ``None`` when it doesn't rerank.
     """
 
-    partitions: list[str]
+    partitions: tuple[str, ...]
     pipeline: RetrieverPipeline
     default_top_k: int | None
     reranker_identity: dict[str, object] | None

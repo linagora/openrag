@@ -15,11 +15,11 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from core.models.retrieval_trace import TraceRemovalReason
-from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks, _safe_trace, _with_removal_reasons
+from core.retrieval.pipeline import _rerank_chunks, _safe_trace, _with_removal_reasons
 from core.retrieval.retriever import _expand_with_related_chunks
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.searcher import file_id_restriction
@@ -37,9 +37,9 @@ from core.utils.logging import get_logger
 if TYPE_CHECKING:
     from core.config.root import Settings
     from core.models.chunk import Chunk
-    from core.models.query import Query, SearchQueries
+    from core.models.query import SearchQueries
     from core.rerankers.reranker import Reranker
-    from core.retrieval.pipeline_factory import PipelineFactory
+    from core.retrieval.pipeline_factory import PipelineFactory, PipelineGroup
     from core.retrieval.searcher import RetrievalSearcher
     from services.orchestrators.retrieval_identity import RetrievalIdentity
 
@@ -51,21 +51,14 @@ def _chunk_key(c: Chunk):
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedRetrievalGroup:
-    partitions: tuple[str, ...]
-    pipeline: RetrieverPipeline
-    default_top_k: int | None
-
-
-@dataclass(frozen=True, slots=True)
 class ResolvedRetrievalPlan:
-    groups: tuple[ResolvedRetrievalGroup, ...]
+    groups: tuple[PipelineGroup, ...]
     public_configuration: dict[str, object]
     configuration_fingerprint: str
 
 
 class RetrievalService:
-    """Retrieval pipeline orchestration (search, single/multi retrieve).
+    """Retrieval orchestration: the raw ``search`` and the pipeline ``retrieve_multi``.
 
     Built by ``di.retrieval.create_retrieval_service``.
     """
@@ -175,13 +168,12 @@ class RetrievalService:
         """Resolve executable pipelines and their public identity once."""
         await self.refresh_partition_configs()
         requested = list(partitions)
-        configs = self._partition_configs()
-        selected = list(configs) if "all" in requested else list(dict.fromkeys(requested))
         reranker_identities: dict[str, dict[str, object]] = {}
-        groups: list[ResolvedRetrievalGroup] = []
+        groups: list[PipelineGroup] = []
 
         if not build_execution:
-            for partition_name in selected:
+            configs = self._partition_configs()
+            for partition_name in self._selected_partitions(requested):
                 partition = configs.get(partition_name)
                 retrieval = partition.retrieval if partition is not None else self._config.retriever
                 reranker_enabled = getattr(
@@ -195,27 +187,20 @@ class RetrievalService:
                         partition_name,
                     )
                     reranker_identities[partition_name] = identity
-        elif selected:
-            for group in self._pipelines.pipeline_groups(
-                selected,
+        else:
+            groups = self._pipeline_groups(
+                requested,
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
-            ):
-                groups.append(ResolvedRetrievalGroup(tuple(group.partitions), group.pipeline, group.default_top_k))
+            )
+            for group in groups:
                 # Every partition of a group shares the reranker it was grouped by.
                 if group.reranker_identity is not None:
                     for partition_name in group.partitions:
                         reranker_identities[partition_name] = group.reranker_identity
-            if len(groups) == 1:
-                # Keep the requested scope, so "all" stays unscoped, as in _pipeline_groups_for_partitions.
-                (group,) = groups
-                groups = [
-                    ResolvedRetrievalGroup(
-                        tuple(["all"] if "all" in requested else selected), group.pipeline, group.default_top_k
-                    )
-                ]
+            groups = self._keep_requested_scope(requested, groups)
 
         public, fingerprint = await self._identity.resolved_configuration(
             requested,
@@ -233,46 +218,36 @@ class RetrievalService:
             configuration_fingerprint=fingerprint,
         )
 
-    async def _pipeline_groups_for_partitions(
-        self,
-        partitions: list[str],
-        *,
-        top_k: int | None = None,
-        similarity_threshold: float | None = None,
-        disable_reranker: bool = False,
-        disable_expansion: bool = False,
-    ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
-        """The partitions grouped by the pipeline that retrieves them, each with that pipeline.
-
-        See ``PipelineFactory.pipeline_groups`` for the grouping. The groups'
-        lists are fused with RRF by the caller.
+    def _selected_partitions(self, partitions: Sequence[str]) -> list[str]:
+        """The concrete partitions a request names, each once.
 
         ``"all"`` only reaches this layer post-authorization (a SUPER_ADMIN_MODE
         admin; regular users are already expanded to their memberships upstream),
-        so every hydrated partition is in scope. With a single group it is kept,
-        so the search stays unscoped, as in ``PipelineFactory.search_groups``.
+        so every hydrated partition is in scope.
         """
-        await self.refresh_partition_configs()
-        configs = self._partition_configs()
-        scope = list(configs) if "all" in partitions else partitions
-        if not scope:
+        if "all" in partitions:
+            return list(self._partition_configs())
+        return list(dict.fromkeys(partitions))
+
+    def _pipeline_groups(self, partitions: Sequence[str], **overrides: Any) -> list[PipelineGroup]:
+        """The concrete partitions grouped by the pipeline that retrieves them.
+
+        See ``PipelineFactory.pipeline_groups`` for the grouping. The groups'
+        lists are fused with RRF by the caller.
+        """
+        selected = self._selected_partitions(partitions)
+        if not selected:
             # No partition to retrieve from: nothing to search.
             return []
-        groups = [
-            (group.partitions, group.pipeline, group.default_top_k)
-            for group in self._pipelines.pipeline_groups(
-                scope,
-                top_k=top_k,
-                similarity_threshold=similarity_threshold,
-                disable_reranker=disable_reranker,
-                disable_expansion=disable_expansion,
-            )
-        ]
-        if len(groups) == 1:
-            # Keep the caller's partitions, so "all" stays unscoped.
-            _, pipeline, default_top_k = groups[0]
-            return [(partitions, pipeline, default_top_k)]
-        return groups
+        return self._pipelines.pipeline_groups(selected, **overrides)
+
+    @staticmethod
+    def _keep_requested_scope(partitions: Sequence[str], groups: list[PipelineGroup]) -> list[PipelineGroup]:
+        """With a single group, ``"all"`` stays unscoped, as in ``PipelineFactory.search_groups``."""
+        if len(groups) != 1 or "all" not in partitions:
+            return groups
+        (group,) = groups
+        return [replace(group, partitions=("all",))]
 
     def _single_partition_retrieval_config(self, partitions: list[str]):
         """The retrieval preset of a search scoped to exactly one configured partition, else ``None``."""
@@ -568,7 +543,7 @@ class RetrievalService:
         return hits + [c for c in surrounding if c.id not in seen]
 
     # ------------------------------------------------------------------
-    # Pipeline retrieval (powers QueryService — 8C.2)
+    # Pipeline retrieval (chat and completions, through SourceRetriever)
     # ------------------------------------------------------------------
 
     async def _gather_partition_groups(
@@ -593,10 +568,7 @@ class RetrievalService:
         flood of embed+Milvus calls (#708).
 
         The semaphore is per-call, not shared: it caps this request's own fan-out
-        without coupling concurrent requests, and the caps compose safely across
-        the ``retrieve_per_query`` → ``retrieve`` nesting (each inner call bounds
-        its own leaves; the coroutines being awaited hold no permit while
-        waiting for one, so there is no cross-level deadlock).
+        without coupling concurrent requests.
 
         One unhealthy partition must not empty the whole result set (#736), so
         legs are gathered with ``return_exceptions=True`` and a failed one is
@@ -674,77 +646,6 @@ class RetrievalService:
             except Exception:
                 pass
 
-    async def retrieve(
-        self,
-        *,
-        partitions: list[str],
-        query: Query,
-        top_k: int | None = None,
-        retrieval_top_k: int | None = None,
-        filter_params: dict | None = None,
-        trace: RetrievalTraceBuilder | None = None,
-        similarity_threshold: float | None = None,
-        disable_reranker: bool = False,
-        disable_expansion: bool = False,
-        resolved_plan: ResolvedRetrievalPlan | None = None,
-    ) -> list[Chunk]:
-        """Single ``Query`` through retrieve → expand → rerank."""
-        if resolved_plan is None:
-            groups = await self._pipeline_groups_for_partitions(
-                partitions,
-                top_k=retrieval_top_k,
-                similarity_threshold=similarity_threshold,
-                disable_reranker=disable_reranker,
-                disable_expansion=disable_expansion,
-            )
-        else:
-            groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
-        child_traces = (
-            [
-                RetrievalTraceBuilder(
-                    f"{trace.request_id}:partition:{index}",
-                    query.query,
-                    partition=partition_group[0] if len(partition_group) == 1 else None,
-                    diagnostics=trace.diagnostics,
-                )
-                for index, (partition_group, _pipeline, _default_top_k) in enumerate(groups)
-            ]
-            if trace is not None and len(groups) > 1
-            else None
-        )
-        try:
-            ranked_groups = await self._gather_partition_groups(
-                [
-                    (
-                        partition_group,
-                        pipeline.retrieve_docs(
-                            partition=partition_group,
-                            query=query,
-                            top_k=top_k if top_k is not None else default_top_k,
-                            filter_params=filter_params,
-                            trace=child_traces[index] if child_traces is not None else trace,
-                        ),
-                    )
-                    for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
-                ],
-                child_traces=child_traces,
-                error_stage="partition_retrieval",
-            )
-        finally:
-            if trace is not None and child_traces is not None:
-                self._safe_merge_child_traces(trace, child_traces)
-        if len(ranked_groups) == 1:
-            ((_names, result),) = ranked_groups
-            if len(groups) > 1:
-                self._record_degraded_final(trace, result)
-            return result
-        return self.fuse(
-            [chunks for _names, chunks in ranked_groups],
-            top_k=top_k,
-            trace=trace,
-            partition_counts=[len(names) for names, _chunks in ranked_groups],
-        )
-
     async def retrieve_multi(
         self,
         *,
@@ -759,26 +660,35 @@ class RetrievalService:
         disable_expansion: bool = False,
         resolved_plan: ResolvedRetrievalPlan | None = None,
     ) -> list[Chunk]:
-        """Every sub-query in parallel, fused with RRF."""
+        """Every sub-query in parallel over each partition group, fused with RRF.
+
+        The one document-retrieval path: chat and completions reach it through
+        ``SourceRetriever``. The groups come from *resolved_plan* when the
+        caller resolved one for the trace, else they are built here.
+        """
         if resolved_plan is None:
-            groups = await self._pipeline_groups_for_partitions(
+            await self.refresh_partition_configs()
+            groups = self._keep_requested_scope(
                 partitions,
-                top_k=retrieval_top_k,
-                similarity_threshold=similarity_threshold,
-                disable_reranker=disable_reranker,
-                disable_expansion=disable_expansion,
+                self._pipeline_groups(
+                    partitions,
+                    top_k=retrieval_top_k,
+                    similarity_threshold=similarity_threshold,
+                    disable_reranker=disable_reranker,
+                    disable_expansion=disable_expansion,
+                ),
             )
         else:
-            groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
+            groups = list(resolved_plan.groups)
         child_traces = (
             [
                 RetrievalTraceBuilder(
                     f"{trace.request_id}:partition:{index}",
                     search_queries.query_list[0].query if len(search_queries.query_list) == 1 else None,
-                    partition=partition_group[0] if len(partition_group) == 1 else None,
+                    partition=group.partitions[0] if len(group.partitions) == 1 else None,
                     diagnostics=trace.diagnostics,
                 )
-                for index, (partition_group, _pipeline, _default_top_k) in enumerate(groups)
+                for index, group in enumerate(groups)
             ]
             if trace is not None and len(groups) > 1
             else None
@@ -787,16 +697,16 @@ class RetrievalService:
             ranked_groups = await self._gather_partition_groups(
                 [
                     (
-                        partition_group,
-                        pipeline.get_relevant_docs(
-                            partition=partition_group,
+                        list(group.partitions),
+                        group.pipeline.get_relevant_docs(
+                            partition=list(group.partitions),
                             search_queries=search_queries,
-                            top_k=top_k if top_k is not None else default_top_k,
+                            top_k=top_k if top_k is not None else group.default_top_k,
                             filter_params=filter_params,
                             trace=child_traces[index] if child_traces is not None else trace,
                         ),
                     )
-                    for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
+                    for index, group in enumerate(groups)
                 ],
                 child_traces=child_traces,
                 error_stage="partition_retrieval",
@@ -815,74 +725,6 @@ class RetrievalService:
             trace=trace,
             partition_counts=[len(names) for names, _chunks in ranked_groups],
         )
-
-    async def retrieve_per_query(
-        self,
-        *,
-        partitions: list[str],
-        queries: list[Query],
-        top_k: int | None = None,
-        retrieval_top_k: int | None = None,
-        filter_params: dict | None = None,
-        trace: RetrievalTraceBuilder | None = None,
-        similarity_threshold: float | None = None,
-        disable_reranker: bool = False,
-        disable_expansion: bool = False,
-        resolved_plan: ResolvedRetrievalPlan | None = None,
-    ) -> list[list[Chunk]]:
-        """Per-sub-query ranked lists (NOT fused).
-
-        QueryService's combined web-search path interleaves these with web
-        searches concurrently, then fuses; exposing the un-fused lists
-        lets it run one ``asyncio.gather`` over both.
-        """
-        child_traces = (
-            [
-                RetrievalTraceBuilder(
-                    f"{trace.request_id}:query:{index}",
-                    query.query,
-                    diagnostics=trace.diagnostics,
-                )
-                for index, query in enumerate(queries)
-            ]
-            if trace is not None and len(queries) > 1
-            else None
-        )
-        tasks = [
-            self.retrieve(
-                partitions=partitions,
-                query=query,
-                top_k=top_k,
-                retrieval_top_k=retrieval_top_k,
-                filter_params=filter_params,
-                trace=child_traces[index] if child_traces is not None else trace,
-                similarity_threshold=similarity_threshold,
-                disable_reranker=disable_reranker,
-                disable_expansion=disable_expansion,
-                resolved_plan=resolved_plan,
-            )
-            for index, query in enumerate(queries)
-        ]
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=child_traces is not None)
-            if child_traces is not None:
-                for child, result in zip(child_traces, results, strict=True):
-                    if isinstance(result, Exception):
-                        try:
-                            child.record_error("query_retrieval", result)
-                        except Exception:
-                            pass
-        finally:
-            if trace is not None and child_traces is not None:
-                self._safe_merge_child_traces(trace, child_traces)
-        if child_traces is not None:
-            for result in results:
-                if isinstance(result, asyncio.CancelledError):
-                    raise result
-            for result in results:
-                if isinstance(result, BaseException):
-                    raise result
-        return results
 
     @staticmethod
     def fuse(
@@ -928,4 +770,4 @@ class RetrievalService:
         return fused
 
 
-__all__ = ["ResolvedRetrievalGroup", "ResolvedRetrievalPlan", "RetrievalService"]
+__all__ = ["ResolvedRetrievalPlan", "RetrievalService"]

@@ -49,7 +49,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from core.chat.budget import fit_prompt, fit_sources
 from core.chat.history import history_window, latest_user_query, sanitize_messages, split_leading_system_prompt
-from core.chat.routing import resolve_route
+from core.chat.routing import Route, resolve_route
+from core.chat.scope import Scope
 from core.chat.smalltalk import (
     CasualMessagePolicy,
     acknowledgement_language,
@@ -705,7 +706,14 @@ class QueryService:
             else:
                 queries = SearchQueries(query_list=[Query(query=prompt)])
         if queries.query_list:
-            chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
+            chunks, _web = await self._retriever.retrieve(
+                queries,
+                route=Route.DOCUMENTS,
+                scope=Scope(partitions=partition),
+                top_k=None,
+                retrieval_top_k=None,
+                overrides={},
+            )
             docs = [c.to_langchain() for c in chunks]
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).

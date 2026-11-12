@@ -94,9 +94,9 @@ async def test_retrieve_threads_trace_and_records_final_stage():
     searcher = _Searcher()
     trace = RetrievalTraceBuilder("request-1", "hello")
 
-    chunks = await _service(searcher, config=_tenant_config()).retrieve(
+    chunks = await _service(searcher, config=_tenant_config()).retrieve_multi(
         partitions=["tenant-a"],
-        query=Query(query="hello"),
+        search_queries=SearchQueries(query_list=[Query(query="hello")]),
         trace=trace,
     )
 
@@ -165,9 +165,9 @@ async def test_single_query_multi_partition_trace_uses_effective_query():
     await _service(
         config=config,
         searcher_factory=lambda name: searchers[name],
-    ).retrieve(
+    ).retrieve_multi(
         partitions=["a", "b"],
-        query=Query(query="contextualized question"),
+        search_queries=SearchQueries(query_list=[Query(query="contextualized question")]),
         trace=trace,
     )
 
@@ -177,9 +177,9 @@ async def test_single_query_multi_partition_trace_uses_effective_query():
     ]
 
 
-@pytest.mark.parametrize("per_query", [False, True])
+@pytest.mark.parametrize("sub_queries", [["original question"], ["rewrite one", "rewrite two"]])
 @pytest.mark.asyncio
-async def test_all_partition_failures_are_preserved_when_retrieval_raises(per_query):
+async def test_all_partition_failures_are_preserved_when_retrieval_raises(sub_queries):
     config = _config()
     config.partitions = {
         "a": _partition("a", "embed-a"),
@@ -193,39 +193,29 @@ async def test_all_partition_failures_are_preserved_when_retrieval_raises(per_qu
     service = _service(config=config, searcher_factory=lambda name: searchers[name])
 
     with pytest.raises(RuntimeError, match="partition a failed"):
-        if per_query:
-            await service.retrieve_per_query(
-                partitions=["a", "b"],
-                queries=[Query(query="rewrite one"), Query(query="rewrite two")],
-                trace=trace,
-            )
-        else:
-            await service.retrieve(
-                partitions=["a", "b"],
-                query=Query(query="original question"),
-                trace=trace,
-            )
+        await service.retrieve_multi(
+            partitions=["a", "b"],
+            search_queries=SearchQueries(query_list=[Query(query=query) for query in sub_queries]),
+            trace=trace,
+        )
 
-    if per_query:
-        assert [child.query for child in trace.query_traces] == ["rewrite one", "rewrite two"]
-        for query_trace in trace.query_traces:
-            assert [error.stage for error in query_trace.errors] == ["query_retrieval"]
-            assert [child.partition for child in query_trace.query_traces] == ["a", "b"]
-            assert [[error.stage for error in child.errors] for child in query_trace.query_traces] == [
-                ["partition_retrieval"],
-                ["partition_retrieval"],
+    assert [child.partition for child in trace.query_traces] == ["a", "b"]
+    assert [[error.stage for error in child.errors] for child in trace.query_traces] == [
+        ["partition_retrieval"],
+        ["partition_retrieval"],
+    ]
+    if len(sub_queries) > 1:
+        # Each partition's trace holds one trace per sub-query, each with its own error.
+        for partition_trace in trace.query_traces:
+            assert [child.query for child in partition_trace.query_traces] == sub_queries
+            assert [[error.stage for error in child.errors] for child in partition_trace.query_traces] == [
+                ["query_retrieval"],
+                ["query_retrieval"],
             ]
-    else:
-        assert [child.partition for child in trace.query_traces] == ["a", "b"]
-        assert [[error.stage for error in child.errors] for child in trace.query_traces] == [
-            ["partition_retrieval"],
-            ["partition_retrieval"],
-        ]
 
 
-@pytest.mark.parametrize("method", ["retrieve", "retrieve_multi"])
 @pytest.mark.asyncio
-async def test_multi_partition_retrieval_survives_child_trace_merge_failure(monkeypatch, method):
+async def test_multi_partition_retrieval_survives_child_trace_merge_failure(monkeypatch):
     config = _config()
     config.partitions = {
         "a": _partition("a", "embed-a"),
@@ -240,34 +230,27 @@ async def test_multi_partition_retrieval_survives_child_trace_merge_failure(monk
 
     monkeypatch.setattr("services.orchestrators.retrieval_service.merge_child_traces", fail_merge)
 
-    if method == "retrieve":
-        chunks = await service.retrieve(
-            partitions=["a", "b"],
-            query=Query(query="question"),
-            trace=trace,
-        )
-    else:
-        chunks = await service.retrieve_multi(
-            partitions=["a", "b"],
-            search_queries=SearchQueries(query_list=[Query(query="question")]),
-            trace=trace,
-        )
+    chunks = await service.retrieve_multi(
+        partitions=["a", "b"],
+        search_queries=SearchQueries(query_list=[Query(query="question")]),
+        trace=trace,
+    )
 
     assert {chunk.id for chunk in chunks} == {"a-hit", "b-hit"}
     assert [error.stage for error in trace.errors] == ["partition_traces"]
 
 
 @pytest.mark.asyncio
-async def test_retrieve_per_query_traces_each_query_in_order():
+async def test_each_sub_query_is_traced_in_order():
     searcher = _Searcher([_chunk("hit")])
     trace = RetrievalTraceBuilder("request-1", "original question")
 
-    results = await _service(searcher, config=_tenant_config()).retrieve_per_query(
+    chunks = await _service(searcher, config=_tenant_config()).retrieve_multi(
         partitions=["tenant-a"],
-        queries=[Query(query="rewrite one"), Query(query="rewrite two")],
+        search_queries=SearchQueries(query_list=[Query(query="rewrite one"), Query(query="rewrite two")]),
         trace=trace,
     )
 
-    assert [[chunk.id for chunk in chunks] for chunks in results] == [["hit"], ["hit"]]
+    assert [chunk.id for chunk in chunks] == ["hit"]
     assert [child.query for child in trace.query_traces] == ["rewrite one", "rewrite two"]
     assert [call["trace"].original_query for call in searcher.calls] == ["rewrite one", "rewrite two"]

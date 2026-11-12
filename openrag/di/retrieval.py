@@ -250,7 +250,7 @@ class RetrievalPipelineFactory:
             allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
             rrf_k=settings.rrf_k,
         )
-        return PipelineGroup(partitions, pipeline, settings.top_n, reranker_identity)
+        return PipelineGroup(tuple(partitions), pipeline, settings.top_n, reranker_identity)
 
     def pipeline_groups(
         self,

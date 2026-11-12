@@ -154,10 +154,12 @@
   },
   "retrieval_calls": [
     {
+      "filter_params": null,
       "method": "retrieve_multi",
       "partitions": [
         "legal"
       ],
+      "retrieval_top_k": null,
       "search_queries": {
         "intent": "other",
         "query_list": [
@@ -168,7 +170,8 @@
           }
         ],
         "requires_retrieval": true
-      }
+      },
+      "top_k": null
     }
   ],
   "status": 200,
