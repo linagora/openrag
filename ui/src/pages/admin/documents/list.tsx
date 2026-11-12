@@ -310,6 +310,7 @@ export default function DocumentListPage() {
       const failed: File[] = [];
       for (const f of files) {
         let fileId = fileIds.current.get(f);
+        const isRetry = fileId !== undefined;
         if (!fileId) {
           fileId = newFileId();
           fileIds.current.set(f, fileId);
@@ -328,6 +329,14 @@ export default function DocumentListPage() {
           if (e instanceof ApiError && e.code === "DOCUMENT_INDEXING_IN_PROGRESS") {
             ok += 1;
             results.push({ name: f.name, note: "already indexing" });
+            continue;
+          }
+          // An uncoded 409 on a reused ID means that earlier attempt already
+          // finished indexing ("File '<id>' already exists"). Coded 409s such
+          // as DOCUMENT_CONTENT_EXISTS stay real errors.
+          if (isRetry && e instanceof ApiError && e.status === 409 && !e.code) {
+            ok += 1;
+            results.push({ name: f.name, note: "already uploaded" });
             continue;
           }
           results.push({ name: f.name, error: (e as Error).message });

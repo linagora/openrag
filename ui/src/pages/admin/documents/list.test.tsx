@@ -476,6 +476,37 @@ describe("DocumentListPage", () => {
     expect(toastSuccessMock).toHaveBeenCalledWith("1 file(s) queued for indexing.", expect.anything());
   });
 
+  it("counts a retry refused because the first attempt already finished as queued", async () => {
+    uploadFileMock.mockRejectedValue(new Error("Network error"));
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["done"], "done.txt", { type: "text/plain" }),
+      new File(["dup"], "dup.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByRole("button", { name: "Retry failed" });
+    toastSuccessMock.mockClear();
+
+    uploadFileMock.mockImplementation(async (_partition, id, file) => {
+      if ((file as File).name === "done.txt") {
+        throw new ApiError(409, { detail: `File '${id}' already exists in partition docs` });
+      }
+      throw new ApiError(409, {
+        detail: "[DOCUMENT_CONTENT_EXISTS]: Same content already indexed",
+      });
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    await waitFor(() =>
+      expect(toastSuccessMock).toHaveBeenCalledWith("1 file(s) queued for indexing.", expect.anything()),
+    );
+    expect(await screen.findByText("dup.txt: Same content already indexed")).toBeTruthy();
+    expect(screen.getByText("done.txt: already uploaded")).toBeTruthy();
+  });
+
   it("closes the upload dialog when every file is accepted", async () => {
     uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
     renderDocuments();
