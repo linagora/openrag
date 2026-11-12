@@ -394,8 +394,10 @@ def _apply_policy(
     def dimension(reference: DataRef | None, positions: frozenset[int]) -> DataRef | None:
         if reference is None:
             return None
-        if on_hidden_sheet(reference.formula):
-            return replace(reference, values=(), withheld=True) if withhold else reference
+        # Recorded in every mode; only withholding stops here. In ``full`` the
+        # points of a hidden sheet still follow the series' visibility decision.
+        if on_hidden_sheet(reference.formula) and withhold:
+            return replace(reference, values=(), withheld=True)
         cell_range = resolve(reference.formula)
         if not drop_hidden_cells or not reference.values:
             return reference

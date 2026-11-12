@@ -2538,3 +2538,41 @@ def test_a_drawing_marker_outside_the_grid_names_no_cells(column):
 
     assert "Note" in found.text
     assert found.metadata["text_box_anchors"] == []
+
+
+def test_cached_values_on_a_hidden_sheet_follow_the_series_points_in_full_mode():
+    """Visible categories over a hidden row, values cached on a hidden sheet:
+    full mode keeps the hidden sheet's data, but drops the hidden point from both."""
+    workbook = Workbook()
+    sheet = _data_sheet(workbook)
+    sheet.row_dimensions[3].hidden = True
+    secret = workbook.create_sheet("Secret")
+    for value in ("Amount", 100, 101.5, 3):
+        secret.append([None, value])
+    secret.sheet_state = "hidden"
+    _add_chart(sheet, sheet)
+    series = _series("S", ("Data!$A$2:$A$4", ["Jan", "Feb", "Mar"]), ("Secret!$B$2:$B$4", [100, 101.5, 3]))
+    raw = _replace_parts(_save(workbook), {"xl/charts/chart1.xml": _chart_xml([_plot("barChart", [series])])})
+
+    (chart,) = _charts(raw)
+
+    assert "| Jan | 100 |" in chart.text and "| Mar | 3 |" in chart.text
+    assert "101.5" not in chart.text and "Source data: hidden worksheet 'Secret'." in chart.text
+
+
+def test_a_chart_context_longer_than_half_the_budget_is_shortened():
+    from core.chunking.markdown_utils import chunk_xlsx_chart
+
+    def words(text: str) -> int:
+        return len(text.split())
+
+    context = "Chart: " + " ".join(f"word{index}" for index in range(80)) + " (line chart), worksheet Data"
+    rows = "\n".join(f"| r{index} | {index} |" for index in range(40))
+    content = f"{context}\n\n| X | Y |\n| --- | --- |\n{rows}"
+    pieces = chunk_xlsx_chart(content, {"chart_context": context}, 30, words)
+
+    assert len(pieces) > 1
+    assert all(words(piece) <= 30 for piece in pieces)
+    assert all(piece.startswith("Chart: word0") for piece in pieces[1:])
+    assert all("…" in piece.splitlines()[0] for piece in pieces[1:])
+    assert "| r39 | 39 |" in pieces[-1]

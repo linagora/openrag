@@ -1260,6 +1260,20 @@ def _chunk_csv_table(
     return chunks
 
 
+def _fit_words(text: str, budget: int, length_function: Callable[[str], int]) -> str:
+    """``text`` on one line within ``budget``, cut by word and marked ``…``; empty if no word fits."""
+    text = " ".join(text.split())
+    if not text or length_function(text) <= budget:
+        return text
+    kept = ""
+    for word in text.split(" "):
+        candidate = f"{kept} {word}" if kept else word
+        if length_function(f"{candidate} …") > budget:
+            break
+        kept = candidate
+    return f"{kept} …" if kept else ""
+
+
 def chunk_xlsx_chart(content: str, metadata: dict, chunk_size: int, length_function: Callable[[str], int]) -> list[str]:
     """Split a chart block so every piece says which chart its rows belong to.
 
@@ -1272,7 +1286,10 @@ def chunk_xlsx_chart(content: str, metadata: dict, chunk_size: int, length_funct
     """
     if length_function(content) <= chunk_size:
         return [content]
-    context = [metadata["chart_context"].strip()] if metadata.get("chart_context") else []
+    # The context opens every piece, so it may take at most half the budget:
+    # a longer one (a long chart title, a small chunk size) is shortened.
+    label = _fit_words(metadata.get("chart_context") or "", chunk_size // 2, length_function)
+    context = [label] if label else []
     pieces: list[str] = []
     opening: list[str] = []  # lines repeated at the top of the current piece
     current: list[str] = []
