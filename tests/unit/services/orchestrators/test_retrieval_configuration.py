@@ -9,7 +9,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
 from core.retrieval.trace import canonical_fingerprint
-from services.orchestrators.retrieval_service import RetrievalService
+from di.retrieval import create_retrieval_service
 
 
 class _Searcher:
@@ -70,7 +70,7 @@ def test_public_configuration_uses_effective_contextualizer_llm():
             retrieval=RetrievalPipelineConfig(type="multiQuery", llm="query-model"),
         )
     }
-    service = RetrievalService(
+    service = create_retrieval_service(
         searcher=_Searcher(),
         reranker=None,
         config=config,
@@ -93,7 +93,7 @@ def test_public_configuration_uses_effective_contextualizer_llm():
 def test_configuration_fingerprint_tracks_rag_query_path_settings(setting, changed):
     config = _config()
     config.partitions = {"tenant-a": _partition()}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     first = service.configuration_fingerprint(["tenant-a"])
     setattr(config.rag, setting, changed)
@@ -109,7 +109,7 @@ def test_configuration_fingerprint_tracks_pipeline_settings(setting, initial, ch
     config = _config()
     retrieval = RetrievalPipelineConfig(**{setting: initial})
     config.partitions = {"tenant-a": _partition(retrieval=retrieval)}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     first = service.configuration_fingerprint(["tenant-a"])
     setattr(retrieval, setting, changed)
@@ -123,7 +123,7 @@ def test_public_configuration_reports_the_top_n_that_applies():
         "tenant-a": _partition(name="tenant-a"),
         "tenant-b": _partition(name="tenant-b", retrieval=RetrievalPipelineConfig(top_n=12)),
     }
-    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     public = service.public_retrieval_configuration(["all"])
 
@@ -133,7 +133,7 @@ def test_public_configuration_reports_the_top_n_that_applies():
 def test_configuration_fingerprint_tracks_global_top_n_when_preset_leaves_it_unset():
     config = _config()
     config.partitions = {"tenant-a": _partition()}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     first = service.configuration_fingerprint(["tenant-a"])
     config.reranker.top_k = 15
@@ -149,7 +149,7 @@ def test_configuration_fingerprint_expands_all_partitions():
         "tenant-b": _partition(name="tenant-b", retrieval=tenant_b),
         "tenant-a": _partition(name="tenant-a", retrieval=tenant_a),
     }
-    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     public = service.public_retrieval_configuration(["all"])
     first = service.configuration_fingerprint(["all"])
@@ -174,7 +174,7 @@ async def test_resolved_plan_is_executed_without_resolving_a_prompt():
     config = _config()
     config.partitions = {"tenant-a": _partition()}
     prompts = _Prompts()
-    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config, prompt_service=prompts)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config, prompt_service=prompts)
 
     plan = await service.resolve_retrieval_plan(
         ["tenant-a"],
@@ -209,7 +209,7 @@ async def test_snapshot_plan_uses_strict_prompt_resolution_for_the_contextualize
     config = _config()
     config.partitions = {"tenant-a": _partition()}
     prompts = _Prompts()
-    service = RetrievalService(
+    service = create_retrieval_service(
         searcher=_Searcher(),
         reranker=None,
         config=config,
@@ -239,7 +239,7 @@ async def test_resolved_plan_records_effective_request_overrides():
             )
         )
     }
-    service = RetrievalService(searcher=_Searcher(), reranker=object(), config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=object(), config=config)
 
     plan = await service.resolve_retrieval_plan(
         ["tenant-a"],
@@ -281,7 +281,7 @@ async def test_resolved_snapshot_uses_global_reranker_for_legacy_preset():
             return object()
         raise KeyError(name)
 
-    service = RetrievalService(
+    service = create_retrieval_service(
         searcher=_Searcher(),
         reranker=object(),
         config=config,
@@ -310,7 +310,7 @@ async def test_static_reranker_model_changes_resolved_fingerprint(has_factory):
     def missing_catalog_endpoint(name):
         raise KeyError(name)
 
-    service = RetrievalService(
+    service = create_retrieval_service(
         searcher=_Searcher(),
         reranker=object(),
         config=config,
@@ -343,7 +343,9 @@ async def test_resolved_plan_reloads_an_embedder_switched_by_another_process():
                 )
             }
 
-    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config, preset_service=SwappedElsewhere())
+    service = create_retrieval_service(
+        searcher=_Searcher(), reranker=None, config=config, preset_service=SwappedElsewhere()
+    )
     prompt = SimpleNamespace(content_hash="context-hash", name=None, source="default")
     plan = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)
 

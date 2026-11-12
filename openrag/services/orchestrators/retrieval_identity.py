@@ -33,6 +33,16 @@ def public_endpoint(config: Settings, endpoint_type: str, name: str | None) -> d
     }
 
 
+def static_reranker_identity(config: Settings, *, exists: bool) -> dict[str, object]:
+    """Describe the reranker built at startup from ``settings.reranker``; *exists* says whether it was."""
+    if not exists:
+        return {"name": None, "model": None}
+    return {
+        "name": "default",
+        "model": getattr(getattr(config, "reranker", None), "model_name", None),
+    }
+
+
 def partition_search_identity(
     partition_name: str,
     configured_partitions: Mapping[str, Any],
@@ -101,12 +111,7 @@ class RetrievalIdentity:
 
     def static_reranker_identity(self) -> dict[str, object]:
         """Describe the static reranker built at startup from ``settings.reranker``."""
-        if not self._static_reranker:
-            return {"name": None, "model": None}
-        return {
-            "name": "default",
-            "model": getattr(getattr(self._config, "reranker", None), "model_name", None),
-        }
+        return static_reranker_identity(self._config, exists=self._static_reranker)
 
     def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
         """Mirror QueryService's partition LLM resolution for public metadata."""

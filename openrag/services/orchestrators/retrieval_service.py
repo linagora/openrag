@@ -1,34 +1,26 @@
 """RetrievalService — retrieval orchestration.
 
-Builds one ``core.retrieval`` pipeline (retriever, optional reranker,
-related/ancestor expansion) per group of partitions that share an embedder
-and retrieval settings, from the partition configs cached in
-``Settings.partitions``, and fuses the groups' results with RRF. It also
-serves the raw ``/search`` endpoint. The description of the retrieval
-settings for the trace and its fingerprints is ``RetrievalIdentity``
-(``retrieval_identity.py``); this service adds what resolving the pipelines
-tells.
-
-The core retriever talks to the ``RetrievalSearcher`` port, implemented by
-``services.storage.vector_store_searcher.VectorStoreSearcher`` (query
-embedding in-process, then the ``VectorStore``). The container injects the
-default searcher, rerankers and LLM, and factories that resolve a partition's
-own embedder, reranker and LLM by name. A partition missing from the config
-cache is a ``PartitionNotFoundError``: there is no fallback pipeline built
-from the static ``settings.retriever`` config.
+Fans a query out over the groups of partitions that share a retrieval
+pipeline, and fuses the groups' results with RRF. Which pipeline, searcher
+and reranker serve which partitions is the ``PipelineFactory`` port
+(``core.retrieval.pipeline_factory``), implemented in ``di/retrieval.py``,
+which also builds this service. It also serves the raw ``/search`` endpoint.
+The description of the retrieval settings for the trace and its fingerprints
+is ``RetrievalIdentity`` (``retrieval_identity.py``); this service adds what
+resolving the pipelines tells.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from core.models.retrieval_trace import TraceRemovalReason
 from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks, _safe_trace, _with_removal_reasons
-from core.retrieval.retriever import SingleRetriever, _expand_with_related_chunks
+from core.retrieval.retriever import _expand_with_related_chunks
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.searcher import file_id_restriction
 from core.retrieval.trace import (
@@ -39,18 +31,17 @@ from core.retrieval.trace import (
     merge_query_traces,
 )
 from core.utils.consts import MAX_RERANK_CANDIDATES
-from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
+from core.utils.exceptions import ServiceUnavailableError
 from core.utils.logging import get_logger
-from services.orchestrators.retrieval_identity import RetrievalIdentity, partition_search_identity, public_endpoint
 
 if TYPE_CHECKING:
     from core.config.root import Settings
-    from core.llm.llm import LLM
     from core.models.chunk import Chunk
-    from core.models.preset import PartitionConfig
     from core.models.query import Query, SearchQueries
     from core.rerankers.reranker import Reranker
+    from core.retrieval.pipeline_factory import PipelineFactory
     from core.retrieval.searcher import RetrievalSearcher
+    from services.orchestrators.retrieval_identity import RetrievalIdentity
 
 logger = get_logger()
 
@@ -73,62 +64,25 @@ class ResolvedRetrievalPlan:
     configuration_fingerprint: str
 
 
-@dataclass(frozen=True, slots=True)
-class _PipelineSettings:
-    """What a partition's retrieval pipeline is built from, after the caller's overrides.
-
-    Partitions searched on one vector field with equal settings build the same
-    pipeline, so they are retrieved together.
-    """
-
-    rerank: bool
-    reranker: str | None
-    top_k: int
-    top_n: int
-    similarity_threshold: float
-    include_related: bool
-    include_ancestors: bool
-    rrf_k: int
-
-
 class RetrievalService:
-    """Retrieval pipeline orchestration (search, single/multi retrieve)."""
+    """Retrieval pipeline orchestration (search, single/multi retrieve).
+
+    Built by ``di.retrieval.create_retrieval_service``.
+    """
 
     def __init__(
         self,
         *,
-        searcher: RetrievalSearcher,
-        reranker: Reranker | None = None,
+        pipelines: PipelineFactory,
+        identity: RetrievalIdentity,
         config: Settings,
-        searcher_factory: Callable[[str], RetrievalSearcher] | None = None,
-        reranker_factory: Callable[[str], Reranker] | None = None,
-        llm_factory: Callable[[str], LLM] | None = None,
-        prompt_service: Any | None = None,
         preset_service: Any | None = None,
     ) -> None:
-        self._searcher = searcher
+        self._pipelines = pipelines
+        self._identity = identity
+        # Live reference: the partition configs are refreshed on every preset change.
         self._config = config
-        self._legacy_reranker = reranker
-        self._searcher_factory = searcher_factory
-        self._reranker_factory = reranker_factory
         self._preset_service = preset_service
-        # The LLM factory and the prompt service only describe the
-        # contextualizer: the trace's configuration identity. Without a prompt
-        # service (unit tests, no DB) the on-disk seed is read.
-        self._identity = RetrievalIdentity(
-            config=config,
-            prompt_service=prompt_service,
-            catalog_llms=llm_factory is not None,
-            catalog_rerankers=reranker_factory is not None,
-            catalog_embedders=searcher_factory is not None,
-            static_reranker=reranker is not None,
-        )
-
-        logger.debug(
-            "RetrievalService ready",
-            reranker_enabled=config.reranker.enabled and reranker is not None,
-            partition_configs=len(getattr(config, "partitions", {}) or {}),
-        )
 
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
@@ -206,173 +160,6 @@ class RetrievalService:
         )
         return plan.configuration_fingerprint
 
-    def _require_partition_config(self, partition: str):
-        partitions = self._partition_configs()
-        if partition not in partitions:
-            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-        return partitions[partition]
-
-    def _legacy_retriever_value(self, name: str, default: Any) -> Any:
-        return getattr(self._config.retriever, name, default)
-
-    def _resolve_reranker_with_identity(
-        self,
-        reranker_name: str | None,
-        partition: str,
-    ) -> tuple[Reranker | None, dict[str, object]]:
-        """Effective reranker for one partition's retrieval pipeline.
-
-        Resolution order — mirrors ``QueryService._resolve_llm``:
-
-        1. The partition's configured ``reranker`` endpoint, resolved fresh via
-           the model-endpoint catalog factory so a rename/promotion of that
-           endpoint takes effect immediately.
-        2. The **catalog default** endpoint (``is_default=True``) when the
-           partition sets no reranker, or its endpoint name has gone stale (the
-           endpoint was renamed/deleted after assignment — unlike
-           ``chat_llm``, this field has no create/PATCH-time validation, so a
-           stale name reaching here is expected, not a bug).
-        3. The static reranker built at startup from ``settings.reranker``,
-           only when no factory is wired (unit tests) or the catalog has no
-           default reranker endpoint yet.
-
-        The resolved endpoint name is always logged (at debug), including for
-        the default, so "which reranker ran?" is answerable from the logs.
-        """
-        if self._reranker_factory is None:
-            return self._legacy_reranker, self._identity.static_reranker_identity()
-        if reranker_name:
-            try:
-                reranker = self._reranker_factory(reranker_name)
-            except KeyError:
-                logger.bind(reranker=reranker_name, partition=partition).warning(
-                    "Partition reranker endpoint not found in the model-endpoint catalog — "
-                    "falling back to the default reranker"
-                )
-            else:
-                logger.bind(reranker=reranker_name, partition=partition).debug(
-                    "Reranking with the partition's reranker endpoint"
-                )
-                return reranker, public_endpoint(self._config, "reranker", reranker_name)
-        try:
-            reranker = self._reranker_factory("default")
-        except KeyError:
-            pass
-        else:
-            logger.bind(reranker=self._default_reranker_name(), partition=partition).debug(
-                "Reranking with the default reranker endpoint"
-            )
-            return reranker, public_endpoint(self._config, "reranker", "default")
-        logger.bind(partition=partition).debug(
-            "Reranking with the static default reranker (no catalog default endpoint)"
-        )
-        return self._legacy_reranker, self._identity.static_reranker_identity()
-
-    def _default_reranker_name(self) -> str:
-        """Real endpoint name behind the catalog reranker ``"default"`` alias, for logging.
-
-        Same identity-lookup trick as ``QueryService._default_llm_name``: the
-        ``"default"`` alias config object is the *same* object as its real-named
-        entry, so the name is recovered by identity. Returns ``"default"`` when
-        it can't be resolved (e.g. the alias isn't populated yet).
-        """
-        rerankers = self._config.models.reranker
-        default_cfg = rerankers.get("default")
-        if default_cfg is not None:
-            for name, cfg in rerankers.items():
-                if name != "default" and cfg is default_cfg:
-                    return name
-        return "default"
-
-    async def _pipeline_from_settings(
-        self,
-        partition: str,
-        embedder: str,
-        settings: _PipelineSettings,
-    ) -> tuple[RetrieverPipeline, int | None, dict[str, object] | None]:
-        """The pipeline *settings* describe, searching *embedder*'s vectors.
-
-        It reads no partition config, so a group's pipeline is the one it was
-        grouped by, even when a config refresh lands while an earlier group
-        resolves its prompt. *partition* only names the group in the logs.
-        """
-        searcher = self._searcher_factory(embedder) if self._searcher_factory is not None else self._searcher
-
-        reranker = None
-        reranker_identity = None
-        if settings.rerank:
-            reranker, reranker_identity = self._resolve_reranker_with_identity(settings.reranker, partition)
-
-        retriever = SingleRetriever(
-            searcher=searcher,
-            top_k=settings.top_k,
-            similarity_threshold=settings.similarity_threshold,
-            with_surrounding_chunks=self._legacy_retriever_value("with_surrounding_chunks", False),
-            include_related=settings.include_related,
-            include_ancestors=settings.include_ancestors,
-            related_limit=self._legacy_retriever_value("related_limit", 10),
-            max_ancestor_depth=self._legacy_retriever_value("max_ancestor_depth", None),
-        )
-        pipeline = RetrieverPipeline(
-            retriever=retriever,
-            reranker=reranker,
-            reranker_top_k=settings.top_n,
-            allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
-            rrf_k=settings.rrf_k,
-        )
-        return pipeline, settings.top_n, reranker_identity
-
-    def _pipeline_settings(
-        self,
-        partition_cfg: PartitionConfig,
-        *,
-        top_k: int | None,
-        similarity_threshold: float | None,
-        disable_reranker: bool,
-        disable_expansion: bool,
-    ) -> _PipelineSettings:
-        """The settings *partition_cfg*'s pipeline is built from, after the caller's overrides.
-
-        Only what the pipeline reads: a preset field it ignores (the reranker
-        when reranking is off, the contextualizer prompt, which QueryService
-        reads, a value the caller overrides) cannot split partitions into
-        separate retrievals.
-        """
-        cfg = partition_cfg.retrieval
-        rerank = cfg.enable_reranker and not disable_reranker
-        return _PipelineSettings(
-            rerank=rerank,
-            reranker=cfg.reranker if rerank else None,
-            top_k=top_k if top_k is not None else cfg.top_k,
-            top_n=cfg.effective_top_n(self._config.reranker.top_k),
-            similarity_threshold=similarity_threshold if similarity_threshold is not None else cfg.similarity_threshold,
-            include_related=cfg.include_related and not disable_expansion,
-            include_ancestors=cfg.include_ancestors and not disable_expansion,
-            rrf_k=cfg.rrf_k,
-        )
-
-    async def _pipeline_for_partition(
-        self,
-        partition: str,
-        *,
-        top_k: int | None = None,
-        similarity_threshold: float | None = None,
-        disable_reranker: bool = False,
-        disable_expansion: bool = False,
-    ) -> tuple[RetrieverPipeline, int | None]:
-        partition_cfg = self._require_partition_config(partition)
-        settings = self._pipeline_settings(
-            partition_cfg,
-            top_k=top_k,
-            similarity_threshold=similarity_threshold,
-            disable_reranker=disable_reranker,
-            disable_expansion=disable_expansion,
-        )
-        pipeline, default_top_k, _reranker_identity = await self._pipeline_from_settings(
-            partition, partition_cfg.embedder, settings
-        )
-        return pipeline, default_top_k
-
     async def resolve_retrieval_plan(
         self,
         partitions: Sequence[str],
@@ -403,28 +190,24 @@ class RetrievalService:
                     getattr(getattr(self._config, "reranker", None), "enabled", False),
                 )
                 if partition is not None and reranker_enabled and not disable_reranker:
-                    _reranker, identity = self._resolve_reranker_with_identity(
+                    _reranker, identity = self._pipelines.reranker(
                         getattr(retrieval, "reranker", None),
                         partition_name,
                     )
                     reranker_identities[partition_name] = identity
         elif selected:
-            partition_groups = self._partitions_by_pipeline(
+            for group in self._pipelines.pipeline_groups(
                 selected,
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
-            )
-            for names, embedder, settings in partition_groups:
-                # Every partition of a group shares the pipeline and reranker it was grouped by.
-                pipeline, default_top_k, reranker_identity = await self._pipeline_from_settings(
-                    names[0], embedder, settings
-                )
-                groups.append(ResolvedRetrievalGroup(tuple(names), pipeline, default_top_k))
-                if reranker_identity is not None:
-                    for partition_name in names:
-                        reranker_identities[partition_name] = reranker_identity
+            ):
+                groups.append(ResolvedRetrievalGroup(tuple(group.partitions), group.pipeline, group.default_top_k))
+                # Every partition of a group shares the reranker it was grouped by.
+                if group.reranker_identity is not None:
+                    for partition_name in group.partitions:
+                        reranker_identities[partition_name] = group.reranker_identity
             if len(groups) == 1:
                 # Keep the requested scope, so "all" stays unscoped, as in _pipeline_groups_for_partitions.
                 (group,) = groups
@@ -461,13 +244,13 @@ class RetrievalService:
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
         """The partitions grouped by the pipeline that retrieves them, each with that pipeline.
 
-        See :meth:`_partitions_by_pipeline` for the grouping. The groups' lists
-        are fused with RRF by the caller.
+        See ``PipelineFactory.pipeline_groups`` for the grouping. The groups'
+        lists are fused with RRF by the caller.
 
         ``"all"`` only reaches this layer post-authorization (a SUPER_ADMIN_MODE
         admin; regular users are already expanded to their memberships upstream),
         so every hydrated partition is in scope. With a single group it is kept,
-        so the search stays unscoped, as in :meth:`_search_groups`.
+        so the search stays unscoped, as in ``PipelineFactory.search_groups``.
         """
         await self.refresh_partition_configs()
         configs = self._partition_configs()
@@ -475,86 +258,21 @@ class RetrievalService:
         if not scope:
             # No partition to retrieve from: nothing to search.
             return []
-        groups: list[tuple[list[str], RetrieverPipeline, int | None]] = []
-        partition_groups = self._partitions_by_pipeline(
-            scope,
-            top_k=top_k,
-            similarity_threshold=similarity_threshold,
-            disable_reranker=disable_reranker,
-            disable_expansion=disable_expansion,
-        )
-        for names, embedder, settings in partition_groups:
-            # Every partition of a group shares the pipeline it was grouped by.
-            pipeline, default_top_k, _reranker_identity = await self._pipeline_from_settings(
-                names[0], embedder, settings
-            )
-            groups.append((names, pipeline, default_top_k))
-        if len(groups) == 1:
-            # Keep the caller's partitions, so "all" stays unscoped.
-            _, pipeline, default_top_k = groups[0]
-            return [(partitions, pipeline, default_top_k)]
-        return groups
-
-    def _partitions_by_pipeline(
-        self,
-        partitions: Sequence[str],
-        *,
-        top_k: int | None,
-        similarity_threshold: float | None,
-        disable_reranker: bool,
-        disable_expansion: bool,
-    ) -> list[tuple[list[str], str, _PipelineSettings]]:
-        """Concrete partitions grouped by the retrieval pipeline they build, each with its embedder and settings.
-
-        A query embedding only matches vectors of the same model, so partitions
-        on different embedders need their own retrieval. Partitions on the same
-        vector field (so the ``default`` alias and the embedder behind it stay
-        together, as in :meth:`_search_groups`) with the same pipeline settings
-        (:meth:`_pipeline_settings`: the preset fields the pipeline reads, after
-        the caller's overrides) build the same pipeline, so one retrieval serves
-        them all: one query embedding, one search over all of them, one rerank
-        pass, and their chunks compete on score rather than being fused by rank.
-        """
-        configs = self._partition_configs()
-        endpoints = getattr(self._config.models, "embedder", None) or {}
-        grouped: dict[tuple[str, _PipelineSettings], tuple[str, list[str]]] = {}
-        for partition in partitions:
-            partition_cfg = self._require_partition_config(partition)
-            embedder, _endpoint, _vector_field, search_key = partition_search_identity(partition, configs, endpoints)
-            settings = self._pipeline_settings(
-                partition_cfg,
+        groups = [
+            (group.partitions, group.pipeline, group.default_top_k)
+            for group in self._pipelines.pipeline_groups(
+                scope,
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
             )
-            # A group's pipeline searches with its first partition's embedder, as in _search_groups.
-            grouped.setdefault((search_key, settings), (embedder, []))[1].append(partition)
-        return [(names, embedder, settings) for (_key, settings), (embedder, names) in grouped.items()]
-
-    def _search_groups(self, partitions: list[str]) -> list[tuple[list[str], RetrievalSearcher]]:
-        """The partitions grouped by the vector field they are searched on, each with its searcher.
-
-        A query embedding only matches vectors of the same model, so each
-        embedder's partitions need their own search. Grouping by field rather
-        than embedder name keeps the ``default`` alias and the embedder behind
-        it in one search. A partition without a config is searched with the
-        default embedder, as before.
-        """
-        configs = self._partition_configs()
-        if self._searcher_factory is None or not configs or not partitions:
-            return [(partitions, self._searcher)]
-        expanded = list(configs) if "all" in partitions else partitions
-        endpoints = getattr(self._config.models, "embedder", None) or {}
-        groups: dict[str, tuple[str, list[str]]] = {}
-        for partition in expanded:
-            embedder, _endpoint, _vector_field, group_key = partition_search_identity(partition, configs, endpoints)
-            groups.setdefault(group_key, (embedder, []))[1].append(partition)
+        ]
         if len(groups) == 1:
             # Keep the caller's partitions, so "all" stays unscoped.
-            ((embedder, _),) = groups.values()
-            return [(partitions, self._searcher_factory(embedder))]
-        return [(names, self._searcher_factory(embedder)) for embedder, names in groups.values()]
+            _, pipeline, default_top_k = groups[0]
+            return [(partitions, pipeline, default_top_k)]
+        return groups
 
     def _single_partition_retrieval_config(self, partitions: list[str]):
         """The retrieval preset of a search scoped to exactly one configured partition, else ``None``."""
@@ -590,7 +308,7 @@ class RetrievalService:
                 "only a search over one partition whose retrieval preset enables it can rerank.",
                 code="RERANKER_UNAVAILABLE",
             )
-        reranker, identity = self._resolve_reranker_with_identity(
+        reranker, identity = self._pipelines.reranker(
             pipeline_cfg.reranker if pipeline_cfg else None, ",".join(partitions)
         )
         if reranker is None:
@@ -660,7 +378,7 @@ class RetrievalService:
             candidates = self._search_rerank_candidates(parts, top_k, rerank_candidates)
         if trace is not None:
             trace.record_stage("original_query", status="complete", candidates=[])
-        groups = self._search_groups(parts)
+        groups = self._pipelines.search_groups(parts)
         search_kwargs = {
             "query": text,
             "top_k": candidates,

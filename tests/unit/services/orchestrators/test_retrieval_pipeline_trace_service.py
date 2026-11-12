@@ -7,6 +7,7 @@ from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
 from core.retrieval.trace import RetrievalTraceBuilder
+from di.retrieval import create_retrieval_service
 from services.orchestrators.retrieval_service import RetrievalService
 
 
@@ -80,7 +81,7 @@ def _tenant_config() -> SimpleNamespace:
 
 
 def _service(searcher=None, *, config=None, searcher_factory=None) -> RetrievalService:
-    return RetrievalService(
+    return create_retrieval_service(
         searcher=searcher or _Searcher(),
         reranker=None,
         config=config or _config(),

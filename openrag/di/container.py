@@ -573,7 +573,7 @@ class ServiceContainer:
     def retrieval_service(self) -> RetrievalService:
         """RetrievalService — lazily built, cached for the container's lifetime."""
         if self._retrieval_service is None:
-            from services.orchestrators.retrieval_service import RetrievalService
+            from di.retrieval import create_retrieval_service
             from services.storage.catalog_searcher import CatalogSearcher
             from services.storage.vector_store_searcher import VectorStoreSearcher
 
@@ -631,7 +631,7 @@ class ServiceContainer:
                     ),
                     DEFAULT_PROVIDER,
                 )
-            self._retrieval_service = RetrievalService(
+            self._retrieval_service = create_retrieval_service(
                 searcher=searcher,
                 reranker=reranker,
                 config=settings,
