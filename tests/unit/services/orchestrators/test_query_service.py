@@ -242,20 +242,6 @@ def test_top_n_falls_back_to_reranker_top_k():
     assert svc._resolve_top_n(["unknown"]) == 5
 
 
-def test_empty_response_retry_instruction_uses_one_system_message():
-    messages = [
-        {"role": "system", "content": "Follow the existing answer instructions."},
-        {"role": "user", "content": "ok"},
-    ]
-
-    retry_messages = qs._empty_response_retry_messages(messages)
-
-    assert [message["role"] for message in retry_messages].count("system") == 1
-    assert "Follow the existing answer instructions." in retry_messages[0]["content"]
-    assert "previous response was empty" in retry_messages[0]["content"]
-    assert messages[0]["content"] == "Follow the existing answer instructions."
-
-
 def test_acknowledgement_prompt_does_not_assume_the_user_expressed_gratitude():
     prompt = qs.build_casual_response_prompt("acknowledgement", "en")
 
@@ -2280,64 +2266,6 @@ async def test_partial_retry_stream_failure_keeps_partial_text_and_truncation_fl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("close_early", [False, True])
-async def test_empty_response_retry_closes_streams_before_retry_and_on_disconnect(close_early):
-    close_order = []
-    retry_opened_after = []
-
-    class TrackedStream:
-        def __init__(self, name, lines):
-            self.name = name
-            self.lines = list(lines)
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            if not self.lines:
-                raise StopAsyncIteration
-            return self.lines.pop(0)
-
-        async def aclose(self):
-            close_order.append(self.name)
-
-    initial_stream = TrackedStream(
-        "initial",
-        [
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-            "data: [DONE]\n\n",
-        ],
-    )
-
-    def retry_stream_factory():
-        retry_opened_after.append(list(close_order))
-        return TrackedStream(
-            "retry",
-            [
-                'data: {"choices":[{"delta":{"content":"Answer"}}]}\n\n',
-                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-                "data: [DONE]\n\n",
-            ],
-        )
-
-    response_stream = qs._retry_empty_response_stream(
-        initial_stream,
-        retry_stream_factory,
-        fallback_text="Please try again.",
-        fallback_extra={},
-        model_name="m",
-    )
-    if close_early:
-        await anext(response_stream)
-        await response_stream.aclose()
-    else:
-        _ = [line async for line in response_stream]
-
-    assert retry_opened_after == [["initial"]]
-    assert close_order == ["initial", "retry"]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["chat", "chat_stream"])
 async def test_empty_length_completion_uses_fallback_without_retry(operation):
     contextualizer_result = json.dumps({"intent": "other", "requires_retrieval": True, "query_list": []})
@@ -3610,11 +3538,6 @@ def test_dedupe_web_drops_invalid_urls_before_source_numbering():
     valid = SimpleNamespace(url="https://example.test/evidence")
 
     assert qs._dedupe_web([[invalid, valid]]) == [valid]
-
-
-def test_sampling_strips_transport_keys():
-    out = qs._sampling({"messages": [], "stream": True, "model": "m", "temperature": 0.5})
-    assert out == {"temperature": 0.5}
 
 
 @pytest.mark.asyncio

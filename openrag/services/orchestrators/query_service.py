@@ -14,22 +14,22 @@ Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
   JSON-instructed prompt + ``response_format=json_object`` and
   ``json.loads`` into the Pydantic model, keeping the legacy fallbacks
   (retry → raw user query; relevancy=False on parse failure).
-* **Streaming + citations live here; the router is pure transport.**
-  ``chat_stream`` drives the proven
-  ``core.utils.source_filtering.stream_with_source_filtering`` (it holds back a lookahead that
-  keeps the ``[Sources: N]`` tag from reaching the client, and emits only settled text);
-  ``chat`` / ``complete`` return the finalized OpenAI dict with the
-  citation-filtered ``extra`` sources. The router only maps the
-  partition, builds request-bound source links (``prepare_sources``
-  callable — keeps ``request.url_for`` in transport), and wraps
-  ``StreamingResponse`` / ``JSONResponse``.
+* **The router is pure transport.** It maps the partition, builds
+  request-bound source links (the ``prepare_sources`` callable keeps
+  ``request.url_for`` in transport), and wraps ``StreamingResponse`` /
+  ``JSONResponse``.
 
-The rules with no I/O live in ``core``: small talk (``core.chat.smalltalk``),
-the history window (``core.chat.history``), fitting the sources into the
-window (``core.chat.budget``), the route (``core.chat.routing``), the request's
-metadata flags (``core.models.chat.ChatOptions``) and the contextualizer's
-messages (``core.prompts.query_contextualizer``). This module wires them to the
-LLM, retrieval, web search and the prompt library.
+This module finds the sources and renders them into the prompt;
+``AnswerService`` (``answer_service.py``) then calls the model, strips the
+``[Sources: N]`` tag, retries an empty answer and builds ``extra``, the same
+way for ``chat``, ``chat_stream`` and ``complete``. The rules with no I/O live
+in ``core``: small talk (``core.chat.smalltalk``), the history window
+(``core.chat.history``), fitting the sources into the window
+(``core.chat.budget``), the route (``core.chat.routing``), shaping the answer
+(``core.chat.answer``), the request's metadata flags
+(``core.models.chat.ChatOptions``) and the contextualizer's messages
+(``core.prompts.query_contextualizer``). This module wires them to the LLM,
+retrieval, web search and the prompt library.
 
 No LangChain symbol is imported into this module. ``Chunk`` is converted to a
 LangChain ``Document`` via ``Chunk.to_langchain()`` at the boundary so the
@@ -43,7 +43,6 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import aclosing
 from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -55,7 +54,6 @@ from core.chat.smalltalk import (
     CasualMessagePolicy,
     acknowledgement_language,
     classify_latest_message,
-    is_casual_reply,
 )
 from core.models.chat import ChatOptions
 from core.models.preset import resolve_partition_chat_llm
@@ -87,15 +85,11 @@ from core.retrieval.trace import (
 )
 from core.utils.exceptions import ContextWindowExceededError, ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
-from core.utils.source_filtering import (
-    extract_and_strip_sources_block,
-    filter_sources_by_citations,
-    stream_with_source_filtering,
-)
 from core.utils.string_utils import json_object_slice
 from core.utils.text import get_num_tokens
 from core.utils.web_url import normalize_web_url
 from services.inference.runtime import detect_language, get_llm_semaphore
+from services.orchestrators.answer_service import AnswerService, PreparedAnswer
 from services.orchestrators.prompt_service import ResolvedPrompt
 
 if TYPE_CHECKING:
@@ -146,8 +140,10 @@ class QueryService:
         workspace_service: WorkspaceService,
         prompt_service: PromptService,
         llm_factory: Callable[[str], LLM] | None = None,
+        answer_service: AnswerService | None = None,
     ) -> None:
         self._retrieval = retrieval_service
+        self._answer = answer_service or AnswerService(detect_language=detect_language)
         self._llm = llm
         self._llm_factory = llm_factory
         self._web = web_search_service
@@ -1187,27 +1183,23 @@ class QueryService:
         trace.timings["total"] = time.perf_counter() - started
         return trace.finish(configuration_fingerprint=result.configuration_fingerprint)
 
-    async def chat(
+    async def _prepare_answer(
         self,
         *,
         partitions: list[str] | None,
         payload: dict,
         prepare_sources: PrepareSources,
-        model_name: str,
-        request_id: str | None = None,
-        max_prompt_tokens: int | None = None,
-    ) -> dict:
-        """Non-streaming chat completion → finalized OpenAI dict.
+        llm: LLM,
+        request_id: str | None,
+        max_prompt_tokens: int | None,
+        request_started: float,
+    ) -> PreparedAnswer:
+        """Find the sources of a chat request and render them into its prompt.
 
-        *max_prompt_tokens* is what the answering model's window leaves for the
-        prompt (window minus output); the retrieved sources are capped to fit
-        it. ``None`` means the window is unknown: only ``top_n`` caps them.
-        Raises ``ContextWindowExceededError`` (413) when the instructions and
-        the conversation alone don't fit in it.
+        A request with no partition and no web search goes to the model as it
+        is. *max_prompt_tokens*: see ``chat``.
         """
-        request_started = time.perf_counter()
         options = ChatOptions.from_metadata(payload.get("metadata"))
-        include_all_retrieved = options.include_all_retrieved_sources
         original_query = latest_user_query(payload.get("messages", []))
         trace = (
             RetrievalTraceBuilder(
@@ -1219,7 +1211,6 @@ class QueryService:
             else None
         )
         configuration_fingerprint = "unavailable"
-        llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         retry_empty_response = True
         if not resolve_route(partitions, options).searches:
@@ -1243,131 +1234,10 @@ class QueryService:
         # `all_retrieved_sources` is debug/eval telemetry, not needed by most
         # callers — skip building it (and calling prepare_sources on the full,
         # uncapped retrieval set) unless the caller opted in (#847 review).
-        all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
-        structured_output = _is_structured_output(payload)
-
-        payload["messages"] = sanitize_messages(payload["messages"])
-        chunk = await llm.chat(payload["messages"], **_sampling(payload))
-        chunk["model"] = model_name
-        content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-        if citation_protocol_active and not structured_output:
-            clean, citations = extract_and_strip_sources_block(
-                content,
-                include_inline_markers=bool(sources),
-            )
-        else:
-            clean, citations = content, None
-        response_message = chunk["choices"][0]["message"]
-        retry_failed = False
-        can_retry = (
-            retry_empty_response
-            and not structured_output
-            and chunk["choices"][0].get("finish_reason") in (None, "stop")
-            and not clean.strip()
-            and not response_message.get("tool_calls")
-            and not response_message.get("refusal")
-        )
-        if can_retry:
-            try:
-                retry_chunk = await llm.chat(_empty_response_retry_messages(payload["messages"]), **_sampling(payload))
-            except Exception as exc:
-                retry_failed = True
-                logger.warning("Empty-response retry failed; returning a short fallback", error=str(exc))
-            else:
-                retry_chunk["model"] = model_name
-                retry_content = retry_chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-                if citation_protocol_active:
-                    clean, citations = extract_and_strip_sources_block(
-                        retry_content,
-                        include_inline_markers=bool(sources),
-                    )
-                else:
-                    clean, citations = retry_content, None
-                chunk = retry_chunk
-                response_message = chunk["choices"][0]["message"]
-
-        response_truncated = chunk["choices"][0].get("finish_reason") == "length"
-        if (
-            retry_empty_response
-            and not structured_output
-            and not clean.strip()
-            and not response_message.get("tool_calls")
-            and not response_message.get("function_call")
-            and not response_message.get("refusal")
-            and chunk["choices"][0].get("finish_reason") in (None, "stop", "length")
-        ):
-            clean = _empty_response_fallback(payload["messages"])
-            chunk["choices"][0]["finish_reason"] = "stop"
-        response_message["content"] = clean
-        extra = _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
-        if retry_failed or response_truncated:
-            extra["truncated"] = True
-        if options.attachments_sent:
-            # Indicate which attachments were actually searched to generate the answer.
-            extra["attachments"] = attachments
-        if trace is not None:
-            if trace.contextualization is None:
-                self._record_contextualization(
-                    trace,
-                    SearchQueries(query_list=[Query(query=original_query)]),
-                    original_query=original_query,
-                )
-            trace.timings["total"] = time.perf_counter() - request_started
-            extra["retrieval_trace"] = trace.finish(configuration_fingerprint=configuration_fingerprint)
-        chunk["extra"] = extra
-        return chunk
-
-    async def chat_stream(
-        self,
-        *,
-        partitions: list[str] | None,
-        payload: dict,
-        prepare_sources: PrepareSources,
-        model_name: str,
-        request_id: str | None = None,
-        max_prompt_tokens: int | None = None,
-    ) -> AsyncIterator[str]:
-        """Streaming chat completion → SSE strings with filtered sources (*max_prompt_tokens*: see ``chat``)."""
-        request_started = time.perf_counter()
-        options = ChatOptions.from_metadata(payload.get("metadata"))
         include_all_retrieved = options.include_all_retrieved_sources
-        original_query = latest_user_query(payload.get("messages", []))
-        trace = (
-            RetrievalTraceBuilder(
-                request_id=request_id or str(uuid.uuid4()),
-                original_query=original_query,
-                diagnostics=self._retrieval_diagnostics_context(options),
-            )
-            if options.include_retrieval_trace
-            else None
-        )
-        configuration_fingerprint = "unavailable"
-        llm = self._resolve_llm(partitions)
-        citation_protocol_active = False
-        retry_empty_response = True
-        if not resolve_route(partitions, options).searches:
-            docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
-            attachments: list[str] = []
-            self._record_contextualization_not_run(trace, original_query=original_query)
-        else:
-            result = await self._prepare_chat(
-                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens
-            )
-            payload = result.payload
-            docs = result.docs
-            web_results = result.web_results
-            retrieved_docs = result.retrieved_docs
-            retrieved_web_results = result.retrieved_web_results
-            citation_protocol_active = result.citation_protocol_active
-            attachments = result.indexed_attachment_ids
-            configuration_fingerprint = result.configuration_fingerprint
-            retry_empty_response = result.retry_empty_response
-        sources = prepare_sources(docs, web_results)
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
-        structured_output = _is_structured_output(payload)
 
-        extra_fields = {"attachments": attachments} if options.attachments_sent else {}
-        terminal_extra_fields = None
+        finish_trace = None
         if trace is not None:
             if trace.contextualization is None:
                 self._record_contextualization(
@@ -1380,37 +1250,76 @@ class QueryService:
                 trace.timings["total"] = time.perf_counter() - request_started
                 return {"retrieval_trace": trace.finish(configuration_fingerprint=configuration_fingerprint)}
 
-            terminal_extra_fields = finish_trace
+        return PreparedAnswer(
+            payload=payload,
+            sources=sources,
+            all_sources=all_sources,
+            include_all_retrieved=include_all_retrieved,
+            citation_protocol_active=citation_protocol_active,
+            retry_empty_response=retry_empty_response,
+            # Which attachments were actually searched to generate the answer.
+            extra_fields={"attachments": attachments} if options.attachments_sent else {},
+            finish_trace=finish_trace,
+        )
 
-        payload["messages"] = sanitize_messages(payload["messages"])
+    async def chat(
+        self,
+        *,
+        partitions: list[str] | None,
+        payload: dict,
+        prepare_sources: PrepareSources,
+        model_name: str,
+        request_id: str | None = None,
+        max_prompt_tokens: int | None = None,
+    ) -> dict:
+        """Non-streaming chat completion → finalized OpenAI dict.
 
-        def filtered_stream(messages):
-            return stream_with_source_filtering(
-                llm.stream_chat(messages, **_sampling(payload)),
-                sources,
-                model_name,
-                all_sources=all_sources,
-                include_all_retrieved=include_all_retrieved,
-                citation_protocol_active=citation_protocol_active and not structured_output,
-                extra_fields=extra_fields or None,
-                terminal_extra_fields=terminal_extra_fields,
-            )
+        *max_prompt_tokens* is what the answering model's window leaves for the
+        prompt (window minus output); the retrieved sources are capped to fit
+        it. ``None`` means the window is unknown: only ``top_n`` caps them.
+        Raises ``ContextWindowExceededError`` (413) when the instructions and
+        the conversation alone don't fit in it.
+        """
+        request_started = time.perf_counter()
+        llm = self._resolve_llm(partitions)
+        prepared = await self._prepare_answer(
+            partitions=partitions,
+            payload=payload,
+            prepare_sources=prepare_sources,
+            llm=llm,
+            request_id=request_id,
+            max_prompt_tokens=max_prompt_tokens,
+            request_started=request_started,
+        )
+        return await self._answer.chat(prepared, llm=llm, model_name=model_name)
 
-        response_stream = filtered_stream(payload["messages"])
-        if retry_empty_response and not structured_output:
-            fallback_extra = _build_extra_payload(
-                sources, None, all_sources, include_all_retrieved=include_all_retrieved
-            )
-            if extra_fields:
-                fallback_extra.update(extra_fields)
-            response_stream = _retry_empty_response_stream(
-                response_stream,
-                lambda: filtered_stream(_empty_response_retry_messages(payload["messages"])),
-                fallback_text=_empty_response_fallback(payload["messages"]),
-                fallback_extra=fallback_extra,
-                model_name=model_name,
-            )
-        async for sse_line in response_stream:
+    async def chat_stream(
+        self,
+        *,
+        partitions: list[str] | None,
+        payload: dict,
+        prepare_sources: PrepareSources,
+        model_name: str,
+        request_id: str | None = None,
+        max_prompt_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Streaming chat completion → SSE strings with filtered sources (*max_prompt_tokens*: see ``chat``).
+
+        The sources are prepared once the caller starts iterating, so a failure
+        there reaches it inside the stream.
+        """
+        request_started = time.perf_counter()
+        llm = self._resolve_llm(partitions)
+        prepared = await self._prepare_answer(
+            partitions=partitions,
+            payload=payload,
+            prepare_sources=prepare_sources,
+            llm=llm,
+            request_id=request_id,
+            max_prompt_tokens=max_prompt_tokens,
+            request_started=request_started,
+        )
+        async for sse_line in self._answer.chat_stream(prepared, llm=llm, model_name=model_name):
             yield sse_line
 
     async def complete(
@@ -1424,192 +1333,23 @@ class QueryService:
         """Non-streaming text completion → finalized OpenAI dict (*max_prompt_tokens*: see ``chat``)."""
         include_all_retrieved = ChatOptions.from_metadata(payload.get("metadata")).include_all_retrieved_sources
         llm = self._resolve_llm(partitions)
-        citation_protocol_active = partitions is not None
         if partitions is None:
             docs, retrieved_docs = [], []
         else:
             payload, docs, retrieved_docs = await self._prepare_completions(partitions, payload, llm, max_prompt_tokens)
-        sources = prepare_sources(docs, [])
-        all_sources = prepare_sources(retrieved_docs, []) if include_all_retrieved else None
-        structured_output = _is_structured_output(payload)
-
-        resp = await llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
-        text = resp.get("choices", [{}])[0].get("text", "") or ""
-        if citation_protocol_active and not structured_output:
-            clean, citations = extract_and_strip_sources_block(
-                text,
-                include_inline_markers=bool(sources),
-            )
-        else:
-            clean, citations = text, None
-        resp["choices"][0]["text"] = clean
-        resp["extra"] = _build_extra_payload(
-            sources, citations, all_sources, include_all_retrieved=include_all_retrieved
+        prepared = PreparedAnswer(
+            payload=payload,
+            sources=prepare_sources(docs, []),
+            all_sources=prepare_sources(retrieved_docs, []) if include_all_retrieved else None,
+            include_all_retrieved=include_all_retrieved,
+            citation_protocol_active=partitions is not None,
         )
-        return resp
+        return await self._answer.complete(prepared, llm=llm)
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-
-
-_EMPTY_RESPONSE_RETRY_INSTRUCTION = (
-    "Your previous response was empty after response filtering. Try once more using the conversation, "
-    "the supplied context, and the response language already specified above. If the context does not support a "
-    "substantive answer, say so briefly. Do not return only a source marker or an empty message."
-)
-
-
-def _empty_response_retry_messages(messages: list[dict]) -> list[dict]:
-    """Append the retry instruction to the existing system message when present."""
-    retry_messages = [dict(message) for message in messages]
-    if retry_messages and retry_messages[0].get("role") == "system":
-        existing = retry_messages[0].get("content") or ""
-        retry_messages[0]["content"] = f"{existing.rstrip()}\n\n{_EMPTY_RESPONSE_RETRY_INSTRUCTION}"
-    else:
-        retry_messages.insert(0, {"role": "system", "content": _EMPTY_RESPONSE_RETRY_INSTRUCTION})
-    return retry_messages
-
-
-def _empty_response_fallback(messages: list[dict]) -> str:
-    """Return a short, language-aware response when one retry cannot answer."""
-    latest_user = next(
-        (message.get("content") or "" for message in reversed(messages) if message.get("role") == "user"),
-        "",
-    )
-    is_casual = is_casual_reply(latest_user)
-    language = (
-        acknowledgement_language(messages, latest_user, detect_language)
-        if is_casual
-        else detect_language(latest_user) or "en"
-    )
-    if language == "fr":
-        if is_casual:
-            return "Je suis là si vous souhaitez continuer."
-        return "Je n'ai pas pu formuler de réponse. Veuillez réessayer."
-    if is_casual:
-        return "I'm here if you'd like to continue."
-    return "I couldn't produce a response. Please try again."
-
-
-def _fallback_stream_lines(template, fallback_text: str, extra: dict, model_name: str):
-    """Build a complete SSE response around a short fallback message."""
-    base = dict(template or {})
-    base.setdefault("model", model_name)
-    choices = base.get("choices") or [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-    original_choice = dict(choices[0])
-    base["choices"] = [{**original_choice, "delta": {"content": fallback_text}, "finish_reason": None}]
-    base["extra"] = {key: value for key, value in extra.items() if key != "retrieval_trace"}
-    yield f"data: {json.dumps(base)}\n\n"
-
-    finish = dict(template or base)
-    finish.setdefault("model", model_name)
-    finish_choice = dict((finish.get("choices") or [original_choice])[0])
-    finish["choices"] = [{**finish_choice, "delta": {}, "finish_reason": "stop"}]
-    finish["extra"] = dict(extra)
-    yield f"data: {json.dumps(finish)}\n\n"
-    yield "data: [DONE]\n\n"
-
-
-async def _retry_empty_response_stream(
-    initial_stream,
-    retry_stream_factory,
-    *,
-    fallback_text: str,
-    fallback_extra: dict,
-    model_name: str,
-):
-    """Retry once after source filtering proves a completed answer is empty."""
-    template = None
-    extra = dict(fallback_extra)
-
-    for attempt in range(2):
-        buffered: list[str] = []
-        answer_started = False
-        saw_done = False
-        saw_non_text_output = False
-        saw_truncated = False
-        last_finish_reason = None
-
-        try:
-            stream = initial_stream if attempt == 0 else retry_stream_factory()
-            async with aclosing(stream):
-                async for line in stream:
-                    if answer_started:
-                        yield line
-                        continue
-
-                    buffered.append(line)
-                    if not line.startswith("data:"):
-                        continue
-                    data_text = line[len("data:") :].strip()
-                    if data_text == "[DONE]":
-                        saw_done = True
-                        break
-
-                    try:
-                        data = json.loads(data_text)
-                    except json.JSONDecodeError:
-                        # Filtered streams should be valid SSE JSON; pass unexpected
-                        # events through instead of treating them as an empty answer.
-                        answer_started = True
-                        for buffered_line in buffered:
-                            yield buffered_line
-                        buffered.clear()
-                        continue
-
-                    event_extra = data.get("extra")
-                    if isinstance(event_extra, dict) and event_extra:
-                        extra = dict(event_extra)
-                        saw_truncated = saw_truncated or event_extra.get("truncated") is True
-
-                    choices = data.get("choices") or []
-                    if not choices:
-                        continue
-                    template = data
-                    choice = choices[0]
-                    delta = choice.get("delta", {}) or {}
-                    content = delta.get("content", "") or ""
-                    if choice.get("finish_reason") is not None:
-                        last_finish_reason = choice["finish_reason"]
-                    if delta.get("tool_calls") or delta.get("function_call") or delta.get("refusal"):
-                        saw_non_text_output = True
-                    if (isinstance(content, str) and content.strip()) or saw_non_text_output:
-                        answer_started = True
-                        for buffered_line in buffered:
-                            yield buffered_line
-                        buffered.clear()
-        except Exception as exc:
-            if answer_started or attempt == 0:
-                raise
-            logger.warning("Empty-response stream retry failed; returning a short fallback", error=str(exc))
-            fallback_extra = {**extra, "truncated": True}
-            for fallback_line in _fallback_stream_lines(template, fallback_text, fallback_extra, model_name):
-                yield fallback_line
-            return
-
-        if answer_started:
-            return
-        if attempt == 0 and saw_truncated:
-            for buffered_line in buffered:
-                yield buffered_line
-            return
-        if attempt == 0 and saw_done and not saw_truncated and last_finish_reason in (None, "stop"):
-            continue
-
-        if last_finish_reason not in (None, "stop", "length"):
-            for buffered_line in buffered:
-                yield buffered_line
-            return
-
-        if attempt == 1 and saw_truncated:
-            extra = {**extra, "truncated": True}
-        if last_finish_reason == "length":
-            extra = {**extra, "truncated": True}
-        for fallback_line in _fallback_stream_lines(template, fallback_text, extra, model_name):
-            yield fallback_line
-        return
 
 
 def _summary_doc(chunk, summary: str):
@@ -1639,46 +1379,6 @@ def _messages_tokens(messages: list[dict]) -> int:
     """Tokens a chat message list takes, counted as the router's preflight does."""
     length_function = get_num_tokens()
     return sum(message_tokens(message, length_function) for message in messages)
-
-
-def _sampling(payload: dict, key: str = "messages") -> dict:
-    """Sampling kwargs handed to the core LLM (everything but the body).
-
-    Mirrors the legacy ``_LLMShim``: strip the transport keys; the core
-    ``VLLMClient`` consumes ``metadata`` (llm_override) and the rest as
-    OpenAI sampling params.
-    """
-    drop = {key, "stream", "model"}
-    return {k: v for k, v in payload.items() if k not in drop}
-
-
-def _is_structured_output(payload: dict) -> bool:
-    """Structured output cannot carry the plain-text citation marker."""
-    response_format = payload.get("response_format")
-    return isinstance(response_format, dict) and response_format.get("type") in {"json_object", "json_schema"}
-
-
-def _build_extra_payload(
-    sources: list,
-    citations: set[int] | None,
-    all_sources: list | None,
-    *,
-    include_all_retrieved: bool,
-) -> dict:
-    """Shared ``extra`` shape for ``chat``/``complete`` (mirrors
-    ``stream_with_source_filtering``'s payload, minus the streaming-only
-    ``truncated`` flag) so the three response paths can't drift apart.
-    """
-    filtered = filter_sources_by_citations(sources, citations)
-    payload = {
-        "sources": filtered,
-        "presented_sources": sources,
-        "cited_sources": filtered if citations is not None else [],
-        "citations_reported": citations is not None,
-    }
-    if include_all_retrieved:
-        payload["all_retrieved_sources"] = all_sources
-    return payload
 
 
 __all__ = ["QueryService", "RAGMODE"]
