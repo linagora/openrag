@@ -6,6 +6,7 @@ import {
   createModelEndpoint,
   getModelEndpointIndexedUsage,
   listModelEndpoints,
+  type ModelEndpointResponse,
   setDefaultModelEndpoint,
   updateModelEndpoint,
   validateModelEndpoint,
@@ -55,10 +56,11 @@ beforeAll(() => {
   });
 });
 
-function renderPage() {
+function renderPage(cachedEndpoints?: ModelEndpointResponse[]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  if (cachedEndpoints) queryClient.setQueryData(["model-endpoints"], cachedEndpoints, { updatedAt: 0 });
   return render(
     <QueryClientProvider client={queryClient}>
       <ModelsPage />
@@ -511,6 +513,32 @@ describe("ModelsPage validation", () => {
     await waitFor(() => expect(updateButton.disabled).toBe(true));
     expect(within(dialog).getByText("Endpoint B rejected its stored credential.")).toBeTruthy();
   });
+});
+
+describe("ModelsPage read errors", () => {
+  beforeEach(() => listModelEndpointsMock.mockReset());
+
+  it("shows a retryable load error instead of empty endpoint groups", async () => {
+    listModelEndpointsMock
+      .mockRejectedValueOnce(new Error("service unavailable"))
+      .mockResolvedValueOnce([]);
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("Model endpoints could not be loaded")).not.toBeNull();
+    expect(screen.queryByText("No embedder endpoints configured.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No embedder endpoints configured.")).not.toBeNull();
+  });
+
+  it("keeps the last loaded endpoints visible when a refresh fails", async () => {
+    listModelEndpointsMock.mockRejectedValueOnce(new Error("service unavailable"));
+    renderPage([]);
+
+    expect(await screen.findByText("Model endpoints could not be refreshed")).not.toBeNull();
+    expect(screen.getByText("No embedder endpoints configured.")).not.toBeNull();
+  });
+
 });
 
 describe("ModelsPage delete warning (#762)", () => {

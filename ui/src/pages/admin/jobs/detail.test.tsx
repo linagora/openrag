@@ -4,9 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
-import { getTaskError, getTaskStatus, getTaskStageProgress, cancelTask } from "@/lib/api/jobs";
+import { getTaskError, getTaskStatus, getTaskStageProgress, cancelTask, type TaskStatus } from "@/lib/api/jobs";
 import { listPartitions, type PartitionResponse } from "@/lib/api/partitions";
 import { copyToClipboard } from "@/lib/utils";
+import { ApiError } from "@/lib/api/client";
 import JobDetailPage from "./detail";
 
 vi.mock("sonner", () => ({
@@ -75,13 +76,16 @@ function jobDetailTree(queryClient: QueryClient, taskId: string) {
   );
 }
 
-function renderJobDetail(taskId = "task-1") {
+function renderJobDetail(taskId = "task-1", cachedTask?: TaskStatus) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
       mutations: { retry: false },
     },
   });
+  if (cachedTask) {
+    queryClient.setQueryData(["task", taskId, 7, "admin"], cachedTask, { updatedAt: 0 });
+  }
 
   const rendered = render(jobDetailTree(queryClient, taskId));
   return {
@@ -97,6 +101,10 @@ describe("JobDetailPage", () => {
     permissions.superAdmin = false;
     auth.user = { id: 7, is_admin: true };
     vi.clearAllMocks();
+    getTaskStatusMock.mockReset();
+    getTaskErrorMock.mockReset();
+    cancelTaskMock.mockReset();
+    copyToClipboardMock.mockReset();
     listPartitionsMock.mockResolvedValue(partitionRows({ partition: "docs", role: "owner" }));
     getTaskStatusMock.mockResolvedValue({
       task_id: "task-1",
@@ -149,6 +157,47 @@ describe("JobDetailPage", () => {
     expect(copyToClipboardMock.mock.calls[0][0]).toContain("ValueError: canonical parser failure");
     expect(copyToClipboardMock.mock.calls[0][0]).toContain("Failed stage: chunking");
     expect(toastSuccessMock).toHaveBeenCalledWith("Diagnostics copied to clipboard");
+  });
+
+  it("offers retry for a transient task-load failure", async () => {
+    getTaskStatusMock
+      .mockRejectedValueOnce(new Error("service unavailable"))
+      .mockResolvedValueOnce({
+        task_id: "task-1",
+        task_state: "COMPLETED",
+        details: { file_id: "file-1", partition: "docs", metadata: {}, user_id: 1 },
+      });
+    renderJobDetail();
+
+    expect(await screen.findByText("Task could not be loaded")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("heading", { name: "Task task-1" })).not.toBeNull();
+  });
+
+  it("reports a task as missing only for a 404 response", async () => {
+    getTaskStatusMock.mockRejectedValue(new ApiError(404, { detail: "Task not found" }));
+    renderJobDetail();
+
+    expect(await screen.findByText("Task not found.")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("keeps the cached task visible when a polling refresh returns 404", async () => {
+    getTaskStatusMock.mockRejectedValueOnce(new ApiError(404, { detail: "Task not found" }));
+    renderJobDetail("task-1", {
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: {
+        file_id: "file-1",
+        partition: "docs",
+        metadata: { filename: "retained.pdf" },
+        user_id: 1,
+      },
+    });
+
+    expect(await screen.findByText("Task could not be refreshed")).not.toBeNull();
+    expect(screen.getByText("retained.pdf")).not.toBeNull();
+    expect(screen.queryByText("Task not found.")).toBeNull();
   });
 
   it("uses the complete reason in details and copied diagnostics", async () => {
