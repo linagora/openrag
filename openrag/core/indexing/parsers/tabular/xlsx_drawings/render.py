@@ -88,6 +88,11 @@ def fit_chart_metadata(metadata: dict) -> None:
     field, at any depth, is cut to 128 characters, then to 32; the optional
     lists are emptied. Only a key count can then remain, which never comes
     near the budget. The chunk text keeps every label.
+
+    The guarantee rests on the current chart metadata: strings, lists of
+    strings or of small dicts, and short scalars. A new field that can grow
+    otherwise (a long list of numbers, say) must be added to
+    ``_OPTIONAL_LISTS`` or bounded where it is made.
     """
     size = _json_bytes(metadata)
     if size <= _MAX_METADATA_BYTES:
