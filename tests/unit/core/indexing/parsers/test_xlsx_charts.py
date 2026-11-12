@@ -1027,7 +1027,8 @@ def test_cached_points_on_hidden_rows_are_dropped_when_excel_would_not_draw_them
 def test_off_mode_reads_no_chart(monkeypatch):
     from core.indexing.parsers.tabular.xlsx_drawings import extract
 
-    monkeypatch.setattr(extract, "locate_charts", lambda *a, **k: pytest.fail("charts must not be read"))
+    monkeypatch.setattr(extract, "parse_chart", lambda *a, **k: pytest.fail("charts must not be read"))
+    monkeypatch.setattr(extract, "parse_chartex", lambda *a, **k: pytest.fail("charts must not be read"))
     blocks = _blocks(_workbook_with_chart(_monthly_revenue()), mode="off")
 
     assert [block.metadata["xlsx_content_kind"] for block in blocks] == ["table"]
@@ -2164,3 +2165,246 @@ def test_a_title_or_name_read_from_a_hidden_sheet_is_reported_in_full_mode():
     assert chart.metadata["chart_hidden_source_sheets"] == ["Labels"]
     # A chart reading a hidden sheet is never treated as already indexed.
     assert chart.metadata["chart_data_in_tables"] is False
+
+
+# --- text boxes, text drawn on charts, data labels, trendlines ---------------
+
+_A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+
+
+def _text_box(text, *, cells=((5, 1), (7, 3)), hidden=False, textlink="", grouped=False) -> str:
+    (from_col, from_row), (to_col, to_row) = cells
+    shape = (
+        f'<sp macro="" textlink="{textlink}"><nvSpPr><cNvPr id="9" name="TextBox 1"'
+        f'{' hidden="1"' if hidden else ""}/><cNvSpPr txBox="1"/></nvSpPr><spPr/>'
+        f"<txBody><a:bodyPr/>{''.join(f'<a:p><a:r><a:t>{line}</a:t></a:r></a:p>' for line in text.split(chr(10)))}"
+        "</txBody></sp>"
+    )
+    if grouped:
+        shape = f"<grpSp><nvGrpSpPr><cNvPr id='8' name='Group'/><cNvGrpSpPr/></nvGrpSpPr><grpSpPr/>{shape}</grpSp>"
+    return (
+        f"<twoCellAnchor {_A}><from><col>{from_col}</col><colOff>0</colOff><row>{from_row}</row><rowOff>0</rowOff>"
+        f"</from><to><col>{to_col}</col><colOff>0</colOff><row>{to_row}</row><rowOff>0</rowOff></to>"
+        f"{shape}<clientData/></twoCellAnchor>"
+    )
+
+
+def _with_text_boxes(raw: bytes, *boxes: str) -> bytes:
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        drawing = archive.read("xl/drawings/drawing1.xml").decode()
+    return _replace_parts(raw, {"xl/drawings/drawing1.xml": drawing.replace("</wsDr>", "".join(boxes) + "</wsDr>")})
+
+
+def _with_chart_text(raw: bytes, text: str, *, hidden=False) -> bytes:
+    shapes = (
+        '<c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+        f'xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing" {_A}>'
+        "<cdr:relSizeAnchor><cdr:from><cdr:x>0.1</cdr:x><cdr:y>0.1</cdr:y></cdr:from>"
+        "<cdr:to><cdr:x>0.4</cdr:x><cdr:y>0.2</cdr:y></cdr:to>"
+        f'<cdr:sp macro="" textlink=""><cdr:nvSpPr><cdr:cNvPr id="2" name="TextBox 1"{' hidden="1"' if hidden else ""}/>'
+        '<cdr:cNvSpPr txBox="1"/></cdr:nvSpPr><cdr:spPr/>'
+        f"<cdr:txBody><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></cdr:txBody></cdr:sp>"
+        "</cdr:relSizeAnchor></c:userShapes>"
+    )
+    rels = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Target="../drawings/drawing2.xml" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartUserShapes"/></Relationships>'
+    )
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        types = archive.read("[Content_Types].xml").decode()
+        chart = archive.read("xl/charts/chart1.xml").decode()
+    types = types.replace(
+        "</Types>",
+        '<Override PartName="/xl/drawings/drawing2.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml"/></Types>',
+    )
+    return _replace_parts(
+        raw,
+        {
+            "xl/drawings/drawing2.xml": shapes,
+            "xl/charts/chart1.xml": chart.replace(
+                "</c:chartSpace>",
+                '<c:userShapes xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+                'r:id="rId1"/></c:chartSpace>',
+            ),
+            "xl/charts/_rels/chart1.xml.rels": rels,
+            "[Content_Types].xml": types,
+        },
+    )
+
+
+def _kinds(blocks) -> list[str]:
+    return [block.metadata["xlsx_content_kind"] for block in blocks]
+
+
+def _text_boxes(blocks) -> list:
+    return [block for block in blocks if block.metadata["xlsx_content_kind"] == "text_box"]
+
+
+def test_worksheet_text_boxes_are_indexed_after_the_sheet_charts():
+    raw = _with_text_boxes(
+        _workbook_with_chart(_monthly_revenue()),
+        _text_box("Q3 dip:\nsupplier strike"),
+        _text_box("Grouped note", cells=((1, 20), (3, 22)), grouped=True),
+    )
+    blocks = _blocks(raw)
+    (box,) = _text_boxes(blocks)
+
+    assert _kinds(blocks) == ["table", "chart", "text_box"]
+    assert box.text.startswith("Text boxes on worksheet Data:")
+    assert "- Over F2:H4: Q3 dip:\n  supplier strike" in box.text
+    assert "- Over B21:D23: Grouped note" in box.text
+    assert box.metadata["text_box_count"] == 2
+    assert box.metadata["text_box_anchors"] == ["F2:H4", "B21:D23"]
+
+
+def test_text_boxes_are_indexed_when_charts_are_off():
+    raw = _with_text_boxes(_workbook_with_chart(_monthly_revenue()), _text_box("Note on the data"))
+
+    assert _kinds(_blocks(raw, mode="off")) == ["table", "text_box"]
+
+
+def test_hidden_text_boxes_and_links_to_hidden_cells_are_withheld():
+    workbook = Workbook()
+    sheet = _data_sheet(workbook)
+    sheet.row_dimensions[3].hidden = True
+    _add_chart(sheet, sheet)
+    raw = _with_text_boxes(
+        _save(workbook),
+        _text_box("Visible note"),
+        _text_box("Hidden note", hidden=True),
+        _text_box("101.5", textlink="$B$3"),
+    )
+
+    (withheld,) = _text_boxes(_blocks(raw, mode="without_hidden_data"))
+    (full,) = _text_boxes(_blocks(raw))
+    (off,) = _text_boxes(_blocks(raw, mode="off"))
+
+    assert "Visible note" in withheld.text
+    assert "Hidden note" not in withheld.text and "101.5" not in withheld.text
+    assert "(hidden in Excel) Hidden note" in full.text and "101.5" in full.text
+    assert off.text == withheld.text
+
+
+def test_text_drawn_on_a_chart_is_part_of_its_chunk():
+    raw = _with_chart_text(_workbook_with_chart(_monthly_revenue()), "Target revised in June")
+    blocks = _blocks(raw)
+    (chart,) = [block for block in blocks if block.metadata["xlsx_content_kind"] == "chart"]
+
+    assert 'Text on the chart: "Target revised in June"' in chart.text
+    assert "text_box" not in _kinds(blocks)
+
+
+def test_hidden_text_on_a_chart_is_withheld_without_hidden_data():
+    raw = _with_chart_text(_workbook_with_chart(_monthly_revenue()), "Draft figure", hidden=True)
+
+    (withheld,) = _charts(raw, mode="without_hidden_data")
+    (full,) = _charts(raw)
+
+    assert "Draft figure" not in withheld.text
+    assert "Draft figure" in full.text
+
+
+def _labelled_series(labels_xml: str, ext_xml: str = "") -> str:
+    months = ("Data!$A$2:$A$4", ["Jan", "Feb", "Mar"])
+    series = _series("2025", months, ("Data!$B$2:$B$4", [100, 101.5, 3]))
+    return series.replace("</c:ser>", f"<c:dLbls>{labels_xml}</c:dLbls>{ext_xml}</c:ser>")
+
+
+def _custom_label(index: int, text: str) -> str:
+    return (
+        f'<c:dLbl><c:idx val="{index}"/><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r></a:p>'
+        '</c:rich></c:tx><c:showVal val="1"/></c:dLbl>'
+    )
+
+
+def test_typed_data_labels_get_a_column_next_to_their_values():
+    xml = _chart_xml(
+        [_plot("barChart", [_labelled_series(_custom_label(1, "Supplier strike") + '<c:showVal val="1"/>')])]
+    )
+    (chart,) = _charts(_workbook_with_chart(xml))
+
+    assert "| Month | 2025 | 2025 (data label) |" in chart.text
+    assert "| Feb | 101.5 | Supplier strike |" in chart.text
+    assert "| Jan | 100 |  |" in chart.text
+
+
+def test_automatic_value_labels_add_no_column():
+    xml = _chart_xml([_plot("barChart", [_labelled_series('<c:showVal val="1"/>')])])
+    (chart,) = _charts(_workbook_with_chart(xml))
+
+    assert "(data label)" not in chart.text
+
+
+def test_data_labels_from_cells_are_read_from_their_cache():
+    ext = (
+        '<c:extLst><c:ext uri="{02D57815-91ED-43cb-92C2-25804820EDAC}">'
+        '<c15:datalabelsRange xmlns:c15="http://schemas.microsoft.com/office/drawing/2012/chart">'
+        "<c15:f>Data!$C$2:$C$4</c15:f><c15:dlblRangeCache>"
+        f"{_points(['North', 'South', 'East'])}</c15:dlblRangeCache></c15:datalabelsRange></c:ext></c:extLst>"
+    )
+    shown = (
+        '<c:extLst><c:ext uri="{CE6537A1-D6FC-4f65-9D91-7224C49458BB}">'
+        '<c15:showDataLabelsRange xmlns:c15="http://schemas.microsoft.com/office/drawing/2012/chart" val="1"/>'
+        "</c:ext></c:extLst>"
+    )
+    xml = _chart_xml([_plot("barChart", [_labelled_series(shown, ext)])])
+    (chart,) = _charts(_workbook_with_chart(xml))
+
+    assert "| Mar | 3 | East |" in chart.text
+
+
+def test_a_data_label_leaves_with_its_hidden_point():
+    workbook = _data_with_hidden_row(3)
+    xml = _chart_xml(
+        [_plot("barChart", [_labelled_series(_custom_label(1, "Feb note") + _custom_label(2, "Mar note"))])]
+    )
+    raw = _replace_parts(_save(workbook), {"xl/charts/chart1.xml": xml})
+
+    (chart,) = _charts(raw, mode="without_hidden_data")
+
+    assert "Feb note" not in chart.text
+    assert "| Mar | 3 | Mar note |" in chart.text
+
+
+def test_linked_data_label_does_not_expose_a_hidden_cell():
+    workbook = _data_with_hidden_row(3)
+    linked = (
+        '<c:dLbl><c:idx val="0"/><c:tx><c:strRef><c:f>Data!$C$3</c:f>'
+        f"<c:strCache>{_points(['Confidential label'])}</c:strCache></c:strRef></c:tx></c:dLbl>"
+    )
+    xml = _chart_xml([_plot("barChart", [_labelled_series(linked + _custom_label(2, "Mar note"))])])
+    raw = _replace_parts(_save(workbook), {"xl/charts/chart1.xml": xml})
+
+    (full,) = _charts(raw)
+    (withheld,) = _charts(raw, mode="without_hidden_data")
+
+    assert "| Jan | 100 | Confidential label |" in full.text
+    assert "| Jan | 100 |  |" in withheld.text
+    assert "Confidential label" not in withheld.text
+    assert "| Mar | 3 | Mar note |" in withheld.text
+
+
+def test_drawing_discovery_stops_reading_when_workbook_budget_is_exhausted():
+    from core.indexing.parsers.tabular.xlsx_drawings.package import locate_charts
+
+    raw = _with_text_boxes(_workbook_with_chart(_monthly_revenue()), _text_box("Long drawing note " * 500))
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        budget = archive.getinfo("xl/workbook.xml").file_size + archive.getinfo("xl/_rels/workbook.xml.rels").file_size
+        inventory = locate_charts(archive, max_charts=10, max_part_bytes=64_000, max_total_bytes=budget)
+
+    assert not inventory.placements and not inventory.text_boxes
+    assert len([reason for reason in inventory.skipped if "discovery budget exhausted" in reason]) == 1
+
+
+def test_trendlines_are_named():
+    months = ("Data!$A$2:$A$4", ["Jan", "Feb", "Mar"])
+    series = _series("2025", months, ("Data!$B$2:$B$4", [100, 101.5, 3])).replace(
+        "</c:ser>",
+        '<c:trendline><c:name>Trend</c:name><c:trendlineType val="movingAvg"/><c:period val="2"/></c:trendline>'
+        '<c:trendline><c:trendlineType val="linear"/></c:trendline></c:ser>',
+    )
+    (chart,) = _charts(_workbook_with_chart(_chart_xml([_plot("lineChart", [series])])))
+
+    assert "Trendlines: 2025: Trend (moving average (period 2) trendline), linear trendline." in chart.text

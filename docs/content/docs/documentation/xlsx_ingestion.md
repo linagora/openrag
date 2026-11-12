@@ -217,6 +217,8 @@ Series sharing their categories share a table, one column per series and at most
 
 **What a reader sees.** Date axes are written as ISO dates, in the workbook's 1900 or 1904 date system, not as Excel serial numbers. Percentage and currency series keep their raw values and get a `Display:` line, as tables do. A series whose chart stores no number format of its own (XlsxWriter and pandas write `General`, OpenPyXL and Excel's Office 2016 charts store none) takes its cells' format, as Excel does when drawing it: a date format for categories, a percentage or currency format for values. Values formatted as dates stay numbers. A chart that plots visible cells only (Excel's default) leaves out the cells of hidden and filtered rows and hidden columns, as Excel does when drawing it; a worksheet table, by contrast, indexes rows hidden by an active filter.
 
+**Labels, trendlines and text on a chart.** Data labels that carry text of their own get a column next to their series, `| Month | Revenue | Revenue (data label) |`: text typed on a point ("Supplier strike"), or labels taken from a cell range (Excel 2013+, such as campaign names on scatter points). Labels that only repeat the value add nothing and are left out. A label leaves the chunk with its point when that point's row is hidden. Trendlines are named in a closing note (`Trendlines: Revenue: linear trendline.`). Text boxes drawn on the chart (`Target revised in June`) are written on a `Text on the chart:` line.
+
 **Large charts.** At most `max_chart_points` data points are written per chart; past it, the chunk says how many were left out and adds a summary of each numeric series (minimum and maximum with their categories, and the total). A chart whose plotted ranges all lie inside indexed worksheet tables repeats at most `max_chart_points_from_tables` points: past it, the data is not indexed a second time, and the chunk keeps the summary and names the table that holds the data. When a chart is split into several chunks, each chunk starts with the chart's title, type and worksheet, and each data table repeats its header.
 
 **Data on hidden worksheets.** A visible chart can plot a hidden worksheet's data, and anyone who opens the file sees it in the chart. `loader.xlsx_charts` (`XLSX_CHARTS`) decides what reaches the index:
@@ -225,9 +227,11 @@ Series sharing their categories share a table, one column per series and at most
 | --- | --- |
 | `full` (default) | Every chart with all its data. The chunk names the hidden source worksheet: `Source data: hidden worksheet 'Data'.` |
 | `without_hidden_data` | Every chart, with its type, axes and source references, but no value, category label, series name, title or column header from a hidden worksheet, row or column. A hidden worksheet's cells are never even read; cells in hidden rows and columns of a visible worksheet are left out of the chunk, and a cached range that cannot be matched cell by cell (several label columns) is read again from its visible cells. The chunk says `Source data: hidden worksheet 'Data'; its values are not indexed.` |
-| `off` | No chart is read. A workbook whose only content is charts is then rejected as empty. |
+| `off` | No chart is read. Visible worksheet text boxes can still be indexed. A workbook with no other indexable content is rejected as empty. |
 
-`chart_hidden_source_sheets` and `chart_hidden_data_withheld` record the outcome in metadata.
+`chart_hidden_source_sheets` and `chart_hidden_data_withheld` record the chart policy in metadata. In `without_hidden_data`, cached data labels and text boxes are omitted when their source cells are hidden or their links cannot be resolved. Text boxes hidden in Excel are omitted too. The same text box policy applies in `off` mode. In `full`, hidden worksheet text boxes are marked `(hidden in Excel)`.
+
+**Text boxes on worksheets.** Text boxes and other shapes holding text on a visible worksheet or chart sheet, grouped ones included, are indexed as text blocks after that sheet's charts (`xlsx_content_kind: text_box`), with the cells each one covers: `- Over F2:H4: Q3 dip: supplier strike`. A sheet can produce multiple blocks when its text exceeds the batch byte limit. Metadata gives `text_box_count` and `text_box_anchors`. The placeholder Excel stores for readers that cannot show an Office 2016 chart ("This chart isn't available in your version of Excel") is not indexed. At most 1,024 text boxes are collected per workbook, and each is cut at 4,000 characters.
 
 **Robustness.** A chart never makes a workbook fail: a missing, malformed or oversized chart part, or a chart type that is not recognized, is skipped or reported in the chunk, and the worksheet tables are indexed as usual. `workbook_charts_skipped` counts skipped charts.
 
@@ -278,7 +282,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_spool_memory_bytes` | Part of `max_spool_bytes` kept in memory before the temporary file is used | 32 MiB |
 | `max_charts` | Charts read across the workbook. Later charts are skipped, never rejected | 256 |
 | `max_chart_part_bytes` | One drawing or chart part, read whole when the workbook is parsed. Cached values make charts large: 10 series of 5,000 points is about 4 MB. A larger part is skipped | 16 MiB |
-| `max_chart_bytes` | Chart parts read across the workbook. Charts past it are skipped and counted, never rejected | 64 MiB |
+| `max_chart_bytes` | Separate workbook-wide byte budgets for drawing discovery and chart content. Parts exceeding a budget are skipped without rejecting the workbook | 64 MiB each |
 | `max_chart_points` | Data points written per chart, and cells read per range of a chart without stored values. The chunk says when points were left out | 5,000 |
 | `max_chart_points_from_tables` | Data points a chart repeats when its data is already indexed as worksheet tables. Past it, the chart keeps a summary and names the table | 200 |
 
@@ -306,7 +310,9 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | More than 256 blocks in one worksheet | Blocks sharing columns are merged into one table per column band; later header rows appear as data rows | Spread the blocks over several worksheets, or combine them into one table with a column naming the block (week, store), when that matters |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
 | Images, comments, and shapes | Not indexed | Extract them through a dedicated document or media workflow |
-| Chart decorations | Trendlines, error bars, data labels and colors are not indexed; a chart's own data is | No action is required for the plotted data |
+| Chart decorations | Error bars, colors and labels that only repeat a value are not indexed; text data labels, trendline types and text drawn on a chart are | No action is required for the plotted data |
+| Data labels on a chart whose cached points cannot be matched to cells, with hidden rows in the plotted range | Those labels are left out rather than risk landing on the wrong point | Unhide the rows, or store full caches (save the workbook in Excel) |
+| Sparklines, pictures and cell comments | Not indexed by this chart extraction | Repeat important notes in cells or text boxes |
 | Chart over data on a hidden worksheet | Indexed with its data in the default `full` chart mode, with a note naming the hidden worksheet | Set `XLSX_CHARTS=without_hidden_data`, or remove the data, if hidden worksheets must stay out of the index |
 | Chart references that are unions, formulas or other workbooks | The chart is indexed without those values, and the chunk says how many series could not be read | Plot single ranges of the same workbook |
 | Chart without a category axis title whose series are not named from a header row | The category column is labelled `Category` rather than guessed | Give the category axis a title, or name the series from the header row above the data |

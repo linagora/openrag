@@ -25,7 +25,7 @@ from defusedxml.ElementTree import fromstring
 
 from .chartex import parse_chartex
 from .charts import Chart, DataRef, Plot, Series, parse_chart
-from .package import PART_READ_ERRORS, ChartPlacement, locate_charts
+from .package import PART_READ_ERRORS, ChartPlacement, _relationship_id, locate_charts
 from .references import (
     CellRange,
     RowReader,
@@ -34,7 +34,8 @@ from .references import (
     resolve_ranges,
     series_values,
 )
-from .render import RenderedChart, ValueFormatter, complete_chart, render_chart
+from .render import RenderedChart, ValueFormatter, complete_chart, render_chart, render_text_boxes
+from .shapes import ShapeText, drawn_texts
 
 logger = get_logger()
 
@@ -307,6 +308,7 @@ def _apply_policy(
     hidden_cells: HiddenCells,
     *,
     withhold: bool,
+    sheet: str | None = None,
 ) -> tuple[Chart, tuple[str, ...]]:
     """Find the hidden worksheets a chart reads and, if asked, withhold their data.
 
@@ -354,17 +356,58 @@ def _apply_policy(
                 return replace(reference, values=kept)
         return reference
 
+    def hidden_or_unknown_text(formula: str | None) -> bool:
+        return hidden_text(formula) or (withhold and bool(formula) and resolve(formula) is None)
+
+    def labels_of(series: Series, values: DataRef | None) -> DataRef | None:
+        """Data labels follow their points: dropped with hidden points, withheld
+        with withheld values or a label range on a hidden sheet."""
+        labels = series.labels
+        if labels is None:
+            return None
+        hidden_range = hidden_or_unknown_text(labels.formula)
+        hidden_points = {index for index, formula in series.label_refs if hidden_or_unknown_text(formula)}
+        if (values is not None and values.withheld) or hidden_range:
+            return None
+        if hidden_points and labels.values:
+            labels = replace(labels, values=tuple("" if i in hidden_points else v for i, v in enumerate(labels.values)))
+        cell_range = resolve(series.values.formula) if series.values is not None else None
+        if not drop_hidden_cells or cell_range is None or not labels.values:
+            return labels
+        rows, columns = hidden_cells(cell_range.sheet)
+        hidden_rows, hidden_columns = frozenset(rows), frozenset(columns)
+        if not _intersects(cell_range, hidden_rows, hidden_columns):
+            return labels
+        length = max(cell_range.max_row - cell_range.min_row, cell_range.max_column - cell_range.min_column) + 1
+        cached = len(series.values.values) if series.values.values is not None else length
+        if cached != length:
+            # Points cannot be matched to cells: no label can be placed safely.
+            return None
+        padded = (labels.values + ("",) * length)[:length]
+        kept = _visible_points(padded, cell_range, hidden_rows, hidden_columns)
+        return replace(labels, values=kept) if kept is not None else None
+
     def series_of(series: Series) -> Series:
         # A withheld name loses its reference too, so it is never read from the cell.
         hidden_name = hidden_text(series.name_ref)
+        values = dimension(series.values)
         return replace(
             series,
             name=None if hidden_name else series.name,
             name_ref=None if hidden_name else series.name_ref,
             categories=dimension(series.categories),
-            values=dimension(series.values),
+            values=values,
             sizes=dimension(series.sizes),
+            labels=labels_of(series, values),
+            label_refs=(),
         )
+
+    def drawn(shape: ShapeText) -> bool:
+        """A text box on the chart is kept unless withheld: hidden, or linked to
+        a hidden cell. A link to a hidden sheet is reported in every mode."""
+        if shape.textlink and hidden_or_unknown_text(_qualified(shape.textlink, sheet)):
+            return False
+        return not (withhold and shape.hidden)
 
     def plot_of(plot):
         hidden_header = hidden_text(plot.category_header_ref)
@@ -378,7 +421,16 @@ def _apply_policy(
     plots = tuple(plot_of(plot) for plot in chart.plots)
     if hidden_text(chart.title_ref):
         chart = replace(chart, title=None, title_ref=None)
-    return replace(chart, plots=plots), tuple(sources)
+    annotations = tuple(shape for shape in chart.annotations if drawn(shape))
+    return replace(chart, plots=plots, annotations=annotations), tuple(sources)
+
+
+def _qualified(link: str, sheet: str | None) -> str | None:
+    """A text box's cell link with its sheet: ``$A$1`` on ``Sales`` is ``'Sales'!$A$1``."""
+    link = link.lstrip("=").strip()
+    if "!" in link or not sheet:
+        return link or None
+    return "'" + sheet.replace("'", "''") + "'!" + link
 
 
 def _first_cell(cell_range: CellRange) -> CellRange:
@@ -559,6 +611,7 @@ def _slim(chart: Chart) -> Chart:
             categories=sample(series.categories),
             values=sample(series.values),
             sizes=sample(series.sizes),
+            labels=None,
         )
 
     return replace(chart, plots=tuple(replace(plot, series=tuple(map(series_of, plot.series))) for plot in chart.plots))
@@ -568,7 +621,7 @@ def _held_points(chart: Chart) -> int:
     return sum(
         len(reference.values or ())
         for series in chart.series
-        for reference in (series.categories, series.values, series.sizes)
+        for reference in (series.categories, series.values, series.sizes, series.labels)
         if reference is not None
     )
 
@@ -596,8 +649,8 @@ class WorkbookCharts:
         hidden_sheets: frozenset[str] = frozenset(),
         mode: str = "full",
     ) -> None:
-        if mode not in CHART_MODES or mode == "off":
-            raise ValueError(f"WorkbookCharts needs a chart mode that reads charts, not {mode!r}")
+        if mode not in CHART_MODES:
+            raise ValueError(f"Unknown chart mode {mode!r}")
         self._limits = limits
         self._workbook_filename = workbook_filename
         self._emitted = 0
@@ -605,7 +658,14 @@ class WorkbookCharts:
         if hasattr(source, "seek"):
             source.seek(0)
         with zipfile.ZipFile(source) as archive:
-            inventory = locate_charts(archive, max_charts=limits.max_charts, max_part_bytes=limits.max_part_bytes)
+            # Text boxes are not charts: read in every mode, ``off`` included.
+            inventory = locate_charts(
+                archive,
+                max_charts=limits.max_charts,
+                max_part_bytes=limits.max_part_bytes,
+                max_total_bytes=limits.max_total_bytes,
+                read_charts=mode != "off",
+            )
             self.skipped = list(inventory.skipped)
             self._formatter = ValueFormatter(
                 date1904=inventory.date1904,
@@ -614,6 +674,7 @@ class WorkbookCharts:
             resolve = make_resolver(inventory.defined_names, inventory.sheet_indexes)
             hidden_cells = hidden_cells or (lambda sheet: ((), ()))
             self._withhold = mode == "without_hidden_data"
+            self._texts = self._text_boxes(inventory, resolve, hidden_sheets, hidden_cells, withhold=mode != "full")
             self._source_tables = source_tables
             self._pending: list[_Entry] = []
             # Charts whose number formats or header labels sit in cells are
@@ -694,7 +755,9 @@ class WorkbookCharts:
             return None
         chart = _shown_references(chart, resolve)
         # Withholding first means hidden data is never even read from the cells.
-        chart, hidden_sources = _apply_policy(chart, resolve, hidden_sheets, hidden_cells, withhold=self._withhold)
+        chart, hidden_sources = _apply_policy(
+            chart, resolve, hidden_sheets, hidden_cells, withhold=self._withhold, sheet=placement.sheet_name
+        )
         if _uncached(chart, resolve):
             # The chart reads its cells anyway: its header cells join that read.
             chart = _with_header_refs(chart, resolve, hidden_cells, self._withhold)
@@ -765,10 +828,37 @@ class WorkbookCharts:
             return None
         try:
             root = fromstring(data)
-            return parse_chartex(root) if placement.format == "chartex" else parse_chart(root)
+            chart = parse_chartex(root) if placement.format == "chartex" else parse_chart(root)
         except (ParseError, DefusedXmlException, ValueError) as exc:
             self.skipped.append(f"Chart {placement.chart_path} could not be read ({type(exc).__name__})")
             return None
+        if placement.user_shapes:
+            reference = root.find("{*}userShapes")
+            rel_id = _relationship_id(reference) if reference is not None else None
+            path = dict(placement.user_shapes).get(rel_id) if rel_id else None
+            if path is not None:
+                chart = replace(chart, annotations=self._drawn_on(archive, path, count_budget))
+        return chart
+
+    def _drawn_on(self, archive: zipfile.ZipFile, path: str, count_budget: bool) -> tuple[ShapeText, ...]:
+        """Text boxes drawn on a chart; a part that cannot be read only loses them."""
+        try:
+            size = archive.getinfo(path).file_size
+        except KeyError:
+            return ()
+        budget = self._limits.max_total_bytes
+        if size > self._limits.max_part_bytes or (
+            count_budget and budget is not None and self._bytes_read + size > budget
+        ):
+            self.skipped.append(f"Chart drawing {path} exceeds the chart size limits")
+            return ()
+        if count_budget:
+            self._bytes_read += size
+        try:
+            return drawn_texts(fromstring(archive.read(path)))
+        except (*PART_READ_ERRORS, ParseError, DefusedXmlException, ValueError) as exc:
+            self.skipped.append(f"Chart drawing {path} could not be read ({type(exc).__name__})")
+            return ()
 
     def _entry(self, placement: ChartPlacement, chart: Chart, hidden_sources, resolve: Resolver) -> _Entry:
         """Describe a chart's links to the indexed tables before it is rendered."""
@@ -796,7 +886,7 @@ class WorkbookCharts:
         )
 
     def __len__(self) -> int:
-        return len(self._pending)
+        return len(self._pending) + len(self._texts)
 
     def _render(self, entry: _Entry) -> RenderedChart:
         """Emit a chart: numbered in emission order, with the workbook's skip count."""
@@ -827,10 +917,68 @@ class WorkbookCharts:
         return rendered
 
     def before_sheet(self, sheet_index: int) -> Iterator[RenderedChart]:
-        """Render, in order, the charts of every sheet before ``sheet_index``."""
-        while self._pending and self._pending[0].placement.sheet_index < sheet_index:
-            yield self._render(self._pending.pop(0))
+        """Render, in order, the charts and text boxes of every sheet before ``sheet_index``."""
+        return self._drain(sheet_index)
 
     def remaining(self) -> Iterator[RenderedChart]:
-        while self._pending:
-            yield self._render(self._pending.pop(0))
+        return self._drain(None)
+
+    def _drain(self, limit: int | None) -> Iterator[RenderedChart]:
+        """Yield sheet by sheet: a sheet's charts, then its text boxes."""
+        while True:
+            chart_sheet = self._pending[0].placement.sheet_index if self._pending else None
+            text_sheet = self._texts[0][0] if self._texts else None
+            ready = [index for index in (chart_sheet, text_sheet) if index is not None]
+            ready = [index for index in ready if limit is None or index < limit]
+            if not ready:
+                return
+            if chart_sheet == min(ready):
+                yield self._render(self._pending.pop(0))
+            else:
+                yield self._texts.pop(0)[1]
+
+    def _text_boxes(
+        self,
+        inventory,
+        resolve: Resolver,
+        hidden_sheets: frozenset[str],
+        hidden_cells: HiddenCells,
+        *,
+        withhold: bool,
+    ) -> list[tuple[int, RenderedChart]]:
+        """Render each sheet's text boxes; ``without_hidden_data`` leaves out hidden
+        ones and those linked to a hidden cell."""
+        by_sheet: dict[int, list] = {}
+        for box in inventory.text_boxes:
+            if withhold and _shape_withheld(box.shape, box.sheet_name, resolve, hidden_sheets, hidden_cells):
+                continue
+            by_sheet.setdefault(box.sheet_index, []).append(box)
+        texts = []
+        for sheet_index, boxes in by_sheet.items():
+            entries = [
+                (box.anchor, ("(hidden in Excel) " if box.shape.hidden else "") + box.shape.text) for box in boxes
+            ]
+            for rendered in render_text_boxes(
+                entries,
+                sheet_name=boxes[0].sheet_name,
+                sheet_index=sheet_index,
+                sheet_kind=boxes[0].sheet_kind,
+                workbook_filename=self._workbook_filename,
+                max_bytes=self._limits.max_batch_bytes,
+            ):
+                texts.append((sheet_index, rendered))
+        return texts
+
+
+def _shape_withheld(
+    shape: ShapeText, sheet: str, resolve: Resolver, hidden_sheets: frozenset[str], hidden_cells: HiddenCells
+) -> bool:
+    if shape.hidden:
+        return True
+    cell_range = resolve(_qualified(shape.textlink, sheet)) if shape.textlink else None
+    if cell_range is None:
+        return bool(shape.textlink)
+    if cell_range.sheet in hidden_sheets:
+        return True
+    rows, columns = hidden_cells(cell_range.sheet)
+    return _intersects(cell_range, frozenset(rows), frozenset(columns))

@@ -187,11 +187,15 @@ def _table(
         + [series.values.point_count for _, _, series in members if series.values and not series.values.withheld]
     )
     headers = [first]
+    # A column of data labels only for a series whose labels say something.
+    labelled = {id(series) for _, _, series in members if any(_values(series.labels))}
     for plot, number, series in members:
         label = _series_label(series, number)
         headers.append(label)
         if plot.kind == "bubbleChart":
             headers.append(f"{label} (size)")
+        if id(series) in labelled:
+            headers.append(f"{label} (data label)")
     lines = [markdown_row(headers), markdown_row(["---"] * len(headers))]
     used = sum(len(line.encode("utf-8")) + 1 for line in lines)
     shown = 0
@@ -211,6 +215,9 @@ def _table(
             if plot.kind == "bubbleChart":
                 sizes = _values(series.sizes)
                 cells.append(formatter.cell(sizes[index], series.sizes) if index < len(sizes) else "")
+            if id(series) in labelled:
+                labels = _values(series.labels)
+                cells.append(_single_line(labels[index]) if index < len(labels) else "")
         line = markdown_row(cells)
         size = len(line.encode("utf-8")) + 1
         if used + size > byte_budget:
@@ -368,6 +375,9 @@ def render_chart(
                 axes.append(entry)
     if axes:
         lines.append("Axes: " + "; ".join(axes))
+    if chart.annotations:
+        drawn = "; ".join(f'"{_single_line(shape.text)}"' for shape in chart.annotations)
+        lines.append("Text on the chart: " + drawn[:_MAX_DATA_LINE])
     members = _numbered(chart)
     for plot in chart.plots:
         data_line = _data_line(plot, members)
@@ -429,6 +439,13 @@ def render_chart(
                 for index in plot.total_points
             ]
             notes.append("Totals (bars showing the running total): " + ", ".join(names) + ".")
+    trendlines = [
+        f"{_series_label(series, number)}: {', '.join(series.trendlines)}"
+        for _, number, series in _numbered(chart)
+        if series.trendlines
+    ]
+    if trendlines:
+        notes.append(("Trendlines: " + "; ".join(trendlines))[:_MAX_DATA_LINE] + ".")
     notes.extend(chart.notes)
     if unresolved_references:
         notes.append(f"Values of {unresolved_references} series could not be read from the workbook.")
@@ -505,3 +522,59 @@ def complete_chart(rendered: RenderedChart, chart: Chart, formatter: ValueFormat
         entry["display_format"] = formatter.display(series.values)
     metadata["chart_series"] = entries
     return RenderedChart(_bounded(text, max_bytes), metadata)
+
+
+def render_text_boxes(
+    boxes: list[tuple[str | None, str]],
+    *,
+    sheet_name: str,
+    sheet_index: int,
+    sheet_kind: str,
+    workbook_filename: str,
+    max_bytes: int,
+) -> list[RenderedChart]:
+    """Render a sheet's text boxes, (anchor, text) in drawing order, as text blocks.
+
+    Each block stays under ``max_bytes``; a sheet with more text starts another.
+    """
+    where = "chart sheet" if sheet_kind == "chartsheet" else "worksheet"
+    heading = f"Text boxes on {where} {_single_line(sheet_name)}:"
+    blocks: list[list[tuple[str | None, str]]] = [[]]
+    used = len(heading.encode("utf-8")) + 1
+    for anchor, text in boxes:
+        entry = _text_box_entry(anchor, text)
+        size = len(entry.encode("utf-8")) + 1
+        if blocks[-1] and used + size > max_bytes:
+            blocks.append([])
+            used = len(heading.encode("utf-8")) + 1
+        blocks[-1].append((anchor, entry))
+        used += size
+    rendered = []
+    for block in blocks:
+        if not block:
+            continue
+        text = _bounded("\n".join([heading, *(entry for _, entry in block)]), max_bytes)
+        anchors = [anchor for anchor, _ in block if anchor]
+        rendered.append(
+            RenderedChart(
+                text,
+                {
+                    "tabular_format": "xlsx",
+                    "xlsx_content_kind": "text_box",
+                    "workbook_filename": workbook_filename,
+                    "sheet_name": sheet_name,
+                    "sheet_index": sheet_index,
+                    "sheet_kind": sheet_kind,
+                    "text_box_count": len(block),
+                    "text_box_anchors": anchors[:_MAX_SERIES_METADATA],
+                    "spreadsheet_backend": "ooxml",
+                },
+            )
+        )
+    return rendered
+
+
+def _text_box_entry(anchor: str | None, text: str) -> str:
+    lines = [_single_line(line) for line in text.splitlines() if line.strip()]
+    first = f"- Over {anchor}: " if anchor else "- "
+    return first + "\n  ".join(lines)

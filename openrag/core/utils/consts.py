@@ -134,6 +134,6 @@ MAX_RERANK_CANDIDATES = 1000
 XLSX_TEXT_NUMBER_FORMAT_KINDS = frozenset({"percentage", "currency"})
 
 # XLSX blocks chunked as prose; every other XLSX block is a worksheet table
-# whose rows chunk_table splits under a repeated header. Loose cells and charts
-# carry no table row metadata.
-XLSX_TEXT_CONTENT_KINDS = frozenset({"cells", "chart"})
+# whose rows chunk_table splits under a repeated header. Loose cells, charts
+# and text boxes carry no table row metadata.
+XLSX_TEXT_CONTENT_KINDS = frozenset({"cells", "chart", "text_box"})
