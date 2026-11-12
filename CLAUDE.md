@@ -91,7 +91,7 @@ The main application entry point is `openrag/api/main.py` which creates a FastAP
 - `MarkerPool` / `MarkerWorker` (`openrag/services/workers/parsers/marker_workers.py`) - Pool of workers for PDF processing with Marker
 
 **Pipeline Classes**:
-- `ChatService` (`openrag/services/orchestrators/chat_service.py`) - Orchestrates retrieval and LLM generation, calling the steps in `openrag/services/capabilities/` (contextualize, scope, retrieve, web search, summarize) and then `AnswerService`
+- `ChatService` (`openrag/services/orchestrators/chat_service.py`) - Orchestrates retrieval and LLM generation. A chat request runs through the `classic` LangGraph graph (wiring in `openrag/services/chat/graphs/classic.py`, the only module importing `langgraph`; node bodies in `openrag/services/chat/classic.py`), whose steps call the capabilities in `openrag/services/capabilities/` (contextualize, scope, retrieve, web search, summarize); `AnswerService` then answers, outside the graph
 - `RetrieverPipeline` (`openrag/core/retrieval/pipeline.py`) - Handles document retrieval and reranking
 - `Summarizer` (`openrag/services/capabilities/summarize.py`) - Map-reduce for processing large document sets
 
@@ -219,7 +219,7 @@ reads, stable within a document and with undated (or future-dated) chunks last. 
 decides *which* sources the model gets: retrieval, the `top_k` cut, the context-budget fit
 (`fit_sources`) and the drop-until-it-fits loop (`fit_prompt`, both in `core/chat/budget.py`) all
 stay relevance-ranked, exactly as without a date order, and only the chunks that made it in are
-re-sorted, in `_prepare_chat` and `_prepare_completions` right before rendering. Selecting by date instead let recent, loosely
+re-sorted, in the classic graph's `prompt` step and in `_prepare_completions`, right before rendering. Selecting by date instead let recent, loosely
 matching documents (invitations, agendas) crowd the asked-for report out of the context (review
 on PR #1317); with the dates shown, the model picks the newest relevant source itself. The
 returned `docs` (hence `extra.sources` and the citation numbers) follow the rendered order.
