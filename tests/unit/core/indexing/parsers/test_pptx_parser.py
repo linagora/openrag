@@ -190,14 +190,15 @@ def test_a_picture_in_another_format_is_skipped(tmp_path, psd_bytes, encoded_ima
 
 
 # ---------------------------------------------------------------------------
-# A chart whose relationship cannot be resolved is skipped (#1374)
+# An unreadable chart or graphic frame does not fail the deck (#1374)
 # ---------------------------------------------------------------------------
 
 _R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 
 
-def _deck_with_broken_chart(tmp_path, break_chart):
-    """Build a real .pptx with a text box and a chart, then break the chart's r:id."""
+def _deck_with_broken_frame(tmp_path, kind, break_frame):
+    """Build a real .pptx with text, a chart or table frame, more text and a
+    second slide, then break the frame."""
     import pptx
     from pptx.chart.data import CategoryChartData
     from pptx.enum.chart import XL_CHART_TYPE
@@ -206,26 +207,76 @@ def _deck_with_broken_chart(tmp_path, break_chart):
     presentation = pptx.Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = "Quarterly revenue"
-    data = CategoryChartData()
-    data.categories = ["Q1", "Q2"]
-    data.add_series("Revenue", (1.0, 2.0))
-    frame = slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(2), Inches(4), Inches(3), data)
-    break_chart(frame._element.chart)
+    if kind == "chart":
+        data = CategoryChartData()
+        data.categories = ["Q1", "Q2"]
+        data.add_series("Revenue", (1.0, 2.0))
+        frame = slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(2), Inches(4), Inches(3), data)
+    else:
+        frame = slide.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(4), Inches(1))
+    slide.shapes.add_textbox(Inches(1), Inches(6), Inches(4), Inches(1)).text = "Source: finance"
+    second = presentation.slides.add_slide(presentation.slide_layouts[6])
+    second.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = "Next slide"
+    break_frame(frame)
     deck = tmp_path / "deck.pptx"
     presentation.save(deck)
     return deck
 
 
+def _point_chart_at_layout(frame):
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    layout = next(rid for rid, rel in frame.part.rels.items() if rel.reltype == RT.SLIDE_LAYOUT)
+    frame._element.chart.set(_R_ID, layout)
+
+
+def _point_chart_at_hyperlink(frame):
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    frame._element.chart.set(_R_ID, frame.part.relate_to("https://example.com", RT.HYPERLINK, is_external=True))
+
+
 @pytest.mark.parametrize(
     "break_chart",
     [
-        pytest.param(lambda chart: chart.attrib.pop(_R_ID), id="missing-r-id"),
-        pytest.param(lambda chart: chart.set(_R_ID, "rId99"), id="dangling-r-id"),
+        pytest.param(lambda frame: frame._element.chart.attrib.pop(_R_ID), id="missing-r-id"),
+        pytest.param(lambda frame: frame._element.chart.set(_R_ID, "rId99"), id="dangling-r-id"),
+        # The relationship exists but its target is not a chart.
+        pytest.param(_point_chart_at_layout, id="r-id-to-the-slide-layout"),
+        pytest.param(_point_chart_at_hyperlink, id="r-id-to-an-external-hyperlink"),
     ],
 )
-def test_a_chart_with_an_unresolvable_relationship_becomes_a_placeholder(tmp_path, break_chart):
-    deck = _deck_with_broken_chart(tmp_path, break_chart)
+def test_a_chart_that_cannot_be_read_becomes_a_placeholder(tmp_path, break_chart):
+    deck = _deck_with_broken_frame(tmp_path, "chart", break_chart)
 
     _, slides, _ = PptxParser()._convert(str(deck))
 
-    assert slides == [(1, "Quarterly revenue\n\n\n[unsupported chart]")]
+    assert slides == [
+        (1, "Quarterly revenue\n\n\n[unsupported chart]\n\nSource: finance"),
+        (2, "Next slide"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "break_frame"),
+    [
+        # has_chart itself raises on a graphicData without its uri.
+        pytest.param(
+            "chart", lambda frame: frame._element.graphic.graphicData.attrib.pop("uri"), id="chart-without-uri"
+        ),
+        pytest.param(
+            "table", lambda frame: frame._element.graphic.graphicData.attrib.pop("uri"), id="table-without-uri"
+        ),
+        pytest.param(
+            "table",
+            lambda frame: frame._element.graphic.graphicData.remove(frame._element.graphic.graphicData.tbl),
+            id="table-without-its-grid",
+        ),
+    ],
+)
+def test_a_graphic_frame_that_cannot_be_read_is_skipped(tmp_path, kind, break_frame):
+    deck = _deck_with_broken_frame(tmp_path, kind, break_frame)
+
+    _, slides, _ = PptxParser()._convert(str(deck))
+
+    assert slides == [(1, "Quarterly revenue\nSource: finance"), (2, "Next slide")]
