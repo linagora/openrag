@@ -199,7 +199,8 @@ def test_chart_metadata_identifies_the_chart_and_its_source_ranges():
     assert metadata["chart_points_truncated"] is False
     assert [series["values_ref"] for series in metadata["chart_series"]] == ["Data!$B$2:$B$4", "Data!$C$2:$C$4"]
     assert all(series["values_available"] for series in metadata["chart_series"])
-    assert metadata["workbook_charts_skipped"] == 0
+    assert metadata["workbook_chart_extraction"] == "complete"
+    assert metadata["workbook_chart_issues"] == []
 
 
 def test_two_cell_anchor_gives_the_covered_range():
@@ -505,7 +506,7 @@ def test_skipped_charts_are_counted_on_the_others():
     raw = _replace_parts(raw, {"xl/charts/chart1.xml": "not xml"})
     (chart,) = _charts(raw)
 
-    assert chart.metadata["workbook_charts_skipped"] == 1
+    assert chart.metadata["workbook_chart_issue_count"] == 1
 
 
 def test_oversized_chart_part_is_skipped():
@@ -1090,7 +1091,10 @@ def test_every_chunk_of_a_split_chart_names_its_chart_and_repeats_the_header(chu
     rows = [line for body in bodies for line in body.splitlines() if line.startswith("| day-")]
 
     assert len(chunks) > 3
-    assert all(body.startswith("Chart: Daily revenue") for body in bodies)
+    # The first piece opens with the chart heading, the others with the
+    # one-line context: type and worksheet first, then the title.
+    assert bodies[0].startswith("Chart: Daily revenue")
+    assert all(body.startswith("Chart (line chart), worksheet Data: Daily revenue") for body in bodies[1:])
     assert all("| Category | Revenue | Cost |" in body for body in bodies if "| day-" in body)
     # Each data row is indexed exactly once, and no chunk exceeds the budget.
     assert len(rows) == len(set(rows)) == 300
@@ -1738,7 +1742,7 @@ def test_workbook_chart_budget_skips_later_charts():
     charts = _charts(raw, max_chart_bytes=2 * size + 10)
 
     assert [chart.metadata["chart_id"] for chart in charts] == ["sheet:0:chart:1", "sheet:0:chart:2"]
-    assert all(chart.metadata["workbook_charts_skipped"] == 1 for chart in charts)
+    assert all(chart.metadata["workbook_chart_issue_count"] == 1 for chart in charts)
 
 
 def test_default_part_limit_accepts_a_large_cached_chart():
@@ -2158,7 +2162,8 @@ def test_an_unreadable_chart_part_skips_that_chart_only():
 
     assert any(block.metadata["xlsx_content_kind"] == "table" for block in blocks)
     assert [chart.metadata["chart_title"] for chart in charts] == ["Monthly revenue"]
-    assert charts[0].metadata["workbook_charts_skipped"] == 1
+    assert charts[0].metadata["workbook_chart_issue_count"] == 1
+    assert charts[0].metadata["workbook_chart_extraction"] == "partial"
 
 
 def test_a_title_or_name_read_from_a_hidden_sheet_is_reported_in_full_mode():
@@ -2576,3 +2581,180 @@ def test_a_chart_context_longer_than_half_the_budget_is_shortened():
     assert all(piece.startswith("Chart: word0") for piece in pieces[1:])
     assert all("…" in piece.splitlines()[0] for piece in pieces[1:])
     assert "| r39 | 39 |" in pieces[-1]
+
+
+# --- read budget, hidden chart objects, metadata caps, workbook status --------
+
+
+def _two_distant_uncached_charts() -> bytes:
+    workbook = Workbook()
+    sheet = _data_sheet(workbook)
+    for offset, row in enumerate((["Apr", 7, 8], ["May", 9, 10], ["Jun", 11, 12])):
+        for column, value in enumerate(row, 1):
+            sheet.cell(row=2000 + offset, column=column, value=value)
+    for anchor, (first, last) in (("E2", (2, 4)), ("E30", (2000, 2002))):
+        chart = BarChart()
+        chart.title = f"Rows {first}-{last}"
+        chart.add_data(Reference(sheet, min_col=2, min_row=first, max_row=last), titles_from_data=False)
+        chart.set_categories(Reference(sheet, min_col=1, min_row=first, max_row=last))
+        sheet.add_chart(chart, anchor)
+    return _save(workbook)
+
+
+def test_chart_reads_stop_at_the_workbook_read_budget_and_say_so():
+    """Each read parses its sheet from row 1: a window costs its last row. The
+    far chart does not fit in the budget; it is reported, not counted as broken."""
+    near, far = _charts(_two_distant_uncached_charts(), max_chart_scan_rows=10)
+
+    assert "| Jan | 100 |" in near.text and near.metadata["chart_ranges_not_read"] == 0
+    assert far.metadata["chart_ranges_not_read"] == 2
+    assert far.metadata["chart_unresolved_series"] == 0
+    assert "2 of this chart's cell ranges were not read: the workbook's chart read budget was reached." in far.text
+    assert "May" not in far.text
+
+
+def test_chart_reads_within_the_budget_read_every_range():
+    near, far = _charts(_two_distant_uncached_charts())
+
+    assert "| May | 9 |" in far.text and far.metadata["chart_ranges_not_read"] == 0
+
+
+def _hide_frame(raw: bytes, *, grouped: bool = False) -> bytes:
+    """Hide the first chart frame in Excel: itself, or the group it is moved into."""
+    import re
+
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        drawing = archive.read("xl/drawings/drawing1.xml").decode()
+    frame = re.search(r"<graphicFrame>.*?</graphicFrame>", drawing, flags=re.DOTALL).group(0)
+    if grouped:
+        group = (
+            '<grpSp><nvGrpSpPr><cNvPr id="7" name="Group" hidden="1"/><cNvGrpSpPr/></nvGrpSpPr><grpSpPr/>'
+            f"<grpSp><nvGrpSpPr><cNvPr id='8' name='Inner'/><cNvGrpSpPr/></nvGrpSpPr><grpSpPr/>{frame}</grpSp></grpSp>"
+        )
+        drawing = drawing.replace(frame, group, 1)
+    else:
+        drawing = drawing.replace('name="Chart 1"/>', 'name="Chart 1" hidden="1"/>', 1)
+    return _replace_parts(raw, {"xl/drawings/drawing1.xml": drawing})
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_a_chart_hidden_in_excel_is_withheld_without_hidden_data(grouped):
+    raw = _hide_frame(_workbook_with_chart(_monthly_revenue(), charts=2), grouped=grouped)
+
+    withheld = _charts(raw, mode="without_hidden_data")
+    full = _charts(raw)
+
+    # The visible sibling stays; the hidden one is not even parsed.
+    assert len(withheld) == 1 and withheld[0].metadata["chart_hidden_in_excel"] is False
+    assert len(full) == 2
+    hidden = [chart for chart in full if chart.metadata["chart_hidden_in_excel"]]
+    assert len(hidden) == 1 and "\nHidden in Excel.\n" in hidden[0].text
+    assert hidden[0].metadata["chart_title"] == "Monthly revenue"
+
+
+def test_worst_case_chart_metadata_fits_the_store_without_its_truncation():
+    """300 series with 2,000-character names and sheet references, a huge title:
+    capped at the source and flagged, so Milvus never cuts it at random."""
+    import copy
+    import json
+
+    from services.storage.milvus_store import (
+        DEFAULT_JSON_SAFETY_MARGIN_BYTES,
+        MAX_DYNAMIC_FIELD_BYTES,
+        _fit_milvus_row_limits,
+    )
+
+    name = "Évolution " * 200
+    categories = ("Data!$A$2:$A$3", ["Q1", "Q2"])
+    series = [
+        _series(
+            f"{name}{index}",
+            categories,
+            (f"'Feuille très longue {index}'!$B$2:$B$3", [index, index]),
+            index=index,
+            name_ref=f"'Feuille très longue {index}'!$B$1",
+        )
+        for index in range(300)
+    ]
+    (chart,) = _charts(_workbook_with_chart(_chart_xml([_plot("barChart", series)], title="Titre " * 2000)))
+    metadata = chart.metadata
+
+    assert metadata["chart_metadata_truncated"] is True
+    assert metadata["chart_series_count"] == 300 and len(metadata["chart_series"]) == 64
+    assert (
+        len(json.dumps(metadata, ensure_ascii=False).encode())
+        < MAX_DYNAMIC_FIELD_BYTES - DEFAULT_JSON_SAFETY_MARGIN_BYTES
+    )
+    entity = {"text": "chunk", "file_id": "f", "partition": "p", **copy.deepcopy(metadata)}
+    _fit_milvus_row_limits(entity, static_fields={"text", "vector", "sparse", "_id", "partition", "file_id"})
+    assert {key: entity[key] for key in metadata} == metadata
+
+
+def test_a_long_title_never_pushes_the_chart_type_and_worksheet_out_of_a_chunk():
+    from core.chunking.markdown_utils import chunk_xlsx_chart
+
+    def words(text: str) -> int:
+        return len(text.split())
+
+    title = " ".join(f"word{index}" for index in range(300))
+    xml = _chart_xml(
+        [_plot("lineChart", [_series("S", ("Data!$A$2:$A$4", ["Jan", "Feb", "Mar"]), ("Data!$B$2:$B$4", [1, 2, 3]))])],
+        title=title,
+    )
+    (chart,) = _charts(_workbook_with_chart(xml))
+    pieces = chunk_xlsx_chart(chart.text, chart.metadata, 60, words)
+
+    assert chart.metadata["chart_context"].startswith("Chart (line chart), worksheet Data: word0")
+    assert len(pieces) > 1 and all(words(piece) <= 60 for piece in pieces)
+    assert all(piece.startswith("Chart (line chart), worksheet Data: word0") for piece in pieces[1:])
+
+
+def test_every_block_carries_the_workbook_chart_status_even_without_chart_chunks():
+    """Every chart skipped: no chart chunk exists, but the table says so."""
+    raw = _replace_parts(_workbook_with_chart(_monthly_revenue()), {"xl/charts/chart1.xml": "<c:chartSpace><broken>"})
+    (table,) = _blocks(raw)
+
+    assert table.metadata["xlsx_content_kind"] == "table"
+    assert table.metadata["workbook_chart_extraction"] == "partial"
+    assert table.metadata["workbook_chart_issue_count"] == 1
+    assert "could not be read" in table.metadata["workbook_chart_issues"][0]
+
+
+def test_a_failed_chart_extraction_is_reported_on_the_tables(monkeypatch):
+    from core.indexing.parsers.tabular import xlsx_parser
+
+    def failing(*args, **kwargs):
+        raise ValueError("secret detail that must not reach metadata")
+
+    monkeypatch.setattr(xlsx_parser, "WorkbookCharts", failing)
+    (table,) = _blocks(_workbook_with_chart(_monthly_revenue()))
+
+    assert table.metadata["workbook_chart_extraction"] == "failed"
+    assert table.metadata["workbook_chart_issues"] == ["Chart extraction failed (ValueError)"]
+
+
+def test_the_read_budget_is_a_workbook_chart_issue():
+    blocks = _blocks(_two_distant_uncached_charts(), max_chart_scan_rows=10)
+
+    assert {block.metadata["workbook_chart_extraction"] for block in blocks} == {"partial"}
+    # The far chart's categories and values, and its value-format lookup.
+    assert blocks[0].metadata["workbook_chart_issues"] == [
+        "The chart read budget was reached: 3 cell ranges were not read"
+    ]
+
+
+def test_off_mode_reports_charts_as_off():
+    (table,) = _blocks(_workbook_with_chart(_monthly_revenue()), mode="off")
+
+    assert table.metadata["workbook_chart_extraction"] == "off"
+
+
+def test_a_text_box_in_a_hidden_group_is_hidden_too():
+    box = _text_box("Group note", grouped=True).replace("name='Group'/>", "name='Group' hidden='1'/>", 1)
+    raw = _with_text_boxes(_workbook_with_chart(_monthly_revenue()), box, _text_box("Visible note"))
+
+    (withheld,) = _text_boxes(_blocks(raw, mode="without_hidden_data"))
+    (full,) = _text_boxes(_blocks(raw))
+
+    assert "Group note" not in withheld.text and "Visible note" in withheld.text
+    assert "(hidden in Excel) Group note" in full.text

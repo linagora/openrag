@@ -44,6 +44,32 @@ _MAX_DATA_LINE = 2000
 _MAX_SERIES_PER_TABLE = 8
 # Series described in chunk metadata, which every chunk of the chart carries.
 _MAX_SERIES_METADATA = 64
+# Chunk metadata is stored in a 64 KiB JSON field and repeated on every chunk
+# of a chart. Strings and lists are cut here, predictably and with a flag
+# (``chart_metadata_truncated``), so the store never has to cut them itself;
+# the chunk text keeps what a reader needs.
+_MAX_METADATA_TEXT = 128
+_MAX_METADATA_TITLE = 512
+_MAX_METADATA_LIST = 64
+
+
+class _Capped:
+    """Cut metadata strings and lists, remembering whether anything was cut."""
+
+    def __init__(self) -> None:
+        self.truncated = False
+
+    def text(self, value: str | None, limit: int = _MAX_METADATA_TEXT) -> str | None:
+        if value is None or len(value) <= limit:
+            return value
+        self.truncated = True
+        return value[: limit - 1] + "…"
+
+    def items(self, values: list, limit: int = _MAX_METADATA_LIST) -> list:
+        if len(values) <= limit:
+            return values
+        self.truncated = True
+        return values[:limit]
 
 
 @dataclass(frozen=True)
@@ -299,21 +325,21 @@ def _display_line(chart: Chart, formatter: ValueFormatter) -> str | None:
     return "; ".join(parts)[:_MAX_DATA_LINE] or None
 
 
-def _series_metadata(chart: Chart, formatter: ValueFormatter) -> list[dict]:
+def _series_metadata(chart: Chart, formatter: ValueFormatter, capped: _Capped) -> list[dict]:
     entries = []
-    for _, number, series in _numbered(chart):
+    for _, number, series in _numbered(chart)[:_MAX_SERIES_METADATA]:
         entries.append(
             {
-                "name": _series_label(series, number),
-                "name_ref": series.name_ref,
-                "categories_ref": series.categories.formula if series.categories is not None else None,
-                "values_ref": series.values.formula if series.values is not None else None,
+                "name": capped.text(_series_label(series, number)),
+                "name_ref": capped.text(series.name_ref),
+                "categories_ref": capped.text(series.categories.formula if series.categories is not None else None),
+                "values_ref": capped.text(series.values.formula if series.values is not None else None),
                 "point_count": series.values.point_count if series.values and not series.values.withheld else 0,
                 "values_available": series.values is not None
                 and series.values.values is not None
                 and not series.values.withheld,
                 "values_withheld": series.values is not None and series.values.withheld,
-                "format_code": series.values.format_code if series.values is not None else None,
+                "format_code": capped.text(series.values.format_code if series.values is not None else None),
                 "display_format": formatter.display(series.values),
             }
         )
@@ -321,9 +347,15 @@ def _series_metadata(chart: Chart, formatter: ValueFormatter) -> list[dict]:
 
 
 def _chart_context(title: str, labels: list[str], placement: ChartPlacement) -> str:
+    """One line naming a chart, repeated on every piece of a split chart.
+
+    The type and the sheet come first and the title last, so a line cut to
+    fit (a long title, a small chunk size) loses part of the title, not what
+    says where the chart is.
+    """
     kind = " + ".join(dict.fromkeys(labels)) or "chart"
     where = "chart sheet" if placement.sheet_kind == "chartsheet" else "worksheet"
-    return f"Chart: {title} ({kind}), {where} {_single_line(placement.sheet_name)}"[:_MAX_DATA_LINE]
+    return f"Chart ({kind}), {where} {_single_line(placement.sheet_name)}: {title}"[:_MAX_DATA_LINE]
 
 
 def render_chart(
@@ -335,6 +367,7 @@ def render_chart(
     max_points: int,
     max_bytes: int,
     unresolved_references: int = 0,
+    ranges_not_read: int = 0,
     formatter: ValueFormatter | None = None,
     hidden_sources: tuple[str, ...] = (),
     hidden_data_withheld: bool = False,
@@ -355,6 +388,8 @@ def render_chart(
         lines.append(f"Chart sheet: {sheet}")
     else:
         lines.append(f"Worksheet: {sheet}" + (f", placed over {placement.anchor}" if placement.anchor else ""))
+    if placement.hidden:
+        lines.append("Hidden in Excel.")
     if chart.pivot_table:
         where = f" (worksheet {_single_line(chart.pivot_sheet)})" if chart.pivot_sheet else ""
         lines.append(f"Pivot chart of pivot table {_single_line(chart.pivot_table)}{where}")
@@ -449,6 +484,11 @@ def render_chart(
     notes.extend(chart.notes)
     if unresolved_references:
         notes.append(f"Values of {unresolved_references} series could not be read from the workbook.")
+    if ranges_not_read:
+        notes.append(
+            f"{ranges_not_read} of this chart's cell ranges were not read: the workbook's chart read budget "
+            "was reached."
+        )
     if chart.unsupported_plots:
         notes.append("Part of this chart uses a chart type that is not extracted.")
     if not chart.series:
@@ -462,7 +502,8 @@ def render_chart(
     if not deferred:
         text = _bounded(text, max_bytes)
     sheet_ref = "'" + placement.sheet_name.replace("'", "''") + "'!"
-    series_entries = _series_metadata(chart, formatter)
+    capped = _Capped()
+    series_entries = _series_metadata(chart, formatter, capped)
     metadata = {
         "tabular_format": "xlsx",
         "xlsx_content_kind": "chart",
@@ -472,24 +513,27 @@ def render_chart(
         "sheet_kind": placement.sheet_kind,
         "chart_id": f"sheet:{placement.sheet_index}:chart:{placement.position}",
         "chart_index": chart_index,
-        "chart_title": chart.title,
+        "chart_title": capped.text(chart.title, _MAX_METADATA_TITLE),
         # Repeated at the top of every chunk of a chart split across chunks.
         "chart_context": _chart_context(title, labels, placement),
         "chart_types": list(dict.fromkeys(labels)),
         "chart_format": placement.format,
-        "chart_pivot_table": chart.pivot_table,
-        "chart_pivot_sheet": chart.pivot_sheet,
+        "chart_pivot_table": capped.text(chart.pivot_table),
+        "chart_pivot_sheet": capped.text(chart.pivot_sheet),
         "chart_anchor_range": f"{sheet_ref}{placement.anchor}" if placement.anchor else None,
-        "chart_series": series_entries[:_MAX_SERIES_METADATA],
-        "chart_series_count": len(series_entries),
+        "chart_series": series_entries,
+        "chart_series_count": len(chart.series),
         "chart_data_in_tables": data_in_tables,
         "chart_point_count": points_total,
         "chart_points_truncated": shown_total < points_total and not data_in_tables,
         "chart_unresolved_series": unresolved_references,
-        "chart_hidden_source_sheets": list(hidden_sources),
+        "chart_ranges_not_read": ranges_not_read,
+        "chart_hidden_source_sheets": capped.items(list(hidden_sources)),
         "chart_hidden_data_withheld": hidden_data_withheld,
+        "chart_hidden_in_excel": placement.hidden,
         "spreadsheet_backend": "ooxml",
     }
+    metadata["chart_metadata_truncated"] = capped.truncated
     return RenderedChart(text, metadata, tuple(header_plots) if deferred else None)
 
 
@@ -517,10 +561,12 @@ def complete_chart(rendered: RenderedChart, chart: Chart, formatter: ValueFormat
     text = text.replace(_DISPLAY_SLOT + "\n", display + "\n" if display else "", 1)
     metadata = dict(rendered.metadata)
     entries = [dict(entry) for entry in metadata["chart_series"]]
+    capped = _Capped()
     for entry, (_, _, series) in zip(entries, _numbered(chart), strict=False):
-        entry["format_code"] = series.values.format_code if series.values is not None else None
+        entry["format_code"] = capped.text(series.values.format_code if series.values is not None else None)
         entry["display_format"] = formatter.display(series.values)
     metadata["chart_series"] = entries
+    metadata["chart_metadata_truncated"] = metadata.get("chart_metadata_truncated", False) or capped.truncated
     return RenderedChart(_bounded(text, max_bytes), metadata)
 
 

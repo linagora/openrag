@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import zipfile
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from xml.etree.ElementTree import Element, ParseError
 
 from core.utils.exceptions import PipelineError
@@ -58,6 +58,8 @@ class ChartPlacement:
     format: str = "chart"
     # The chart's own drawing of text boxes drawn on it, if any.
     user_shapes: tuple[tuple[str, str], ...] = ()
+    # Hidden in Excel: the frame itself, or a group it sits in.
+    hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,32 @@ def _anchor_range(anchor: Element) -> str | None:
     if start and end and start != end:
         return f"{start}:{end}"
     return start
+
+
+def _hidden(properties: Element | None) -> bool:
+    return properties is not None and properties.get("hidden", "0").lower() in {"1", "true"}
+
+
+def _drawn(element: Element, hidden: bool = False):
+    """Yield the shapes and graphic frames under ``element``: (element, hidden).
+
+    Each is visited once, groups included; a group hidden in Excel hides what
+    it holds. What ``mc:Fallback`` holds stands in for content old readers
+    cannot show ("This chart isn't available in your version of Excel"): it
+    duplicates the chosen content, so it is skipped.
+    """
+    for child in element:
+        name = child.tag.rsplit("}", 1)[-1] if isinstance(child.tag, str) else ""
+        if name == "Fallback":
+            continue
+        if name == "sp":
+            yield child, hidden
+        elif name == "graphicFrame":
+            yield child, hidden or _hidden(child.find("{*}nvGraphicFramePr/{*}cNvPr"))
+        elif name == "grpSp":
+            yield from _drawn(child, hidden or _hidden(child.find("{*}nvGrpSpPr/{*}cNvPr")))
+        else:
+            yield from _drawn(child, hidden)
 
 
 def _relationship_id(element: Element) -> str | None:
@@ -238,25 +266,24 @@ def locate_charts(
             charts = reader.relationships(drawing, "/chart", "/chartEx") if read_charts else {}
             for anchor in (element for element in root if element.tag.rsplit("}", 1)[-1] in _ANCHORS):
                 cells = _anchor_range(anchor) if kind == "worksheet" else None
-                # What mc:Fallback holds stands in for content old readers
-                # cannot show ("This chart isn't available in your version of
-                # Excel"): it duplicates the chosen content, so it is skipped.
-                fallback = {id(element) for found in anchor.iterfind(".//{*}Fallback") for element in found.iter()}
-                for shape in anchor.iterfind(".//{*}sp"):
-                    if id(shape) in fallback:
+                for element, hidden in _drawn(anchor):
+                    if element.tag.rsplit("}", 1)[-1] == "sp":
+                        found = shape_text(element)
+                        if found is None:
+                            continue
+                        if len(inventory.text_boxes) >= max_text_boxes:
+                            if not inventory.text_boxes_capped:
+                                inventory.text_boxes_capped = True
+                                inventory.skipped.append(
+                                    f"Text boxes beyond the {max_text_boxes}-text-box limit were not indexed"
+                                )
+                            continue
+                        found = replace(found, hidden=found.hidden or hidden)
+                        inventory.text_boxes.append(TextBox(sheet.get("name", ""), index, kind, found, cells))
                         continue
-                    found = shape_text(shape)
-                    if found is None:
+                    if not read_charts:
                         continue
-                    if len(inventory.text_boxes) >= max_text_boxes:
-                        if not inventory.text_boxes_capped:
-                            inventory.text_boxes_capped = True
-                            inventory.skipped.append(
-                                f"Text boxes beyond the {max_text_boxes}-text-box limit were not indexed"
-                            )
-                        continue
-                    inventory.text_boxes.append(TextBox(sheet.get("name", ""), index, kind, found, cells))
-                for frame in anchor.iterfind(".//{*}graphicFrame") if read_charts else ():
+                    frame = element
                     data = frame.find("{*}graphic/{*}graphicData")
                     if data is None:
                         continue
@@ -287,6 +314,7 @@ def locate_charts(
                             anchor=cells,
                             format=chart_format,
                             user_shapes=tuple((rel_id, path) for rel_id, (_, path) in user_shapes.items()),
+                            hidden=hidden,
                         )
                     )
     return inventory
