@@ -27,8 +27,10 @@ import ipaddress
 import mimetypes
 import socket
 import tempfile
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -587,7 +589,7 @@ class MCPService:
         # Downloaded under the suffix it is parsed as, like an upload, so the
         # path-based parsers read this file rather than a second copy.
         suffix = Document.type_suffix(filename, metadata.get("mimetype"))
-        tmp_path = await asyncio.to_thread(_create_download_target, suffix)
+        tmp_path = await _to_thread_undone_on_cancel(_remove_file, _create_download_target, suffix)
         download_complete = False
         try:
             await self._safe_download(url, tmp_path)
@@ -698,7 +700,7 @@ class MCPService:
                     written = 0
                     # File I/O runs in a worker thread so slow storage never
                     # stalls the event loop.
-                    fh = await asyncio.to_thread(dest.open, "wb")
+                    fh = await _to_thread_undone_on_cancel(_discard_download, dest.open, "wb")
                     try:
                         async for chunk in response.aiter_bytes():
                             written += len(chunk)
@@ -712,6 +714,45 @@ class MCPService:
 
 
 __all__ = ["MCPService"]
+
+_T = TypeVar("_T")
+
+# Threads still running for a cancelled call, held until their result is undone
+# (the event loop keeps only a weak reference to a task).
+_UNDO_ON_CANCEL: set[asyncio.Future[Any]] = set()
+
+
+async def _to_thread_undone_on_cancel(undo: Callable[[_T], None], func: Callable[..., _T], *args: Any) -> _T:
+    """Run ``func`` in a worker thread; if the caller is cancelled first, ``undo`` its result.
+
+    A thread cannot be interrupted: a cancelled ``asyncio.to_thread`` returns at
+    once while the thread goes on, so a file it then creates or opens would be
+    left on disk with nobody holding it. The thread's work is shielded instead,
+    and ``undo`` receives its result as soon as it finishes.
+    """
+    job = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(job)
+    except asyncio.CancelledError:
+        _UNDO_ON_CANCEL.add(job)
+        job.add_done_callback(partial(_undo_result, undo))
+        raise
+
+
+def _undo_result(undo: Callable[[_T], None], job: asyncio.Future[_T]) -> None:
+    _UNDO_ON_CANCEL.discard(job)
+    if job.cancelled() or job.exception() is not None:
+        return
+    undo(job.result())
+
+
+def _remove_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _discard_download(fh: Any) -> None:
+    fh.close()
+    Path(fh.name).unlink(missing_ok=True)
 
 
 def _create_download_target(suffix: str) -> Path:

@@ -8,6 +8,7 @@ fuzzy ranking, task assembly and URL-indexation guards in isolation.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1087,6 +1088,108 @@ async def test_index_url_keeps_file_io_off_the_event_loop(monkeypatch):
     recorded = {name for name, _ in index_url_calls}
     assert {"NamedTemporaryFile", "open", "write", "read", "close"} <= recorded
     assert [call for call in index_url_calls if call[1]] == []
+
+
+async def _cancel_while_blocked(task: asyncio.Task, gate: dict[str, threading.Event]) -> None:
+    """Cancel ``task`` while its worker thread is blocked, then let the thread finish."""
+    assert await asyncio.to_thread(gate["entered"].wait, 5), "the worker thread never started"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate["release"].set()
+    assert await asyncio.to_thread(gate["finished"].wait, 5), "the worker thread never finished"
+
+
+async def _until_removed(path: Path) -> bool:
+    """Wait for the cleanup that runs once the worker thread has finished."""
+    for _ in range(200):
+        if not path.exists():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+def _index_url_task(svc) -> asyncio.Task:
+    return asyncio.ensure_future(
+        svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f8",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+    )
+
+
+# A worker thread cannot be interrupted: cancelling the await returns at once
+# while the thread goes on. A temp file the thread creates or opens after the
+# request was cancelled must still be removed.
+@pytest.mark.asyncio
+async def test_index_url_removes_the_temp_file_created_after_a_cancel(monkeypatch):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    gate = {"entered": threading.Event(), "release": threading.Event(), "finished": threading.Event()}
+    created: list[Path] = []
+    real_create = mcp_mod._create_download_target
+
+    def blocked_create(suffix):
+        gate["entered"].set()
+        gate["release"].wait(5)
+        created.append(real_create(suffix))
+        gate["finished"].set()
+        return created[-1]
+
+    monkeypatch.setattr(mcp_mod, "_create_download_target", blocked_create)
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+
+    await _cancel_while_blocked(_index_url_task(svc), gate)
+
+    assert await _until_removed(created[0]), f"temp file left behind: {created[0]}"
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_the_download_opened_after_a_cancel(monkeypatch):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    gate = {"entered": threading.Event(), "release": threading.Event(), "finished": threading.Event()}
+    opened: list[Path] = []
+    real_path_open = Path.open
+
+    def blocked_open(self, mode="r", *args, **kwargs):
+        if mode != "wb":
+            return real_path_open(self, mode, *args, **kwargs)
+        opened.append(self)
+        gate["entered"].set()
+        gate["release"].wait(5)
+        try:
+            return real_path_open(self, mode, *args, **kwargs)
+        finally:
+            gate["finished"].set()
+
+    def handler(request):
+        return httpx.Response(200, content=_PDF_HEADER + b"data")
+
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", blocked_open)
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+
+    async def _resolves_ok(host):
+        return None
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", _resolves_ok)
+
+    await _cancel_while_blocked(_index_url_task(svc), gate)
+
+    assert opened, "the download was never opened"
+    assert await _until_removed(opened[0]), f"download left behind: {opened[0]}"
 
 
 # ---------------------------------------------------------------------------
