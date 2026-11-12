@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
+import { PartitionCombobox } from "@/components/shared/partition-combobox";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import {
   DEGRADED_STAGE_OPTIONS,
@@ -555,18 +556,13 @@ export default function DocumentListPage() {
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Label className="text-sm font-medium">Partition</Label>
-        <Select value={selected} onValueChange={selectPartition}>
-          <SelectTrigger className="w-[220px]">
-            <SelectValue placeholder="Select partition" />
-          </SelectTrigger>
-          <SelectContent>
-            {partitions.map((p) => (
-              <SelectItem key={p.partition} value={p.partition}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <PartitionCombobox
+          partitions={partitions}
+          value={selected}
+          onValueChange={selectPartition}
+          className="w-[220px]"
+          aria-label="Partition"
+        />
         <div className="relative max-w-xs">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
