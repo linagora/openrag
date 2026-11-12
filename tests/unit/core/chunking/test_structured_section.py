@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from core.chunking.registry import chunking_registry
 from core.chunking.structured_section import StructuredSectionChunker, _Unit
 from core.models.chunk import ChunkType
@@ -775,8 +776,10 @@ def test_heading_before_a_figure_travels_with_it():
 def test_headings_only_unit_never_merges_backward():
     from core.chunking.structured_section import _is_headings_only, _Unit
 
-    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\n### Sub", tokens=4))
-    assert not _is_headings_only(_Unit(heading_path=[], text="## Title\n\nBody line.", tokens=5))
+    is_heading = _chunker()._is_heading_line
+    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\n### Sub", tokens=4), is_heading)
+    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\nParagraphe 2 : Objet", tokens=6), is_heading)
+    assert not _is_headings_only(_Unit(heading_path=[], text="## Title\n\nBody line.", tokens=5), is_heading)
 
 
 def test_split_table_keeps_its_column_header_on_every_piece():
@@ -790,3 +793,98 @@ def test_split_table_keeps_its_column_header_on_every_piece():
     for piece in tables:
         assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
     assert "Regional breakdown" in tables[0].text, "the heading should lead the first piece"
+
+
+def test_split_table_under_an_anchored_article_heading_keeps_its_column_header():
+    """Marker anchors a heading with a page ``<span>``. The chunk keeps the line
+    without it, where the article test then reads ``Article L110-5`` as content,
+    not a heading: the line must still be recognised in front of the table."""
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    heading = '## <span id="page-1-0"></span>Article L110-5'
+    doc = _doc(f"{heading}\n\n| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n")
+    tables = [c for c in _chunker(chunk_size=200).chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    for piece in tables:
+        assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
+    assert "## Article L110-5" in tables[0].content, "the heading should lead the first piece"
+    assert all("Article L110-5" not in piece.content for piece in tables[1:]), "the heading must not be replayed"
+
+
+# The heading in front of a split table is recognised the way the chunker
+# recognised it when it opened the section: every default keyword, including
+# ``Paragraphe``, and a deployment's own ``heading_keywords``. Otherwise the
+# heading is replayed as the column header of every piece (#1375).
+@pytest.mark.parametrize(
+    ("heading", "keywords"),
+    [
+        ("Paragraphe 3 : Ventilation régionale", None),
+        ("Rubrique 4 : Ventilation régionale", ["rubrique"]),
+    ],
+)
+def test_split_table_under_a_keyword_heading_keeps_its_column_header(heading, keywords):
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    doc = _doc(f"{heading}\n\n| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n")
+    chunker = _chunker(chunk_size=200, heading_keywords=keywords)
+    tables = [c for c in chunker.chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    for piece in tables:
+        assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
+    assert heading in tables[0].text, "the heading should lead the first piece"
+    assert all(heading not in piece.content for piece in tables[1:]), "the heading must not be replayed"
+
+
+# A lone ``\r`` and the other characters ``str.splitlines()`` breaks on
+# (vertical tab, form feed, record separator, Unicode line separator) can sit
+# inside a table cell of converted documents. Splitting an oversize table must
+# not cut the row there, or the table parser drops the half-rows' text (#1375).
+@pytest.mark.parametrize("sep", ["\r", "\x0b", "\x0c", "\x1e", " "])
+def test_oversize_table_keeps_cell_text_around_a_line_break_character(sep):
+    rows = "\n".join(f"| r{i} | v{i} |" for i in range(20))
+    table = f"## Results\n\n| Name | Value |\n| --- | --- |\n| alpha{sep}beta | gamma |\n{rows}\n"
+    chunks = _chunker(chunk_size=8, inline_threshold=0, layout="flowing").chunk(_doc(table))
+    tables = [c for c in chunks if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    body = " ".join(c.content for c in chunks)
+    for word in ("alpha", "beta", "gamma", "r0", "v19"):
+        assert word in body, word
+
+
+_CRLF_DOC = """# Rapport annuel
+
+Introduction paragraph describing the scope of the report in a few words.
+
+## Contexte
+
+- first point of the list
+- second point of the list
+- third point of the list
+
+Chapitre 2 : Budget
+
+| Poste | Montant |
+| --- | --- |
+| Personnel | 120 |
+| Loyer | 40 |
+
+## Annexe détaillée
+
+{big}
+
+Closing paragraph after the large table.
+"""
+
+
+def test_crlf_document_chunks_like_the_lf_document():
+    big = "| Region | Q1 | Q2 |\n| --- | --- | --- |\n" + "\n".join(f"| R{i} | {i} | {i * 2} |" for i in range(60))
+    lf = _CRLF_DOC.format(big=big)
+    crlf = lf.replace("\n", "\r\n")
+    chunker = _chunker(chunk_size=60)
+    lf_chunks = chunker.chunk(_doc(lf))
+    crlf_chunks = chunker.chunk(_doc(crlf))
+    assert sum(c.chunk_type == ChunkType.TABLE for c in lf_chunks) > 1, "the big table must split"
+
+    def norm(text: str) -> str:
+        return text.replace("\r\n", "\n")
+
+    assert [norm(c.text) for c in crlf_chunks] == [c.text for c in lf_chunks]
+    assert [c.chunk_type for c in crlf_chunks] == [c.chunk_type for c in lf_chunks]
