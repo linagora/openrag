@@ -65,10 +65,12 @@ export function PartitionCombobox({
       >
         <Command defaultValue={value}>
           <CommandInput placeholder="Search partitions..." />
-          {/* Fixed height, so filtering can't resize the popover and flip it to the other side. */}
+          {/* Fixed height, so filtering can't resize the popover and flip it to the other side.
+              The var() fallback keeps the cap valid on the first frame, before Radix sets the variable,
+              so cmdk's scroll to the selected partition is not lost when the list shrinks. */}
           <CommandList
             style={{
-              height: `min(${Math.max(sorted.length * ROW_HEIGHT + GROUP_PADDING, MIN_LIST_HEIGHT)}px, calc(var(--radix-popover-content-available-height) - ${SEARCH_INPUT_HEIGHT}px))`,
+              height: `min(${Math.max(sorted.length * ROW_HEIGHT + GROUP_PADDING, MIN_LIST_HEIGHT)}px, calc(var(--radix-popover-content-available-height, 348px) - ${SEARCH_INPUT_HEIGHT}px))`,
             }}
           >
             <CommandEmpty>No partition found.</CommandEmpty>
