@@ -281,7 +281,9 @@ cluster through `env.config.RAY_ADDRESS`. Set `ray.externalCluster: true` when
 same task state. By default the chart's `RayCluster` runs a fixed number of
 worker pods: `ray.workers.count` groups of `ray.workers.replicas` each. With
 `ray.enableInTreeAutoscaling: true`, each group scales between
-`ray.workers.minReplicas` and `ray.workers.maxReplicas`. Upgrades follow
+`ray.workers.minReplicas` and `ray.workers.maxReplicas`; the autoscaler then
+needs the Ray head's service account token, which the chart does not mount by
+default, so set `ray.automountServiceAccountToken: true` too. Upgrades follow
 [Upgrades that change the indexer generation](#upgrades-that-change-the-indexer-generation).
 See [Deploy a Ray cluster](/openrag/documentation/deploy_ray_cluster/).
 
