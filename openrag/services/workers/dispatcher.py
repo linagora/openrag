@@ -39,6 +39,7 @@ from services.workers.task_state import (
     QUEUE_REFUSED_FILE_INDEXING,
     QUEUE_REFUSED_INDEXING_CAPACITY,
     TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
+    read_ref_when_settled,
 )
 
 logger = get_logger()
@@ -570,6 +571,9 @@ class WorkerDispatcher(IndexingDispatcher):
             self._pool.submit.remote(**submit_kwargs),
             task_description=f"submit({task_id})",
         )
+        # Deserializing the ref made this process borrow it, and it is dropped
+        # once handed to the completion tracker.
+        read_ref_when_settled(submitted[0])
         return submitted[0]
 
     async def _mark_submit_failed(self, task_id: str, tb: str, error_reason: str) -> None:
@@ -998,6 +1002,9 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         if obj_ref is None:
             return False
+        # Fetching the ref made this process borrow it, and a task already
+        # settled returns below without reading it.
+        read_ref_when_settled(obj_ref)
 
         # Atomically claim the cancellation first: if ray.cancel() ran before
         # this and the RPC then failed, a killed worker could never report
