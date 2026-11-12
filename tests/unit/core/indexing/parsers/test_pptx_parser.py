@@ -280,3 +280,43 @@ def test_a_graphic_frame_that_cannot_be_read_is_skipped(tmp_path, kind, break_fr
     _, slides, _ = PptxParser()._convert(str(deck))
 
     assert slides == [(1, "Quarterly revenue\nSource: finance"), (2, "Next slide")]
+
+
+# python-pptx builds a shape before any guard sees it, and a placeholder of a
+# type it does not know cannot be built: the slide keeps what was read before
+# it, its notes and the next slides are kept.
+def _deck_with_unknown_placeholder(tmp_path, where):
+    import pptx
+
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = "Slide title"
+    slide.placeholders[1].text = "Body text"
+    slide.notes_slide.notes_text_frame.text = "Speaker note"
+    second = presentation.slides.add_slide(presentation.slide_layouts[1])
+    second.shapes.title.text = "Next slide"
+    placeholder = {
+        "title": slide.shapes.title,
+        "body": slide.placeholders[1],
+        "notes": slide.notes_slide.notes_placeholder,
+    }[where]
+    placeholder._element.ph.set("type", "bogus")
+    deck = tmp_path / "deck.pptx"
+    presentation.save(deck)
+    return deck
+
+
+@pytest.mark.parametrize(
+    ("where", "first_slide"),
+    [
+        ("title", "### Notes:\nSpeaker note"),
+        ("body", "# Slide title\n\n### Notes:\nSpeaker note"),
+        ("notes", "# Slide title\nBody text"),
+    ],
+)
+def test_a_placeholder_of_an_unknown_type_does_not_fail_the_deck(tmp_path, where, first_slide):
+    deck = _deck_with_unknown_placeholder(tmp_path, where)
+
+    _, slides, _ = PptxParser()._convert(str(deck))
+
+    assert slides == [(1, first_slide), (2, "# Next slide")]

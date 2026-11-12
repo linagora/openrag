@@ -93,22 +93,30 @@ class PptxParser(DocumentParser):
                 logger.warning("Capping PPTX slide processing at %d slides", _MAX_SLIDES)
                 break
             md = ""
-            title = slide.shapes.title
-
-            for shape in slide.shapes:
-                # python-pptx reads a shape's parts lazily, so a damaged one
-                # raises only here. Skip that shape, not the whole deck.
-                try:
-                    md += self._shape_to_markdown(shape, title, slide_num, images, Image)
-                except Exception as exc:
-                    logger.warning("Skipping unreadable PPTX shape: %s", exc)
+            try:
+                title = slide.shapes.title
+                for shape in slide.shapes:
+                    # python-pptx reads a shape's parts lazily, so a damaged one
+                    # raises only here. Skip that shape, not the whole deck.
+                    try:
+                        md += self._shape_to_markdown(shape, title, slide_num, images, Image)
+                    except Exception as exc:
+                        logger.warning("Skipping unreadable PPTX shape: %s", exc)
+            except Exception as exc:
+                # A shape python-pptx cannot even build, such as a placeholder of
+                # an unknown type, raises from slide.shapes itself: keep what was
+                # read before it.
+                logger.warning("Stopping at an unreadable PPTX shape on slide %d: %s", slide_num, exc)
 
             md = md.strip()
-            if slide.has_notes_slide:
-                notes_frame = slide.notes_slide.notes_text_frame
-                if notes_frame is not None:
-                    md += "\n\n### Notes:\n" + notes_frame.text
-                md = md.strip()
+            try:
+                if slide.has_notes_slide:
+                    notes_frame = slide.notes_slide.notes_text_frame
+                    if notes_frame is not None:
+                        md += "\n\n### Notes:\n" + notes_frame.text
+            except Exception as exc:
+                logger.warning("Skipping unreadable PPTX notes on slide %d: %s", slide_num, exc)
+            md = md.strip()
 
             if md:
                 slides.append((slide_num, md))
