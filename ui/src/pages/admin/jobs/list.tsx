@@ -10,7 +10,7 @@ import { usePermissions } from "@/lib/permissions";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
-import { DegradedCompletionStatus } from "@/components/shared/degraded-stages";
+import { defaultStageBadgeColor, StageElapsedTime, stageBadgeColors } from "@/components/shared/stage-progress";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cancelTask, isActiveState, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
+import { ApiError } from "@/lib/api/client";
 import { downloadCsv } from "@/lib/csv";
 import {
   invalidateJobsQueries,
@@ -35,6 +36,7 @@ import { formatDate } from "@/lib/utils";
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
 const JOB_SEARCH_DEBOUNCE_MS = 250;
+const ACTIVE_JOBS_PAGE_SIZE = 10;
 const ALL_PARTITIONS_FILTER = "__openrag/all_partitions__";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
@@ -52,6 +54,116 @@ function formatDuration(durationMs: number | null | undefined): string {
   if (hours > 0) return `${hours}h${minutes > 0 ? ` ${minutes}m` : ""}`;
   if (minutes > 0) return `${minutes}m${seconds > 0 ? ` ${seconds}s` : ""}`;
   return `${seconds}s`;
+}
+
+const stageIdsByLabel: Record<string, string> = {
+  parsing: "parse",
+  captioning: "caption",
+  "image captioning": "caption",
+  chunking: "chunk",
+  contextualizing: "contextualize",
+  contextualization: "contextualize",
+  "topic tagging": "topic_tag",
+  embedding: "embed",
+  storing: "store",
+};
+
+const stageLabelsById: Record<string, string> = {
+  parse: "Parsing",
+  caption: "Image captioning",
+  chunk: "Chunking",
+  contextualize: "Contextualization",
+  topic_tag: "Topic tagging",
+  embed: "Embedding",
+  store: "Storing",
+};
+
+function stageIdForLabel(label: string | null | undefined): string | null {
+  return label ? stageIdsByLabel[label.trim().toLowerCase()] ?? null : null;
+}
+
+function stageLabelForId(stageId: string | null | undefined): string | null {
+  return stageId ? stageLabelsById[stageId] ?? null : null;
+}
+
+function stageProgressDisplay(task: TaskListItem): {
+  stage: string;
+  quality: string | null;
+  stageId: string | null;
+  elapsedMs: number | null;
+  elapsedSampledAt: string | null;
+} | null {
+  const progress = task.stage_progress;
+  if (!progress || task.state === "QUEUED") return null;
+
+  const label = progress.stage_label
+    || progress.last_known_stage_label
+    || stageLabelForId(progress.stage_id)
+    || stageLabelForId(progress.last_known_stage_id);
+  const liveStage = progress.freshness === "live" && progress.is_currently_running && !!(
+    progress.stage_label || progress.stage_id
+  );
+  const live = progress.freshness === "live";
+  const activeWithoutLiveConfirmation = isActiveState(task.state) && !live;
+  const activeStageWithoutLiveConfirmation = isActiveState(task.state) && !liveStage;
+  const interrupted = !!progress.interrupted_invocation_id &&
+    progress.interrupted_invocation_id === progress.current_invocation_id;
+  const hasCurrentPhase = ["preparing", "between_stages", "finalizing"].includes(progress.phase ?? "");
+  const stageHasNoSeparatePhase = !hasCurrentPhase;
+  const statusUnconfirmed = !interrupted && (
+    (activeStageWithoutLiveConfirmation && !!label && stageHasNoSeparatePhase)
+    || (activeWithoutLiveConfirmation && hasCurrentPhase)
+  );
+  let stage = isActiveState(task.state) ? "Waiting for stage update…" : "Stage history unavailable";
+  if (interrupted) {
+    stage = label ? `Interrupted: ${label}` : "Interrupted before a stage was recorded";
+  } else if (liveStage) {
+    stage = progress.stage_label ?? label ?? "Waiting for stage update…";
+  } else if (progress.phase === "finalizing") {
+    stage = live || activeWithoutLiveConfirmation ? "Finalizing" : "Last observed: Finalizing";
+  } else if (progress.phase === "between_stages") {
+    stage = live || activeWithoutLiveConfirmation ? "Between stages" : "Last observed: Between stages";
+  } else if (progress.phase === "preparing") {
+    stage = live || activeWithoutLiveConfirmation ? "Preparing" : "Last observed: Preparing";
+  } else if (label) {
+    stage = activeStageWithoutLiveConfirmation ? label : `Last observed: ${label}`;
+  } else if (progress.history_quality === "not_started") {
+    stage = "No stage history recorded";
+  }
+
+  const substageIsParse = progress.stage_id === "parse" || progress.last_known_stage_id === "parse";
+  if (substageIsParse && progress.current_substage_label) {
+    const hasCount = progress.current_substage_progress != null && progress.current_substage_total != null;
+    const count = hasCount
+      ? ` (${progress.current_substage_progress}/${progress.current_substage_total})`
+      : "";
+    stage = `${stage} · ${progress.current_substage_label}${count}`;
+  }
+  if (statusUnconfirmed && !interrupted) {
+    stage = `${stage} · Status unconfirmed`;
+  }
+
+  const quality = progress.history_quality === "pending_persistence"
+    ? "Saving history"
+    : progress.history_quality === "incomplete"
+      ? "History incomplete"
+      : progress.history_quality === "truncated"
+        ? "Older history trimmed"
+        : null;
+  const stageId = liveStage
+    ? progress.stage_id ?? stageIdForLabel(progress.stage_label)
+    : interrupted || (
+        !!label && !["preparing", "between_stages", "finalizing"].includes(progress.phase ?? "")
+      )
+      ? progress.stage_id ?? progress.last_known_stage_id ?? stageIdForLabel(label)
+      : null;
+  return {
+    stage,
+    quality,
+    stageId,
+    elapsedMs: liveStage ? progress.elapsed_ms ?? null : null,
+    elapsedSampledAt: liveStage ? progress.elapsed_sampled_at ?? null : null,
+  };
 }
 
 function QueuePressureSummary({
@@ -104,6 +216,58 @@ function TruncatedValue({ value, className = "max-w-[320px]" }: { value: string;
   );
 }
 
+function TaskStateCell({ task, showActiveState }: { task: TaskListItem; showActiveState: boolean }) {
+  const state = <StatusBadge status={task.state} />;
+  const progress = showActiveState ? null : stageProgressDisplay(task);
+  const hideActiveState = !showActiveState && task.state === "SERIALIZING";
+  const progressLabel = progress && (
+    <>
+      <span>{progress.stage}</span>
+      {progress.elapsedMs !== null && (
+        <>
+          {" · "}
+          <StageElapsedTime
+            key={`${progress.stageId ?? progress.stage}:${progress.elapsedSampledAt ?? ""}`}
+            elapsedMs={progress.elapsedMs}
+            elapsedSampledAt={progress.elapsedSampledAt}
+          />
+        </>
+      )}
+    </>
+  );
+
+  return (
+    <div className="flex min-w-32 flex-col items-start gap-1">
+      {!hideActiveState && state}
+      {progress ? (
+        <div className="text-xs text-muted-foreground">
+          {progress.stageId ? (
+            <Badge
+              variant="outline"
+              className={stageBadgeColors[progress.stageId] ?? defaultStageBadgeColor}
+            >
+              {progressLabel}
+            </Badge>
+          ) : (
+            <span>{progressLabel}</span>
+          )}
+          {progress.quality && <span className="block">{progress.quality}</span>}
+        </div>
+      ) : hideActiveState ? (
+        task.state === "QUEUED"
+          ? state
+          : <span className="text-xs text-muted-foreground">Waiting for stage update…</span>
+      ) : null}
+    </div>
+  );
+}
+
+const taskStateColumn = (showActiveState: boolean): ColumnDef<TaskListItem, unknown> => ({
+  accessorKey: "state",
+  header: "State",
+  cell: ({ row }) => <TaskStateCell task={row.original} showActiveState={showActiveState} />,
+});
+
 const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
     accessorKey: "task_id",
@@ -118,16 +282,7 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
       </Link>
     ),
   },
-  {
-    accessorKey: "state",
-    header: "State",
-    cell: ({ row }) => {
-      if (row.original.outcome !== "completed_degraded") {
-        return <StatusBadge status={row.original.state} />;
-      }
-      return <DegradedCompletionStatus stages={row.original.details?.degraded_stages} />;
-    },
-  },
+  taskStateColumn(true),
   {
     id: "file",
     accessorFn: (task) =>
@@ -172,6 +327,12 @@ const failureReasonColumn: ColumnDef<TaskListItem, unknown> = {
 };
 
 const adminColumns = [columns[0], columns[1], failureReasonColumn, ...columns.slice(2)];
+const activeColumns: ColumnDef<TaskListItem, unknown>[] = [
+  columns[0],
+  taskStateColumn(false),
+  ...columns.slice(2),
+];
+const adminActiveColumns = [activeColumns[0], activeColumns[1], failureReasonColumn, ...activeColumns.slice(2)];
 
 export default function JobListPage() {
   const { isAdmin } = usePermissions();
@@ -181,9 +342,15 @@ export default function JobListPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [partitionFilter, setPartitionFilter] = useState(ALL_PARTITIONS_FILTER);
+  const [activePageIndex, setActivePageIndex] = useState(0);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const taskStatusFilter = statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab;
+  const requestServerPage =
+    statusTab === "ACTIVE" && !debouncedSearch.trim() && partitionFilter === ALL_PARTITIONS_FILTER;
+  const requestedPage = requestServerPage
+    ? { limit: ACTIVE_JOBS_PAGE_SIZE, offset: activePageIndex * ACTIVE_JOBS_PAGE_SIZE }
+    : undefined;
   const userId = user?.id ?? 0;
   const queryScope = { userId, isAdmin };
 
@@ -193,7 +360,17 @@ export default function JobListPage() {
   }, [search]);
 
   const tasksQuery = useQuery({
-    ...jobsTaskListQueryOptions(queryScope, taskStatusFilter),
+    ...jobsTaskListQueryOptions(queryScope, taskStatusFilter, requestedPage),
+    queryFn: async () => {
+      try {
+        return await listTasks(taskStatusFilter, requestedPage);
+      } catch (error) {
+        if (requestServerPage && error instanceof ApiError && error.code === "TASK_LIST_PAGINATION_UNAVAILABLE") {
+          return listTasks(taskStatusFilter);
+        }
+        throw error;
+      }
+    },
     enabled: !!user,
   });
   const queueInfoQuery = useQuery({
@@ -202,11 +379,12 @@ export default function JobListPage() {
   });
 
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data?.tasks]);
-  const partitionOptions = useMemo(
-    () =>
-      Array.from(new Set(tasks.map((task) => str(task.details?.partition)).filter(Boolean))).sort(),
-    [tasks],
-  );
+  const serverPagination = tasksQuery.data?.pagination;
+  const isServerPaginated = requestServerPage && !!serverPagination;
+  const partitionOptions = useMemo(() => {
+    if (isServerPaginated && serverPagination) return serverPagination.available_partitions;
+    return Array.from(new Set(tasks.map((task) => str(task.details?.partition)).filter(Boolean))).sort();
+  }, [isServerPaginated, serverPagination, tasks]);
   const filteredTasks = useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
     return tasks.filter((task) => {
@@ -248,8 +426,11 @@ export default function JobListPage() {
     onError: (error: Error) => toast.error(`Bulk cancel failed: ${error.message}`),
   });
 
-  const exportJobs = () => {
+  const exportJobs = async () => {
     try {
+      const exportRows = isServerPaginated
+        ? (await listTasks(taskStatusFilter)).tasks
+        : filteredTasks;
       downloadCsv(
         "openrag-jobs.csv",
         [
@@ -266,7 +447,7 @@ export default function JobListPage() {
             ? [{ header: "failure_reason", value: (task: TaskListItem) => task.error_summary }]
             : []),
         ],
-        filteredTasks,
+        exportRows,
       );
     } catch (error) {
       toast.error(`CSV export failed: ${error instanceof Error ? error.message : "Unknown error"}`);
@@ -278,6 +459,7 @@ export default function JobListPage() {
     setSearch("");
     setDebouncedSearch("");
     setPartitionFilter(ALL_PARTITIONS_FILTER);
+    setActivePageIndex(0);
     setRowSelection({});
   };
 
@@ -294,6 +476,7 @@ export default function JobListPage() {
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value);
+                setActivePageIndex(0);
                 setRowSelection({});
               }}
               className="pl-9"
@@ -303,6 +486,7 @@ export default function JobListPage() {
             value={partitionFilter}
             onValueChange={(value) => {
               setPartitionFilter(value);
+              setActivePageIndex(0);
               setRowSelection({});
             }}
           >
@@ -320,7 +504,8 @@ export default function JobListPage() {
           </Select>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <p className="text-sm text-muted-foreground">
-              {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
+              {(isServerPaginated ? serverPagination.total : filteredTasks.length)} job
+              {(isServerPaginated ? serverPagination.total : filteredTasks.length) === 1 ? "" : "s"}
             </p>
             {selectedActiveTasks.length > 0 && (
               <>
@@ -349,7 +534,7 @@ export default function JobListPage() {
             <Button
               variant="outline"
               size="sm"
-              onClick={exportJobs}
+              onClick={() => void exportJobs()}
               disabled={!filteredTasks.length}
               title="Export filtered jobs"
             >
@@ -394,8 +579,24 @@ export default function JobListPage() {
               // Remounting resets pagination for a new tab/search context; sort state resets with it.
               <DataTable
                 key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
-                columns={isAdmin ? adminColumns : columns}
+                pageSize={statusTab === "ACTIVE" ? ACTIVE_JOBS_PAGE_SIZE : undefined}
+                columns={statusTab === "ACTIVE"
+                  ? (isAdmin ? adminActiveColumns : activeColumns)
+                  : (isAdmin ? adminColumns : columns)}
                 data={filteredTasks}
+                disableSorting={statusTab === "ACTIVE"}
+                manualPage={
+                  isServerPaginated && serverPagination
+                    ? {
+                        pageIndex: activePageIndex,
+                        pageCount: Math.max(1, Math.ceil(serverPagination.total / serverPagination.limit)),
+                        onPageIndexChange: (pageIndex) => {
+                          setActivePageIndex(pageIndex);
+                          setRowSelection({});
+                        },
+                      }
+                    : undefined
+                }
                 enableSelection
                 canSelectRow={(task) => isActiveState(task.state)}
                 getRowId={(task) => task.task_id}

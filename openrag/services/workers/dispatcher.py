@@ -21,7 +21,7 @@ from core.models.catalog import (
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
-from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
+from core.utils.exceptions import ConflictError, ServiceUnavailableError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
@@ -34,7 +34,13 @@ from services.workers.ray_utils import (
 )
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
-from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING, read_ref_when_settled
+from services.workers.task_state import (
+    QUEUE_REFUSED_CANCELLED,
+    QUEUE_REFUSED_FILE_INDEXING,
+    QUEUE_REFUSED_INDEXING_CAPACITY,
+    TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
+    read_ref_when_settled,
+)
 
 logger = get_logger()
 
@@ -350,7 +356,14 @@ class WorkerDispatcher(IndexingDispatcher):
         user_metadata = {
             key: value
             for key, value in metadata.items()
-            if key not in {"file_id", "source", TASK_CREATED_AT_METADATA_KEY, TASK_FINISHED_AT_METADATA_KEY}
+            if key
+            not in {
+                "file_id",
+                "source",
+                TASK_CREATED_AT_METADATA_KEY,
+                TASK_FINISHED_AT_METADATA_KEY,
+                TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
+            }
         }
         user_metadata[TASK_CREATED_AT_METADATA_KEY] = _utc_now_iso()
         task_details = {
@@ -387,6 +400,13 @@ class WorkerDispatcher(IndexingDispatcher):
                 raise _indexing_in_progress(file_id, partition, busy_task_id)
             if reason == QUEUE_REFUSED_CANCELLED:
                 raise RuntimeError(f"Task {task_id} was cancelled before it queued")
+            if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
+                raise ServiceUnavailableError(
+                    "Indexing is temporarily paused because task capacity is full "
+                    "(queued or running work and unsaved job outcomes). Please retry shortly.",
+                    # Preserve this API code so existing clients keep retrying it.
+                    code="INDEXING_OUTCOME_BACKLOG",
+                )
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )

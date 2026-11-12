@@ -407,9 +407,10 @@ replaced during bootstrap when an older actor lacks that support — that replac
 `TaskStateManager` actor id, which strands the dispatcher's and workers' cached handles to it unless
 the whole generation rolls together; v9 folds in both independent v8 lineages; v14 (develop)
 makes workers emit stage history, and v15 to v17 (develop) add stage snapshots and the streaming
-workbook parser; v18 folds them with an independent v15 lineage bumped for worker behavior, not a
-signature: workers log their failures and poll `has_object_ref`, and the `TaskStateManager` is
-replaced when it lacks that method, #1296). Without the bump, new
+workbook parser; v18 on this branch preserves unsettled terminal outcomes, while independent v18
+on `develop` added worker-ref ownership through `has_object_ref` and replaces older task-state
+actors (#1296). v19 combines both contracts because the two v18 actor generations cannot be safely
+reused under the same detached actor names. Without the bump, new
 replicas attach to the previous release's actors and every submit raises `TypeError`. Old generations
 are retired with `services/workers/retire_indexer_generation.py`.
 

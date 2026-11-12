@@ -202,12 +202,21 @@ describe("jobsQueryKeys", () => {
       7,
       "user",
       "active",
+      "unpaged",
     ]);
     expect(jobsQueryKeys.tasks({ userId: 7, isAdmin: true })).toEqual([
       "tasks",
       7,
       "admin",
       "all",
+      "unpaged",
+    ]);
+    expect(jobsQueryKeys.tasks({ userId: 7, isAdmin: true }, "active", { limit: 10, offset: 20 })).toEqual([
+      "tasks",
+      7,
+      "admin",
+      "active",
+      { limit: 10, offset: 20 },
     ]);
     expect(jobsQueryKeys.queueInfo({ userId: 7, isAdmin: true })).toEqual([
       "queue-info",
