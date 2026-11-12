@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from collections.abc import Callable, MutableMapping
 from contextlib import nullcontext
 from typing import Any
 
+from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.utils.logging import get_logger
@@ -205,6 +207,41 @@ def _captionable_count(images: list[ImageBlock]) -> int:
     return sum(1 for image in images if image.image_bytes)
 
 
+async def _encode_deferred_images(images: list[ImageBlock]) -> None:
+    """PNG-encode the images a parser handed over decoded, off the event loop.
+
+    A figure-heavy PDF takes seconds to minutes of CPU to encode. It is paid
+    here, not at parse, so a document that is never captioned never pays it.
+    A cancel cannot interrupt the thread; the event tells it to stop.
+    """
+    if all(image.pil_image is None for image in images):
+        return
+    cancelled = threading.Event()
+    try:
+        await asyncio.to_thread(_encode_in_place, images, cancelled)
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
+
+
+def _encode_in_place(images: list[ImageBlock], cancelled: threading.Event) -> None:
+    for image in images:
+        if cancelled.is_set():
+            return
+        # Dropped as it is encoded, so the decoded figures and their PNGs are
+        # never all held at once.
+        pil_image, image.pil_image = image.pil_image, None
+        if pil_image is None or image.image_bytes:
+            continue
+        try:
+            image.image_bytes = pil_to_png_bytes(pil_image)
+        except Exception as exc:  # noqa: BLE001 - one unreadable figure must not cost the others their captions
+            # Left without bytes, it is skipped like a remote image: uncaptioned,
+            # its ref kept in the text.
+            ref = image.metadata.get("markdown_ref") or "without a ref"
+            logger.warning(f"Failed to encode image {ref}: {exc}")
+
+
 async def _caption_document(
     processed_document: ProcessedDocument,
     vlm: VLM,
@@ -230,6 +267,7 @@ async def _caption_document(
     images = processed_document.images
     if not images:
         return processed_document
+    await _encode_deferred_images(images)
 
     # Per-document fan-out bound. One task per image is created either way, but
     # only this many contend for the shared VLM gate at a time. Without it a
