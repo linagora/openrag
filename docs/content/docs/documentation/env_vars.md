@@ -649,6 +649,8 @@ The map & reduce mechanism processes documents by fetching chunks (map phase), f
 3. Stops expansion when the last `MAP_REDUCE_EXPANSION_BATCH_SIZE` chunks are all irrelevant
 4. Otherwise, continues fetching additional documents up to `MAP_REDUCE_MAX_TOTAL_DOCUMENTS`
 
+A chunk whose relevance can't be evaluated (the LLM call fails, or its answer can't be read) is kept as it is, unsummarized, and doesn't count toward the stop in step 3. If the map & reduce LLM is down, the answer still gets the first `MAP_REDUCE_MAX_TOTAL_DOCUMENTS` chunks, as many as fit in the context window, instead of none.
+
 When `MAP_REDUCE_DEBUG` is enabled, the mechanism logs detailed information to `./logs/map_reduce.md`.
 
 | Variable | Type | Default | Description |

@@ -2,7 +2,9 @@
 
 Each chunk is sent to the LLM with the query; the ones it finds relevant are
 kept, as its summary of them. Chunks are judged in batches, and the run stops
-early once a whole batch is irrelevant (``map_reduce`` in the config).
+early once a whole batch is irrelevant (``map_reduce`` in the config). A chunk
+the LLM could not judge (the call failed, or its verdict can't be read) is
+kept as it is.
 """
 
 from __future__ import annotations
@@ -48,7 +50,14 @@ class Summarizer:
         self.expansion_batch_size = mr.expansion_batch_size
         self.max_total_documents = mr.max_total_documents
 
-    async def _infer_relevancy(self, query: str, doc) -> tuple[bool, str]:
+    async def _infer_relevancy(self, query: str, doc) -> tuple[bool, str | None]:
+        """Whether *doc* is relevant to *query*, and the LLM's summary of it.
+
+        Fails open: a chunk the LLM could not judge is relevant, with no
+        summary, so its own text reaches the prompt. Dropping it would also
+        count it toward the early stop, and an outage of the map-reduce LLM
+        would end the run with no sources at all.
+        """
         async with self._semaphore():
             try:
                 resp = await self._llm.chat(
@@ -60,18 +69,21 @@ class Summarizer:
                 data = json.loads(json_object_slice(resp["choices"][0]["message"]["content"]))
                 return bool(data.get("relevancy", False)), str(data.get("summary", "") or "")
             except Exception as e:
-                logger.error("Error during chunk relevancy inference", error=str(e))
-                return False, ""
+                logger.error("Chunk relevancy inference failed; keeping the chunk unsummarized", error=str(e))
+                return True, None
 
     async def summarize(self, query: str, docs: list) -> list:
-        """The relevant *docs*, each as its summary, at most ``max_total_documents`` of them."""
+        """The relevant *docs*, each as its summary, at most ``max_total_documents`` of them.
+
+        A chunk the LLM could not judge is kept as it is, not summarized.
+        """
 
         async def _batch(chunks: list, summaries: list) -> bool:
             outputs = await asyncio.gather(*[self._infer_relevancy(query, c) for c in chunks])
             terminate = all(not rel for rel, _ in outputs[-self.expansion_batch_size :])
             for (rel, summary), chunk in zip(outputs, chunks, strict=True):
                 if rel:
-                    summaries.append(_summary_doc(chunk, summary))
+                    summaries.append(chunk if summary is None else _summary_doc(chunk, summary))
             return terminate
 
         summaries: list = []
