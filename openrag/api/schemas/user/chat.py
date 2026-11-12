@@ -1,6 +1,7 @@
 import math
 from typing import Any, Literal
 
+from core.models.chat import parse_rag_mode
 from core.utils import consts
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -117,9 +118,17 @@ class OpenAIChatCompletionRequest(BaseModel):
             "'compare_original_query' runs an isolated original-query retrieval only when tracing is enabled; "
             "it never changes the documents used for the answer. "
             "'bypass_query_contextualization' skips query rewriting for a traced, explicitly required retrieval; "
-            "it cannot be combined with 'compare_original_query'."
+            "it cannot be combined with 'compare_original_query'. "
+            "'rag_mode' picks how a partition-backed request finds its sources: 'classic' (the default) runs "
+            "the fixed contextualize, retrieve, answer pipeline. It is the only mode available for now; any other "
+            "value is rejected. Ignored in direct LLM mode."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_rag_mode(self) -> "OpenAIChatCompletionRequest":
+        parse_rag_mode((self.metadata or {}).get("rag_mode"))
+        return self
 
     @model_validator(mode="after")
     def _ignore_top_logprobs_without_logprobs(self) -> "OpenAIChatCompletionRequest":
@@ -253,6 +262,12 @@ class OpenAICompletionRequest(BaseModel):
             "when the deployment sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT, and ignored otherwise. "
             "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
             "set to the response's extra.all_retrieved_sources — off by default since it can be "
-            "large; opt in only for debugging/evaluation."
+            "large; opt in only for debugging/evaluation. "
+            "'rag_mode' accepts only 'classic', the default."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_rag_mode(self) -> "OpenAICompletionRequest":
+        parse_rag_mode((self.metadata or {}).get("rag_mode"))
+        return self

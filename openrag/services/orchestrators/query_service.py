@@ -24,6 +24,13 @@ Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
   callable — keeps ``request.url_for`` in transport), and wraps
   ``StreamingResponse`` / ``JSONResponse``.
 
+The rules with no I/O live in ``core``: small talk (``core.chat.smalltalk``),
+the history window (``core.chat.history``), fitting the sources into the
+window (``core.chat.budget``), the route (``core.chat.routing``), the request's
+metadata flags (``core.models.chat.ChatOptions``) and the contextualizer's
+messages (``core.prompts.query_contextualizer``). This module wires them to the
+LLM, retrieval, web search and the prompt library.
+
 No LangChain symbol is imported into this module. ``Chunk`` is converted to a
 LangChain ``Document`` via ``Chunk.to_langchain()`` at the boundary so the
 ``format_context`` and source helpers are reused as they are.
@@ -34,7 +41,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
@@ -42,6 +48,16 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from core.chat.budget import fit_prompt, fit_sources
+from core.chat.history import history_window, latest_user_query, sanitize_messages, split_leading_system_prompt
+from core.chat.routing import Route, resolve_route
+from core.chat.smalltalk import (
+    CasualMessagePolicy,
+    acknowledgement_language,
+    classify_latest_message,
+    is_casual_reply,
+)
+from core.models.chat import ChatOptions
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.models.retrieval_trace import (
@@ -55,14 +71,13 @@ from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
     build_map_messages,
-    calendar_anchors,
-    describe_source,
-    format_context,
+    documents_context,
     format_web_context,
     message_tokens,
     prepend_system_prompt,
     tool_definition_tokens,
 )
+from core.prompts.query_contextualizer import build_contextualizer_messages, parse_search_queries
 from core.retrieval.date_order import order_chunks_by_date
 from core.retrieval.trace import (
     TRACE_FILE_SCOPE_KIND_KEY,
@@ -77,6 +92,7 @@ from core.utils.source_filtering import (
     filter_sources_by_citations,
     stream_with_source_filtering,
 )
+from core.utils.string_utils import json_object_slice
 from core.utils.text import get_num_tokens
 from core.utils.web_url import normalize_web_url
 from services.inference.runtime import detect_language, get_llm_semaphore
@@ -94,109 +110,6 @@ logger = get_logger()
 PrepareSources = Callable[[list, list], list]
 
 
-class CasualMessagePolicy(NamedTuple):
-    intent: str
-    language: str
-
-
-CASUAL_MESSAGE_INTENTS: dict[str, CasualMessagePolicy] = {
-    "bonjour": CasualMessagePolicy("greeting", "fr"),
-    "salut": CasualMessagePolicy("greeting", "fr"),
-    "hello": CasualMessagePolicy("greeting", "en"),
-    "hey": CasualMessagePolicy("greeting", "en"),
-    "comment allez vous": CasualMessagePolicy("greeting", "fr"),
-    "how are you": CasualMessagePolicy("greeting", "en"),
-    "hey how are you": CasualMessagePolicy("greeting", "en"),
-    "comment pouvez vous m aider": CasualMessagePolicy("capability", "fr"),
-    "how can you help me": CasualMessagePolicy("capability", "en"),
-    "what can you do": CasualMessagePolicy("capability", "en"),
-    "merci": CasualMessagePolicy("gratitude", "fr"),
-    "thank you": CasualMessagePolicy("gratitude", "en"),
-    "thanks": CasualMessagePolicy("gratitude", "en"),
-    "au revoir": CasualMessagePolicy("farewell", "fr"),
-    "bye": CasualMessagePolicy("farewell", "en"),
-}
-CASUAL_MESSAGES = frozenset(CASUAL_MESSAGE_INTENTS)
-_EMPTY_CASUAL_POLICY = CasualMessagePolicy("empty", "en")
-
-
-def normalize_casual_message(message: str) -> str:
-    """Normalize a complete message for strict casual-message matching."""
-    normalized = unicodedata.normalize("NFKC", message).casefold()
-    characters: list[str] = []
-    for character in normalized:
-        category = unicodedata.category(character)
-        codepoint = ord(character)
-        is_variation_selector = 0xFE00 <= codepoint <= 0xFE0F or 0xE0100 <= codepoint <= 0xE01EF
-        if category.startswith("S") or category == "Cf" or is_variation_selector or character == "\u20e3":
-            continue
-        characters.append(" " if category.startswith("P") else character)
-    return " ".join("".join(characters).split())
-
-
-CASUAL_ACKNOWLEDGEMENTS = frozenset(
-    normalize_casual_message(phrase)
-    for phrase in (
-        "ok",
-        "okay",
-        "yes",
-        "yep",
-        "yeah",
-        "sure",
-        "cool",
-        "great",
-        "nice",
-        "perfect",
-        "sounds good",
-        "got it",
-        "ok thanks",
-        "ok thank you",
-        "okay thanks",
-        "okay thank you",
-        "ok merci",
-        "okay merci",
-        "oui",
-        "oui merci",
-        "d'accord",
-        "d'accord merci",
-        "super",
-        "super merci",
-        "parfait",
-        "parfait merci",
-    )
-)
-_THUMB_SKIN_TONES = ("🏻", "🏼", "🏽", "🏾", "🏿")
-_THUMBS_UP_REACTIONS = frozenset(
-    ("👍", "👍️") + tuple(f"👍{tone}" for tone in _THUMB_SKIN_TONES) + tuple(f"👍️{tone}" for tone in _THUMB_SKIN_TONES)
-)
-
-
-def casual_message_policy(message: str) -> CasualMessagePolicy | None:
-    """Return the exact-match casual policy, including empty-input fallback."""
-    normalized = normalize_casual_message(message)
-    if not normalized:
-        return _EMPTY_CASUAL_POLICY
-    return CASUAL_MESSAGE_INTENTS.get(normalized)
-
-
-def _is_thumbs_up_reaction(message: str) -> bool:
-    """Recognize the common text and skin-tone forms of a thumbs-up reply."""
-    return message.strip() in _THUMBS_UP_REACTIONS
-
-
-def _acknowledgement_language(messages: list[dict], latest_message: str) -> str:
-    """Prefer the last assistant turn's language for very short replies."""
-    for message in reversed(messages[:-1]):
-        if message.get("role") != "assistant":
-            continue
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            language = detect_language(content)
-            if language:
-                return language
-    return detect_language(latest_message) or "en"
-
-
 class _PrepareChatResult(NamedTuple):
     """Prepared chat data passed from orchestration to the response methods."""
 
@@ -209,28 +122,6 @@ class _PrepareChatResult(NamedTuple):
     indexed_attachment_ids: list[str]
     configuration_fingerprint: str
     retry_empty_response: bool = True
-
-
-# Appended to the contextualizer prompt as a last reminder of the output shape.
-# It must leave every rule-driven field open: an earlier version showed
-# `"temporal_filters": null` as the only form and models copied it literally,
-# so the date rules above it were never applied.
-_QUERY_JSON_HINT = (
-    "\n\nClassify the complete latest user message conservatively. Retrieval is the default. "
-    "Only a message consisting exclusively of a greeting or salutation, gratitude, farewell, or a question about "
-    "the assistant's capabilities may skip retrieval. A factual, informational, analytical, ambiguous, or mixed "
-    "message must require retrieval, even when it has no question mark or also contains a social phrase. "
-    "A brief acknowledgement after a social, wellbeing, or feedback question remains gratitude and may skip "
-    "retrieval. It requires retrieval only when it accepts factual, informational, analytical, or document-backed "
-    "continuation from the assistant's previous turn. "
-    "Respond ONLY with one of these JSON forms: "
-    '{"intent": "greeting", "requires_retrieval": false, "query_list": []} for an exclusively casual message '
-    "(using gratitude, farewell, or capability instead of greeting when appropriate), or "
-    '{"intent": "other", "requires_retrieval": true, '
-    '"query_list": [{"query": "<search query>", "temporal_filters": <predicates per the rules above, or null>, '
-    '"date_order": <"newest" | "oldest" | null, per the rules above>}]} for everything else. '
-    "If uncertain, use intent other and require retrieval."
-)
 
 
 class RAGMODE(Enum):
@@ -344,23 +235,13 @@ class QueryService:
     def _fit_sources(self, docs: list, partition: list[str] | None, headroom: int | None) -> list[int]:
         """Positions of up to ``top_n`` of *docs*, within the *headroom* the answering model's window leaves.
 
-        Sizes the blocks exactly as ``_documents_context`` renders them, provenance
-        line included.
-
-        *headroom* is ``None`` when the window is unknown: only ``top_n`` applies.
-        The window comes from the LLM endpoint's context size (admin-set, else
-        probed from vLLM, else ``MAX_LLM_CONTEXT_SIZE``), so a too-small value
-        there shows up here as fewer sources than ``top_n``: logged, because
-        nothing else surfaces it.
+        See ``core.chat.budget.fit_sources``. The window comes from the LLM
+        endpoint's context size (admin-set, else probed from vLLM, else
+        ``MAX_LLM_CONTEXT_SIZE``), so a too-small value there shows up here as
+        fewer sources than ``top_n``: logged, because nothing else surfaces it.
         """
         top_n = self._resolve_top_n(partition)
-        _, included = format_context(
-            [doc.page_content for doc in docs],
-            max_context_tokens=headroom,
-            length_function=get_num_tokens(),
-            max_sources=top_n,
-            headers=[describe_source(doc.metadata) for doc in docs],
-        )
+        included = fit_sources(docs, top_n=top_n, headroom=headroom, length_function=get_num_tokens())
         if len(included) < min(len(docs), top_n):
             logger.bind(partition=partition, top_n=top_n, presented=len(included), headroom=headroom).info(
                 "Sources left out: they don't fit in the answering model's context window"
@@ -523,15 +404,12 @@ class QueryService:
         trace: RetrievalTraceBuilder | None = None,
     ) -> SearchQueries:
         llm = llm or self._llm
-        last_user = _latest_user_query(messages) or (messages[-1].get("content") or "")
+        last_user = latest_user_query(messages) or (messages[-1].get("content") or "")
         if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
             queries = SearchQueries(query_list=[Query(query=last_user)])
             self._record_contextualization(trace, queries, original_query=last_user)
             return queries
 
-        # The results of the tools are data the app gave, not turns of the
-        # conversation: they do not shape the search.
-        chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages if m.get("role") != "tool")
         prompt_name = self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
@@ -541,21 +419,13 @@ class QueryService:
             contextualizer = ResolvedPrompt.create(
                 content, name=prompt_name, source="named" if prompt_name else "default"
             )
-        # UTC, not the host clock: the anchors are compared against UTC
-        # created_at timestamps, and near midnight the local date is a
-        # different day.
-        now = datetime.now(UTC)
-        prompt = contextualizer.content.format(
+        llm_messages = build_contextualizer_messages(
+            contextualizer.content,
+            messages=messages,
             query_language=detect_language(last_user),
-            current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
-            # Pre-computed week/month/year ranges: the model must not do the
-            # calendar arithmetic itself (see core.prompts.calendar_anchors).
-            calendar_anchors=calendar_anchors(now),
+            # UTC, not the host clock: see build_contextualizer_messages.
+            now=datetime.now(UTC),
         )
-        llm_messages = [
-            {"role": "system", "content": prompt + _QUERY_JSON_HINT},
-            {"role": "user", "content": f"Here is the chat history: \n{chat_history}\n"},
-        ]
         params = {
             "max_completion_tokens": self._max_contextualized_query_len,
             "response_format": {"type": "json_object"},
@@ -569,7 +439,7 @@ class QueryService:
             try:
                 resp = await llm.chat(llm_messages, **params)
                 content = resp["choices"][0]["message"]["content"]
-                queries = SearchQueries.model_validate_json(_json_slice(content))
+                queries = parse_search_queries(content)
                 self._record_contextualization(
                     trace,
                     queries,
@@ -702,7 +572,7 @@ class QueryService:
                     temperature=0.3,
                     response_format={"type": "json_object"},
                 )
-                data = json.loads(_json_slice(resp["choices"][0]["message"]["content"]))
+                data = json.loads(json_object_slice(resp["choices"][0]["message"]["content"]))
                 return bool(data.get("relevancy", False)), str(data.get("summary", "") or "")
             except Exception as e:
                 logger.error("Error during chunk relevancy inference", error=str(e))
@@ -747,21 +617,20 @@ class QueryService:
         trace: RetrievalTraceBuilder | None = None,
         max_prompt_tokens: int | None = None,
     ):
-        messages = _history_window(payload["messages"], self._resolve_chat_history_depth(partition))
-        custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
+        messages = history_window(payload["messages"], self._resolve_chat_history_depth(partition))
+        custom_prompt, messages = split_leading_system_prompt(payload["messages"], messages)
         if not messages:
             raise ValidationError("Request must contain at least one non-system message")
 
-        metadata = payload.get("metadata") or {}
-        use_map_reduce = metadata.get("use_map_reduce", False)
-        spoken_style = metadata.get("spoken_style_answer", False)
-        use_websearch = metadata.get("websearch", False)
-        workspace = metadata.get("workspace")
-        attachment_ids = _extract_attachment_ids(metadata)
+        options = ChatOptions.from_metadata(payload.get("metadata"))
+        # Taken before a workspace narrows the partitions: narrowing never empties them.
+        route = resolve_route(partition, options)
+        workspace = options.workspace
+        attachment_ids = list(options.attachment_ids)
 
-        effective_retrieval_options = self._effective_retrieval_options(metadata)
+        effective_retrieval_options = options.retrieval.as_options()
         retrieval_top_k = effective_retrieval_options.get("top_k")
-        top_k = self._mr_max if use_map_reduce else None
+        top_k = self._mr_max if options.use_map_reduce else None
         retrieval_overrides = {key: value for key, value in effective_retrieval_options.items() if key != "top_k"}
 
         filter_params = None
@@ -794,33 +663,18 @@ class QueryService:
             if trace is not None:
                 filter_params[TRACE_FILE_SCOPE_KIND_KEY] = "attachment"
 
-        last_user_message = _latest_user_query(messages)
-        casual_policy = casual_message_policy(last_user_message)
-        normalized_last_user = normalize_casual_message(last_user_message)
-        acknowledgement_reaction = _is_thumbs_up_reaction(last_user_message)
-        acknowledgement_candidate = normalized_last_user in CASUAL_ACKNOWLEDGEMENTS or acknowledgement_reaction
-        contextual_acknowledgement = normalized_last_user in CASUAL_ACKNOWLEDGEMENTS or (
-            acknowledgement_reaction and RAGMODE(self._rag_mode) is RAGMODE.CHATBOTRAG
+        last_user_message = latest_user_query(messages)
+        casual_policy, acknowledgement_candidate = classify_latest_message(
+            messages, last_user_message, query_rewrite=self._rag_mode == RAGMODE.CHATBOTRAG.value
         )
-        if contextual_acknowledgement:
-            # Short acknowledgements need the full history: they can be thanks
-            # after a social question or acceptance of a factual offer.
-            casual_policy = None
-        if messages[-1].get("role") == "tool":
-            # The LLM goes on with the result of its tool call: the request of
-            # the user it serves is answered in full, however short it is.
-            casual_policy = None
-            acknowledgement_candidate = False
-        explicitly_required = metadata.get("require_retrieval") is True
-        existing_force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
-
-        retrieval_forced = explicitly_required or existing_force_retrieval
+        retrieval_forced = (
+            options.require_retrieval or options.websearch or options.use_map_reduce or bool(indexed_attachment_ids)
+        )
         queries: SearchQueries | None = None
-        bypass_contextualization = metadata.get("bypass_query_contextualization") is True
         configuration_fingerprint = "unavailable"
         resolved_retrieval_plan = None
 
-        if bypass_contextualization:
+        if options.bypass_query_contextualization:
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
             self._record_contextualization_bypass(trace, original_query=last_user_message)
         elif casual_policy is None or retrieval_forced:
@@ -834,7 +688,7 @@ class QueryService:
                 and not usable_queries
             ):
                 casual_policy = CasualMessagePolicy(
-                    "acknowledgement", _acknowledgement_language(messages, last_user_message)
+                    "acknowledgement", acknowledgement_language(messages, last_user_message, detect_language)
                 )
             elif not usable_queries:
                 queries = SearchQueries(query_list=[Query(query=last_user_message)])
@@ -863,7 +717,7 @@ class QueryService:
             )
 
         # The history as the model gets it, so the window is checked against what is sent.
-        messages = self._sanitize_messages(messages)
+        messages = sanitize_messages(messages)
 
         if casual_policy is not None and not retrieval_forced:
             if trace is not None and trace.contextualization is None:
@@ -905,7 +759,7 @@ class QueryService:
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
 
         web_results: list = []
-        if partition is not None and use_websearch:
+        if route is Route.DOCUMENTS_AND_WEB:
             chunks, web_lists = await self._gather_rag_and_web(
                 queries,
                 partition,
@@ -917,7 +771,7 @@ class QueryService:
                 **retrieval_overrides,
             )
             web_results = _dedupe_web(web_lists)
-        elif partition is not None:
+        elif route is Route.DOCUMENTS:
             trace_kwargs = {"trace": trace} if trace is not None else {}
             chunks = await self._retrieval.retrieve_multi(
                 partitions=partition,
@@ -933,7 +787,7 @@ class QueryService:
             web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
             chunks = []
 
-        if trace is not None and partition is not None and metadata.get("compare_original_query") is True:
+        if trace is not None and route.has_documents and options.compare_original_query:
             await self._compare_original_query(
                 trace,
                 original_query=last_user_message,
@@ -946,7 +800,7 @@ class QueryService:
                 **retrieval_overrides,
             )
 
-        if not chunks and not web_results and partition is None:
+        if not chunks and not web_results and not route.has_documents:
             return _PrepareChatResult(
                 payload,
                 [],
@@ -970,7 +824,7 @@ class QueryService:
         retrieved_docs = docs
         retrieved_web_results = web_results
 
-        prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
+        prompt_type = "spoken_style_answer" if options.spoken_style_answer else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
         )
@@ -988,7 +842,7 @@ class QueryService:
             if room < 0:
                 raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
 
-        if use_map_reduce and docs:
+        if options.use_map_reduce and docs:
             docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
 
         # Web results come out of the same room, so they can't take more than it either.
@@ -1008,7 +862,11 @@ class QueryService:
 
         def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
             """The answer messages with *docs*, then the *web_candidates* that fit after them."""
-            context = _documents_context(order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(candidates))
+            context = documents_context(
+                order_chunks_by_date(docs, queries.date_order),
+                any_retrieved=bool(candidates),
+                length_function=get_num_tokens(),
+            )
             web_shown: list = []
             if web_candidates:
                 start = len(docs) + 1
@@ -1022,24 +880,16 @@ class QueryService:
             )
             return answer_messages, web_shown
 
-        web_candidates = web_results
-        new_messages, web_results = assemble(docs, web_candidates)
         # The sources were sized part by part, without the separators between
         # documents and web results or the web results' final numbering: measure
-        # what is sent, and drop sources (documents first) until it fits. With
-        # none left, the prompt can still carry what the room above didn't
-        # measure: the no-document message when retrieval found nothing.
-        while max_prompt_tokens is not None:
-            sent = _messages_tokens(new_messages) + tools_tokens
-            if sent <= max_prompt_tokens:
-                break
-            if not (docs or web_results):
-                raise ContextWindowExceededError(sent, max_prompt_tokens)
-            if docs:
-                docs = docs[:-1]
-            else:
-                web_candidates = web_results[:-1]
-            new_messages, web_results = assemble(docs, web_candidates)
+        # what is sent, and drop sources (documents first) until it fits.
+        new_messages, docs, web_results = fit_prompt(
+            assemble,
+            docs,
+            web_results,
+            measure=lambda answer_messages: _messages_tokens(answer_messages) + tools_tokens,
+            max_tokens=max_prompt_tokens,
+        )
         payload["messages"] = new_messages
         return _PrepareChatResult(
             payload,
@@ -1179,31 +1029,12 @@ class QueryService:
             },
         }
 
-    def _effective_retrieval_options(self, metadata: dict) -> dict[str, object]:
-        options: dict[str, object] = {}
-        top_k = metadata.get("retrieval_top_k")
-        if top_k is not None:
-            options["top_k"] = top_k
-        threshold = metadata.get("retrieval_similarity_threshold")
-        if threshold is not None:
-            options["similarity_threshold"] = float(threshold)
-        if metadata.get("retrieval_disable_reranker") is True:
-            options["disable_reranker"] = True
-        if metadata.get("retrieval_disable_expansion") is True:
-            options["disable_expansion"] = True
-        return options
-
-    def _retrieval_diagnostics_context(self, metadata: dict) -> RetrievalDiagnosticsContext:
-        if metadata.get("compare_original_query") is True:
-            query_mode = "compare"
-        elif metadata.get("bypass_query_contextualization") is True:
-            query_mode = "original"
-        else:
-            query_mode = "contextualized"
+    @staticmethod
+    def _retrieval_diagnostics_context(options: ChatOptions) -> RetrievalDiagnosticsContext:
         return RetrievalDiagnosticsContext(
-            query_mode=query_mode,
-            compare_original_query=metadata.get("compare_original_query") is True,
-            effective_options=self._effective_retrieval_options(metadata),
+            query_mode=options.query_mode,
+            compare_original_query=options.compare_original_query,
+            effective_options=options.retrieval.as_options(),
         )
 
     async def _configuration_fingerprint(
@@ -1251,11 +1082,11 @@ class QueryService:
         max_prompt_tokens: int | None = None,
     ):
         prompt = payload["prompt"]
-        metadata = payload.get("metadata") or {}
+        options = ChatOptions.from_metadata(payload.get("metadata"))
         # partition= is ours: the retrieval preset's query_contextualizer is
         # resolved per partition. The skip below is from #807.
         queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm, partition=partition)
-        prompt_type = "spoken_style_answer" if metadata.get("spoken_style_answer", False) else "sys_prompt"
+        prompt_type = "spoken_style_answer" if options.spoken_style_answer else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
         )
@@ -1275,9 +1106,10 @@ class QueryService:
                 raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
 
         retrieved_docs: list = []
+        docs: list = []
         if not queries.query_list:
-            if not queries.requires_retrieval and metadata.get("require_retrieval") is not True:
-                docs, context = [], ""
+            if not queries.requires_retrieval and not options.require_retrieval:
+                payload["prompt"] = render("")
             else:
                 queries = SearchQueries(query_list=[Query(query=prompt)])
         if queries.query_list:
@@ -1287,74 +1119,23 @@ class QueryService:
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
             docs = [docs[i] for i in self._fit_sources(docs, partition, room)]
-            context = _documents_context(
-                order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(retrieved_docs)
-            )
+
+            def assemble(docs: list, _web: list) -> tuple[str, list]:
+                context = documents_context(
+                    order_chunks_by_date(docs, queries.date_order),
+                    any_retrieved=bool(retrieved_docs),
+                    length_function=get_num_tokens(),
+                )
+                return render(context), []
+
             # Sized part by part: measure what is sent and drop documents until
             # it fits. With none left, the no-document message can still overflow.
-            while max_prompt_tokens is not None:
-                sent = get_num_tokens()(render(context))
-                if sent <= max_prompt_tokens:
-                    break
-                if not docs:
-                    raise ContextWindowExceededError(sent, max_prompt_tokens)
-                docs = docs[:-1]
-                context = _documents_context(
-                    order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(retrieved_docs)
-                )
+            payload["prompt"], docs, _ = fit_prompt(
+                assemble, docs, [], measure=lambda text: get_num_tokens()(text), max_tokens=max_prompt_tokens
+            )
             docs = order_chunks_by_date(docs, queries.date_order)
 
-        payload["prompt"] = render(context)
         return payload, docs, retrieved_docs
-
-    # ------------------------------------------------------------------
-    # Message sanitization
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _sanitize_messages(messages: list[dict]) -> list[dict]:
-        """Replace empty-content ``role="assistant"`` messages with a placeholder.
-
-        Some LLMs reject an assistant turn with no content. Substituting a
-        placeholder preserves role alternation (no consecutive same-role
-        messages are created). This should normally never happen, but we do it
-        as a safeguard against a client sending a malformed history.
-
-        An assistant message carrying ``tool_calls`` / ``function_call`` is
-        legitimately content-free and is left untouched.
-        """
-
-        def _is_empty_content(content: object) -> bool:
-            if content is None:
-                return True
-            if isinstance(content, str):
-                return not content.strip()
-            if isinstance(content, list):
-                return not content
-            return False
-
-        result = []
-        replaced_count = 0
-        for msg in messages:
-            should_replace_msg = (
-                msg.get("role") == "assistant"
-                and not msg.get("tool_calls")
-                and not msg.get("function_call")
-                and _is_empty_content(msg.get("content"))
-            )
-            if should_replace_msg:
-                result.append({**msg, "content": "NO_CONTENT"})
-                replaced_count += 1
-            else:
-                result.append(msg)
-        if replaced_count:
-            logger.warning(
-                "Replaced empty assistant message(s) with NO_CONTENT placeholder before LLM call — "
-                "this should normally never happen; likely a client-side history persistence "
-                "or streaming response issue",
-                replaced_count=replaced_count,
-            )
-        return result
 
     # ------------------------------------------------------------------
     # Public API (router = transport)
@@ -1390,11 +1171,11 @@ class QueryService:
         if disable_expansion:
             metadata["retrieval_disable_expansion"] = True
 
-        original_query = _latest_user_query(messages)
+        original_query = latest_user_query(messages)
         trace = RetrievalTraceBuilder(
             request_id=request_id or str(uuid.uuid4()),
             original_query=original_query,
-            diagnostics=self._retrieval_diagnostics_context(metadata),
+            diagnostics=self._retrieval_diagnostics_context(ChatOptions.from_metadata(metadata)),
         )
         started = time.perf_counter()
         result = await self._prepare_chat(
@@ -1425,24 +1206,23 @@ class QueryService:
         the conversation alone don't fit in it.
         """
         request_started = time.perf_counter()
-        metadata = payload.get("metadata") or {}
-        include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
-        include_trace = metadata.get("include_retrieval_trace") is True
-        original_query = _latest_user_query(payload.get("messages", []))
+        options = ChatOptions.from_metadata(payload.get("metadata"))
+        include_all_retrieved = options.include_all_retrieved_sources
+        original_query = latest_user_query(payload.get("messages", []))
         trace = (
             RetrievalTraceBuilder(
                 request_id=request_id or str(uuid.uuid4()),
                 original_query=original_query,
-                diagnostics=self._retrieval_diagnostics_context(metadata),
+                diagnostics=self._retrieval_diagnostics_context(options),
             )
-            if include_trace
+            if options.include_retrieval_trace
             else None
         )
         configuration_fingerprint = "unavailable"
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         retry_empty_response = True
-        if partitions is None and not metadata.get("websearch", False):
+        if not resolve_route(partitions, options).searches:
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
             self._record_contextualization_not_run(trace, original_query=original_query)
@@ -1466,7 +1246,7 @@ class QueryService:
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
 
-        payload["messages"] = self._sanitize_messages(payload["messages"])
+        payload["messages"] = sanitize_messages(payload["messages"])
         chunk = await llm.chat(payload["messages"], **_sampling(payload))
         chunk["model"] = model_name
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
@@ -1522,7 +1302,7 @@ class QueryService:
         extra = _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
         if retry_failed or response_truncated:
             extra["truncated"] = True
-        if metadata.get("attachments"):
+        if options.attachments_sent:
             # Indicate which attachments were actually searched to generate the answer.
             extra["attachments"] = attachments
         if trace is not None:
@@ -1549,24 +1329,23 @@ class QueryService:
     ) -> AsyncIterator[str]:
         """Streaming chat completion → SSE strings with filtered sources (*max_prompt_tokens*: see ``chat``)."""
         request_started = time.perf_counter()
-        metadata = payload.get("metadata") or {}
-        include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
-        include_trace = metadata.get("include_retrieval_trace") is True
-        original_query = _latest_user_query(payload.get("messages", []))
+        options = ChatOptions.from_metadata(payload.get("metadata"))
+        include_all_retrieved = options.include_all_retrieved_sources
+        original_query = latest_user_query(payload.get("messages", []))
         trace = (
             RetrievalTraceBuilder(
                 request_id=request_id or str(uuid.uuid4()),
                 original_query=original_query,
-                diagnostics=self._retrieval_diagnostics_context(metadata),
+                diagnostics=self._retrieval_diagnostics_context(options),
             )
-            if include_trace
+            if options.include_retrieval_trace
             else None
         )
         configuration_fingerprint = "unavailable"
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         retry_empty_response = True
-        if partitions is None and not metadata.get("websearch", False):
+        if not resolve_route(partitions, options).searches:
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
             self._record_contextualization_not_run(trace, original_query=original_query)
@@ -1587,7 +1366,7 @@ class QueryService:
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
 
-        extra_fields = {"attachments": attachments} if metadata.get("attachments") else {}
+        extra_fields = {"attachments": attachments} if options.attachments_sent else {}
         terminal_extra_fields = None
         if trace is not None:
             if trace.contextualization is None:
@@ -1603,7 +1382,7 @@ class QueryService:
 
             terminal_extra_fields = finish_trace
 
-        payload["messages"] = self._sanitize_messages(payload["messages"])
+        payload["messages"] = sanitize_messages(payload["messages"])
 
         def filtered_stream(messages):
             return stream_with_source_filtering(
@@ -1643,8 +1422,7 @@ class QueryService:
         max_prompt_tokens: int | None = None,
     ) -> dict:
         """Non-streaming text completion → finalized OpenAI dict (*max_prompt_tokens*: see ``chat``)."""
-        metadata = payload.get("metadata") or {}
-        include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
+        include_all_retrieved = ChatOptions.from_metadata(payload.get("metadata")).include_all_retrieved_sources
         llm = self._resolve_llm(partitions)
         citation_protocol_active = partitions is not None
         if partitions is None:
@@ -1700,12 +1478,12 @@ def _empty_response_fallback(messages: list[dict]) -> str:
         (message.get("content") or "" for message in reversed(messages) if message.get("role") == "user"),
         "",
     )
-    is_casual = (
-        casual_message_policy(latest_user) is not None
-        or normalize_casual_message(latest_user) in CASUAL_ACKNOWLEDGEMENTS
-        or _is_thumbs_up_reaction(latest_user)
+    is_casual = is_casual_reply(latest_user)
+    language = (
+        acknowledgement_language(messages, latest_user, detect_language)
+        if is_casual
+        else detect_language(latest_user) or "en"
     )
-    language = _acknowledgement_language(messages, latest_user) if is_casual else detect_language(latest_user) or "en"
     if language == "fr":
         if is_casual:
             return "Je suis là si vous souhaitez continuer."
@@ -1834,80 +1612,9 @@ async def _retry_empty_response_stream(
         return
 
 
-def _json_slice(text: str) -> str:
-    """Best-effort extract the first JSON object from an LLM response."""
-    start = text.find("{")
-    end = text.rfind("}")
-    return text[start : end + 1] if start != -1 and end > start else text
-
-
-def _history_window(messages: list[dict], depth: int) -> list[dict]:
-    """The last *depth* messages, widened to the latest message of the user.
-
-    A conversation may end with the results of tool calls (an agentic loop):
-    the request of the user they serve stays in the window, and the window
-    never opens on a ``tool`` message cut from the assistant turn that called
-    it.
-    """
-    start = max(0, len(messages) - depth)
-    latest_user = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None)
-    if latest_user is not None and latest_user < start:
-        start = latest_user
-    while start < len(messages) and messages[start].get("role") == "tool":
-        start += 1
-    return messages[start:]
-
-
-def _latest_user_query(messages: list[dict]) -> str:
-    """Return the latest user text without retaining any other message content."""
-    for message in reversed(messages):
-        if message.get("role") == "user":
-            content = message.get("content")
-            return content if isinstance(content, str) else ""
-    return ""
-
-
 def _summary_doc(chunk, summary: str):
     """A summarised copy of a LangChain Document (page_content replaced)."""
     return chunk.__class__(page_content=summary, metadata=chunk.metadata)
-
-
-def _split_leading_system_prompt(raw_messages: list[dict], truncated: list[dict]) -> tuple[str | None, list[dict]]:
-    """Pull a client-pinned leading system prompt out of ``raw_messages``.
-
-    A leading run of ``role="system"`` messages in ``raw_messages`` (the
-    untruncated payload) is a pinned instruction, not a chat turn. ``truncated``
-    is a tail slice of ``raw_messages`` (``raw_messages[-depth:]``), so only the
-    portion of that leading run still inside the tail is stripped from it — a
-    system message elsewhere in history that merely lands first after
-    chat_history_depth truncation is never mistaken for the pin and dropped.
-
-    ``content`` is read defensively: ``OpenAIMessage`` allows a null/absent
-    content (the assistant turn carrying ``tool_calls``), and the router dumps
-    with ``exclude_none=True``, so the key is genuinely optional. A content-free
-    system message still counts toward the leading run — it is stripped from the
-    history like its siblings — it just contributes nothing to the pin.
-    """
-    parts: list[str] = []
-    i = 0
-    while i < len(raw_messages) and raw_messages[i]["role"] == "system":
-        content = raw_messages[i].get("content")
-        if content:
-            parts.append(content)
-        i += 1
-
-    offset = len(raw_messages) - len(truncated)
-    strip = max(0, i - offset)
-
-    return ("\n\n".join(parts) if parts else None), truncated[strip:]
-
-
-def _extract_attachment_ids(metadata: dict) -> list[str]:
-    """file_ids from ``metadata.attachments = [{"id": ...}, ...]``; malformed payloads dropped."""
-    raw = metadata.get("attachments")
-    if not isinstance(raw, list):
-        return []
-    return [a["id"] for a in raw if isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"]]
 
 
 def _within_workspace(attachment_ids: list[str], workspace_file_ids: list[str]) -> list[str]:
@@ -1926,22 +1633,6 @@ def _dedupe_web(web_lists: list[list]) -> list:
             seen.add(url)
             out.append(r)
     return out
-
-
-def _documents_context(docs: list, *, any_retrieved: bool) -> str:
-    """*docs* as numbered ``[Source N]`` blocks.
-
-    Empty when retrieval found documents but none fit the prompt, and the
-    no-document message when it found none.
-    """
-    if not docs and any_retrieved:
-        return ""
-    return format_context(
-        [doc.page_content for doc in docs],
-        max_context_tokens=None,
-        length_function=get_num_tokens(),
-        headers=[describe_source(doc.metadata) for doc in docs],
-    )[0]
 
 
 def _messages_tokens(messages: list[dict]) -> int:

@@ -29,8 +29,11 @@ from api.dependencies.llm import (
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
 from api.routers.user.source_links import build_document_source_link
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
+from core.chat.routing import is_direct_llm_model as _names_the_llm
+from core.chat.routing import resolve_route
 from core.config import load_config
 from core.config.endpoints import client_llm_override, custom_endpoint_override_enabled
+from core.models.chat import ChatOptions
 from core.models.preset import resolve_partition_chat_llm
 from core.prompts import message_tokens, tool_definition_tokens
 from core.utils import consts
@@ -273,8 +276,7 @@ def is_direct_llm_model(
     settings: "Settings | None" = None,
 ) -> bool:
     """True if the request should use the LLM directly (no RAG partition)."""
-    config = _runtime_config(settings)
-    return request.model is None or request.model == "" or request.model == config.llm.model
+    return _names_the_llm(request.model, _runtime_config(settings).llm.model)
 
 
 async def _fetch_max_model_tokens(
@@ -583,12 +585,8 @@ async def openai_chat_completion(
             detail="The last message must be a non-empty user message or a tool result with its tool_call_id",
         )
 
-    metadata = request.metadata or {}
-    if (
-        metadata.get("include_retrieval_trace") is True
-        or metadata.get("compare_original_query") is True
-        or metadata.get("bypass_query_contextualization") is True
-    ):
+    options = ChatOptions.from_metadata(request.metadata)
+    if options.include_retrieval_trace or options.compare_original_query or options.bypass_query_contextualization:
         await diagnostics_guard.authorize(user)
 
     log.debug("Received chat completion request with messages: {}", truncate(str(request.messages)))
@@ -609,7 +607,7 @@ async def openai_chat_completion(
     # gives it nothing to look for.
     latest_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
     if (
-        (partitions is not None or metadata.get("websearch"))
+        resolve_route(partitions, options).searches
         and last.role == "tool"
         and not (latest_user and latest_user.content)
     ):
@@ -738,12 +736,8 @@ async def openai_completion(
             detail="Streaming is not supported for this endpoint",
         )
 
-    metadata = request.metadata or {}
-    if (
-        metadata.get("include_retrieval_trace") is True
-        or metadata.get("compare_original_query") is True
-        or metadata.get("bypass_query_contextualization") is True
-    ):
+    options = ChatOptions.from_metadata(request.metadata)
+    if options.include_retrieval_trace or options.compare_original_query or options.bypass_query_contextualization:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Retrieval diagnostics are supported only by chat completions",
