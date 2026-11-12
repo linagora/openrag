@@ -1,0 +1,22 @@
+{
+  "llm_calls": [],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "What is the notice period?",
+          "role": "user"
+        }
+      ],
+      "model": "openrag-sales"
+    },
+    "path": "/v1/chat/completions",
+    "rag_mode": "ChatBotRag"
+  },
+  "response": {
+    "detail": "Partition `sales` not found for given model `openrag-sales`"
+  },
+  "retrieval_calls": [],
+  "status": 404,
+  "web_calls": []
+}

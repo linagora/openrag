@@ -1,0 +1,82 @@
+{
+  "llm_calls": [
+    {
+      "kwargs": {
+        "logprobs": false,
+        "max_tokens": 1024,
+        "metadata": {
+          "attachments": [
+            {
+              "id": "contract"
+            }
+          ],
+          "use_map_reduce": true,
+          "workspace": "ws-1"
+        },
+        "temperature": 0.3,
+        "top_p": 1.0
+      },
+      "llm": "default",
+      "messages": [
+        {
+          "content": "What is the notice period?",
+          "role": "user"
+        }
+      ],
+      "method": "chat"
+    }
+  ],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "What is the notice period?",
+          "role": "user"
+        }
+      ],
+      "metadata": {
+        "attachments": [
+          {
+            "id": "contract"
+          }
+        ],
+        "use_map_reduce": true,
+        "workspace": "ws-1"
+      },
+      "model": ""
+    },
+    "path": "/v1/chat/completions",
+    "rag_mode": "ChatBotRag"
+  },
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "Three months.",
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": 1772619630,
+    "extra": {
+      "attachments": [],
+      "citations_reported": false,
+      "cited_sources": [],
+      "presented_sources": [],
+      "sources": []
+    },
+    "id": "chatcmpl-fake",
+    "model": "direct-llm",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 10,
+      "prompt_tokens": 100,
+      "total_tokens": 110
+    }
+  },
+  "retrieval_calls": [],
+  "status": 200,
+  "web_calls": []
+}

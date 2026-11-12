@@ -1,0 +1,22 @@
+{
+  "llm_calls": [],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "What is the notice period?",
+          "role": "user"
+        }
+      ],
+      "model": "gpt-4o"
+    },
+    "path": "/v1/chat/completions",
+    "rag_mode": "ChatBotRag"
+  },
+  "response": {
+    "detail": "Model not found. Model should respect this format: openrag-partition_name"
+  },
+  "retrieval_calls": [],
+  "status": 404,
+  "web_calls": []
+}

@@ -1,0 +1,93 @@
+{
+  "llm_calls": [
+    {
+      "kwargs": {
+        "logprobs": false,
+        "max_tokens": 1024,
+        "metadata": {
+          "bypass_query_contextualization": false,
+          "compare_original_query": false,
+          "include_all_retrieved_sources": false,
+          "include_retrieval_trace": false,
+          "llm_override": null,
+          "require_retrieval": false,
+          "spoken_style_answer": false,
+          "use_map_reduce": false,
+          "websearch": false
+        },
+        "temperature": 0.3,
+        "top_p": 1.0
+      },
+      "llm": "default",
+      "messages": [
+        {
+          "content": "What is the notice period?",
+          "role": "user"
+        }
+      ],
+      "method": "stream_chat"
+    }
+  ],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "What is the notice period?",
+          "role": "user"
+        }
+      ],
+      "model": "",
+      "stream": true
+    },
+    "path": "/v1/chat/completions",
+    "rag_mode": "ChatBotRag"
+  },
+  "response": {
+    "events": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "Three months."
+            },
+            "finish_reason": null,
+            "index": 0
+          }
+        ],
+        "created": 1772619630,
+        "extra": {
+          "citations_reported": false,
+          "cited_sources": [],
+          "presented_sources": [],
+          "sources": []
+        },
+        "id": "chatcmpl-fake",
+        "model": "direct-llm",
+        "object": "chat.completion.chunk"
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop",
+            "index": 0
+          }
+        ],
+        "created": 1772619630,
+        "extra": {
+          "citations_reported": false,
+          "cited_sources": [],
+          "presented_sources": [],
+          "sources": []
+        },
+        "id": "chatcmpl-fake",
+        "model": "direct-llm",
+        "object": "chat.completion.chunk"
+      },
+      "[DONE]"
+    ]
+  },
+  "retrieval_calls": [],
+  "status": 200,
+  "web_calls": []
+}

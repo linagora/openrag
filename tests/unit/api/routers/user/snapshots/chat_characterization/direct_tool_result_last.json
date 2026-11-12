@@ -1,0 +1,151 @@
+{
+  "llm_calls": [
+    {
+      "kwargs": {
+        "logprobs": false,
+        "max_tokens": 1024,
+        "metadata": {
+          "bypass_query_contextualization": false,
+          "compare_original_query": false,
+          "include_all_retrieved_sources": false,
+          "include_retrieval_trace": false,
+          "llm_override": null,
+          "require_retrieval": false,
+          "spoken_style_answer": false,
+          "use_map_reduce": false,
+          "websearch": false
+        },
+        "temperature": 0.3,
+        "tools": [
+          {
+            "function": {
+              "description": "Weather for a city",
+              "name": "get_weather",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "object"
+              }
+            },
+            "type": "function"
+          }
+        ],
+        "top_p": 1.0
+      },
+      "llm": "default",
+      "messages": [
+        {
+          "content": "Weather in Paris?",
+          "role": "user"
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{\"city\": \"Paris\"}",
+                "name": "get_weather"
+              },
+              "id": "call_1",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "18 C, sunny",
+          "role": "tool",
+          "tool_call_id": "call_1"
+        }
+      ],
+      "method": "chat"
+    }
+  ],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "Weather in Paris?",
+          "role": "user"
+        },
+        {
+          "content": null,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{\"city\": \"Paris\"}",
+                "name": "get_weather"
+              },
+              "id": "call_1",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "18 C, sunny",
+          "role": "tool",
+          "tool_call_id": "call_1"
+        }
+      ],
+      "model": "",
+      "tools": [
+        {
+          "function": {
+            "description": "Weather for a city",
+            "name": "get_weather",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "path": "/v1/chat/completions",
+    "rag_mode": "ChatBotRag"
+  },
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "It is 18 C and sunny in Paris.",
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": 1772619630,
+    "extra": {
+      "citations_reported": false,
+      "cited_sources": [],
+      "presented_sources": [],
+      "sources": []
+    },
+    "id": "chatcmpl-fake",
+    "model": "direct-llm",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 10,
+      "prompt_tokens": 100,
+      "total_tokens": 110
+    }
+  },
+  "retrieval_calls": [],
+  "status": 200,
+  "web_calls": []
+}

@@ -1,0 +1,25 @@
+{
+  "llm_calls": [],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "What is the notice period?",
+          "role": "user"
+        }
+      ],
+      "metadata": {
+        "include_retrieval_trace": true
+      },
+      "model": "openrag-legal"
+    },
+    "path": "/v1/chat/completions",
+    "rag_mode": "ChatBotRag"
+  },
+  "response": {
+    "detail": "Retrieval diagnostics require administrator privileges"
+  },
+  "retrieval_calls": [],
+  "status": 403,
+  "web_calls": []
+}

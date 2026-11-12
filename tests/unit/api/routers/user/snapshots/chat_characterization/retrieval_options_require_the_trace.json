@@ -1,0 +1,48 @@
+{
+  "llm_calls": [],
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "What is the notice period?",
+          "role": "user"
+        }
+      ],
+      "metadata": {
+        "retrieval_top_k": 7
+      },
+      "model": "openrag-legal"
+    },
+    "path": "/v1/chat/completions",
+    "rag_mode": "ChatBotRag"
+  },
+  "response": {
+    "detail": [
+      {
+        "ctx": {
+          "error": {}
+        },
+        "input": {
+          "messages": [
+            {
+              "content": "What is the notice period?",
+              "role": "user"
+            }
+          ],
+          "metadata": {
+            "retrieval_top_k": 7
+          },
+          "model": "openrag-legal"
+        },
+        "loc": [
+          "body"
+        ],
+        "msg": "Value error, retrieval diagnostic overrides require include_retrieval_trace",
+        "type": "value_error"
+      }
+    ]
+  },
+  "retrieval_calls": [],
+  "status": 422,
+  "web_calls": []
+}

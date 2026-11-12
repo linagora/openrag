@@ -1,0 +1,54 @@
+{
+  "llm_calls": [
+    {
+      "kwargs": {
+        "best_of": 1,
+        "echo": false,
+        "frequency_penalty": 0.0,
+        "max_tokens": 1024,
+        "metadata": {
+          "include_all_retrieved_sources": false,
+          "llm_override": null,
+          "require_retrieval": false,
+          "spoken_style_answer": false
+        },
+        "n": 1,
+        "presence_penalty": 0.0,
+        "temperature": 0.3,
+        "top_p": 1.0
+      },
+      "llm": "default",
+      "method": "generate",
+      "prompt": "Notice period?"
+    }
+  ],
+  "request": {
+    "body": {
+      "prompt": "Notice period?"
+    },
+    "path": "/v1/completions",
+    "rag_mode": "ChatBotRag"
+  },
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "text": "Three months."
+      }
+    ],
+    "created": 1772619630,
+    "extra": {
+      "citations_reported": false,
+      "cited_sources": [],
+      "presented_sources": [],
+      "sources": []
+    },
+    "id": "cmpl-fake",
+    "model": "upstream-default",
+    "object": "text_completion"
+  },
+  "retrieval_calls": [],
+  "status": 200,
+  "web_calls": []
+}
