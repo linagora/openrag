@@ -30,6 +30,7 @@ from .package import PART_READ_ERRORS, ChartPlacement, _relationship_id, locate_
 from .references import (
     CellRange,
     RowReader,
+    ScanBudget,
     first_cell_formats,
     parse_reference,
     resolve_ranges,
@@ -62,6 +63,9 @@ class ChartLimits:
     max_points_from_tables: int = 200
     # Chart parts read across the workbook; charts past it are skipped.
     max_total_bytes: int | None = None
+    # Worksheet rows the chart cell reads may parse across the workbook (see
+    # references.ScanBudget); None reads every range.
+    max_scan_rows: int | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,8 @@ class _Entry:
     # A chart that needed no cell read is rendered as soon as it is parsed, so
     # a workbook of many large cached charts never holds more than their text.
     rendered: RenderedChart | None = None
+    # Ranges of the chart left unread because the workbook's read budget ran out.
+    not_read: int = 0
 
 
 #: Turns a series formula into the single range it reads, or None.
@@ -200,6 +206,7 @@ def _filled(
     resolve: Resolver,
     *,
     drop_hidden_cells: bool,
+    omitted: set[CellRange] = frozenset(),
 ) -> tuple[Chart, int]:
     """Put resolved cell values into the chart; count series left without values.
 
@@ -258,7 +265,7 @@ def _filled(
             values=fill(series.values, positions),
             sizes=fill(series.sizes, positions),
         )
-        if filled.values is not None and filled.values.needs_cells:
+        if filled.values is not None and filled.values.needs_cells and resolve(filled.values.formula) not in omitted:
             unresolved += 1
         return filled
 
@@ -692,6 +699,9 @@ def _held_points(chart: Chart) -> int:
     )
 
 
+# Tables a chart's metadata names; a chart over more is flagged as truncated.
+_MAX_SOURCE_TABLES = 64
+
 # Points of the charts kept in memory while the cells they look up are read.
 # Charts past it are dropped and parsed again once the cells are known, so
 # memory stays bounded however many large charts a workbook holds.
@@ -721,6 +731,7 @@ class WorkbookCharts:
         self._workbook_filename = workbook_filename
         self._emitted = 0
         self._bytes_read = 0
+        self._scan = ScanBudget(limits.max_scan_rows)
         if hasattr(source, "seek"):
             source.seek(0)
         with zipfile.ZipFile(source) as archive:
@@ -750,6 +761,9 @@ class WorkbookCharts:
             wanted_headers: list[CellRange] = []
             held = 0
             for placement in inventory.placements:
+                if self._withhold and placement.hidden:
+                    # A chart hidden in Excel is hidden content: never even parsed.
+                    continue
                 loaded = self._load(archive, placement, resolve, hidden_sheets, hidden_cells, count_budget=True)
                 if loaded is None:
                     continue
@@ -770,8 +784,10 @@ class WorkbookCharts:
                 held += points if keep else 0
                 slots.append((placement, loaded if keep else None))
             found = _LookedUp(
-                first_cell_formats(wanted_formats, read_rows) if wanted_formats else {},
-                resolve_ranges(wanted_headers, read_rows, cell_text, max_cells=1) if wanted_headers else {},
+                first_cell_formats(wanted_formats, read_rows, budget=self._scan) if wanted_formats else {},
+                resolve_ranges(wanted_headers, read_rows, cell_text, max_cells=1, budget=self._scan)
+                if wanted_headers
+                else {},
             )
             for slot in slots:
                 if isinstance(slot, _Entry):
@@ -789,17 +805,25 @@ class WorkbookCharts:
         # Charts that store references read their cells in bounded windows.
         waiting = [entry for entry in self._pending if entry.rendered is None]
         wanted = [cell_range for entry in waiting for cell_range in _uncached(entry.chart, resolve)]
-        resolved = resolve_ranges(wanted, read_rows, cell_text, max_cells=limits.max_points) if wanted else {}
+        resolved = (
+            resolve_ranges(wanted, read_rows, cell_text, max_cells=limits.max_points, budget=self._scan)
+            if wanted
+            else {}
+        )
         for index, entry in enumerate(self._pending):
             if entry.rendered is None:
+                # Counted apart from references that cannot be read: these
+                # could be, but the workbook's read budget ran out first.
+                not_read = sum(1 for cell_range in _uncached(entry.chart, resolve) if cell_range in self._scan.omitted)
                 filled, unresolved = _filled(
                     entry.chart,
                     resolved,
                     hidden_cells,
                     resolve,
                     drop_hidden_cells=self._withhold or entry.chart.plot_visible_only,
+                    omitted=self._scan.omitted,
                 )
-                self._pending[index] = replace(entry, chart=filled, unresolved=unresolved)
+                self._pending[index] = replace(entry, chart=filled, unresolved=unresolved, not_read=not_read)
         if self.skipped:
             logger.bind(filename=workbook_filename).warning(
                 f"{len(self.skipped)} XLSX chart part(s) skipped: {self.skipped[0]}"
@@ -966,6 +990,18 @@ class WorkbookCharts:
             self._withhold and bool(hidden_sources),
         )
 
+    @property
+    def issues(self) -> list[str]:
+        """Why the workbook's charts and drawings were not all indexed, one reason each.
+
+        Reasons, not a chart count: one reason ("charts beyond the limit") can
+        stand for many charts.
+        """
+        issues = list(self.skipped)
+        if self._scan.omitted:
+            issues.append(f"The chart read budget was reached: {len(self._scan.omitted)} cell ranges were not read")
+        return issues
+
     def __len__(self) -> int:
         return len(self._pending) + len(self._texts)
 
@@ -974,7 +1010,6 @@ class WorkbookCharts:
         self._emitted += 1
         rendered = entry.rendered or self._render_entry(entry)
         rendered.metadata["chart_index"] = self._emitted
-        rendered.metadata["workbook_charts_skipped"] = len(self.skipped)
         return rendered
 
     def _render_entry(self, entry: _Entry, *, deferred: bool = False) -> RenderedChart:
@@ -986,6 +1021,7 @@ class WorkbookCharts:
             max_points=self._limits.max_points,
             max_bytes=self._limits.max_batch_bytes,
             unresolved_references=entry.unresolved,
+            ranges_not_read=entry.not_read,
             formatter=self._formatter,
             hidden_sources=entry.hidden_sources,
             hidden_data_withheld=entry.hidden_data_withheld,
@@ -994,7 +1030,10 @@ class WorkbookCharts:
             deferred=deferred,
         )
         # Tables the chart plots, by table_id, so a chart can be found with its data.
-        rendered.metadata["chart_source_table_ids"] = list(entry.source_tables)
+        tables = list(entry.source_tables)
+        rendered.metadata["chart_source_table_ids"] = tables[:_MAX_SOURCE_TABLES]
+        if len(tables) > _MAX_SOURCE_TABLES:
+            rendered.metadata["chart_metadata_truncated"] = True
         return rendered
 
     def before_sheet(self, sheet_index: int) -> Iterator[RenderedChart]:

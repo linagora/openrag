@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 _REFERENCE = re.compile(
@@ -87,6 +87,43 @@ def parse_reference(formula: str | None) -> CellRange | None:
 RowReader = Callable[..., Iterator[tuple[Any, ...]]]
 
 _MAX_READ_WINDOW_CELLS = 100_000
+
+
+@dataclass
+class ScanBudget:
+    """Worksheet rows the chart reads of one workbook may parse, all reads together.
+
+    OpenPyXL's read-only reader parses a sheet from its first row on every
+    read, so a window costs the rows up to its last one, however few cells it
+    keeps: about 14 us a row on a laptop, 4 s for 300,000 rows. Format,
+    header and value reads share the budget, in a fixed order (sheet name,
+    then window position). A window past it is not read, and its ranges are
+    recorded in ``omitted``, apart from references that cannot be read at all.
+    """
+
+    rows: int | None = None
+    omitted: set[CellRange] = field(default_factory=set)
+
+    def take(self, last_row: int) -> bool:
+        if self.rows is None:
+            return True
+        if last_row > self.rows:
+            return False
+        self.rows -= last_row
+        return True
+
+    def affordable(self, window: set[CellRange]) -> tuple[set[CellRange], set[CellRange]]:
+        """Split a window into the ranges read and those left out.
+
+        A window costs its deepest row, so when it does not fit, its shallow
+        ranges are still read: a far range must not cost the near ones.
+        """
+        if self.take(max(cell_range.max_row for cell_range in window)):
+            return window, set()
+        fitting = {cell_range for cell_range in window if self.rows is not None and cell_range.max_row <= self.rows}
+        if fitting and self.take(max(cell_range.max_row for cell_range in fitting)):
+            return fitting, window - fitting
+        return set(), window
 
 
 def _read_windows(ranges: set[CellRange]) -> Iterator[set[CellRange]]:
@@ -172,6 +209,7 @@ def resolve_ranges(
     cell_text: Callable[[Any], str],
     *,
     max_cells: int,
+    budget: ScanBudget | None = None,
 ) -> dict[CellRange, list[list[str]]]:
     """Read the cell texts of ``ranges``, row by row; an unreadable range is absent.
 
@@ -185,12 +223,19 @@ def resolve_ranges(
     by_sheet: dict[str, dict[CellRange, CellRange]] = {}
     for requested, part in parts.items():
         by_sheet.setdefault(requested.sheet, {})[requested] = part
+    budget = budget or ScanBudget()
     resolved: dict[CellRange, list[list[str]]] = {}
-    for sheet, requested_parts in by_sheet.items():
+    for sheet in sorted(by_sheet):
+        requested_parts = by_sheet[sheet]
         grids = {}
+        skipped: set[CellRange] = set()
         for window in _read_windows(set(requested_parts.values())):
-            grids.update(_read_sheet(sheet, window, read_rows, cell_text))
+            read, left_out = budget.affordable(window)
+            if read:
+                grids.update(_read_sheet(sheet, read, read_rows, cell_text))
+            skipped |= left_out
         resolved.update({requested: grids[part] for requested, part in requested_parts.items() if part in grids})
+        budget.omitted |= {requested for requested, part in requested_parts.items() if part in skipped}
     return resolved
 
 
@@ -250,7 +295,9 @@ def _read_sheet(
     return grids
 
 
-def first_cell_formats(ranges: Iterable[CellRange], read_rows: RowReader) -> dict[CellRange, str]:
+def first_cell_formats(
+    ranges: Iterable[CellRange], read_rows: RowReader, *, budget: ScanBudget | None = None
+) -> dict[CellRange, str]:
     """Return the number format of each range's first cell in bounded windows.
 
     A chart's category cache may say ``General`` while the cells are dates:
@@ -259,13 +306,21 @@ def first_cell_formats(ranges: Iterable[CellRange], read_rows: RowReader) -> dic
     by_sheet: dict[str, set[CellRange]] = {}
     for cell_range in set(ranges):
         by_sheet.setdefault(cell_range.sheet, set()).add(cell_range)
+    budget = budget or ScanBudget()
     found: dict[CellRange, str] = {}
-    for sheet, wanted in by_sheet.items():
+    for sheet in sorted(by_sheet):
+        wanted = by_sheet[sheet]
         by_cell: dict[tuple[int, int], list[CellRange]] = {}
         for cell_range in wanted:
             by_cell.setdefault((cell_range.min_row, cell_range.min_column), []).append(cell_range)
         points = {CellRange(sheet, row, col, row, col) for row, col in by_cell}
         for window in _read_windows(points):
+            window, left_out = budget.affordable(window)
+            budget.omitted |= {
+                cell_range for point in left_out for cell_range in by_cell[(point.min_row, point.min_column)]
+            }
+            if not window:
+                continue
             min_row = min(point.min_row for point in window)
             max_row = max(point.max_row for point in window)
             min_column = min(point.min_column for point in window)

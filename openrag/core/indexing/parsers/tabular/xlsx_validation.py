@@ -69,6 +69,10 @@ class XlsxLimits:
     # A chart over data already indexed as worksheet tables repeats at most
     # this many points; past it, it keeps a summary and points to the tables.
     max_chart_points_from_tables: int = 200
+    # Worksheet rows the chart cell reads may parse across the workbook. Each
+    # read parses its sheet from the first row (about 14 us a row), so this
+    # bounds their time: about 30 s at most, two full passes of a 1M-row sheet.
+    max_chart_scan_rows: int = 2_000_000
 
     def __post_init__(self):
         for field in fields(self):

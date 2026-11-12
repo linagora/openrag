@@ -702,23 +702,56 @@ def _chart_block(rendered) -> TextBlock:
     return TextBlock(text=rendered.text, block_type="text", metadata=rendered.metadata)
 
 
-def _with_charts(batches, charts: WorkbookCharts | None):
+# Reasons listed on each block of a workbook whose charts were not all indexed.
+_MAX_CHART_ISSUES = 16
+_MAX_CHART_ISSUE_TEXT = 200
+
+
+def _chart_status(charts: WorkbookCharts | None, failure: str | None, mode: str) -> dict:
+    """Whether the workbook's charts were all indexed, stamped on every block.
+
+    Chunk metadata, not a job-level warning: it shows a partial extraction
+    even when no chart chunk exists (every chart skipped, or extraction failed).
+    """
+    if mode == "off":
+        status, issues = "off", []
+    elif charts is None:
+        status, issues = "failed", [failure or "Chart extraction failed"]
+    else:
+        issues = charts.issues
+        status = "partial" if issues else "complete"
+    return {
+        "workbook_chart_extraction": status,
+        "workbook_chart_issue_count": len(issues),
+        "workbook_chart_issues": [issue[:_MAX_CHART_ISSUE_TEXT] for issue in issues[:_MAX_CHART_ISSUES]],
+    }
+
+
+def _with_charts(batches, charts: WorkbookCharts | None, status: dict):
     """Emit each sheet's charts after its tables, then those of sheets without any.
 
     A workbook whose only content is charts (a dashboard of chart sheets) is
-    indexed through its charts instead of being rejected as empty.
+    indexed through its charts instead of being rejected as empty. Every block
+    carries the workbook's chart extraction status.
     """
+
+    def stamped(block):
+        block.metadata.update(status)
+        return block
+
     if charts is None:
-        yield from batches
+        yield from map(stamped, batches)
         return
     try:
         for block in batches:
-            yield from map(_chart_block, charts.before_sheet(block.metadata["sheet_index"]))
-            yield block
+            yield from (
+                stamped(_chart_block(rendered)) for rendered in charts.before_sheet(block.metadata["sheet_index"])
+            )
+            yield stamped(block)
     except NoIndexableContentError:
         if not len(charts):
             raise
-    yield from map(_chart_block, charts.remaining())
+    yield from (stamped(_chart_block(rendered)) for rendered in charts.remaining())
 
 
 @contextmanager
@@ -1324,8 +1357,8 @@ class XlsxParser(TabularBatchParser):
             )
             with closing(self._iter_sheets(document, source, infos)) as batches:
                 try:
-                    charts = self._workbook_charts(document, source, infos)
-                    yield from _with_charts(batches, charts)
+                    charts, failure = self._workbook_charts(document, source, infos)
+                    yield from _with_charts(batches, charts, _chart_status(charts, failure, self.charts))
                 except PipelineError:
                     raise
                 except (
@@ -1342,7 +1375,7 @@ class XlsxParser(TabularBatchParser):
                         "File is not a valid XLSX workbook", code="INVALID_XLSX", status_code=422
                     ) from exc
 
-    def _workbook_charts(self, document, source, infos: list[SheetInfo]) -> WorkbookCharts | None:
+    def _workbook_charts(self, document, source, infos: list[SheetInfo]) -> tuple[WorkbookCharts | None, str | None]:
         """Read the workbook's charts; a failure here never fails the workbook.
 
         With ``charts="off"`` no chart part is read; drawings still are, for
@@ -1358,12 +1391,13 @@ class XlsxParser(TabularBatchParser):
             max_batch_bytes=self.limits.max_batch_bytes,
             max_points_from_tables=self.limits.max_chart_points_from_tables,
             max_total_bytes=self.limits.max_chart_bytes,
+            max_scan_rows=self.limits.max_chart_scan_rows,
         )
         hidden = {info.name: (info.hidden_rows | info.filtered_rows, info.hidden_columns) for info in infos}
         by_name = {info.name: info for info in infos if not info.hidden}
         try:
             with _chart_cell_reader(document) as read_rows:
-                return WorkbookCharts(
+                charts = WorkbookCharts(
                     source,
                     limits=limits,
                     workbook_filename=document.filename,
@@ -1376,9 +1410,11 @@ class XlsxParser(TabularBatchParser):
                     hidden_sheets=frozenset(info.name for info in infos if info.hidden),
                     mode=self.charts,
                 )
+                return charts, None
         except (OSError, KeyError, IndexError, TypeError, ValueError, zipfile.BadZipFile) as exc:
             logger.bind(filename=document.filename).warning(f"XLSX charts were not extracted: {exc!r}")
-            return None
+            # Only the exception type reaches chunk metadata, never its text.
+            return None, f"Chart extraction failed ({type(exc).__name__})"
         finally:
             if hasattr(source, "seek"):
                 source.seek(0)
