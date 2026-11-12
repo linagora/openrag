@@ -10,6 +10,16 @@ violate the dependency rule:
 
 Layer boundaries are checked only inside openrag/{core,services,api,di}/.
 
+Two third-party rules apply inside openrag/ as well:
+
+    langgraph               -> only in openrag/services/chat/graphs/
+    langchain_openai,
+    langchain_community,
+    langchain_core.messages -> not in openrag/services/
+
+LangGraph only wires the chat workflows; the nodes call OpenRag's own LLM
+port with OpenAI-style message dicts, never LangChain's model layer.
+
 Absolute application imports must use the bare layer root, not ``openrag.``:
 mixing the two loads distinct copies of classes such as exception types.
 This import-root rule covers all Python files in openrag/, tests/, and scripts/.
@@ -38,6 +48,21 @@ FORBIDDEN: dict[str, set[str]] = {
     "api": {"services"},
     "di": set(),
 }
+
+
+#: Third-party modules importable only under these openrag/ sub-paths.
+CONFINED_THIRD_PARTY: dict[str, tuple[str, ...]] = {
+    "langgraph": ("services/chat/graphs",),
+}
+
+#: Third-party modules a layer must not import.
+BANNED_THIRD_PARTY: dict[str, tuple[str, ...]] = {
+    "services": ("langchain_openai", "langchain_community", "langchain_core.messages"),
+}
+
+
+def _is_module_or_submodule(module: str, prefix: str) -> bool:
+    return module == prefix or module.startswith(prefix + ".")
 
 
 def layer_of(module: str) -> str | None:
@@ -72,6 +97,48 @@ def iter_imports(tree: ast.AST):
                 yield node.lineno, ("__relative__", node.level, node.module or "")
             else:
                 yield node.lineno, node.module or ""
+
+
+def iter_absolute_imports(tree: ast.AST):
+    """Yield (lineno, dotted_name) for every absolute import, ``from`` names included.
+
+    ``from langchain_core import messages`` yields ``langchain_core`` and
+    ``langchain_core.messages``, so a submodule imported by name is caught too.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield node.lineno, alias.name
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            yield node.lineno, node.module
+            for alias in node.names:
+                yield node.lineno, f"{node.module}.{alias.name}"
+
+
+def check_third_party(path: Path, tree: ast.AST) -> list[str]:
+    """Violations of CONFINED_THIRD_PARTY / BANNED_THIRD_PARTY in an openrag/ file."""
+    try:
+        within = path.relative_to(OPENRAG).as_posix()
+    except ValueError:
+        return []
+    src_layer = file_layer(path)
+    rel = path.relative_to(REPO_ROOT)
+    violations: list[str] = []
+    seen: set[tuple[int, str]] = set()
+    for lineno, dotted in iter_absolute_imports(tree):
+        for prefix, allowed in CONFINED_THIRD_PARTY.items():
+            if _is_module_or_submodule(dotted, prefix) and not any(
+                within.startswith(sub_path + "/") for sub_path in allowed
+            ):
+                if (lineno, prefix) not in seen:
+                    seen.add((lineno, prefix))
+                    places = ", ".join(f"openrag/{sub_path}/" for sub_path in allowed)
+                    violations.append(f"{rel}:{lineno}  {prefix} is only allowed in {places}  ({dotted})")
+        for prefix in BANNED_THIRD_PARTY.get(src_layer, ()):
+            if _is_module_or_submodule(dotted, prefix) and (lineno, prefix) not in seen:
+                seen.add((lineno, prefix))
+                violations.append(f"{rel}:{lineno}  {src_layer} must not import {prefix}  ({dotted})")
+    return violations
 
 
 def resolve_relative(file_path: Path, level: int, module: str) -> str:
@@ -115,6 +182,7 @@ def check_file(path: Path) -> list[str]:
         if tgt_layer in forbidden:
             rel = path.relative_to(REPO_ROOT)
             violations.append(f"{rel}:{lineno}  {src_layer} -> {tgt_layer}  ({dotted})")
+    violations.extend(check_third_party(path, tree))
     return violations
 
 
