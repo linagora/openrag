@@ -1026,7 +1026,8 @@ openrag:
   # objects). They take precedence over the shared env.config ConfigMap the
   # container also reads. RAY_METRICS_EXPORT_PORT is refused: the chart sets it.
   # So are RAY_ADDRESS, ENABLE_RAY_SERVE and POSTGRES_RUN_MIGRATIONS, which the
-  # chart reads from env.config: set those there.
+  # chart reads from env.config: set those there. POSTGRES_AUTO_CREATE_DB is
+  # refused too: set postgresProvisioning.autoCreateDatabase instead.
   extraEnv: []
   # Size of the /dev/shm emptyDir volume. Ray's plasma object store and Python
   # multiprocessing both use /dev/shm for POSIX semaphores and shared memory.

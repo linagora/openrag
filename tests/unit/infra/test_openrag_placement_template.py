@@ -179,6 +179,33 @@ def test_extra_env_refuses_what_the_chart_reads_from_env_config(tmp_path: Path, 
 
 
 @requires_helm
+def test_extra_env_refuses_auto_create_db(tmp_path: Path) -> None:
+    """The chart sets POSTGRES_AUTO_CREATE_DB from autoCreateDatabase; an
+    extraEnv entry would win over it and create the database anyway."""
+    assert HELM is not None
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(
+        yaml.safe_dump(
+            {
+                "postgresProvisioning": {"autoCreateDatabase": False},
+                "openrag": {"extraEnv": [{"name": "POSTGRES_AUTO_CREATE_DB", "value": "true"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [HELM, "template", "test", str(_isolated_chart(tmp_path)), "--show-only", "templates/openrag.yaml"]
+        + ["-f", str(values_file)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "openrag.extraEnv sets POSTGRES_AUTO_CREATE_DB" in result.stderr
+
+
+@requires_helm
 def test_extra_env_may_set_the_metrics_port_without_embedded_ray(tmp_path: Path) -> None:
     """Pointed at an external Ray, the chart sets no metrics port of its own."""
     spec = _pod_spec(

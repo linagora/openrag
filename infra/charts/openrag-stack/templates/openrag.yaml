@@ -208,10 +208,15 @@ spec:
           {{- /* The chart owns RAY_METRICS_EXPORT_PORT: the ray-metrics port and the
              PodMonitor follow it, so a second entry would move the export away from
              them. The chart reads the others from env.config to pick the Ray mode,
-             probes and migrations, so an API-only value would contradict them. */}}
+             probes and migrations, and POSTGRES_AUTO_CREATE_DB from
+             postgresProvisioning.autoCreateDatabase, so an API-only value would
+             contradict them. */}}
           {{- range .Values.openrag.extraEnv }}
           {{- if and $embeddedRay (eq (toString .name) "RAY_METRICS_EXPORT_PORT") }}
           {{- fail "openrag.extraEnv sets RAY_METRICS_EXPORT_PORT, which the chart pins for the embedded Ray: the ray-metrics port and the PodMonitor follow it. Remove it from openrag.extraEnv." }}
+          {{- end }}
+          {{- if eq (toString .name) "POSTGRES_AUTO_CREATE_DB" }}
+          {{- fail "openrag.extraEnv sets POSTGRES_AUTO_CREATE_DB, which the chart sets from postgresProvisioning.autoCreateDatabase. Set postgresProvisioning.autoCreateDatabase instead." }}
           {{- end }}
           {{- if has (toString .name) (list "RAY_ADDRESS" "ENABLE_RAY_SERVE" "POSTGRES_RUN_MIGRATIONS") }}
           {{- fail (printf "openrag.extraEnv sets %s, which the chart reads from env.config to render the Ray mode, probes and migrations. Set it in env.config instead." .name) }}
