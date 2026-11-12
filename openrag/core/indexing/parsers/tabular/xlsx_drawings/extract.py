@@ -739,6 +739,8 @@ class WorkbookCharts:
         self._emitted = 0
         self._bytes_read = 0
         self._scan = ScanBudget(limits.max_scan_rows)
+        # Every required range actually read, whichever phase read it.
+        self._obtained: set[CellRange] = set()
         if hasattr(source, "seek"):
             source.seek(0)
         with zipfile.ZipFile(source) as archive:
@@ -824,7 +826,7 @@ class WorkbookCharts:
                 slots[index] = _Deferred(entry) if isinstance(slots[index], _Deferred) else entry
             found = _LookedUp(
                 first_cell_formats(wanted_formats, read_rows, budget=self._scan) if wanted_formats else {},
-                resolve_ranges(wanted_headers, read_rows, cell_text, max_cells=1, budget=self._scan)
+                resolve_ranges(wanted_headers, read_rows, cell_text, max_cells=1, budget=self._scan, lookup=True)
                 if wanted_headers
                 else {},
             )
@@ -883,18 +885,25 @@ class WorkbookCharts:
             known.update(
                 resolve_ranges(missing, read_rows, cell_text, max_cells=self._limits.max_points, budget=self._scan)
             )
+        self._obtained |= known.keys()
         filled_entries = []
         for entry in entries:
             # Counted apart from references that cannot be read: these could
             # be, but the workbook's read budget ran out first.
-            not_read = sum(1 for cell_range in _uncached(entry.chart, resolve) if cell_range in self._scan.omitted)
+            # Only ranges with no grid count: one read earlier (a prefetch) is
+            # in ``known`` even if a later lookup of the same cell was skipped.
+            not_read = sum(
+                1
+                for cell_range in _uncached(entry.chart, resolve)
+                if cell_range in self._scan.omitted and cell_range not in known
+            )
             filled, unresolved = _filled(
                 entry.chart,
                 known,
                 hidden_cells,
                 resolve,
                 drop_hidden_cells=self._withhold or entry.chart.plot_visible_only,
-                omitted=self._scan.omitted,
+                omitted=self._scan.omitted - known.keys(),
             )
             filled_entries.append(replace(entry, chart=filled, unresolved=unresolved, not_read=not_read, filled=True))
         return filled_entries, known
@@ -1068,8 +1077,14 @@ class WorkbookCharts:
         stand for many charts.
         """
         issues = list(self.skipped)
-        if self._scan.omitted:
-            issues.append(f"The chart read budget was reached: {len(self._scan.omitted)} cell ranges were not read")
+        unread = self._scan.omitted - self._obtained
+        if unread:
+            issues.append(f"The chart read budget was reached: {len(unread)} chart cell ranges were not read")
+        if self._scan.omitted_lookups:
+            issues.append(
+                f"The chart read budget was reached: {len(self._scan.omitted_lookups)} number-format or header "
+                "lookups were skipped; those charts are indexed without them"
+            )
         return issues
 
     def __len__(self) -> int:

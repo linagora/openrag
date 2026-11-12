@@ -102,7 +102,11 @@ class ScanBudget:
     """
 
     rows: int | None = None
+    # Ranges a chart needs (values, categories, sizes) left unread.
     omitted: set[CellRange] = field(default_factory=set)
+    # Optional lookups (number formats, header labels) left unread: the chart
+    # is still complete without them, only less refined.
+    omitted_lookups: set[CellRange] = field(default_factory=set)
 
     def take(self, last_row: int) -> bool:
         if self.rows is None:
@@ -210,6 +214,7 @@ def resolve_ranges(
     *,
     max_cells: int,
     budget: ScanBudget | None = None,
+    lookup: bool = False,
 ) -> dict[CellRange, list[list[str]]]:
     """Read the cell texts of ``ranges``, row by row; an unreadable range is absent.
 
@@ -235,7 +240,11 @@ def resolve_ranges(
                 grids.update(_read_sheet(sheet, read, read_rows, cell_text))
             skipped |= left_out
         resolved.update({requested: grids[part] for requested, part in requested_parts.items() if part in grids})
-        budget.omitted |= {requested for requested, part in requested_parts.items() if part in skipped}
+        left_out_ranges = {requested for requested, part in requested_parts.items() if part in skipped}
+        if lookup:
+            budget.omitted_lookups |= left_out_ranges
+        else:
+            budget.omitted |= left_out_ranges
     return resolved
 
 
@@ -316,7 +325,7 @@ def first_cell_formats(
         points = {CellRange(sheet, row, col, row, col) for row, col in by_cell}
         for window in _read_windows(points):
             window, left_out = budget.affordable(window)
-            budget.omitted |= {
+            budget.omitted_lookups |= {
                 cell_range for point in left_out for cell_range in by_cell[(point.min_row, point.min_column)]
             }
             if not window:

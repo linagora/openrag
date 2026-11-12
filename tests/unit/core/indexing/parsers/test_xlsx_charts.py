@@ -2737,9 +2737,11 @@ def test_the_read_budget_is_a_workbook_chart_issue():
     blocks = _blocks(_two_distant_uncached_charts(), max_chart_scan_rows=10)
 
     assert {block.metadata["workbook_chart_extraction"] for block in blocks} == {"partial"}
-    # The far chart's categories and values, and its value-format lookup.
+    # The far chart's categories and values, then its optional format lookup.
     assert blocks[0].metadata["workbook_chart_issues"] == [
-        "The chart read budget was reached: 3 cell ranges were not read"
+        "The chart read budget was reached: 2 chart cell ranges were not read",
+        "The chart read budget was reached: 1 number-format or header lookups were skipped; "
+        "those charts are indexed without them",
     ]
 
 
@@ -2847,3 +2849,29 @@ def test_a_drawing_nested_thousands_of_groups_deep_is_read_without_recursion():
 
     assert "Deep note" in _text_boxes(blocks)[0].text
     assert blocks[0].metadata["workbook_chart_extraction"] == "complete"
+
+
+# --- review round 3: a prefetched value is never reported as unread ----------
+
+
+def test_a_prefetched_value_is_not_reported_unread_when_its_format_lookup_is_skipped():
+    """Codex's case: the held chart's single value cell is read first; the
+    optional format lookup of the same cell then exceeds the budget."""
+    raw = _general_dates_workbook()
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        chart = archive.read("xl/charts/chart1.xml").decode()
+    single = chart.replace(
+        _num_cache_ref("Data!$B$2:$B$3", [5, 7], "General"), "<c:numRef><c:f>Data!$B$2</c:f></c:numRef>"
+    ).replace(
+        _num_cache_ref("Data!$A$2:$A$3", [45658, 45659], "General"), _num_cache_ref("Data!$A$2", [45658], "General")
+    )
+    assert single != chart
+    raw = _replace_parts(raw, {"xl/charts/chart1.xml": single})
+
+    (chart,) = _charts(raw, max_chart_scan_rows=2)
+
+    assert "| 5 |" in chart.text
+    assert chart.metadata["chart_ranges_not_read"] == 0
+    assert "were not read" not in chart.text
+    issues = chart.metadata["workbook_chart_issues"]
+    assert issues and all("lookups were skipped" in issue for issue in issues)
