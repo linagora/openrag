@@ -232,6 +232,8 @@ def locate_charts(
     max_total_bytes: int | None = None,
     read_charts: bool = True,
     max_text_boxes: int = 1024,
+    skip_hidden_charts: bool = False,
+    skip_hidden_text_boxes: bool = False,
 ) -> ChartInventory:
     """List the charts and text boxes of every visible sheet, in workbook then
     drawing order; with ``read_charts`` false, only the text boxes."""
@@ -269,7 +271,9 @@ def locate_charts(
                 for element, hidden in _drawn(anchor):
                     if element.tag.rsplit("}", 1)[-1] == "sp":
                         found = shape_text(element)
-                        if found is None:
+                        # Withheld objects never count toward a limit: hidden
+                        # ones must not crowd out the visible ones after them.
+                        if found is None or (skip_hidden_text_boxes and (found.hidden or hidden)):
                             continue
                         if len(inventory.text_boxes) >= max_text_boxes:
                             if not inventory.text_boxes_capped:
@@ -281,7 +285,7 @@ def locate_charts(
                         found = replace(found, hidden=found.hidden or hidden)
                         inventory.text_boxes.append(TextBox(sheet.get("name", ""), index, kind, found, cells))
                         continue
-                    if not read_charts:
+                    if not read_charts or (skip_hidden_charts and hidden):
                         continue
                     frame = element
                     data = frame.find("{*}graphic/{*}graphicData")

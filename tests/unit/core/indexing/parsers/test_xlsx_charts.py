@@ -2758,3 +2758,56 @@ def test_a_text_box_in_a_hidden_group_is_hidden_too():
 
     assert "Group note" not in withheld.text and "Visible note" in withheld.text
     assert "(hidden in Excel) Group note" in full.text
+
+
+# --- review round 1: limits after policy, list truncation, read priority -----
+
+
+def test_hidden_charts_never_crowd_a_visible_one_out_of_the_chart_limit():
+    """max_charts=1: the hidden chart comes first, the visible one must still fit."""
+    raw = _hide_frame(_workbook_with_chart(_monthly_revenue(), charts=2))
+
+    (chart,) = _charts(raw, mode="without_hidden_data", max_charts=1)
+
+    assert chart.metadata["chart_hidden_in_excel"] is False
+    assert chart.metadata["workbook_chart_extraction"] == "complete"
+
+
+def test_withheld_text_boxes_never_crowd_a_visible_one_out_of_the_limit(monkeypatch):
+    from core.indexing.parsers.tabular.xlsx_drawings import extract
+
+    monkeypatch.setattr(extract, "_MAX_TEXT_BOXES", 1)
+    monkeypatch.setattr(extract, "_TEXT_BOX_DISCOVERY", 4)
+    workbook = Workbook()
+    sheet = _data_sheet(workbook)
+    sheet.row_dimensions[3].hidden = True
+    _add_chart(sheet, sheet)
+    raw = _with_text_boxes(
+        _save(workbook),
+        _text_box("Hidden note", hidden=True),
+        _text_box("101.5", textlink="$B$3"),
+        _text_box("Visible note"),
+    )
+
+    (box,) = _text_boxes(_blocks(raw, mode="without_hidden_data"))
+
+    assert "Visible note" in box.text and "Hidden" not in box.text and "101.5" not in box.text
+
+
+def test_a_capped_series_list_is_flagged_even_with_short_names():
+    categories = ("Data!$A$2:$A$3", ["Q1", "Q2"])
+    series = [_series(f"S{index}", categories, ("Data!$B$2:$B$3", [index, index]), index=index) for index in range(65)]
+    (chart,) = _charts(_workbook_with_chart(_chart_xml([_plot("barChart", series)])))
+
+    assert chart.metadata["chart_series_count"] == 65 and len(chart.metadata["chart_series"]) == 64
+    assert chart.metadata["chart_metadata_truncated"] is True
+
+
+def test_required_chart_values_are_read_before_optional_format_lookups():
+    """The budget fits the values or the format lookups at row 2,000, not both:
+    the values win, since a format only refines how they read."""
+    near, far = _charts(_two_distant_uncached_charts(), max_chart_scan_rows=2010)
+
+    assert "| May | 9 |" in far.text
+    assert far.metadata["chart_ranges_not_read"] == 0
+    assert near.metadata["workbook_chart_extraction"] == "partial"

@@ -94,6 +94,8 @@ class _Entry:
     rendered: RenderedChart | None = None
     # Ranges of the chart left unread because the workbook's read budget ran out.
     not_read: int = 0
+    # Its cells were read (or tried): a chart is never read twice.
+    filled: bool = False
 
 
 #: Turns a series formula into the single range it reads, or None.
@@ -699,6 +701,11 @@ def _held_points(chart: Chart) -> int:
     )
 
 
+# Text boxes indexed per workbook, counted after the hidden-data policy; the
+# drawings are scanned for at most four times as many.
+_MAX_TEXT_BOXES = 1024
+_TEXT_BOX_DISCOVERY = 4 * _MAX_TEXT_BOXES
+
 # Tables a chart's metadata names; a chart over more is flagged as truncated.
 _MAX_SOURCE_TABLES = 64
 
@@ -742,6 +749,12 @@ class WorkbookCharts:
                 max_part_bytes=limits.max_part_bytes,
                 max_total_bytes=limits.max_total_bytes,
                 read_charts=mode != "off",
+                # Text boxes withheld through a cell link are known only once
+                # names resolve: discovery keeps a looser bound, and the
+                # limit applies after the hidden-data policy.
+                max_text_boxes=_TEXT_BOX_DISCOVERY,
+                skip_hidden_charts=mode == "without_hidden_data",
+                skip_hidden_text_boxes=mode != "full",
             )
             self.skipped = list(inventory.skipped)
             self._formatter = ValueFormatter(
@@ -783,6 +796,21 @@ class WorkbookCharts:
                 keep = held + points <= _MAX_HELD_POINTS
                 held += points if keep else 0
                 slots.append((placement, loaded if keep else None))
+            # Required reads first: the values and categories of charts that
+            # store none. Number formats and header labels only refine a
+            # chart, so they get what the read budget has left.
+            early = [
+                (index, slot.entry if isinstance(slot, _Deferred) else slot)
+                for index, slot in enumerate(slots)
+                if isinstance(slot, (_Entry, _Deferred))
+                and (slot.entry if isinstance(slot, _Deferred) else slot).rendered is None
+            ]
+            for (index, _), entry in zip(
+                early,
+                self._fill([entry for _, entry in early], resolve, hidden_cells, read_rows, cell_text),
+                strict=True,
+            ):
+                slots[index] = _Deferred(entry) if isinstance(slots[index], _Deferred) else entry
             found = _LookedUp(
                 first_cell_formats(wanted_formats, read_rows, budget=self._scan) if wanted_formats else {},
                 resolve_ranges(wanted_headers, read_rows, cell_text, max_cells=1, budget=self._scan)
@@ -802,32 +830,43 @@ class WorkbookCharts:
                 )
                 if loaded is not None:
                     self._pending.append(self._finish(placement, *loaded, resolve, hidden_cells, found=found))
-        # Charts that store references read their cells in bounded windows.
-        waiting = [entry for entry in self._pending if entry.rendered is None]
-        wanted = [cell_range for entry in waiting for cell_range in _uncached(entry.chart, resolve)]
-        resolved = (
-            resolve_ranges(wanted, read_rows, cell_text, max_cells=limits.max_points, budget=self._scan)
-            if wanted
-            else {}
-        )
-        for index, entry in enumerate(self._pending):
-            if entry.rendered is None:
-                # Counted apart from references that cannot be read: these
-                # could be, but the workbook's read budget ran out first.
-                not_read = sum(1 for cell_range in _uncached(entry.chart, resolve) if cell_range in self._scan.omitted)
-                filled, unresolved = _filled(
-                    entry.chart,
-                    resolved,
-                    hidden_cells,
-                    resolve,
-                    drop_hidden_cells=self._withhold or entry.chart.plot_visible_only,
-                    omitted=self._scan.omitted,
-                )
-                self._pending[index] = replace(entry, chart=filled, unresolved=unresolved, not_read=not_read)
+        # Charts known to need their cells only once their formats were read
+        # (a cached category axis over uncached values) are read last.
+        late = [index for index, entry in enumerate(self._pending) if entry.rendered is None and not entry.filled]
+        for index, entry in zip(
+            late,
+            self._fill([self._pending[index] for index in late], resolve, hidden_cells, read_rows, cell_text),
+            strict=True,
+        ):
+            self._pending[index] = entry
         if self.skipped:
             logger.bind(filename=workbook_filename).warning(
                 f"{len(self.skipped)} XLSX chart part(s) skipped: {self.skipped[0]}"
             )
+
+    def _fill(
+        self, entries: list[_Entry], resolve: Resolver, hidden_cells: HiddenCells, read_rows: RowReader, cell_text
+    ) -> list[_Entry]:
+        """Read the cells of charts that store references, in bounded windows."""
+        wanted = [cell_range for entry in entries for cell_range in _uncached(entry.chart, resolve)]
+        if not wanted:
+            return [replace(entry, filled=True) for entry in entries]
+        resolved = resolve_ranges(wanted, read_rows, cell_text, max_cells=self._limits.max_points, budget=self._scan)
+        filled_entries = []
+        for entry in entries:
+            # Counted apart from references that cannot be read: these could
+            # be, but the workbook's read budget ran out first.
+            not_read = sum(1 for cell_range in _uncached(entry.chart, resolve) if cell_range in self._scan.omitted)
+            filled, unresolved = _filled(
+                entry.chart,
+                resolved,
+                hidden_cells,
+                resolve,
+                drop_hidden_cells=self._withhold or entry.chart.plot_visible_only,
+                omitted=self._scan.omitted,
+            )
+            filled_entries.append(replace(entry, chart=filled, unresolved=unresolved, not_read=not_read, filled=True))
+        return filled_entries
 
     def _load(
         self,
@@ -1069,9 +1108,14 @@ class WorkbookCharts:
         """Render each sheet's text boxes; ``without_hidden_data`` leaves out hidden
         ones and those linked to a hidden cell."""
         by_sheet: dict[int, list] = {}
+        kept = 0
         for box in inventory.text_boxes:
             if withhold and _shape_withheld(box.shape, box.sheet_name, resolve, hidden_sheets, hidden_cells):
                 continue
+            if kept == _MAX_TEXT_BOXES:
+                self.skipped.append(f"Text boxes beyond the {_MAX_TEXT_BOXES}-text-box limit were not indexed")
+                break
+            kept += 1
             by_sheet.setdefault(box.sheet_index, []).append(box)
         texts = []
         for sheet_index, boxes in by_sheet.items():

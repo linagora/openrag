@@ -327,7 +327,9 @@ def _display_line(chart: Chart, formatter: ValueFormatter) -> str | None:
 
 def _series_metadata(chart: Chart, formatter: ValueFormatter, capped: _Capped) -> list[dict]:
     entries = []
-    for _, number, series in _numbered(chart)[:_MAX_SERIES_METADATA]:
+    numbered = _numbered(chart)
+    capped.items(numbered, _MAX_SERIES_METADATA)
+    for _, number, series in numbered[:_MAX_SERIES_METADATA]:
         entries.append(
             {
                 "name": capped.text(_series_label(series, number)),
