@@ -109,6 +109,17 @@ async def test_06_empty_file():
     assert result.text_blocks == []
 
 
+@pytest.mark.parametrize("raw", [b"\xef", b"\xef\xbb"])
+async def test_truncated_bom_bytes_parse_like_the_same_file(tmp_path, raw):
+    path = tmp_path / "truncated-bom.csv"
+    path.write_bytes(raw)
+
+    from_path = await CsvParser().parse(Document(source_path=str(path)))
+    from_bytes = await CsvParser().parse(Document(raw_bytes=raw))
+
+    assert from_bytes.text_blocks == from_path.text_blocks == []
+
+
 async def test_07_inconsistent_column_count():
     document = Document(text="id,name\n1,Ali,extra")
 
