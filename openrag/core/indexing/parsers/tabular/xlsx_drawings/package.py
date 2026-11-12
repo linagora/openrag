@@ -136,23 +136,31 @@ def _hidden(properties: Element | None) -> bool:
 def _drawn(element: Element, hidden: bool = False):
     """Yield the shapes and graphic frames under ``element``: (element, hidden).
 
-    Each is visited once, groups included; a group hidden in Excel hides what
-    it holds. What ``mc:Fallback`` holds stands in for content old readers
-    cannot show ("This chart isn't available in your version of Excel"): it
-    duplicates the chosen content, so it is skipped.
+    Each is visited once, groups included, in document order; a group hidden
+    in Excel hides what it holds. What ``mc:Fallback`` holds stands in for
+    content old readers cannot show ("This chart isn't available in your
+    version of Excel"): it duplicates the chosen content, so it is skipped.
+    The walk uses its own stack, not recursion: groups nested thousands deep
+    in a crafted drawing cost memory, not a RecursionError.
     """
-    for child in element:
+    stack = [(iter(element), hidden)]
+    while stack:
+        children, inherited = stack[-1]
+        child = next(children, None)
+        if child is None:
+            stack.pop()
+            continue
         name = child.tag.rsplit("}", 1)[-1] if isinstance(child.tag, str) else ""
         if name == "Fallback":
             continue
         if name == "sp":
-            yield child, hidden
+            yield child, inherited
         elif name == "graphicFrame":
-            yield child, hidden or _hidden(child.find("{*}nvGraphicFramePr/{*}cNvPr"))
+            yield child, inherited or _hidden(child.find("{*}nvGraphicFramePr/{*}cNvPr"))
         elif name == "grpSp":
-            yield from _drawn(child, hidden or _hidden(child.find("{*}nvGrpSpPr/{*}cNvPr")))
+            stack.append((iter(child), inherited or _hidden(child.find("{*}nvGrpSpPr/{*}cNvPr"))))
         else:
-            yield from _drawn(child, hidden)
+            stack.append((iter(child), inherited))
 
 
 def _relationship_id(element: Element) -> str | None:
