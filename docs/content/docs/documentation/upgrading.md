@@ -119,7 +119,7 @@ The chart can check the GPU settings only where it can read them: in `env.config
 and in `env.secrets` when it renders the Secret itself. A `MARKER_*`, `DOCLING_*` or
 `WHISPER_*` value in an `env.existingSecret` or in a secret from an external secrets
 operator is not checked, and it overrides `env.config` at runtime. Keep these
-settings in `env.config`, or check the fit yourself.
+settings in `env.config` only, removed from that Secret, or check the fit yourself.
 
 The chart also drops `RAY_NUM_GPUS` from its defaults: OpenRAG never read it, so a
 copy in your values does nothing.
