@@ -91,7 +91,7 @@ The main application entry point is `openrag/api/main.py` which creates a FastAP
 - `MarkerPool` / `MarkerWorker` (`openrag/services/workers/parsers/marker_workers.py`) - Pool of workers for PDF processing with Marker
 
 **Pipeline Classes**:
-- `QueryService` (`openrag/services/orchestrators/query_service.py`) - Orchestrates retrieval and LLM generation, calling the steps in `openrag/services/capabilities/` (contextualize, scope, retrieve, web search, summarize) and then `AnswerService`
+- `ChatService` (`openrag/services/orchestrators/chat_service.py`) - Orchestrates retrieval and LLM generation, calling the steps in `openrag/services/capabilities/` (contextualize, scope, retrieve, web search, summarize) and then `AnswerService`
 - `RetrieverPipeline` (`openrag/core/retrieval/pipeline.py`) - Handles document retrieval and reranking
 - `Summarizer` (`openrag/services/capabilities/summarize.py`) - Map-reduce for processing large document sets
 

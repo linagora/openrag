@@ -579,7 +579,7 @@ class PartitionService:
                 self._validate_preset_refs({**current, **updates})
                 # Only the incoming value is checked — a *stored* name that went
                 # stale (endpoint deleted later) must not block unrelated PATCHes;
-                # QueryService falls back to the default LLM for those at runtime.
+                # ChatService falls back to the default LLM for those at runtime.
                 if updates.get("chat_llm"):
                     self._validate_chat_llm_ref(updates["chat_llm"])
                 if updates.get("embedder"):
@@ -761,7 +761,7 @@ class PartitionService:
         """Assignment-time check: ``chat_llm`` must name a catalogued LLM endpoint.
 
         Only guards assignment — a stored name can go stale afterwards (the
-        endpoint may be renamed or deleted), which QueryService tolerates by
+        endpoint may be renamed or deleted), which ChatService tolerates by
         falling back to the default LLM at request time.
         """
         if chat_llm not in self._require_config().models.llm:
@@ -865,7 +865,7 @@ class PartitionService:
             retrieval=RetrievalPipelineConfig(**ret_preset),
             collection_name=row.get("collection_name"),
             # This value feeds Settings.partitions, so it's what
-            # QueryService._resolve_chat_history_depth actually reads at chat time.
+            # ChatService._resolve_chat_history_depth actually reads at chat time.
             chat_history_depth=row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             chat_llm=row.get("chat_llm"),
             generation_prompt_names=row.get("generation_prompt_names") or {},
@@ -905,7 +905,7 @@ class PartitionService:
         """Value substituted for a partition row still holding the pre-guard ``0``.
 
         ``0`` used to mean "inherit the global default" (``config.rag.chat_history_depth``,
-        see ``QueryService._resolve_chat_history_depth``). New writes can no longer
+        see ``ChatService._resolve_chat_history_depth``). New writes can no longer
         produce ``0`` (``ge=1`` on ``CreatePartitionRequest``/``UpdatePartitionRequest``),
         but a row written before that guard existed may still have it stored — read it
         from the live config, not a hardcoded constant, so a legacy row keeps resolving

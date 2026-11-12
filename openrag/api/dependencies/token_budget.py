@@ -140,7 +140,7 @@ def max_prompt_tokens_for(
     """Tokens the prompt may take on the endpoint answering this request.
 
     Its context window (``get_max_model_tokens``: admin-set, else probed, else
-    the global fallback) minus the output budget. ``QueryService`` caps the
+    the global fallback) minus the output budget. ``ChatService`` caps the
     retrieved context to what is left of it once the instructions and the
     conversation are in. ``None`` for a client-supplied endpoint, whose window
     is unknown here.

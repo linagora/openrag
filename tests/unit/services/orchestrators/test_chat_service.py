@@ -1,4 +1,4 @@
-"""Unit tests for :class:`QueryService` (Phase 8C.2).
+"""Unit tests for :class:`ChatService` (Phase 8C.2).
 
 The Ray-backed LLM semaphore and the model-file-backed language detector
 are monkeypatched (both are infra concerns exercised in integration, not
@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-import services.orchestrators.query_service as qs
+import services.orchestrators.chat_service as qs
 from core.chat import smalltalk
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
@@ -24,9 +24,9 @@ from core.models.query import Query, SearchQueries
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
 from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
-from services.orchestrators.query_service import QueryService
+from services.orchestrators.chat_service import ChatService
 
-# Real prompt-template config (dir + key->filename mapping) so QueryService
+# Real prompt-template config (dir + key->filename mapping) so ChatService
 # can load its system / contextualizer / spoken-style templates from disk.
 _PROMPT_CFG = load_config()
 
@@ -167,8 +167,8 @@ def _config(mode="SimpleRag"):
     )
 
 
-def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> QueryService:
-    return QueryService(
+def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> ChatService:
+    return ChatService(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
         config=_config(mode),
@@ -277,7 +277,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
     of what this depth is meant to limit."""
     config = _config()
     config.rag.chat_history_depth = global_depth
-    svc = QueryService(
+    svc = ChatService(
         retrieval_service=FakeRetrieval(),
         llm=FakeLLM(),
         config=config,
@@ -2487,7 +2487,7 @@ async def test_websearch_with_partition_forwards_retrieval_diagnostic_overrides(
 async def test_answer_system_prompt_comes_from_prompt_service():
     # Revert-proves the query seam: the payload's system message is built from
     # prompt_service.resolve_prompt("sys_prompt", ...), resolved request-time —
-    # not a startup snapshot. Reverting query_service to load_template_by_key at
+    # not a startup snapshot. Reverting chat_service to load_template_by_key at
     # __init__ makes the marker disappear.
     class MarkerPromptService:
         def __init__(self):

@@ -114,7 +114,7 @@ class RetrievalIdentity:
         return static_reranker_identity(self._config, exists=self._static_reranker)
 
     def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
-        """Mirror QueryService's partition LLM resolution for public metadata."""
+        """Mirror ChatService's partition LLM resolution for public metadata."""
         if not self._catalog_llms:
             return "default"
         name = resolve_partition_chat_llm(list(partitions), self._partition_configs())

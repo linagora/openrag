@@ -1,23 +1,8 @@
-"""QueryService — RAG orchestration (Phase 8C.2).
+"""ChatService — orchestrates the chat and completions endpoints (was ``QueryService``).
 
-Rebuilt from ``components/pipeline.py:RagPipeline`` + ``map_reduce.py``.
-The hardest single extraction in Phase 8: query generation, retrieval,
-web search, map-reduce, context formatting, system-prompt assembly, and
-streaming all lived tangled in ``RagPipeline``.
-
-Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
-
-* **Structured output** — the legacy used a LangChain structured-output
-  chain for ``SearchQueries`` (query generation) and ``SummarizedChunk``
-  (map-reduce). 8H bans LangChain in orchestrators, so QueryService uses
-  the injected core ``LLM`` with a
-  JSON-instructed prompt + ``response_format=json_object`` and
-  ``json.loads`` into the Pydantic model, keeping the legacy fallbacks
-  (retry → raw user query; relevancy=False on parse failure).
-* **The router is pure transport.** It maps the partition, builds
-  request-bound source links (the ``prepare_sources`` callable keeps
-  ``request.url_for`` in transport), and wraps ``StreamingResponse`` /
-  ``JSONResponse``.
+The router is pure transport: it maps the partition, builds request-bound
+source links (the ``prepare_sources`` callable keeps ``request.url_for`` in
+transport), and wraps ``StreamingResponse`` / ``JSONResponse``.
 
 This module finds the sources and renders them into the prompt;
 ``AnswerService`` (``answer_service.py``) then calls the model, strips the
@@ -114,8 +99,8 @@ class _PrepareChatResult(NamedTuple):
     retry_empty_response: bool = True
 
 
-class QueryService:
-    """End-to-end RAG: query-gen → retrieve (+web) → map-reduce → answer."""
+class ChatService:
+    """End-to-end RAG: contextualize → retrieve (+web) → map-reduce → answer."""
 
     #: Used when the global ``rag.chat_history_depth`` config is < 1 — see
     #: PartitionService._CHAT_HISTORY_DEPTH_DEFAULT for the matching partition-side clamp.
@@ -962,4 +947,4 @@ def _messages_tokens(messages: list[dict]) -> int:
     return sum(message_tokens(message, length_function) for message in messages)
 
 
-__all__ = ["QueryService"]
+__all__ = ["ChatService"]

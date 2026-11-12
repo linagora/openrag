@@ -72,13 +72,13 @@ def test_layer_boundaries_only_apply_to_application_layers(tmp_path, monkeypatch
         ("openrag/api/routers/user/chat.py", "import langgraph", True),
         ("tests/unit/services/chat/test_classic.py", "from langgraph.graph import StateGraph", False),
         # The chat path uses OpenRag's LLM port, not LangChain's model layer.
-        ("openrag/services/orchestrators/query_service.py", "from langchain_core.messages import HumanMessage", True),
-        ("openrag/services/orchestrators/query_service.py", "from langchain_core import messages", True),
+        ("openrag/services/orchestrators/chat_service.py", "from langchain_core.messages import HumanMessage", True),
+        ("openrag/services/orchestrators/chat_service.py", "from langchain_core import messages", True),
         ("openrag/services/inference/client.py", "import langchain_openai", True),
         ("openrag/services/storage/loader.py", "from langchain_community.document_loaders import PyPDFLoader", True),
         ("openrag/core/models/chunk.py", "from langchain_core.documents.base import Document", False),
         ("openrag/core/utils/text.py", "from langchain_openai import ChatOpenAI", False),
-        ("openrag/services/orchestrators/query_service.py", "from langchain_core.documents import Document", False),
+        ("openrag/services/orchestrators/chat_service.py", "from langchain_core.documents import Document", False),
     ],
 )
 def test_third_party_import_rules(tmp_path, monkeypatch, capsys, relative_path, source, rejected):

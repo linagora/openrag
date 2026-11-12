@@ -6,7 +6,7 @@ admin-configured ``max_llm_context_size``, else the ``max_model_len`` its
 after every endpoint write, cached per endpoint name), else the global
 ``llm_context`` fallback. The endpoint is the partition's ``chat_llm`` when the
 request's partitions agree on one (``resolve_partition_chat_llm``, the rule
-``QueryService`` answers with), else the ``"default"`` alias.
+``ChatService`` answers with), else the ``"default"`` alias.
 
 The probe cache is process state: the API's lifespan primes it, and the admin
 model-endpoint routes invalidate and re-prime it.
@@ -222,7 +222,7 @@ def resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None) 
     """Effective LLM endpoint registry name for *partitions*.
 
     Delegates to ``resolve_partition_chat_llm`` — the same consensus rule
-    ``QueryService._resolve_llm`` uses to pick the LLM that actually answers
+    ``ChatService._resolve_llm`` uses to pick the LLM that actually answers
     the request — so the token preflight is checked against the budget of the
     model that will really be called, not always the global default. Falls
     back to the ``"default"`` alias (see ``ModelEndpointService``) when no
@@ -230,7 +230,7 @@ def resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None) 
 
     A partition's ``chat_llm`` can also go **stale** — the endpoint it names
     may have been deleted or renamed after assignment (nothing cascades the
-    reference). ``QueryService._resolve_llm`` handles that by catching the
+    reference). ``ChatService._resolve_llm`` handles that by catching the
     factory ``KeyError`` and answering with the catalog default; the preflight
     must converge on the same endpoint, otherwise it would check the request
     against the global budget while a differently-sized default endpoint

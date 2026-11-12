@@ -103,7 +103,7 @@ class RetrievalPipelineFactory:
     def reranker(self, name: str | None, partition: str) -> tuple[Reranker | None, dict[str, object]]:
         """Effective reranker for one partition's retrieval pipeline.
 
-        Resolution order — mirrors ``QueryService._resolve_llm``:
+        Resolution order — mirrors ``ChatService._resolve_llm``:
 
         1. The partition's configured ``reranker`` endpoint, resolved fresh via
            the model-endpoint catalog factory so a rename/promotion of that
@@ -152,7 +152,7 @@ class RetrievalPipelineFactory:
     def _default_reranker_name(self) -> str:
         """Real endpoint name behind the catalog reranker ``"default"`` alias, for logging.
 
-        Same identity-lookup trick as ``QueryService._default_llm_name``: the
+        Same identity-lookup trick as ``ChatService._default_llm_name``: the
         ``"default"`` alias config object is the *same* object as its real-named
         entry, so the name is recovered by identity. Returns ``"default"`` when
         it can't be resolved (e.g. the alias isn't populated yet).
@@ -204,7 +204,7 @@ class RetrievalPipelineFactory:
         """The settings *partition_cfg*'s pipeline is built from, after the caller's overrides.
 
         Only what the pipeline reads: a preset field it ignores (the reranker
-        when reranking is off, the contextualizer prompt, which QueryService
+        when reranking is off, the contextualizer prompt, which ChatService
         reads, a value the caller overrides) cannot split partitions into
         separate retrievals.
         """

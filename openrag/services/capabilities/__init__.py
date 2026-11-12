@@ -2,7 +2,7 @@
 
 Each one takes what it needs from outside (the LLM, the prompt library,
 retrieval, web search, the clock, the language detector) in its constructor,
-so it is testable on its own. ``QueryService`` calls them in order today; the
+so it is testable on its own. ``ChatService`` calls them in order today; the
 ``classic`` graph will call them as nodes, and the ``agentic`` one as tools.
 
 - ``contextualize``: the conversation rewritten into search queries.

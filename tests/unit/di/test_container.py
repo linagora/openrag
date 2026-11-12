@@ -446,7 +446,7 @@ _ORCHESTRATORS = [
     ("workspace_service", "get_workspace_service"),
     ("retrieval_service", "get_retrieval_service"),
     ("retrieval_snapshot_service", "get_retrieval_snapshot_service"),
-    ("query_service", "get_query_service"),
+    ("chat_service", "get_chat_service"),
     ("indexing_service", "get_indexing_service"),
     ("job_service", "get_job_service"),
     ("conversion_service", "get_conversion_service"),
@@ -500,7 +500,7 @@ class TestPhase8OrchestratorWiring:
         monkeypatch.setattr("services.websearch.WebSearchFactory.create_service", lambda settings: None)
 
         container.retrieval_service
-        container.query_service
+        container.chat_service
 
         assert len(built) == 3
         assert [getattr(client, PROVIDER_NAME_ATTR, None) for client in built] == ["default"] * 3

@@ -630,7 +630,7 @@ class TestProbePending:
 
 
 class TestMaxPromptTokens:
-    """What the router hands QueryService to cap the retrieved sources: the
+    """What the router hands ChatService to cap the retrieved sources: the
     answering endpoint's window minus the output budget."""
 
     def test_window_minus_output_budget(self, monkeypatch):
@@ -764,7 +764,7 @@ class TestPartitionResolvedMaxModelTokens:
     def test_stale_partition_preset_falls_back_to_default_endpoint_budget(self, monkeypatch):
         """A partition ``chat_llm`` naming an endpoint that was later deleted or
         renamed (nothing cascades the preset) must resolve the preflight to the
-        catalog default — mirroring ``QueryService._resolve_llm``'s KeyError
+        catalog default — mirroring ``ChatService._resolve_llm``'s KeyError
         fallback — so the budget matches the endpoint that actually answers.
 
         Otherwise the preflight would fall to the *global* budget while the

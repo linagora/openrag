@@ -1,8 +1,8 @@
-"""OpenAI-compatible RAG endpoints — thin HTTP layer over QueryService.
+"""OpenAI-compatible RAG endpoints — thin HTTP layer over ChatService.
 
 The RAG flow (query generation, retrieval, web search, map-reduce,
 context/prompt assembly, streaming, and the ``[Sources: N]`` citation
-filtering) lives in ``services.orchestrators.query_service.QueryService`` and
+filtering) lives in ``services.orchestrators.chat_service.ChatService`` and
 ``AnswerService``. This module keeps HTTP transport only: model→partition
 resolution, the OpenAI ``/models`` listing, request-bound source-link building
 (``__prepare_sources`` uses ``request.url_for`` so it stays here and is
@@ -35,7 +35,7 @@ from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from core.utils.text import sanitize_text
 from core.utils.web_url import normalize_web_url
-from di.providers import get_config, get_partition_service, get_query_service
+from di.providers import get_chat_service, get_config, get_partition_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -182,7 +182,7 @@ async def openai_chat_completion(
     request: OpenAIChatCompletionRequest = Body(...),
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    service=Depends(get_query_service),
+    service=Depends(get_chat_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
@@ -337,7 +337,7 @@ async def openai_completion(
     request: OpenAICompletionRequest,
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    service=Depends(get_query_service),
+    service=Depends(get_chat_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
 ):

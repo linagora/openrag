@@ -59,7 +59,7 @@ def test_only_chatbotrag_rewrites_the_queries(mode, rewrites):
 
 @pytest.mark.asyncio
 async def test_the_dates_come_from_the_clock_it_is_given():
-    """``QueryService`` gives it the UTC clock (tested there); the anchors and the
+    """``ChatService`` gives it the UTC clock (tested there); the anchors and the
     current date the model copies are that clock's, with the ``+00:00`` the
     Milvus filter requires."""
     payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})

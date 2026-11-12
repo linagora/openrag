@@ -329,7 +329,7 @@ class RetrievalService:
 
         Without ``rerank`` this is a faithful port of ``indexer.asearch`` + the
         legacy ``_expand_with_related_chunks`` (no query generation / reranking —
-        those belong to QueryService). Partitions on different embedders are
+        those belong to ChatService). Partitions on different embedders are
         searched separately, each with its own model's query embedding; their
         hits are fused with RRF and cut to ``top_k`` before the surrounding
         chunks are added.

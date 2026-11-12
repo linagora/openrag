@@ -34,7 +34,7 @@ import core.prompts.chat_prompt_builder as chat_prompt_builder
 import core.utils.text as text_utils
 import pytest
 import services.inference.runtime as inference_runtime
-import services.orchestrators.query_service as qs
+import services.orchestrators.chat_service as qs
 from api.dependencies import model_limits
 from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
 from api.dependencies.retrieval_diagnostics import RetrievalDiagnosticsGuard, get_retrieval_diagnostics_guard
@@ -49,10 +49,10 @@ from core.models.preset import PartitionConfig
 from core.models.retrieval_result import ScoredChunk
 from core.models.workspace import WorkspaceScope
 from core.websearch import WebResult
-from di.providers import get_config, get_partition_service, get_query_service
+from di.providers import get_chat_service, get_config, get_partition_service
 from fastapi import FastAPI
+from services.orchestrators.chat_service import ChatService
 from services.orchestrators.prompt_service import PromptService
-from services.orchestrators.query_service import QueryService
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "chat_characterization"
 UPDATE_SNAPSHOTS = os.environ.get("UPDATE_CHAT_SNAPSHOTS") == "1"
@@ -649,7 +649,7 @@ def _settings(scenario: Scenario) -> Settings:
     return settings
 
 
-def _build_chat_service(settings: Settings, scenario: Scenario, calls: dict[str, list]) -> QueryService:
+def _build_chat_service(settings: Settings, scenario: Scenario, calls: dict[str, list]) -> ChatService:
     """The chat service under test, wired to the fakes. Follows the refactor."""
     llms = {name: FakeLLM(name, calls["llm"], scenario.script) for name in ("static", "default", scenario.hr_chat_llm)}
 
@@ -658,7 +658,7 @@ def _build_chat_service(settings: Settings, scenario: Scenario, calls: dict[str,
             raise KeyError(name)
         return llms[name]
 
-    return QueryService(
+    return ChatService(
         retrieval_service=FakeRetrieval(calls["retrieval"], list(scenario.chunks)),
         llm=llms["static"],
         config=settings,
@@ -669,7 +669,7 @@ def _build_chat_service(settings: Settings, scenario: Scenario, calls: dict[str,
     )
 
 
-def _app(settings: Settings, service: QueryService, user: dict) -> FastAPI:
+def _app(settings: Settings, service: ChatService, user: dict) -> FastAPI:
     app = FastAPI()
     register_error_handlers(app)
     app.include_router(chat.router, prefix="/v1")
@@ -683,7 +683,7 @@ def _app(settings: Settings, service: QueryService, user: dict) -> FastAPI:
 
     app.dependency_overrides[current_user] = lambda: user
     app.dependency_overrides[current_user_or_admin_partitions_list] = lambda: list(PARTITIONS)
-    app.dependency_overrides[get_query_service] = lambda: service
+    app.dependency_overrides[get_chat_service] = lambda: service
     app.dependency_overrides[get_partition_service] = FakePartitions
     app.dependency_overrides[get_config] = lambda: settings
     app.dependency_overrides[get_retrieval_diagnostics_guard] = lambda: RetrievalDiagnosticsGuard("1000/minute")

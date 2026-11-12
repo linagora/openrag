@@ -35,8 +35,8 @@ from core.utils.consts import MAX_RERANK_CANDIDATES, RETRIEVAL_SCORE_KEYS
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import (
+    get_chat_service,
     get_config,
-    get_query_service,
     get_retrieval_service,
     get_retrieval_snapshot_service,
     get_workspace_service,
@@ -246,7 +246,7 @@ async def retrieval_diagnostics(
     partition: str,
     payload: RetrievalDiagnosticRequest,
     partition_viewer=Depends(require_partition_viewer),
-    service=Depends(get_query_service),
+    service=Depends(get_chat_service),
     config=Depends(get_config),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
