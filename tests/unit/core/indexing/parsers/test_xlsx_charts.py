@@ -2680,7 +2680,9 @@ def test_worst_case_chart_metadata_fits_the_store_without_its_truncation():
     metadata = chart.metadata
 
     assert metadata["chart_metadata_truncated"] is True
-    assert metadata["chart_series_count"] == 300 and len(metadata["chart_series"]) == 64
+    # At most 64 entries, fewer when their bytes do not fit the budget.
+    assert metadata["chart_series_count"] == 300 and 0 < len(metadata["chart_series"]) <= 64
+    assert len(json.dumps(metadata, ensure_ascii=True).encode()) <= 32 * 1024
     assert (
         len(json.dumps(metadata, ensure_ascii=False).encode())
         < MAX_DYNAMIC_FIELD_BYTES - DEFAULT_JSON_SAFETY_MARGIN_BYTES
@@ -2875,3 +2877,43 @@ def test_a_prefetched_value_is_not_reported_unread_when_its_format_lookup_is_ski
     assert "were not read" not in chart.text
     issues = chart.metadata["workbook_chart_issues"]
     assert issues and all("lookups were skipped" in issue for issue in issues)
+
+
+# --- review round 4: a byte budget, not only character caps ------------------
+
+
+def test_multibyte_chart_metadata_fits_a_byte_budget_and_is_flagged():
+    """Codex's case: 64 series, 128-character Unicode names, references on a
+    30-character Unicode sheet name. Character caps alone left about 70 KB."""
+    import copy
+    import json
+
+    from services.storage.milvus_store import (
+        DEFAULT_JSON_SAFETY_MARGIN_BYTES,
+        MAX_DYNAMIC_FIELD_BYTES,
+        _fit_milvus_row_limits,
+    )
+
+    sheet = "Données géographiques élevées"[:30]
+    categories = ("Data!$A$2:$A$3", ["Q1", "Q2"])
+    series = [
+        _series(
+            ("Évolution année " * 10)[:120] + f" {index:03d}",
+            categories,
+            (f"'{sheet}'!$B$2:$B$3", [index, index]),
+            index=index,
+            name_ref=f"'{sheet}'!$B$1",
+        )
+        for index in range(64)
+    ]
+    (chart,) = _charts(_workbook_with_chart(_chart_xml([_plot("barChart", series)])))
+    metadata = chart.metadata
+
+    # Measured the way an escaping JSON encoder writes it: the worst case.
+    escaped = len(json.dumps(metadata, ensure_ascii=True).encode())
+    assert escaped <= 32 * 1024 < MAX_DYNAMIC_FIELD_BYTES - DEFAULT_JSON_SAFETY_MARGIN_BYTES
+    assert metadata["chart_metadata_truncated"] is True
+    assert metadata["chart_series_count"] == 64 and len(metadata["chart_series"]) < 64
+    entity = {"text": "chunk", "file_id": "f", "partition": "p", **copy.deepcopy(metadata)}
+    _fit_milvus_row_limits(entity, static_fields={"text", "vector", "sparse", "_id", "partition", "file_id"})
+    assert {key: entity[key] for key in metadata} == metadata

@@ -36,7 +36,14 @@ from .references import (
     resolve_ranges,
     series_values,
 )
-from .render import RenderedChart, ValueFormatter, complete_chart, render_chart, render_text_boxes
+from .render import (
+    RenderedChart,
+    ValueFormatter,
+    complete_chart,
+    fit_chart_metadata,
+    render_chart,
+    render_text_boxes,
+)
 from .shapes import ShapeText, drawn_texts
 
 logger = get_logger()
@@ -1119,6 +1126,7 @@ class WorkbookCharts:
         rendered.metadata["chart_source_table_ids"] = tables[:_MAX_SOURCE_TABLES]
         if len(tables) > _MAX_SOURCE_TABLES:
             rendered.metadata["chart_metadata_truncated"] = True
+        fit_chart_metadata(rendered.metadata)
         return rendered
 
     def before_sheet(self, sheet_index: int) -> Iterator[RenderedChart]:

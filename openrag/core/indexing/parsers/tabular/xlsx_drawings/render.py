@@ -25,6 +25,7 @@ out.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, time
@@ -51,6 +52,38 @@ _MAX_SERIES_METADATA = 64
 _MAX_METADATA_TEXT = 128
 _MAX_METADATA_TITLE = 512
 _MAX_METADATA_LIST = 64
+# Character caps cannot bound bytes: multibyte names, escaped by a JSON
+# encoder that writes non-ASCII as \uXXXX (6 bytes a character), can still
+# outgrow the field. Chart metadata must fit this many bytes in that worst
+# encoding, half the 64 KiB field, leaving the rest to the chunk's other keys.
+_MAX_METADATA_BYTES = 32 * 1024
+
+
+def _json_bytes(value: Any) -> int:
+    # Escaped non-ASCII and default separators: the largest common encoding.
+    return len(json.dumps(value, ensure_ascii=True))
+
+
+def fit_chart_metadata(metadata: dict) -> None:
+    """Fit chart metadata in :data:`_MAX_METADATA_BYTES`, in place, flagging any cut.
+
+    Series entries go first, from the last; then the context line and title
+    are shortened. The chunk text keeps every label.
+    """
+    size = _json_bytes(metadata)
+    series = metadata.get("chart_series") or []
+    while size > _MAX_METADATA_BYTES and series:
+        series.pop()
+        metadata["chart_metadata_truncated"] = True
+        size = _json_bytes(metadata)
+    for key in ("chart_context", "chart_title"):
+        if size <= _MAX_METADATA_BYTES:
+            break
+        value = metadata.get(key)
+        if isinstance(value, str) and len(value) > _MAX_METADATA_TEXT:
+            metadata[key] = value[: _MAX_METADATA_TEXT - 1] + "…"
+            metadata["chart_metadata_truncated"] = True
+            size = _json_bytes(metadata)
 
 
 class _Capped:
@@ -536,6 +569,7 @@ def render_chart(
         "spreadsheet_backend": "ooxml",
     }
     metadata["chart_metadata_truncated"] = capped.truncated
+    fit_chart_metadata(metadata)
     return RenderedChart(text, metadata, tuple(header_plots) if deferred else None)
 
 
@@ -569,6 +603,7 @@ def complete_chart(rendered: RenderedChart, chart: Chart, formatter: ValueFormat
         entry["display_format"] = formatter.display(series.values)
     metadata["chart_series"] = entries
     metadata["chart_metadata_truncated"] = metadata.get("chart_metadata_truncated", False) or capped.truncated
+    fit_chart_metadata(metadata)
     return RenderedChart(_bounded(text, max_bytes), metadata)
 
 
