@@ -56,6 +56,19 @@ class XlsxLimits:
     # Part of max_spool_bytes kept in memory before the temporary file is used.
     # Typical side-by-side sheets fit, so they never depend on a usable TMPDIR.
     max_spool_memory_bytes: int = 32 * 1024 * 1024
+    # Charts read across the workbook; later ones are skipped, never rejected.
+    max_charts: int = 256
+    # Size of one drawing or chart part, read whole when the workbook is parsed.
+    # Cached values make charts large: 10 series x 5,000 points is about 4 MB.
+    max_chart_part_bytes: int = 16 * 1024 * 1024
+    # Chart parts read across the workbook (about 2-3 s of parsing at most);
+    # later charts are skipped, never rejected.
+    max_chart_bytes: int = 64 * 1024 * 1024
+    # Data points rendered per chart; the chunk says when points were left out.
+    max_chart_points: int = 5_000
+    # A chart over data already indexed as worksheet tables repeats at most
+    # this many points; past it, it keeps a summary and points to the tables.
+    max_chart_points_from_tables: int = 200
 
     def __post_init__(self):
         for field in fields(self):

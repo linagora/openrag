@@ -340,6 +340,7 @@ _BUILDERS: dict[str, Any] = {
         "xlsx",
         batch_size=d._config.loader.xlsx_batch_size,
         limits=d._config.loader.xlsx_limits,
+        charts=d._config.loader.xlsx_charts,
     ),
 }
 

@@ -85,10 +85,11 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `XLSX_BATCH_SIZE` | `int` | `10000` | Positive number of data rows per parser batch for `.xlsx` and `.xlsm` workbooks. The rendered batch byte limit can flush a batch earlier. This is independent of the chunk token budget. |
+| `XLSX_CHARTS` | `str` | `full` | Charts in workbooks: `full` indexes every chart with its data, including data plotted from hidden worksheets; `without_hidden_data` indexes every chart but leaves out values, labels and names read from hidden worksheets, rows or columns; `off` reads no chart. |
 
 Set archive, worksheet, cell, and batch byte limits through `loader.xlsx_limits` in YAML; there are no individual environment-variable overrides for these limits. Unknown limit names, non-integer values, and non-positive values are rejected. Rows waiting for their table's turn in the single worksheet pass use memory first, then a temporary file in the standard `TMPDIR`; a read-only or full `TMPDIR` only makes large worksheets fall back to slower per-table reads, never changes what is indexed. Header selection is automatic per table; the former `XLSX_HEADER_ROW` and per-sheet header settings are no longer supported.
 
-See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, formula handling, hidden content, and default safety limits.
+See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, charts, formula handling, hidden content, and default safety limits.
 
 #### PDF Loader
 ##### PyMuPDF Loader Configuration

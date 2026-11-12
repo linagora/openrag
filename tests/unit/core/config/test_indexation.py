@@ -52,6 +52,19 @@ def test_xlsx_limits_validate_names_at_config_load():
         LoaderConfig(xlsx_limits={"max_table": 3})
 
 
+def test_xlsx_charts_mode_defaults_to_full_and_rejects_unknown_modes():
+    assert LoaderConfig().xlsx_charts == "full"
+    assert LoaderConfig(xlsx_charts="off").xlsx_charts == "off"
+    with pytest.raises(ValidationError):
+        LoaderConfig(xlsx_charts="hidden")
+
+
+def test_xlsx_charts_mode_can_be_set_by_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("XLSX_CHARTS", "without_hidden_data")
+
+    assert load_config(config_path=tmp_path).loader.xlsx_charts == "without_hidden_data"
+
+
 def test_transcriber_config_default_direct_upload_suffixes():
     cfg = TranscriberConfig()
     assert cfg.direct_upload_suffixes == set(_DEFAULT_DIRECT_UPLOAD_SUFFIXES)

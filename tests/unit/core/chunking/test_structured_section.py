@@ -950,3 +950,26 @@ def test_crlf_document_chunks_like_the_lf_document():
 
     assert [norm(c.text) for c in crlf_chunks] == [c.text for c in lf_chunks]
     assert [c.chunk_type for c in crlf_chunks] == [c.chunk_type for c in lf_chunks]
+
+
+def test_chart_pieces_fit_the_ceiling_lowered_by_hard_max_tokens():
+    """A chart is split like a packed chunk: the source header included, under
+    a ceiling a small-context embedder lowered below ``chunk_size``."""
+    rows = "\n".join(f"| 2026-{month:02d} | {100 + month} | {90 + month} |" for month in range(1, 13)) * 5
+    text = (
+        "Chart: Actual vs target\nType: clustered column chart + line chart\nWorksheet: Sales\n\n"
+        f"| Month | Actual | Target |\n| --- | --- | --- |\n{rows}"
+    )
+    doc = _doc(
+        text,
+        filename="book.xlsx",
+        tabular_format="xlsx",
+        xlsx_content_kind="chart",
+        chart_context="Chart: Actual vs target (clustered column chart + line chart), worksheet Sales",
+    )
+    chunker = _chunker(chunk_size=400, hard_max_tokens=80)
+    chunks = chunker.chunk(doc)
+
+    assert len(chunks) > 1
+    assert all(_words(chunk.text) <= 80 for chunk in chunks)
+    assert all("| Month | Actual | Target |" in chunk.text for chunk in chunks)
