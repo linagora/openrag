@@ -16,7 +16,7 @@ import threading
 import ray
 import torch
 from core.config import load_config
-from core.indexing.image_preprocessor import pil_to_png_bytes
+from core.indexing.image_preprocessor import decode_data_uri
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
@@ -175,9 +175,9 @@ class DoclingLoader(BasePooledParser):
         async with document.as_temporary_file() as path:
             result: ConversionResult = await self._dispatch(str(path))
 
-        # Exporting each page re-walks the whole document and every picture is
-        # PNG-encoded: it can take minutes of CPU on a large PDF. On the loop that
-        # starves the lease renewals of every other file on this worker.
+        # Exporting each page re-walks the whole document: it can take minutes of
+        # CPU on a large PDF. On the loop that starves the lease renewals of every
+        # other file on this worker.
         # A timeout or cancel cannot interrupt the thread; the event tells it to stop.
         cancelled = threading.Event()
         try:
@@ -230,29 +230,33 @@ class DoclingLoader(BasePooledParser):
 
     @staticmethod
     def _build_image_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[ImageBlock]:
+        """One ``ImageBlock`` per picture, without encoding any of them.
+
+        Docling PNG-encoded each picture into its ``data:`` URI when it generated
+        it, so those bytes are reused as they are. A picture without one keeps its
+        decoded image in ``pil_image``, which the caption stage encodes only when
+        it captions the document.
+        """
         blocks: list[ImageBlock] = []
-        pictures = result.document.pictures
-        total = len(pictures)
-        if total:
-            report_parser_substage("parse.images", "Extracting images", progress=0, total=total)
-        for idx, picture in enumerate(pictures):
+        for idx, picture in enumerate(result.document.pictures):
             if cancelled is not None and cancelled.is_set():
                 break
             try:
-                pil_image = picture.image.pil_image
-                if pil_image is not None:
-                    png_bytes = pil_to_png_bytes(pil_image)
-                    ref = f"![](docling_img_{idx})"
-                    blocks.append(
-                        ImageBlock(
-                            image_bytes=png_bytes,
-                            mime_type="image/png",
-                            metadata={"markdown_ref": ref},
-                        )
-                    )
+                uri = str(getattr(picture.image, "uri", None) or "")
+                png_bytes = decode_data_uri(uri) if uri.startswith("data:image/png;") else None
+                pil_image = None if png_bytes else picture.image.pil_image
             except Exception as exc:
-                logger.warning(f"Failed to encode Docling picture {idx}: {exc}")
-            report_parser_substage("parse.images", "Extracting images", progress=idx + 1, total=total)
+                logger.warning(f"Failed to read Docling picture {idx}: {exc}")
+                continue
+            if png_bytes or pil_image is not None:
+                blocks.append(
+                    ImageBlock(
+                        image_bytes=png_bytes or b"",
+                        pil_image=pil_image,
+                        mime_type="image/png",
+                        metadata={"markdown_ref": f"![](docling_img_{idx})"},
+                    )
+                )
         return blocks
 
 
