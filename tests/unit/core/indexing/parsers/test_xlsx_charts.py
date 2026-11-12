@@ -1260,14 +1260,18 @@ def _cx_axis(axis_id, scaling, title=None) -> str:
     return f'<cx:axis id="{axis_id}"><cx:{scaling}/>{title_xml}</cx:axis>'
 
 
-def _workbook_with_chartex(chartex_xml: str, *, alternate_content: bool = True, hidden_sheet: bool = False) -> bytes:
+def _workbook_with_chartex(
+    chartex_xml: str, *, alternate_content: bool = True, hidden_sheet: bool = False, base: bytes | None = None
+) -> bytes:
     """Turn the classic chart frame into an Office 2016 one, as Excel writes it.
 
     With ``hidden_sheet``, the workbook also has a hidden sheet named Secret.
     """
     import re
 
-    if hidden_sheet:
+    if base is not None:
+        raw = base
+    elif hidden_sheet:
         workbook = Workbook()
         data = _data_sheet(workbook)
         secret = workbook.create_sheet("Secret")
@@ -2105,18 +2109,33 @@ def test_series_name_and_title_on_hidden_cells_are_withheld():
     assert "Secret title" in full.text and "Secret name" in full.text
 
 
-def test_unmappable_cache_over_hidden_rows_is_read_from_the_visible_cells():
-    """Two label columns cannot be mapped point by point to their cells: the
-    cache is dropped and the visible cells are read, so no hidden label stays."""
+def test_a_hidden_row_leaves_a_two_level_category_cache_with_its_point():
+    """One cached label per row: the hidden row's point leaves from the cache."""
     workbook = _data_with_hidden_row(3)
     series = _series("S", ("Data!$A$2:$B$4", ["Jan", "SECRET", "Mar"]), ("Data!$C$2:$C$4", [200, 201, 202]))
     raw = _replace_parts(_save(workbook), {"xl/charts/chart1.xml": _chart_xml([_plot("barChart", [series])])})
 
     (chart,) = _charts(raw, mode="without_hidden_data")
 
-    assert "SECRET" not in chart.text and "Feb" not in chart.text
-    assert "| 100 / Jan | 200 |" in chart.text or "| Jan / 100 | 200 |" in chart.text
-    assert "| 202 |" in chart.text
+    assert "SECRET" not in chart.text and "201" not in chart.text
+    assert "| Jan | 200 |" in chart.text and "| Mar | 202 |" in chart.text
+
+
+def test_a_hidden_label_level_is_read_again_from_the_visible_cells():
+    """A combined cached label cannot lose one level: the visible cells are read."""
+    workbook = Workbook()
+    sheet = _data_sheet(workbook)
+    sheet.column_dimensions["B"].hidden = True
+    _add_chart(sheet, sheet)
+    series = _series(
+        "S", ("Data!$A$2:$B$4", ["Jan / SECRET", "Feb / SECRET", "Mar / SECRET"]), ("Data!$C$2:$C$4", [200, 201, 202])
+    )
+    raw = _replace_parts(_save(workbook), {"xl/charts/chart1.xml": _chart_xml([_plot("barChart", [series])])})
+
+    (chart,) = _charts(raw, mode="without_hidden_data")
+
+    assert "SECRET" not in chart.text
+    assert "| Feb | 201 |" in chart.text
 
 
 def _corrupt_member(raw: bytes, name: str) -> bytes:
@@ -2408,3 +2427,95 @@ def test_trendlines_are_named():
     (chart,) = _charts(_workbook_with_chart(_chart_xml([_plot("lineChart", [series])])))
 
     assert "Trendlines: 2025: Trend (moving average (period 2) trendline), linear trendline." in chart.text
+
+
+# --- one visibility decision per point; what counts as already indexed -------
+
+
+def test_waterfall_totals_move_with_the_points_left_out():
+    """Start (a total) sits on a hidden row: End stays named, Sales is not a total."""
+    base = _save(_data_with_hidden_row(2))
+    (chart,) = _charts(_workbook_with_chartex(_waterfall(), base=base))
+
+    assert "Totals (bars showing the running total): End." in chart.text
+    assert "| Start |" not in chart.text
+
+
+def test_offset_category_and_value_ranges_stay_paired_around_a_hidden_row():
+    workbook = _data_with_hidden_row(3)
+    series = _series("S", ("Data!$A$2:$A$4", ["Jan", "Feb", "Mar"]), ("Data!$C$5:$C$7", [10, 20, 30]))
+    raw = _replace_parts(_save(workbook), {"xl/charts/chart1.xml": _chart_xml([_plot("barChart", [series])])})
+
+    (chart,) = _charts(raw)
+
+    assert "| Jan | 10 |" in chart.text and "| Mar | 30 |" in chart.text
+    assert "| 20 |" not in chart.text and "Feb" not in chart.text
+
+
+def _literal_values_series() -> str:
+    literal = '<c:numLit><c:ptCount val="3"/>' + "".join(
+        f'<c:pt idx="{index}"><c:v>{value}</c:v></c:pt>' for index, value in enumerate((7, 8, 9))
+    )
+    series = _series("Typed", ("Data!$A$2:$A$4", ["Jan", "Feb", "Mar"]), ("Data!$B$2:$B$4", [1, 2, 3]))
+    return series.replace(
+        '<c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:ptCount val="3"/>'
+        '<c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt><c:pt idx="2"><c:v>3</c:v></c:pt>'
+        "</c:numCache></c:numRef></c:val>",
+        f"<c:val>{literal}</c:numLit></c:val>",
+    )
+
+
+def test_literal_values_keep_the_chart_data_over_an_indexed_table():
+    """The categories are in a table, the typed values are not: the data stays."""
+    xml = _chart_xml([_plot("barChart", [_literal_values_series()])])
+    (chart,) = _charts(_workbook_with_chart(xml), max_chart_points_from_tables=1)
+
+    assert chart.metadata["chart_data_in_tables"] is False
+    assert "| Feb | 8 |" in chart.text
+
+
+def test_text_data_labels_keep_the_chart_data_over_an_indexed_table():
+    xml = _chart_xml([_plot("barChart", [_labelled_series(_custom_label(1, "Supplier strike"))])])
+    (chart,) = _charts(_workbook_with_chart(xml), max_chart_points_from_tables=1)
+
+    assert chart.metadata["chart_data_in_tables"] is False
+    assert "Supplier strike" in chart.text
+
+
+def test_a_chart_plotting_cells_its_table_left_out_keeps_its_data():
+    """plotVisOnly off: the chart shows a row hidden by hand, which no table indexed."""
+    workbook = _data_with_hidden_row(3)
+    months = ("Data!$A$2:$A$4", ["Jan", "Feb", "Mar"])
+    xml = _chart_xml([_plot("barChart", [_series("2025", months, ("Data!$B$2:$B$4", [100, 101.5, 3]))])]).replace(
+        '<c:plotVisOnly val="1"/>', '<c:plotVisOnly val="0"/>'
+    )
+    raw = _replace_parts(_save(workbook), {"xl/charts/chart1.xml": xml})
+    (chart,) = _charts(raw, max_chart_points_from_tables=1)
+
+    assert chart.metadata["chart_data_in_tables"] is False
+    assert "| Feb | 101.5 |" in chart.text
+
+
+def test_a_chart_section_longer_than_a_chunk_is_split_with_the_chart_context():
+    """A notes paragraph (300 waterfall totals) or a heading over the budget no
+    longer makes one oversized piece: each part fits and names its chart."""
+    from core.chunking.markdown_utils import chunk_xlsx_chart
+
+    def words(text: str) -> int:
+        return len(text.split())
+
+    totals = "Totals (bars showing the running total): " + ", ".join(f"step{index}" for index in range(300)) + "."
+    content = "Chart: Cash flow\nType: waterfall chart\n\n| Step | Amount |\n| --- | --- |\n| A | 1 |\n\n" + totals
+    context = "Chart: Cash flow (waterfall chart), worksheet Data"
+    pieces = chunk_xlsx_chart(content, {"chart_context": context}, 60, words)
+
+    assert all(words(piece) <= 60 for piece in pieces)
+    assert all(piece.startswith(context) for piece in pieces[1:])
+    assert "step0" in "".join(pieces) and "step299" in "".join(pieces)
+
+    heading = "Chart: " + " ".join(f"title{index}" for index in range(100))
+    pieces = chunk_xlsx_chart(
+        heading + "\n\n| X | Y |\n| --- | --- |\n| a | 1 |", {"chart_context": context}, 40, words
+    )
+    assert all(words(piece) <= 40 for piece in pieces)
+    assert "| a | 1 |" in pieces[-1]

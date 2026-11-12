@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import zipfile
+from bisect import bisect_left
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any
@@ -214,25 +215,34 @@ def _filled(
         cells = series_values(cell_range, grid) if grid is not None else ()
         return " ".join(cell for cell in cells if cell) or None
 
-    def values_of(formula: str | None) -> tuple[tuple[str, ...] | None, int | None]:
-        """Return the series values and, when only part was read, the range's size."""
+    def values_of(formula: str | None, positions: frozenset[int]) -> tuple[tuple[str, ...] | None, int | None]:
+        """Return the series values and, when only part was read, the range's size.
+
+        Points are left out by the series' own decision (``positions``); only
+        a hidden label level of a two-dimensional range is dropped here.
+        """
         cell_range = resolve(formula)
         grid = resolved.get(cell_range) if cell_range is not None else None
         if grid is None:
             return None, None
         hidden_rows, hidden_columns = hidden_cells(cell_range.sheet) if drop_hidden_cells else ((), ())
+        vertical = cell_range.max_row - cell_range.min_row >= cell_range.max_column - cell_range.min_column
         values = series_values(
-            cell_range, grid, hidden_rows=frozenset(hidden_rows), hidden_columns=frozenset(hidden_columns)
+            cell_range,
+            grid,
+            hidden_rows=frozenset() if vertical else frozenset(hidden_rows),
+            hidden_columns=frozenset(hidden_columns) if vertical else frozenset(),
         )
+        values = _without(values, positions) if positions else values
         rows = cell_range.max_row - cell_range.min_row + 1
         columns = cell_range.max_column - cell_range.min_column + 1
         partial = len(grid) < rows or (bool(grid) and len(grid[0]) < columns)
         return values, max(rows, columns) if partial else None
 
-    def fill(reference: DataRef | None) -> DataRef | None:
+    def fill(reference: DataRef | None, positions: frozenset[int]) -> DataRef | None:
         if reference is None or not reference.needs_cells:
             return reference
-        values, declared = values_of(reference.formula)
+        values, declared = values_of(reference.formula, positions)
         return replace(reference, values=values, declared_points=declared) if values is not None else reference
 
     def series_of(series: Series) -> Series:
@@ -240,12 +250,13 @@ def _filled(
         name = series.name
         if name is None and series.name_ref:
             name = text_of(series.name_ref)
+        positions = _series_hidden_points(series, resolve, hidden_cells) if drop_hidden_cells else frozenset()
         filled = replace(
             series,
             name=name,
-            categories=fill(series.categories),
-            values=fill(series.values),
-            sizes=fill(series.sizes),
+            categories=fill(series.categories, positions),
+            values=fill(series.values, positions),
+            sizes=fill(series.sizes, positions),
         )
         if filled.values is not None and filled.values.needs_cells:
             unresolved += 1
@@ -278,27 +289,67 @@ def _intersects(cell_range: CellRange, hidden_rows: frozenset[int], hidden_colum
     )
 
 
-def _visible_points(
-    values: tuple[str, ...], cell_range: CellRange, hidden_rows: frozenset[int], hidden_columns: frozenset[int]
-) -> tuple[str, ...] | None:
-    """Drop cached points that sit on hidden cells of a one-dimensional range.
+def _hidden_points(cell_range: CellRange, hidden_rows: frozenset[int], hidden_columns: frozenset[int]) -> set[int]:
+    """Positions of a range's points that sit on a hidden row or column.
 
-    A cache holding one point per cell of the range maps point ``i`` to the
-    ``i``-th cell. Any other cache (a two-dimensional range of multi-level
-    labels, a cache shorter than its range) cannot be mapped to its cells:
-    return None, and the range is read from the cells without the hidden ones.
+    Points run along the range's longer side, as :func:`series_values` reads
+    them; a one-cell-wide range on a hidden column (or row) hides every point.
     """
-    vertical = cell_range.min_column == cell_range.max_column
-    horizontal = cell_range.min_row == cell_range.max_row
-    if not (vertical or horizontal) or len(values) != max(
-        cell_range.max_row - cell_range.min_row + 1, cell_range.max_column - cell_range.min_column + 1
-    ):
-        return None
-    if vertical and cell_range.min_column in hidden_columns or horizontal and cell_range.min_row in hidden_rows:
-        return ()
+    vertical = cell_range.max_row - cell_range.min_row >= cell_range.max_column - cell_range.min_column
     if vertical:
-        return tuple(value for index, value in enumerate(values) if cell_range.min_row + index not in hidden_rows)
-    return tuple(value for index, value in enumerate(values) if cell_range.min_column + index not in hidden_columns)
+        start, end, along = cell_range.min_row, cell_range.max_row, hidden_rows
+        low, high, across = cell_range.min_column, cell_range.max_column, hidden_columns
+    else:
+        start, end, along = cell_range.min_column, cell_range.max_column, hidden_columns
+        low, high, across = cell_range.min_row, cell_range.max_row, hidden_rows
+    length = end - start + 1
+    if low == high and low in across:
+        return set(range(length))
+    if length < len(along):
+        return {index for index in range(length) if start + index in along}
+    return {index - start for index in along if start <= index <= end}
+
+
+def _point_length(cell_range: CellRange) -> int:
+    return max(cell_range.max_row - cell_range.min_row, cell_range.max_column - cell_range.min_column) + 1
+
+
+def _hidden_across(cell_range: CellRange, hidden_rows: frozenset[int], hidden_columns: frozenset[int]) -> bool:
+    """Whether a two-dimensional range (several label levels) has a hidden level."""
+    vertical = cell_range.max_row - cell_range.min_row >= cell_range.max_column - cell_range.min_column
+    if vertical:
+        low, high, across = cell_range.min_column, cell_range.max_column, hidden_columns
+    else:
+        low, high, across = cell_range.min_row, cell_range.max_row, hidden_rows
+    return low < high and any(low <= index <= high for index in across)
+
+
+def _series_hidden_points(series: Series, resolve: Resolver, hidden_cells: HiddenCells) -> frozenset[int]:
+    """The points of a series Excel leaves out: one decision per point.
+
+    A point is left out when any of its cells (category, value, bubble size)
+    is on a hidden row or column, and then from every dimension at once, so
+    categories and values stay paired even when their ranges are offset.
+    """
+    found: set[int] = set()
+    for reference in (series.categories, series.values, series.sizes):
+        cell_range = resolve(reference.formula) if reference is not None else None
+        if cell_range is not None:
+            rows, columns = hidden_cells(cell_range.sheet)
+            found |= _hidden_points(cell_range, frozenset(rows), frozenset(columns))
+    return frozenset(found)
+
+
+def _without(values: tuple[str, ...], positions: frozenset[int]) -> tuple[str, ...]:
+    return tuple(value for index, value in enumerate(values) if index not in positions)
+
+
+def _mappable(reference: DataRef | None, resolve: Resolver) -> bool:
+    """Whether cached points match their cells one to one (or come from cells)."""
+    if reference is None or reference.values is None:
+        return True
+    cell_range = resolve(reference.formula)
+    return cell_range is None or len(reference.values) == _point_length(cell_range)
 
 
 def _apply_policy(
@@ -340,26 +391,29 @@ def _apply_policy(
         hidden_rows, hidden_columns = hidden_cells(cell_range.sheet)
         return _intersects(cell_range, frozenset(hidden_rows), frozenset(hidden_columns))
 
-    def dimension(reference: DataRef | None) -> DataRef | None:
+    def dimension(reference: DataRef | None, positions: frozenset[int]) -> DataRef | None:
         if reference is None:
             return None
         if on_hidden_sheet(reference.formula):
             return replace(reference, values=(), withheld=True) if withhold else reference
         cell_range = resolve(reference.formula)
-        if drop_hidden_cells and cell_range is not None and reference.values:
+        if not drop_hidden_cells or not reference.values:
+            return reference
+        if cell_range is not None:
             rows, columns = hidden_cells(cell_range.sheet)
-            hidden_rows, hidden_columns = frozenset(rows), frozenset(columns)
-            if _intersects(cell_range, hidden_rows, hidden_columns):
-                kept = _visible_points(reference.values, cell_range, hidden_rows, hidden_columns)
-                # An unmappable cache is dropped: the cells are read instead,
-                # without the hidden ones, so no hidden label reaches the index.
-                return replace(reference, values=kept)
-        return reference
+            if not _mappable(reference, resolve) or _hidden_across(cell_range, frozenset(rows), frozenset(columns)):
+                if positions or _intersects(cell_range, frozenset(rows), frozenset(columns)):
+                    # A cache that cannot be matched to its cells is dropped:
+                    # the visible cells are read instead, so no hidden label
+                    # reaches the index and points stay paired.
+                    return replace(reference, values=None)
+                return reference
+        return replace(reference, values=_without(reference.values, positions)) if positions else reference
 
     def hidden_or_unknown_text(formula: str | None) -> bool:
         return hidden_text(formula) or (withhold and bool(formula) and resolve(formula) is None)
 
-    def labels_of(series: Series, values: DataRef | None) -> DataRef | None:
+    def labels_of(series: Series, values: DataRef | None, positions: frozenset[int]) -> DataRef | None:
         """Data labels follow their points: dropped with hidden points, withheld
         with withheld values or a label range on a hidden sheet."""
         labels = series.labels
@@ -369,36 +423,33 @@ def _apply_policy(
         hidden_points = {index for index, formula in series.label_refs if hidden_or_unknown_text(formula)}
         if (values is not None and values.withheld) or hidden_range:
             return None
+        label_range = resolve(labels.formula)
+        if withhold and label_range is not None and labels.values:
+            # A label read from a hidden cell is blanked; its point may stay.
+            rows, columns = hidden_cells(label_range.sheet)
+            hidden_points |= _hidden_points(label_range, frozenset(rows), frozenset(columns))
         if hidden_points and labels.values:
             labels = replace(labels, values=tuple("" if i in hidden_points else v for i, v in enumerate(labels.values)))
-        cell_range = resolve(series.values.formula) if series.values is not None else None
-        if not drop_hidden_cells or cell_range is None or not labels.values:
+        if not drop_hidden_cells or not positions or not labels.values:
             return labels
-        rows, columns = hidden_cells(cell_range.sheet)
-        hidden_rows, hidden_columns = frozenset(rows), frozenset(columns)
-        if not _intersects(cell_range, hidden_rows, hidden_columns):
-            return labels
-        length = max(cell_range.max_row - cell_range.min_row, cell_range.max_column - cell_range.min_column) + 1
-        cached = len(series.values.values) if series.values.values is not None else length
-        if cached != length:
+        if not _mappable(series.values, resolve):
             # Points cannot be matched to cells: no label can be placed safely.
             return None
-        padded = (labels.values + ("",) * length)[:length]
-        kept = _visible_points(padded, cell_range, hidden_rows, hidden_columns)
-        return replace(labels, values=kept) if kept is not None else None
+        return replace(labels, values=_without(labels.values, positions))
 
     def series_of(series: Series) -> Series:
         # A withheld name loses its reference too, so it is never read from the cell.
         hidden_name = hidden_text(series.name_ref)
-        values = dimension(series.values)
+        positions = _series_hidden_points(series, resolve, hidden_cells) if drop_hidden_cells else frozenset()
+        values = dimension(series.values, positions)
         return replace(
             series,
             name=None if hidden_name else series.name,
             name_ref=None if hidden_name else series.name_ref,
-            categories=dimension(series.categories),
+            categories=dimension(series.categories, positions),
             values=values,
-            sizes=dimension(series.sizes),
-            labels=labels_of(series, values),
+            sizes=dimension(series.sizes, positions),
+            labels=labels_of(series, values, positions),
             label_refs=(),
         )
 
@@ -409,6 +460,18 @@ def _apply_policy(
             return False
         return not (withhold and shape.hidden)
 
+    def totals_of(plot) -> tuple[int, ...]:
+        """Waterfall totals are positions: they move with the points left out."""
+        if not drop_hidden_cells or not plot.total_points or not plot.series:
+            return plot.total_points
+        first = plot.series[0]
+        if not _mappable(first.values, resolve) or not _mappable(first.categories, resolve):
+            return plot.total_points
+        hidden = sorted(_series_hidden_points(first, resolve, hidden_cells))
+        return tuple(
+            position - bisect_left(hidden, position) for position in plot.total_points if position not in set(hidden)
+        )
+
     def plot_of(plot):
         hidden_header = hidden_text(plot.category_header_ref)
         return replace(
@@ -416,6 +479,7 @@ def _apply_policy(
             series=tuple(series_of(series) for series in plot.series),
             category_header=None if hidden_header else plot.category_header,
             category_header_ref=None if hidden_header else plot.category_header_ref,
+            total_points=totals_of(plot),
         )
 
     plots = tuple(plot_of(plot) for plot in chart.plots)
@@ -867,8 +931,23 @@ class WorkbookCharts:
         tables = tuple(dict.fromkeys(table.table_id for found in coverage for table in found))
         # The chart's data is already indexed when each plotted range lies
         # inside a visible table; a hidden source is never "already indexed".
+        # Every plotted dimension must come from such a range: literal values
+        # or a reference that cannot be resolved were never indexed, and text
+        # data labels are the chart's own, so those keep the chart's tables.
+        dimensions = [
+            reference
+            for series in chart.series
+            for reference in (series.categories, series.values, series.sizes)
+            if reference is not None
+        ]
+        complete = all(resolve(reference.formula) is not None for reference in dimensions) and not any(
+            series.labels is not None and any(series.labels.values or ()) for series in chart.series
+        )
         covered = (
-            bool(ranges) and not hidden_sources and all(any(table.contains for table in found) for found in coverage)
+            bool(ranges)
+            and complete
+            and not hidden_sources
+            and all(any(table.contains for table in found) for found in coverage)
         )
         covering = (
             tuple(dict.fromkeys(table.table_range for found in coverage for table in found if table.contains))

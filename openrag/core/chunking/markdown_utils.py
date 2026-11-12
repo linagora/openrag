@@ -1287,12 +1287,53 @@ def chunk_xlsx_chart(content: str, metadata: dict, chunk_size: int, length_funct
         opening = list(new_opening)
         current = list(new_opening)
 
+    def cut(lines: list[str]) -> list[list[str]]:
+        """Split a section too long for a fresh piece: by line, then by word.
+
+        Each part fits after the chart context; a single word longer than the
+        budget stays whole, like an oversized table row.
+        """
+        prefix = [*context, ""] if context else []
+        parts: list[list[str]] = []
+        part: list[str] = []
+        for line in lines:
+            if fits([*prefix, *part, line]):
+                part.append(line)
+                continue
+            if part:
+                parts.append(part)
+            part = []
+            if fits([*prefix, line]):
+                part = [line]
+                continue
+            words = ""
+            for word in line.split(" "):
+                candidate = f"{words} {word}" if words else word
+                if words and not fits([*prefix, candidate]):
+                    parts.append([words])
+                    candidate = word
+                words = candidate
+            part = [words] if words else []
+        if part:
+            parts.append(part)
+        return parts
+
     for position, section in enumerate(part for part in content.split("\n\n") if part.strip()):
         lines = section.split("\n")
+        is_table = len(lines) > 1 and lines[0].startswith("|") and lines[1].startswith("| ---")
+        if not is_table and not fits([*context, "", *lines] if context else lines):
+            # No piece can hold it whole (a long heading or notes paragraph):
+            # its parts each get a piece, opened by the chart context.
+            for index, part in enumerate(cut(lines)):
+                if position == 0 and index == 0:
+                    current = part
+                    continue
+                restart(context)
+                current += ["", *part] if current else part
+            continue
         if position == 0:
             current = lines
             continue
-        is_table = len(lines) > 1 and lines[0].startswith("|") and lines[1].startswith("| ---")
         if not is_table:
             if not fits([*current, "", *lines]):
                 restart(context)
