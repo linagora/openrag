@@ -276,7 +276,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
 | `EMBEDDER_TIMEOUT` | `float` | 120.0 | Per-request HTTP timeout (in seconds) for embedding calls. Raise it for slow remote endpoints. |
 | `EMBEDDER_BATCH_SIZE` | `int` | 32 | Number of chunks sent per embedding request; large documents are split into batches of this size. |
-| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests in flight at once. |
+| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests one `embed()` call keeps in flight, when its texts span several batches of `EMBEDDER_BATCH_SIZE`. It is not a limit for the whole process: N files embedding at once send up to N times this many requests. |
 
 If you prefer to use an **external embedding service**, simply comment out the embedder service in the [docker-compose.yaml](https://github.com/linagora/openrag/blob/dev/docker-compose.yaml#L117-L153) and provide the variables above in your environment.
 
