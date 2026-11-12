@@ -1335,7 +1335,8 @@ class XlsxParser(TabularBatchParser):
     def _workbook_charts(self, document, source, infos: list[SheetInfo]) -> WorkbookCharts | None:
         """Read the workbook's charts; a failure here never fails the workbook.
 
-        With ``charts="off"`` no drawing or chart part is read at all.
+        With ``charts="off"`` no chart part is read; drawings still are, for
+        the text boxes on each sheet, which are not charts.
 
         Cells read for uncached charts are read here, before the tables, and the
         reader opened for them is closed before the table reader opens.
@@ -1348,8 +1349,6 @@ class XlsxParser(TabularBatchParser):
             max_points_from_tables=self.limits.max_chart_points_from_tables,
             max_total_bytes=self.limits.max_chart_bytes,
         )
-        if self.charts == "off":
-            return None
         hidden = {info.name: (info.hidden_rows | info.filtered_rows, info.hidden_columns) for info in infos}
         by_name = {info.name: info for info in infos if not info.hidden}
         try:

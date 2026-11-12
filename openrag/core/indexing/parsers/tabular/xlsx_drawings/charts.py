@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from xml.etree.ElementTree import Element
 
+from .shapes import ShapeText
+
 # Plot elements of ``c:plotArea`` and the readable name of each.
 _PLOT_NAMES = {
     "barChart": "bar",
@@ -94,6 +96,13 @@ class Series:
     values: DataRef | None
     # Bubble charts only: the third dimension.
     sizes: DataRef | None = None
+    # Data labels that say more than the value: text typed on a point, or
+    # labels taken from a cell range (Excel 2013+). One entry per point, by
+    # point index like the values, "" where a point has none.
+    labels: DataRef | None = None
+    label_refs: tuple[tuple[int, str], ...] = ()
+    # Trendlines drawn over the series: "linear", "moving average (period 3)".
+    trendlines: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,6 +141,8 @@ class Chart:
     # (``c:pivotSource``: ``[Sales.xlsx]Pivot!PivotTable1``).
     pivot_table: str | None = None
     pivot_sheet: str | None = None
+    # Text drawn on the chart: its text boxes (``c:userShapes``).
+    annotations: tuple[ShapeText, ...] = ()
 
     @property
     def series(self) -> tuple[Series, ...]:
@@ -253,8 +264,95 @@ def _series_name(series: Element) -> tuple[str | None, str | None]:
     return ((literal.text or "").strip() or None if literal is not None else None), None
 
 
+_TRENDLINES = {
+    "linear": "linear",
+    "exp": "exponential",
+    "log": "logarithmic",
+    "movingAvg": "moving average",
+    "poly": "polynomial",
+    "power": "power",
+}
+
+
+def _label_text(label: Element) -> tuple[str, str | None]:
+    """A point's own label: typed text (``c:rich``) or a cell's cached text."""
+    tx = _child(label, "tx")
+    rich = _child(tx, "rich")
+    if rich is not None:
+        runs = ("".join(run.text or "" for run in paragraph.iter() if _local(run) == "t") for paragraph in rich)
+        return " ".join(" ".join(runs).split()), None
+    reference = _child(tx, "strRef")
+    cache = _child(reference, "strCache")
+    formula = _child(reference, "f")
+    return (
+        " ".join(value for value in _cache_points(cache) if value) if cache is not None else "",
+        (formula.text or "").strip() or None if formula is not None else None,
+    )
+
+
+def _data_labels(series: Element) -> tuple[DataRef | None, tuple[tuple[int, str], ...]]:
+    """Labels that carry text of their own; automatic value labels add nothing.
+
+    Labels from a cell range (Excel 2013+) come with their range and a cache,
+    shown when the series asks for them; a point's own label wins over them.
+    """
+    labels = _child(series, "dLbls")
+    if labels is None:
+        return None, ()
+    points: dict[int, str] = {}
+    refs: dict[int, str] = {}
+    formula = None
+    shown = labels.find(".//{*}showDataLabelsRange")
+    source = series.find("{*}extLst/{*}ext/{*}datalabelsRange")
+    if source is not None and shown is not None and shown.get("val", "1").lower() in {"1", "true"}:
+        formula_node = _child(source, "f")
+        formula = (formula_node.text or "").strip() or None if formula_node is not None else None
+        cache = _child(source, "dlblRangeCache")
+        if cache is not None:
+            points.update(enumerate(_cache_points(cache)))
+    for label in labels.findall("{*}dLbl"):
+        index = _val(label, "idx")
+        if index is None or not index.isdigit():
+            continue
+        point = int(index)
+        if _val(label, "delete") in {"1", "true"}:
+            points.pop(point, None)
+            refs.pop(point, None)
+            continue
+        text, reference = _label_text(label)
+        if text:
+            points[point] = text
+            refs.pop(point, None)
+            if reference:
+                refs[point] = reference
+    if not any(points.values()):
+        return None, ()
+    count = _checked_cache_count(points, None)
+    # Indexed by point, like the values; the range only says where they come from.
+    values = tuple(" ".join(points.get(index, "").split()) for index in range(count))
+    return DataRef(formula, values), tuple(refs.items())
+
+
+def _trendlines(series: Element) -> tuple[str, ...]:
+    found = []
+    for trendline in series.findall("{*}trendline"):
+        kind = _TRENDLINES.get(_val(trendline, "trendlineType") or "")
+        if kind is None:
+            continue
+        if kind == "polynomial" and _val(trendline, "order"):
+            kind += f" (order {_val(trendline, 'order')})"
+        if kind == "moving average" and _val(trendline, "period"):
+            kind += f" (period {_val(trendline, 'period')})"
+        name = _child(trendline, "name")
+        label = " ".join((name.text or "").split()) if name is not None else ""
+        found.append(f"{label} ({kind} trendline)" if label else f"{kind} trendline")
+    return tuple(found)
+
+
 def _series(series: Element, xy: bool) -> Series:
     name, name_ref = _series_name(series)
+    labels, label_refs = _data_labels(series)
+    extras = {"labels": labels, "label_refs": label_refs, "trendlines": _trendlines(series)}
     if xy:
         return Series(
             name,
@@ -262,8 +360,9 @@ def _series(series: Element, xy: bool) -> Series:
             _data_ref(_child(series, "xVal")),
             _data_ref(_child(series, "yVal")),
             _data_ref(_child(series, "bubbleSize")),
+            **extras,
         )
-    return Series(name, name_ref, _data_ref(_child(series, "cat")), _data_ref(_child(series, "val")))
+    return Series(name, name_ref, _data_ref(_child(series, "cat")), _data_ref(_child(series, "val")), **extras)
 
 
 def _plot_label(plot: Element, kind: str) -> str:
