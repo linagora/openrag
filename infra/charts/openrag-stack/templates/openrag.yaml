@@ -31,13 +31,19 @@
    files first need them, so the workers must fit in every order the three
    pools can start in. Without a GPU in the pod the reservations
    are dropped (marker_workers._marker_num_gpus and its Docling and Whisper
-   twins). env.secrets is read too: envFrom loads it after the ConfigMap, so its
-   copy wins. The defaults are the app's (conf/config.yaml). */ -}}
+   twins). env.secrets is read too when the chart renders it into the Secret
+   (no env.existingSecret, the "values" provider): envFrom loads the Secret
+   after the ConfigMap, so its copy wins. With any other Secret, env.secrets
+   never reaches the pod, and the Secret's own values are out of the chart's
+   sight. The defaults are the app's (conf/config.yaml). */ -}}
 {{- if $embeddedRay -}}
 {{- $resources := .Values.openrag.resources | default dict -}}
 {{- $podGpus := int (dig "limits" "nvidia.com/gpu" (dig "requests" "nvidia.com/gpu" 0 $resources) $resources) -}}
 {{- if gt $podGpus 0 -}}
-{{- $env := mergeOverwrite (deepCopy (.Values.env.config | default dict)) (.Values.env.secrets | default dict) -}}
+{{- $env := deepCopy (.Values.env.config | default dict) -}}
+{{- if and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") -}}
+{{- $env = mergeOverwrite $env (.Values.env.secrets | default dict) -}}
+{{- end -}}
 {{- $pools := list
   (dict "name" "Marker" "poolKey" "MARKER_POOL_SIZE" "gpusKey" "MARKER_NUM_GPUS" "count" (int (dig "MARKER_POOL_SIZE" "1" $env)) "size" (float64 (dig "MARKER_NUM_GPUS" "0.01" $env)))
   (dict "name" "Docling" "poolKey" "DOCLING_POOL_SIZE" "gpusKey" "DOCLING_NUM_GPUS" "count" (int (dig "DOCLING_POOL_SIZE" "1" $env)) "size" (float64 (dig "DOCLING_NUM_GPUS" "0.01" $env)))
