@@ -64,24 +64,54 @@ def _json_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=True))
 
 
+def _shortened(value: Any, limit: int) -> tuple[Any, bool]:
+    """``value`` with every string, at any depth, cut to ``limit`` characters."""
+    if isinstance(value, str):
+        return (value[: limit - 1] + "…", True) if len(value) > limit else (value, False)
+    if isinstance(value, list):
+        items = [_shortened(item, limit) for item in value]
+        return [item for item, _ in items], any(changed for _, changed in items)
+    if isinstance(value, dict):
+        items = {key: _shortened(item, limit) for key, item in value.items()}
+        return {key: item for key, (item, _) in items.items()}, any(changed for _, changed in items.values())
+    return value, False
+
+
+# Lists only describing the chart, emptied as a last resort.
+_OPTIONAL_LISTS = ("chart_series", "chart_hidden_source_sheets", "chart_source_table_ids", "chart_types")
+
+
 def fit_chart_metadata(metadata: dict) -> None:
     """Fit chart metadata in :data:`_MAX_METADATA_BYTES`, in place, flagging any cut.
 
-    Series entries go first, from the last; then the context line and title
-    are shortened. The chunk text keeps every label.
+    In order, until it fits: series entries go, from the last; every string
+    field, at any depth, is cut to 128 characters, then to 32; the optional
+    lists are emptied. Only a key count can then remain, which never comes
+    near the budget. The chunk text keeps every label.
     """
     size = _json_bytes(metadata)
+    if size <= _MAX_METADATA_BYTES:
+        return
     series = metadata.get("chart_series") or []
     while size > _MAX_METADATA_BYTES and series:
         series.pop()
         metadata["chart_metadata_truncated"] = True
         size = _json_bytes(metadata)
-    for key in ("chart_context", "chart_title"):
+    for limit in (_MAX_METADATA_TEXT, 32):
         if size <= _MAX_METADATA_BYTES:
-            break
-        value = metadata.get(key)
-        if isinstance(value, str) and len(value) > _MAX_METADATA_TEXT:
-            metadata[key] = value[: _MAX_METADATA_TEXT - 1] + "…"
+            return
+        for key in sorted(metadata, key=lambda key: -_json_bytes(metadata[key])):
+            metadata[key], changed = _shortened(metadata[key], limit)
+            if changed:
+                metadata["chart_metadata_truncated"] = True
+                size = _json_bytes(metadata)
+                if size <= _MAX_METADATA_BYTES:
+                    return
+    for key in _OPTIONAL_LISTS:
+        if size <= _MAX_METADATA_BYTES:
+            return
+        if metadata.get(key):
+            metadata[key] = []
             metadata["chart_metadata_truncated"] = True
             size = _json_bytes(metadata)
 
@@ -563,7 +593,7 @@ def render_chart(
         "chart_points_truncated": shown_total < points_total and not data_in_tables,
         "chart_unresolved_series": unresolved_references,
         "chart_ranges_not_read": ranges_not_read,
-        "chart_hidden_source_sheets": capped.items(list(hidden_sources)),
+        "chart_hidden_source_sheets": [capped.text(name) for name in capped.items(list(hidden_sources))],
         "chart_hidden_data_withheld": hidden_data_withheld,
         "chart_hidden_in_excel": placement.hidden,
         "spreadsheet_backend": "ooxml",

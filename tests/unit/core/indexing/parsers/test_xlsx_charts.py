@@ -2917,3 +2917,52 @@ def test_multibyte_chart_metadata_fits_a_byte_budget_and_is_flagged():
     entity = {"text": "chunk", "file_id": "f", "partition": "p", **copy.deepcopy(metadata)}
     _fit_milvus_row_limits(entity, static_fields={"text", "vector", "sparse", "_id", "partition", "file_id"})
     assert {key: entity[key] for key in metadata} == metadata
+
+
+# --- review round 5: every field fits the byte budget ------------------------
+
+
+def test_oversized_hidden_sheet_names_are_capped_at_the_source():
+    from core.indexing.parsers.tabular.xlsx_drawings.charts import Chart
+    from core.indexing.parsers.tabular.xlsx_drawings.package import ChartPlacement
+    from core.indexing.parsers.tabular.xlsx_drawings.render import render_chart
+
+    long_name = "Feuille cachée " * 70  # far beyond Excel's 31 characters, but not rejected
+    placement = ChartPlacement("Data", 0, "worksheet", "xl/charts/chart1.xml", 1)
+    rendered = render_chart(
+        placement,
+        Chart("Board", ()),
+        chart_index=1,
+        workbook_filename="charts.xlsx",
+        max_points=100,
+        max_bytes=100_000,
+        hidden_sources=tuple(f"{long_name}{index}" for index in range(80)),
+    )
+
+    names = rendered.metadata["chart_hidden_source_sheets"]
+    assert len(names) == 64 and all(len(name) <= 128 for name in names)
+    assert rendered.metadata["chart_metadata_truncated"] is True
+
+
+def test_any_oversized_metadata_field_is_fitted_and_flagged():
+    """Codex's case at the storage boundary: 64 hidden-sheet names of 1,000
+    Unicode characters measured 384 KB after the series-only fitter."""
+    import copy
+    import json
+
+    from core.indexing.parsers.tabular.xlsx_drawings.render import fit_chart_metadata
+    from services.storage.milvus_store import _fit_milvus_row_limits
+
+    (chart,) = _charts(_workbook_with_chart(_monthly_revenue()))
+    metadata = copy.deepcopy(chart.metadata)
+    metadata["chart_hidden_source_sheets"] = [("Données cachées " * 63)[:1000] + str(index) for index in range(64)]
+    metadata["chart_metadata_truncated"] = False
+
+    fit_chart_metadata(metadata)
+
+    assert len(json.dumps(metadata, ensure_ascii=True).encode()) <= 32 * 1024
+    assert metadata["chart_metadata_truncated"] is True
+    assert metadata["chart_title"] == "Monthly revenue"  # short fields are left alone
+    entity = {"text": "chunk", "file_id": "f", "partition": "p", **copy.deepcopy(metadata)}
+    _fit_milvus_row_limits(entity, static_fields={"text", "vector", "sparse", "_id", "partition", "file_id"})
+    assert {key: entity[key] for key in metadata} == metadata
