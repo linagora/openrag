@@ -776,8 +776,10 @@ def test_heading_before_a_figure_travels_with_it():
 def test_headings_only_unit_never_merges_backward():
     from core.chunking.structured_section import _is_headings_only, _Unit
 
-    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\n### Sub", tokens=4))
-    assert not _is_headings_only(_Unit(heading_path=[], text="## Title\n\nBody line.", tokens=5))
+    is_heading = _chunker()._is_heading_line
+    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\n### Sub", tokens=4), is_heading)
+    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\nParagraphe 2 : Objet", tokens=6), is_heading)
+    assert not _is_headings_only(_Unit(heading_path=[], text="## Title\n\nBody line.", tokens=5), is_heading)
 
 
 def test_split_table_keeps_its_column_header_on_every_piece():
@@ -791,6 +793,29 @@ def test_split_table_keeps_its_column_header_on_every_piece():
     for piece in tables:
         assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
     assert "Regional breakdown" in tables[0].text, "the heading should lead the first piece"
+
+
+# The heading in front of a split table is recognised the way the chunker
+# recognised it when it opened the section: every default keyword, including
+# ``Paragraphe``, and a deployment's own ``heading_keywords``. Otherwise the
+# heading is replayed as the column header of every piece (#1375).
+@pytest.mark.parametrize(
+    ("heading", "keywords"),
+    [
+        ("Paragraphe 3 : Ventilation régionale", None),
+        ("Rubrique 4 : Ventilation régionale", ["rubrique"]),
+    ],
+)
+def test_split_table_under_a_keyword_heading_keeps_its_column_header(heading, keywords):
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    doc = _doc(f"{heading}\n\n| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n")
+    chunker = _chunker(chunk_size=200, heading_keywords=keywords)
+    tables = [c for c in chunker.chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    for piece in tables:
+        assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
+    assert heading in tables[0].text, "the heading should lead the first piece"
+    assert all(heading not in piece.content for piece in tables[1:]), "the heading must not be replayed"
 
 
 # A lone ``\r`` and the other characters ``str.splitlines()`` breaks on
