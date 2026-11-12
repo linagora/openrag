@@ -1258,3 +1258,53 @@ def _chunk_csv_table(
         if row_number in split_row_counts:
             chunk.metadata["csv_row_chunks_total"] = split_row_counts[row_number]
     return chunks
+
+
+def chunk_xlsx_chart(content: str, metadata: dict, chunk_size: int, length_function: Callable[[str], int]) -> list[str]:
+    """Split a chart block so every piece says which chart its rows belong to.
+
+    A chart block is a heading, then data tables and notes, separated by blank
+    lines. The first piece keeps the full heading; every later piece opens
+    with the one-line ``chart_context`` and, inside a table, repeats the table
+    header, so a row such as ``| Mar | 3 | 202 |`` is never indexed without
+    its chart, series names and worksheet. A row longer than the budget on its
+    own still becomes one piece rather than being cut.
+    """
+    if length_function(content) <= chunk_size:
+        return [content]
+    context = [metadata["chart_context"].strip()] if metadata.get("chart_context") else []
+    pieces: list[str] = []
+    opening: list[str] = []  # lines repeated at the top of the current piece
+    current: list[str] = []
+
+    def fits(lines: list[str]) -> bool:
+        return length_function("\n".join(lines)) <= chunk_size
+
+    def restart(new_opening: list[str]) -> None:
+        nonlocal opening, current
+        if len(current) > len(opening):
+            pieces.append("\n".join(current).strip())
+        opening = list(new_opening)
+        current = list(new_opening)
+
+    for position, section in enumerate(part for part in content.split("\n\n") if part.strip()):
+        lines = section.split("\n")
+        if position == 0:
+            current = lines
+            continue
+        is_table = len(lines) > 1 and lines[0].startswith("|") and lines[1].startswith("| ---")
+        if not is_table:
+            if not fits([*current, "", *lines]):
+                restart(context)
+            current += ["", *lines] if current else lines
+            continue
+        header, rows = lines[:2], lines[2:]
+        if not fits([*current, "", *header, *rows[:1]]):
+            restart(context)
+        current += ["", *header] if current else header
+        for row in rows:
+            if not fits([*current, row]):
+                restart([*context, "", *header] if context else header)
+            current.append(row)
+    restart([])
+    return pieces
