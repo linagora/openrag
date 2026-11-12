@@ -75,6 +75,13 @@ _EMPHASIS_RE = re.compile(r"[*_`\\]+")
 # Stricter than ``_HEADING_PREFIX_RE``: requires text after the hashes, so a
 # ``#hashtag`` line is not mistaken for a heading when re-homing split pieces.
 _CAPTION_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
+# A body line that is a heading — markdown, or a structural keyword the parsers
+# emit as plain text. Read on the text a chunk keeps, where a heading line has
+# lost its inline HTML; ``_is_heading_line`` adds the chunker's own heading test.
+_HEADING_LINE_RE = re.compile(
+    r"^\s*(?:#{1,6}\s+\S|\*{0,2}(?:Livre|Titre|Chapitre|Section|Sous-section|Partie|Annexe)\b)",
+    re.IGNORECASE,
+)
 # Inline HTML the parsers leave in heading lines — chiefly Marker's page anchors
 # (``<span id="page-46-0"></span>Encadré 3 …``), which would otherwise ride into
 # the breadcrumb verbatim.
@@ -663,8 +670,16 @@ class StructuredSectionChunker(BaseChunker):
         return None
 
     def _is_heading_line(self, line: str) -> bool:
-        """Whether ``line`` opens a section, by the same test as ``_heading``."""
-        return self._heading(line) is not None
+        """Whether a line of a chunk's text is a heading.
+
+        ``_heading`` adds every heading keyword, ``Paragraphe`` and a
+        deployment's own included. It cannot stand alone: it judged the source
+        line, and the chunk keeps that line without its inline HTML, so a Marker
+        heading ``## <span id="page-1-0"></span>Article L110-5`` comes back as
+        ``## Article L110-5``, which ``_heading`` reads as an article, not a
+        heading.
+        """
+        return bool(_HEADING_LINE_RE.match(line)) or self._heading(line) is not None
 
     def _keyword_level_for(self, text: str) -> int | None:
         """Nesting level if ``text`` opens with a structural keyword, else None."""
@@ -1085,8 +1100,8 @@ def _split_leading_headings(text: str, is_heading: Callable[[str], bool]) -> tup
     ``\\x85``, ``\\u2028`` and ``\\u2029``: inside a table cell that cut the row
     in two, and the table parser then dropped both halves' text (#1375).
 
-    ``is_heading`` is the chunker's own heading test, the one that put these
-    lines in the block, so every heading keyword is recognised here too.
+    ``is_heading`` is ``_is_heading_line``, so every heading keyword is
+    recognised here too.
     """
     lines = text.replace("\r\n", "\n").split("\n")
     cut = 0

@@ -795,6 +795,21 @@ def test_split_table_keeps_its_column_header_on_every_piece():
     assert "Regional breakdown" in tables[0].text, "the heading should lead the first piece"
 
 
+def test_split_table_under_an_anchored_article_heading_keeps_its_column_header():
+    """Marker anchors a heading with a page ``<span>``. The chunk keeps the line
+    without it, where the article test then reads ``Article L110-5`` as content,
+    not a heading: the line must still be recognised in front of the table."""
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    heading = '## <span id="page-1-0"></span>Article L110-5'
+    doc = _doc(f"{heading}\n\n| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n")
+    tables = [c for c in _chunker(chunk_size=200).chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    for piece in tables:
+        assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
+    assert "## Article L110-5" in tables[0].content, "the heading should lead the first piece"
+    assert all("Article L110-5" not in piece.content for piece in tables[1:]), "the heading must not be replayed"
+
+
 # The heading in front of a split table is recognised the way the chunker
 # recognised it when it opened the section: every default keyword, including
 # ``Paragraphe``, and a deployment's own ``heading_keywords``. Otherwise the
