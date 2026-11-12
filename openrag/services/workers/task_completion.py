@@ -500,9 +500,11 @@ class TaskCompletionTracker:
         not know gives it back once past the grace window, since a slot that
         recent may belong to an upload not yet queued.
 
-        Releasing early is safe: the catalog insert counts the file anyway when
-        its slot is gone, so the count stays true and only the quota is briefly
-        loose. Keeping a slot too long would block the user's uploads.
+        Releasing early keeps the count exact: the catalog insert counts the
+        file anyway when its slot is gone. The quota is what gives: the freed
+        slot can admit another upload meanwhile, so each early release can
+        leave the user one file over quota until they delete files. Keeping a
+        slot too long would block the user's uploads instead.
         """
         live_ids = [task_id for task_id, info in all_info.items() if (info or {}).get("state") not in _TERMINAL_STATES]
         settled_ids = [task_id for task_id, info in all_info.items() if (info or {}).get("state") in _TERMINAL_STATES]
