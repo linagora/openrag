@@ -20,6 +20,7 @@ interface ConfirmDialogProps {
   onConfirm: () => void;
   children: ReactNode;
   destructive?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 export function ConfirmDialog({
@@ -28,9 +29,10 @@ export function ConfirmDialog({
   onConfirm,
   children,
   destructive = true,
+  onOpenChange,
 }: ConfirmDialogProps) {
   return (
-    <AlertDialog>
+    <AlertDialog onOpenChange={onOpenChange}>
       <AlertDialogTrigger asChild>{children}</AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader className="min-w-0">

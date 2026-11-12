@@ -172,7 +172,11 @@ async def get_user(
 
 **Behavior:**
 - Permanently deletes the user account
-- Removes user from all partitions
+- Deletes every partition where the user has the `owner` role, with all of
+  its documents, even when other users also own it
+- The `default` partition is never deleted: the user only loses their
+  membership, and if they owned it the default admin (ID: 1) becomes its owner
+- Removes the user from all other partitions
 - Invalidates all user tokens
 
 **Response:**
