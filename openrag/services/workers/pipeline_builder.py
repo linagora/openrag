@@ -992,13 +992,18 @@ def _release_image_bytes(row: MutableMapping[str, Any]) -> None:
     enrichment failure, and a failed caption makes the bytes no more useful than
     a successful one.
 
-    Only ``image_bytes`` is cleared. ``caption``, ``page_number``, ``mime_type``,
-    ``source_url`` and ``metadata`` stay — the substitution and the chunkers read
-    them.
+    ``ImageBlock.pil_image`` goes too: it is the same figure still decoded, which
+    a parser hands over instead of the bytes so that it is PNG-encoded only when
+    captioning runs. Still decoded, it is several times the size of its PNG.
+
+    Only ``image_bytes`` and ``pil_image`` are cleared. ``caption``,
+    ``page_number``, ``mime_type``, ``source_url`` and ``metadata`` stay — the
+    substitution and the chunkers read them.
     """
     processed = row.get("processed_document")
     for image in getattr(processed, "images", ()) or ():
         image.image_bytes = b""
+        image.pil_image = None
 
 
 def _release_raw_bytes(row: MutableMapping[str, Any]) -> None:

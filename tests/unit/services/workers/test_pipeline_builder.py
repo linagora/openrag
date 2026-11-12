@@ -1822,6 +1822,63 @@ async def test_image_bytes_are_released_when_captioning_fails():
     assert all(image.image_bytes == b"" for image in images)
 
 
+def _deferred_image_pipeline(vlm, *, enable_image_captioning: bool, image_count: int = 3):
+    """A PDF whose parser hands its figures over decoded, as Marker does."""
+    from PIL import Image
+
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="body")],
+        images=[ImageBlock(pil_image=Image.new("RGB", (8, 8), "red"), page_number=i) for i in range(image_count)],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        indexation_config=IndexationPipelineConfig(enable_image_captioning=enable_image_captioning),
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_deferred_images_are_never_encoded_when_the_partition_does_not_caption(monkeypatch):
+    """PNG-encoding a figure costs up to a quarter of a second of CPU, and only
+    the caption stage reads the bytes: a partition without captioning must not
+    pay for it, and the decoded figures must not outlive the caption decision."""
+    encoded: list[object] = []
+    monkeypatch.setattr(caption_module, "pil_to_png_bytes", lambda image: encoded.append(image) or b"png")
+    vlm = FakeVLM()
+    pipeline, document = _deferred_image_pipeline(vlm, enable_image_captioning=False)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
+    assert vlm.calls == [], "guard: the partition does not caption"
+    assert encoded == []
+    images = row["processed_document"].images
+    assert len(images) == 3, "guard: the images must survive the release"
+    assert all(image.pil_image is None and image.image_bytes == b"" for image in images)
+
+
+@pytest.mark.asyncio
+async def test_deferred_images_are_encoded_for_the_vlm_and_then_released():
+    vlm = FakeVLM()
+    pipeline, document = _deferred_image_pipeline(vlm, enable_image_captioning=True)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert len(vlm.calls) == 3
+    assert all(call.startswith(b"\x89PNG") for call in vlm.calls), "the VLM must receive the encoded figures"
+    images = row["processed_document"].images
+    assert [image.caption for image in images] == ["caption"] * 3
+    assert all(image.pil_image is None and image.image_bytes == b"" for image in images)
+
+
 class OneFailingVLM:
     def __init__(self) -> None:
         self.calls = 0

@@ -492,6 +492,79 @@ async def test_caption_stage_keeps_other_captions_when_one_image_fails():
 
 
 @pytest.mark.asyncio
+async def test_caption_stage_encodes_deferred_images_off_the_event_loop(monkeypatch):
+    """Encoding a figure-heavy PDF must not starve other coroutines (worker
+    lease renewals) running on the same loop."""
+    import time
+
+    ticks = 0
+    # Ticks seen when the encoding starts and ends: only that span counts.
+    window: list[int] = []
+
+    def _slow_encode(image):
+        window.append(ticks)
+        time.sleep(0.5)
+        window.append(ticks)
+        return b"png:" + image.encode()
+
+    monkeypatch.setattr(caption_module, "pil_to_png_bytes", _slow_encode)
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[TextBlock(text="a ![](ref)", page_number=1)],
+        images=[ImageBlock(pil_image="figure", page_number=1, metadata={"markdown_ref": "![](ref)"})],
+    )
+    vlm = FakeVLM(["a chart"])
+
+    async def _ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    task = asyncio.create_task(_ticker())
+    try:
+        await caption_stage({"processed_document": processed}, vlm)
+    finally:
+        task.cancel()
+
+    during_encode = window[1] - window[0]
+    assert during_encode >= 20, f"event loop was blocked while encoding the images (ticks={during_encode})"
+    assert vlm.calls == [(b"png:figure", None)]
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_leaves_a_figure_it_cannot_encode_uncaptioned(monkeypatch):
+    """Like a remote image, it is skipped: the others keep their captions and the
+    stage is not reported degraded, as when the parser used to drop it."""
+
+    def _encode(image):
+        if image == "broken":
+            raise OSError("truncated image")
+        return image.encode()
+
+    monkeypatch.setattr(caption_module, "pil_to_png_bytes", _encode)
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[TextBlock(text="a ![](ref-ok) b ![](ref-broken)", page_number=1)],
+        images=[
+            ImageBlock(pil_image="ok", page_number=1, metadata={"markdown_ref": "![](ref-ok)"}),
+            ImageBlock(pil_image="broken", page_number=1, metadata={"markdown_ref": "![](ref-broken)"}),
+        ],
+    )
+    row = {"processed_document": processed}
+    vlm = FakeVLM(["caption:ok"])
+
+    await caption_stage(row, vlm)
+
+    out = row["processed_document"]
+    assert vlm.calls == [(b"ok", None)]
+    assert [image.caption for image in out.images] == ["caption:ok", None]
+    assert "![](ref-broken)" in out.text_blocks[0].text
+    assert row["stage"] == "captioned"
+    assert "degraded_stages" not in row
+
+
+@pytest.mark.asyncio
 async def test_caption_stage_raises_when_every_image_fails():
     """All images failed: the stage fails as a whole so the #702 fallback applies."""
     processed = ProcessedDocument(
