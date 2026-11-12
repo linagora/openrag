@@ -663,10 +663,19 @@ def _has_text(values: list[str]) -> bool:
 
 
 def _tables_reading(cell_range, by_name: dict[str, SheetInfo]) -> list[TableCoverage]:
-    """Return the indexed tables a chart range overlaps, and whether each contains it."""
+    """Return the indexed tables a chart range overlaps, and whether each contains it.
+
+    A table contains a range only when every cell of it was indexed: rows and
+    columns hidden by hand are left out of tables (rows hidden by a filter are
+    indexed), so a range touching them is never "already indexed".
+    """
     info = by_name.get(cell_range.sheet)
     if info is None:
         return []
+    excluded_rows = info.hidden_rows - info.filtered_rows
+    complete = not any(cell_range.min_row <= row <= cell_range.max_row for row in excluded_rows) and not any(
+        cell_range.min_column <= column <= cell_range.max_column for column in info.hidden_columns
+    )
     sheet_ref = "'" + info.name.replace("'", "''") + "'!"
     return [
         TableCoverage(
@@ -675,7 +684,8 @@ def _tables_reading(cell_range, by_name: dict[str, SheetInfo]) -> list[TableCove
                 f"{sheet_ref}{_column_name(table.start_column)}{table.start_row}:"
                 f"{_column_name(table.end_column)}{table.end_row}"
             ),
-            contains=table.start_row <= cell_range.min_row
+            contains=complete
+            and table.start_row <= cell_range.min_row
             and cell_range.max_row <= table.end_row
             and table.start_column <= cell_range.min_column
             and cell_range.max_column <= table.end_column,
