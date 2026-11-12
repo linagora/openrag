@@ -334,8 +334,11 @@ def slides_markdown(extracted: Any, image_prefix: str) -> tuple[int, list[tuple[
 
 def _slide_markdown(section: str, notes: list[str]) -> str:
     """One slide's body, with its title as ``#`` and its notes taken out."""
-    for note in notes:
-        section = section.replace(note, "", 1)
+    # The notes follow the slide's body, so the last occurrence is the note: a
+    # note repeating the title must not take the title out instead.
+    for note in reversed(notes):
+        if (at := section.rfind(note)) != -1:
+            section = section[:at] + section[at + len(note) :]
     section = section.strip()
     if not section.startswith("## "):
         return section

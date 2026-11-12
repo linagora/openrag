@@ -321,6 +321,22 @@ async def test_notes_holding_a_list_are_kept(odf_package):
     assert processed.text_blocks[0].text == "# T\n\n### Notes:\nPoint oral"
 
 
+@pytest.mark.asyncio
+async def test_a_note_repeating_the_title_leaves_the_title_alone(odf_package):
+    processed = await _parse(
+        odf_package(
+            "odp",
+            "<draw:page>"
+            f"{_frame('title', '<text:p>Budget</text:p>')}"
+            f"{_frame('outline', '<text:p>Budget 2024 review</text:p>')}"
+            f"{_notes('Budget')}"
+            "</draw:page>",
+        )
+    )
+
+    assert processed.text_blocks[0].text == "# Budget\n\nBudget 2024 review\n\n### Notes:\nBudget"
+
+
 # ---------------------------------------------------------------------------
 # A deck LibreOffice wrote (26.8, exported from a python-pptx deck)
 # ---------------------------------------------------------------------------
