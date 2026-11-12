@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from api.dependencies import model_limits
 from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
 from api.error_handlers import register_error_handlers
 from api.routers.user import chat
@@ -41,7 +42,7 @@ def service() -> RecordingQueryService:
 
 @pytest.fixture
 def client(async_client_factory, monkeypatch, service):
-    monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+    monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
     app = FastAPI()
     register_error_handlers(app)
     app.include_router(chat.router, prefix="/v1")

@@ -758,11 +758,11 @@ async def test_an_embedder_endpoint_reports_the_vector_field_it_owns(async_clien
 @pytest.fixture
 def probed_windows(monkeypatch):
     """Set the auto-probed max_model_len cache (and its pending flag) the routes report."""
-    import api.routers.user.chat as chat
+    import api.dependencies.model_limits as model_limits
 
     def _set(windows: dict[str, int], *, pending: bool = False) -> None:
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", dict(windows))
-        monkeypatch.setattr(chat, "_max_model_tokens_pending", pending)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", dict(windows))
+        monkeypatch.setattr(model_limits, "_max_model_tokens_pending", pending)
 
     _set({})
     return _set

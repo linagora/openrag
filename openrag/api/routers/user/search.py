@@ -19,7 +19,7 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import validate_file_id
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
-from api.routers.user.chat import check_tokens_limit
+from api.dependencies.token_budget import check_tokens_limit
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAIMessage
 from api.schemas.user.retrieval_diagnostics import (
     RetrievalDiagnosticRequest,

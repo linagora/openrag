@@ -35,6 +35,7 @@ import core.utils.text as text_utils
 import pytest
 import services.inference.runtime as inference_runtime
 import services.orchestrators.query_service as qs
+from api.dependencies import model_limits
 from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
 from api.dependencies.retrieval_diagnostics import RetrievalDiagnosticsGuard, get_retrieval_diagnostics_guard
 from api.error_handlers import register_error_handlers
@@ -91,7 +92,7 @@ def _deterministic(monkeypatch):
     for module in (qs, inference_runtime):
         monkeypatch.setattr(module, "detect_language", lambda _text, **_kwargs: "en")
         monkeypatch.setattr(module, "get_llm_semaphore", _no_semaphore)
-    monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+    monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
 
 # --------------------------------------------------------------------------- #

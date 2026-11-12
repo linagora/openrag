@@ -9,6 +9,7 @@ import json
 from typing import Any
 
 import pytest
+from api.dependencies import model_limits, token_budget
 from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
 from api.error_handlers import register_error_handlers
 from api.routers.user import chat
@@ -23,7 +24,7 @@ WINDOW = 16384
 
 @pytest.fixture(autouse=True)
 def _deterministic_token_counter(monkeypatch):
-    monkeypatch.setattr(chat, "get_num_tokens", lambda: lambda text: len(text.split()))
+    monkeypatch.setattr(token_budget, "get_num_tokens", lambda: lambda text: len(text.split()))
 
 
 class RecordingQueryService:
@@ -77,7 +78,7 @@ def service() -> RecordingQueryService:
 
 @pytest.fixture
 def make_client(async_client_factory, monkeypatch):
-    monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+    monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
     settings = Settings()
     settings.models.llm["default"] = ModelEndpointConfig(
         endpoint="http://llm:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: WINDOW}
@@ -176,7 +177,7 @@ async def test_counter_failure_returns_503_before_processing(
         raise RuntimeError("secret tokenizer details")
 
     monkeypatch.setattr(
-        chat, "get_num_tokens", fail_counting if failure_stage == "initialization" else lambda: fail_counting
+        token_budget, "get_num_tokens", fail_counting if failure_stage == "initialization" else lambda: fail_counting
     )
     async with client:
         response = await client.post(path, json={**body, "model": model})
