@@ -6,7 +6,7 @@ the OIDC ID token — into the partition memberships OpenRAG understands. The
 and reconciles the result against the database; everything here is a string
 transform so it is exhaustively unit-testable without a DB or an IdP.
 
-The strategy doc (``REFACTORING_STRATEGY_v1.md`` §15C) specified this mapping:
+The mapping:
 
     /openrag/project-alpha/editor  ->  ("project-alpha", "editor")
 
