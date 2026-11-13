@@ -557,6 +557,68 @@ def test_hard_max_above_the_band_changes_nothing():
     assert [c.token_count for c in with_bound] == [c.token_count for c in without]
 
 
+@pytest.mark.parametrize("layout", ["flowing", "paginated"])
+@pytest.mark.parametrize("limit", [1, 8, 20])
+def test_long_header_respects_hard_max_without_losing_body(layout, limit):
+    heading = "Titre " + " ".join(f"mot{i}" for i in range(12))
+    body = "un deux trois quatre cinq six sept huit neuf dix onze douze"
+    chunks = _chunker(chunk_size=32, hard_max_tokens=limit, layout=layout).chunk(_doc(f"{heading}\n\n{body}"))
+    assert chunks
+    assert all(c.token_count <= limit for c in chunks), [c.text for c in chunks]
+    assert " ".join(c.content for c in chunks).split() == f"{heading} {body}".split()
+    assert all(c.metadata["hierarchy_path"] == [heading] for c in chunks)
+
+
+def test_long_filename_and_deep_heading_path_leave_room_for_body():
+    heading = "Titre " + " ".join(f"section{i}" for i in range(20))
+    filename = " ".join(f"name{i}" for i in range(30)) + ".pdf"
+    doc = _doc(f"# Outer\n\n## Inner\n\n{heading}\n\nSome body text.", filename=filename)
+    chunks = _chunker(chunk_size=32, hard_max_tokens=16).chunk(doc)
+    assert chunks
+    assert all(c.token_count <= 16 for c in chunks), [c.text for c in chunks]
+    assert all(c.metadata["filename"] == filename for c in chunks)
+    joined = " ".join(c.content for c in chunks)
+    for text in ("Outer", "Inner", heading, "Some body text."):
+        assert text in joined
+
+
+def test_header_sanitizes_control_characters_in_headings():
+    chunks = _chunker().chunk(_doc("Titre Hello\x07world\n\nSome body text."))
+    assert chunks[0].header
+    assert "\x07" not in chunks[0].header
+    assert "Helloworld" in chunks[0].header
+
+
+@pytest.mark.parametrize(
+    "length_function", [len, lambda text: len(text) // 4], ids=["characters", "quarter-characters"]
+)
+def test_header_budget_uses_the_injected_token_counter(length_function):
+    heading = "Titre " + " ".join(f"mot{i}" for i in range(20))
+    body = "un deux trois quatre cinq six sept huit neuf dix onze douze"
+    chunks = _chunker(chunk_size=28, max_tokens=28, hard_max_tokens=14, length_function=length_function).chunk(
+        _doc(f"{heading}\n\n{body}", page=9, filename="")
+    )
+    assert chunks
+    assert all(length_function(c.text) <= 14 for c in chunks), [c.text for c in chunks]
+    assert all(c.token_count == length_function(c.text) for c in chunks)
+    assert " ".join(c.content for c in chunks).split() == f"{heading} {body}".split()
+
+
+def test_bounded_header_keeps_the_innermost_heading():
+    doc = _doc("# Outer\n\n## Middle\n\n### Inner\n\nSome body text.")
+    chunks = _chunker(chunk_size=20, hard_max_tokens=20).chunk(doc)
+    assert chunks
+    assert all("Section: Middle > Inner]" in c.header for c in chunks)
+    assert all("Outer" not in c.header for c in chunks)
+    assert all(c.metadata["hierarchy_path"] == ["Outer", "Middle", "Inner"] for c in chunks)
+
+
+def test_small_header_keeps_its_existing_format():
+    chunk = _chunker().chunk(_doc("# Title\n\nSome body text.", page=9))[0]
+    assert chunk.header == "[Source: code.pdf | Page: 9 | Section: Title]"
+    assert chunk.text == f"{chunk.header}\n\n{chunk.content}"
+
+
 def test_every_chunk_of_a_named_file_has_a_source_header():
     doc = ProcessedDocument(
         document_id="d",
