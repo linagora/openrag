@@ -34,18 +34,21 @@ jobs:
       backend: ${{ steps.areas.outputs.backend }}
       unit: ${{ steps.areas.outputs.unit }}
       ui: ${{ steps.areas.outputs.ui }}
+      site: ${{ steps.areas.outputs.site }}
     steps:
       # Pushes to main and develop run everything. On a pull request:
       #   backend  anything outside ui/, docs/ and the top-level *.md files
       #   unit     anything outside ui/ and the top-level *.md files, since
       #            unit tests read pages and env files under docs/
       #   ui       anything under ui/, or this file
+      #   site     anything the documentation site is built from: docs/, the
+      #            Astro config, the root package files, or this file
       - name: Find the areas this pull request changes
         id: areas
         uses: actions/github-script@v7
         with:
           script: |
-            const areas = { backend: true, unit: true, ui: true };
+            const areas = { backend: true, unit: true, ui: true, site: true };
             if (context.eventName === 'pull_request') {
               try {
                 const files = await github.paginate(github.rest.pulls.listFiles, {
@@ -65,6 +68,8 @@ jobs:
                   areas.backend = paths.some((path) => !isUi(path) && !isDocs(path));
                   areas.unit = paths.some((path) => !isUi(path) && !isTopLevelMarkdown(path));
                   areas.ui = paths.some((path) => isUi(path) || path === '.github/workflows/ci.yml');
+                  const siteFiles = ['astro.config.mjs', 'package.json', 'package-lock.json', 'tsconfig.json', '.github/workflows/ci.yml'];
+                  areas.site = paths.some((path) => path.startsWith('docs/') || siteFiles.includes(path));
                 }
               } catch (error) {
                 core.warning(`Could not list the changed files, running every job: ${error.message}`);
@@ -536,3 +541,34 @@ jobs:
         # vite.config.ts sets passWithNoTests: true for local runs; in CI an empty
         # test discovery means something broke, so make it a failure.
         run: npm test -- --passWithNoTests=false
+
+  docs-build:
+    # The site deploys only from main (astro.yml), so a page that breaks the
+    # build would otherwise surface on release day. This builds it, as
+    # astro.yml does, without deploying anything.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.site != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the documentation site
+        run: npx --no-install astro build
