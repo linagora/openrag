@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from core.utils.exceptions import ValidationError
 
 
 class _AsyncContext:
@@ -268,3 +269,16 @@ def test_row_to_dict_exposes_chunk_count_as_catalog_data():
     result = PgDocumentRepository._row_to_dict(row)
 
     assert result["chunk_count"] == 9
+
+
+@pytest.mark.asyncio
+async def test_auto_create_refuses_a_reserved_partition_name():
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _FakePool()
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ValidationError, match="reserved") as exc:
+        await repo.add_file_to_partition(file_id="f1", partition="all", user_id=42)
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
+    assert pool.conn.executed == []

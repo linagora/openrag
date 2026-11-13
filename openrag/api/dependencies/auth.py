@@ -1,6 +1,7 @@
 import os
 
 from core.indexing.validators import validate_partition_name
+from core.utils.consts import is_reserved_partition_name
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from di.providers import get_auth_service, get_config, get_job_service, get_partition_service
@@ -72,7 +73,17 @@ async def ensure_partition_role(
     """Ensure the user has at least `required_role` for the partition."""
     # Reject crafted partition names before they reach any filter expression.
     validate_partition_name(partition)
-    if SUPER_ADMIN_MODE and user.get("is_admin"):
+    is_super_admin = SUPER_ADMIN_MODE and user.get("is_admin")
+    # Reserved names never name a partition anyone can change: the store reads
+    # one as "every partition", so deleting file X there would delete X in
+    # every partition. Only a super-admin may read through it, which is the
+    # access to every partition they already have.
+    if is_reserved_partition_name(partition) and not (is_super_admin and required_role == "viewer"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access to partition '{partition}' forbidden",
+        )
+    if is_super_admin:
         return True
 
     membership = next((p for p in user_partitions if p["partition"] == partition), None)
