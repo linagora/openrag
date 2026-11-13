@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import zipfile
+import zlib
 from collections.abc import Iterable
 from typing import IO, Any
 
@@ -133,6 +134,10 @@ CONTENT_SNIFF_BYTES = 8192
 #: * ``docx``/``pptx``/``xlsx`` are **not** here: a ZIP's authoritative index is its
 #:   central directory, which sits at the end of the file, so no head buffer can
 #:   settle them. They are checked by :func:`validate_ooxml_package` instead.
+#: * ``odt``/``odp`` are not here either, for the same reason. ODF asks for an
+#:   uncompressed ``mimetype`` entry first, which ``filetype`` reads, but not
+#:   every producer writes it first; :func:`validate_ooxml_package` reads the
+#:   central directory instead.
 _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
     "pdf": frozenset({"pdf"}),
     "png": frozenset({"png"}),
@@ -198,6 +203,14 @@ _OOXML_MAIN_PARTS: dict[str, str] = {
     "pptx": "ppt/presentation.xml",
     "xlsx": "xl/workbook.xml",
     "xlsm": "xl/workbook.xml",
+}
+
+#: The ``mimetype`` entry an ODF package of that kind carries (ODF 1.2, part 3,
+#: section 3.3). Its content names the kind, so a text document renamed
+#: ``.odp`` is refused like a plain zip.
+_ODF_MIMETYPES: dict[str, bytes] = {
+    "odt": b"application/vnd.oasis.opendocument.text",
+    "odp": b"application/vnd.oasis.opendocument.presentation",
 }
 
 #: Parts every OPC package carries whatever its flavour: the content-type map
@@ -383,7 +396,10 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
 
 
 def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
-    """Reject an Office OOXML upload that is not a real package of its type.
+    """Reject an Office OOXML or OpenDocument upload that is not a real package of its type.
+
+    ODF packages are checked by :func:`_validate_odf_package`; the rest of this
+    describes OOXML.
 
     ``filetype`` cannot settle this, and was verified failing both ways: its
     matcher looks for an entry *named* ``word/`` or ``ppt/`` among the first few
@@ -403,7 +419,7 @@ def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
 
     Args:
         extension: Lowercased extension without the dot. Anything that is not an
-            OOXML format returns without reading the stream.
+            OOXML or ODF format returns without reading the stream.
         stream: Seekable binary stream holding the **whole** file. Its position
             is restored before returning, on success and on rejection alike, so
             a caller can go on to stream the same handle to disk.
@@ -411,6 +427,9 @@ def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
     Raises:
         ValidationError: HTTP 415, when the archive is not a package of that kind.
     """
+    if extension in _ODF_MIMETYPES:
+        _validate_odf_package(extension, stream)
+        return
     main_part = _OOXML_MAIN_PARTS.get(extension)
     if main_part is None:
         # A tolerant extension can still carry an OOXML package: a .docx saved as
@@ -445,3 +464,34 @@ def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
             f"Upload it with the extension matching its actual format.",
             status_code=415,
         )
+
+
+def _validate_odf_package(extension: str, stream: IO[bytes]) -> None:
+    """Reject an ``.odt``/``.odp`` upload whose archive is not an ODF package of that kind.
+
+    Reads the central directory, then the ``mimetype`` entry, capped at a few
+    hundred bytes whatever its header claims. ``content.xml`` is required as
+    well: it is the part the parser reads. The stream position is restored.
+    """
+    expected = _ODF_MIMETYPES[extension]
+    refused = (
+        f"Uploaded file does not match its .{extension} extension: it is not a valid OpenDocument "
+        f"package. Upload it with the extension matching its actual format."
+    )
+    position = stream.tell()
+    try:
+        with zipfile.ZipFile(stream) as package:
+            names = set(package.namelist())
+            if "mimetype" not in names or "content.xml" not in names:
+                raise ValidationError(refused, status_code=415)
+            # One byte past the bound tells an over-long entry from one that fits.
+            bound = len(expected) + 64
+            with package.open("mimetype") as entry:
+                declared = entry.read(bound + 1)
+    # An encrypted entry raises RuntimeError, a corrupt deflate stream zlib.error.
+    except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError, RuntimeError, zlib.error) as exc:
+        raise ValidationError(refused, status_code=415) from exc
+    finally:
+        stream.seek(position)
+    if len(declared) > bound or declared.strip() != expected:
+        raise ValidationError(refused, status_code=415)

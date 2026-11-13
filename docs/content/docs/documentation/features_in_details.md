@@ -7,7 +7,7 @@ title: ✨ Key Features
 
 * **Text Files**: `txt`, `md`
 * **Tabular Data**: `csv`, `xlsx`, `xlsm` - Row-preserving batch ingestion with independent table extraction (each worksheet read in one pass, however its tables are laid out), worksheet context, and formula metadata. Hidden columns are skipped; hidden rows are skipped too, except in the range of an active filter, where they are indexed. Macros are never executed. See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/)
-* **Document Files**: `pdf`, `docx`, `doc`, `pptx` - Advanced PDF parsing with OCR support and Office document processing
+* **Document Files**: `pdf`, `docx`, `doc`, `pptx`, `odt`, `odp` - Advanced PDF parsing with OCR support and Office document processing
 * **E-mail**: `eml` - Message body and headers, with attachments parsed through their own format's pipeline
 * **Audio Files**: `wav`, `mp3`, `flac`, `ogg`, `aac`, `wma` - Audio transcription and content extraction
 * **Video Files**: `mp4`, `flv` - Speech transcription from the audio track
