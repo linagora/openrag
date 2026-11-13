@@ -403,6 +403,36 @@ describe("DocumentListPage", () => {
     await waitFor(() => expect((screen.getByLabelText("Files") as HTMLInputElement).disabled).toBe(true));
   });
 
+  it("keeps earlier successes when a retry still has failures", async () => {
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name !== "a.txt") throw new Error("Network error");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["a"], "a.txt", { type: "text/plain" }),
+      new File(["b"], "b.txt", { type: "text/plain" }),
+      new File(["c"], "c.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByText("c.txt: Network error");
+
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "c.txt") throw new Error("Still failing");
+      return { task_status_url: "/queue/task-2" };
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    expect(await screen.findByText("c.txt: Still failing")).toBeTruthy();
+    expect(screen.getByText("a.txt: uploaded")).toBeTruthy();
+    expect(screen.getByText("b.txt: uploaded")).toBeTruthy();
+    expect(screen.queryByText("b.txt: Network error")).toBeNull();
+    expect(screen.getByText("1 failed file(s) ready to retry")).toBeTruthy();
+  });
+
   it("resends the same file ID when retrying a failed upload", async () => {
     let next = 0;
     vi.mocked(newFileId).mockImplementation(() => `file-id-${++next}`);

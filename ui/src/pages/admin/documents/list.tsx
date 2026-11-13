@@ -367,7 +367,8 @@ export default function DocumentListPage() {
         // Keep the dialog open with only the failed files, so a retry does not
         // resubmit files that were already accepted.
         toast.error(`${failed.length} upload(s) failed. See the upload dialog for details.`);
-        setUploadResults(results);
+        // A retry only resends the failed files: keep the earlier successes.
+        setUploadResults((prev) => [...prev.filter((r) => !r.error), ...results]);
         setFiles(failed);
         return;
       }
