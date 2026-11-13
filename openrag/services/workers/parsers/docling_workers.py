@@ -284,8 +284,11 @@ class DoclingLoader(BasePooledParser):
         Docling PNG-encoded each picture into its ``data:`` URI when it generated
         it, so those bytes are reused as they are. A picture without one keeps its
         decoded image in ``pil_image``, which the caption stage encodes only when
-        it captions the document.
+        it captions the document. A picture Docling generated no image for has
+        no block, and nothing failed, so nothing is logged.
         """
+        if picture.image is None:
+            return None
         try:
             uri = str(getattr(picture.image, "uri", None) or "")
             png_bytes = decode_data_uri(uri) if uri.startswith("data:image/png;") else None

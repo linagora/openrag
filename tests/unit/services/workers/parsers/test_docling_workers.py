@@ -351,3 +351,13 @@ def test_a_picture_without_a_png_data_uri_is_handed_over_unencoded(uri):
 
     assert block.pil_image is figure
     assert block.image_bytes == b""
+
+
+def test_a_picture_without_an_image_has_no_block_and_logs_no_read_failure(monkeypatch):
+    warnings: list[str] = []
+    monkeypatch.setattr(docling_workers.logger, "warning", warnings.append)
+
+    block = docling_workers.DoclingLoader._build_image_block(SimpleNamespace(image=None), 0, 1)
+
+    assert block is None
+    assert warnings == []
