@@ -282,7 +282,9 @@ Update file metadata without reindexing the document.
 **Request Body (form-data):**
 - `metadata` (JSON string): Updated metadata
 
-**Response:** `200 OK` on successful update
+**Response:** `200 OK` on successful update. A `partition` other than the file's own is refused with
+`400 Bad Request` (`PARTITION_CHANGE_UNSUPPORTED`): this endpoint does not move files. To move one, copy
+it to the other partition, then delete it from this one.
 
 #### Delete File
 ```http

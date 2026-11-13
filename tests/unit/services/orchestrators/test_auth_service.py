@@ -836,3 +836,12 @@ async def test_callback_returns_an_unmanaged_account_found_on_the_provisioning_r
     state, cookie = await _login_and_get_state(svc)
     result = await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
     assert result.next_url == "/home"
+
+
+@pytest.mark.asyncio
+async def test_request_partitions_skip_reserved_names():
+    repo = FakeMembershipRepo(
+        seed=[(7, "all", "owner"), (7, "ALL", "viewer"), (7, "team", "editor"), (8, "x", "viewer")]
+    )
+    partitions = await _service(membership_repo=repo).list_user_partitions_for_request(7)
+    assert [(p["partition"], p["role"]) for p in partitions] == [("team", "editor")]
