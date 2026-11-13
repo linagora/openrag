@@ -126,3 +126,20 @@ async def test_serialize_carries_the_files_own_path_on_the_document(monkeypatch,
     dispatcher = serializer._dispatcher
     assert len(dispatcher.calls) == 1, "guard: the dispatcher must have been handed a document"
     assert dispatcher.calls[0].source_path == str(path)
+
+
+@pytest.mark.asyncio
+async def test_serialize_leaves_out_the_refs_of_images_it_did_not_caption(monkeypatch, tmp_path):
+    """extractText returned ``![](docling_img_0)`` as if it were the document's text."""
+    serializer, _ = _build_serializer(monkeypatch, None, vlm_semaphore=None)
+    serializer._dispatcher = FakeDispatcher(
+        ProcessedDocument(
+            document_id="doc",
+            text_blocks=[TextBlock(text="before ![](docling_img_0) after")],
+            images=[ImageBlock(image_bytes=b"png", metadata={"markdown_ref": "![](docling_img_0)"})],
+        )
+    )
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"%PDF")
+
+    assert await serializer.serialize(str(path), {}) == "before  after"

@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import threading
 import time
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from core.models.document import Document, DocumentType
+from core.chunking.recursive import RecursiveSplitter
+from core.chunking.structured_section import StructuredSectionChunker
+from core.models.document import Document, DocumentType, ProcessedDocument
+from docling_core.types.doc.base import BoundingBox, Size
+from docling_core.types.doc.document import ContentLayer, DoclingDocument, ImageRef, PictureItem, ProvenanceItem
+from docling_core.types.doc.labels import DocItemLabel
+from PIL import Image
 from services.workers.parsers import docling_workers
+from services.workers.stages import caption as caption_module
+from services.workers.stages.caption import caption_stage, drop_uncaptioned_image_refs
 
 
 def _config(docling_num_gpus: float = 0.25):
@@ -65,13 +75,12 @@ def _png_data_uri(payload: bytes) -> str:
     return "data:image/png;base64," + base64.b64encode(payload).decode()
 
 
-def _fake_conversion(n_pages: int, n_pictures: int, export=lambda page_no: "text"):
+def _fake_conversion(n_pages: int, n_pictures: int):
     """The slice of a ``ConversionResult`` that the block builders read."""
-    picture = SimpleNamespace(image=SimpleNamespace(uri=_png_data_uri(b"\x89PNG"), pil_image=object()))
-    return SimpleNamespace(
-        pages=[None] * n_pages,
-        document=SimpleNamespace(export_to_markdown=export, pictures=[picture] * n_pictures),
-    )
+    document = _docling_document(n_pages)
+    for _ in range(n_pictures):
+        _add_picture(document, 1)
+    return SimpleNamespace(pages=[None] * n_pages, document=document)
 
 
 def _pdf() -> Document:
@@ -88,16 +97,17 @@ async def test_parse_builds_blocks_off_the_event_loop(monkeypatch):
     # temporary-file write around the dispatch.
     window: list[int] = []
 
-    def _slow_export(page_no):
+    def _slow_export(*_args):
         window.append(ticks)
         time.sleep(0.5)
         window.append(ticks)
         return "text"
 
     async def _fake_dispatch(path):
-        return _fake_conversion(n_pages=1, n_pictures=0, export=_slow_export)
+        return _fake_conversion(n_pages=1, n_pictures=0)
 
     monkeypatch.setattr(loader, "_dispatch", _fake_dispatch)
+    monkeypatch.setattr(docling_workers, "_page_markdown", _slow_export)
 
     async def _ticker():
         nonlocal ticks
@@ -136,7 +146,8 @@ async def test_cancelling_parse_stops_building_the_blocks(monkeypatch, slow_step
         return _step
 
     if slow_step == "page export":
-        result = _fake_conversion(n_pages=total, n_pictures=0, export=_slow("text"))
+        result = _fake_conversion(n_pages=total, n_pictures=0)
+        monkeypatch.setattr(docling_workers, "_page_markdown", _slow("text"))
     else:
         result = _fake_conversion(n_pages=1, n_pictures=total)
         monkeypatch.setattr(docling_workers, "decode_data_uri", _slow(b"png"))
@@ -164,6 +175,214 @@ async def test_cancelling_parse_stops_building_the_blocks(monkeypatch, slow_step
     assert done == settled < total
 
 
+# ----------------------------------------------------------------------------------
+# #1313: the caption stage substitutes a caption for the picture's ``markdown_ref``
+# wherever it occurs in the page text. ``export_to_markdown`` printed
+# ``<!-- image -->`` instead, so every caption was appended at the end of the
+# document and attributed to the last page, and the marker itself was indexed.
+# These build real docling-core documents: which pictures a page export prints
+# (body layer only, ``prov[0]`` on that page) is docling-core's call.
+# ----------------------------------------------------------------------------------
+
+
+def _docling_document(n_pages: int = 3) -> DoclingDocument:
+    document = DoclingDocument(name="report")
+    for page_no in range(1, n_pages + 1):
+        document.add_page(page_no=page_no, size=Size(width=100, height=100))
+    return document
+
+
+def _prov(page_no: int) -> ProvenanceItem:
+    return ProvenanceItem(page_no=page_no, bbox=BoundingBox(l=0, t=0, r=10, b=10), charspan=(0, 0))
+
+
+def _add_text(document: DoclingDocument, page_no: int, text: str, label=DocItemLabel.TEXT):
+    return document.add_text(label=label, text=text, prov=_prov(page_no))
+
+
+def _add_picture(document: DoclingDocument, page_no: int | None, *, width: int = 2, **kwargs) -> PictureItem:
+    """A picture carrying the PNG data URI Docling generates for it."""
+    image = ImageRef.from_pil(Image.new("RGB", (width, 2)), dpi=72)
+    return document.add_picture(image=image, prov=_prov(page_no) if page_no else None, **kwargs)
+
+
+def _postprocess(document: DoclingDocument):
+    loader = docling_workers.DoclingLoader.__new__(docling_workers.DoclingLoader)
+    result = SimpleNamespace(pages=[None] * len(document.pages), document=document)
+    return loader._postprocess(result, threading.Event())
+
+
+def test_each_picture_is_printed_as_the_ref_of_its_own_block():
+    document = _docling_document()
+    _add_text(document, 1, "Before")
+    first = _add_picture(document, 1)
+    caption = _add_text(document, 1, "Figure 1: revenue", label=DocItemLabel.CAPTION)
+    first.captions.append(caption.get_ref())
+    _add_text(document, 1, "Middle")
+    _add_picture(document, 1)
+    _add_text(document, 3, "Last page")
+    _add_picture(document, 3)
+
+    text_blocks, image_blocks = _postprocess(document)
+
+    assert [(b.page_number, b.text) for b in text_blocks] == [
+        (1, "Before\n\nFigure 1: revenue\n\n![](docling_img_0)\n\nMiddle\n\n![](docling_img_1)"),
+        (2, ""),
+        (3, "Last page\n\n![](docling_img_2)"),
+    ]
+    assert [b.metadata["markdown_ref"] for b in image_blocks] == [f"![](docling_img_{i})" for i in range(3)]
+    assert [b.page_number for b in image_blocks] == [1, 1, 3]
+
+
+def test_a_furniture_picture_does_not_stop_the_body_pictures_of_its_page_anchoring():
+    """The page export leaves out a picture outside the body layer (a logo):
+    counting it among the page's pictures disabled every ref of the page."""
+    document = _docling_document(n_pages=1)
+    _add_picture(document, 1, content_layer=ContentLayer.FURNITURE)
+    _add_text(document, 1, "Body")
+    _add_picture(document, 1)
+
+    text_blocks, _ = _postprocess(document)
+
+    assert text_blocks[0].text.startswith("Body\n\n![](docling_img_1)")
+
+
+def test_a_picture_the_page_export_leaves_out_ends_its_own_page():
+    """Not on the last page: appended after it, its caption was chunked with
+    the last page's text, which took the caption's page number."""
+    document = _docling_document()
+    _add_text(document, 1, "First page")
+    _add_picture(document, 1, content_layer=ContentLayer.FURNITURE)
+    _add_text(document, 3, "Last page")
+
+    text_blocks, image_blocks = _postprocess(document)
+
+    assert [b.page_number for b in image_blocks] == [1]
+    assert [b.text for b in text_blocks] == ["First page\n\n![](docling_img_0)", "", "Last page"]
+
+
+def test_a_picture_without_provenance_has_no_page_and_does_not_shift_the_others():
+    """docling-core leaves a picture with an empty ``prov`` out of every page
+    export, so only the provenanced one is printed, with its own ref."""
+    document = _docling_document(n_pages=1)
+    _add_picture(document, None)
+    _add_text(document, 1, "Body")
+    _add_picture(document, 1)
+
+    text_blocks, image_blocks = _postprocess(document)
+
+    assert [b.page_number for b in image_blocks] == [None, 1]
+    assert text_blocks[0].text == "Body\n\n![](docling_img_1)"
+
+
+def test_an_unreadable_picture_prints_nothing_and_keeps_its_caption():
+    """No block, so no ref, and no ``<!-- image -->`` left in its place."""
+    document = _docling_document(n_pages=1)
+    _add_text(document, 1, "Before")
+    broken = _add_picture(document, 1)
+    broken.image = ImageRef(mimetype="image/png", dpi=72, size=Size(width=2, height=2), uri="file:///missing.png")
+    caption = _add_text(document, 1, "Figure 1: lost", label=DocItemLabel.CAPTION)
+    broken.captions.append(caption.get_ref())
+    _add_text(document, 1, "After")
+    _add_picture(document, 1)
+
+    text_blocks, image_blocks = _postprocess(document)
+
+    assert [b.metadata["markdown_ref"] for b in image_blocks] == ["![](docling_img_1)"]
+    assert text_blocks[0].text == "Before\n\nFigure 1: lost\n\nAfter\n\n![](docling_img_1)"
+
+
+def test_every_page_docling_kept_is_exported_under_its_own_number():
+    """Page 2 left out of the document: counting ``result.pages`` from 1
+    exported a page 2 that isn't there and lost page 3 with its pictures."""
+    document = DoclingDocument(name="report")
+    for page_no in (1, 3):
+        document.add_page(page_no=page_no, size=Size(width=100, height=100))
+    _add_text(document, 1, "First page")
+    _add_text(document, 3, "Last page")
+    _add_picture(document, 3)
+
+    text_blocks, _ = _postprocess(document)
+
+    assert [(b.page_number, b.text) for b in text_blocks] == [
+        (1, "First page"),
+        (3, "Last page\n\n![](docling_img_0)"),
+    ]
+
+
+def test_the_page_text_is_docling_s_own_page_export_apart_from_the_pictures():
+    """Pins ``_page_markdown`` to ``export_to_markdown``'s defaults (labels,
+    layers, escaping), so a docling-core upgrade that changes them shows here."""
+    document = _docling_document(n_pages=2)
+    _add_text(document, 1, "Title", label=DocItemLabel.TITLE)
+    _add_text(document, 1, "snake_case <b>body</b>")
+    _add_text(document, 1, "Running header", label=DocItemLabel.PAGE_HEADER)
+    _add_text(document, 2, "Second page")
+
+    for page_no in (1, 2):
+        expected = document.export_to_markdown(page_no=page_no).strip()
+        assert docling_workers._page_markdown(document, page_no, {}) == expected
+
+
+class _WidthVLM:
+    """Captions an image with its width, so each caption names its picture."""
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            return f"Figure {image.width} pixels wide"
+
+
+def _words(text: str) -> int:
+    return len(text.split())
+
+
+@pytest.mark.parametrize(
+    "chunker",
+    [
+        RecursiveSplitter(chunk_size=60, chunk_overlap_rate=0.0, length_function=_words),
+        StructuredSectionChunker(chunk_size=60, length_function=_words),
+    ],
+    ids=["recursive", "structured_section"],
+)
+@pytest.mark.parametrize("captioning", [True, False], ids=["captioned", "not-captioned"])
+async def test_docling_pictures_through_captioning_and_chunking(monkeypatch, chunker, captioning):
+    """#1313 end to end: Docling's output, then the caption stage (or the ref
+    scrub when captioning is off), then a real chunker."""
+
+    @asynccontextmanager
+    async def _no_gate():
+        yield
+
+    monkeypatch.setattr(caption_module, "get_vlm_semaphore", _no_gate)
+    filler = " ".join(f"word{i}" for i in range(40))
+    document = _docling_document()
+    _add_text(document, 1, f"Opening remarks {filler}")
+    _add_picture(document, 1, width=3)
+    _add_picture(document, 1, width=4, content_layer=ContentLayer.FURNITURE)
+    _add_text(document, 2, f"Middle page {filler}")
+    _add_text(document, 3, f"Closing remarks {filler}")
+    _add_picture(document, 3, width=5)
+    text_blocks, image_blocks = _postprocess(document)
+    processed = ProcessedDocument(
+        document_id="d", text_blocks=text_blocks, images=image_blocks, metadata={"filename": "report.pdf"}
+    )
+    if captioning:
+        row = await caption_stage({"processed_document": processed}, _WidthVLM())
+        processed = row["processed_document"]
+    processed = drop_uncaptioned_image_refs(processed)
+
+    chunks = chunker.chunk(processed, "p")
+
+    text = "\n".join(chunk.text for chunk in chunks)
+    assert "<!-- image -->" not in text
+    assert "docling_img" not in text
+    assert all(chunk.page_number == 3 for chunk in chunks if "Closing remarks" in chunk.text)
+    if captioning:
+        for width, page in ((3, 1), (4, 1), (5, 3)):
+            pages = [chunk.page_number for chunk in chunks if f"Figure {width} pixels wide" in chunk.text]
+            assert pages == [page], f"caption of the {width}px picture: pages {pages}, expected [{page}]"
+
+
 class _UndecodedImage:
     """An ``ImageRef`` whose ``pil_image`` must not be read: decoding the PNG
     only to encode it again is the work the loader skips."""
@@ -178,26 +397,32 @@ class _UndecodedImage:
 
 def test_pictures_reuse_the_png_docling_already_encoded():
     png = b"\x89PNG\r\n\x1a\n" + b"pixels" * 100
-    result = SimpleNamespace(
-        document=SimpleNamespace(pictures=[SimpleNamespace(image=_UndecodedImage(_png_data_uri(png)))])
-    )
+    picture = SimpleNamespace(image=_UndecodedImage(_png_data_uri(png)))
 
-    blocks = docling_workers.DoclingLoader._build_image_blocks(result)
+    block = docling_workers.DoclingLoader._build_image_block(picture, 0, 1)
 
-    assert [block.image_bytes for block in blocks] == [png]
-    assert blocks[0].pil_image is None
-    assert blocks[0].metadata == {"markdown_ref": "![](docling_img_0)"}
+    assert block.image_bytes == png
+    assert block.pil_image is None
+    assert block.metadata == {"markdown_ref": "![](docling_img_0)"}
 
 
 @pytest.mark.parametrize("uri", [None, "file:///tmp/figure.png", "data:image/jpeg;base64,/9j/"])
 def test_a_picture_without_a_png_data_uri_is_handed_over_unencoded(uri):
     """The caption stage encodes it, and only when the partition captions."""
     figure = object()
-    result = SimpleNamespace(
-        document=SimpleNamespace(pictures=[SimpleNamespace(image=SimpleNamespace(uri=uri, pil_image=figure))])
-    )
+    picture = SimpleNamespace(image=SimpleNamespace(uri=uri, pil_image=figure))
 
-    blocks = docling_workers.DoclingLoader._build_image_blocks(result)
+    block = docling_workers.DoclingLoader._build_image_block(picture, 0, 1)
 
-    assert [block.pil_image for block in blocks] == [figure]
-    assert blocks[0].image_bytes == b""
+    assert block.pil_image is figure
+    assert block.image_bytes == b""
+
+
+def test_a_picture_without_an_image_has_no_block_and_logs_no_read_failure(monkeypatch):
+    warnings: list[str] = []
+    monkeypatch.setattr(docling_workers.logger, "warning", warnings.append)
+
+    block = docling_workers.DoclingLoader._build_image_block(SimpleNamespace(image=None), 0, 1)
+
+    assert block is None
+    assert warnings == []
