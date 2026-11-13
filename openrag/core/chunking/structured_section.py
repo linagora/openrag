@@ -329,8 +329,8 @@ class StructuredSectionChunker(BaseChunker):
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
             base = unit.metadata if xlsx_table and unit.metadata else metadata
-            header = self._build_header(filename, unit.heading_path, unit.pages)
             body = unit.text.strip()
+            header = self._build_header(filename, unit.heading_path, unit.pages, body=body)
             text = f"{header}\n\n{body}" if header else body
             chunks.append(
                 Chunk(
@@ -861,9 +861,8 @@ class StructuredSectionChunker(BaseChunker):
         reserve = self._header_reserve(filename, path, unit.pages)
         pieces = _greedy_split(
             unit.text,
-            # Floored at ``min_tokens`` like ``_packing_budget`` /
-            # ``_effective_max``: a floor of 1 let a long filename or deep
-            # breadcrumb eat the whole budget and emit one-token pieces.
+            # The bounded header leaves room for body text even at small
+            # limits; keep the body budget positive for the splitter.
             max(1, target - reserve) if target is not None else self._packing_budget(filename, path, unit.pages),
             max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages),
             self.length_function,
@@ -986,17 +985,47 @@ class StructuredSectionChunker(BaseChunker):
     # ------------------------------------------------------------------
     # Header
     # ------------------------------------------------------------------
-    @staticmethod
-    def _build_header(filename: str, heading_path: list[str], pages: set[int]) -> str:
-        parts: list[str] = []
-        if filename:
-            parts.append(f"Source: {filename}")
-        page_range = _page_range(pages)
-        if page_range:
-            parts.append(f"Page: {page_range}")
-        if heading_path:
-            parts.append(f"Section: {' > '.join(heading_path)}")
-        return f"[{' | '.join(parts)}]" if parts else ""
+    def _build_header(self, filename: str, heading_path: list[str], pages: set[int], *, body: str | None = None) -> str:
+        """Bound the rendered header, leaving at least half the target for body.
+
+        Like ``recursive.source_header``, measure the separator too. Prefer
+        the innermost headings when a breadcrumb is too long, then shorten
+        the remaining text fields. Full names and paths stay in metadata;
+        heading text also stays in the body. Very small budgets omit the
+        header rather than letting it overflow on every split piece.
+        """
+        limit = min(self.target_tokens, self.max_tokens) // 2
+        if body is not None and self.hard_max_tokens is not None:
+            # Rehoming a trailing heading or keeping an atomic block intact
+            # can grow the body after packing. Trim only the repeated header.
+            limit = min(limit, max(0, self.hard_max_tokens - self.length_function(body)))
+        path = [" ".join(sanitize_text(heading).split()) for heading in heading_path]
+        fields = {
+            "Source": " ".join(sanitize_text(filename).split()),
+            "Page": _page_range(pages),
+            "Section": " > ".join(path),
+        }
+        while any(fields.values()):
+            header = "[" + " | ".join(f"{key}: {value}" for key, value in fields.items() if value) + "]"
+            tokens = self.length_function(f"{header}\n\n")
+            if tokens <= limit and (
+                body is None
+                or self.hard_max_tokens is None
+                or self.length_function(f"{header}\n\n{body}") <= self.hard_max_tokens
+            ):
+                return header
+            if len(path) > 1:
+                path.pop(0)
+                fields["Section"] = " > ".join(path)
+                continue
+            # Strictly shorten on each pass, even for counters whose cost
+            # does not decrease with every removed character.
+            key = max(("Section", "Source"), key=lambda key: len(fields[key]))
+            value = fields[key]
+            if not value:
+                break  # Even the page-only header cannot fit.
+            fields[key] = value[: min(len(value) - 1, len(value) * limit // tokens)].rstrip()
+        return ""
 
 
 # ---------------------------------------------------------------------------
