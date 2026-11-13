@@ -7,6 +7,8 @@ model's arguments are validated as they will be.
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from core.chat.routing import Route
@@ -15,6 +17,7 @@ from core.models.chunk import Chunk
 from core.tools import ToolCall, ToolContext, run_tool
 from core.utils.exceptions import PartitionNotFoundError
 from di.tools import create_tool_registry
+from services.capabilities.summarize import Summarizer
 
 
 def _chunk(n: int, *, file_id: str = "f", partition: str = "p", text: str | None = None, **metadata) -> Chunk:
@@ -62,6 +65,23 @@ class FakeRetrievalService:
         return neighbours
 
 
+class FakeSummarizer:
+    """Keeps the passages whose text starts with "keep", as summaries, and one starting "unjudged" as it was."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str]]] = []
+
+    async def summarize(self, query, docs):
+        self.calls.append((query, [d.metadata["_id"] for d in docs]))
+        kept = []
+        for d in docs:
+            if d.page_content.startswith("unjudged"):
+                kept.append(d)  # fail-open: the document itself
+            elif d.page_content.startswith("keep"):
+                kept.append(d.__class__(page_content=f"summary of {d.metadata['_id']}", metadata=d.metadata))
+        return kept
+
+
 class FakePromptSettings:
     def __init__(self, top_n: int = 5) -> None:
         self._top_n = top_n
@@ -70,12 +90,13 @@ class FakePromptSettings:
         return self._top_n
 
 
-def _tools(retriever=None, *, top_n: int = 5):
+def _tools(retriever=None, *, top_n: int = 5, summarizer=None):
     service = FakeRetrievalService()
     registry = create_tool_registry(
         retriever=retriever or FakeRetriever(),
         retrieval_service=service,
         prompt_settings=FakePromptSettings(top_n),
+        summarizer=summarizer or FakeSummarizer(),
         document_repo=object(),  # the file tools' catalog: unused here
     )
     return registry, service
@@ -92,7 +113,14 @@ async def _call(registry, ctx, name: str, **arguments):
 def test_the_registry_offers_the_agents_read_only_tools():
     registry, _ = _tools()
 
-    assert registry.names == ["search_knowledge", "search_file", "read_file", "find_files", "get_file_info"]
+    assert registry.names == [
+        "search_knowledge",
+        "search_file",
+        "read_file",
+        "summarize",
+        "find_files",
+        "get_file_info",
+    ]
     assert all(registry.get(name).read_only for name in registry.names)
 
 
@@ -309,5 +337,115 @@ async def test_read_file_reads_only_a_source_a_search_returned():
     unknown = await _call(registry, ctx, "read_file", source=4)
     web = await _call(registry, ctx, "read_file", source=1)
 
-    assert unknown.content == "Error: There is no [Source 4] yet: read a source a search returned."
+    assert unknown.content == "Error: There is no [Source 4] yet: use the numbers a search returned."
     assert web.content == "Error: [Source 1] is a web page, not a document."
+
+
+# --------------------------------------------------------------------------- #
+# summarize
+# --------------------------------------------------------------------------- #
+
+
+async def test_summarize_condenses_the_sources_asked_for_under_their_own_numbers():
+    found = [_chunk(1, text="keep: budget"), _chunk(2, text="drop: weather"), _chunk(3, text="unjudged: " + "x " * 300)]
+    summarizer = FakeSummarizer()
+    registry, _ = _tools(FakeRetriever(found), summarizer=summarizer)
+    ctx = _ctx()
+    await _call(registry, ctx, "search_knowledge", queries=["budget"])
+
+    result = await _call(registry, ctx, "summarize", question="What is the budget?", sources=[1, 2, 3, 1])
+
+    assert summarizer.calls == [("What is the budget?", ["f-1", "f-2", "f-3"])]
+    assert result.content.startswith("2 of 3 passages are relevant to the question, each summarized; 1 not relevant.")
+    first, third = result.content.split("\n\n", 1)[1].split("----------")
+    assert first.startswith("[Source 1]\n") and first.rstrip().endswith("summary of f-1")
+    assert third.lstrip().startswith("[Source 3]\n")
+    assert "(Not summarized.) unjudged: x x" in third and len(third) < 600
+    assert [c.id for c in ctx.sources.entries] == ["f-1", "f-2", "f-3"]
+    assert ctx.sources.get(1).text == "keep: budget"
+
+
+async def test_summarize_a_file_takes_its_passages_best_matching_the_question():
+    retriever = FakeRetriever([_chunk(4, text="keep: clause"), _chunk(5, text="drop")])
+    summarizer = FakeSummarizer()
+    registry, _ = _tools(retriever, summarizer=summarizer)
+    ctx = _ctx()
+
+    result = await _call(registry, ctx, "summarize", question="the termination clause", partition="p", file_id="f")
+
+    (call,) = retriever.calls
+    assert call["scope"] == Scope(partitions=["p"], file_ids=["f"])
+    assert [q.query for q in call["queries"].query_list] == ["the termination clause"]
+    assert summarizer.calls == [("the termination clause", ["f-4", "f-5"])]
+    assert result.content.startswith("1 of 2 passages are relevant")
+    assert "[Source 1]" in result.content and ctx.sources.get(1).id == "f-4"
+
+
+async def test_summarize_says_when_nothing_is_relevant_or_found():
+    registry, _ = _tools(FakeRetriever([_chunk(1, text="drop")], []))
+    ctx = _ctx()
+
+    nothing_relevant = await _call(registry, ctx, "summarize", question="q", partition="p", file_id="f")
+    nothing_found = await _call(registry, ctx, "summarize", question="q", partition="p", file_id="f")
+
+    assert nothing_relevant.content == "None of the 1 passages is relevant to the question."
+    assert nothing_found.content == "No passage of file 'f' matches the question."
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({}, "Give either sources or a file"),
+        ({"sources": [1], "partition": "p", "file_id": "f"}, "Give either sources or a file"),
+        ({"partition": "p"}, "named by both its partition and its file_id"),
+        ({"sources": [7]}, "There is no [Source 7] yet"),
+        ({"sources": [2]}, "[Source 2] is a web page"),
+        ({"partition": "other", "file_id": "f"}, "is not among this conversation's documents"),
+        ({"sources": list(range(1, 22))}, "sources"),
+    ],
+)
+async def test_bad_summarize_requests_are_errors_and_nothing_is_summarized(arguments, expected):
+    summarizer = FakeSummarizer()
+    registry, _ = _tools(FakeRetriever([_chunk(1)]), summarizer=summarizer)
+    ctx = _ctx()
+    await _call(registry, ctx, "search_knowledge", queries=["q"])
+    ctx.sources.number({"url": "https://example.org"}, key="https://example.org")
+
+    result = await _call(registry, ctx, "summarize", question="q", **arguments)
+
+    assert result.is_error and expected in result.content
+    assert summarizer.calls == []
+
+
+async def test_summarize_with_the_real_map_reduce_keeps_each_summary_under_its_chunks_number():
+    class VerdictLLM:
+        def __init__(self, *verdicts):
+            self._verdicts = list(verdicts)
+
+        async def chat(self, messages, **kwargs):
+            verdict = self._verdicts.pop(0)
+            if isinstance(verdict, Exception):
+                raise verdict
+            return {"choices": [{"message": {"content": json.dumps(verdict)}}]}
+
+    @asynccontextmanager
+    async def no_semaphore():
+        yield
+
+    summarizer = Summarizer(
+        llm=VerdictLLM({"relevancy": True, "summary": "The budget is 2 M€."}, {"relevancy": False}, TimeoutError()),
+        config=SimpleNamespace(
+            map_reduce=SimpleNamespace(initial_batch_size=3, expansion_batch_size=2, max_total_documents=5)
+        ),
+        semaphore=no_semaphore,
+    )
+    registry, _ = _tools(FakeRetriever([_chunk(1), _chunk(2), _chunk(3)]), summarizer=summarizer)
+    ctx = _ctx()
+    await _call(registry, ctx, "search_knowledge", queries=["budget"])
+
+    result = await _call(registry, ctx, "summarize", question="What is the budget?", sources=[1, 2, 3])
+
+    assert result.content.startswith("2 of 3 passages are relevant to the question, each summarized; 1 not relevant.")
+    assert "[Source 1]" in result.content and "The budget is 2 M€." in result.content
+    assert "[Source 3]" in result.content and "(Not summarized.) text of chunk 3" in result.content
+    assert "[Source 2]" not in result.content

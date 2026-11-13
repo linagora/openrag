@@ -1,10 +1,11 @@
-"""The agent's tools over the documents: search them all, search one file, read around a passage.
+"""The agent's tools over the documents: search them all, search one file, read around a passage, summarize.
 
 Searching *locates*: it returns excerpts, numbered ``[Source N]``, best match
 first. Reading proves: ``read_file`` returns a passage in full with the ones
 around it in the file. Both go through chat retrieval, so the partition's
 retrieval preset (reranker, ``top_n``) applies as in ``classic``, and both stay
 within the request's scope (``ToolContext.scope``), whatever the model asks for.
+``summarize`` condenses passages for a question with ``classic``'s map-reduce.
 """
 
 from __future__ import annotations
@@ -18,12 +19,13 @@ from core.models.chunk import Chunk
 from core.models.query import DateOrder, Query, SearchQueries, TemporalPredicate
 from core.retrieval.date_order import order_chunks_by_date
 from core.tools import ToolContext, ToolError, tool
-from core.tools.passages import passage, passages
+from core.tools.passages import excerpt, passage, passages
 from core.utils.exceptions import PartitionNotFoundError
 from pydantic import Field
 
 if TYPE_CHECKING:
     from services.capabilities.retrieve import SourceRetriever
+    from services.capabilities.summarize import Summarizer
     from services.chat.prompt_settings import PartitionPromptSettings
     from services.orchestrators.retrieval_service import RetrievalService
 
@@ -47,6 +49,14 @@ _READ_FILE = (
     "Read in full a passage a search returned, [Source N], with the passages just before and after it "
     "in its file, in reading order. Read a passage before relying on its excerpt."
 )
+_SUMMARIZE = (
+    "Condense passages for a question: give the [Source N] numbers to summarize, or one file (partition and "
+    "file id), whose passages best matching the question are taken. Keeps the relevant ones, each as a short "
+    "summary under its own [Source N]; says how many were not relevant."
+)
+
+#: Sources ``summarize`` takes in one call.
+MAX_SUMMARIZED_SOURCES = 20
 
 Queries = Annotated[
     list[Annotated[str, Field(min_length=1, max_length=500)]],
@@ -66,7 +76,10 @@ Neighbours = Annotated[int, Field(ge=0, le=MAX_NEIGHBOURS)]
 
 
 class DocumentTools:
-    """``search_knowledge``, ``search_file`` and ``read_file``."""
+    """``search_knowledge``, ``search_file``, ``read_file`` and ``summarize``.
+
+    *summarizer* is ``classic``'s map-reduce, which runs on the static LLM.
+    """
 
     def __init__(
         self,
@@ -74,11 +87,13 @@ class DocumentTools:
         retriever: SourceRetriever,
         retrieval_service: RetrievalService,
         prompt_settings: PartitionPromptSettings,
+        summarizer: Summarizer,
         excerpt_chars: int = DEFAULT_EXCERPT_CHARS,
     ) -> None:
         self._retriever = retriever
         self._retrieval = retrieval_service
         self._prompt_settings = prompt_settings
+        self._summarizer = summarizer
         self._excerpt_chars = excerpt_chars
 
     @tool("search_knowledge", _SEARCH_KNOWLEDGE)
@@ -133,19 +148,74 @@ class DocumentTools:
         before: Annotated[Neighbours, Field(description="Passages to add before it.")] = 1,
         after: Annotated[Neighbours, Field(description="Passages to add after it.")] = 1,
     ) -> str:
-        chunk = ctx.sources.get(source)
-        if chunk is None:
-            raise ToolError(f"There is no [Source {source}] yet: read a source a search returned.")
-        if not isinstance(chunk, Chunk):
-            raise ToolError(f"[Source {source}] is a web page, not a document.")
-        if not ctx.allows_file(chunk.partition, chunk.document_id):
-            raise ToolError(f"[Source {source}] is not among this conversation's documents.")
+        chunk = self._document_source(ctx, source)
         earlier, later = await self._neighbours(chunk, before=before, after=after)
         blocks = [passage(ctx.sources.number(c, key=c.id), c) for c in [*earlier, chunk, *later]]
         return (
             f"[Source {source}] in full, with {len(earlier)} passage(s) before and {len(later)} after:\n\n"
             + passages(blocks)
         )
+
+    @tool("summarize", _SUMMARIZE, timeout=120)
+    async def summarize(
+        self,
+        ctx: ToolContext,
+        question: Annotated[str, Field(min_length=1, max_length=500, description="What the summaries are for.")],
+        sources: Annotated[
+            list[Annotated[int, Field(ge=1)]] | None,
+            Field(min_length=1, max_length=MAX_SUMMARIZED_SOURCES, description="The N of each [Source N] to condense."),
+        ] = None,
+        partition: Annotated[str | None, Field(description="With file_id, the file to condense.")] = None,
+        file_id: Annotated[str | None, Field(description="With partition, the file to condense.")] = None,
+    ) -> str:
+        if (sources is None) == (partition is None and file_id is None):
+            raise ToolError("Give either sources or a file (partition and file_id), not both.")
+        if sources is not None:
+            chunks = [self._document_source(ctx, number) for number in dict.fromkeys(sources)]
+        else:
+            if partition is None or file_id is None:
+                raise ToolError("A file is named by both its partition and its file_id.")
+            if not ctx.allows_file(partition, file_id):
+                raise ToolError(
+                    f"File '{file_id}' of partition '{partition}' is not among this conversation's documents."
+                )
+            search = SearchQueries(query_list=[Query(query=question)])
+            chunks = await self._search(search, Scope(partitions=[partition], file_ids=[file_id]))
+            if not chunks:
+                return f"No passage of file '{file_id}' matches the question."
+
+        documents = [chunk.to_langchain() for chunk in chunks]
+        kept = await self._summarizer.summarize(question, documents)
+        # The summaries keep their chunk's metadata, its _id among them; a chunk
+        # the map-reduce could not judge comes back as it was (fail-open).
+        by_document = {id(document): chunk for document, chunk in zip(documents, chunks, strict=True)}
+        by_id = {chunk.id: chunk for chunk in chunks}
+        blocks = []
+        for document in kept:
+            if (chunk := by_document.get(id(document))) is not None:
+                text = f"(Not summarized.) {excerpt(chunk.text, self._excerpt_chars)}"
+            else:
+                chunk = by_id[str(document.metadata["_id"])]
+                text = document.page_content
+            number = ctx.sources.number(chunk, key=chunk.id)
+            blocks.append(passage(number, chunk.model_copy(update={"text": text})))
+        left_out = len(chunks) - len(blocks)
+        if not blocks:
+            return f"None of the {len(chunks)} passages is relevant to the question."
+        heading = f"{len(blocks)} of {len(chunks)} passages are relevant to the question, each summarized"
+        heading += f"; {left_out} not relevant." if left_out else "."
+        return f"{heading}\n\n{passages(blocks)}"
+
+    def _document_source(self, ctx: ToolContext, number: int) -> Chunk:
+        """The document chunk shown as ``[Source number]``, refused when it is missing, a web page or out of scope."""
+        chunk = ctx.sources.get(number)
+        if chunk is None:
+            raise ToolError(f"There is no [Source {number}] yet: use the numbers a search returned.")
+        if not isinstance(chunk, Chunk):
+            raise ToolError(f"[Source {number}] is a web page, not a document.")
+        if not ctx.allows_file(chunk.partition, chunk.document_id):
+            raise ToolError(f"[Source {number}] is not among this conversation's documents.")
+        return chunk
 
     async def _search(self, search: SearchQueries, scope: Scope) -> list[Chunk]:
         """The chunks for *search* in *scope*, cut to the ``top_n`` its partitions' presets set."""
