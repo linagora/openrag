@@ -391,6 +391,18 @@ describe("DocumentListPage", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("locks the file selection while an upload runs", async () => {
+    uploadFileMock.mockImplementation(() => new Promise(() => {}));
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [new File(["x"], "x.txt", { type: "text/plain" })]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect((screen.getByLabelText("Files") as HTMLInputElement).disabled).toBe(true));
+  });
+
   it("resends the same file ID when retrying a failed upload", async () => {
     let next = 0;
     vi.mocked(newFileId).mockImplementation(() => `file-id-${++next}`);

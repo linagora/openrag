@@ -580,6 +580,7 @@ export default function DocumentListPage() {
                     type="file"
                     multiple
                     ref={fileRef}
+                    disabled={uploading}
                     onChange={(e) => {
                       setFiles(e.target.files ? Array.from(e.target.files) : []);
                       setUploadResults([]);
