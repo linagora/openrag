@@ -1,13 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
+import { ApiError } from "@/lib/api/client";
 import { listPartitionFiles } from "@/lib/api/documents";
-import { deleteFile, uploadFile } from "@/lib/api/indexing";
+import { deleteFile, newFileId, uploadFile } from "@/lib/api/indexing";
 import { listModelEndpoints } from "@/lib/api/models";
 import { listPartitions } from "@/lib/api/partitions";
 import { getQueueInfo, type QueueInfo } from "@/lib/api/jobs";
@@ -118,6 +119,11 @@ function LocationProbe() {
   return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
 }
 
+function NavigateProbe() {
+  const navigate = useNavigate();
+  return <button type="button" hidden data-testid="go-other" onClick={() => navigate("/documents?partition=other")} />;
+}
+
 function ActiveJobsProbe() {
   return <output data-testid="active-jobs">{useActiveJobsCount()}</output>;
 }
@@ -135,6 +141,7 @@ function renderDocuments(initialEntries = ["/documents"], includeJobsProbe = fal
       <MemoryRouter initialEntries={initialEntries}>
         <DocumentListPage />
         <LocationProbe />
+        <NavigateProbe />
         {includeJobsProbe && <ActiveJobsProbe />}
       </MemoryRouter>
     </QueryClientProvider>
@@ -152,6 +159,7 @@ describe("DocumentListPage", () => {
     permissions.superAdminModeResolved = true;
     deleteFileMock.mockClear();
     uploadFileMock.mockReset();
+    vi.mocked(newFileId).mockImplementation(() => "new-file-id");
     getQueueInfoMock.mockReset();
     listPartitionFilesMock.mockReset();
     listPartitionFilesMock.mockResolvedValue({
@@ -358,6 +366,237 @@ describe("DocumentListPage", () => {
     act(() => action.onClick({} as ReactMouseEvent<HTMLButtonElement>));
 
     expect(screen.getByTestId("location").textContent).toBe("/jobs");
+  });
+
+  it("keeps failed files in the dialog after a partial upload failure and retries only those", async () => {
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "bad.txt") throw new Error("Unsupported file type");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["good"], "good.txt", { type: "text/plain" }),
+      new File(["bad"], "bad.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(screen.getByText("good.txt: uploaded")).toBeTruthy();
+    expect(screen.getByText("bad.txt: Unsupported file type")).toBeTruthy();
+    expect(screen.getByText("1 failed file(s) ready to retry")).toBeTruthy();
+
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-2" });
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(3));
+    expect((uploadFileMock.mock.calls[2][2] as File).name).toBe("bad.txt");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("keeps earlier successes when a retry still has failures", async () => {
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name !== "a.txt") throw new Error("Network error");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["a"], "a.txt", { type: "text/plain" }),
+      new File(["b"], "b.txt", { type: "text/plain" }),
+      new File(["c"], "c.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByText("c.txt: Network error");
+
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "c.txt") throw new Error("Still failing");
+      return { task_status_url: "/queue/task-2" };
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    expect(await screen.findByText("c.txt: Still failing")).toBeTruthy();
+    expect(screen.getByText("a.txt: uploaded")).toBeTruthy();
+    expect(screen.getByText("b.txt: uploaded")).toBeTruthy();
+    expect(screen.queryByText("b.txt: Network error")).toBeNull();
+    expect(screen.getByText("1 failed file(s) ready to retry")).toBeTruthy();
+  });
+
+  it("drops failed files kept for retry when the partition changes", async () => {
+    listPartitionsMock.mockResolvedValueOnce({
+      partitions: [
+        { partition: "docs", name: "docs", role: "owner", created_at: null, document_count: 2 },
+        { partition: "other", name: "other", role: "owner", created_at: null, document_count: 0 },
+      ],
+    } as never);
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "bad.txt") throw new Error("Network error");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments(["/documents?partition=docs"]);
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["good"], "good.txt", { type: "text/plain" }),
+      new File(["bad"], "bad.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByRole("button", { name: "Retry failed" });
+
+    // Stands in for browser Back to a URL with another ?partition=.
+    fireEvent.click(screen.getByTestId("go-other"));
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry failed" })).toBeNull());
+    expect(screen.queryByText("bad.txt: Network error")).toBeNull();
+    expect(uploadFileMock.mock.calls.every(([partition]) => partition === "docs")).toBe(true);
+  });
+
+  it("locks the file selection while an upload runs", async () => {
+    uploadFileMock.mockImplementation(() => new Promise(() => {}));
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [new File(["x"], "x.txt", { type: "text/plain" })]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect((screen.getByLabelText("Files") as HTMLInputElement).disabled).toBe(true));
+  });
+
+  it("resends the same file ID when retrying a failed upload", async () => {
+    let next = 0;
+    vi.mocked(newFileId).mockImplementation(() => `file-id-${++next}`);
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "lost.txt") throw new Error("Network error");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["good"], "good.txt", { type: "text/plain" }),
+      new File(["lost"], "lost.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(2));
+    const firstId = uploadFileMock.mock.calls[1][1];
+
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-2" });
+    await userEvent.click(await screen.findByRole("button", { name: "Retry failed" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(3));
+    expect((uploadFileMock.mock.calls[2][2] as File).name).toBe("lost.txt");
+    expect(uploadFileMock.mock.calls[2][1]).toBe(firstId);
+  });
+
+  it("ignores the result of an upload whose dialog was cancelled", async () => {
+    let rejectUpload: (error: Error) => void = () => {};
+    uploadFileMock.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectUpload = reject;
+        }),
+    );
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["late"], "late.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await act(async () => rejectUpload(new Error("Network error")));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("1 upload(s) failed."));
+
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(screen.queryByText("late.txt: Network error")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry failed" })).toBeNull();
+  });
+
+  it("counts a retry refused because the first attempt is still indexing as queued", async () => {
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "lost.txt") throw new Error("Network error");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["good"], "good.txt", { type: "text/plain" }),
+      new File(["lost"], "lost.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByRole("button", { name: "Retry failed" });
+    toastSuccessMock.mockClear();
+
+    uploadFileMock.mockRejectedValue(
+      new ApiError(409, {
+        detail: "[DOCUMENT_INDEXING_IN_PROGRESS]: File is already being indexed",
+        extra: { existing_task_id: "task-1" },
+      }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(toastSuccessMock).toHaveBeenCalledWith("1 file(s) queued for indexing.", expect.anything());
+  });
+
+  it("counts a retry refused because the first attempt already finished as queued", async () => {
+    uploadFileMock.mockRejectedValue(new Error("Network error"));
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["done"], "done.txt", { type: "text/plain" }),
+      new File(["dup"], "dup.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByRole("button", { name: "Retry failed" });
+    toastSuccessMock.mockClear();
+
+    uploadFileMock.mockImplementation(async (_partition, id, file) => {
+      if ((file as File).name === "done.txt") {
+        throw new ApiError(409, { detail: `File '${id}' already exists in partition docs` });
+      }
+      throw new ApiError(409, {
+        detail: "[DOCUMENT_CONTENT_EXISTS]: Same content already indexed",
+      });
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    await waitFor(() =>
+      expect(toastSuccessMock).toHaveBeenCalledWith("1 file(s) queued for indexing.", expect.anything()),
+    );
+    expect(await screen.findByText("dup.txt: Same content already indexed")).toBeTruthy();
+    expect(screen.getByText("done.txt: already uploaded")).toBeTruthy();
+  });
+
+  it("closes the upload dialog when every file is accepted", async () => {
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["one"], "one.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("refreshes the active Jobs count as soon as uploads are accepted", async () => {
