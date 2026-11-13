@@ -40,7 +40,7 @@ from core.indexing.validators import (
     validate_ooxml_package,
 )
 from core.models.document import Document
-from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
+from core.utils.consts import is_internal_metadata_key, is_reserved_partition_name, strip_protected_metadata
 from core.utils.exceptions import ConflictError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -156,6 +156,11 @@ class MCPService:
         user_id: int | None,
     ) -> None:
         """Require editor (or owner) role on *partition*."""
+        # The store reads a reserved name as "every partition", so no one, the
+        # admin wildcard included, may change one (deleting file X in it would
+        # delete X in every partition).
+        if is_reserved_partition_name(partition):
+            raise PermissionError(f"Partition name '{partition}' is reserved")
         self._enforce_partition_access(partition, allowed_partitions)
         if allowed_partitions == ["all"]:
             return  # admin wildcard
@@ -492,12 +497,9 @@ class MCPService:
     ) -> dict[str, Any]:
         self._validate_file_id(file_id)
         await self._enforce_editor_access(partition, allowed_partitions, user_id)
-        # ``partition`` in the payload is an authorized move control (not a
-        # protected key) — require editor on the destination too.
-        if metadata and "partition" in metadata:
-            await self._enforce_editor_access(metadata["partition"], allowed_partitions, user_id)
         if not await self._partitions.file_exists(file_id, partition):
             raise FileNotFoundError(f"File '{file_id}' not found in partition '{partition}'")
+        # A ``partition`` other than the file's own is refused there.
         await self._indexing.update_metadata(
             file_id,
             _strip_protected_metadata(metadata),

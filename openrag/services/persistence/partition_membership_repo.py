@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING
 
 from core.models.user import PartitionRole, UserPartition
 from core.ports.partition_membership_repo import PartitionMembershipRepository
+from core.utils.consts import is_reserved_partition_name
+from core.utils.exceptions import ValidationError
 
 if TYPE_CHECKING:
     import asyncpg
@@ -202,6 +204,12 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
 
     async def add_partition_member(self, partition: str, user_id: int, role: str) -> bool:
         """TODO(phase-9): remove. Creates the partition row on first use."""
+        if is_reserved_partition_name(partition):
+            raise ValidationError(
+                f"Partition name '{partition}' is reserved.",
+                status_code=400,
+                code="RESERVED_PARTITION_NAME",
+            )
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 exists = await conn.fetchval(
