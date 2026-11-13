@@ -19,6 +19,7 @@ import services.orchestrators.query_service as qs
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
+from core.models.query import Query, SearchQueries
 from core.models.retrieval_trace import TraceCandidate
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
@@ -1472,6 +1473,7 @@ async def test_chat_trace_persists_exact_contextualized_query():
                         "value": "2026-01-01T00:00:00+00:00",
                     }
                 ],
+                "date_order": "newest",
             }
         ],
     }
@@ -1494,6 +1496,7 @@ async def test_chat_trace_persists_exact_contextualized_query():
         {
             "query": "exact generated legal query",
             "temporal_filters": [{"operator": ">=", "value": "2026-01-01T00:00:00+00:00"}],
+            "date_order": "newest",
         }
     ]
     assert trace["contextualization"]["intent"] == "other"
@@ -4169,3 +4172,109 @@ async def test_chat_after_a_tool_result_retrieves_for_a_short_request():
     sent = llm.chat_calls[-1][0]
     assert sent[-1]["role"] == "tool"
     assert out["choices"][0]["message"]["content"].startswith("Claire asks")
+
+
+# --------------------------------------------------------------------------- #
+# Temporal answers: the model sees each source's creation date
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_chat_context_carries_each_sources_file_and_creation_date():
+    """ "Summarize the last meeting I had" is only answerable if the model can
+    tell yesterday's notes from last year's: every dated source gets a
+    provenance line under its ``[Source N]`` marker; an undated one gets none."""
+    chunks = [
+        Chunk(
+            id="new",
+            text="notes of the 22nd",
+            metadata={"_id": "new", "filename": "Résumé.md", "created_at": "2026-09-22T14:51:30Z"},
+        ),
+        Chunk(id="bare", text="undated text", metadata={"_id": "bare"}),
+    ]
+    llm = FakeLLM(chat_responses=["answer [Sources: 1]"])
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
+    await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "summarize the last meeting"}]},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    system = llm.chat_calls[-1][0][0]["content"]
+    assert "[Source 1]\nCreated: 2026-09-22 14:51 UTC | File: Résumé.md\nnotes of the 22nd" in system
+    assert "[Source 2]\nundated text" in system
+
+
+@pytest.mark.asyncio
+async def test_generate_query_keeps_the_contextualizers_date_order():
+    payload = json.dumps(
+        {
+            "intent": "other",
+            "requires_retrieval": True,
+            "query_list": [{"query": "meeting notes", "temporal_filters": None, "date_order": "newest"}],
+        }
+    )
+    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    out = await svc.generate_query([{"role": "user", "content": "résume le dernier meeting que j'ai eu"}])
+    assert out.query_list[0].date_order == "newest"
+    assert out.date_order == "newest"
+
+
+def test_query_json_hint_leaves_the_temporal_fields_open():
+    """The hint is the last thing the model reads; a literal ``null`` there was
+    copied verbatim and the date rules never fired."""
+    assert '"temporal_filters": null' not in qs._QUERY_JSON_HINT
+    assert '"date_order"' in qs._QUERY_JSON_HINT
+
+
+def _dated(cid: str, created_at: str) -> Chunk:
+    return Chunk(id=cid, text=f"text of {cid}", metadata={"_id": cid, "created_at": created_at})
+
+
+# In relevance order: the best match is the oldest, the loosest one the newest.
+_BY_RELEVANCE = [
+    _dated("best", "2026-01-10T00:00:00Z"),
+    _dated("mid", "2026-06-10T00:00:00Z"),
+    _dated("loose", "2026-10-01T00:00:00Z"),
+]
+
+
+def _service_with_orders(orders):
+    svc = _svc(retrieval=FakeRetrieval(chunks=_BY_RELEVANCE))
+    svc._config.partitions = {"p": _partition_cfg(top_n=2)}
+
+    async def generate_query(*_args, **_kwargs):
+        return SearchQueries(query_list=[Query(query=f"q{i}", date_order=order) for i, order in enumerate(orders)])
+
+    svc.generate_query = generate_query
+    return svc
+
+
+def _in_reading_order(text: str, ids: list[str]) -> bool:
+    positions = [text.index(f"text of {cid}") for cid in ids]
+    return positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    ("orders", "shown"),
+    [(["newest"], ["mid", "best"]), (["oldest"], ["best", "mid"]), (["newest", "oldest"], ["best", "mid"])],
+)
+@pytest.mark.asyncio
+async def test_prepare_chat_selects_sources_by_relevance_and_shows_them_by_date(orders, shown):
+    out = await _service_with_orders(orders)._prepare_chat(
+        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
+    )
+    assert [doc.metadata["_id"] for doc in out.docs] == shown, "the citation numbers index into this order"
+    system = out.payload["messages"][0]["content"]
+    assert _in_reading_order(system, shown)
+    assert "text of loose" not in system, "a newer but looser match never takes a better one's place"
+
+
+@pytest.mark.asyncio
+async def test_prepare_completions_selects_sources_by_relevance_and_shows_them_by_date():
+    payload, docs, _retrieved = await _service_with_orders(["newest"])._prepare_completions(
+        ["p"], {"prompt": "q", "metadata": {}}
+    )
+    assert [doc.metadata["_id"] for doc in docs] == ["mid", "best"]
+    assert _in_reading_order(payload["prompt"], ["mid", "best"])
+    assert "text of loose" not in payload["prompt"]

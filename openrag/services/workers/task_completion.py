@@ -16,7 +16,7 @@ from core.models.catalog import (
 )
 from core.utils.error_summary import extract_task_error_reason
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
-from services.workers.task_state import STALE_TASK_STATE_MANAGER_HINT
+from services.workers.task_state import STALE_TASK_STATE_MANAGER_HINT, TASK_JOB_OUTCOME_PENDING_METADATA_KEY
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _REFLESS_RECOVERY_POLL_SECONDS = 5.0
@@ -149,8 +149,9 @@ class TaskCompletionTracker:
         task.add_done_callback(self._background_tasks.discard)
 
     async def _recover_terminal_settlement(self, task_id: str) -> None:
+        persisted = False
         try:
-            await self._record_finished_at(task_id)
+            persisted = await self._record_finished_at(task_id)
         except Exception as exc:
             self._logger.warning(
                 "Failed to recover terminal indexing task completion",
@@ -158,6 +159,8 @@ class TaskCompletionTracker:
                 error=str(exc),
             )
         finally:
+            if persisted:
+                await self._finish_cancellation(task_id)
             self._tracked_task_ids.discard(task_id)
 
     async def recover_refless(
@@ -294,7 +297,7 @@ class TaskCompletionTracker:
         *,
         worker_settled: bool = False,
         stage_settlement_confirmed: bool | None = None,
-    ) -> None:
+    ) -> bool:
         # Keep the handle in a variable: Ray's ActorMethod holds it weakly, so a
         # method called off an unstored handle raises "Lost reference to actor".
         task_state_manager = self._task_state_manager()
@@ -303,14 +306,24 @@ class TaskCompletionTracker:
             f"get_details({task_id}) for completion timestamp",
         )
         if not isinstance(details, dict) or _has_finished_at(details):
-            return
+            return True
 
         if worker_settled:
             settlement_confirmed = stage_settlement_confirmed is not False
         else:
-            if not await self._wait_for_worker_settled(task_id, task_state_manager):
-                return
-            settlement_confirmed = True
+            state = await self._call_task_state(
+                lambda: task_state_manager.get_state.remote(task_id),
+                f"get_state({task_id}) before recovered completion",
+            )
+            if state == "COMPLETED":
+                # COMPLETED is written only after indexing has returned. Older
+                # task-state actors may not expose the settlement probe, but
+                # that optional probe must not erase an already-known outcome.
+                settlement_confirmed = False
+            else:
+                if not await self._wait_for_worker_settled(task_id, task_state_manager):
+                    return False
+                settlement_confirmed = True
 
         # Persist before stamping the actor: the stamp is what stops this method
         # running again, so a failed write must leave the task unstamped for
@@ -322,8 +335,9 @@ class TaskCompletionTracker:
             details,
             stage_settlement_confirmed=settlement_confirmed,
         ):
-            return
+            return False
         await self._stamp_finished_at(task_id, details)
+        return True
 
     async def _wait_for_worker_settled(self, task_id: str, task_state_manager: Any) -> bool:
         """Do not persist settlement or interruption until the worker cannot write."""
@@ -367,6 +381,7 @@ class TaskCompletionTracker:
                 return
         metadata = details.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata.pop(TASK_JOB_OUTCOME_PENDING_METADATA_KEY, None)
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
         await self._call_task_state(
             lambda: task_state_manager.set_details.remote(
@@ -534,6 +549,8 @@ class TaskCompletionTracker:
                 self._pending_settlements.pop(task_id, None)
                 try:
                     await self._stamp_finished_at(task_id)
+                    if job.status is DocumentStatus.CANCELLED:
+                        await self._finish_cancellation(task_id)
                 except Exception as exc:
                     self._logger.warning(
                         "Failed to record indexing task completion time",
@@ -557,6 +574,23 @@ class TaskCompletionTracker:
                     task_state_manager.get_all_info.remote,
                     "get_all_info_for_periodic_reconcile",
                 )
+                for task_id, info in all_info.items():
+                    terminal_outcome_pending = (
+                        info.get("state") in _TERMINAL_STATES
+                        and not _has_finished_at(info.get("details"))
+                        and task_id not in self._pending_settlements
+                    )
+                    cancellation_cleanup_pending = (
+                        info.get("state") == "CANCELLED"
+                        and (info.get("worker_submitted") or info.get("submission_started_at") is not None)
+                        and task_id not in self._pending_settlements
+                    )
+                    if terminal_outcome_pending or cancellation_cleanup_pending:
+                        # A prior persistence attempt may have failed before it
+                        # could enter the bounded retry queue. The task-state
+                        # actor retains its outcome marker until the history
+                        # write succeeds, so the periodic scan can retry it.
+                        self._schedule_terminal_settlement(task_id)
                 await self.reconcile_jobs(list(all_info))
             except Exception as exc:
                 self._logger.warning("Periodic indexing job reconciliation failed", error=str(exc))

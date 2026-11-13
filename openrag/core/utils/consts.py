@@ -5,6 +5,16 @@ LEGACY_PARTITION_PREFIX = "ragondin-"
 # one partition and the in-memory partition cache is never empty.
 DEFAULT_PARTITION_NAME = "default"
 
+# Names no partition may take, because they already mean something when
+# partitions are selected (``openrag-all``, ``?partitions=all``). Matched
+# case-insensitively.
+RESERVED_PARTITION_NAMES = frozenset({"all"})
+
+
+def is_reserved_partition_name(name: str) -> bool:
+    return name.strip().lower() in RESERVED_PARTITION_NAMES
+
+
 # The admin account seeded at startup: undeletable, cannot lose admin rights,
 # and the owner the default partition is seeded with.
 DEFAULT_ADMIN_USER_ID = 1
@@ -39,8 +49,9 @@ def strip_internal_metadata(row: dict) -> dict:
 # ``indexed_at`` controls reconciliation's grace period and repair eligibility,
 # so only storage paths may assign it.
 #
-# ``partition`` is intentionally NOT here — the MCP update tool uses it as an
-# authorized move control and re-checks editor access on the destination.
+# ``partition`` is not here: a metadata update naming any partition but the
+# file's own is refused (``IndexingService.update_metadata``), and the copy
+# path sets it from the server side.
 #
 # Lives in core/ (not in one orchestrator) so every transport shares one guard:
 # the upload path, the MCP tools, and the REST PATCH path previously each

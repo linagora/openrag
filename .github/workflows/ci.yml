@@ -393,6 +393,21 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      # The repo suite's fixtures need Postgres, Milvus tests included. The same
+      # major version as the Compose stack.
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: root_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U root"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -447,7 +462,30 @@ jobs:
         env:
           OPENRAG_TEST_VDB_HOST: localhost
           OPENRAG_TEST_VDB_PORT: "19530"
-        run: uv run pytest tests/integration/repos/ -m integration -v --tb=short
+          POSTGRES_TEST_ADMIN_DSN: postgresql://root:root_password@localhost:5432/postgres
+        run: uv run pytest tests/integration/repos/ -v --tb=short -rs --junitxml=integration-results.xml
+
+      # Every skip in this suite means a service is missing, and pytest exits 0
+      # when all tests skip: this job passed for months having run nothing (#1068).
+      # The report also writes an expected failure as <skipped>. It is not a skip,
+      # and it ran unless pytest marked it [NOTRUN], as it does for xfail(run=False).
+      - name: Fail if a test was skipped or none ran
+        run: |
+          python3 -c "
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse('integration-results.xml').getroot()
+          tests = root.findall('.//testcase')
+          def ran_body(test):
+              skipped = test.find('skipped')
+              if skipped is None:
+                  return True
+              return skipped.get('type') == 'pytest.xfail' and not skipped.get('message', '').startswith('[NOTRUN]')
+          ran = [t for t in tests if ran_body(t)]
+          skipped = [s for s in root.iter('skipped') if s.get('type') != 'pytest.xfail']
+          print(f'{len(tests)} tests, {len(ran)} ran, {len(skipped)} skipped')
+          sys.exit(not ran or len(skipped) > 0)
+          "
 
       - name: Show logs on failure
         if: failure()

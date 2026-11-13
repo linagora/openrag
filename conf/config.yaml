@@ -62,7 +62,7 @@ embedder:
   max_model_len: 2047 # truncate_prompt_tokens = this - 1; keep below the model's context boundary (vllm#29496)
   timeout: 120.0       # per-request HTTP timeout (s); raise for slow remote endpoints
   batch_size: 32       # chunks per embedding request (big docs are split into batches)
-  embed_concurrency: 4 # max embedding requests in flight at once
+  embed_concurrency: 4 # max embedding requests one file keeps in flight (not process-wide)
 
 # --- Vector Database (Milvus) ---
 # Env: VDB_HOST, VDB_PORT, VDB_CONNECTOR_NAME, VDB_COLLECTION_NAME, VDB_HYBRID_SEARCH,

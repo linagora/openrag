@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
-from core.utils.consts import strip_protected_metadata
+from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
 from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
@@ -55,6 +55,20 @@ def _human_readable_size(size_bytes: int) -> str:
             return f"{size:.2f} {unit}"
         size /= 1024
     return f"{size:.2f} PB"
+
+
+def _refuse_reserved_partition(partition: str) -> None:
+    """Refuse to change a file in a partition named like the `all` wildcard.
+
+    The vector store reads that name as every partition, so deleting or
+    updating file X there would reach file X in every partition.
+    """
+    if is_reserved_partition_name(partition):
+        raise ValidationError(
+            f"Partition name '{partition}' is reserved.",
+            status_code=400,
+            code="RESERVED_PARTITION_NAME",
+        )
 
 
 def _sha256_file(path: str) -> str:
@@ -336,6 +350,7 @@ class IndexingService:
             )
 
     async def delete_file(self, file_id: str, partition: str) -> None:
+        _refuse_reserved_partition(partition)
         await self._dispatcher.delete_file(file_id, partition)
 
     async def update_metadata(
@@ -345,6 +360,17 @@ class IndexingService:
         partition: str,
         user: dict | None,
     ) -> None:
+        _refuse_reserved_partition(partition)
+        # The file's row stays in its partition while its chunks would be
+        # rewritten into the other one, so it would drop out of every search.
+        # A null is refused too: it would be written into every chunk.
+        if "partition" in (metadata or {}) and metadata["partition"] != partition:
+            raise ValidationError(
+                "A metadata update cannot change the partition of a file. "
+                "Copy the file to the other partition, then delete it from this one.",
+                status_code=400,
+                code="PARTITION_CHANGE_UNSUPPORTED",
+            )
         # Drop server-managed keys before they reach the store (#713). Without
         # this a partition editor could repoint ``source`` at another tenant's
         # upload under the shared data dir and read it back through

@@ -26,6 +26,8 @@ from services.workers.task_state import (
 
 # How soon a renewal that failed is tried again, capped by the renewal interval.
 _LEASE_RETRY_SECONDS = 2.0
+# Poll a missing first progress snapshot promptly, then use the normal lease cadence.
+_INITIAL_STAGE_SNAPSHOT_RETRY_SECONDS = 1.0
 
 
 class WorkerLeaseLostError(RuntimeError):
@@ -109,6 +111,10 @@ async def keep_worker_lease(
         return
     interval = WORKER_LEASE_RENEW_INTERVAL_SECONDS if renew_interval is None else renew_interval
     ttl = _WORKER_LEASE_TTL_SECONDS if lease_ttl is None else lease_ttl
+    stage_snapshot_pending = snapshot_provider is not None and (
+        snapshot_remote is not None or stage_progress_sink is not None
+    )
+    stage_snapshot_retry_interval = min(_INITIAL_STAGE_SNAPSHOT_RETRY_SECONDS, interval)
     # Counted from when a renewal was sent, never later than the
     # TaskStateManager started its TTL; the interval left over is for the
     # cancellation to land.
@@ -116,53 +122,96 @@ async def keep_worker_lease(
     loop = asyncio.get_running_loop()
     stop_at = loop.time() + stop_after
     answered = False
-    while True:
-        sent_at = loop.time()
-        if sent_at >= stop_at:
-            if not answered:
-                raise WorkerLeaseLostError(f"Task {task_id} could not register its worker with the task state")
-            if is_working is not None and not is_working():
-                return
-            logger.warning(f"Task {task_id} could not renew its worker lease; stopping its worker before it lapses")
-            worker_task.cancel()
-            raise WorkerLeaseLostError(f"Task {task_id} lost its worker lease")
-        try:
-            # Awaited directly: the shared timeout helper ray.cancel()s the
-            # call when this loop is cancelled, and a renewal needs no undo.
-            if snapshot_remote is not None and snapshot_provider is not None:
-                try:
-                    stage_snapshot = snapshot_provider()
-                except Exception:  # noqa: BLE001 - snapshot fallback cannot break worker liveness
-                    stage_snapshot = None
-                renewal = remote(task_id, stage_snapshot)
-            else:
-                renewal = remote(task_id)
-            (renewed,) = await asyncio.wait_for(asyncio.gather(renewal), timeout=min(interval, stop_at - sent_at))
-        except Exception as exc:  # noqa: BLE001 - one missed renewal must not fail the file
-            logger.warning(f"Failed to renew the worker lease of task {task_id}: {type(exc).__name__}: {exc}")
-            await asyncio.sleep(max(0.0, min(_LEASE_RETRY_SECONDS, interval, stop_at - loop.time())))
-            continue
-        answered = True
-        stop_at = sent_at + stop_after
-        if renewed is False and (is_working is None or is_working()):
-            logger.warning(f"Task {task_id} was cancelled or abandoned; stopping its worker")
-            worker_task.cancel()
-        if started is not None:
-            started.set()
-        if snapshot_remote is None and stage_progress_sink is not None and snapshot_provider is not None:
+    snapshot_delivery_task: asyncio.Task[None] | None = None
+    try:
+        while True:
+            sent_at = loop.time()
+            if sent_at >= stop_at:
+                if not answered:
+                    raise WorkerLeaseLostError(f"Task {task_id} could not register its worker with the task state")
+                if is_working is not None and not is_working():
+                    return
+                logger.warning(f"Task {task_id} could not renew its worker lease; stopping its worker before it lapses")
+                worker_task.cancel()
+                raise WorkerLeaseLostError(f"Task {task_id} lost its worker lease")
+            stage_snapshot: StageProgressWorkerSnapshot | None = None
             try:
-                stage_snapshot = snapshot_provider()
-                if stage_snapshot is not None:
-                    snapshot_delivery = stage_progress_sink(task_id, stage_snapshot)
-                    await asyncio.wait_for(
-                        asyncio.gather(snapshot_delivery),
-                        timeout=min(interval, stop_at - loop.time()),
-                    )
-            except Exception as exc:  # noqa: BLE001 - snapshot sidecar failure must not fail indexing
-                logger.warning(f"Failed to publish live stage progress for task {task_id}: {type(exc).__name__}: {exc}")
-        if renewed is False:
-            return
-        await asyncio.sleep(interval)
+                # Awaited directly: the shared timeout helper ray.cancel()s the
+                # call when this loop is cancelled, and a renewal needs no undo.
+                if snapshot_remote is not None and snapshot_provider is not None:
+                    try:
+                        stage_snapshot = snapshot_provider()
+                    except Exception as exc:  # noqa: BLE001 - snapshot fallback cannot break worker liveness
+                        stage_snapshot = None
+                        logger.warning(
+                            f"Failed to read live stage progress for task {task_id}: {type(exc).__name__}: {exc}"
+                        )
+                    renewal = remote(task_id, stage_snapshot)
+                else:
+                    renewal = remote(task_id)
+                (renewed,) = await asyncio.wait_for(asyncio.gather(renewal), timeout=min(interval, stop_at - sent_at))
+            except Exception as exc:  # noqa: BLE001 - one missed renewal must not fail the file
+                logger.warning(f"Failed to renew the worker lease of task {task_id}: {type(exc).__name__}: {exc}")
+                await asyncio.sleep(max(0.0, min(_LEASE_RETRY_SECONDS, interval, stop_at - loop.time())))
+                continue
+            answered = True
+            stop_at = sent_at + stop_after
+            if snapshot_remote is not None and stage_snapshot is not None:
+                stage_snapshot_pending = False
+            if renewed is False and (is_working is None or is_working()):
+                logger.warning(f"Task {task_id} was cancelled or abandoned; stopping its worker")
+                worker_task.cancel()
+            if started is not None:
+                started.set()
+            if snapshot_remote is None and stage_progress_sink is not None and snapshot_provider is not None:
+                if snapshot_delivery_task is None or snapshot_delivery_task.done():
+                    try:
+                        stage_snapshot = snapshot_provider()
+                    except Exception as exc:  # noqa: BLE001 - snapshot fallback cannot break worker liveness
+                        stage_snapshot = None
+                        logger.warning(
+                            f"Failed to read live stage progress for task {task_id}: {type(exc).__name__}: {exc}"
+                        )
+                    delivery_timeout = min(interval, max(0.0, stop_at - loop.time()))
+                    if stage_snapshot is not None and delivery_timeout > 0:
+                        stage_snapshot_pending = False
+                        snapshot_delivery_task = asyncio.create_task(
+                            _publish_stage_snapshot(
+                                stage_progress_sink,
+                                task_id,
+                                stage_snapshot,
+                                timeout=delivery_timeout,
+                                logger=logger,
+                            )
+                        )
+            if renewed is False:
+                if snapshot_delivery_task is not None:
+                    await asyncio.gather(snapshot_delivery_task, return_exceptions=True)
+                return
+            if stage_snapshot_pending:
+                await asyncio.sleep(stage_snapshot_retry_interval)
+                stage_snapshot_retry_interval = min(stage_snapshot_retry_interval * 2, interval)
+            else:
+                await asyncio.sleep(interval)
+    finally:
+        if snapshot_delivery_task is not None and not snapshot_delivery_task.done():
+            snapshot_delivery_task.cancel()
+            await asyncio.gather(snapshot_delivery_task, return_exceptions=True)
+
+
+async def _publish_stage_snapshot(
+    sink: Callable[[str, StageProgressWorkerSnapshot], Any],
+    task_id: str,
+    snapshot: StageProgressWorkerSnapshot,
+    *,
+    timeout: float,
+    logger: Any,
+) -> None:
+    """Publish an optional snapshot without holding up the next lease renewal."""
+    try:
+        await asyncio.wait_for(asyncio.gather(sink(task_id, snapshot)), timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - sidecar failure must not fail indexing
+        logger.warning(f"Failed to publish live stage progress for task {task_id}: {type(exc).__name__}: {exc}")
 
 
 async def wait_for_worker_lease_start(started: asyncio.Event, worker_lease: asyncio.Task[None]) -> None:

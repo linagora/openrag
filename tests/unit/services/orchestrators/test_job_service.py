@@ -717,6 +717,31 @@ async def test_paginated_task_list_fails_if_last_known_stage_lookup_fails() -> N
 
 
 @pytest.mark.asyncio
+async def test_slow_optional_stage_sidecar_does_not_block_task_state_snapshot_fallback(monkeypatch) -> None:
+    import asyncio
+
+    from services.orchestrators import job_service
+
+    monkeypatch.setattr(job_service, "_OPTIONAL_STAGE_PROGRESS_SIDECAR_TIMEOUT_SECONDS", 0.01)
+    tsm = FakeTSM(info={"task-1": {"state": "SERIALIZING", "details": {}}})
+
+    class SlowSidecarMethod:
+        @staticmethod
+        async def remote(_task_ids):
+            await asyncio.Event().wait()
+
+    class SlowSidecar:
+        get_stage_progress_snapshots = SlowSidecarMethod()
+
+    snapshots = await JobService(tsm, stage_progress_manager=SlowSidecar())._live_stage_progress_snapshots(
+        {"task-1": {"state": "SERIALIZING"}}
+    )
+
+    assert snapshots == {}
+    assert tsm.stage_snapshot_bulk_reads == 1
+
+
+@pytest.mark.asyncio
 async def test_paginated_task_list_reads_only_the_ordered_durable_window() -> None:
     from core.models.catalog import DocumentStatus
 

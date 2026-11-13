@@ -27,8 +27,10 @@ import ipaddress
 import mimetypes
 import socket
 import tempfile
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -38,7 +40,7 @@ from core.indexing.validators import (
     validate_ooxml_package,
 )
 from core.models.document import Document
-from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
+from core.utils.consts import is_internal_metadata_key, is_reserved_partition_name, strip_protected_metadata
 from core.utils.exceptions import ConflictError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -154,6 +156,11 @@ class MCPService:
         user_id: int | None,
     ) -> None:
         """Require editor (or owner) role on *partition*."""
+        # The store reads a reserved name as "every partition", so no one, the
+        # admin wildcard included, may change one (deleting file X in it would
+        # delete X in every partition).
+        if is_reserved_partition_name(partition):
+            raise PermissionError(f"Partition name '{partition}' is reserved")
         self._enforce_partition_access(partition, allowed_partitions)
         if allowed_partitions == ["all"]:
             return  # admin wildcard
@@ -490,12 +497,9 @@ class MCPService:
     ) -> dict[str, Any]:
         self._validate_file_id(file_id)
         await self._enforce_editor_access(partition, allowed_partitions, user_id)
-        # ``partition`` in the payload is an authorized move control (not a
-        # protected key) — require editor on the destination too.
-        if metadata and "partition" in metadata:
-            await self._enforce_editor_access(metadata["partition"], allowed_partitions, user_id)
         if not await self._partitions.file_exists(file_id, partition):
             raise FileNotFoundError(f"File '{file_id}' not found in partition '{partition}'")
+        # A ``partition`` other than the file's own is refused there.
         await self._indexing.update_metadata(
             file_id,
             _strip_protected_metadata(metadata),
@@ -587,8 +591,7 @@ class MCPService:
         # Downloaded under the suffix it is parsed as, like an upload, so the
         # path-based parsers read this file rather than a second copy.
         suffix = Document.type_suffix(filename, metadata.get("mimetype"))
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = Path(tmp.name)
+        tmp_path = await _to_thread_undone_on_cancel(_remove_file, _create_download_target, suffix)
         download_complete = False
         try:
             await self._safe_download(url, tmp_path)
@@ -606,9 +609,7 @@ class MCPService:
         content_verified = False
         try:
             extension = Document.type_extension(filename, metadata.get("mimetype"))
-            with tmp_path.open("rb") as downloaded:
-                validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
-                await asyncio.to_thread(validate_ooxml_package, extension, downloaded)
+            await asyncio.to_thread(_check_downloaded_content, extension, tmp_path)
             content_verified = True
         finally:
             # `finally`, not `except Exception`, and for the same reason as the
@@ -699,17 +700,77 @@ class MCPService:
                         continue
                     response.raise_for_status()
                     written = 0
-                    with dest.open("wb") as fh:
+                    # File I/O runs in a worker thread so slow storage never
+                    # stalls the event loop.
+                    fh = await _to_thread_undone_on_cancel(_discard_download, dest.open, "wb")
+                    try:
                         async for chunk in response.aiter_bytes():
                             written += len(chunk)
                             if written > self.max_download_bytes:
                                 raise ValueError(f"download exceeds {self.max_download_bytes} bytes")
-                            fh.write(chunk)
+                            await asyncio.to_thread(fh.write, chunk)
+                    finally:
+                        await asyncio.to_thread(fh.close)
                     return
         raise ValueError("too many redirects")
 
 
 __all__ = ["MCPService"]
+
+_T = TypeVar("_T")
+
+# Threads still running for a cancelled call, held until their result is undone
+# (the event loop keeps only a weak reference to a task).
+_UNDO_ON_CANCEL: set[asyncio.Future[Any]] = set()
+
+
+async def _to_thread_undone_on_cancel(undo: Callable[[_T], None], func: Callable[..., _T], *args: Any) -> _T:
+    """Run ``func`` in a worker thread; if the caller is cancelled first, ``undo`` its result.
+
+    A thread cannot be interrupted: a cancelled ``asyncio.to_thread`` returns at
+    once while the thread goes on, so a file it then creates or opens would be
+    left on disk with nobody holding it. The thread's work is shielded instead,
+    and ``undo`` receives its result as soon as it finishes.
+    """
+    job = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(job)
+    except asyncio.CancelledError:
+        _UNDO_ON_CANCEL.add(job)
+        job.add_done_callback(partial(_undo_result, undo))
+        raise
+
+
+def _undo_result(undo: Callable[[_T], None], job: asyncio.Future[_T]) -> None:
+    _UNDO_ON_CANCEL.discard(job)
+    if job.cancelled() or job.exception() is not None:
+        return
+    undo(job.result())
+
+
+def _remove_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _discard_download(fh: Any) -> None:
+    fh.close()
+    Path(fh.name).unlink(missing_ok=True)
+
+
+def _create_download_target(suffix: str) -> Path:
+    """Create an empty temp file for ``index_url`` to download into (blocking; run in a thread)."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        return Path(tmp.name)
+
+
+def _check_downloaded_content(extension: str, path: Path) -> None:
+    """Check the downloaded bytes match *extension* (blocking; run in a thread).
+
+    The sniff and the package check share one handle, as for an upload.
+    """
+    with path.open("rb") as downloaded:
+        validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
+        validate_ooxml_package(extension, downloaded)
 
 
 def _public_chunk_metadata(row: dict[str, Any], *, exclude: tuple[str, ...]) -> dict[str, Any]:
