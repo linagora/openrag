@@ -19,14 +19,14 @@ export interface Release {
  */
 export const releaseNotes: Release = {
   version: "2.3.5",
-  date: "2026-11-12",
+  date: "2026-11-13",
   summary:
-    'OpenRAG 2.3.5 shows each file\'s indexing progress, adds sheet-aware spreadsheet ingestion and date-aware answers for "the latest" questions, and upgrades Milvus to 3.0.5.',
+    'OpenRAG 2.3.5 shows each file\'s indexing progress, indexes Excel workbooks (.xlsx), sorts sources by date for "the latest" questions, and upgrades Milvus to 3.0.5.',
 
   newFeatures: [
     "The Jobs page shows each file's current indexing stage, its elapsed time and its stage history.",
-    "Spreadsheets (.xlsx) are ingested sheet by sheet, without rejecting valid workbooks.",
-    "Questions about the latest documents get sources sorted by date, with their dates shown.",
+    "Excel workbooks (.xlsx) can now be indexed, sheet by sheet.",
+    "Questions about the latest documents get sources sorted by date, with their dates shown, for documents that carry a creation date (created_at metadata).",
     "Figure and table captions stay attached to the block they label.",
     "Admin console usability improvements, and failed data loads shown as errors instead of empty lists.",
   ],
