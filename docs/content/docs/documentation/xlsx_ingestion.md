@@ -1,4 +1,6 @@
-# XLSX ingestion
+---
+title: XLSX ingestion
+---
 
 OpenRAG indexes `.xlsx` and `.xlsm` workbooks as structured tabular content. It uses OpenPyXL in read-only mode and sends every detected table in each visible worksheet through the same bounded indexing pipeline used for CSV data.
 
