@@ -5,7 +5,7 @@ The hardest single extraction in Phase 8: query generation, retrieval,
 web search, map-reduce, context formatting, system-prompt assembly, and
 streaming all lived tangled in ``RagPipeline``.
 
-Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
+Two design decisions:
 
 * **Structured output** — the legacy used a LangChain structured-output
   chain for ``SearchQueries`` (query generation) and ``SummarizedChunk``

@@ -8,14 +8,10 @@ and auto-skip when the configured Milvus host is not reachable.
 Run locally against the dev compose stack:
 
     docker compose up -d milvus
-    uv run pytest tests/integration/test_milvus_store_integration.py -m integration
+    uv run pytest tests/integration/repos/test_milvus_store_integration.py -m integration
 
-Lives under ``tests/integration/`` per the Phase 13C target test layout
-(``tests/{unit,integration,load}``) — see
-``docs/refactoring/REFACTORING_STRATEGY_v1.md``. Pure-logic tests (filter
-expressions, ID coercion, ABC discipline) stay colocated at
-``openrag/services/storage/test_milvus_store.py`` until the Phase 13C sweep
-relocates them under ``tests/unit/``.
+Pure-logic tests (filter expressions, ID coercion, ABC discipline) are in
+``tests/unit/services/storage/test_milvus_store.py``.
 """
 
 from __future__ import annotations
