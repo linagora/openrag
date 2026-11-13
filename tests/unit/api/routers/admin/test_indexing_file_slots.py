@@ -16,7 +16,7 @@ from api.dependencies.files import validate_file_format, validate_file_id, valid
 from api.error_handlers import register_error_handlers
 from api.routers.admin import indexing as indexing_routes
 from core.models.user import FileSlotGrant
-from core.utils.exceptions import ConflictError
+from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from di.providers import get_auth_service, get_config, get_indexing_service, get_job_service, get_partition_service
 from fastapi import FastAPI, UploadFile
 from services.orchestrators.auth_service import AuthService
@@ -176,6 +176,30 @@ async def test_an_upload_that_is_never_queued_gives_its_slot_back(
     assert resp.status_code == status
     assert len(repo.reserved) == 1
     assert repo.released == repo.reserved
+
+
+def _unknown_outcome_error() -> BaseException:
+    exc = TimeoutError("submission timed out")
+    mark_indexing_worker_may_be_running(exc)
+    return exc
+
+
+@pytest.mark.asyncio
+async def test_an_upload_whose_worker_may_be_running_keeps_its_slot(tmp_path, monkeypatch):
+    """A worker that may still run must not lose its slot to another upload.
+
+    The completion tracker, or the reconcile sweep, releases it once the task
+    settles.
+    """
+    repo = _SlotRepo()
+    service = _IndexingService(error=_unknown_outcome_error())
+    app = _build_app(tmp_path, monkeypatch, repo=repo, service=service)
+
+    resp = await _send(app, "POST", "/indexer/partition/p1/file/f1")
+
+    assert resp.status_code == 500
+    assert len(repo.reserved) == 1
+    assert repo.released == []
 
 
 @pytest.mark.asyncio

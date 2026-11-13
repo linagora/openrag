@@ -313,7 +313,12 @@ async def add_file(
         # A submission whose outcome is unknown may have left a worker running
         # that has not read the file yet; deleting it would fail an indexing
         # run that could still succeed. The worker cleans up its own input.
-        if not indexing_worker_may_be_running(exc):
+        if indexing_worker_may_be_running(exc):
+            # That worker would consume the slot, so it stays with the task:
+            # the completion tracker or the reconcile sweep releases it once
+            # the task settles, or once past the grace window if it never ran.
+            hand_off_file_slot(file_slot)
+        else:
             file_path.unlink(missing_ok=True)
         await _point_conflict_at_running_task(
             exc,
