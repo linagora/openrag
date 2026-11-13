@@ -233,14 +233,28 @@ rebuilt from a corrected tag.
 
 ## 7. The tag is where it should be
 
+The tag must sit on the merge of the release or hotfix pull request, not on a
+later commit. v2.3.4 was tagged on its release merge, then moved onto a docs
+pull request merged into `main` half an hour later, and its images were rebuilt
+under the same version (rule 5 below). A printed subject that nobody compared
+let that pass, so this is a gate:
+
 ```bash
-git fetch origin main --tags
-git tag --contains "$VER" >/dev/null 2>&1
-git merge-base --is-ancestor "$VER" origin/main && echo "OK: $VER is on main" || echo "FAIL: not on main"
-git log -1 --format='%H %s' "$VER"
+git fetch origin main --tags || exit 1
+fail=0
+git merge-base --is-ancestor "$VER" origin/main \
+  && echo "OK    $VER is on main" \
+  || { echo "FAIL  $VER is not on main"; fail=1; }
+subject=$(git log -1 --format=%s "$VER")
+case "$subject" in
+  "Merge pull request #"*" from linagora/release/"*|"Merge pull request #"*" from linagora/hotfix/"*)
+    echo "OK    $subject" ;;
+  *) echo "FAIL  not a release or hotfix merge: $subject"; fail=1 ;;
+esac
+[ "$fail" -eq 0 ] && echo "step 7 PASS" || { echo "step 7 FAIL" >&2; exit 1; }
 ```
 
-**PASS**: `OK`, and the commit is the release-branch merge commit.
+**PASS**: `step 7 PASS`.
 
 ## 8. Chart and compose reference the published tags
 
@@ -496,6 +510,14 @@ Rules this produces:
 4. **Dry-run the verification itself against the previous release.** Doing that
    for v2.0.1 is what exposed the broken `--format` flag above. A checklist
    that silently reports nonsense is worse than none.
+5. **A published tag never moves.** Rule 2 covers a tag whose build failed and
+   published nothing. Once its images are in the registry, the version is
+   fixed: anyone may already run them or have pinned their digests. v2.3.4 broke
+   this. Its tag was deleted and re-created on a docs-only merge into `main`
+   (#1334), so `build.yml` rebuilt and re-pushed `v2.3.4` and `latest` 30
+   minutes after the first build, with different digests for the same version.
+   A code fix after that is a new patch version. A docs-only fix is merged
+   without a tag ("Hotfixes" in [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ### Open risk for the next release
 
