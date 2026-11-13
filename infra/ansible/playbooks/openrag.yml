@@ -1,3 +1,4 @@
+
 ---
 # OpenRAG Application Deployment Playbook
 #
@@ -142,12 +143,12 @@
       block:
         - name: Start Docker Compose services with appropriate profile
           shell: |
-            cd {{ project_path }}
+            cd {{ project_path }}/infra/compose
             docker compose --profile "{{ compose_profile }}" up -d --build
 
         - name: Wait for Docker containers to be running and healthy
           shell: |
-            cd {{ project_path }}
+            cd {{ project_path }}/infra/compose
             # Wait for containers to start and stabilize
             sleep 30
             # Check if containers are running
@@ -215,6 +216,8 @@
             msg:
               - "Server Type: {{ 'GPU-enabled' if inventory_hostname in groups['gpu_servers'] else 'CPU-only' }}"
               - "OpenRAG API: http://{{ ansible_default_ipv4.address }}:8080"
-              - "Ray Dashboard: not published (open it on 127.0.0.1:8265 with: docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml{{ ' --profile cpu' if compose_profile else '' }} up -d)"
+              - "Ray Dashboard is opt-in and not published by default."
+              - "To enable it, run from {{ project_path }}/infra/compose: docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml{{ ' --profile cpu' if compose_profile else '' }} up -d"
+              - "For remote access, run locally: ssh -L 8265:127.0.0.1:8265 {{ project_user }}@{{ ansible_default_ipv4.address }}, then open http://127.0.0.1:8265 in your browser."
               - "Milvus: {{ ansible_default_ipv4.address }}:19530"
       become_user: "{{ project_user }}"
