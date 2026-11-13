@@ -9,7 +9,7 @@ long-lived branches, plus short-lived branches for features, releases, and hotfi
 
 | Branch | Purpose | Branches from | Merges into |
 |--------|---------|---------------|-------------|
-| `main` | Production. Every commit is a released, tagged version. **Never commit directly.** | — | — |
+| `main` | Production. Takes only release and hotfix merges, each tagged except a docs-only hotfix. **Never commit directly.** | — | — |
 | `develop` | Integration branch. The next release accumulates here. | — | — |
 | `feature/*` | A single feature or fix. | `develop` | `develop` |
 | `release/X.Y.Z` | Stabilize a version before shipping. | `develop` | `main` **and** `develop` |
@@ -162,23 +162,41 @@ predicted would ship.
 
 When the release is ready:
 
-1. Merge `release/X.Y.Z` into `main`.
-2. Tag `main` with `vX.Y.Z` — this triggers the GA image build (`.github/workflows/build.yml`).
-3. Once steps 1-8 of [`.github/RELEASING.md`](.github/RELEASING.md) pass, create the GitHub Release
+1. Check the documentation site builds from the release branch:
+   `gh workflow run astro.yml -R linagora/openrag --ref release/X.Y.Z`. Its Build job must pass. Its
+   Deploy job is refused, because the `github-pages` environment deploys only from `main`; the merge
+   in step 2 publishes the site. A docs fix found now goes into `release/X.Y.Z`, not into `main`
+   after the release.
+2. Merge `release/X.Y.Z` into `main`.
+3. Tag the merge commit on `main` with `vX.Y.Z`. This triggers the GA image build
+   (`.github/workflows/build.yml`). Once the images are built, the tag never moves (rule 5 of
+   [`.github/RELEASING.md`](.github/RELEASING.md)).
+4. Once steps 1-8 of [`.github/RELEASING.md`](.github/RELEASING.md) pass, publish the private
+   security advisories the release fixes, if any, each with its affected versions and `vX.Y.Z` as
+   the patched version. They go out before the GitHub Release, whose notes describe the changes they
+   cover. The release notes never link to an advisory: the advisory names the release, not the
+   other way round.
+5. Read this release's pages on the published documentation site, then create the GitHub Release
    (no workflow does) as a draft titled with the tag,
    `gh release create vX.Y.Z -R linagora/openrag --verify-tag --draft --title vX.Y.Z --generate-notes`,
    edit its notes, and publish it with `gh release edit vX.Y.Z -R linagora/openrag --draft=false`.
    Then run step 9 of RELEASING.md. Without `--verify-tag`, a mistyped tag is silently created on
    `develop` and a Release is created for a version that does not exist.
-4. Merge `release/X.Y.Z` back into `develop` so the stabilization fixes and version bump aren't lost.
+6. Merge `main` back into `develop` so the stabilization fixes and version bump aren't lost. GitHub
+   deletes `release/X.Y.Z` when its pull request merges, so the back-merge branches from `main`.
 
-Name the branch to match the tag scheme (`release/2.1.0` → tag `v2.1.0`).
+Name the branch `release/X.Y.Z`, matching the tag (`release/2.1.0` → tag `v2.1.0`), or `hotfix/*`
+for a hotfix. Step 7 of RELEASING.md refuses a tag on the merge of any other branch.
 
 ### Hotfixes
 
 For an urgent fix to something already in production that can't wait for the next release, branch
 `hotfix/*` off `main`, then merge it into **both** `main` (tag a new patch version) **and** `develop`.
-The new patch version is released like any other: steps 2 and 3 above.
+The new patch version is released like any other: steps 3 to 5 above.
+
+A docs-only fix that the published site needs before the next release takes the same path, without
+a tag: it changes no image, and the release tag stays where it is. A fix to code, configuration or
+the chart is a new patch version.
 
 ## Rule of thumb
 

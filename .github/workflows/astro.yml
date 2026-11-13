@@ -11,9 +11,9 @@ on:
   push:
     branches: ["main"]
 
-  # Allows you to run this workflow manually from the Actions tab, selecting the
-  # branch to publish from — use this to update the documentation site ahead of
-  # a release.
+  # A manual run builds the site from any branch, which checks a release
+  # branch before it merges. Only a run from main deploys: the github-pages
+  # environment refuses every other branch, so the Deploy job fails there.
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
