@@ -35,7 +35,9 @@
    (no env.existingSecret, the "values" provider): envFrom loads the Secret
    after the ConfigMap, so its copy wins. With any other Secret, env.secrets
    never reaches the pod, and the Secret's own values are out of the chart's
-   sight. The defaults are the app's (conf/config.yaml). */ -}}
+   sight. openrag.extraEnv wins over both, since the container env overrides
+   envFrom. An extraEnv entry with valueFrom cannot be read at render time and
+   goes unchecked. The defaults are the app's (conf/config.yaml). */ -}}
 {{- if $embeddedRay -}}
 {{- $resources := .Values.openrag.resources | default dict -}}
 {{- $podGpus := int (dig "limits" "nvidia.com/gpu" (dig "requests" "nvidia.com/gpu" 0 $resources) $resources) -}}
@@ -43,6 +45,9 @@
 {{- $env := deepCopy (.Values.env.config | default dict) -}}
 {{- if and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") -}}
 {{- $env = mergeOverwrite $env (.Values.env.secrets | default dict) -}}
+{{- end -}}
+{{- range $entry := .Values.openrag.extraEnv | default list -}}
+{{- if hasKey $entry "value" -}}{{- $_ := set $env $entry.name (toString $entry.value) -}}{{- end -}}
 {{- end -}}
 {{- $pools := list
   (dict "name" "Marker" "poolKey" "MARKER_POOL_SIZE" "gpusKey" "MARKER_NUM_GPUS" "count" (int (dig "MARKER_POOL_SIZE" "1" $env)) "size" (float64 (dig "MARKER_NUM_GPUS" "0.01" $env)))
