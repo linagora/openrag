@@ -238,7 +238,21 @@ def test_a_furniture_picture_does_not_stop_the_body_pictures_of_its_page_anchori
 
     text_blocks, _ = _postprocess(document)
 
-    assert "Body\n\n![](docling_img_1)" in text_blocks[0].text
+    assert text_blocks[0].text.startswith("Body\n\n![](docling_img_1)")
+
+
+def test_a_picture_the_page_export_leaves_out_ends_its_own_page():
+    """Not on the last page: appended after it, its caption was chunked with
+    the last page's text, which took the caption's page number."""
+    document = _docling_document()
+    _add_text(document, 1, "First page")
+    _add_picture(document, 1, content_layer=ContentLayer.FURNITURE)
+    _add_text(document, 3, "Last page")
+
+    text_blocks, image_blocks = _postprocess(document)
+
+    assert [b.page_number for b in image_blocks] == [1]
+    assert [b.text for b in text_blocks] == ["First page\n\n![](docling_img_0)", "", "Last page"]
 
 
 def test_a_picture_without_provenance_has_no_page_and_does_not_shift_the_others():

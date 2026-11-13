@@ -262,6 +262,7 @@ class DoclingLoader(BasePooledParser):
         """
         blocks: list[ImageBlock] = []
         refs: dict[str, str] = {}
+        page_refs: dict[int, list[str]] = {}
         for idx, picture in enumerate(result.document.pictures):
             if cancelled.is_set():
                 break
@@ -269,9 +270,12 @@ class DoclingLoader(BasePooledParser):
             page_no = picture.prov[0].page_no if picture.prov else None
             block = self._build_image_block(picture, idx, page_no)
             if block is not None:
-                refs[picture.self_ref] = block.metadata["markdown_ref"]
+                ref = block.metadata["markdown_ref"]
+                refs[picture.self_ref] = ref
+                if page_no is not None:
+                    page_refs.setdefault(page_no, []).append(ref)
                 blocks.append(block)
-        return self._build_text_blocks(result, refs, cancelled), blocks
+        return self._build_text_blocks(result, refs, page_refs, cancelled), blocks
 
     @staticmethod
     def _build_image_block(picture: Any, idx: int, page_no: int | None) -> ImageBlock | None:
@@ -311,6 +315,7 @@ class DoclingLoader(BasePooledParser):
     def _build_text_blocks(
         result: ConversionResult,
         refs: Mapping[str, str] | None = None,
+        page_refs: Mapping[int, list[str]] | None = None,
         cancelled: threading.Event | None = None,
     ) -> list[TextBlock]:
         """One ``TextBlock`` per page, each picture printed as its ref (``refs``).
@@ -320,6 +325,11 @@ class DoclingLoader(BasePooledParser):
         the end of the document, attributed to the last page, and the marker
         was indexed (#1313).
 
+        A picture the page export leaves out (outside the body layer, like a
+        logo) has its ref put at the end of its page (``page_refs``): appended
+        after the last page instead, its caption was chunked with that page's
+        text, which then took the caption's page number.
+
         The pages are the ones the document holds, by their own number: a page
         Docling left out leaves a gap, so counting ``result.pages`` from 1
         would export a missing page and skip the last one.
@@ -328,6 +338,7 @@ class DoclingLoader(BasePooledParser):
         page_numbers = sorted(result.document.pages)
         n_pages = len(page_numbers)
         refs = refs or {}
+        page_refs = page_refs or {}
         if n_pages:
             report_parser_substage("parse.text", "Extracting page text", progress=0, total=n_pages)
         else:
@@ -336,6 +347,8 @@ class DoclingLoader(BasePooledParser):
             if cancelled is not None and cancelled.is_set():
                 break
             text = _page_markdown(result.document, page_no, refs)
+            left_out = [ref for ref in page_refs.get(page_no, ()) if ref not in text]
+            text = "\n\n".join([text, *left_out]).strip()
             blocks.append(TextBlock(text=text, page_number=page_no))
             report_parser_substage("parse.text", "Extracting page text", progress=done, total=n_pages)
         return blocks
