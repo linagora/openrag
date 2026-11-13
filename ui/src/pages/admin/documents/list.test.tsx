@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
@@ -119,6 +119,11 @@ function LocationProbe() {
   return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
 }
 
+function NavigateProbe() {
+  const navigate = useNavigate();
+  return <button type="button" hidden data-testid="go-other" onClick={() => navigate("/documents?partition=other")} />;
+}
+
 function ActiveJobsProbe() {
   return <output data-testid="active-jobs">{useActiveJobsCount()}</output>;
 }
@@ -136,6 +141,7 @@ function renderDocuments(initialEntries = ["/documents"], includeJobsProbe = fal
       <MemoryRouter initialEntries={initialEntries}>
         <DocumentListPage />
         <LocationProbe />
+        <NavigateProbe />
         {includeJobsProbe && <ActiveJobsProbe />}
       </MemoryRouter>
     </QueryClientProvider>
@@ -391,18 +397,6 @@ describe("DocumentListPage", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("locks the file selection while an upload runs", async () => {
-    uploadFileMock.mockImplementation(() => new Promise(() => {}));
-    renderDocuments();
-
-    await screen.findByText("a.pdf");
-    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
-    await userEvent.upload(screen.getByLabelText("Files"), [new File(["x"], "x.txt", { type: "text/plain" })]);
-    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
-
-    await waitFor(() => expect((screen.getByLabelText("Files") as HTMLInputElement).disabled).toBe(true));
-  });
-
   it("keeps earlier successes when a retry still has failures", async () => {
     uploadFileMock.mockImplementation(async (_partition, _id, file) => {
       if ((file as File).name !== "a.txt") throw new Error("Network error");
@@ -431,6 +425,48 @@ describe("DocumentListPage", () => {
     expect(screen.getByText("b.txt: uploaded")).toBeTruthy();
     expect(screen.queryByText("b.txt: Network error")).toBeNull();
     expect(screen.getByText("1 failed file(s) ready to retry")).toBeTruthy();
+  });
+
+  it("drops failed files kept for retry when the partition changes", async () => {
+    listPartitionsMock.mockResolvedValueOnce({
+      partitions: [
+        { partition: "docs", name: "docs", role: "owner", created_at: null, document_count: 2 },
+        { partition: "other", name: "other", role: "owner", created_at: null, document_count: 0 },
+      ],
+    } as never);
+    uploadFileMock.mockImplementation(async (_partition, _id, file) => {
+      if ((file as File).name === "bad.txt") throw new Error("Network error");
+      return { task_status_url: "/queue/task-1" };
+    });
+    renderDocuments(["/documents?partition=docs"]);
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["good"], "good.txt", { type: "text/plain" }),
+      new File(["bad"], "bad.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByRole("button", { name: "Retry failed" });
+
+    // Stands in for browser Back to a URL with another ?partition=.
+    fireEvent.click(screen.getByTestId("go-other"));
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry failed" })).toBeNull());
+    expect(screen.queryByText("bad.txt: Network error")).toBeNull();
+    expect(uploadFileMock.mock.calls.every(([partition]) => partition === "docs")).toBe(true);
+  });
+
+  it("locks the file selection while an upload runs", async () => {
+    uploadFileMock.mockImplementation(() => new Promise(() => {}));
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [new File(["x"], "x.txt", { type: "text/plain" })]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect((screen.getByLabelText("Files") as HTMLInputElement).disabled).toBe(true));
   });
 
   it("resends the same file ID when retrying a failed upload", async () => {

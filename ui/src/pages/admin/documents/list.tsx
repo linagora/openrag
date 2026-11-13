@@ -128,6 +128,25 @@ export default function DocumentListPage() {
       `(${embedderSwap?.files_done} of ${embedderSwap?.files_total} files).`
     : null;
 
+  const closeUpload = () => {
+    setUploadOpen(false);
+    uploadSession.current += 1;
+    setFiles([]);
+    setUploadResults([]);
+    fileIds.current.clear();
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  // The upload dialog (and failed files kept for retry) belongs to the partition
+  // it was opened for: reset it if the partition changes underneath, e.g. via
+  // browser Back. Runs before the route effect so ?upload=1 can still open it.
+  const uploadPartition = useRef(selected);
+  useEffect(() => {
+    if (!selected) return;
+    if (uploadPartition.current && uploadPartition.current !== selected) closeUpload();
+    uploadPartition.current = selected;
+  }, [selected]);
+
   // Keep the remembered partition in sync, and heal a stale ?partition= URL so a
   // refresh / shared link doesn't re-trigger the not-found error.
   useEffect(() => {
@@ -288,15 +307,6 @@ export default function DocumentListPage() {
       setFileRowSelection({});
     },
   });
-
-  const closeUpload = () => {
-    setUploadOpen(false);
-    uploadSession.current += 1;
-    setFiles([]);
-    setUploadResults([]);
-    fileIds.current.clear();
-    if (fileRef.current) fileRef.current.value = "";
-  };
 
   // OpenRag indexes one file per request; multi-file upload is a client-side
   // loop, each file becoming its own indexing task (track in Jobs).
