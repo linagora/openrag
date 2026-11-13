@@ -163,6 +163,28 @@ Two changes to chunks indexed after the upgrade. Chunks already indexed don't ch
 - Contextualized chunks no longer have a `* filename:` line. The chunker's `[Source: ...]` header now names the file once, using the sanitized filename.
 - `structured_section` no longer has a `prepend_heading_path` option. A preset that still sets it to `false` keeps loading and ignores it, so its new chunks get a header, which leaves less room for each chunk's body and can move chunk boundaries.
 
+## OpenRAG 2.3.5: a partition named `all`
+
+Search and chat use `all` to mean every partition you can access (`partitions=all`,
+`openrag-all`). From 2.3.5 it is a reserved partition name, in any case and with or
+without surrounding whitespace. A partition can no longer be created with that name, and
+the files of one that already exists are no longer reachable through the API after
+the upgrade.
+
+Only an instance that ran 2.2.2 or earlier can have one. Check before you upgrade, in
+the OpenRAG database:
+
+```sql
+SELECT partition FROM partitions WHERE lower(regexp_replace(partition, '[^[:alnum:]]', '', 'g')) = 'all';
+```
+
+The query also lists a name such as `a.l.l`, which is not reserved: only a name that
+reads `all` once the whitespace around it is removed is. If it returns such a name,
+upload that partition's files again into a partition with another name before you
+upgrade. Don't delete or copy files out of the `all` partition first:
+on 2.3.4 and earlier, those operations also reach files with the same ID in other
+partitions.
+
 ## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
 
 From OpenRAG 2.3.4, `recursive_splitter` puts the filename at the start of every

@@ -38,13 +38,13 @@ To upgrade a running release to 2.3.0, follow [Upgrading OpenRAG — 2.2.x to 2.
    helm upgrade\
       --install openrag oci://ghcr.io/linagora/openrag-stack\
       -f ./values.yaml\
-      --version 0.6.0
+      --version 0.7.15
    ```
 
    - `openrag` is the Helm release name.
    - `oci://ghcr.io/linagora/openrag-stack` is the remote chart location.
    - `-f ./values.yaml` specifies your custom configuration.
-   - `--version 0.6.0` ensures you deploy a specific chart version — check `Chart.yaml` for the current version before installing.
+   - `--version 0.7.15` deploys the chart published with OpenRAG 2.3.5. To deploy another release, use the chart version published with it.
 
 ---
 
