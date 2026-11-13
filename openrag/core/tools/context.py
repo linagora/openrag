@@ -51,11 +51,12 @@ class ToolContext:
     *scope* is what the request may search, settled before the agent runs; a
     tool never widens it, whatever the model asks for. A ``partitions`` of
     ``["all"]`` is a super admin's every partition; ``None`` is no partition
-    at all (a web-only request).
+    at all (a web-only request). *user* is who asks, when the caller knows:
+    what they may read is already the scope.
     """
 
-    user: dict
     scope: Scope
+    user: dict | None = None
     sources: SourceList = field(default_factory=SourceList)
     trace: RetrievalTraceBuilder | None = None
 

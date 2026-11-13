@@ -1,7 +1,7 @@
 """What a chat request asks for, read once from its metadata."""
 
 import pytest
-from core.models.chat import ChatOptions, RagMode, RetrievalOverrides, parse_rag_mode
+from core.models.chat import ChatOptions, RagMode, RetrievalOverrides, check_agentic_request, parse_rag_mode
 
 
 def test_empty_metadata_gives_the_defaults():
@@ -67,17 +67,51 @@ def test_query_mode(metadata, mode):
     assert ChatOptions.from_metadata(metadata).query_mode == mode
 
 
-def test_parse_rag_mode_accepts_classic():
+def test_parse_rag_mode_accepts_both_modes():
     assert parse_rag_mode(None) is RagMode.CLASSIC
     assert parse_rag_mode("classic") is RagMode.CLASSIC
-
-
-def test_parse_rag_mode_refuses_agentic_until_it_exists():
-    with pytest.raises(ValueError, match="not available yet"):
-        parse_rag_mode("agentic")
+    assert parse_rag_mode("agentic") is RagMode.AGENTIC
 
 
 @pytest.mark.parametrize("value", ["Classic", "simple", "", 1])
 def test_parse_rag_mode_refuses_an_unknown_mode(value):
-    with pytest.raises(ValueError, match="rag_mode must be one of: classic"):
+    with pytest.raises(ValueError, match="rag_mode must be one of: classic, agentic"):
         parse_rag_mode(value)
+
+
+def test_agent_profile_is_read_from_the_metadata():
+    assert ChatOptions.from_metadata({"rag_mode": "agentic", "agent_profile": "legal"}).agent_profile == "legal"
+    assert ChatOptions.from_metadata({}).agent_profile is None
+
+
+_AGENTIC = {"rag_mode": "agentic"}
+
+
+def _check(metadata, *, stream=False, client_tools=False, structured_output=False):
+    check_agentic_request(metadata, stream=stream, client_tools=client_tools, structured_output=structured_output)
+
+
+def test_an_agentic_request_is_accepted_with_what_it_does():
+    _check(_AGENTIC)
+    # Off flags are fine: clients such as the chat UI send them all, false.
+    _check({**_AGENTIC, "websearch": False, "use_map_reduce": False, "agent_profile": "legal"})
+
+
+@pytest.mark.parametrize(
+    ("metadata", "flags", "message"),
+    [
+        (_AGENTIC, {"stream": True}, "doesn't stream yet"),
+        (_AGENTIC, {"client_tools": True}, "runs its own tools"),
+        ({**_AGENTIC, "websearch": True}, {}, "doesn't search the web"),
+        ({**_AGENTIC, "use_map_reduce": True}, {}, "summarizes with its own tool"),
+        (_AGENTIC, {"structured_output": True}, "answers in text"),
+        ({**_AGENTIC, "agent_profile": ["a"]}, {}, "agent_profile must be a string"),
+    ],
+)
+def test_an_agentic_request_asking_for_what_the_agent_doesnt_do_is_refused(metadata, flags, message):
+    with pytest.raises(ValueError, match=message):
+        _check(metadata, **flags)
+
+
+def test_a_classic_request_is_not_checked():
+    _check({"websearch": True, "use_map_reduce": True}, stream=True, client_tools=True, structured_output=True)

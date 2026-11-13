@@ -21,12 +21,13 @@ import services.chat.classic as classic_steps
 import services.orchestrators.chat_service as qs
 from core.chat import smalltalk
 from core.config import load_config
+from core.config.agentic import AgenticConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
-from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
+from core.utils.exceptions import ContextWindowExceededError, ValidationError, WorkspaceNotFoundError
 from di.chat import create_chat_service
 from services.orchestrators.chat_service import ChatService
 
@@ -168,7 +169,18 @@ def _config(mode="SimpleRag"):
         partitions={},
         models=SimpleNamespace(llm={}),
         server=SimpleNamespace(assistant_name=""),
+        agentic=AgenticConfig(),
     )
+
+
+class FakeDocumentRepo:
+    """The catalog the agent's file tools read; empty, as no test here runs them."""
+
+    async def list_catalog_files(self, partitions, *, file_ids=None, limit):
+        return []
+
+    async def get_file_metadata(self, file_id, partition):
+        return None
 
 
 def _svc(
@@ -181,6 +193,7 @@ def _svc(
         web_search_service=web or FakeWeb(),
         workspace_service=workspace or FakeWorkspace(),
         prompt_service=prompt_service or _disk_prompt_service(),
+        document_repo=FakeDocumentRepo(),
         llm_factory=llm_factory,
     )
 
@@ -264,6 +277,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
         web_search_service=FakeWeb(),
         workspace_service=FakeWorkspace(),
         prompt_service=_disk_prompt_service(),
+        document_repo=FakeDocumentRepo(),
     )
     assert svc._default_chat_history_depth == 4
     assert svc._resolve_chat_history_depth(None) == 4
@@ -3603,3 +3617,118 @@ async def test_prepare_completions_selects_sources_by_relevance_and_shows_them_b
     assert [doc.metadata["_id"] for doc in docs] == ["mid", "best"]
     assert _in_reading_order(payload["prompt"], ["mid", "best"])
     assert "text of loose" not in payload["prompt"]
+
+
+# --------------------------------------------------------------------------- #
+# agentic: the agent finds the sources with its tools, then answers
+# --------------------------------------------------------------------------- #
+
+
+def _agentic_payload(**metadata) -> dict:
+    return {
+        "messages": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "notice period?"}],
+        "metadata": {"rag_mode": "agentic", **metadata},
+        "temperature": 0.3,
+    }
+
+
+_SEARCH = {
+    "content": None,
+    "tool_calls": [
+        {
+            "id": "call00001",
+            "type": "function",
+            "function": {"name": "search_knowledge", "arguments": '{"queries": ["notice period"]}'},
+        }
+    ],
+}
+_NOTICE = [
+    Chunk(id="c1", text="The notice period is three months.", metadata={"_id": "c1"}),
+    Chunk(id="c2", text="Holidays are 25 days.", metadata={"_id": "c2"}),
+]
+
+
+def _source_ids(docs, web):
+    return [{"id": doc.metadata["_id"]} for doc in docs]
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_answers_from_what_its_tools_found():
+    llm = FakeLLM(chat_responses=[_SEARCH, "Three months.\n\n[Sources: 1]"])
+    retrieval = FakeRetrieval(list(_NOTICE))
+
+    out = await _svc(llm=llm, retrieval=retrieval).chat(
+        partitions=["p"], payload=_agentic_payload(), prepare_sources=_source_ids, model_name="openrag-p"
+    )
+
+    assert out["choices"][0]["message"]["content"] == "Three months."
+    assert out["model"] == "openrag-p"
+    assert out["extra"]["presented_sources"] == [{"id": "c1"}, {"id": "c2"}]
+    assert out["extra"]["cited_sources"] == [{"id": "c1"}]
+    assert len(llm.chat_calls) == 2, "no query rewriting, no separate answering call: the agent's reply is the answer"
+    first_messages, first_kwargs = llm.chat_calls[0]
+    assert "search_knowledge" in {t["function"]["name"] for t in first_kwargs["tools"]}
+    assert "<unsafe_custom_prompt>\nBe brief.\n</unsafe_custom_prompt>" in first_messages[0]["content"]
+    assert first_messages[1:] == [{"role": "user", "content": "notice period?"}]
+    second_messages, _ = llm.chat_calls[1]
+    assert second_messages[-1]["role"] == "tool"
+    result = second_messages[-1]["content"]
+    assert result.startswith("2 excerpts, best match first.")
+    assert "[Source 1]\nPartition: default | File id: \nThe notice period is three months." in result
+    assert retrieval.retrieve_multi_calls[0]["partitions"] == ["p"]
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_retries_an_empty_answer_on_the_agents_conversation():
+    llm = FakeLLM(chat_responses=[_SEARCH, "[Sources: 1]", "Three months.\n\n[Sources: 1]"])
+
+    out = await _svc(llm=llm, retrieval=FakeRetrieval(list(_NOTICE))).chat(
+        partitions=["p"], payload=_agentic_payload(), prepare_sources=_source_ids, model_name="openrag-p"
+    )
+
+    assert out["choices"][0]["message"]["content"] == "Three months."
+    retry_messages, retry_kwargs = llm.chat_calls[2]
+    assert "tools" not in retry_kwargs
+    assert [m["role"] for m in retry_messages] == ["system", "user", "assistant", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_with_an_unknown_profile_is_a_400_before_the_model_is_called():
+    llm = FakeLLM()
+
+    with pytest.raises(ValidationError) as error:
+        await _svc(llm=llm).chat(
+            partitions=["p"],
+            payload=_agentic_payload(agent_profile="lawyer"),
+            prepare_sources=_source_ids,
+            model_name="openrag-p",
+        )
+
+    assert error.value.status_code == 400
+    assert llm.chat_calls == []
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_does_not_stream_yet():
+    llm = FakeLLM()
+
+    with pytest.raises(ValidationError, match="doesn't stream yet"):
+        async for _ in _svc(llm=llm).chat_stream(
+            partitions=["p"], payload=_agentic_payload(), prepare_sources=_source_ids, model_name="openrag-p"
+        ):
+            pass
+
+    assert llm.chat_calls == [] and llm.stream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_agentic_is_ignored_without_documents():
+    # A request to the LLM itself (no partition) goes straight to the model, as in classic.
+    llm = FakeLLM(chat_responses=["Hello."])
+
+    out = await _svc(llm=llm).chat(
+        partitions=None, payload=_agentic_payload(), prepare_sources=_source_ids, model_name="m"
+    )
+
+    assert out["choices"][0]["message"]["content"] == "Hello."
+    assert "tools" not in llm.chat_calls[0][1]

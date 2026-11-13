@@ -165,3 +165,4 @@ class PromptsConfig(ConfigMixin):
     spoken_style_answer: str = "spoken_style_answer_tmpl.txt"
     topic_tagger: str = "topic_tagger_tmpl.txt"
     asr_transcription: str = "asr_transcription_tmpl.txt"
+    agent: str = "agent_tmpl.txt"

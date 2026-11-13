@@ -206,7 +206,7 @@ class TestSeeding:
         await _service(repo).seed_defaults()
         seeded_types = {p.prompt_type for p in repo.prompts.values()}
         assert seeded_types == set(PROMPT_TYPE_KEYS)
-        assert len(PROMPT_TYPE_KEYS) == 7
+        assert len(PROMPT_TYPE_KEYS) == 8
         assert seeded_types.isdisjoint(RETIRED_PROMPT_TYPES)
         for p in repo.prompts.values():
             assert p.is_default is True
@@ -225,7 +225,7 @@ class TestSeeding:
         sysp.content = "OPERATOR EDIT"
         await svc.seed_defaults()
         assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
-        assert len(repo.prompts) == 7
+        assert len(repo.prompts) == 8
 
     async def test_seed_defaults_propagates_repository_read_failure(self):
         class FailingRepo(FakePromptRepo):

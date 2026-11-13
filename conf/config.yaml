@@ -169,6 +169,7 @@ prompts:
   image_describer: image_captioning_tmpl.txt
   spoken_style_answer: spoken_style_answer_tmpl.txt
   asr_transcription: asr_transcription_tmpl.txt
+  agent: agent_tmpl.txt
 
 # --- Document loader ---
 loader:
@@ -378,6 +379,20 @@ rag:
   mode: ChatBotRag
   chat_history_depth: 4
   max_contextualized_query_len: 512
+
+# --- Agentic mode (metadata.rag_mode: agentic) ---
+# The agents a request can pick with metadata.agent_profile. Each one: its prompt
+# (a prompt of type `agent` in the library; null for the type's default), the
+# tools it is offered, its temperature (when the request sends none), and the
+# rounds of tool calls it may make before it must answer from what it found.
+agentic:
+  default_profile: default
+  profiles:
+    default:
+      prompt_name: null
+      tools: [search_knowledge, search_file, read_file, summarize, find_files, get_file_info]
+      temperature: 0.2
+      max_tool_rounds: 6
 
 # --- Web Search ---
 # Env: WEBSEARCH_PROVIDER, WEBSEARCH_API_TOKEN, WEBSEARCH_BASE_URL,

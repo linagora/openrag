@@ -19,8 +19,7 @@ class RagMode(StrEnum):
     """How a partition-backed request finds its sources (``metadata.rag_mode``).
 
     ``classic`` runs the fixed pipeline: contextualize, retrieve, answer.
-    ``agentic`` will let the model call search tools in a loop; it is not
-    available yet, and a request asking for it is refused.
+    ``agentic`` lets the model call search and read tools in a loop, then answer.
     """
 
     CLASSIC = "classic"
@@ -28,25 +27,53 @@ class RagMode(StrEnum):
 
 
 DEFAULT_RAG_MODE = RagMode.CLASSIC
-AVAILABLE_RAG_MODES = frozenset({RagMode.CLASSIC})
 
 
 def parse_rag_mode(value: object) -> RagMode:
     """``metadata.rag_mode`` as a ``RagMode``; ``None`` is the default.
 
-    Raises ``ValueError`` for an unknown mode and for one that isn't available
-    yet, never falling back silently to another mode.
+    Raises ``ValueError`` for an unknown mode, never falling back silently to
+    another mode.
     """
     if value is None:
         return DEFAULT_RAG_MODE
     try:
-        mode = RagMode(value)
+        return RagMode(value)
     except ValueError:
-        choices = ", ".join(sorted(m.value for m in AVAILABLE_RAG_MODES))
+        choices = ", ".join(mode.value for mode in RagMode)
         raise ValueError(f"rag_mode must be one of: {choices}") from None
-    if mode not in AVAILABLE_RAG_MODES:
-        raise ValueError(f"rag_mode '{mode.value}' is not available yet")
-    return mode
+
+
+AGENTIC_STREAM_REFUSAL = "rag_mode 'agentic' doesn't stream yet: send stream: false."
+
+
+def check_agentic_request(
+    metadata: Mapping[str, Any], *, stream: bool, client_tools: bool, structured_output: bool
+) -> None:
+    """Refuse, with ``ValueError``, an ``agentic`` chat request asking for what the agent doesn't do.
+
+    The agent runs its own tools, has no web search (its sources are the
+    documents), summarizes with its own tool rather than ``use_map_reduce``,
+    answers in text, and doesn't stream yet. Each of these would otherwise be
+    dropped without a word. A request in another mode is not checked.
+    """
+    if parse_rag_mode(metadata.get("rag_mode")) is not RagMode.AGENTIC:
+        return
+    profile = metadata.get("agent_profile")
+    if profile is not None and not isinstance(profile, str):
+        raise ValueError("agent_profile must be a string")
+    if stream:
+        raise ValueError(AGENTIC_STREAM_REFUSAL)
+    if client_tools:
+        raise ValueError("rag_mode 'agentic' runs its own tools: a request can't add tools to it.")
+    if metadata.get("websearch"):
+        raise ValueError("rag_mode 'agentic' doesn't search the web: drop websearch, or use rag_mode 'classic'.")
+    if metadata.get("use_map_reduce"):
+        raise ValueError(
+            "rag_mode 'agentic' summarizes with its own tool: drop use_map_reduce, or use rag_mode 'classic'."
+        )
+    if structured_output:
+        raise ValueError("rag_mode 'agentic' answers in text: drop response_format, or use rag_mode 'classic'.")
 
 
 @dataclass(frozen=True)
@@ -95,6 +122,8 @@ class ChatOptions:
     """The ``metadata`` flags of a chat or text-completion request."""
 
     rag_mode: RagMode = DEFAULT_RAG_MODE
+    #: ``metadata.agent_profile``: the agent an ``agentic`` request runs; ``None`` for the configured default.
+    agent_profile: str | None = None
     # Sources
     websearch: bool = False
     workspace: Any = None
@@ -119,6 +148,7 @@ class ChatOptions:
         metadata = metadata or {}
         return cls(
             rag_mode=parse_rag_mode(metadata.get("rag_mode")),
+            agent_profile=metadata.get("agent_profile"),
             websearch=bool(metadata.get("websearch", False)),
             workspace=metadata.get("workspace"),
             attachment_ids=_attachment_ids(metadata),
@@ -144,10 +174,11 @@ class ChatOptions:
 
 
 __all__ = [
-    "AVAILABLE_RAG_MODES",
+    "AGENTIC_STREAM_REFUSAL",
     "DEFAULT_RAG_MODE",
     "ChatOptions",
     "RagMode",
     "RetrievalOverrides",
+    "check_agentic_request",
     "parse_rag_mode",
 ]

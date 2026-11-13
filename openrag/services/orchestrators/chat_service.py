@@ -10,9 +10,11 @@ This module finds the sources and renders them into the prompt;
 way for ``chat``, ``chat_stream`` and ``complete``. A chat request's sources
 are found by the ``classic`` graph (``services.chat``), whose steps call the
 capabilities in ``services.capabilities``: the scope, the contextualized
-queries, the documents and web results, the map-reduce summaries. This module
-settles the history, the route and the scope, runs the graph, and prepares
-completions itself; ``di.chat`` builds it and compiles the graph. The rules
+queries, the documents and web results, the map-reduce summaries. With
+``metadata.rag_mode: agentic`` the ``agentic`` graph runs instead: the model
+searches and reads with tools, then answers (``services.chat.agentic``). This
+module settles the history, the route and the scope, runs the graph, and
+prepares completions itself; ``di.chat`` builds it and compiles the graphs. The rules
 with no I/O live in ``core``: small talk (``core.chat.smalltalk``), the history window
 (``core.chat.history``), fitting the sources into the window
 (``core.chat.budget``), the route (``core.chat.routing``), shaping the answer
@@ -38,7 +40,7 @@ from core.chat.budget import fit_prompt
 from core.chat.history import history_window, latest_user_query, split_leading_system_prompt
 from core.chat.routing import Route, resolve_route
 from core.chat.scope import Scope
-from core.models.chat import ChatOptions
+from core.models.chat import AGENTIC_STREAM_REFUSAL, ChatOptions, RagMode
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import documents_context
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
     from services.capabilities.contextualize import QueryContextualizer
     from services.capabilities.retrieve import SourceRetriever
     from services.capabilities.scope import ScopeResolver
+    from services.chat.agentic import AgenticChat
     from services.chat.classic import ClassicGraph
     from services.chat.prompt_settings import PartitionPromptSettings
     from services.orchestrators.answer_service import AnswerService
@@ -101,10 +104,11 @@ class ChatService:
         retriever: SourceRetriever,
         prompt_settings: PartitionPromptSettings,
         classic: ClassicGraph,
+        agentic: AgenticChat,
         answer_service: AnswerService,
         llm_factory: Callable[[str], LLM] | None = None,
     ) -> None:
-        """Built by ``di.chat.create_chat_service``, which compiles the *classic* graph.
+        """Built by ``di.chat.create_chat_service``, which compiles the *classic* and *agentic* graphs.
 
         The graph's steps share *contextualizer*, *retriever* and
         *prompt_settings* with the completions endpoint, which runs outside it.
@@ -121,6 +125,7 @@ class ChatService:
         self._retriever = retriever
         self._prompt_settings = prompt_settings
         self._classic = classic
+        self._agentic = agentic
 
         # Keep a live reference so per-partition config (resolved into
         # ``config.partitions`` and refreshed on every preset change) can be
@@ -491,6 +496,15 @@ class ChatService:
         is. *max_prompt_tokens*: see ``chat``.
         """
         options = ChatOptions.from_metadata(payload.get("metadata"))
+        if options.rag_mode is RagMode.AGENTIC and resolve_route(partitions, options).has_documents:
+            return await self._prepare_agentic_answer(
+                partitions=partitions,
+                payload=payload,
+                options=options,
+                prepare_sources=prepare_sources,
+                llm=llm,
+                max_prompt_tokens=max_prompt_tokens,
+            )
         original_query = latest_user_query(payload.get("messages", []))
         trace = (
             RetrievalTraceBuilder(
@@ -553,6 +567,52 @@ class ChatService:
             finish_trace=finish_trace,
         )
 
+    async def _prepare_agentic_answer(
+        self,
+        *,
+        partitions: list[str],
+        payload: dict,
+        options: ChatOptions,
+        prepare_sources: PrepareSources,
+        llm: LLM,
+        max_prompt_tokens: int | None,
+    ) -> PreparedAnswer:
+        """Let the agent find the sources and answer; ``AnswerService`` then shapes its answer.
+
+        The history and the scope are settled as for ``classic``. The sources
+        are every passage the tools showed, numbered as the model saw them, so
+        its ``[Sources: N]`` citations map back to them.
+        """
+        profile = self._agentic.profile(options.agent_profile)
+        messages = history_window(payload["messages"], self._resolve_chat_history_depth(partitions))
+        custom_prompt, messages = split_leading_system_prompt(payload["messages"], messages)
+        if not messages:
+            raise ValidationError("Request must contain at least one non-system message")
+        scope = await self._scope.resolve(
+            partitions, workspace=options.workspace, attachment_ids=list(options.attachment_ids)
+        )
+        run = await self._agentic.run(
+            profile=profile,
+            messages=messages,
+            custom_prompt=custom_prompt,
+            scope=scope,
+            llm=llm,
+            payload=payload,
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        sources = prepare_sources([chunk.to_langchain() for chunk in run.sources], [])
+        include_all_retrieved = options.include_all_retrieved_sources
+        return PreparedAnswer(
+            # The conversation the model last saw: an empty answer is retried on it.
+            payload={**payload, "messages": run.messages},
+            sources=sources,
+            all_sources=sources if include_all_retrieved else None,
+            include_all_retrieved=include_all_retrieved,
+            citation_protocol_active=True,
+            extra_fields={"attachments": scope.attachment_ids} if options.attachments_sent else {},
+            response=run.response,
+        )
+
     async def chat(
         self,
         *,
@@ -597,8 +657,12 @@ class ChatService:
         """Streaming chat completion → SSE strings with filtered sources (*max_prompt_tokens*: see ``chat``).
 
         The sources are prepared once the caller starts iterating, so a failure
-        there reaches it inside the stream.
+        there reaches it inside the stream. ``agentic`` doesn't stream yet: the
+        request schema refuses it, and so does this.
         """
+        options = ChatOptions.from_metadata(payload.get("metadata"))
+        if options.rag_mode is RagMode.AGENTIC and resolve_route(partitions, options).has_documents:
+            raise ValidationError(AGENTIC_STREAM_REFUSAL)
         request_started = time.perf_counter()
         llm = self._resolve_llm(partitions)
         prepared = await self._prepare_answer(

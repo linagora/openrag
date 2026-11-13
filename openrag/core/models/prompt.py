@@ -19,6 +19,7 @@ class PromptType(str, Enum):
     SPOKEN_STYLE_ANSWER = "spoken_style_answer"
     TOPIC_TAGGER = "topic_tagger"
     ASR_TRANSCRIPTION = "asr_transcription"
+    AGENT = "agent"
 
 
 #: Types of features that were removed: the ``hyde`` and ``multiQuery``

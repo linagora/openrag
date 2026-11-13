@@ -18,6 +18,7 @@ _PROMPT_TEMPLATE_METADATA: dict[str, tuple[str, str]] = {
     "spoken_style_answer": ("spoken_style_answer", "spoken_style_answer_tmpl.txt"),
     "topic_tagger": ("topic_tagger", "topic_tagger_tmpl.txt"),
     "asr_transcription": ("asr_transcription", "asr_transcription_tmpl.txt"),
+    "agent": ("agent", "agent_tmpl.txt"),
 }
 
 # Per-type hashes, oldest stable release first and the bundled template last.
@@ -43,6 +44,9 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
     ),
     "asr_transcription": (
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # v2.2.0-v2.3.2 and current
+    ),
+    "agent": (
+        "26d7ef569b64c7830e91d450ec7daa51d610a9e87dd8acff022d6eea58e319c9",  # current (agentic mode)
     ),
     "chunk_contextualizer": (
         "35cc087891c587627f572d4876890c3a78a59e3141b217d05ffd77750ffd1af6",  # v2.1.0-v2.3.2 and current

@@ -2,7 +2,10 @@
 
 The sources are already chosen and rendered into the prompt when this runs;
 ``PreparedAnswer`` carries the request body to send, the source links shown to
-the model, and what goes into ``extra`` beside them. AnswerService calls the
+the model, and what goes into ``extra`` beside them. In ``agentic`` the model
+has already answered, at the end of the agent's loop: ``PreparedAnswer``
+carries that reply, and ``chat`` shapes it without calling the model again,
+except to retry an empty answer. AnswerService calls the
 model, strips the ``[Sources: N]`` tag and keeps the cited sources, retries an
 answer that comes back empty, and builds ``extra``. The rules it applies are
 the pure functions of ``core.chat.answer``.
@@ -50,6 +53,9 @@ class PreparedAnswer:
     extra_fields: dict = field(default_factory=dict)
     #: Called once the answer is complete; its result is added to ``extra`` (the retrieval trace).
     finish_trace: Callable[[], dict] | None = None
+    #: The model's reply when it is already made (the agent's last turn, ``agentic``): ``chat``
+    #: shapes it as it would its own call's. ``None`` everywhere else.
+    response: dict | None = None
 
 
 class AnswerService:
@@ -66,7 +72,10 @@ class AnswerService:
         structured_output = is_structured_output(payload)
 
         payload["messages"] = sanitize_messages(payload["messages"])
-        chunk = await llm.chat(payload["messages"], **sampling_params(payload))
+        if prepared.response is not None:
+            chunk = prepared.response
+        else:
+            chunk = await llm.chat(payload["messages"], **sampling_params(payload))
         chunk["model"] = model_name
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         if prepared.citation_protocol_active and not structured_output:

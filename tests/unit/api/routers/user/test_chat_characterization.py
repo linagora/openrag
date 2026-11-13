@@ -312,6 +312,16 @@ class _EmptyPromptRepo:
         return None
 
 
+class _EmptyCatalog:
+    """No catalog: the agent's file tools are built, but no scenario runs them."""
+
+    async def list_catalog_files(self, partitions, *, file_ids=None, limit):
+        return []
+
+    async def get_file_metadata(self, file_id, partition):
+        return None
+
+
 # --------------------------------------------------------------------------- #
 # Scenarios
 # --------------------------------------------------------------------------- #
@@ -667,6 +677,7 @@ def _build_chat_service(settings: Settings, scenario: Scenario, calls: dict[str,
         web_search_service=FakeWeb(calls["web"], list(scenario.web_results)),
         workspace_service=FakeWorkspaces(),
         prompt_service=PromptService(prompt_repo=_EmptyPromptRepo(), config=settings),
+        document_repo=_EmptyCatalog(),
         llm_factory=llm_factory,
     )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from core.models.preset import PartitionConfig
 from pydantic import Field
 
+from .agentic import AgenticConfig
 from .auth import AuthConfig
 from .base import ConfigMixin
 from .chunking import ChunkerConfig
@@ -67,6 +68,7 @@ class Settings(ConfigMixin):
     chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)
     retriever: RetrieverConfig = Field(default_factory=RetrieverConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
+    agentic: AgenticConfig = Field(default_factory=AgenticConfig)
     websearch: WebSearchConfig = Field(default_factory=StaanWebSearchConfig)
     mcp: MCPServerConfig = Field(default_factory=MCPServerConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)

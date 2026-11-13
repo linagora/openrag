@@ -513,6 +513,7 @@ The RAG pipeline ships with preconfigured prompts bundled inside the package at 
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
 | `asr_transcription_tmpl.txt` | Empty by default so external transcription keeps the provider's native behavior. Configure it in Prompt Library and select it on an indexation preset when `AUDIOLOADER=OpenAIAudioLoader`. |
+| `agent_tmpl.txt` | The agent's instructions in `rag_mode: agentic`: how to search and read with its tools, and how to answer and cite. Selected per agent profile (`prompt_name` in `agentic.profiles`). |
 
 To customize prompt:
 1. **Copy the bundled templates**: Copy `openrag/prompts/templates` to a folder of your choice

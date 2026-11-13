@@ -22,7 +22,8 @@ export type PromptType =
   | "hyde"
   | "multi_query"
   | "topic_tagger"
-  | "asr_transcription";
+  | "asr_transcription"
+  | "agent";
 
 export interface PromptResponse {
   id: string;

@@ -68,6 +68,13 @@ describe("validatePlaceholders", () => {
     expect(v.missing).toEqual([]);
   });
 
+  it("accepts every placeholder the API allows for the agent prompt", () => {
+    const v = validatePlaceholders("{current_date}\n{calendar_anchors}\n{custom_prompt}", "agent");
+    expect(v.unknown).toEqual([]);
+    expect(v.missing).toEqual([]);
+    expect(validatePlaceholders("Here: {context}", "agent").unknown).toEqual(["context"]);
+  });
+
   it("accepts any literal text for verbatim prompt types", () => {
     // chunk_contextualizer is sent to the model as-is and never `.format`-ed,
     // so braces in it are just characters.

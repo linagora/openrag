@@ -1,4 +1,4 @@
-"""The state a chat graph carries from node to node.
+"""The state the chat graphs carry from node to node.
 
 Each key is written by one node and read by the ones after it; a node returns
 only the keys it changes. Per-request data that no node writes (the options,
@@ -14,6 +14,7 @@ from typing import Any, TypedDict
 from core.chat.smalltalk import CasualMessagePolicy
 from core.models.chunk import Chunk
 from core.models.query import SearchQueries
+from core.tools import ToolCall
 from core.websearch import WebResult
 
 
@@ -60,4 +61,23 @@ class ClassicState(TypedDict, total=False):
     retry_empty_response: bool
 
 
-__all__ = ["ClassicState"]
+class AgentState(TypedDict, total=False):
+    """What the ``agentic`` graph knows about a request at each step."""
+
+    # The conversation the model sees: its prompt, the history, then each
+    # round's calls and their results.
+    messages: list[dict]
+    # The model's last reply, a chat completion: tool calls, or the answer.
+    response: dict
+    # The calls of that reply, which the ``tools`` node runs.
+    calls: list[ToolCall]
+    # Rounds of tool calls run so far.
+    rounds: int
+    # The calls already made this turn, for the loop guard
+    # (``core.chat.agent.call_signature``).
+    calls_made: list[str]
+    # The answer came from ``finalize``: the rounds ran out or the window filled.
+    finalized: bool
+
+
+__all__ = ["AgentState", "ClassicState"]

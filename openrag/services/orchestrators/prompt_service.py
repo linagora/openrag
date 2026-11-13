@@ -87,6 +87,9 @@ _PROMPT_FORMAT_FIELDS: dict[str, frozenset[str]] = {
     # placeholders and must be validated identically.
     PromptType.SPOKEN_STYLE_ANSWER.value: frozenset({"context", "current_date", "custom_prompt"}),
     PromptType.QUERY_CONTEXTUALIZER.value: frozenset({"query_language", "current_date", "calendar_anchors"}),
+    # The agent's own prompt (``metadata.rag_mode: agentic``): no context, the
+    # agent fetches its sources with tools; the date ranges are for their date arguments.
+    PromptType.AGENT.value: frozenset({"current_date", "calendar_anchors", "custom_prompt"}),
     PromptType.HYDE.value: frozenset({"question"}),
     PromptType.MULTI_QUERY.value: frozenset({"query", "k_queries"}),
 }

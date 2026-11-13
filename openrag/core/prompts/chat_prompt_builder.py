@@ -251,27 +251,28 @@ def prepend_system_prompt(
     ``[Sources: ...]`` marker.
     """
     out = copy.deepcopy(messages)
-    # A literal closing tag could break out of the untrusted-content wrapper
-    # and have trailing attacker text read as if outside it.
-    safe_custom_prompt = (
-        _UNSAFE_PROMPT_CLOSE_TAG_RE.sub(
-            "&lt;/unsafe_custom_prompt&gt;", neutralize_prompt_control_tokens(custom_prompt)
-        )
-        if custom_prompt
-        else custom_prompt
-    )
-    custom_prompt_block = (
-        f"\n# User defined an unsafe_custom_prompt\n<unsafe_custom_prompt>\n{safe_custom_prompt}\n</unsafe_custom_prompt>\n"
-        if custom_prompt
-        else ""
-    )
     rendered = system_template.format(
         context=context,
         current_date=current_date,
-        custom_prompt=custom_prompt_block,
+        custom_prompt=custom_prompt_block(custom_prompt),
     )
     out.insert(0, {"role": "system", "content": rendered})
     return out
+
+
+def custom_prompt_block(custom_prompt: str | None) -> str:
+    """A client's custom system instruction as a template's ``{custom_prompt}``, marked untrusted; ``""`` without one.
+
+    See ``prepend_system_prompt``.
+    """
+    if not custom_prompt:
+        return ""
+    # A literal closing tag could break out of the untrusted-content wrapper
+    # and have trailing attacker text read as if outside it.
+    safe_custom_prompt = _UNSAFE_PROMPT_CLOSE_TAG_RE.sub(
+        "&lt;/unsafe_custom_prompt&gt;", neutralize_prompt_control_tokens(custom_prompt)
+    )
+    return f"\n# User defined an unsafe_custom_prompt\n<unsafe_custom_prompt>\n{safe_custom_prompt}\n</unsafe_custom_prompt>\n"
 
 
 def message_tokens(message: dict, length_function: Callable[[str], int]) -> int:
@@ -295,8 +296,8 @@ def message_tokens(message: dict, length_function: Callable[[str], int]) -> int:
 def tool_definition_tokens(request: dict, length_function: Callable[[str], int]) -> int:
     """Tokens the tool definitions in a chat *request* take, as their JSON.
 
-    OpenRag doesn't call tools itself, but forwards a client's definitions to
-    the provider, which renders them into the prompt.
+    The provider renders them into the prompt: a client's definitions, which
+    ``classic`` forwards, or the agent's own tools in ``agentic``.
     """
     definitions = {k: request[k] for k in TOOL_DEFINITION_FIELDS if request.get(k)}
     return length_function(json.dumps(definitions, ensure_ascii=False, default=str)) if definitions else 0

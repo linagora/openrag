@@ -20,6 +20,7 @@ PromptTypeName = Literal[
     "spoken_style_answer",
     "topic_tagger",
     "asr_transcription",
+    "agent",
 ]
 
 

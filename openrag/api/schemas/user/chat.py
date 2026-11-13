@@ -1,7 +1,8 @@
 import math
 from typing import Any, Literal
 
-from core.models.chat import parse_rag_mode
+from core.chat.answer import is_structured_output
+from core.models.chat import RagMode, check_agentic_request, parse_rag_mode
 from core.utils import consts
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -120,14 +121,30 @@ class OpenAIChatCompletionRequest(BaseModel):
             "'bypass_query_contextualization' skips query rewriting for a traced, explicitly required retrieval; "
             "it cannot be combined with 'compare_original_query'. "
             "'rag_mode' picks how a partition-backed request finds its sources: 'classic' (the default) runs "
-            "the fixed contextualize, retrieve, answer pipeline. It is the only mode available for now; any other "
-            "value is rejected. Ignored in direct LLM mode."
+            "the fixed contextualize, retrieve, answer pipeline; 'agentic' lets the model search and read the "
+            "documents with tools, then answer. Any other value is rejected. Ignored in direct LLM mode. "
+            "'agentic' doesn't stream yet, and refuses a request's own 'tools', 'websearch', 'use_map_reduce' "
+            "and a JSON 'response_format'. 'agent_profile' names the agent it runs (the configured default "
+            "otherwise); an unknown name is a 400. An 'agentic' request without 'temperature' gets its agent's."
         ),
     )
 
     @model_validator(mode="after")
     def _validate_rag_mode(self) -> "OpenAIChatCompletionRequest":
-        parse_rag_mode((self.metadata or {}).get("rag_mode"))
+        extra = self.model_extra or {}
+        check_agentic_request(
+            self.metadata or {},
+            stream=bool(self.stream),
+            client_tools=bool(extra.get("tools") or extra.get("functions")),
+            structured_output=is_structured_output({"response_format": self.response_format}),
+        )
+        if parse_rag_mode((self.metadata or {}).get("rag_mode")) is RagMode.AGENTIC and (
+            "temperature" not in self.model_fields_set
+        ):
+            # The 0.3 default is classic's. An agentic request that sends no
+            # temperature gets its agent profile's: dropped here, the payload
+            # (dumped without None) carries none, and the agent fills it in.
+            self.temperature = None
         return self
 
     @model_validator(mode="after")
@@ -263,11 +280,12 @@ class OpenAICompletionRequest(BaseModel):
             "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
             "set to the response's extra.all_retrieved_sources — off by default since it can be "
             "large; opt in only for debugging/evaluation. "
-            "'rag_mode' accepts only 'classic', the default."
+            "'rag_mode' accepts only 'classic', the default: 'agentic' is for chat completions."
         ),
     )
 
     @model_validator(mode="after")
     def _validate_rag_mode(self) -> "OpenAICompletionRequest":
-        parse_rag_mode((self.metadata or {}).get("rag_mode"))
+        if parse_rag_mode((self.metadata or {}).get("rag_mode")) is RagMode.AGENTIC:
+            raise ValueError("rag_mode 'agentic' is for chat completions: a text completion runs 'classic'.")
         return self

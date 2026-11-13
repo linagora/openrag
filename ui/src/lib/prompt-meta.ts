@@ -41,6 +41,11 @@ export const PROMPT_GROUPS: PromptGroup[] = [
     types: [{ value: "query_contextualizer", label: "Query contextualizer" }],
   },
   {
+    name: "Agent",
+    description: "The agentic mode's instructions — selected per agent profile (agentic.profiles in the config)",
+    types: [{ value: "agent", label: "Agent prompt" }],
+  },
+  {
     name: "Transcription",
     description: "ASR instruction — selected per indexation preset when AUDIOLOADER=OpenAIAudioLoader",
     types: [{ value: "asr_transcription", label: "ASR transcription" }],
@@ -113,6 +118,20 @@ export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
         "- past N days/weeks/months/years: [today − N, tomorrow)",
     },
     { name: "query_language", description: "Detected language of the user's query", sample: "English" },
+  ],
+  agent: [
+    { name: "current_date", description: "Today's date, injected at request time", sample: "2026-07-27" },
+    {
+      name: "calendar_anchors",
+      description: "Pre-computed date ranges (today, last/this week, month, year, recent) for the tools' date arguments",
+      sample:
+        "Calendar anchors (use verbatim, do not recompute):\n" +
+        "- today 2026-07-27T00:00:00+00:00, tomorrow 2026-07-28T00:00:00+00:00, yesterday 2026-07-26T00:00:00+00:00\n" +
+        "- last week [2026-07-20, 2026-07-27)\n" +
+        "- this week [2026-07-27, 2026-08-03)\n" +
+        "- past N days/weeks/months/years: [today − N, tomorrow)",
+    },
+    { name: "custom_prompt", description: "Client-supplied custom system instructions (wrapped in unsafe_custom_prompt tags)", sample: "Always respond in French" },
   ],
   chunk_contextualizer: [],
   image_captioning: [],
@@ -234,6 +253,7 @@ const FORMATTED_PROMPT_TYPES = new Set([
   "sys_prompt",
   "spoken_style_answer",
   "query_contextualizer",
+  "agent",
   "hyde",
   "multi_query",
 ]);

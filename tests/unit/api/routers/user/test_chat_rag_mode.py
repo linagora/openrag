@@ -1,4 +1,4 @@
-"""``metadata.rag_mode`` on the chat and text-completion endpoints: only ``classic`` is available."""
+"""``metadata.rag_mode`` on the chat and text-completion endpoints: ``classic`` and ``agentic``, for chat."""
 
 from __future__ import annotations
 
@@ -64,8 +64,8 @@ def _chat(rag_mode: object, model: str | None = "openrag-p") -> dict:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rag_mode", [..., None, "classic"])
-async def test_classic_is_accepted(client, service, rag_mode):
+@pytest.mark.parametrize("rag_mode", [..., None, "classic", "agentic"])
+async def test_both_modes_are_accepted(client, service, rag_mode):
     async with client:
         response = await client.post("/v1/chat/completions", json=_chat(rag_mode))
 
@@ -74,15 +74,47 @@ async def test_classic_is_accepted(client, service, rag_mode):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("rag_mode", "message"),
-    [("agentic", "rag_mode 'agentic' is not available yet"), ("simple", "rag_mode must be one of: classic")],
-)
 @pytest.mark.parametrize("model", ["openrag-p", None])
-async def test_any_other_mode_is_refused_before_anything_runs(client, service, rag_mode, message, model):
+async def test_any_other_mode_is_refused_before_anything_runs(client, service, model):
     """Refused in direct LLM mode too, where the mode is otherwise ignored: a typo never passes silently."""
     async with client:
-        response = await client.post("/v1/chat/completions", json=_chat(rag_mode, model))
+        response = await client.post("/v1/chat/completions", json=_chat("simple", model))
+
+    assert response.status_code == 422
+    assert "rag_mode must be one of: classic, agentic" in response.text
+    assert service.calls == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rag_mode", "sent", "forwarded"),
+    [
+        ("agentic", {}, None),  # no temperature: the agent profile's applies
+        ("agentic", {"temperature": 0.9}, 0.9),
+        ("classic", {}, 0.3),  # classic keeps the API's default
+    ],
+)
+async def test_an_agentic_request_forwards_only_a_temperature_it_sent(client, service, rag_mode, sent, forwarded):
+    async with client:
+        response = await client.post("/v1/chat/completions", json={**_chat(rag_mode), **sent})
+
+    assert response.status_code == 200, response.text
+    assert service.calls["chat"]["payload"].get("temperature") == forwarded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"stream": True}, "doesn't stream yet"),
+        ({"tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}]}, "runs its own tools"),
+        ({"metadata": {"rag_mode": "agentic", "websearch": True}}, "doesn't search the web"),
+        ({"response_format": {"type": "json_object"}}, "answers in text"),
+    ],
+)
+async def test_an_agentic_request_asking_for_what_the_agent_doesnt_do_is_refused(client, service, change, message):
+    async with client:
+        response = await client.post("/v1/chat/completions", json={**_chat("agentic"), **change})
 
     assert response.status_code == 422
     assert message in response.text

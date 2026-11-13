@@ -692,6 +692,8 @@ class ServiceContainer:
                 web_search_service=WebSearchFactory.create_service(settings),
                 workspace_service=self.workspace_service,
                 prompt_service=self.prompt_service,
+                document_repo=self.document_repo,
+                topic_tag_repo=self.topic_tag_repo,
                 llm_factory=self.llm_factory,
             )
         return self._chat_service

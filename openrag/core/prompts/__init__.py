@@ -6,6 +6,7 @@ from .chat_prompt_builder import (
     EMPTY_CONTEXT_MESSAGE,
     SOURCE_SEPARATOR,
     WebSourceLike,
+    custom_prompt_block,
     describe_source,
     documents_context,
     format_context,
@@ -41,6 +42,7 @@ __all__ = [
     "load_template",
     "load_template_by_key",
     # chat
+    "custom_prompt_block",
     "describe_source",
     "documents_context",
     "format_context",
