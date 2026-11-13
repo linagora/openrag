@@ -506,8 +506,10 @@ class TaskCompletionTracker:
         leave the user one file over quota until they delete files. Keeping a
         slot too long would block the user's uploads instead.
         """
-        live_ids = [task_id for task_id, info in all_info.items() if (info or {}).get("state") not in _TERMINAL_STATES]
-        settled_ids = [task_id for task_id, info in all_info.items() if (info or {}).get("state") in _TERMINAL_STATES]
+        live_ids: list[str] = []
+        settled_ids: list[str] = []
+        for task_id, info in all_info.items():
+            (settled_ids if _holds_no_running_worker(info or {}) else live_ids).append(task_id)
         try:
             repo = await self._user_repo()
             released = await repo.release_stale_file_slots(
@@ -695,6 +697,20 @@ class TaskCompletionTracker:
 TaskCompletionTrackerActor = ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)(
     TaskCompletionTracker
 )
+
+
+def _holds_no_running_worker(info: dict) -> bool:
+    """Whether a task is settled for its quota slot (#664).
+
+    A CANCELLED task whose worker was submitted counts as running until the
+    worker settles and ``finished_at`` is recorded, as in :meth:`recover`.
+    """
+    state = info.get("state")
+    if state not in _TERMINAL_STATES:
+        return False
+    return not (
+        state == "CANCELLED" and info.get("worker_submitted") is True and not _has_finished_at(info.get("details"))
+    )
 
 
 def _has_finished_at(details: Any) -> bool:

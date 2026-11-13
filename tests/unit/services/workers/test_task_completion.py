@@ -1360,6 +1360,29 @@ async def test_the_slot_sweep_keeps_live_tasks_and_releases_settled_ones(user_re
 
 
 @pytest.mark.asyncio
+async def test_the_slot_sweep_keeps_a_cancelled_task_whose_worker_has_not_settled(user_repo) -> None:
+    """A cancelled worker that was submitted may still insert its file (#664).
+
+    Recovery treats it as running until ``finished_at`` is recorded, so its
+    slot stays until then.
+    """
+    from services.workers.task_completion import TASK_FINISHED_AT_METADATA_KEY, TaskCompletionTracker
+
+    finished = {"metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-01-01T00:00:00+00:00"}}
+    await TaskCompletionTracker().reconcile_file_slots(
+        {
+            "unsettled": {"state": "CANCELLED", "worker_submitted": True, "details": {"metadata": {}}},
+            "settled": {"state": "CANCELLED", "worker_submitted": True, "details": finished},
+            "never-submitted": {"state": "CANCELLED", "worker_submitted": False},
+        }
+    )
+
+    (sweep,) = user_repo.sweeps
+    assert sweep["live_ids"] == ["unsettled"]
+    assert sweep["settled_ids"] == ["never-submitted", "settled"]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_slot_sweep_is_swallowed(user_repo) -> None:
     from services.workers.task_completion import TaskCompletionTracker
 
