@@ -76,7 +76,8 @@ _EMPHASIS_RE = re.compile(r"[*_`\\]+")
 # ``#hashtag`` line is not mistaken for a heading when re-homing split pieces.
 _CAPTION_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
 # A body line that is a heading — markdown, or a structural keyword the parsers
-# emit as plain text. Used to spot a unit that carries no body of its own.
+# emit as plain text. Read on the text a chunk keeps, where a heading line has
+# lost its inline HTML; ``_is_heading_line`` adds the chunker's own heading test.
 _HEADING_LINE_RE = re.compile(
     r"^\s*(?:#{1,6}\s+\S|\*{0,2}(?:Livre|Titre|Chapitre|Section|Sous-section|Partie|Annexe)\b)",
     re.IGNORECASE,
@@ -228,7 +229,6 @@ class StructuredSectionChunker(BaseChunker):
         inline_threshold: int | None = None,
         heading_keywords: tuple[str, ...] | list[str] | None = None,
         leaf_patterns: tuple[str, ...] | list[str] | None = None,
-        prepend_heading_path: bool = True,
         layout: str = "flowing",
         **kwargs: Any,
     ) -> None:
@@ -275,7 +275,6 @@ class StructuredSectionChunker(BaseChunker):
         # surrounding prose instead of becoming standalone chunks (matches the
         # recursive chunker's inline threshold).
         self._inline_threshold = inline_threshold if inline_threshold is not None else _INLINE_ELEMENT_TOKEN_THRESHOLD
-        self.prepend_heading_path = prepend_heading_path
         self.layout = layout
 
         keywords = tuple(k.lower() for k in (heading_keywords or _DEFAULT_HEADING_KEYWORDS))
@@ -290,6 +289,9 @@ class StructuredSectionChunker(BaseChunker):
     # ChunkingStrategy contract
     # ------------------------------------------------------------------
     def chunk(self, document: ProcessedDocument, partition: str = "default") -> list[Chunk]:
+        workbook_chunks = self._chunk_workbook_blocks(document, partition)
+        if workbook_chunks is not None:
+            return workbook_chunks
         content = self._content_from(document)
         if not content.strip():
             return []
@@ -298,7 +300,10 @@ class StructuredSectionChunker(BaseChunker):
         filename = str(metadata.get("filename") or metadata.get("source") or "")
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
-        units = self._page_units(content) if paginated else self._build_units(content)
+        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells":
+            units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
+        else:
+            units = self._page_units(content) if paginated else self._build_units(content)
         csv_metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
         if csv_metadata:
             for unit in units:
@@ -315,29 +320,18 @@ class StructuredSectionChunker(BaseChunker):
             if not paginated:
                 candidates = self._merge_small(candidates, filename)
 
+        # An XLSX table unit's metadata is a complete copy of the block's that
+        # chunk_table scoped to the unit's rows and columns. Spreading the block
+        # metadata under it would bring back keys the unit dropped (whole-table
+        # formula/format groups, a detached worksheet context, table columns on
+        # a worksheet-note chunk).
+        xlsx_table = metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells"
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
-            # ``_build_units`` never emits a heading line as body — it updates
-            # the stack and continues, so a heading can't be stranded as an
-            # orphan chunk. That makes the header the *only* path by which
-            # heading text reaches the index. With ``prepend_heading_path``
-            # off, the breadcrumb is therefore kept inline at the top of the
-            # body instead of dropped: BM25 is declared over ``text`` alone, so
-            # a heading living only in ``metadata["hierarchy_path"]`` is
-            # unreachable by dense *and* sparse retrieval. The flag drops the
-            # verbose ``[Source | Page | Section]`` preamble, which is what an
-            # operator turning it off is asking for — not the document's
-            # structure.
+            base = unit.metadata if xlsx_table and unit.metadata else metadata
             header = self._build_header(filename, unit.heading_path, unit.pages)
             body = unit.text.strip()
-            if self.prepend_heading_path:
-                text = f"{header}\n\n{body}" if header else body
-            else:
-                # No breadcrumb fallback needed any more — the heading lines are
-                # in the body themselves, so turning the preamble off no longer
-                # removes the document's structure from the index.
-                text = body
-                header = ""
+            text = f"{header}\n\n{body}" if header else body
             chunks.append(
                 Chunk(
                     document_id=metadata.get("file_id", ""),
@@ -350,11 +344,11 @@ class StructuredSectionChunker(BaseChunker):
                     header=header or None,
                     content=body,
                     metadata={
-                        **{k: v for k, v in metadata.items() if k not in ("file_id", "partition")},
+                        **{k: v for k, v in base.items() if k not in ("file_id", "partition")},
                         "hierarchy_path": list(unit.heading_path),
                         "section_title": unit.heading_path[-1] if unit.heading_path else "",
                         "page_range": _page_range(unit.pages),
-                        **unit.metadata,
+                        **({} if base is unit.metadata else unit.metadata),
                     },
                 )
             )
@@ -588,8 +582,7 @@ class StructuredSectionChunker(BaseChunker):
                     # it only in the breadcrumb made the breadcrumb its sole
                     # home, so every path-shortening step deleted it outright:
                     # _merge_small taking a _common_prefix dropped the differing
-                    # leaf, a sibling heading popped it before any body flushed,
-                    # and prepend_heading_path=False removed the last copy.
+                    # leaf, and a sibling heading popped it before any body flushed.
                     # Coverage against the source ran 91-99% where
                     # recursive_splitter ran ~100%.
                     #
@@ -676,6 +669,18 @@ class StructuredSectionChunker(BaseChunker):
             return self._keyword_level[kw.group(1).lower()], text
         return None
 
+    def _is_heading_line(self, line: str) -> bool:
+        """Whether a line of a chunk's text is a heading.
+
+        ``_heading`` adds every heading keyword, ``Paragraphe`` and a
+        deployment's own included. It cannot stand alone: it judged the source
+        line, and the chunk keeps that line without its inline HTML, so a Marker
+        heading ``## <span id="page-1-0"></span>Article L110-5`` comes back as
+        ``## Article L110-5``, which ``_heading`` reads as an article, not a
+        heading.
+        """
+        return bool(_HEADING_LINE_RE.match(line)) or self._heading(line) is not None
+
     def _keyword_level_for(self, text: str) -> int | None:
         """Nesting level if ``text`` opens with a structural keyword, else None."""
         kw = self._keyword_re.match(text)
@@ -726,8 +731,6 @@ class StructuredSectionChunker(BaseChunker):
         the filename is long, and the body then overshoots ``max`` by exactly
         the amount the estimate missed.
         """
-        if not self.prepend_heading_path:
-            return 0
         header = self._build_header(filename, heading_path, pages)
         return self.length_function(f"{header}\n\n") if header else 0
 
@@ -758,7 +761,7 @@ class StructuredSectionChunker(BaseChunker):
             # alone and re-attach the heading to the first piece, which is the
             # one it introduces. A caption labels the whole table, so it goes
             # back on every piece and counts against each piece's budget.
-            lead, table_text = _split_leading_headings(unit.text)
+            lead, table_text = _split_leading_headings(unit.text, self._is_heading_line)
             caption = f"{unit.caption}\n\n" if unit.caption else ""
             element = MDElement(
                 type="table",
@@ -775,7 +778,8 @@ class StructuredSectionChunker(BaseChunker):
                     text=f"{caption}{s.content.strip()}",
                     tokens=self.length_function(f"{caption}{s.content}"),
                     pages={s.page_number} if s.page_number else set(unit.pages),
-                    chunk_type=ChunkType.TABLE,
+                    # XLSX worksheet notes split from a table are prose.
+                    chunk_type=ChunkType.TEXT if s.type == "text" else ChunkType.TABLE,
                     atomic=True,
                     metadata=dict(s.metadata or {}),
                 )
@@ -948,7 +952,7 @@ class StructuredSectionChunker(BaseChunker):
         # introduces what comes *after*, so absorbing it backward leaves that
         # chunk ending on a heading whose body is in the next one — the orphan
         # this strategy exists to remove, arriving through the merge pass.
-        if _is_headings_only(unit):
+        if _is_headings_only(unit, self._is_heading_line):
             return False
         if prev.tokens + unit.tokens > self._effective_max(filename, merged_path, prev.pages | unit.pages):
             return False
@@ -1087,22 +1091,32 @@ def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
         cur.heading_path = list(path)
 
 
-def _split_leading_headings(text: str) -> tuple[str, str]:
-    """Separate a block's leading heading lines from its content."""
-    lines = text.splitlines()
+def _split_leading_headings(text: str, is_heading: Callable[[str], bool]) -> tuple[str, str]:
+    """Separate a block's leading heading lines from its content.
+
+    Lines are split on ``\\n`` only (a ``\\r\\n`` ending counts as one), as
+    ``TABLE_RE`` and ``_build_units`` read them. ``str.splitlines()`` also
+    breaks on a lone ``\\r``, ``\\x0b``, ``\\x0c``, ``\\x1c``-``\\x1e``,
+    ``\\x85``, ``\\u2028`` and ``\\u2029``: inside a table cell that cut the row
+    in two, and the table parser then dropped both halves' text (#1375).
+
+    ``is_heading`` is ``_is_heading_line``, so every heading keyword is
+    recognised here too.
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
     cut = 0
     lead: list[str] = []
-    while cut < len(lines) and (not lines[cut].strip() or _HEADING_LINE_RE.match(lines[cut])):
+    while cut < len(lines) and (not lines[cut].strip() or is_heading(lines[cut])):
         if lines[cut].strip():
             lead.append(lines[cut].strip())
         cut += 1
     return "\n\n".join(lead), "\n".join(lines[cut:]).strip()
 
 
-def _is_headings_only(unit: _Unit) -> bool:
+def _is_headings_only(unit: _Unit, is_heading: Callable[[str], bool]) -> bool:
     """A unit carrying nothing but heading lines — no body of its own."""
-    lines = [line for line in unit.text.splitlines() if line.strip()]
-    return bool(lines) and all(_HEADING_LINE_RE.match(line) for line in lines)
+    lines = [line for line in unit.text.replace("\r\n", "\n").split("\n") if line.strip()]
+    return bool(lines) and all(is_heading(line) for line in lines)
 
 
 def _keeps_context(a: list[str], b: list[str]) -> bool:

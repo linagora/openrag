@@ -48,7 +48,9 @@ import {
 } from "@/components/ui/table";
 import { NewBadge } from "@/components/shared/new-badge";
 import { PageHeader } from "@/components/shared/page-header";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { ApiError } from "@/lib/api/client";
 import { computeEmbedderDrift, driftSignature } from "./embedder-drift";
 import { ChangeEmbedderDialog, EmbedderSwapBanner } from "./embedder-swap";
 import { useEmbedderSwap } from "./use-embedder-swap";
@@ -306,23 +308,26 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
 
   // Preset/model registries are admin-only — only fetch them for admins so a
   // non-admin member's view doesn't fire requests the API answers with 403.
-  const { data: presetsData } = useQuery({
+  const presetsQuery = useQuery({
     queryKey: ["presets"],
     queryFn: () => listPresets(),
     enabled: isAdmin,
   });
+  const { data: presetsData } = presetsQuery;
 
-  const { data: llmEndpoints } = useQuery({
+  const llmEndpointsQuery = useQuery({
     queryKey: ["model-endpoints", "llm"],
     queryFn: () => listModelEndpoints("llm"),
     enabled: isAdmin,
   });
+  const { data: llmEndpoints } = llmEndpointsQuery;
 
-  const { data: embedderEndpoints } = useQuery({
+  const embedderEndpointsQuery = useQuery({
     queryKey: ["model-endpoints", "embedder"],
     queryFn: () => listModelEndpoints("embedder"),
     enabled: isAdmin,
   });
+  const { data: embedderEndpoints } = embedderEndpointsQuery;
 
   // Computed once and handed to both the panel and the dialog, so a partition
   // can never be flagged in one and clean in the other.
@@ -343,11 +348,19 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   // the files recorded with another model or vector field are redone.
   const reembedDrifted = canSwapEmbedder ? () => setSwapTarget(currentEmbedderName) : undefined;
 
-  const { data: promptsData } = useQuery({
+  const promptsQuery = useQuery({
     queryKey: ["prompts-library"],
     queryFn: () => listAllPrompts(),
     enabled: isAdmin,
   });
+  const { data: promptsData } = promptsQuery;
+  const optionQueries = [presetsQuery, llmEndpointsQuery, embedderEndpointsQuery, promptsQuery];
+  const optionLoading = isAdmin && optionQueries.some((query) => query.isLoading);
+  const optionReadFailed = isAdmin && optionQueries.some((query) => query.isError);
+  const optionInitialLoadFailed = isAdmin && optionQueries.some((query) => query.isLoadingError);
+  const retryOptionReads = () => {
+    optionQueries.filter((query) => query.isError).forEach((query) => void query.refetch());
+  };
   const promptsByType = (type: string): PromptResponse[] =>
     (promptsData ?? []).filter((p) => p.prompt_type === type);
 
@@ -434,6 +447,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (partitionsQuery.isLoadingError || optionLoading || optionInitialLoadFailed) return;
     if (!indexationPreset.trim() || !retrievalPreset.trim()) {
       toast.error("Presets are required");
       return;
@@ -445,12 +459,67 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     mutation.mutate();
   };
 
+  if (partitionsQuery.isLoading) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">General Settings</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground" role="status">
+            Checking your partition permissions…
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (partitionsQuery.isLoadingError) {
+    return (
+      <QueryErrorNotice
+        title="Partition permissions could not be checked"
+        message="We can't confirm whether you can edit these settings. Retry before making changes."
+        isRetrying={partitionsQuery.isFetching}
+        onRetry={() => void partitionsQuery.refetch()}
+      />
+    );
+  }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">General Settings</CardTitle>
       </CardHeader>
       <CardContent>
+        {partitionsQuery.isRefetchError && (
+          <div className="mb-4">
+            <QueryErrorNotice
+              title="Partition permissions could not be refreshed"
+              message="Using the last known permission. It may be out of date."
+              isRetrying={partitionsQuery.isFetching}
+              onRetry={() => void partitionsQuery.refetch()}
+              stale
+            />
+          </div>
+        )}
+        {isAdmin && optionLoading && (
+          <p className="mb-4 text-sm text-muted-foreground" role="status">
+            Loading preset, model, and prompt options…
+          </p>
+        )}
+        {optionReadFailed && (
+          <div className="mb-4">
+            <QueryErrorNotice
+              title={optionInitialLoadFailed ? "Settings options could not be loaded" : "Settings options could not be refreshed"}
+              message={optionInitialLoadFailed
+                ? "Some preset, model, or prompt choices are unavailable. Retry before saving."
+                : "Showing previously loaded choices. They may be out of date."}
+              isRetrying={optionQueries.some((query) => query.isFetching)}
+              onRetry={retryOptionReads}
+              stale={!optionInitialLoadFailed}
+            />
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-6 max-w-5xl">
           {!canEdit && (
             <p className="rounded-md border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
@@ -643,7 +712,12 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             <Button
               type="submit"
               disabled={
-                mutation.isPending || llmValidating || llmValidated === false || intOr(chatHistoryDepth, 0) < 1
+                mutation.isPending ||
+                llmValidating ||
+                llmValidated === false ||
+                intOr(chatHistoryDepth, 0) < 1 ||
+                optionLoading ||
+                optionInitialLoadFailed
               }
             >
               <Save className="h-4 w-4" />
@@ -736,6 +810,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     queryKey: ["partition", partitionName, "users"],
     queryFn: () => listPartitionMembers(partitionName),
   });
+  const usersAccessDenied = usersQuery.error instanceof ApiError && usersQuery.error.status === 403;
 
   // Only a partition owner (or a platform admin) can manage members; the caller's
   // role comes from the membership-scoped partition list. Mirrors the server's
@@ -887,79 +962,111 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <Skeleton key={i} className="h-10 w-full" />
             ))}
           </div>
-        ) : usersQuery.data && usersQuery.data.members.length > 0 ? (
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>User</TableHead>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Role</TableHead>
-                  <TableHead>Added</TableHead>
-                  {canManage && <TableHead>Actions</TableHead>}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {usersQuery.data.members.map((user) => (
-                  <TableRow key={user.user_id}>
-                    <TableCell className="text-sm">
-                      <PartitionMemberIdentity member={user} />
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      <PartitionMemberEmail member={user} />
-                    </TableCell>
-                    <TableCell>
-                      {canManage ? (
-                        <Select
-                          value={String(user.role)}
-                          onValueChange={(v) => {
-                            if (v !== user.role)
-                              roleMutation.mutate({ uid: user.user_id, newRole: v as PartitionRole });
-                          }}
-                        >
-                          <SelectTrigger className="h-8 w-32 capitalize" disabled={roleMutation.isPending}>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="viewer">Viewer</SelectItem>
-                            <SelectItem value="editor">Editor</SelectItem>
-                            <SelectItem value="owner">Owner</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      ) : (
-                        <span className="capitalize">{user.role}</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDate(user.added_at)}
-                    </TableCell>
-                    {canManage && (
-                      <TableCell>
-                        <ConfirmDialog
-                          title="Remove User"
-                          description={`Remove ${describePartitionMember(user)} from this partition? They will lose access to partition data.`}
-                          onConfirm={() => removeMutation.mutate(user.user_id)}
-                        >
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={removeMutation.isPending}
-                            aria-label={`Remove ${describePartitionMember(user)} from partition`}
-                          >
-                            <Trash2 className="h-3 w-3 text-destructive" />
-                          </Button>
-                        </ConfirmDialog>
-                      </TableCell>
-                    )}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+        ) : usersQuery.isLoadingError ? (
+          <QueryErrorNotice
+            title={usersQuery.error instanceof ApiError && usersQuery.error.status === 403
+              ? "Partition users are not available to your role"
+              : "Partition users could not be loaded"}
+            message={usersAccessDenied
+              ? "Only partition owners can view its members. Ask an owner to check this list."
+              : "The member list is unavailable. Try again to reload it."}
+            isRetrying={usersQuery.isFetching}
+            onRetry={usersAccessDenied ? undefined : () => void usersQuery.refetch()}
+            variant={usersAccessDenied ? "default" : undefined}
+          />
         ) : (
-          <p className="text-sm text-muted-foreground text-center py-6">
-            No users assigned to this partition yet.
-          </p>
+          <>
+            {usersQuery.isRefetchError && (
+              <div className="mb-3">
+                <QueryErrorNotice
+                  title={usersAccessDenied
+                    ? "Partition users are no longer available to your role"
+                    : "Partition users could not be refreshed"}
+                  message={usersAccessDenied
+                    ? "Only partition owners can view its members. Ask an owner to check this list."
+                    : "Showing the previously loaded members. They may be out of date."}
+                  isRetrying={usersQuery.isFetching}
+                  onRetry={usersAccessDenied ? undefined : () => void usersQuery.refetch()}
+                  variant={usersAccessDenied ? "default" : undefined}
+                  stale
+                />
+              </div>
+            )}
+            {usersQuery.data && usersQuery.data.members.length > 0 ? (
+              <div className="overflow-x-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>User</TableHead>
+                      <TableHead>Email</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Added</TableHead>
+                      {canManage && <TableHead>Actions</TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {usersQuery.data.members.map((user) => (
+                      <TableRow key={user.user_id}>
+                        <TableCell className="text-sm">
+                          <PartitionMemberIdentity member={user} />
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          <PartitionMemberEmail member={user} />
+                        </TableCell>
+                        <TableCell>
+                          {canManage ? (
+                            <Select
+                              value={String(user.role)}
+                              onValueChange={(v) => {
+                                if (v !== user.role)
+                                  roleMutation.mutate({ uid: user.user_id, newRole: v as PartitionRole });
+                              }}
+                            >
+                              <SelectTrigger className="h-8 w-32 capitalize" disabled={roleMutation.isPending}>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="viewer">Viewer</SelectItem>
+                                <SelectItem value="editor">Editor</SelectItem>
+                                <SelectItem value="owner">Owner</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <span className="capitalize">{user.role}</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {formatDate(user.added_at)}
+                        </TableCell>
+                        {canManage && (
+                          <TableCell>
+                            <ConfirmDialog
+                              title="Remove User"
+                              description={`Remove ${describePartitionMember(user)} from this partition? They will lose access to partition data.`}
+                              onConfirm={() => removeMutation.mutate(user.user_id)}
+                            >
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={removeMutation.isPending}
+                                aria-label={`Remove ${describePartitionMember(user)} from partition`}
+                              >
+                                <Trash2 className="h-3 w-3 text-destructive" />
+                              </Button>
+                            </ConfirmDialog>
+                          </TableCell>
+                        )}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-6">
+                No users assigned to this partition yet.
+              </p>
+            )}
+          </>
         )}
 
         <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
@@ -1074,6 +1181,7 @@ export default function PartitionDetailPage() {
     queryFn: () => getPartitionConfig(name!),
     enabled: !!name,
   });
+  const partitionAccessDenied = partitionQuery.error instanceof ApiError && partitionQuery.error.status === 403;
 
   if (!name) {
     return (
@@ -1101,12 +1209,10 @@ export default function PartitionDetailPage() {
     );
   }
 
-  if (partitionQuery.isError) {
+  if (partitionQuery.isLoadingError && partitionQuery.error instanceof ApiError && partitionQuery.error.status === 404) {
     return (
       <div className="text-center py-12">
-        <p className="text-destructive mb-4">
-          Failed to load partition: {partitionQuery.error.message}
-        </p>
+        <p className="text-destructive mb-4">Partition not found.</p>
         <Button variant="outline" asChild>
           <Link to="/partitions">
             <ArrowLeft className="h-4 w-4" />
@@ -1116,6 +1222,27 @@ export default function PartitionDetailPage() {
       </div>
     );
   }
+
+  if (partitionQuery.isLoadingError) {
+    return (
+      <div className="space-y-4">
+        <QueryErrorNotice
+          title={partitionAccessDenied ? "Partition is not available to your role" : "Partition could not be loaded"}
+          message={partitionAccessDenied
+            ? "You don't have access to this partition. Ask an owner to grant access."
+            : "The partition details are unavailable. Try again to reload them."}
+          isRetrying={partitionQuery.isFetching}
+          onRetry={partitionAccessDenied ? undefined : () => void partitionQuery.refetch()}
+          variant={partitionAccessDenied ? "default" : undefined}
+        />
+        <Button variant="outline" asChild>
+          <Link to="/partitions"><ArrowLeft className="h-4 w-4" />Back to Partitions</Link>
+        </Button>
+      </div>
+    );
+  }
+
+  if (!partitionQuery.data) return null;
 
   const partition = partitionQuery.data!;
 
@@ -1133,6 +1260,23 @@ export default function PartitionDetailPage() {
           </Button>
         }
       />
+
+      {partitionQuery.isRefetchError && (
+        <div className="mb-4">
+          <QueryErrorNotice
+            title={partitionAccessDenied
+              ? "Partition is no longer available to your role"
+              : "Partition could not be refreshed"}
+            message={partitionAccessDenied
+              ? "You don't have access to this partition. Ask an owner to grant access."
+              : "Showing the previously loaded partition. It may be out of date."}
+            isRetrying={partitionQuery.isFetching}
+            onRetry={partitionAccessDenied ? undefined : () => void partitionQuery.refetch()}
+            variant={partitionAccessDenied ? "default" : undefined}
+            stale
+          />
+        </div>
+      )}
 
       <Tabs defaultValue="general">
         <TabsList>

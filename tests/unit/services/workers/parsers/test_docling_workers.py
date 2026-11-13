@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import threading
 import time
 from types import SimpleNamespace
@@ -61,9 +62,13 @@ def test_docling_pool_restart_policy_matches_marker():
 # ---------------------------------------------------------------------------
 
 
+def _png_data_uri(payload: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(payload).decode()
+
+
 def _fake_conversion(n_pages: int, n_pictures: int, export=lambda page_no: "text"):
     """The slice of a ``ConversionResult`` that the block builders read."""
-    picture = SimpleNamespace(image=SimpleNamespace(pil_image=object()))
+    picture = SimpleNamespace(image=SimpleNamespace(uri=_png_data_uri(b"\x89PNG"), pil_image=object()))
     return SimpleNamespace(
         pages=[None] * n_pages,
         document=SimpleNamespace(export_to_markdown=export, pictures=[picture] * n_pictures),
@@ -112,10 +117,10 @@ async def test_parse_builds_blocks_off_the_event_loop(monkeypatch):
     assert [block.text for block in parsed.text_blocks] == ["text"]
 
 
-@pytest.mark.parametrize("slow_step", ["page export", "picture encoding"])
+@pytest.mark.parametrize("slow_step", ["page export", "picture decoding"])
 async def test_cancelling_parse_stops_building_the_blocks(monkeypatch, slow_step):
     """A cancelled parse must not leave the worker thread exporting every
-    remaining page or encoding every remaining picture."""
+    remaining page or decoding every remaining picture."""
     loader = docling_workers.DoclingLoader.__new__(docling_workers.DoclingLoader)
     total = 50
     done = 0
@@ -135,7 +140,7 @@ async def test_cancelling_parse_stops_building_the_blocks(monkeypatch, slow_step
         result = _fake_conversion(n_pages=total, n_pictures=0, export=_slow("text"))
     else:
         result = _fake_conversion(n_pages=1, n_pictures=total)
-        monkeypatch.setattr(docling_workers, "pil_to_png_bytes", _slow(b"png"))
+        monkeypatch.setattr(docling_workers, "decode_data_uri", _slow(b"png"))
 
     async def _fake_dispatch(path):
         return result
@@ -227,23 +232,15 @@ def test_each_page_maps_only_its_own_pictures():
     assert [b.text for b in text_blocks] == ["first\n\n![](docling_img_0)", "text only", "![](docling_img_1)"]
 
 
-def test_failed_encoding_keeps_its_position_and_does_not_shift_later_refs(monkeypatch):
-    """Picture 2 fails to encode: its occurrence stays an inert ``<!-- image -->``
+def test_unreadable_picture_keeps_its_position_and_does_not_shift_later_refs():
+    """Picture 2 cannot be read: its occurrence stays an inert ``<!-- image -->``
     (no ref pointing at a nonexistent block) and picture 3 still lands at its
     own occurrence instead of sliding into picture 2's slot."""
     result = _fake_document(
         {1: "a\n\n<!-- image -->\n\nb\n\n<!-- image -->\n\nc\n\n<!-- image -->\n\nd"},
         pictures=[1, 1, 1],
     )
-    calls = {"n": 0}
-
-    def _flaky(_pil_image):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise RuntimeError("encode blew up")
-        return b"png"
-
-    monkeypatch.setattr(docling_workers, "pil_to_png_bytes", _flaky)
+    result.document.pictures[1].image = None  # reading ``pil_image`` raises
 
     text_blocks, image_blocks = _loader()._postprocess(result, threading.Event())
 
@@ -345,3 +342,38 @@ def test_docling_export_order_matches_the_pictures_collection():
         "",
         "![](docling_img_2)",
     ]
+
+
+class _UndecodedImage:
+    """An ``ImageRef`` whose ``pil_image`` must not be read: decoding the PNG
+    only to encode it again is the work the loader skips."""
+
+    def __init__(self, uri):
+        self.uri = uri
+
+    @property
+    def pil_image(self):
+        raise AssertionError("the picture was decoded")
+
+
+def test_pictures_reuse_the_png_docling_already_encoded():
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels" * 100
+    picture = SimpleNamespace(image=_UndecodedImage(_png_data_uri(png)))
+
+    block = docling_workers.DoclingLoader._build_image_block(picture, 0, 1)
+
+    assert block.image_bytes == png
+    assert block.pil_image is None
+    assert block.metadata == {"markdown_ref": "![](docling_img_0)"}
+
+
+@pytest.mark.parametrize("uri", [None, "file:///tmp/figure.png", "data:image/jpeg;base64,/9j/"])
+def test_a_picture_without_a_png_data_uri_is_handed_over_unencoded(uri):
+    """The caption stage encodes it, and only when the partition captions."""
+    figure = object()
+    picture = SimpleNamespace(image=SimpleNamespace(uri=uri, pil_image=figure))
+
+    block = docling_workers.DoclingLoader._build_image_block(picture, 0, 1)
+
+    assert block.pil_image is figure
+    assert block.image_bytes == b""

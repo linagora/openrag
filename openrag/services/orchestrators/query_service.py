@@ -16,8 +16,8 @@ Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
   (retry → raw user query; relevancy=False on parse failure).
 * **Streaming + citations live here; the router is pure transport.**
   ``chat_stream`` drives the proven
-  ``core.utils.source_filtering.stream_with_source_filtering`` (100-char buffer that
-  strips the ``[Sources: N]`` tag before it reaches the client);
+  ``core.utils.source_filtering.stream_with_source_filtering`` (it holds back a lookahead that
+  keeps the ``[Sources: N]`` tag from reaching the client, and emits only settled text);
   ``chat`` / ``complete`` return the finalized OpenAI dict with the
   citation-filtered ``extra`` sources. The router only maps the
   partition, builds request-bound source links (``prepare_sources``
@@ -58,12 +58,14 @@ from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
     calendar_anchors,
+    describe_source,
     format_context,
     format_web_context,
     message_tokens,
     prepend_system_prompt,
     tool_definition_tokens,
 )
+from core.retrieval.date_order import order_chunks_by_date
 from core.retrieval.trace import (
     TRACE_FILE_SCOPE_KIND_KEY,
     RetrievalDiagnosticsContext,
@@ -228,6 +230,10 @@ _MAP_USER_PROMPT = """Here is a text:
 From this document, identify and comprehensively summarize the information useful for answering the following question:
 {query}"""
 
+# Appended to the contextualizer prompt as a last reminder of the output shape.
+# It must leave every rule-driven field open: an earlier version showed
+# `"temporal_filters": null` as the only form and models copied it literally,
+# so the date rules above it were never applied.
 _QUERY_JSON_HINT = (
     "\n\nClassify the complete latest user message conservatively. Retrieval is the default. "
     "Only a message consisting exclusively of a greeting or salutation, gratitude, farewell, or a question about "
@@ -240,7 +246,8 @@ _QUERY_JSON_HINT = (
     '{"intent": "greeting", "requires_retrieval": false, "query_list": []} for an exclusively casual message '
     "(using gratitude, farewell, or capability instead of greeting when appropriate), or "
     '{"intent": "other", "requires_retrieval": true, '
-    '"query_list": [{"query": "<search query>", "temporal_filters": null}]} for everything else. '
+    '"query_list": [{"query": "<search query>", "temporal_filters": <predicates per the rules above, or null>, '
+    '"date_order": <"newest" | "oldest" | null, per the rules above>}]} for everything else. '
     "If uncertain, use intent other and require retrieval."
 )
 
@@ -353,8 +360,11 @@ class QueryService:
                 return max(top_ns)
         return default
 
-    def _fit_sources(self, texts: list[str], partition: list[str] | None, headroom: int | None) -> list[int]:
-        """Positions of up to ``top_n`` of *texts*, within the *headroom* the answering model's window leaves.
+    def _fit_sources(self, docs: list, partition: list[str] | None, headroom: int | None) -> list[int]:
+        """Positions of up to ``top_n`` of *docs*, within the *headroom* the answering model's window leaves.
+
+        Sizes the blocks exactly as ``_documents_context`` renders them, provenance
+        line included.
 
         *headroom* is ``None`` when the window is unknown: only ``top_n`` applies.
         The window comes from the LLM endpoint's context size (admin-set, else
@@ -364,9 +374,13 @@ class QueryService:
         """
         top_n = self._resolve_top_n(partition)
         _, included = format_context(
-            texts, max_context_tokens=headroom, length_function=get_num_tokens(), max_sources=top_n
+            [doc.page_content for doc in docs],
+            max_context_tokens=headroom,
+            length_function=get_num_tokens(),
+            max_sources=top_n,
+            headers=[describe_source(doc.metadata) for doc in docs],
         )
-        if len(included) < min(len(texts), top_n):
+        if len(included) < min(len(docs), top_n):
             logger.bind(partition=partition, top_n=top_n, presented=len(included), headroom=headroom).info(
                 "Sources left out: they don't fit in the answering model's context window"
             )
@@ -528,13 +542,15 @@ class QueryService:
         trace: RetrievalTraceBuilder | None = None,
     ) -> SearchQueries:
         llm = llm or self._llm
-        last_user = messages[-1]["content"]
+        last_user = _latest_user_query(messages) or (messages[-1].get("content") or "")
         if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
             queries = SearchQueries(query_list=[Query(query=last_user)])
             self._record_contextualization(trace, queries, original_query=last_user)
             return queries
 
-        chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages)
+        # The results of the tools are data the app gave, not turns of the
+        # conversation: they do not shape the search.
+        chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages if m.get("role") != "tool")
         prompt_name = self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
@@ -628,6 +644,7 @@ class QueryService:
                             TemporalFilterTrace(operator=item.operator, value=item.value)
                             for item in (query.temporal_filters or [])
                         ],
+                        date_order=query.date_order,
                     )
                     for query in queries.query_list
                 ],
@@ -752,7 +769,7 @@ class QueryService:
         trace: RetrievalTraceBuilder | None = None,
         max_prompt_tokens: int | None = None,
     ):
-        messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
+        messages = _history_window(payload["messages"], self._resolve_chat_history_depth(partition))
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         if not messages:
             raise ValidationError("Request must contain at least one non-system message")
@@ -799,7 +816,7 @@ class QueryService:
             if trace is not None:
                 filter_params[TRACE_FILE_SCOPE_KIND_KEY] = "attachment"
 
-        last_user_message = messages[-1].get("content") or ""
+        last_user_message = _latest_user_query(messages)
         casual_policy = casual_message_policy(last_user_message)
         normalized_last_user = normalize_casual_message(last_user_message)
         acknowledgement_reaction = _is_thumbs_up_reaction(last_user_message)
@@ -811,6 +828,11 @@ class QueryService:
             # Short acknowledgements need the full history: they can be thanks
             # after a social question or acceptance of a factual offer.
             casual_policy = None
+        if messages[-1].get("role") == "tool":
+            # The LLM goes on with the result of its tool call: the request of
+            # the user it serves is answered in full, however short it is.
+            casual_policy = None
+            acknowledgement_candidate = False
         explicitly_required = metadata.get("require_retrieval") is True
         existing_force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
 
@@ -1004,11 +1026,11 @@ class QueryService:
             )
         headroom = None if room is None else room - web_tokens
         candidates = docs
-        docs = [docs[i] for i in self._fit_sources([doc.page_content for doc in docs], partition, headroom)]
+        docs = [docs[i] for i in self._fit_sources(docs, partition, headroom)]
 
         def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
             """The answer messages with *docs*, then the *web_candidates* that fit after them."""
-            context = _documents_context(docs, any_retrieved=bool(candidates))
+            context = _documents_context(order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(candidates))
             web_shown: list = []
             if web_candidates:
                 start = len(docs) + 1
@@ -1043,7 +1065,8 @@ class QueryService:
         payload["messages"] = new_messages
         return _PrepareChatResult(
             payload,
-            docs,
+            # The order they were rendered in: citation numbers index into it.
+            order_chunks_by_date(docs, queries.date_order),
             web_results,
             retrieved_docs,
             retrieved_web_results,
@@ -1285,8 +1308,10 @@ class QueryService:
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
-            docs = [docs[i] for i in self._fit_sources([doc.page_content for doc in docs], partition, room)]
-            context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
+            docs = [docs[i] for i in self._fit_sources(docs, partition, room)]
+            context = _documents_context(
+                order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(retrieved_docs)
+            )
             # Sized part by part: measure what is sent and drop documents until
             # it fits. With none left, the no-document message can still overflow.
             while max_prompt_tokens is not None:
@@ -1296,7 +1321,10 @@ class QueryService:
                 if not docs:
                     raise ContextWindowExceededError(sent, max_prompt_tokens)
                 docs = docs[:-1]
-                context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
+                context = _documents_context(
+                    order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(retrieved_docs)
+                )
+            docs = order_chunks_by_date(docs, queries.date_order)
 
         payload["prompt"] = render(context)
         return payload, docs, retrieved_docs
@@ -1835,6 +1863,23 @@ def _json_slice(text: str) -> str:
     return text[start : end + 1] if start != -1 and end > start else text
 
 
+def _history_window(messages: list[dict], depth: int) -> list[dict]:
+    """The last *depth* messages, widened to the latest message of the user.
+
+    A conversation may end with the results of tool calls (an agentic loop):
+    the request of the user they serve stays in the window, and the window
+    never opens on a ``tool`` message cut from the assistant turn that called
+    it.
+    """
+    start = max(0, len(messages) - depth)
+    latest_user = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None)
+    if latest_user is not None and latest_user < start:
+        start = latest_user
+    while start < len(messages) and messages[start].get("role") == "tool":
+        start += 1
+    return messages[start:]
+
+
 def _latest_user_query(messages: list[dict]) -> str:
     """Return the latest user text without retaining any other message content."""
     for message in reversed(messages):
@@ -1913,8 +1958,12 @@ def _documents_context(docs: list, *, any_retrieved: bool) -> str:
     """
     if not docs and any_retrieved:
         return ""
-    texts = [doc.page_content for doc in docs]
-    return format_context(texts, max_context_tokens=None, length_function=get_num_tokens())[0]
+    return format_context(
+        [doc.page_content for doc in docs],
+        max_context_tokens=None,
+        length_function=get_num_tokens(),
+        headers=[describe_source(doc.metadata) for doc in docs],
+    )[0]
 
 
 def _messages_tokens(messages: list[dict]) -> int:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import asyncpg
 import pytest
 from core.models.stage_progress import StageEventStatus, StageProgressEvent, StageProgressSummary, StageTaskPhase
 from services.persistence.job_repo import PgJobRepository
@@ -26,6 +27,10 @@ def test_stage_history_schema_has_bounded_task_scoped_storage() -> None:
         "interrupted_invocation_id",
         "persisted_through_sequence",
         "expected_final_sequence",
+        "current_substage_id",
+        "current_substage_label",
+        "current_substage_progress",
+        "current_substage_total",
     } <= set(state.c.keys())
     assert "has_summary" in state.c
     assert "stage_tracking_version" in metadata.tables["jobs"].c
@@ -61,6 +66,40 @@ async def test_stage_writer_rejects_oversized_batches_before_acquiring_storage()
 
     with pytest.raises(ValueError, match="at most 32 stage events"):
         await repo.write_stage_progress(events=[event] * 33, summaries=[])
+
+
+@pytest.mark.asyncio
+async def test_summary_upsert_includes_parser_substage_columns_and_values() -> None:
+    from services.persistence.job_repo import _upsert_stage_summary
+
+    calls = []
+
+    class _Connection:
+        async def execute(self, query: str, *args: object):
+            calls.append((query, args))
+
+    summary = StageProgressSummary(
+        task_id="task-parse-progress",
+        attempt=1,
+        latest_sequence=1,
+        snapshot_revision=2,
+        phase=StageTaskPhase.STAGE,
+        current_stage_id="parse",
+        current_stage_rank=0,
+        current_substage_id="parse.text",
+        current_substage_label="Extracting page text",
+        current_substage_progress=42,
+        current_substage_total=578,
+        current_invocation_id=uuid4(),
+        has_open_invocation=True,
+    )
+
+    await _upsert_stage_summary(_Connection(), summary, persisted_through_sequence=1)
+
+    query, args = calls[0]
+    assert "current_substage_id, current_substage_label" in query
+    assert "current_substage_progress, current_substage_total" in query
+    assert args[17:] == ("parse.text", "Extracting page text", 42, 578)
 
 
 @pytest.mark.asyncio
@@ -126,6 +165,99 @@ async def test_stage_writer_locks_the_task_row_before_reading_event_coverage(mon
     assert calls[0][0] == "fetchrow"
     assert "SELECT id FROM jobs WHERE id = $1 FOR UPDATE" in calls[0][1]
     assert calls[0][2] == (task_id,)
+
+
+@pytest.mark.asyncio
+async def test_permanent_task_error_does_not_roll_back_other_task_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.persistence import job_repo as job_repo_module
+
+    inserted_tasks: list[str] = []
+    persisted_summaries: list[str] = []
+
+    class _Context:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Transaction:
+        async def __aenter__(self):
+            self.inserted_count = len(inserted_tasks)
+            self.summary_count = len(persisted_summaries)
+            return self
+
+        async def __aexit__(self, exc_type, *_args):
+            if exc_type is not None:
+                del inserted_tasks[self.inserted_count :]
+                del persisted_summaries[self.summary_count :]
+            return False
+
+    class _Connection:
+        def transaction(self):
+            return _Transaction()
+
+        async def fetchrow(self, _query: str, *args: object):
+            return {"id": args[0]}
+
+        async def execute(self, _query: str, *_args: object):
+            return "UPDATE 1"
+
+    class _ContextWithValue(_Context):
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+    class _Pool:
+        def acquire(self):
+            return _ContextWithValue(_Connection())
+
+    def event_for(task_id: str, sequence: int = 1) -> StageProgressEvent:
+        return StageProgressEvent(
+            task_id=task_id,
+            attempt=1,
+            sequence=sequence,
+            invocation_id=uuid4(),
+            stage_id="parse",
+            status=StageEventStatus.STARTED,
+            occurred_at=datetime.now(UTC),
+        )
+
+    def summary_for(task_id: str) -> StageProgressSummary:
+        return StageProgressSummary(task_id=task_id)
+
+    async def insert_event(_connection, event):
+        if event.task_id == "invalid-task" and event.sequence == 2:
+            raise asyncpg.NumericValueOutOfRangeError("duration is outside BIGINT range")
+        inserted_tasks.append(event.task_id)
+        return False
+
+    async def persisted_through(_connection, _task_id: str, _attempt: int) -> int:
+        return 1
+
+    async def no_conflict(_connection, _task_id: str, _attempt: int) -> bool:
+        return False
+
+    async def persist_summary(_connection, summary, *, persisted_through_sequence: int) -> None:
+        persisted_summaries.append(summary.task_id)
+
+    monkeypatch.setattr(job_repo_module, "_insert_stage_event", insert_event)
+    monkeypatch.setattr(job_repo_module, "_persisted_through_sequence", persisted_through)
+    monkeypatch.setattr(job_repo_module, "_has_conflicting_invocation_pair", no_conflict)
+    monkeypatch.setattr(job_repo_module, "_upsert_stage_summary", persist_summary)
+    repo = PgJobRepository(lambda: _Pool())
+
+    result = await repo.write_stage_progress(
+        events=[event_for("invalid-task", 1), event_for("invalid-task", 2), event_for("valid-task")],
+        summaries=[summary_for("invalid-task"), summary_for("valid-task")],
+    )
+
+    assert result.permanent_failed_task_ids == ["invalid-task"]
+    assert [row.task_id for row in result.coverage] == ["valid-task"]
+    assert inserted_tasks == ["valid-task"]
+    assert persisted_summaries == ["valid-task"]
 
 
 @pytest.mark.asyncio

@@ -257,6 +257,99 @@ async def test_expansion_fetches_and_orders_csv_continuations():
 
 
 @pytest.mark.asyncio
+async def test_csv_sibling_expansion_respects_related_limit():
+    s = FakeSearcher()
+    initial = Chunk(
+        id="part-1",
+        text="one",
+        document_id="file-1",
+        partition="p1",
+        metadata={
+            "csv_row_number": 30,
+            "csv_part": 1,
+            "csv_parts_total": 14,
+            "csv_row_chunks_total": 14,
+        },
+    )
+    s.csv_row_result = [initial]
+
+    await SingleRetriever(searcher=s, related_limit=10).expand_search_results([initial])
+
+    assert s.csv_row_calls[0]["limit"] == 10
+
+
+@pytest.mark.asyncio
+async def test_csv_sibling_expansion_passes_search_filter():
+    s = FakeSearcher()
+    initial = Chunk(
+        id="part-1",
+        text="one",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 30, "csv_part": 1, "csv_parts_total": 2},
+    )
+
+    await SingleRetriever(searcher=s).expand_search_results([initial], filter='category == "public"')
+
+    assert s.csv_row_calls[0]["filter"] == 'category == "public"'
+
+
+@pytest.mark.asyncio
+async def test_csv_sibling_expansion_respects_concurrency_limit():
+    import asyncio
+
+    from core.retrieval.retriever import MAX_EXPANSION_CONCURRENCY
+
+    searcher = FakeSearcher()
+    active = 0
+    maximum = 0
+
+    async def lookup(**kwargs):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return []
+
+    searcher.get_csv_row_chunks = lookup
+    chunks = [
+        Chunk(
+            id=f"row-{row}",
+            text="value",
+            document_id="file-1",
+            partition="p1",
+            metadata={"csv_row_number": row, "csv_part": 1, "csv_parts_total": 2},
+        )
+        for row in range(MAX_EXPANSION_CONCURRENCY + 5)
+    ]
+    await SingleRetriever(searcher=searcher).expand_search_results(chunks)
+    assert maximum == MAX_EXPANSION_CONCURRENCY
+
+
+@pytest.mark.asyncio
+async def test_csv_sibling_expansion_is_disabled_when_related_limit_is_zero():
+    s = FakeSearcher()
+    initial = Chunk(
+        id="part-1",
+        text="one",
+        document_id="file-1",
+        partition="p1",
+        metadata={
+            "csv_row_number": 30,
+            "csv_part": 1,
+            "csv_parts_total": 2,
+            "csv_row_chunks_total": 2,
+        },
+    )
+    s.csv_row_result = [initial]
+
+    await SingleRetriever(searcher=s, related_limit=0).expand_search_results([initial])
+
+    assert not s.csv_row_calls
+
+
+@pytest.mark.asyncio
 async def test_expansion_fetches_and_orders_csv_column_groups():
     s = FakeSearcher()
     s.csv_row_result = [
@@ -288,6 +381,37 @@ async def test_expansion_fetches_and_orders_csv_column_groups():
     assert [chunk.id for chunk in out] == ["group-1", "group-2", "group-3"]
     assert s.csv_row_calls == [
         {"partition": "p1", "file_id": "file-1", "row_number": 40, "limit": 10, "allowed_file_ids": None}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_spreadsheet_sibling_expansion_is_scoped_to_its_sheet():
+    s = FakeSearcher()
+    initial = Chunk(
+        id="sheet-1-part-1",
+        text="first part",
+        document_id="workbook-1",
+        partition="p1",
+        metadata={
+            "table_id": "sheet:1",
+            "csv_row_number": 3,
+            "csv_part": 1,
+            "csv_parts_total": 2,
+        },
+    )
+    s.csv_row_result = [initial]
+
+    await SingleRetriever(searcher=s).expand_search_results([initial])
+
+    assert s.csv_row_calls == [
+        {
+            "partition": "p1",
+            "file_id": "workbook-1",
+            "row_number": 3,
+            "limit": 10,
+            "allowed_file_ids": None,
+            "table_id": "sheet:1",
+        }
     ]
 
 

@@ -100,7 +100,7 @@ class UserService:
                 status_code=400,
             )
         if isinstance(email, str) and email.strip() and not _EMAIL_RE.match(email.strip()):
-            raise ValidationError(f"Invalid email address: {email!r}", status_code=400)
+            raise ValidationError("Invalid email address.", status_code=400)
 
     async def _ensure_exists(self, user_id: int) -> None:
         if not await self._user_repo.user_exists(user_id):

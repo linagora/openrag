@@ -366,7 +366,8 @@ describe("DocumentListPage", () => {
     renderDocuments(["/documents"], true);
 
     await waitFor(() => expect(getQueueInfoMock).toHaveBeenCalledTimes(1));
-    expect(screen.getByTestId("active-jobs").textContent).toBe("0");
+    expect(screen.getByTestId("active-jobs").textContent).toBe("");
+    await waitFor(() => expect(screen.getByTestId("active-jobs").textContent).toBe("0"));
     await userEvent.click(await screen.findByRole("button", { name: "Upload" }));
     await userEvent.upload(screen.getByLabelText("Files"), [
       new File(["first"], "first.txt", { type: "text/plain" }),

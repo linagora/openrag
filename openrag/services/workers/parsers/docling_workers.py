@@ -17,8 +17,9 @@ from typing import Any
 import ray
 import torch
 from core.config import load_config
-from core.indexing.image_preprocessor import pil_to_png_bytes
+from core.indexing.image_preprocessor import decode_data_uri
 from core.indexing.parsers.document_parser import BasePooledParser
+from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from core.utils.logging import get_logger
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
@@ -219,12 +220,13 @@ class DoclingLoader(BasePooledParser):
                 metadata=dict(document.metadata),
             )
 
+        report_parser_substage("parse.convert", "Converting PDF with Docling")
         async with document.as_temporary_file() as path:
             result: ConversionResult = await self._dispatch(str(path))
 
-        # Exporting each page re-walks the whole document and every picture is
-        # PNG-encoded: it can take minutes of CPU on a large PDF. On the loop that
-        # starves the lease renewals of every other file on this worker.
+        # Exporting each page re-walks the whole document: it can take minutes of
+        # CPU on a large PDF. On the loop that starves the lease renewals of every
+        # other file on this worker.
         # A timeout or cancel cannot interrupt the thread; the event tells it to stop.
         cancelled = threading.Event()
         try:
@@ -265,41 +267,40 @@ class DoclingLoader(BasePooledParser):
             provenance = getattr(picture, "prov", None) or []
             # Docling indexes pages from 1, like OpenRAG's TextBlock/Marker blocks.
             page_no: int | None = provenance[0].page_no if provenance else None
-            png_bytes = self._encode_picture(picture, idx)
+            block = self._build_image_block(picture, idx, page_no)
             ref: str | None = None
-            if png_bytes is not None:
-                ref = f"![](docling_img_{idx})"
-                blocks.append(
-                    ImageBlock(
-                        image_bytes=png_bytes,
-                        page_number=page_no,
-                        mime_type="image/png",
-                        metadata={"markdown_ref": ref},
-                    )
-                )
+            if block is not None:
+                ref = block.metadata["markdown_ref"]
+                blocks.append(block)
             if page_no is not None:
                 slots_by_page.setdefault(page_no, []).append(ref)
         return self._build_text_blocks(result, slots_by_page, cancelled), blocks
 
     @staticmethod
-    def _encode_picture(picture: Any, idx: int) -> bytes | None:
-        """PNG bytes for a Docling picture, or ``None`` when it cannot render.
+    def _build_image_block(picture: Any, idx: int, page_no: int | None) -> ImageBlock | None:
+        """The ``ImageBlock`` of one picture, without encoding it; ``None`` if unreadable.
 
-        A picture without a rendered blob (a degraded parse, a chart exported
-        as a table) stays silent — the caller reserves ``None`` for its slot —
-        while an encode error is logged like before. Keeping both outcomes in
-        one helper is what lets ``_postprocess`` reserve the picture's slot
-        either way, so a failure never shifts later images onto earlier
-        placeholders.
+        Docling PNG-encoded each picture into its ``data:`` URI when it generated
+        it, so those bytes are reused as they are. A picture without one keeps its
+        decoded image in ``pil_image``, which the caption stage encodes only when
+        it captions the document.
         """
         try:
-            pil_image = picture.image.pil_image
-            if pil_image is None:
-                return None
-            return pil_to_png_bytes(pil_image)
+            uri = str(getattr(picture.image, "uri", None) or "")
+            png_bytes = decode_data_uri(uri) if uri.startswith("data:image/png;") else None
+            pil_image = None if png_bytes else picture.image.pil_image
         except Exception as exc:
-            logger.warning(f"Failed to encode Docling picture {idx}: {exc}")
+            logger.warning(f"Failed to read Docling picture {idx}: {exc}")
             return None
+        if not png_bytes and pil_image is None:
+            return None
+        return ImageBlock(
+            image_bytes=png_bytes or b"",
+            pil_image=pil_image,
+            page_number=page_no,
+            mime_type="image/png",
+            metadata={"markdown_ref": f"![](docling_img_{idx})"},
+        )
 
     async def _dispatch(self, file_path: str) -> ConversionResult:
         pool = self._pool()
@@ -340,6 +341,10 @@ class DoclingLoader(BasePooledParser):
         blocks: list[TextBlock] = []
         n_pages = len(result.pages)
         slots_by_page = slots_by_page or {}
+        if n_pages:
+            report_parser_substage("parse.text", "Extracting page text", progress=0, total=n_pages)
+        else:
+            report_parser_substage("parse.text", "Extracting page text")
         for i in range(1, n_pages + 1):
             if cancelled is not None and cancelled.is_set():
                 break
@@ -353,6 +358,7 @@ class DoclingLoader(BasePooledParser):
                     f"vs {len(slots)} picture slots — leaving placeholders in place"
                 )
             blocks.append(TextBlock(text=text, page_number=i))
+            report_parser_substage("parse.text", "Extracting page text", progress=i, total=n_pages)
         return blocks
 
 

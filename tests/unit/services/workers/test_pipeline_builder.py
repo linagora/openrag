@@ -10,9 +10,9 @@ from core.models.document import Document, DocumentType, ImageBlock, ProcessedDo
 from core.models.stage_progress import StageEventStatus, StageFailureEffect
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.utils.exceptions import ConfigError, InferenceError, NoIndexableContentError, PipelineError
+from services.inference import runtime as runtime_module
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stage_tracker import StageTracker
-from services.workers.stages import _common as common_module
 from services.workers.stages import caption as caption_module
 
 
@@ -30,7 +30,7 @@ def _noop_vlm_semaphore(monkeypatch):
 @pytest.fixture(autouse=True)
 def _stub_language_detector(monkeypatch):
     """Keep these tests off the real language detector and its model download."""
-    monkeypatch.setattr(common_module, "detect_language", lambda _text, **_kwargs: "en")
+    monkeypatch.setattr(runtime_module, "detect_language", lambda _text, **_kwargs: "en")
 
 
 class FakeParser:
@@ -1751,15 +1751,16 @@ def _image_pipeline(vlm=None, image_count: int = 6, **kwargs):
         text_blocks=[TextBlock(text="body")],
         images=[ImageBlock(image_bytes=b"\x89PNG" + b"y" * 4096, page_number=i) for i in range(image_count)],
     )
+    chunker = FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")])
     pipeline = build_indexing_pipeline(
         parser=FakeParser(processed),
-        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        chunker=chunker,
         embedder=FakeEmbedder([[1.0]]),
         vector_store=FakeVectorStore(),
         vlm=vlm,
         **kwargs,
     )
-    return pipeline, document
+    return pipeline, document, chunker
 
 
 def _row(document):
@@ -1772,7 +1773,7 @@ async def test_image_bytes_are_released_after_captioning():
     the end of ``run()`` they survive embed and store — the larger half of the
     payload ``_release_raw_bytes`` frees."""
     vlm = FakeVLM()
-    pipeline, document = _image_pipeline(vlm=vlm)
+    pipeline, document, _ = _image_pipeline(vlm=vlm)
 
     row = _row(document)
     await pipeline.run(row)
@@ -1793,7 +1794,7 @@ async def test_image_bytes_are_released_after_captioning():
 async def test_image_bytes_are_released_even_when_captioning_never_runs():
     """No VLM means nothing was ever going to read them, so holding them is pure
     waste. This is why the release sits outside the ``vlm is not None`` branch."""
-    pipeline, document = _image_pipeline(vlm=None)
+    pipeline, document, _ = _image_pipeline(vlm=None)
 
     row = _row(document)
     await pipeline.run(row)
@@ -1810,7 +1811,7 @@ async def test_image_bytes_are_released_even_when_captioning_never_runs():
 async def test_image_bytes_are_released_when_captioning_fails():
     """``_timed_enrichment`` swallows the failure and indexes the file anyway; a
     failed caption makes the bytes no more useful than a successful one."""
-    pipeline, document = _image_pipeline(vlm=FailingVLM())
+    pipeline, document, _ = _image_pipeline(vlm=FailingVLM())
 
     row = _row(document)
     await pipeline.run(row)
@@ -1819,6 +1820,98 @@ async def test_image_bytes_are_released_when_captioning_fails():
     images = row["processed_document"].images
     assert len(images) == 6, "guard: the images must survive the release"
     assert all(image.image_bytes == b"" for image in images)
+
+
+def _deferred_image_pipeline(vlm, *, enable_image_captioning: bool, image_count: int = 3):
+    """A PDF whose parser hands its figures over decoded, as Marker does."""
+    from PIL import Image
+
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="body")],
+        images=[ImageBlock(pil_image=Image.new("RGB", (8, 8), "red"), page_number=i) for i in range(image_count)],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        indexation_config=IndexationPipelineConfig(enable_image_captioning=enable_image_captioning),
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_deferred_images_are_never_encoded_when_the_partition_does_not_caption(monkeypatch):
+    """PNG-encoding a figure costs up to a quarter of a second of CPU, and only
+    the caption stage reads the bytes: a partition without captioning must not
+    pay for it, and the decoded figures must not outlive the caption decision."""
+    encoded: list[object] = []
+    monkeypatch.setattr(caption_module, "pil_to_png_bytes", lambda image: encoded.append(image) or b"png")
+    vlm = FakeVLM()
+    pipeline, document = _deferred_image_pipeline(vlm, enable_image_captioning=False)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
+    assert vlm.calls == [], "guard: the partition does not caption"
+    assert encoded == []
+    images = row["processed_document"].images
+    assert len(images) == 3, "guard: the images must survive the release"
+    assert all(image.pil_image is None and image.image_bytes == b"" for image in images)
+
+
+@pytest.mark.asyncio
+async def test_deferred_images_are_encoded_for_the_vlm_and_then_released():
+    vlm = FakeVLM()
+    pipeline, document = _deferred_image_pipeline(vlm, enable_image_captioning=True)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert len(vlm.calls) == 3
+    assert all(call.startswith(b"\x89PNG") for call in vlm.calls), "the VLM must receive the encoded figures"
+    images = row["processed_document"].images
+    assert [image.caption for image in images] == ["caption"] * 3
+    assert all(image.pil_image is None and image.image_bytes == b"" for image in images)
+
+
+class OneFailingVLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("vlm timeout")
+        return "caption"
+
+
+@pytest.mark.asyncio
+async def test_one_failed_image_keeps_the_other_captions():
+    """#1293: one failed image used to fail the stage and drop every caption."""
+    pipeline, document, chunker = _image_pipeline(vlm=OneFailingVLM())
+
+    observed = []
+    tracker = StageTracker("task-caption", deliver=lambda event, summary, tail: observed.append(event) or True)
+
+    row = _row(document)
+    await pipeline.run(row, stage_tracker=tracker)
+
+    assert row["stage"] == "stored"
+    assert [image.caption for image in row["processed_document"].images].count("caption") == 5
+    chunked_texts = [block.text for block in chunker.calls[0][0].text_blocks]
+    assert chunked_texts.count(wrap_caption("caption")) == 5
+    assert row["degraded_stages"]["caption"].startswith("1/6 image(s) failed captioning")
+    failure = next(
+        event
+        for event in observed
+        if event is not None and event.stage_id == "caption" and event.status is StageEventStatus.FAILED
+    )
+    assert failure.failure_effect is StageFailureEffect.CONTINUED_DEGRADED
 
 
 @pytest.mark.asyncio

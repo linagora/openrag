@@ -20,6 +20,7 @@ from core.models.stage_progress import (
     StageTaskPhase,
 )
 from services.persistence.connection import _ALEMBIC_INI, _MIGRATIONS_DIR
+from services.workers.stage_event_writer import StageEventWriter
 from sqlalchemy import URL
 
 from .conftest import _admin_dsn, _admin_dsn_parts, _connect_admin
@@ -127,6 +128,140 @@ def _summary(task_id: str, *, attempt: int = 1, final_sequence: int = 2, revisio
     )
 
 
+async def test_list_jobs_by_stage_order_uses_persisted_position_scores(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_ids = {
+        "lower": f"stage-order-{uuid4()}",
+        "highest": f"stage-order-{uuid4()}",
+        "middle": f"stage-order-{uuid4()}",
+    }
+    scores = {"lower": 120, "highest": 920, "middle": 510}
+    for name, task_id in task_ids.items():
+        await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="stage-order"))
+        await repo.write_stage_progress(
+            events=[],
+            summaries=[
+                StageProgressSummary(
+                    task_id=task_id,
+                    latest_sequence=0,
+                    snapshot_revision=1,
+                    phase=StageTaskPhase.FINALIZING,
+                    position_score=scores[name],
+                )
+            ],
+        )
+
+    jobs = await repo.list_jobs_by_stage_order(
+        statuses=[DocumentStatus.SERIALIZING.value],
+        exclude_task_ids=[],
+        offset=0,
+        limit=len(task_ids),
+    )
+
+    assert [job.id for job in jobs] == [task_ids["highest"], task_ids["middle"], task_ids["lower"]]
+
+
+async def test_list_jobs_by_stage_order_keeps_finished_tasks_newest_first(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    older_id = f"finished-order-{uuid4()}"
+    newer_id = f"finished-order-{uuid4()}"
+    older = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    newer = older.replace(hour=11)
+    for task_id, status, created_at in (
+        (older_id, DocumentStatus.COMPLETED, older),
+        (newer_id, DocumentStatus.FAILED, newer),
+    ):
+        await repo.upsert_job(IndexationJob(id=task_id, status=status, partition="finished-order"))
+        await postgres_store.pool.execute("UPDATE jobs SET created_at = $1 WHERE id = $2", created_at, task_id)
+
+    jobs = await repo.list_jobs_by_stage_order(
+        statuses=[DocumentStatus.COMPLETED.value, DocumentStatus.FAILED.value],
+        exclude_task_ids=[],
+        offset=0,
+        limit=2,
+    )
+
+    assert [job.id for job in jobs] == [newer_id, older_id]
+
+
+async def test_list_task_page_by_stage_order_merges_actor_only_rows(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    actor_id = f"actor-only-{uuid4()}"
+    durable_id = f"durable-{uuid4()}"
+    actor_created_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
+    await repo.upsert_job(IndexationJob(id=durable_id, status=DocumentStatus.COMPLETED, partition="stage-order"))
+    await postgres_store.pool.execute("UPDATE jobs SET created_at = $1 WHERE id = $2", actor_created_at, durable_id)
+
+    page = await repo.list_task_page_by_stage_order(
+        actor_overlays=[(actor_id, DocumentStatus.QUEUED.value, actor_created_at)],
+        offset=0,
+        limit=2,
+    )
+
+    assert [(task_id, job.id if job is not None else None) for task_id, job in page] == [
+        (actor_id, None),
+        (durable_id, durable_id),
+    ]
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", durable_id)
+
+
+async def test_job_list_metadata_snapshot_includes_actor_rows_and_latest_stage(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    actor_task_id = f"list-snapshot-{uuid4()}"
+    completed_task_id = f"list-snapshot-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=actor_task_id, status=DocumentStatus.FAILED, partition="actor-p"))
+    await repo.upsert_job(IndexationJob(id=completed_task_id, status=DocumentStatus.COMPLETED, partition="done-p"))
+    await repo.write_stage_progress(
+        events=_events(actor_task_id, terminal_status=StageEventStatus.FAILED),
+        summaries=[_summary(actor_task_id)],
+    )
+
+    total, partition_counts, actor_rows = await repo.get_job_list_metadata_with_actor_rows(
+        statuses=[DocumentStatus.COMPLETED.value],
+        actor_task_ids=[actor_task_id],
+    )
+    latest_stage_ids = await repo.get_latest_stage_ids([actor_task_id])
+
+    assert total == 1
+    assert partition_counts == {"done-p": 1}
+    assert actor_rows == {actor_task_id: (DocumentStatus.FAILED.value, "actor-p")}
+    assert latest_stage_ids == {actor_task_id: "parse"}
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = ANY($1::text[])", [actor_task_id, completed_task_id])
+
+
+async def test_task_list_snapshot_keeps_metadata_and_page_consistent(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"list-repeatable-read-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="snapshot-p"))
+
+    try:
+        async with repo.task_list_snapshot() as snapshot:
+            total, _, _ = await snapshot.get_job_list_metadata_with_actor_rows(
+                statuses=[DocumentStatus.SERIALIZING.value],
+                actor_task_ids=[],
+            )
+            assert total == 1
+
+            await postgres_store.pool.execute(
+                "UPDATE jobs SET status = $1 WHERE id = $2",
+                DocumentStatus.COMPLETED.value,
+                task_id,
+            )
+            page = await snapshot.list_task_page_by_stage_order(
+                statuses=[DocumentStatus.SERIALIZING.value],
+                actor_overlays=[],
+                offset=0,
+                limit=1,
+            )
+
+        assert [job.id for _, job in page if job is not None] == [task_id]
+        assert (await repo.get_job(task_id)).status is DocumentStatus.COMPLETED
+    finally:
+        await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
 async def test_stage_event_delivery_is_idempotent_and_reports_conflicting_outcomes(postgres_store) -> None:
     repo = postgres_store.job_repo
     task_id = f"stage-history-{uuid4()}"
@@ -177,6 +312,65 @@ async def test_stage_event_delivery_is_idempotent_and_reports_conflicting_outcom
     assert state_with_unknown_final.latest_sequence == 4
     assert state_with_unknown_final.expected_final_sequence is None
 
+    stale_loss_marker = unknown_final.model_copy(
+        update={"latest_sequence": 3, "snapshot_revision": 4, "known_loss": True}
+    )
+    await repo.write_stage_progress(events=[], summaries=[stale_loss_marker])
+    state_with_known_loss = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert state_with_known_loss.latest_sequence == 4
+    assert state_with_known_loss.snapshot_revision == 5
+    assert state_with_known_loss.known_loss is True
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
+async def test_permanent_event_error_does_not_rollback_sibling_task_writes(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    invalid_task_id = f"stage-history-invalid-{uuid4()}"
+    valid_task_id = f"stage-history-valid-{uuid4()}"
+    for task_id in (invalid_task_id, valid_task_id):
+        await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="test"))
+
+    invalid_event = _events(invalid_task_id)[1].model_copy(update={"duration_ms": 2**63})
+    valid_events = _events(valid_task_id)
+    result = await repo.write_stage_progress(
+        events=[invalid_event, *valid_events],
+        summaries=[_summary(invalid_task_id), _summary(valid_task_id)],
+    )
+
+    assert result.permanent_failed_task_ids == [invalid_task_id]
+    assert [row.task_id for row in result.coverage] == [valid_task_id]
+    assert await repo.get_stage_progress_summaries([invalid_task_id]) == {}
+    valid_state = (await repo.get_stage_progress_summaries([valid_task_id]))[valid_task_id]
+    assert valid_state.persisted_through_sequence == 2
+    assert [event.sequence for event in (await repo.get_stage_progress_events(valid_task_id, limit=100)).events] == [
+        1,
+        2,
+    ]
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = ANY($1::text[])", [invalid_task_id, valid_task_id])
+
+
+async def test_permanent_summary_error_persists_sanitized_loss_marker(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"stage-history-invalid-summary-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="test"))
+    invalid_summary = _summary(task_id).model_copy(update={"current_stage_id": "x" * 65})
+    writer = StageEventWriter(repo)
+
+    assert await writer._write_batch([], [invalid_summary]) is True
+    loss_marker = writer.pending_summaries[task_id]
+    assert loss_marker.known_loss is True
+    assert loss_marker.current_stage_id is None
+
+    await writer._write_batch([], [writer._summaries.pop(task_id)])
+
+    persisted = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert persisted.known_loss is True
+    assert persisted.current_stage_id is None
+    assert persisted.phase is StageTaskPhase.PREPARING
+    assert persisted.latest_sequence == invalid_summary.latest_sequence
+
     await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
 
 
@@ -195,7 +389,9 @@ async def test_conflict_before_first_summary_is_retained_until_summary_arrives(p
     result = await repo.write_stage_progress(events=[conflicting_start], summaries=[])
 
     assert result.conflicted_task_ids == [task_id]
-    assert await repo.get_stage_progress_summaries([task_id]) == {}
+    conflict_state = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert conflict_state.known_conflict is True
+    assert conflict_state.latest_sequence == 0
     marker = await postgres_store.pool.fetchrow(
         "SELECT attempt, known_conflict, has_summary FROM job_stage_state WHERE task_id = $1",
         task_id,
@@ -219,7 +415,9 @@ async def test_conflict_before_first_summary_is_retained_until_summary_arrives(p
     result = await repo.write_stage_progress(events=[previous_attempt_conflict], summaries=[])
 
     assert result.conflicted_task_ids == [previous_attempt_task_id]
-    assert await repo.get_stage_progress_summaries([previous_attempt_task_id]) == {}
+    conflict_state = (await repo.get_stage_progress_summaries([previous_attempt_task_id]))[previous_attempt_task_id]
+    assert conflict_state.known_conflict is True
+    assert conflict_state.latest_sequence == 0
     marker = await postgres_store.pool.fetchrow(
         "SELECT attempt, known_conflict, has_summary FROM job_stage_state WHERE task_id = $1",
         previous_attempt_task_id,
@@ -282,6 +480,216 @@ async def test_stage_summary_persists_interrupted_invocation_and_resets_for_retr
     retried = (await repo.get_stage_progress_summaries([task_id]))[task_id]
     assert retried.attempt == 2
     assert retried.interrupted_invocation_id is None
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
+async def test_stage_summary_persists_parser_substage_progress(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"parser-substage-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="test"))
+
+    invocation_id = uuid4()
+    started_at = datetime.now(UTC)
+    started = StageProgressEvent(
+        task_id=task_id,
+        attempt=1,
+        sequence=1,
+        invocation_id=invocation_id,
+        stage_id="parse",
+        stage_rank=0,
+        status=StageEventStatus.STARTED,
+        occurred_at=started_at,
+    )
+    summary = StageProgressSummary(
+        task_id=task_id,
+        attempt=1,
+        latest_sequence=1,
+        snapshot_revision=2,
+        phase=StageTaskPhase.STAGE,
+        current_stage_id="parse",
+        current_stage_rank=0,
+        current_substage_id="parse.text",
+        current_substage_label="Extracting page text",
+        current_substage_progress=42,
+        current_substage_total=578,
+        stage_started_at=started_at,
+        current_invocation_id=invocation_id,
+        has_open_invocation=True,
+    )
+
+    await repo.write_stage_progress(events=[started], summaries=[summary])
+    persisted = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+
+    assert persisted.current_substage_id == "parse.text"
+    assert persisted.current_substage_label == "Extracting page text"
+    assert persisted.current_substage_progress == 42
+    assert persisted.current_substage_total == 578
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
+async def test_confirmed_failure_marks_open_invocation_and_late_open_snapshot_keeps_marker(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"stage-history-interrupted-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.FAILED, partition="test"))
+
+    invocation_id = uuid4()
+    started_at = datetime.now(UTC)
+    started = StageProgressEvent(
+        task_id=task_id,
+        attempt=1,
+        sequence=1,
+        invocation_id=invocation_id,
+        stage_id="parse",
+        stage_rank=0,
+        status=StageEventStatus.STARTED,
+        occurred_at=started_at,
+    )
+    open_summary = StageProgressSummary(
+        task_id=task_id,
+        attempt=1,
+        latest_sequence=1,
+        snapshot_revision=1,
+        phase=StageTaskPhase.STAGE,
+        current_stage_id="parse",
+        current_stage_rank=0,
+        stage_started_at=started_at,
+        current_invocation_id=invocation_id,
+        has_open_invocation=True,
+    )
+    await repo.write_stage_progress(events=[started], summaries=[open_summary])
+
+    assert await repo.mark_stage_progress_interrupted(task_id) is True
+    assert await repo.mark_stage_progress_interrupted(task_id) is False
+    assert (
+        await postgres_store.pool.fetchval(
+            "SELECT stage_interruption_confirmed_attempt FROM jobs WHERE id = $1", task_id
+        )
+        == 1
+    )
+    assert (await repo.get_stage_progress_summaries([task_id]))[task_id].interrupted_invocation_id == invocation_id
+
+    # A queued worker snapshot can arrive after the completion tracker writes
+    # the settlement marker. It must not erase the interruption evidence.
+    await repo.write_stage_progress(events=[], summaries=[open_summary.model_copy(update={"snapshot_revision": 2})])
+    still_marked = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert still_marked.interrupted_invocation_id == invocation_id
+
+    completed = StageProgressEvent(
+        task_id=task_id,
+        attempt=1,
+        sequence=2,
+        invocation_id=invocation_id,
+        stage_id="parse",
+        stage_rank=0,
+        status=StageEventStatus.COMPLETED,
+        occurred_at=datetime.now(UTC),
+        duration_ms=125,
+    )
+    closed_summary = StageProgressSummary(
+        task_id=task_id,
+        attempt=1,
+        latest_sequence=2,
+        snapshot_revision=3,
+        phase=StageTaskPhase.BETWEEN_STAGES,
+        current_stage_rank=0,
+        expected_final_sequence=2,
+    )
+    await repo.write_stage_progress(events=[completed], summaries=[closed_summary])
+    assert (await repo.get_stage_progress_summaries([task_id]))[task_id].interrupted_invocation_id is None
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
+async def test_settlement_before_first_snapshot_and_retry_track_the_confirmed_attempt(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"stage-history-late-snapshot-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.FAILED, partition="test"))
+
+    # The worker can settle before its queued first stage snapshot reaches Postgres.
+    assert await repo.mark_stage_progress_interrupted(task_id) is False
+    assert (
+        await postgres_store.pool.fetchval(
+            "SELECT stage_interruption_confirmed_attempt FROM jobs WHERE id = $1", task_id
+        )
+        == 1
+    )
+
+    def open_attempt(attempt: int, invocation_id):
+        started = StageProgressEvent(
+            task_id=task_id,
+            attempt=attempt,
+            sequence=1,
+            invocation_id=invocation_id,
+            stage_id="parse",
+            stage_rank=0,
+            status=StageEventStatus.STARTED,
+            occurred_at=datetime.now(UTC),
+        )
+        summary = StageProgressSummary(
+            task_id=task_id,
+            attempt=attempt,
+            latest_sequence=1,
+            snapshot_revision=1,
+            phase=StageTaskPhase.STAGE,
+            current_stage_id="parse",
+            current_stage_rank=0,
+            current_invocation_id=invocation_id,
+            has_open_invocation=True,
+        )
+        return started, summary
+
+    first_id = uuid4()
+    first_start, first_summary = open_attempt(1, first_id)
+    await repo.write_stage_progress(events=[first_start], summaries=[first_summary])
+    first = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert first.interrupted_invocation_id == first_id
+
+    retry_id = uuid4()
+    retry_start, retry_summary = open_attempt(2, retry_id)
+    await repo.write_stage_progress(events=[retry_start], summaries=[retry_summary])
+    retried = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert retried.attempt == 2
+    assert retried.interrupted_invocation_id is None
+
+    # A later retry can fail too. Its settlement must advance the marker so
+    # the second invocation is not left looking merely like the old snapshot.
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.SERIALIZING, partition="test"))
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.FAILED, partition="test"))
+    assert await repo.mark_stage_progress_interrupted(task_id) is True
+    assert (
+        await postgres_store.pool.fetchval(
+            "SELECT stage_interruption_confirmed_attempt FROM jobs WHERE id = $1", task_id
+        )
+        == 2
+    )
+    retried = (await repo.get_stage_progress_summaries([task_id]))[task_id]
+    assert retried.interrupted_invocation_id == retry_id
+
+    await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
+
+
+async def test_settled_failure_does_not_mark_invocation_with_terminal_event(postgres_store) -> None:
+    repo = postgres_store.job_repo
+    task_id = f"stage-history-closed-{uuid4()}"
+    await repo.upsert_job(IndexationJob(id=task_id, status=DocumentStatus.FAILED, partition="test"))
+    started, completed = _events(task_id)
+    open_summary = StageProgressSummary(
+        task_id=task_id,
+        attempt=1,
+        latest_sequence=2,
+        snapshot_revision=2,
+        phase=StageTaskPhase.STAGE,
+        current_stage_id="parse",
+        current_stage_rank=0,
+        stage_started_at=started.occurred_at,
+        current_invocation_id=started.invocation_id,
+        has_open_invocation=True,
+    )
+    await repo.write_stage_progress(events=[started, completed], summaries=[open_summary])
+
+    assert await repo.mark_stage_progress_interrupted(task_id) is False
+    assert (await repo.get_stage_progress_summaries([task_id]))[task_id].interrupted_invocation_id is None
 
     await postgres_store.pool.execute("DELETE FROM jobs WHERE id = $1", task_id)
 

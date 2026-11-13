@@ -524,7 +524,7 @@ def check_tokens_limit(
 
 **Request Format:**
 Accepts OpenAI-compatible chat completion requests with:
-- `messages`: Array of chat messages (last must be from user)
+- `messages`: Array of chat messages (the last one must be a non-empty user message, or a tool result the client sends back)
 - `model`: Model/partition to use
 - `stream`: Optional streaming response (true/false)
 - Standard OpenAI parameters (temperature, max_tokens, etc.)
@@ -569,11 +569,18 @@ async def openai_chat_completion(
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/chat/completions")
 
-    if not request.messages or request.messages[-1].role != "user" or not request.messages[-1].content:
-        log.warning("Invalid request: missing or malformed user message.")
+    # The conversation ends with a message of the user, or with the result
+    # of a tool call of the assistant that the client ran. A tool may return
+    # nothing, but the result names the call it answers.
+    last = request.messages[-1] if request.messages else None
+    if last is None or not (
+        (last.role == "user" and last.content)
+        or (last.role == "tool" and last.content is not None and (last.model_extra or {}).get("tool_call_id"))
+    ):
+        log.warning("Invalid request: missing or malformed last message.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The last message must be a non-empty user message",
+            detail="The last message must be a non-empty user message or a tool result with its tool_call_id",
         )
 
     metadata = request.metadata or {}
@@ -597,6 +604,19 @@ async def openai_chat_completion(
         )
         await service.refresh_partition_configs()
         log.debug(f"Using partitions: {partitions}")
+
+    # The search runs on the latest message of the user: a tool result alone
+    # gives it nothing to look for.
+    latest_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+    if (
+        (partitions is not None or metadata.get("websearch"))
+        and last.role == "tool"
+        and not (latest_user and latest_user.content)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A search needs the latest user message to be non-empty",
+        )
 
     # Bound the caller's input size in every mode, against the resolved
     # partition's chat_llm endpoint budget when one applies (else the default

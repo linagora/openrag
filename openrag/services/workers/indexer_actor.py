@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from core.observability.ray_metrics import initialize_stage_writer_counters
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
-from services.workers.failure_reporting import submit_task_failure
+from services.workers.failure_reporting import log_interrupted_failure, log_task_failure, submit_task_failure
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
@@ -64,6 +65,7 @@ class IndexerWorker:
         collection: str = "default",
         job_repo: Any = None,
         stage_snapshot_sink: Any = None,
+        stage_writer_max_active_tasks: int = 1,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -73,7 +75,15 @@ class IndexerWorker:
         self._collection = collection
         self._job_repo = job_repo
         initialize_stage_writer_counters()
-        self._stage_writer = StageEventWriter(job_repo, live_sink=stage_snapshot_sink) if job_repo is not None else None
+        self._stage_writer = (
+            StageEventWriter(
+                job_repo,
+                live_sink=stage_snapshot_sink,
+                max_active_tasks=stage_writer_max_active_tasks,
+            )
+            if job_repo is not None
+            else None
+        )
 
     async def close_stage_writer(self) -> None:
         if self._stage_writer is not None:
@@ -160,6 +170,7 @@ class IndexerWorker:
         callback_token: str | None = None,
         require_existing_partition: bool = False,
         resolved_prompts: dict[str, str] | None = None,
+        on_failure_report: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -170,6 +181,9 @@ class IndexerWorker:
         When *callback_url* is provided, a best-effort ``POST`` notification is
         sent to it once the task reaches a terminal state; never affects the
         indexing outcome.
+
+        *on_failure_report* is called once the failed run is cleaned up, right
+        before its failure is reported.
         """
         file_id = metadata.get("file_id", "")
         log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
@@ -189,6 +203,8 @@ class IndexerWorker:
                 _safe_stage_tracker_call(stage_tracker, "finish_task")
 
         try:
+            if self._stage_writer is not None:
+                await self._stage_writer.wait_for_summary_capacity()
             # Inside the try so a TaskStateManager outage here still reaches
             # the except block below and sends the error callback.
             accepted = await retry_idempotent_ray_actor_method(
@@ -296,34 +312,48 @@ class IndexerWorker:
             # ask it again, and a cancellation must not fire an error callback.
             raise RuntimeError(f"Task {task_id} was cancelled before indexing started") from None
         except Exception as exc:
-            finish_stage_tracker_once()
-            should_cleanup_vectors = row is not None and (
-                row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
-            )
-            if not catalog_written and should_cleanup_vectors:
-                await _cleanup_indexed_vectors(
-                    vector_store=self._vector_store or getattr(self._pipeline, "vector_store", None),
-                    collection=self._collection,
-                    metadata=metadata,
-                    partition=partition,
-                    task_id=task_id,
-                )
-            tb = traceback.format_exc()
             error_reason = failure_reason_from_exception(exc)
             try:
-                was_failed = await retry_idempotent_ray_actor_method(
-                    lambda: submit_task_failure(
-                        self._tsm,
-                        task_id,
-                        tb,
-                        error_reason,
-                    ),
-                    task_description=f"set_failed_if_not_cancelled({task_id})",
+                finish_stage_tracker_once()
+                should_cleanup_vectors = row is not None and (
+                    row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
                 )
+                if not catalog_written and should_cleanup_vectors:
+                    await _cleanup_indexed_vectors(
+                        vector_store=self._vector_store or getattr(self._pipeline, "vector_store", None),
+                        collection=self._collection,
+                        metadata=metadata,
+                        partition=partition,
+                        task_id=task_id,
+                    )
+                tb = traceback.format_exc()
+                if on_failure_report is not None:
+                    on_failure_report()
+                try:
+                    was_failed = await retry_idempotent_ray_actor_method(
+                        lambda: submit_task_failure(
+                            self._tsm,
+                            task_id,
+                            tb,
+                            error_reason,
+                        ),
+                        task_description=f"set_failed_if_not_cancelled({task_id})",
+                    )
+                except Exception:
+                    # TSM still unreachable: treat as failed so the callback still fires.
+                    was_failed = True
+            except asyncio.CancelledError:
+                log_interrupted_failure(log, exc, error_reason)
+                raise
             except Exception:
-                # TSM still unreachable: treat as failed so the callback still fires.
-                was_failed = True
+                # The transition never ran: log here so a failing cleanup cannot
+                # swallow the original failure.
+                log_task_failure(log, exc, error_reason)
+                raise
             if was_failed:
+                # Only once accepted: cancel_task marks CANCELLED before ray.cancel,
+                # so an error raised in between belongs to a cancelled task.
+                log_task_failure(log, exc, error_reason)
                 await send_indexing_callback(
                     callback_url, partition, file_id, "error", metadata, callback_token=callback_token
                 )
@@ -548,7 +578,7 @@ async def _load_document(
     # document metadata so it never leaks into chunk metadata.
     filename = _display_filename(path, metadata)
     content_type = Document.detect_content_type(filename, metadata.get("mimetype"))
-    raw_bytes = None if content_type is DocumentType.CSV else await asyncio.to_thread(p.read_bytes)
+    raw_bytes = None if content_type in {DocumentType.CSV, DocumentType.XLSX} else await asyncio.to_thread(p.read_bytes)
     return Document(
         id=file_id,
         filename=filename,

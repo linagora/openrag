@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from core.utils.exceptions import ServiceUnavailableError
@@ -362,6 +362,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
                 "filename": "report.txt",
                 "_openrag_job_created_at": "forged-created",
                 "_openrag_job_finished_at": "forged-finished",
+                "_openrag_job_outcome_pending": True,
             },
             partition="tenant-a",
             user={"id": 42},
@@ -398,6 +399,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
             "filename": "report.txt",
             "_openrag_job_created_at": "forged-created",
             "_openrag_job_finished_at": "forged-finished",
+            "_openrag_job_outcome_pending": True,
         },
         partition="tenant-a",
         user={"id": 42},
@@ -444,6 +446,28 @@ async def test_dispatch_indexing_registers_completion_with_detached_tracker() ->
         )
     tracker.track.remote.assert_called_once_with("task-1", {"ref": ref})
     tsm.set_details.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_submit_reads_the_borrowed_worker_ref() -> None:
+    """#1296: dropped unread, a failed ref makes Ray print an unhandled error in this process."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = asyncio.get_running_loop().create_future()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(ref),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.read_ref_when_settled") as read:
+        assert await dispatcher._submit_indexing_task_once("task-1", {}) is ref
+
+    read.assert_called_once_with(ref)
 
 
 @pytest.mark.asyncio
@@ -903,6 +927,42 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_returns_service_unavailable_when_capacity_is_full() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("outcome_backlog"))
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ServiceUnavailableError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=["ws-1"],
+            replace=True,
+        )
+
+    assert caught.value.code == "INDEXING_OUTCOME_BACKLOG"
+    assert caught.value.message == (
+        "Indexing is temporarily paused because task capacity is full "
+        "(queued or running work and unsaved job outcomes). Please retry shortly."
+    )
+    pool.submit.remote.assert_not_called()
+    tsm.set_object_ref.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1798,12 +1858,30 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
         collection="default",
     )
 
-    with patch("ray.cancel") as cancel:
+    with patch("ray.cancel") as cancel, patch("services.workers.dispatcher.read_ref_when_settled") as read:
         result = await dispatcher.cancel_task("task-1")
 
     assert result is False
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
     cancel.assert_not_called()
+    # #1296: the ref was borrowed by the fetch and is dropped here unread.
+    read.assert_called_once_with({"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_counting_active_tasks_reads_the_refs_it_fetched() -> None:
+    """#1296: a replica that did not submit the task borrows its ref for the count, then drops it."""
+    from services.workers.task_cancellation import count_active_indexing_tasks
+    from services.workers.task_state import PENDING_TASK_DETAILS
+
+    ref = object()
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": ref}, "task-2": PENDING_TASK_DETAILS})
+
+    with patch("services.workers.task_cancellation.read_ref_when_settled") as read:
+        assert await count_active_indexing_tasks(tsm, partition="p") == 2
+
+    assert read.call_args_list == [call({"ref": ref}), call(PENDING_TASK_DETAILS)]
 
 
 @pytest.mark.asyncio
