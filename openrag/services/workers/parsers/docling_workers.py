@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Mapping
 from typing import Any
 
 import ray
@@ -33,17 +34,21 @@ from docling.datamodel.pipeline_options import (
     TableStructureOptions,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling_core.transforms.serializer.base import BaseDocSerializer, SerializationResult
+from docling_core.transforms.serializer.markdown import (
+    MarkdownDocSerializer,
+    MarkdownParams,
+    MarkdownPictureSerializer,
+)
+from docling_core.types.doc.document import DoclingDocument, PictureItem
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
 logger = get_logger()
 
-# The token ``export_to_markdown`` prints for every picture whose bytes it does
-# not inline (its ``image_placeholder`` default in docling-core). OpenRAG never
-# ships the picture bytes inside the markdown either; the caption stage instead
-# substitutes these occurrences with the ``markdown_ref`` of the ``ImageBlock``
-# built from the very same picture, which keeps every caption anchored where
-# its figure was.
+# What docling-core prints where a picture's image goes (``image_placeholder``).
+# ``_PictureRefSerializer`` swaps it for the picture's own ref before the page
+# text is assembled, so it never reaches the page text.
 _IMAGE_PLACEHOLDER = "<!-- image -->"
 
 
@@ -66,40 +71,42 @@ def _docling_num_gpus(config) -> float:
         return requested_gpus if torch.cuda.is_available() else 0
 
 
-def _swap_image_placeholders(text: str, slots: list[str | None]) -> str:
-    """Replace the k-th ``<!-- image -->`` with the k-th ref, in document order.
+class _PictureRefSerializer(MarkdownPictureSerializer):
+    """Prints a picture as the ``markdown_ref`` of the ``ImageBlock`` built from it.
 
-    Docling's exporter prints one ``_IMAGE_PLACEHOLDER`` occurrence per picture
-    it walked (``document.pictures`` is appended to in the same traversal order
-    the exporter emits elements in), so the k-th occurrence of a page and the
-    k-th picture of that page correspond one-to-one. Matching by position is
-    what keeps a multi-image page ordered: ``str.replace`` would have stamped
-    the same ref onto every placeholder.
-
-    ``slots`` holds one entry per picture of that page, in traversal order —
-    the picture's ref when it encoded, ``None`` when it did not. Mismatches
-    degrade safely instead of ever misassigning:
-
-    - a ``None`` slot (picture failed to encode or render) keeps its own
-      placeholder retired — the token is inert, and no ref points at a
-      nonexistent ``ImageBlock``; later images still land at their own
-      occurrence because the slot list stays aligned with the pictures;
-    - more occurrences than slots (a picture the exporter rendered some other
-      way, a picture with no page to export on): the surplus occurrences are
-      left as-is;
-    - more slots than occurrences (e.g. a chart exported as a table instead
-      of a picture): the surplus pictures get no inline position, and the
-      caption stage appends their captions with their own page number.
+    ``refs`` maps a picture's ``self_ref`` to that ref, so the caption stage finds
+    each picture's ref exactly where the picture is, whatever else the page
+    holds (#1313). A picture with no block, its image unreadable, prints nothing
+    in its image's place; its caption, if any, stays.
     """
-    parts = text.split(_IMAGE_PLACEHOLDER)
-    if len(parts) == 1:
-        return text  # nothing to substitute
-    out = [parts[0]]
-    for position, part in enumerate(parts[1:]):
-        ref = slots[position] if position < len(slots) else None
-        out.append(ref if ref is not None else _IMAGE_PLACEHOLDER)
-        out.append(part)
-    return "".join(out)
+
+    def __init__(self, refs: Mapping[str, str]) -> None:
+        self._refs = refs
+
+    def serialize(
+        self,
+        *,
+        item: PictureItem,
+        doc_serializer: BaseDocSerializer,
+        doc: DoclingDocument,
+        **kwargs: Any,
+    ) -> SerializationResult:
+        result = super().serialize(item=item, doc_serializer=doc_serializer, doc=doc, **kwargs)
+        # docling-core joins a picture's caption, image and chart table with a
+        # blank line, the image part being the placeholder alone.
+        ref = self._refs.get(item.self_ref, "")
+        parts = [ref if part == _IMAGE_PLACEHOLDER else part for part in result.text.split("\n\n")]
+        return result.model_copy(update={"text": "\n\n".join(part for part in parts if part)})
+
+
+def _page_markdown(document: DoclingDocument, page_no: int, refs: Mapping[str, str]) -> str:
+    """``document.export_to_markdown(page_no=page_no)``, each picture printed as its ref."""
+    serializer = MarkdownDocSerializer(
+        doc=document,
+        picture_serializer=_PictureRefSerializer(refs),
+        params=MarkdownParams(pages={page_no}, image_placeholder=_IMAGE_PLACEHOLDER),
+    )
+    return serializer.serialize().text.strip()
 
 
 @ray.remote
@@ -184,10 +191,9 @@ class DoclingLoader(BasePooledParser):
     named ``DoclingPool`` actor, and converts the ``ConversionResult`` into a
     ``ProcessedDocument`` with one ``TextBlock`` per page and one ``ImageBlock``
     per picture.  Image captioning is left to the downstream caption stage:
-    each page's exported ``<!-- image -->`` placeholders are swapped for the
-    refs of that page's picture blocks in document order, and each block keeps
-    its picture's original page (``prov[0].page_no``), so the stage can land
-    every caption where the figure was.
+    each picture is printed in its page's text as the ref of its block, and
+    each block keeps its picture's page (``prov[0].page_no``), so the stage can
+    land every caption where the figure was.
     """
 
     def __init__(self) -> None:
@@ -248,33 +254,24 @@ class DoclingLoader(BasePooledParser):
     ) -> tuple[list[TextBlock], list[ImageBlock]]:
         """Build the text and image blocks off the loop.
 
-        One walk over ``result.document.pictures`` produces both the image
-        blocks and the per-page ref slots the text stage substitutes with:
-        the k-th slot of a page is that page's k-th picture in traversal
-        order — the same order the exporter prints ``<!-- image -->`` in —
-        holding that picture's ref when it encoded and ``None`` when it did
-        not. A failing picture therefore keeps its own placeholder position
-        instead of shifting every later caption one figure early (#1313).
+        The image blocks are built first: the page text prints each picture as
+        the ref of its block, looked up by the picture's ``self_ref``.
 
         ``cancelled`` is checked before each page and each picture: once set,
         the caller has gone and the result is discarded, so the work stops early.
         """
         blocks: list[ImageBlock] = []
-        slots_by_page: dict[int, list[str | None]] = {}
+        refs: dict[str, str] = {}
         for idx, picture in enumerate(result.document.pictures):
             if cancelled.is_set():
                 break
-            provenance = getattr(picture, "prov", None) or []
             # Docling indexes pages from 1, like OpenRAG's TextBlock/Marker blocks.
-            page_no: int | None = provenance[0].page_no if provenance else None
+            page_no = picture.prov[0].page_no if picture.prov else None
             block = self._build_image_block(picture, idx, page_no)
-            ref: str | None = None
             if block is not None:
-                ref = block.metadata["markdown_ref"]
+                refs[picture.self_ref] = block.metadata["markdown_ref"]
                 blocks.append(block)
-            if page_no is not None:
-                slots_by_page.setdefault(page_no, []).append(ref)
-        return self._build_text_blocks(result, slots_by_page, cancelled), blocks
+        return self._build_text_blocks(result, refs, cancelled), blocks
 
     @staticmethod
     def _build_image_block(picture: Any, idx: int, page_no: int | None) -> ImageBlock | None:
@@ -313,34 +310,19 @@ class DoclingLoader(BasePooledParser):
     @staticmethod
     def _build_text_blocks(
         result: ConversionResult,
-        slots_by_page: dict[int, list[str | None]] | None = None,
+        refs: Mapping[str, str] | None = None,
         cancelled: threading.Event | None = None,
     ) -> list[TextBlock]:
-        """One ``TextBlock`` per page, with image placeholders swapped for refs.
+        """One ``TextBlock`` per page, each picture printed as its ref (``refs``).
 
-        ``export_to_markdown`` prints ``<!-- image -->`` for every picture on
-        the page. Left untouched, those occurrences are searched for by the
-        caption stage in vain — Docling pictures are not exported with usable
-        inline refs — so every caption used to be appended at the end of the
-        document, detached from its figure and attributed to the last page
-        (#1313). The k-th occurrence of a page is swapped for the k-th slot of
-        that page (``slots_by_page``, in document order — see ``_postprocess``),
-        which is the ref of the block built from the k-th picture of that page;
-        the caption stage then substitutes the wrapped caption for the ref,
-        landing where the figure was.
-
-        The substitution only fires on exact alignment: the page's placeholder
-        occurrences must match its slot count. Any other number means the
-        positional model does not hold for that page — empty provenance on a
-        picture, a chart exported as a table, a placeholder without a picture —
-        and swapping positions could assign a caption to the wrong figure, so
-        the page's placeholders are left untouched instead. Captions then fall
-        back to the append path — with their own (now correct) page number,
-        never a wrong one.
+        ``export_to_markdown`` would print ``<!-- image -->`` for every picture,
+        which the caption stage never looks for: each caption was appended at
+        the end of the document, attributed to the last page, and the marker
+        was indexed (#1313).
         """
         blocks: list[TextBlock] = []
         n_pages = len(result.pages)
-        slots_by_page = slots_by_page or {}
+        refs = refs or {}
         if n_pages:
             report_parser_substage("parse.text", "Extracting page text", progress=0, total=n_pages)
         else:
@@ -348,15 +330,7 @@ class DoclingLoader(BasePooledParser):
         for i in range(1, n_pages + 1):
             if cancelled is not None and cancelled.is_set():
                 break
-            text = result.document.export_to_markdown(page_no=i).strip()
-            slots = slots_by_page.get(i, [])
-            if text != "" and text.count(_IMAGE_PLACEHOLDER) == len(slots):
-                text = _swap_image_placeholders(text, slots)
-            elif text.count(_IMAGE_PLACEHOLDER) and slots:
-                logger.bind(page=i).debug(
-                    f"Page {i}: {text.count(_IMAGE_PLACEHOLDER)} image placeholders "
-                    f"vs {len(slots)} picture slots — leaving placeholders in place"
-                )
+            text = _page_markdown(result.document, i, refs)
             blocks.append(TextBlock(text=text, page_number=i))
             report_parser_substage("parse.text", "Extracting page text", progress=i, total=n_pages)
         return blocks
