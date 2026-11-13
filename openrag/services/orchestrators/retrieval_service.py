@@ -308,6 +308,16 @@ class RetrievalService:
     # Raw semantic search (powers routers/search.py — was indexer.asearch)
     # ------------------------------------------------------------------
 
+    async def surrounding_chunks(self, chunks: list[Chunk], *, partition: str) -> list[Chunk]:
+        """The chunks on either side of each of *chunks*, all of *partition*.
+
+        Fetched as retrieval's expansion fetches them, by the partition's own
+        searcher, so the chunks of a file no longer in the catalog are left out.
+        """
+        await self.refresh_partition_configs()
+        ((_names, searcher),) = self._pipelines.search_groups([partition])
+        return await searcher.get_surrounding_chunks(chunks=chunks)
+
     async def search(
         self,
         *,

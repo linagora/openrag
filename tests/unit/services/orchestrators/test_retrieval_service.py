@@ -203,6 +203,22 @@ def _embedder_svc(
 
 
 @pytest.mark.asyncio
+async def test_surrounding_chunks_come_from_the_partitions_own_searcher():
+    svc, default_searcher, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].surrounding_result = [_chunk("next")]
+
+    out = await svc.surrounding_chunks([_chunk("c")], partition="p2")
+
+    assert [c.id for c in out] == ["next"]
+    assert [c.id for c in searchers["embed-b"].surrounding_calls[0]["chunks"]] == ["c"]
+    assert default_searcher.surrounding_calls == []
+    assert "embed-a" not in searchers
+
+
+@pytest.mark.asyncio
 async def test_search_uses_the_partition_embedder():
     # The default embedder's field holds no vectors of this partition.
     svc, default_searcher, searchers = _embedder_svc({"p1": "embed-a"}, {"embed-a": "vector_embed_a"})
