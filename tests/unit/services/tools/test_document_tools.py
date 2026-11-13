@@ -76,6 +76,7 @@ def _tools(retriever=None, *, top_n: int = 5):
         retriever=retriever or FakeRetriever(),
         retrieval_service=service,
         prompt_settings=FakePromptSettings(top_n),
+        document_repo=object(),  # the file tools' catalog: unused here
     )
     return registry, service
 
@@ -88,10 +89,10 @@ async def _call(registry, ctx, name: str, **arguments):
     return await run_tool(registry, ToolCall("call", name, json.dumps(arguments)), ctx)
 
 
-def test_the_registry_offers_the_three_read_only_document_tools():
+def test_the_registry_offers_the_agents_read_only_tools():
     registry, _ = _tools()
 
-    assert registry.names == ["search_knowledge", "search_file", "read_file"]
+    assert registry.names == ["search_knowledge", "search_file", "read_file", "find_files", "get_file_info"]
     assert all(registry.get(name).read_only for name in registry.names)
 
 

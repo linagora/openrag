@@ -28,7 +28,12 @@ from collections.abc import Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
-from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
+from core.models.catalog import (
+    INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
+    CatalogFile,
+    DocumentRecord,
+    DocumentStatus,
+)
 from core.ports.document_repo import ContentClaimLease, DocumentRepository, IndexedCorpusState
 from core.utils.consts import is_reserved_partition_name
 from core.utils.exceptions import ConflictError, ValidationError
@@ -144,6 +149,44 @@ class PgDocumentRepository(DocumentRepository):
             limit,
         )
         return [r["file_id"] for r in rows]
+
+    async def list_catalog_files(
+        self, partitions: Collection[str] | None, *, file_ids: Collection[str] | None = None, limit: int
+    ) -> list[CatalogFile]:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        rows = await self.pool.fetch(
+            """
+            SELECT partition_name, file_id, indexed_at, chunk_count,
+                   file_metadata->>'filename'          AS filename,
+                   file_metadata->>'original_filename' AS original_filename,
+                   file_metadata->>'mimetype'          AS mimetype,
+                   file_metadata->>'file_size'         AS file_size,
+                   file_metadata->>'created_at'        AS created_at
+            FROM files
+            WHERE ($1::text[] IS NULL OR partition_name = ANY($1::text[]))
+              AND ($2::text[] IS NULL OR file_id = ANY($2::text[]))
+            ORDER BY indexed_at DESC, partition_name, file_id
+            LIMIT $3
+            """,
+            None if partitions is None else list(partitions),
+            None if file_ids is None else list(file_ids),
+            limit,
+        )
+        return [
+            CatalogFile(
+                partition=r["partition_name"],
+                file_id=r["file_id"],
+                filename=r["filename"],
+                original_filename=r["original_filename"],
+                mimetype=r["mimetype"],
+                file_size=r["file_size"],
+                created_at=r["created_at"],
+                indexed_at=r["indexed_at"],
+                chunk_count=r["chunk_count"],
+            )
+            for r in rows
+        ]
 
     async def get_indexed_corpus_state(
         self,

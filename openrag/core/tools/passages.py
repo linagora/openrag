@@ -29,7 +29,7 @@ def passage(number: int, chunk: Chunk, *, excerpt_chars: int | None = None) -> s
     provenance = describe_source(chunk.metadata)
     if provenance:
         lines.append(provenance)
-    lines.append(f"Partition: {_one_line(chunk.partition)} | File id: {_one_line(chunk.document_id)}")
+    lines.append(f"Partition: {one_line(chunk.partition)} | File id: {one_line(chunk.document_id)}")
     text = chunk.text if excerpt_chars is None else excerpt(chunk.text, excerpt_chars)
     lines.append(neutralize_prompt_control_tokens(text))
     return "\n".join(lines)
@@ -49,9 +49,10 @@ def excerpt(text: str, max_chars: int) -> str:
     return flat[: cut if cut > max_chars // 2 else max_chars] + " …"
 
 
-def _one_line(value: object) -> str:
+def one_line(value: object) -> str:
+    """*value* as untrusted text on one line: flattened, without the field separator, capped and defanged."""
     flat = " ".join(str(value).replace("|", " ").split())[:_MAX_ID_CHARS]
     return neutralize_prompt_control_tokens(flat)
 
 
-__all__ = ["excerpt", "passage", "passages"]
+__all__ = ["excerpt", "one_line", "passage", "passages"]

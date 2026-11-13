@@ -99,6 +99,26 @@ class DocumentRecord(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class CatalogFile(BaseModel):
+    """What a file listing shows of a catalog entry: its names, type, size and dates.
+
+    *file_size* is the size as the upload recorded it, for display (``"1.84 MB"``).
+    *created_at* is the document's own date, as the client sent it at upload
+    (ISO 8601 text, ``None`` when it sent none); *indexed_at* is when OpenRag
+    indexed it, always set.
+    """
+
+    partition: str
+    file_id: str
+    filename: str | None = None
+    original_filename: str | None = None
+    mimetype: str | None = None
+    file_size: str | None = None
+    created_at: str | None = None
+    indexed_at: datetime
+    chunk_count: int | None = None
+
+
 class IndexationJob(BaseModel):
     """The durable record of one indexing task.
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from core.models.catalog import DocumentRecord
+from core.models.catalog import CatalogFile, DocumentRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,17 @@ class DocumentRepository(ABC):
         self, partition: str, *, before: datetime, after: str | None = None, limit: int = 500
     ) -> list[str]:
         """Keyset page of file IDs indexed before a cutoff, ordered by file ID."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_catalog_files(
+        self, partitions: Collection[str] | None, *, file_ids: Collection[str] | None = None, limit: int
+    ) -> list[CatalogFile]:
+        """The files of *partitions* (every partition when ``None``), most recently indexed first.
+
+        *file_ids*, when not ``None``, keeps only those files. At most *limit*
+        files; only the listed fields are read, not the whole metadata.
+        """
         raise NotImplementedError
 
     @abstractmethod
