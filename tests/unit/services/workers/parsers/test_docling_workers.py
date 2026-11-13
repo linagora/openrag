@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import threading
 import time
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from core.models.document import Document, DocumentType
+from core.chunking.recursive import RecursiveSplitter
+from core.chunking.structured_section import StructuredSectionChunker
+from core.models.document import Document, DocumentType, ProcessedDocument
 from docling_core.types.doc.base import BoundingBox, Size
 from docling_core.types.doc.document import ContentLayer, DoclingDocument, ImageRef, PictureItem, ProvenanceItem
 from docling_core.types.doc.labels import DocItemLabel
 from PIL import Image
 from services.workers.parsers import docling_workers
+from services.workers.stages import caption as caption_module
+from services.workers.stages.caption import caption_stage, drop_uncaptioned_image_refs
 
 
 def _config(docling_num_gpus: float = 0.25):
@@ -316,6 +322,65 @@ def test_the_page_text_is_docling_s_own_page_export_apart_from_the_pictures():
     for page_no in (1, 2):
         expected = document.export_to_markdown(page_no=page_no).strip()
         assert docling_workers._page_markdown(document, page_no, {}) == expected
+
+
+class _WidthVLM:
+    """Captions an image with its width, so each caption names its picture."""
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            return f"Figure {image.width} pixels wide"
+
+
+def _words(text: str) -> int:
+    return len(text.split())
+
+
+@pytest.mark.parametrize(
+    "chunker",
+    [
+        RecursiveSplitter(chunk_size=60, chunk_overlap_rate=0.0, length_function=_words),
+        StructuredSectionChunker(chunk_size=60, length_function=_words),
+    ],
+    ids=["recursive", "structured_section"],
+)
+@pytest.mark.parametrize("captioning", [True, False], ids=["captioned", "not-captioned"])
+async def test_docling_pictures_through_captioning_and_chunking(monkeypatch, chunker, captioning):
+    """#1313 end to end: Docling's output, then the caption stage (or the ref
+    scrub when captioning is off), then a real chunker."""
+
+    @asynccontextmanager
+    async def _no_gate():
+        yield
+
+    monkeypatch.setattr(caption_module, "get_vlm_semaphore", _no_gate)
+    filler = " ".join(f"word{i}" for i in range(40))
+    document = _docling_document()
+    _add_text(document, 1, f"Opening remarks {filler}")
+    _add_picture(document, 1, width=3)
+    _add_picture(document, 1, width=4, content_layer=ContentLayer.FURNITURE)
+    _add_text(document, 2, f"Middle page {filler}")
+    _add_text(document, 3, f"Closing remarks {filler}")
+    _add_picture(document, 3, width=5)
+    text_blocks, image_blocks = _postprocess(document)
+    processed = ProcessedDocument(
+        document_id="d", text_blocks=text_blocks, images=image_blocks, metadata={"filename": "report.pdf"}
+    )
+    if captioning:
+        row = await caption_stage({"processed_document": processed}, _WidthVLM())
+        processed = row["processed_document"]
+    processed = drop_uncaptioned_image_refs(processed)
+
+    chunks = chunker.chunk(processed, "p")
+
+    text = "\n".join(chunk.text for chunk in chunks)
+    assert "<!-- image -->" not in text
+    assert "docling_img" not in text
+    assert all(chunk.page_number == 3 for chunk in chunks if "Closing remarks" in chunk.text)
+    if captioning:
+        for width, page in ((3, 1), (4, 1), (5, 3)):
+            pages = [chunk.page_number for chunk in chunks if f"Figure {width} pixels wide" in chunk.text]
+            assert pages == [page], f"caption of the {width}px picture: pages {pages}, expected [{page}]"
 
 
 class _UndecodedImage:

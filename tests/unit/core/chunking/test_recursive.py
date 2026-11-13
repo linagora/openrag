@@ -440,37 +440,6 @@ def test_symbol_only_caption_is_not_treated_as_a_placeholder():
     assert is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n   \n\n</image_description>")
 
 
-# --- #1313: caption owns its figure page, not the document's last one ----------
-
-
-def test_captioned_image_chunk_is_attributed_to_its_figure_page():
-    """After the Docling fix the caption substitutes in place on the figure's
-    page, so its chunk resolves to page 1 — previously (apart: no ref in the
-    text, appended at the end with page None) it folded into the last page."""
-    from core.prompts.vlm_prompt_builder import wrap_caption
-
-    filler = " ".join(f"sentence{i}" for i in range(60))
-    doc = ProcessedDocument(
-        document_id="d1",
-        text_blocks=[
-            TextBlock(text=f"Intro on one\n\n{wrap_caption('Revenue chart: Q1 grew 12 percent')}", page_number=1),
-            TextBlock(text=filler, page_number=2),
-            TextBlock(text=filler + " extra tail", page_number=3),
-        ],
-        metadata={"source": "report.pdf"},
-    )
-    splitter = RecursiveSplitter(chunk_size=30, chunk_overlap_rate=0.0, length_function=_word_tokens)
-
-    chunks = splitter.chunk(doc, partition="p1")
-
-    joined = " ".join(c.text for c in chunks)
-    assert "<!-- image -->" not in joined, "exporter placeholder leaked into the index"
-    caption_chunks = [c for c in chunks if "Revenue chart" in c.text]
-    assert caption_chunks, "caption text must reach a chunk"
-    assert all(c.page_number == 1 for c in caption_chunks), [c.page_number for c in caption_chunks]
-    assert any(c.page_number > 1 for c in chunks), "the later pages must produce their own chunks"
-
-
 def _standalone_table(rows: int = 8) -> str:
     """An oversized markdown table (>100 tokens) that must stay standalone.
 

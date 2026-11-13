@@ -795,36 +795,6 @@ def test_split_table_keeps_its_column_header_on_every_piece():
     assert "Regional breakdown" in tables[0].text, "the heading should lead the first piece"
 
 
-# --- #1313: caption owns its figure page, not the document's last one ----------
-
-
-def test_captioned_image_keeps_the_figure_page_in_structured_chunks():
-    """Same regression as on the recursive path, asserted through the
-    ``structured_section`` strategy: an unanchored caption appended at the end
-    inherited the last page; substituted in place it stays on page 1."""
-    from core.prompts.vlm_prompt_builder import wrap_caption
-
-    filler = " ".join(f"word{i}" for i in range(60))
-    doc = ProcessedDocument(
-        document_id="d1",
-        text_blocks=[
-            TextBlock(text=f"{wrap_caption('Revenue chart: Q1 grew 12 percent')}", page_number=1),
-            TextBlock(text=filler, page_number=2),
-            TextBlock(text=filler + " tail", page_number=3),
-        ],
-        metadata={"filename": "report.pdf"},
-    )
-
-    chunks = _chunker(chunk_size=40).chunk(doc)
-
-    joined = " ".join(c.text for c in chunks)
-    assert "<!-- image -->" not in joined, "exporter placeholder leaked into the index"
-    caption_chunks = [c for c in chunks if "Revenue chart" in c.text]
-    assert caption_chunks, "caption text must reach a chunk"
-    assert all(c.page_number == 1 for c in caption_chunks), [c.page_number for c in caption_chunks]
-    assert any(c.page_number == 3 for c in chunks), "the last page must be its own chunk"
-
-
 def test_split_table_under_an_anchored_article_heading_keeps_its_column_header():
     """Marker anchors a heading with a page ``<span>``. The chunk keeps the line
     without it, where the article test then reads ``Article L110-5`` as content,
