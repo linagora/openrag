@@ -1,6 +1,6 @@
 # XLSX ingestion
 
-OpenRAG indexes `.xlsx` and `.xlsm` workbooks as structured tabular content. It uses OpenPyXL in read-only mode and sends every detected table in each visible worksheet through the same bounded indexing pipeline used for CSV data.
+OpenRAG indexes `.xlsx` and `.xlsm` workbooks as structured tabular content. It uses OpenPyXL in read-only mode and sends every detected table in each visible worksheet through the same bounded indexing pipeline used for CSV data. Charts placed on visible worksheets and chart sheets are indexed too, as text describing the chart and its data (see [Charts](#charts)).
 
 The parser is designed for retrieval, not spreadsheet execution: it preserves stored values, formulas, worksheet context, and physical row references, but it does not recalculate formulas or reproduce Excel's visual layout.
 
@@ -193,18 +193,67 @@ For example, a raw value of `0.08125` with the Excel format `0.00%` remains `0.0
 
 Only percentage and currency displays are stated in chunk text; dates are already readable in the cells and plain or scientific number formats only restate the raw value, so those groups are kept in `number_format_groups` metadata only. Formula and display context is optional text, so chunking keeps rows whole: it reserves at most a fifth of each chunk's token budget for that context, splits the rows once, and then adds formula lines first, then percentage and currency lines, while they fit. Lines that do not fit stay in metadata, and the chunk sets `supplemental_context_truncated: true`. Wide formatted tables therefore produce about as many chunks as unformatted ones instead of being split by column or rejected. During Markdown chunking, display groups are retained only when their physical rows and columns intersect the chunk. Context always states that raw values remain indexed. Complex conditional or colored formats, quoted custom units, text substitution, and format codes over the safety bound are retained only as workbook styling and are not interpreted or exposed as trusted display meaning. For locale-qualified currency formats, only an allowlisted currency symbol is retained; the locale directive itself is discarded and is never treated as instructions or semantic content. A group holds at most 32 disjoint row ranges; a format applied to more separate runs of rows is split into several groups, so each group's rows stay exact. At most 64 groups are described in one parser batch; truncation is explicit in metadata (`number_format_groups_truncated`). Supplemental human-readable display context is omitted before it can make an otherwise valid batch exceed the byte limit.
 
+## Charts
+
+Every chart on a visible worksheet or chart sheet becomes one text block, emitted after the tables of its worksheet. It states what a reader of the chart sees, then its data:
+
+```text
+Chart: Monthly revenue
+Type: clustered column chart
+Worksheet: Sales, placed over E2:L16
+Axes: Month (categories); EUR (values)
+Data: categories Sales!$A$2:$A$13; 2025 = Sales!$B$2:$B$13; 2026 = Sales!$C$2:$C$13
+
+| Month | 2025 | 2026 |
+| --- | --- | --- |
+| Jan | 100 | 200 |
+```
+
+Series sharing their categories share a table, one column per series and at most eight series per table, so a question such as "revenue in March 2026" finds the category and the value on one line. This holds across the parts of a combination chart: columns for actuals and a line for targets over the same months are one table, `| Month | Actual | Target |`, so "months below target" compares both values on each row. Category and x-value series never share a table. The category column is named after the category axis title; without one, after the header cell above the categories, but only when every series is named by the cell right above its values, in that same header row (rows work the same way, with the header to the left). Otherwise it is `Category` (`X` for scatter charts). Chunk metadata carries `xlsx_content_kind: chart`, `chart_id`, `chart_title`, `chart_types`, `chart_format`, `chart_anchor_range`, `chart_series` (each series' name, source ranges and point count; at most 64, with `chart_series_count` giving the total), `chart_point_count` and `chart_source_table_ids`, the indexed tables the chart plots.
+
+**Chart types.** Classic charts: column and bar (clustered, stacked, 100% stacked), line, area, pie, doughnut, pie-of-pie and bar-of-pie, scatter, bubble, radar, stock, surface, 3-D variants, and combinations of these in one chart. Office 2016 charts, which Excel stores in a different format: waterfall (with the bars drawn as running totals named), treemap and sunburst (hierarchies written outer level first, such as `Europe / France / Paris`), funnel, histogram and Pareto, box and whisker, and map charts. For histograms and box plots the raw values are indexed and the chunk says that Excel bins or summarizes them.
+
+**Where values come from.** Most writers (Excel for classic charts, LibreOffice, XlsxWriter) store the plotted values next to each reference; OpenRAG uses them. When a chart stores only references (OpenPyXL, and Excel itself for Office 2016 charts), the values are read from the worksheet cells. Nearby ranges are read together, in windows of at most 100,000 cells, so a far-apart range does not make one huge read. OpenPyXL parses a sheet from its first row on every read, so a read costs every row down to its last one (about 14 µs a row, 4 s for 300,000 rows on a laptop). All chart reads of a workbook therefore share one budget, `max_chart_scan_rows` rows parsed. The values and categories a chart needs are read first; number formats and header labels, which only refine a chart, get what is left. One exception: a chart whose dates depend on its cells' format is held in memory while that format is read, and past the held-memory bound (100,000 points) its own values are read after the lookups. When the budget runs out, a chart says how many of its ranges were not read (`chart_ranges_not_read`), apart from references that cannot be read at all (`chart_unresolved_series`); a skipped format or header lookup only leaves that chart less refined. The workbook's status reports both kinds (see Robustness). References through defined names are followed, sheet-scoped names first; Excel's internal `_xlchart` names are shown as the ranges they stand for. Unions, names defined as formulas and references to other workbooks are reported as unresolved.
+
+**What a reader sees.** Date axes are written as ISO dates, in the workbook's 1900 or 1904 date system, not as Excel serial numbers. Percentage and currency series keep their raw values and get a `Display:` line, as tables do. A series whose chart stores no number format of its own (XlsxWriter and pandas write `General`, OpenPyXL and Excel's Office 2016 charts store none) takes its cells' format, as Excel does when drawing it: a date format for categories, a percentage or currency format for values. Values formatted as dates stay numbers. A chart that plots visible cells only (Excel's default) leaves out the cells of hidden and filtered rows and hidden columns, as Excel does when drawing it. The decision is made per point: a point whose category, value or size cell is hidden leaves every column of the table together, so categories and values stay paired even when their ranges are offset, and waterfall totals keep their names; a worksheet table, by contrast, indexes rows hidden by an active filter.
+
+**Labels, trendlines and text on a chart.** Data labels that carry text of their own get a column next to their series, `| Month | Revenue | Revenue (data label) |`: text typed on a point ("Supplier strike"), or labels taken from a cell range (Excel 2013+, such as campaign names on scatter points). Labels that only repeat the value add nothing and are left out. A label leaves the chunk with its point when that point's row is hidden. Trendlines are named in a closing note (`Trendlines: Revenue: linear trendline.`). Text boxes drawn on the chart (`Target revised in June`) are written on a `Text on the chart:` line.
+
+**Large charts.** At most `max_chart_points` data points are written per chart; past it, the chunk says how many were left out and adds a summary of each numeric series (minimum and maximum with their categories, and the total). A chart whose plotted ranges all lie inside indexed worksheet tables (every dimension from a cell range, every cell of it indexed, so not on a row or column hidden by hand, and no text data labels of its own) repeats at most `max_chart_points_from_tables` points: past it, the data is not indexed a second time, and the chunk keeps the summary and names the table that holds the data. When a chart is split into several chunks, the first starts with the chart's full heading and the others with a one-line context, type and worksheet first and then the title: `Chart (line chart), worksheet Sales: Gross margin trend`. That line takes at most half a chunk; a longer one is cut by word, so a very long title is shortened, not the type or worksheet. Each data table repeats its header.
+
+**Data on hidden worksheets.** A visible chart can plot a hidden worksheet's data, and anyone who opens the file sees it in the chart. `loader.xlsx_charts` (`XLSX_CHARTS`) decides what reaches the index:
+
+| Mode | Behavior |
+| --- | --- |
+| `full` (default) | Every chart with all its data. The chunk names the hidden source worksheet: `Source data: hidden worksheet 'Data'.` |
+| `without_hidden_data` | Every chart that is not itself hidden in Excel (a chart hidden on its own, or inside a hidden group, is not read; in `full` it is indexed with a `Hidden in Excel.` line and `chart_hidden_in_excel: true`), with its type, axes and source references, but no value, category label, series name, title or column header from a hidden worksheet, row or column. A hidden worksheet's cells are never even read; cells in hidden rows and columns of a visible worksheet are left out of the chunk, and a cached range that cannot be matched cell by cell (several label columns) is read again from its visible cells. The chunk says `Source data: hidden worksheet 'Data'; its values are not indexed.` |
+| `off` | No chart is read. Visible worksheet text boxes can still be indexed. A workbook with no other indexable content is rejected as empty. |
+
+`chart_hidden_source_sheets` and `chart_hidden_data_withheld` record the chart policy in metadata. In `without_hidden_data`, cached data labels and text boxes are omitted when their source cells are hidden or their links cannot be resolved. Text boxes hidden in Excel are omitted too. The same text box policy applies in `off` mode. In `full`, hidden worksheet text boxes are marked `(hidden in Excel)`.
+
+**Text boxes on worksheets.** Text boxes and other shapes holding text on a visible worksheet or chart sheet, grouped ones included, are indexed as text blocks after that sheet's charts (`xlsx_content_kind: text_box`), with the cells each one covers: `- Over F2:H4: Q3 dip: supplier strike`. A sheet can produce multiple blocks when its text exceeds the batch byte limit. Metadata gives `text_box_count` and `text_box_anchors`. The placeholder Excel stores for readers that cannot show an Office 2016 chart ("This chart isn't available in your version of Excel") is not indexed. At most 1,024 text boxes are collected per workbook, and each is cut at 4,000 characters.
+
+**Robustness.** A chart never makes a workbook fail: a missing, malformed or oversized chart part, or a chart type that is not recognized, is skipped or reported in the chunk, and the worksheet tables are indexed as usual. Every block of the workbook, tables and loose cells included, carries the outcome, so it is visible even when no chart chunk exists: `workbook_chart_extraction` is `complete`, `partial`, `failed` (only the error type is recorded) or `off`, and `workbook_chart_issues` lists up to 16 reasons, with `workbook_chart_issue_count` giving their number. These are reasons, not a chart count: one reason, such as the chart limit, can stand for many charts. This is chunk metadata, not yet a warning on the indexing job.
+
+**Metadata size.** Chunk metadata is stored in a 64 KiB JSON field and repeated on every chunk of a chart, so it is capped where it is made: titles at 512 characters, series names and references at 128, `chart_series` at 64 entries (`chart_series_count` gives the total) and lists such as `chart_source_table_ids` at 64. Character caps alone cannot bound bytes, since multibyte labels may be written as `\uXXXX` escapes, so a chart's metadata must also fit 32 KiB in that worst encoding, half the field, the rest left to the chunk's other keys: series entries are dropped from the last, then every text field, at any depth, is cut to 128 characters and then to 32, and as a last resort the optional lists (series, hidden source sheets, source tables, chart types) are emptied. `chart_metadata_truncated` says when anything was cut; the chunk text keeps the full labels.
+
+Chart caches with excessively sparse point indexes are skipped to prevent a small XML part from causing a large allocation. Worksheet references for charts are read in bounded windows, so distant references do not expand into one large rectangular read.
+
 ## Configuration
 
 ```yaml
 loader:
   xlsx_batch_size: 10000
+  # full, without_hidden_data or off; see Charts
+  xlsx_charts: full
   xlsx_limits:
     max_batch_bytes: 2097152
     max_shared_strings: 1000000
     max_tables: 256
+    max_chart_points: 5000
 ```
 
-`xlsx_batch_size` limits the number of data rows emitted in one parser batch and can also be set with `XLSX_BATCH_SIZE` (see the [environment reference](/openrag/documentation/env_vars/#excel-workbook-ingestion)). A batch may flush earlier to stay within `max_batch_bytes`. Parser batches are then split into retrieval chunks according to the configured chunk token budget; batch size is not chunk size.
+`xlsx_charts` selects the chart mode and can also be set with `XLSX_CHARTS`; unknown modes are rejected when the configuration loads. `xlsx_batch_size` limits the number of data rows emitted in one parser batch and can also be set with `XLSX_BATCH_SIZE` (see the [environment reference](/openrag/documentation/env_vars/#excel-workbook-ingestion)). A batch may flush earlier to stay within `max_batch_bytes`. Parser batches are then split into retrieval chunks according to the configured chunk token budget; batch size is not chunk size.
 
 `xlsx_limits` accepts the limit names listed below through YAML configuration. Batch size and limit values must be positive integers; booleans, fractional values, and unknown limit names are rejected. Values not specified retain their defaults. Increase limits only after measuring resource use for the intended workload; they do not impose a hard memory ceiling across simultaneous indexing jobs.
 
@@ -219,7 +268,7 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_uncompressed_bytes` | Total uncompressed archive | 1 GiB |
 | `max_entry_bytes` | Individual ZIP entry | 256 MiB |
 | `max_compression_ratio` | Compression ratio per entry | 200 |
-| `max_metadata_bytes` | Total size of the parts the reader loads whole: workbook, styles, theme, document properties, worksheet relationships, and chart sheets with their drawings, charts, and images. Pivot caches, comments, and worksheet drawings or media are never loaded and only count toward the archive limits | 8 MiB |
+| `max_metadata_bytes` | Total size of the parts the reader loads whole: workbook, styles, theme, document properties, worksheet relationships, and chart sheets with their drawings, charts, and images. Pivot caches, comments, and media are never loaded and only count toward the archive limits; worksheet drawings and charts are read by chart extraction only, each bounded by `max_chart_part_bytes` | 8 MiB |
 | `max_shared_strings_bytes` | Shared-string XML. OpenPyXL keeps the whole table in memory, about 4–5 times this size, so this is the limit that bounds that memory | 32 MiB |
 | `max_shared_strings` | Shared-string entries. Distinct text values in a workbook usually reach the byte limit first; 60,000 rows of 5 unique text columns is 300,000 entries and about 11 MB of XML | 1,000,000 |
 | `max_sheets` | Worksheets, including hidden sheets | 128 |
@@ -233,6 +282,12 @@ Before OpenPyXL opens a workbook, OpenRAG validates the OOXML package, relations
 | `max_batch_bytes` | Rendered batch size | 2 MiB |
 | `max_spool_bytes` | Memory plus temporary-file space per worksheet for rows of tables waiting for their turn in the single worksheet pass. Past it, waiting tables are read separately; output is unchanged | 256 MiB |
 | `max_spool_memory_bytes` | Part of `max_spool_bytes` kept in memory before the temporary file is used | 32 MiB |
+| `max_charts` | Charts read across the workbook. Later charts are skipped, never rejected | 256 |
+| `max_chart_part_bytes` | One drawing or chart part, read whole when the workbook is parsed. Cached values make charts large: 10 series of 5,000 points is about 4 MB. A larger part is skipped | 16 MiB |
+| `max_chart_bytes` | Separate workbook-wide byte budgets for drawing discovery and chart content. Parts exceeding a budget are skipped without rejecting the workbook | 64 MiB each |
+| `max_chart_points` | Data points written per chart, and cells read per range of a chart without stored values. The chunk says when points were left out | 5,000 |
+| `max_chart_points_from_tables` | Data points a chart repeats when its data is already indexed as worksheet tables. Past it, the chart keeps a summary and names the table | 200 |
+| `max_chart_scan_rows` | Worksheet rows the chart cell reads of a workbook may parse in total. Each read parses its sheet from the first row, so this bounds their time; ranges past it are reported, not read | 2,000,000 |
 
 Empty cells that only carry formatting, such as a stray styled cell at `XFD1` or `E1048576`, do not count toward the coordinate or area limits; merged ranges are clipped to them. Coordinates outside the Excel grid are rejected as invalid.
 
@@ -257,7 +312,14 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Rows in a collapsed outline group outside any active filter range | Excluded, like rows hidden by hand: folded detail is a different intent from a filter | Expand the group before saving if those rows should be indexed |
 | More than 256 blocks in one worksheet | Blocks sharing columns are merged into one table per column band; later header rows appear as data rows | Spread the blocks over several worksheets, or combine them into one table with a column naming the block (week, store), when that matters |
 | Formula recalculation | Not performed | Recalculate and save the workbook before upload |
-| Charts, images, comments, and shapes | Not indexed as worksheet data | Extract them through a dedicated document or media workflow |
+| Images, comments, and shapes | Not indexed | Extract them through a dedicated document or media workflow |
+| Chart decorations | Error bars, colors and labels that only repeat a value are not indexed; text data labels, trendline types and text drawn on a chart are | No action is required for the plotted data |
+| Data labels on a chart whose cached points cannot be matched to cells, with hidden rows in the plotted range | Those labels are left out rather than risk landing on the wrong point | Unhide the rows, or store full caches (save the workbook in Excel) |
+| Sparklines, pictures and cell comments | Not indexed by this chart extraction | Repeat important notes in cells or text boxes |
+| Chart over data on a hidden worksheet | Indexed with its data in the default `full` chart mode, with a note naming the hidden worksheet | Set `XLSX_CHARTS=without_hidden_data`, or remove the data, if hidden worksheets must stay out of the index |
+| Chart references that are unions, formulas or other workbooks | The chart is indexed without those values, and the chunk says how many series could not be read | Plot single ranges of the same workbook |
+| Chart without a category axis title whose series are not named from a header row | The category column is labelled `Category` rather than guessed | Give the category axis a title, or name the series from the header row above the data |
+| Chart value series formatted as dates in the cells, with no format stored in the chart | The values stay Excel serial numbers | Plot dates as categories, or store a date format in the chart |
 | Password-protected or encrypted workbook | Rejected at upload with HTTP 422 `ENCRYPTED_OFFICE_FILE` ("This file is password-protected or encrypted"); encrypted `.docx` and `.pptx` uploads get the same response | Remove the password and upload it again |
 | `.xlsm` macro-enabled workbook | Tabular cells, cached values, and formula text are indexed; VBA is neither retained nor executed | Upload it directly when the workbook's tabular content is needed |
 | `.xls`, `.xlsb`, or `.ods` | Unsupported by the XLSX route | Convert to a plain `.xlsx`/`.xlsm` workbook or use a dedicated parser |
@@ -270,4 +332,5 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 - Macros are never executed during ingestion. `.xlsm` support reads only its OOXML worksheet data with VBA retention disabled.
 - Keep identifiers and units in explicit cells so they remain retrievable with numerical values.
 - Use a fresh partition when comparing ingestion behavior across parser versions.
+- Charts are indexed with their data by default, including data they plot from hidden worksheets. Use `XLSX_CHARTS=without_hidden_data` to keep hidden data out while still indexing the charts, or `off` to skip charts.
 - Hidden columns are excluded. Hidden rows are excluded too, except on a worksheet whose filter is active: there, every hidden data row in the worksheet's AutoFilter range or in an Excel Table's filter range is indexed, whether the filter, a collapsed group or the user hid it. Workbook visibility should never be treated as an authorization mechanism: remove data that must not be indexed instead of hiding it.

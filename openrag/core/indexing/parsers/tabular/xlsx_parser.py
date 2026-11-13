@@ -8,7 +8,7 @@ import re
 import zipfile
 from bisect import bisect_left, bisect_right
 from collections.abc import Iterator
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, localcontext
@@ -18,6 +18,7 @@ from typing import Any
 
 from core.indexing.parsers.registry import parser_registry
 from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row, normalize_headers
+from core.indexing.parsers.tabular.xlsx_drawings import CHART_MODES, ChartLimits, TableCoverage, WorkbookCharts
 from core.indexing.parsers.tabular.xlsx_row_router import route_sheet_tables
 from core.indexing.parsers.tabular.xlsx_validation import SheetInfo, TableRegion, XlsxLimits, limit, validate_ooxml
 from core.models.document import Document, ProcessedDocument, TextBlock
@@ -661,6 +662,135 @@ def _has_text(values: list[str]) -> bool:
     return any(value.strip() for value in values)
 
 
+def _tables_reading(cell_range, by_name: dict[str, SheetInfo]) -> list[TableCoverage]:
+    """Return the indexed tables a chart range overlaps, and whether each contains it.
+
+    A table contains a range only when every cell of it was indexed: rows and
+    columns hidden by hand are left out of tables (rows hidden by a filter are
+    indexed), so a range touching them is never "already indexed".
+    """
+    info = by_name.get(cell_range.sheet)
+    if info is None:
+        return []
+    excluded_rows = info.hidden_rows - info.filtered_rows
+    complete = not any(cell_range.min_row <= row <= cell_range.max_row for row in excluded_rows) and not any(
+        cell_range.min_column <= column <= cell_range.max_column for column in info.hidden_columns
+    )
+    sheet_ref = "'" + info.name.replace("'", "''") + "'!"
+    return [
+        TableCoverage(
+            table_id=f"sheet:{info.index}:table:{table.index}",
+            table_range=(
+                f"{sheet_ref}{_column_name(table.start_column)}{table.start_row}:"
+                f"{_column_name(table.end_column)}{table.end_row}"
+            ),
+            contains=complete
+            and table.start_row <= cell_range.min_row
+            and cell_range.max_row <= table.end_row
+            and table.start_column <= cell_range.min_column
+            and cell_range.max_column <= table.end_column,
+        )
+        for table in info.tables
+        if table.start_row <= cell_range.max_row
+        and cell_range.min_row <= table.end_row
+        and table.start_column <= cell_range.max_column
+        and cell_range.min_column <= table.end_column
+    ]
+
+
+def _chart_block(rendered) -> TextBlock:
+    return TextBlock(text=rendered.text, block_type="text", metadata=rendered.metadata)
+
+
+# Reasons listed on each block of a workbook whose charts were not all indexed.
+_MAX_CHART_ISSUES = 16
+_MAX_CHART_ISSUE_TEXT = 200
+
+
+def _chart_status(charts: WorkbookCharts | None, failure: str | None, mode: str) -> dict:
+    """Whether the workbook's charts were all indexed, stamped on every block.
+
+    Chunk metadata, not a job-level warning: it shows a partial extraction
+    even when no chart chunk exists (every chart skipped, or extraction failed).
+    """
+    if mode == "off":
+        status, issues = "off", []
+    elif charts is None:
+        status, issues = "failed", [failure or "Chart extraction failed"]
+    else:
+        issues = charts.issues
+        status = "partial" if issues else "complete"
+    return {
+        "workbook_chart_extraction": status,
+        "workbook_chart_issue_count": len(issues),
+        "workbook_chart_issues": [issue[:_MAX_CHART_ISSUE_TEXT] for issue in issues[:_MAX_CHART_ISSUES]],
+    }
+
+
+def _with_charts(batches, charts: WorkbookCharts | None, status: dict):
+    """Emit each sheet's charts after its tables, then those of sheets without any.
+
+    A workbook whose only content is charts (a dashboard of chart sheets) is
+    indexed through its charts instead of being rejected as empty. Every block
+    carries the workbook's chart extraction status.
+    """
+
+    def stamped(block):
+        block.metadata.update(status)
+        return block
+
+    if charts is None:
+        yield from map(stamped, batches)
+        return
+    try:
+        for block in batches:
+            yield from (
+                stamped(_chart_block(rendered)) for rendered in charts.before_sheet(block.metadata["sheet_index"])
+            )
+            yield stamped(block)
+    except NoIndexableContentError:
+        if not len(charts):
+            raise
+    yield from (stamped(_chart_block(rendered)) for rendered in charts.remaining())
+
+
+@contextmanager
+def _chart_cell_reader(document: Document):
+    """Read worksheet cells for charts that store no cached values, or cell formats.
+
+    The workbook is opened only if a chart needs it, on its own source, so the
+    table reader's position is untouched.
+    """
+    from openpyxl import load_workbook
+
+    state: dict[str, Any] = {}
+    with ExitStack() as stack:
+
+        def read_rows(
+            sheet_name: str, min_row: int, max_row: int, min_column: int, max_column: int, *, formats: bool = False
+        ):
+            """Yield rows of cell values, or of number formats with ``formats``."""
+            if "workbook" not in state:
+                chart_source = stack.enter_context(_document_source(document))
+                state["workbook"] = workbook = load_workbook(
+                    chart_source, read_only=True, data_only=True, keep_links=False, keep_vba=False
+                )
+                stack.callback(workbook.close)
+            sheet = state["workbook"][sheet_name]
+            if not hasattr(sheet, "iter_rows"):
+                raise KeyError(sheet_name)
+            if formats:
+                return (
+                    tuple(getattr(cell, "number_format", "General") for cell in row)
+                    for row in sheet.iter_rows(min_row=min_row, max_row=max_row, min_col=min_column, max_col=max_column)
+                )
+            return sheet.iter_rows(
+                min_row=min_row, max_row=max_row, min_col=min_column, max_col=max_column, values_only=True
+            )
+
+        yield read_rows
+
+
 @contextmanager
 def _document_source(document: Document):
     if document.source_path is not None:
@@ -1197,10 +1327,14 @@ class XlsxParser(TabularBatchParser):
         *,
         batch_size: int = 10_000,
         limits: XlsxLimits | dict[str, int] | None = None,
+        charts: str = "full",
     ) -> None:
         if type(batch_size) is not int or batch_size < 1:
             raise ConfigError("XLSX batch_size must be a positive integer")
+        if charts not in CHART_MODES:
+            raise ConfigError(f"XLSX charts must be one of {', '.join(CHART_MODES)}")
         self.batch_size = batch_size
+        self.charts = charts
         try:
             self.limits = XlsxLimits(**limits) if isinstance(limits, dict) else limits or XlsxLimits()
         except TypeError as exc:
@@ -1223,7 +1357,8 @@ class XlsxParser(TabularBatchParser):
             )
             with closing(self._iter_sheets(document, source, infos)) as batches:
                 try:
-                    yield from batches
+                    charts, failure = self._workbook_charts(document, source, infos)
+                    yield from _with_charts(batches, charts, _chart_status(charts, failure, self.charts))
                 except PipelineError:
                     raise
                 except (
@@ -1239,6 +1374,50 @@ class XlsxParser(TabularBatchParser):
                     raise PipelineError(
                         "File is not a valid XLSX workbook", code="INVALID_XLSX", status_code=422
                     ) from exc
+
+    def _workbook_charts(self, document, source, infos: list[SheetInfo]) -> tuple[WorkbookCharts | None, str | None]:
+        """Read the workbook's charts; a failure here never fails the workbook.
+
+        With ``charts="off"`` no chart part is read; drawings still are, for
+        the text boxes on each sheet, which are not charts.
+
+        Cells read for uncached charts are read here, before the tables, and the
+        reader opened for them is closed before the table reader opens.
+        """
+        limits = ChartLimits(
+            max_charts=self.limits.max_charts,
+            max_part_bytes=self.limits.max_chart_part_bytes,
+            max_points=self.limits.max_chart_points,
+            max_batch_bytes=self.limits.max_batch_bytes,
+            max_points_from_tables=self.limits.max_chart_points_from_tables,
+            max_total_bytes=self.limits.max_chart_bytes,
+            max_scan_rows=self.limits.max_chart_scan_rows,
+        )
+        hidden = {info.name: (info.hidden_rows | info.filtered_rows, info.hidden_columns) for info in infos}
+        by_name = {info.name: info for info in infos if not info.hidden}
+        try:
+            with _chart_cell_reader(document) as read_rows:
+                charts = WorkbookCharts(
+                    source,
+                    limits=limits,
+                    workbook_filename=document.filename,
+                    read_rows=read_rows,
+                    cell_text=_cached_cell_text,
+                    describe_format=_safe_number_format,
+                    # Excel does not plot rows hidden by hand or by a filter.
+                    hidden_cells=lambda name: hidden.get(name, (frozenset(), frozenset())),
+                    source_tables=lambda cell_range: _tables_reading(cell_range, by_name),
+                    hidden_sheets=frozenset(info.name for info in infos if info.hidden),
+                    mode=self.charts,
+                )
+                return charts, None
+        except (OSError, KeyError, IndexError, TypeError, ValueError, RecursionError, zipfile.BadZipFile) as exc:
+            logger.bind(filename=document.filename).warning(f"XLSX charts were not extracted: {exc!r}")
+            # Only the exception type reaches chunk metadata, never its text.
+            return None, f"Chart extraction failed ({type(exc).__name__})"
+        finally:
+            if hasattr(source, "seek"):
+                source.seek(0)
 
     def _iter_sheets(self, document, source, infos):
         content_rows_seen = 0

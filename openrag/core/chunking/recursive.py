@@ -21,12 +21,14 @@ from core.chunking.markdown_utils import (
     PAGE_RE,
     MDElement,
     chunk_table,
+    chunk_xlsx_chart,
     get_page_number,
     split_md_elements,
 )
 from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
+from core.utils.consts import XLSX_TEXT_CONTENT_KINDS
 from core.utils.text import sanitize_text
 
 # Substring (case-insensitive) marking a "no useful content" image caption.
@@ -404,7 +406,17 @@ class BaseChunker(ChunkingStrategy):
         by default.
         """
         body_size = self.chunk_size if body_size is None else body_size
-        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells":
+        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") == "chart":
+            # A chart must not enter prose sanitization either: it would join
+            # the heading lines and leave data rows without their chart.
+            return [
+                {**metadata, "page_content": piece, "page": None, "chunk_type": "table"}
+                for piece in chunk_xlsx_chart(content, metadata, body_size, self.length_function)
+            ]
+        if (
+            metadata.get("tabular_format") == "xlsx"
+            and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
+        ):
             # Canonical workbook tables must never enter prose sanitization or
             # lose sheet metadata, even when below the inline-table threshold.
             pieces = chunk_table(

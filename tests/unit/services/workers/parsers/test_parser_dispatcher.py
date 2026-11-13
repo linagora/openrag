@@ -52,6 +52,7 @@ def _config(
         transcriber=transcriber,
         xlsx_batch_size=512,
         xlsx_limits={"max_batch_bytes": 1024},
+        xlsx_charts="without_hidden_data",
     )
     vlm = SimpleNamespace(
         base_url=vlm_base_url,
@@ -125,6 +126,7 @@ def test_xlsx_builder_passes_streaming_configuration(monkeypatch: pytest.MonkeyP
     assert kwargs == {
         "batch_size": 512,
         "limits": {"max_batch_bytes": 1024},
+        "charts": "without_hidden_data",
     }
 
 
