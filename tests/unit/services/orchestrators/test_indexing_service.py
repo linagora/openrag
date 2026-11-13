@@ -824,6 +824,26 @@ async def test_copy_file_sets_target_fields():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "target"), [("all", "p-dst"), ("ALL", "p-dst"), ("p-src", "all"), ("p-src", " All ")]
+)
+async def test_copy_file_refuses_a_reserved_partition(source, target):
+    """The store reads `all` as every partition: copying file X from there copies X's chunks from everywhere."""
+    disp = FakeDispatcher()
+    with pytest.raises(ValidationError) as exc:
+        await _service(disp=disp).copy_file(
+            source_file_id="src",
+            source_partition=source,
+            target_file_id="dst",
+            target_partition=target,
+            metadata={},
+            user={"id": 1},
+        )
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
+    assert disp.copied == []
+
+
+@pytest.mark.asyncio
 async def test_copy_file_preserves_content_hash_when_deduplication_is_enabled():
     disp = FakeDispatcher()
     config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
