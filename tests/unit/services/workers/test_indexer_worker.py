@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.models.stage_progress import StageEventStatus, StageProgressWriteResult
+from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError, PipelineError
+from loguru import logger
 from ray.exceptions import ActorUnavailableError
 from services.workers.indexer_actor import IndexerWorker, _load_document
 from services.workers.pipeline_builder import (
@@ -87,7 +91,13 @@ class FakeVectorStore:
         self.deleted_ids: list[tuple[list[str], str]] = []
 
     async def upsert(
-        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+        self,
+        chunks: list[Chunk],
+        collection: str = "default",
+        *,
+        indexed_at=None,
+        vector_field=None,
+        protected_metadata=None,
     ) -> int:
         self.calls.append((chunks, collection, indexed_at))
         return len(chunks)
@@ -379,6 +389,34 @@ async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_process_file_signals_the_failure_report_after_cleanup_and_before_submitting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The vector cleanup writes, so the lease must still be able to stop it; only the report outlives it."""
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+    steps: list[str] = []
+    monkeypatch.setattr(
+        "services.workers.indexer_actor._cleanup_indexed_vectors",
+        AsyncMock(side_effect=lambda **_k: steps.append("cleanup")),
+    )
+    tsm = _fake_tsm()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(side_effect=lambda *_a: steps.append("report") or True)
+    worker = IndexerWorker(pipeline=_StoreFailedPipeline(), task_state_manager=tsm)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await worker.process_file(
+            task_id="t2",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+            on_failure_report=lambda: steps.append("signal"),
+        )
+
+    assert steps == ["cleanup", "signal", "report"]
+
+
+@pytest.mark.asyncio
 async def test_process_file_captures_reason_when_task_state_actor_supports_it(tmp_path: Path) -> None:
     path = tmp_path / "bad.txt"
     path.write_bytes(b"x")
@@ -504,6 +542,195 @@ async def test_process_file_zero_chunk_replacement_keeps_existing_catalog_and_ve
     assert repo.update_calls == []
     assert vector_store.deleted_ids == []
     assert vector_store.deleted_filters == []
+
+
+class _StoresNothingPipeline:
+    async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+        row["stored_count"] = 0
+        row["stage"] = "stored"
+        return row
+
+
+class _ExplodingPipeline:
+    async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pipeline", "expected_exc", "expected_level"),
+    [
+        # A 4xx OpenRAGError is a user/content outcome, not an operator alert.
+        (_StoresNothingPipeline(), NoIndexableContentError, "WARNING"),
+        (_ExplodingPipeline(), RuntimeError, "ERROR"),
+    ],
+    ids=["no-indexable-content-warns", "unexpected-error-errors"],
+)
+async def test_process_file_failure_logs_reason_with_task_context(
+    tmp_path: Path, pipeline: Any, expected_exc: type[Exception], expected_level: str
+) -> None:
+    """#1296: a failed indexing task must leave one log line carrying its reason."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=_fake_tsm())
+
+    records: list[Any] = []
+    sink = logger.add(lambda message: records.append(message.record), level="WARNING")
+    try:
+        with pytest.raises(expected_exc) as exc_info:
+            await worker.process_file(
+                task_id="t-log",
+                path=str(path),
+                metadata={"file_id": "f-log"},
+                partition="p-log",
+            )
+    finally:
+        logger.remove(sink)
+
+    reason = failure_reason_from_exception(exc_info.value)
+    failure_logs = [r for r in records if r["extra"].get("task_id") == "t-log"]
+    assert len(failure_logs) == 1, [r["message"] for r in records]
+    record = failure_logs[0]
+    assert record["level"].name == expected_level
+    assert record["extra"]["file_id"] == "f-log"
+    assert record["extra"]["partition"] == "p-log"
+    assert record["extra"]["error_reason"] == reason
+
+
+class _StoreFailedPipeline:
+    """Fails with vectors possibly written, so the failure branch runs the cleanup."""
+
+    async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+        row["stage"] = "store_failed"
+        raise RuntimeError("boom")
+
+
+FAILED_LINE = "File indexing failed."
+INTERRUPTED_LINE = "Indexing error interrupted by a cancellation."
+
+
+async def _logs_of_failing_file(
+    worker: IndexerWorker, tmp_path: Path, *, raises: type[BaseException] = RuntimeError, match: str | None = "boom"
+) -> list[tuple[str, str]]:
+    """Run a failing file; return its (message, logged exception) warnings and errors."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    records: list[Any] = []
+    sink = logger.add(lambda message: records.append(message.record), level="WARNING")
+    try:
+        with pytest.raises(raises, match=match):
+            await worker.process_file(
+                task_id="t",
+                path=str(path),
+                metadata={"file_id": "f"},
+                partition="p",
+                callback_url="https://cozy.example.com/callback",
+            )
+    finally:
+        logger.remove(sink)
+    return [(r["message"], str(r["exception"].value)) for r in records if r["extra"].get("task_id") == "t"]
+
+
+@pytest.mark.asyncio
+async def test_process_file_logs_no_failure_for_a_task_already_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cancel_task marks CANCELLED before ray.cancel: an error in between is not a failure."""
+    callback = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
+    tsm = _fake_tsm()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=False)
+
+    logs = await _logs_of_failing_file(IndexerWorker(pipeline=_ExplodingPipeline(), task_state_manager=tsm), tmp_path)
+
+    assert logs == []
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_file_logs_once_when_the_failure_transition_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable task state counts as failed: logged and notified, with the original error."""
+    callback = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
+    tsm = _fake_tsm()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(side_effect=RuntimeError("tsm down"))
+
+    logs = await _logs_of_failing_file(IndexerWorker(pipeline=_ExplodingPipeline(), task_state_manager=tsm), tmp_path)
+
+    assert logs == [(FAILED_LINE, "boom")]
+    callback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_file_logs_the_original_failure_when_cleanup_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transition never runs here, so nothing later could report the failure."""
+    callback = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
+    monkeypatch.setattr(
+        "services.workers.indexer_actor._cleanup_indexed_vectors",
+        AsyncMock(side_effect=RuntimeError("cleanup down")),
+    )
+    tsm = _fake_tsm()
+
+    logs = await _logs_of_failing_file(
+        IndexerWorker(pipeline=_StoreFailedPipeline(), task_state_manager=tsm), tmp_path, match="cleanup down"
+    )
+
+    assert logs == [(FAILED_LINE, "boom")]
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted_step", ["cleanup", "transition"])
+async def test_process_file_keeps_the_reason_when_a_cancellation_interrupts_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted_step: str
+) -> None:
+    """Not a failure line (the task may end cancelled), yet a lost lease must not erase the reason."""
+    callback = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
+    tsm = _fake_tsm()
+    if interrupted_step == "cleanup":
+        monkeypatch.setattr(
+            "services.workers.indexer_actor._cleanup_indexed_vectors",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+    else:
+        monkeypatch.setattr("services.workers.ray_utils.ray.cancel", lambda *_a, **_k: None)
+        tsm.set_failed_if_not_cancelled.remote = AsyncMock(side_effect=asyncio.CancelledError())
+
+    logs = await _logs_of_failing_file(
+        IndexerWorker(pipeline=_StoreFailedPipeline(), task_state_manager=tsm),
+        tmp_path,
+        raises=asyncio.CancelledError,
+        match=None,
+    )
+
+    assert logs == [(INTERRUPTED_LINE, "boom")]
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_file_logs_before_the_callback_a_cancellation_can_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "services.workers.indexer_actor.send_indexing_callback",
+        AsyncMock(side_effect=asyncio.CancelledError()),
+    )
+
+    logs = await _logs_of_failing_file(
+        IndexerWorker(pipeline=_ExplodingPipeline(), task_state_manager=_fake_tsm()),
+        tmp_path,
+        raises=asyncio.CancelledError,
+        match=None,
+    )
+
+    assert logs == [(FAILED_LINE, "boom")]
 
 
 @pytest.mark.asyncio
@@ -1651,6 +1878,123 @@ async def test_process_file_stamps_started_at_when_the_task_leaves_the_queue(tmp
     )
     assert job.started_at is not None
     assert job.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_process_file_persists_its_actual_pipeline_stage_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StageHistoryRepo:
+        def __init__(self) -> None:
+            self.jobs = []
+            self.writes = []
+
+        async def upsert_job(self, job):
+            self.jobs.append(job)
+            return job
+
+        async def write_stage_progress(self, *, events, summaries):
+            self.writes.append((list(events), list(summaries)))
+            return StageProgressWriteResult()
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    repo = StageHistoryRepo()
+    tsm = _fake_tsm()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, [Chunk(id="c1", text="content", partition="p")]),
+        task_state_manager=tsm,
+        job_repo=repo,
+    )
+    assert worker._stage_writer is not None
+    wait_for_summary_capacity = AsyncMock()
+    monkeypatch.setattr(worker._stage_writer, "wait_for_summary_capacity", wait_for_summary_capacity)
+
+    async def assert_capacity_checked_before_start(*_args: Any) -> None:
+        assert wait_for_summary_capacity.await_count == 1
+
+    tsm.set_state.remote.side_effect = assert_capacity_checked_before_start
+    finish_task = MagicMock(wraps=worker._stage_writer.finish_task)
+    monkeypatch.setattr(worker._stage_writer, "finish_task", finish_task)
+
+    await worker.process_file(task_id="tracked-task", path=str(path), metadata={"file_id": "f1"}, partition="p")
+    await worker.close_stage_writer()
+
+    wait_for_summary_capacity.assert_awaited_once_with()
+    finish_task.assert_called_once()
+    assert repo.jobs[0].stage_tracking_version == 1
+    events = [event for batch, _ in repo.writes for event in batch]
+    starts = [event.stage_id for event in events if event.status is StageEventStatus.STARTED]
+    assert starts == ["parse", "chunk", "embed", "store"]
+    assert [event.sequence for event in events] == list(range(1, 9))
+    summaries = [summary for _, batch in repo.writes for summary in batch]
+    assert summaries[-1].expected_final_sequence == 8
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pipeline_still_finalizes_stage_tracker_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StageHistoryRepo:
+        async def upsert_job(self, job):
+            return job
+
+        async def write_stage_progress(self, *, events, summaries):
+            return StageProgressWriteResult()
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    pipeline = MagicMock()
+    pipeline.run = AsyncMock(side_effect=asyncio.CancelledError)
+    worker = IndexerWorker(
+        pipeline=pipeline,
+        task_state_manager=_fake_tsm(),
+        job_repo=StageHistoryRepo(),
+    )
+    assert worker._stage_writer is not None
+    finish_task = MagicMock(wraps=worker._stage_writer.finish_task)
+    monkeypatch.setattr(worker._stage_writer, "finish_task", finish_task)
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker.process_file(
+            task_id="cancelled-stage-tracker", path=str(path), metadata={"file_id": "f1"}, partition="p"
+        )
+
+    finish_task.assert_called_once()
+    await worker.close_stage_writer()
+
+
+@pytest.mark.asyncio
+async def test_stage_history_database_failure_does_not_change_indexing_result(tmp_path: Path) -> None:
+    class UnavailableHistoryRepo:
+        async def upsert_job(self, job):
+            return job
+
+        async def write_stage_progress(self, *, events, summaries):
+            raise TimeoutError("history database unavailable")
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, [Chunk(id="c1", text="content", partition="p")]),
+        task_state_manager=_fake_tsm(),
+        job_repo=UnavailableHistoryRepo(),
+    )
+
+    result = await worker.process_file(
+        task_id="history-outage",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+    )
+    await worker.close_stage_writer()
+
+    assert result["stored_count"] == 1
+    assert worker._stage_writer is not None
+    assert worker._stage_writer.write_failures >= 1
+    assert worker._stage_writer.write_retries == worker._stage_writer.write_failures
 
 
 @pytest.mark.asyncio

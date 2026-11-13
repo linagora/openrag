@@ -85,7 +85,7 @@ def calendar_anchors(now: datetime) -> str:
         f"- this month [{this_month}, {next_month})\n"
         f"- last year [{last_year}, {this_year})\n"
         f"- this year [{this_year}, {next_year})\n"
-        f"- recent / latest (past {RECENT_DAYS} days) [{recent_start}, {tomorrow})\n"
+        f"- recent / lately (past {RECENT_DAYS} days) [{recent_start}, {tomorrow})\n"
         # One worked instance of the formula: without it the model resolved
         # "past 2 weeks" to a 17-day window in both languages. Labelled as an
         # example, otherwise "past 3 weeks" copies this range instead of

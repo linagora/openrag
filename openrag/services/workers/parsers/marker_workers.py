@@ -9,8 +9,8 @@ import pypdfium2
 import ray
 import torch
 from core.config import load_config
-from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
+from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import (
     Document,
     DocumentType,
@@ -193,6 +193,10 @@ class MarkerWorker:
             # and each get a full memory ceiling (#1167). The slots already
             # parse chunks in parallel.
             "pdftext_workers": 1,
+            # Surya passes disable= explicitly, which beats TQDM_DISABLE: honor
+            # it here (non-empty = off, as tqdm reads it), and turn the bars
+            # off with JSON logs even when TQDM_DISABLE was not set (#1297).
+            "disable_tqdm": bool(os.environ.get("TQDM_DISABLE")) or self.config.verbose.format == "json",
         }
         if self.config.loader.marker_pdftext_workers > 1:
             self.logger.warning(
@@ -658,7 +662,10 @@ class MarkerLoader(BasePooledParser):
     """
 
     PAGE_SEP = "[PAGE_SEP]"
-    _PAGE_MARKER_RE = re.compile(r"\{(\d+)\}" + re.escape(PAGE_SEP))
+    # The page is read with int(), which refuses more than 4,300 digits, and the
+    # PDF's own text can contain ``{N}[PAGE_SEP]``: a number no page count reaches
+    # leaves it plain text, as ``PAGE_RE`` does for ``[PAGE_N]``.
+    _PAGE_MARKER_RE = re.compile(r"\{(\d{1,9})\}" + re.escape(PAGE_SEP))
 
     def __init__(self) -> None:
         self.config = load_config()
@@ -690,11 +697,14 @@ class MarkerLoader(BasePooledParser):
                 metadata=dict(document.metadata),
             )
 
+        report_parser_substage("parse.convert", "Converting PDF with Marker")
         async with document.as_temporary_file() as path:
             markdown, images = await self._dispatch(str(path))
 
-        pages = self._split_pages(markdown)
-        image_blocks = self._build_image_blocks(images)
+        # The figures are handed over unencoded (see ``_build_image_blocks``);
+        # splitting the markdown of a long PDF still runs off the loop, which
+        # also renews the leases of every other file on this worker.
+        pages, image_blocks = await asyncio.to_thread(self._postprocess, markdown, images)
         text_blocks = [TextBlock(text=text, page_number=page) for page, text in pages]
 
         return ProcessedDocument(
@@ -706,6 +716,9 @@ class MarkerLoader(BasePooledParser):
         )
 
     # ----- helpers -----
+
+    def _postprocess(self, markdown: str, images: dict) -> tuple[list[tuple[int, str]], list[ImageBlock]]:
+        return self._split_pages(markdown), self._build_image_blocks(images)
 
     async def _convert_pdf(self, file_path: str):
         pool = self._pool()
@@ -756,17 +769,16 @@ class MarkerLoader(BasePooledParser):
         number is parsed from Marker's key format
         (``_page_{N}_Picture_{i}.{ext}``) and stored 1-indexed to match
         the ``[PAGE_N]`` markers in the post-processed markdown.
+
+        Each image is kept decoded in ``pil_image``: the caption stage
+        PNG-encodes it only when it captions the document, so a partition
+        without captioning never pays for it.
         """
         blocks: list[ImageBlock] = []
         for key, pil_image in images.items():
-            try:
-                png_bytes = pil_to_png_bytes(pil_image)
-            except Exception as exc:
-                logger.warning(f"Failed to encode Marker image {key}: {exc}")
-                continue
             blocks.append(
                 ImageBlock(
-                    image_bytes=png_bytes,
+                    pil_image=pil_image,
                     page_number=_marker_key_to_page(str(key)),
                     mime_type="image/png",
                     metadata={"markdown_ref": f"![]({key})", "marker_key": str(key)},
@@ -795,18 +807,28 @@ class MarkerLoader(BasePooledParser):
             markdown = markdown.split(cls.PAGE_SEP, 1)[1]
         markdown = markdown.replace("<br>", "")
 
+        matches = list(cls._PAGE_MARKER_RE.finditer(markdown))
+        has_trailing_page = bool(markdown[matches[-1].end() :].strip()) if matches else bool(markdown.strip())
+        total_pages = len(matches) + int(has_trailing_page and bool(matches))
+        if not matches and markdown.strip():
+            total_pages = 1
+        if total_pages:
+            report_parser_substage("parse.text", "Extracting page text", progress=0, total=total_pages)
+
         pairs: list[tuple[int, str]] = []
         cursor = 0
         last_page = 0
-        for match in cls._PAGE_MARKER_RE.finditer(markdown):
+        for index, match in enumerate(matches, start=1):
             page = int(match.group(1))
             text = markdown[cursor : match.start()].strip()
             pairs.append((page, text))
             cursor = match.end()
             last_page = page
+            report_parser_substage("parse.text", "Extracting page text", progress=index, total=total_pages)
         tail = markdown[cursor:].strip()
         if tail:
             pairs.append((last_page + 1, tail))
+            report_parser_substage("parse.text", "Extracting page text", progress=len(pairs), total=total_pages)
         elif not pairs and markdown.strip():
             pairs.append((1, markdown.strip()))
         return pairs

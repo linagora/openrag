@@ -21,7 +21,7 @@ from core.models.catalog import (
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
-from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
+from core.utils.exceptions import ConflictError, ServiceUnavailableError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
@@ -34,7 +34,13 @@ from services.workers.ray_utils import (
 )
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
-from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING
+from services.workers.task_state import (
+    QUEUE_REFUSED_CANCELLED,
+    QUEUE_REFUSED_FILE_INDEXING,
+    QUEUE_REFUSED_INDEXING_CAPACITY,
+    TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
+    read_ref_when_settled,
+)
 
 logger = get_logger()
 
@@ -350,7 +356,14 @@ class WorkerDispatcher(IndexingDispatcher):
         user_metadata = {
             key: value
             for key, value in metadata.items()
-            if key not in {"file_id", "source", TASK_CREATED_AT_METADATA_KEY, TASK_FINISHED_AT_METADATA_KEY}
+            if key
+            not in {
+                "file_id",
+                "source",
+                TASK_CREATED_AT_METADATA_KEY,
+                TASK_FINISHED_AT_METADATA_KEY,
+                TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
+            }
         }
         user_metadata[TASK_CREATED_AT_METADATA_KEY] = _utc_now_iso()
         task_details = {
@@ -387,6 +400,13 @@ class WorkerDispatcher(IndexingDispatcher):
                 raise _indexing_in_progress(file_id, partition, busy_task_id)
             if reason == QUEUE_REFUSED_CANCELLED:
                 raise RuntimeError(f"Task {task_id} was cancelled before it queued")
+            if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
+                raise ServiceUnavailableError(
+                    "Indexing is temporarily paused because task capacity is full "
+                    "(queued or running work and unsaved job outcomes). Please retry shortly.",
+                    # Preserve this API code so existing clients keep retrying it.
+                    code="INDEXING_OUTCOME_BACKLOG",
+                )
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
@@ -551,6 +571,9 @@ class WorkerDispatcher(IndexingDispatcher):
             self._pool.submit.remote(**submit_kwargs),
             task_description=f"submit({task_id})",
         )
+        # Deserializing the ref made this process borrow it, and it is dropped
+        # once handed to the completion tracker.
+        read_ref_when_settled(submitted[0])
         return submitted[0]
 
     async def _mark_submit_failed(self, task_id: str, tb: str, error_reason: str) -> None:
@@ -665,7 +688,8 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
-        if await self._document_repo.get_file_metadata(file_id, partition) is None:
+        catalog_metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        if catalog_metadata is None:
             return
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
@@ -685,7 +709,9 @@ class WorkerDispatcher(IndexingDispatcher):
             entity.update(internal_metadata)
             entities.append(entity)
 
-        await self._upsert_entities(entities)
+        target_catalog_metadata = dict(catalog_metadata)
+        target_catalog_metadata.update(public_metadata)
+        await self._upsert_entities(entities, protected_metadata=target_catalog_metadata)
 
         await self._document_repo.update_file_metadata_in_db(file_id, partition, public_metadata)
 
@@ -735,6 +761,9 @@ class WorkerDispatcher(IndexingDispatcher):
 
             public_metadata = strip_internal_metadata(metadata)
             indexed_at = datetime.now(UTC)
+            file_metadata = dict(source_file_metadata)
+            file_metadata.update(public_metadata)
+            file_metadata["indexed_at"] = indexed_at.isoformat()
             entities = []
             for row in rows:
                 entity = strip_internal_metadata(row)
@@ -760,11 +789,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     catalog_kwargs["embedder_fingerprint"] = embedder_fingerprint
             if indexation_config is not None:
                 catalog_kwargs["indexation_config"] = indexation_config
-            await self._insert_entities(entities)
-
-            file_metadata = dict(source_file_metadata)
-            file_metadata.update(public_metadata)
-            file_metadata["indexed_at"] = indexed_at.isoformat()
+            await self._insert_entities(entities, protected_metadata=file_metadata)
             try:
                 await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
@@ -840,17 +865,27 @@ class WorkerDispatcher(IndexingDispatcher):
                 provenance["embedder_dimension"] = widths.pop()
         return provenance
 
-    async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
+    async def _upsert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        protected_metadata: Mapping[str, Any],
+    ) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)
         if upsert_entities is None:
             raise TypeError("vector_store must expose upsert_entities for file metadata mutations")
-        await upsert_entities(entities, self._collection)
+        await upsert_entities(entities, self._collection, protected_metadata=protected_metadata)
 
-    async def _insert_entities(self, entities: list[dict[str, Any]]) -> None:
+    async def _insert_entities(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        protected_metadata: Mapping[str, Any],
+    ) -> None:
         insert_entities = getattr(self._vector_store, "insert_entities", None)
         if insert_entities is None:
             raise TypeError("vector_store must expose insert_entities for file copy mutations")
-        await insert_entities(entities, self._collection)
+        await insert_entities(entities, self._collection, protected_metadata=protected_metadata)
 
     async def _record_job(
         self,
@@ -967,6 +1002,9 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         if obj_ref is None:
             return False
+        # Fetching the ref made this process borrow it, and a task already
+        # settled returns below without reading it.
+        read_ref_when_settled(obj_ref)
 
         # Atomically claim the cancellation first: if ray.cancel() ran before
         # this and the RPC then failed, a killed worker could never report

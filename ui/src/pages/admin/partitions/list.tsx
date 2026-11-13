@@ -34,7 +34,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PageHeader } from "@/components/shared/page-header";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { DEFAULT_PAGE_SIZE } from "@/components/shared/data-table";
 import {
   listPartitions,
   createPartition,
@@ -53,7 +55,6 @@ import { intOr } from "@/lib/utils";
 import { partitionDetailPath } from "@/lib/routes";
 
 type SortDir = "asc" | "desc" | null;
-const PARTITIONS_PAGE_SIZE = 10;
 const PARTITIONS_REFETCH_INTERVAL_MS = 5000;
 // Seeded at startup; the API refuses to delete it.
 const DEFAULT_PARTITION_NAME = "default";
@@ -145,9 +146,9 @@ function SortButton({ label, active, direction, onClick }: { label: string; acti
 export default function PartitionListPage() {
   const queryClient = useQueryClient();
   const { canManagePartitions, canConfigurePartition, canWrite } = usePermissions();
-  // The backend refuses to delete the default partition (409), so it is never offered.
   const canDeletePartition = useCallback(
-    (p: PartitionResponse) => p.name !== DEFAULT_PARTITION_NAME && canConfigurePartition(p.role),
+    (partition: PartitionResponse) =>
+      partition.name !== DEFAULT_PARTITION_NAME && canConfigurePartition(partition.role),
     [canConfigurePartition],
   );
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -178,8 +179,8 @@ export default function PartitionListPage() {
   const [llmValidating, setLlmValidating] = useState(false);
 
   const [search, setSearch] = useState("");
-  const [sortDir, setSortDir] = useState<SortDir>(null);
-  const [sortColumn, setSortColumn] = useState<"name" | "created_at">("created_at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sortColumn, setSortColumn] = useState<"name" | "created_at">("name");
   const [selectedPartitionNames, setSelectedPartitionNames] = useState<string[]>([]);
   const [pageIndex, setPageIndex] = useState(0);
   const [manualRefreshing, setManualRefreshing] = useState(false);
@@ -193,23 +194,35 @@ export default function PartitionListPage() {
     refetchInterval: PARTITIONS_REFETCH_INTERVAL_MS,
   });
 
-  const { data: presetsData } = useQuery({
+  const presetsQuery = useQuery({
     queryKey: ["presets"],
     queryFn: () => listPresets(),
     enabled: canManagePartitions,
   });
 
-  const { data: llmEndpoints } = useQuery({
+  const llmEndpointsQuery = useQuery({
     queryKey: ["model-endpoints", "llm"],
     queryFn: () => listModelEndpoints("llm"),
     enabled: canManagePartitions,
   });
 
-  const { data: embedderEndpoints } = useQuery({
+  const embedderEndpointsQuery = useQuery({
     queryKey: ["model-endpoints", "embedder"],
     queryFn: () => listModelEndpoints("embedder"),
     enabled: canManagePartitions,
   });
+
+  const presetsData = presetsQuery.data;
+  const llmEndpoints = llmEndpointsQuery.data;
+  const embedderEndpoints = embedderEndpointsQuery.data;
+  const setupQueries = [presetsQuery, llmEndpointsQuery, embedderEndpointsQuery];
+  const setupReadFailed = canManagePartitions && setupQueries.some((query) => query.isError);
+  const setupInitialReadFailed =
+    canManagePartitions && setupQueries.some((query) => query.isLoadingError);
+  const setupLoading = canManagePartitions && setupQueries.some((query) => query.isLoading);
+  const retrySetupReads = () => {
+    setupQueries.filter((query) => query.isError).forEach((query) => void query.refetch());
+  };
 
   // Pre-select the default (or only) embedder so the Create button is active
   // immediately when the choice is unambiguous.
@@ -266,21 +279,16 @@ export default function PartitionListPage() {
       );
     }
 
-    // Sort
-    if (sortDir) {
-      const dir = sortDir === "asc" ? 1 : -1;
-      items = [...items].sort((a, b) => {
-        if (sortColumn === "name") {
-          return a.name.localeCompare(b.name) * dir;
-        }
-        // created_at
-        const aDate = a.created_at ?? "";
-        const bDate = b.created_at ?? "";
-        return aDate.localeCompare(bDate) * dir;
-      });
-    }
-
-    return items;
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      if (sortColumn === "name") {
+        return a.name.localeCompare(b.name) * dir;
+      }
+      // created_at
+      const aDate = a.created_at ?? "";
+      const bDate = b.created_at ?? "";
+      return aDate.localeCompare(bDate) * dir;
+    });
   }, [partitionsQuery.data, search, sortDir, sortColumn]);
 
   // Show the actions column whenever the row has at least one available row
@@ -289,7 +297,7 @@ export default function PartitionListPage() {
     canManagePartitions ||
     filteredAndSorted.some((p) => canWrite(p.role) || canConfigurePartition(p.role));
 
-  const pageCount = Math.ceil(filteredAndSorted.length / PARTITIONS_PAGE_SIZE);
+  const pageCount = Math.ceil(filteredAndSorted.length / DEFAULT_PAGE_SIZE);
   useEffect(() => {
     if (pageIndex > 0 && pageIndex > pageCount - 1) {
       setPageIndex(Math.max(0, pageCount - 1));
@@ -297,15 +305,15 @@ export default function PartitionListPage() {
   }, [pageCount, pageIndex]);
 
   const visiblePartitions = useMemo(() => {
-    const start = pageIndex * PARTITIONS_PAGE_SIZE;
-    return filteredAndSorted.slice(start, start + PARTITIONS_PAGE_SIZE);
+    const start = pageIndex * DEFAULT_PAGE_SIZE;
+    return filteredAndSorted.slice(start, start + DEFAULT_PAGE_SIZE);
   }, [filteredAndSorted, pageIndex]);
   const visibleDeletablePartitionNames = useMemo(
     () => visiblePartitions.filter(canDeletePartition).map((p) => p.name),
     [visiblePartitions, canDeletePartition],
   );
   const hasDeletablePartitions = useMemo(
-    () => filteredAndSorted.some((p) => canDeletePartition(p)),
+    () => filteredAndSorted.some(canDeletePartition),
     [filteredAndSorted, canDeletePartition],
   );
   const visibleDeletablePartitionNameSet = useMemo(
@@ -341,12 +349,8 @@ export default function PartitionListPage() {
     if (sortColumn !== column) {
       setSortColumn(column);
       setSortDir("asc");
-    } else if (sortDir === null) {
-      setSortDir("asc");
-    } else if (sortDir === "asc") {
-      setSortDir("desc");
     } else {
-      setSortDir(null);
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
     }
   };
 
@@ -460,7 +464,11 @@ export default function PartitionListPage() {
         )}
         <div className="ml-auto flex items-center gap-2">
           <p className="text-sm text-muted-foreground">
-            {filteredAndSorted.length} partition{filteredAndSorted.length === 1 ? "" : "s"}
+            {partitionsQuery.isLoading
+              ? "Loading partitions…"
+              : partitionsQuery.isLoadingError
+                ? "Partitions unavailable"
+                : `${filteredAndSorted.length} partition${filteredAndSorted.length === 1 ? "" : "s"}`}
           </p>
           <Button
             variant="outline"
@@ -484,154 +492,174 @@ export default function PartitionListPage() {
             <div key={i} className="h-12 rounded-md bg-accent animate-pulse" />
           ))}
         </div>
+      ) : partitionsQuery.isLoadingError ? (
+        <QueryErrorNotice
+          title="Partitions could not be loaded"
+          message="The partition list is unavailable. Try again to reload it."
+          isRetrying={partitionsQuery.isFetching}
+          onRetry={() => void partitionsQuery.refetch()}
+        />
       ) : (
-        <div className="rounded-md border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {hasDeletablePartitions && (
+        <>
+          {partitionsQuery.isRefetchError && (
+            <div className="mb-4">
+              <QueryErrorNotice
+                title="Partitions could not be refreshed"
+                message="Showing previously loaded partitions. They may be out of date."
+                isRetrying={partitionsQuery.isFetching}
+                onRetry={() => void partitionsQuery.refetch()}
+                stale
+              />
+            </div>
+          )}
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  {hasDeletablePartitions && (
+                    <TableHead>
+                      <Checkbox
+                        checked={allDeletableSelected || (someDeletableSelected && "indeterminate")}
+                        disabled={visibleDeletablePartitionNames.length === 0}
+                        onCheckedChange={(value) => {
+                          setSelectedPartitionNames((prev) =>
+                            value
+                              ? Array.from(new Set([...prev, ...visibleDeletablePartitionNames]))
+                              : prev.filter((name) => !visibleDeletablePartitionNameSet.has(name)),
+                          );
+                        }}
+                        aria-label="Select visible deletable partitions"
+                      />
+                    </TableHead>
+                  )}
                   <TableHead>
-                    <Checkbox
-                      checked={allDeletableSelected || (someDeletableSelected && "indeterminate")}
-                      disabled={visibleDeletablePartitionNames.length === 0}
-                      onCheckedChange={(value) => {
-                        setSelectedPartitionNames((prev) =>
-                          value
-                            ? Array.from(new Set([...prev, ...visibleDeletablePartitionNames]))
-                            : prev.filter((name) => !visibleDeletablePartitionNameSet.has(name)),
-                        );
-                      }}
-                      aria-label="Select visible deletable partitions"
+                    <SortButton
+                      label="Name"
+                      active={sortColumn === "name"}
+                      direction={sortColumn === "name" ? sortDir : null}
+                      onClick={() => handleSort("name")}
                     />
                   </TableHead>
-                )}
-                <TableHead>
-                  <SortButton
-                    label="Name"
-                    active={sortColumn === "name"}
-                    direction={sortColumn === "name" ? sortDir : null}
-                    onClick={() => handleSort("name")}
-                  />
-                </TableHead>
-                <TableHead>Description</TableHead>
-                <TableHead>Documents</TableHead>
-                {canManagePartitions && <TableHead>Embedder</TableHead>}
-                {canManagePartitions && <TableHead>Indexation Preset</TableHead>}
-                {canManagePartitions && <TableHead>Retrieval Preset</TableHead>}
-                <TableHead>
-                  <SortButton
-                    label="Created"
-                    active={sortColumn === "created_at"}
-                    direction={sortColumn === "created_at" ? sortDir : null}
-                    onClick={() => handleSort("created_at")}
-                  />
-                </TableHead>
-                {showActions && <TableHead>Actions</TableHead>}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {visiblePartitions.length ? (
-                visiblePartitions.map((p) => (
-                  <TableRow key={p.name}>
-                    {hasDeletablePartitions && (
-                      <TableCell>
-                        <Checkbox
-                          checked={selectedPartitionNameSet.has(p.name)}
-                          disabled={!canDeletePartition(p)}
-                          onCheckedChange={(value) =>
-                            setSelectedPartitionNames((prev) =>
-                              value
-                                ? Array.from(new Set([...prev, p.name]))
-                                : prev.filter((name) => name !== p.name),
-                            )
-                          }
-                          aria-label={`Select partition ${p.name}`}
-                        />
-                      </TableCell>
-                    )}
-                    <TableCell>
-                      <div className="flex min-w-0 items-center gap-2">
-                        <Link
-                          to={partitionDetailPath(p.name)}
-                          className="block max-w-[220px] truncate font-medium text-primary hover:underline"
-                          title={p.name}
-                        >
-                          {p.name}
-                        </Link>
-                        {!canManagePartitions && (
-                          <Badge variant="outline" className="text-xs capitalize">
-                            {p.role?.toLowerCase()}
-                          </Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      {p.description ? (
-                        <span className="max-w-[200px] truncate block" title={p.description}>
-                          {p.description.length > 50
-                            ? `${p.description.slice(0, 50)}...`
-                            : p.description}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">--</span>
-                      )}
-                    </TableCell>
-                    <TableCell>{p.document_count}</TableCell>
-                    {canManagePartitions && (
-                      <TableCell className="text-sm">
-                        <span className="block max-w-[180px] truncate" title={resolveEmbedderName(p.embedder, embedderEndpoints)}>
-                          {resolveEmbedderName(p.embedder, embedderEndpoints)}
-                        </span>
-                      </TableCell>
-                    )}
-                    {canManagePartitions && (
-                      <TableCell>
-                        <span className="block max-w-[180px] truncate" title={p.indexation_preset}>
-                          {p.indexation_preset}
-                        </span>
-                      </TableCell>
-                    )}
-                    {canManagePartitions && (
-                      <TableCell>
-                        <span className="block max-w-[180px] truncate" title={p.retrieval_preset}>
-                          {p.retrieval_preset}
-                        </span>
-                      </TableCell>
-                    )}
-                    <TableCell className="text-sm text-muted-foreground">
-                      {p.created_at
-                        ? new Date(p.created_at).toLocaleDateString()
-                        : "--"}
-                    </TableCell>
-                    {showActions && (
-                      <TableCell>
-                        <RowActions
-                          partition={p}
-                          showUpload={canWrite(p.role)}
-                          showEdit={canManagePartitions}
-                          showDelete={canDeletePartition(p)}
-                        />
-                      </TableCell>
-                    )}
-                  </TableRow>
-                ))
-              ) : (
-                <TableRow>
-                  <TableCell
-                    colSpan={
-                      (canManagePartitions ? 7 : 4) +
-                      (showActions ? 1 : 0) +
-                      (hasDeletablePartitions ? 1 : 0)
-                    }
-                    className="h-24 text-center text-muted-foreground"
-                  >
-                    {search.trim() ? "No partitions match your search." : "No partitions."}
-                  </TableCell>
+                  <TableHead>Description</TableHead>
+                  <TableHead>Documents</TableHead>
+                  {canManagePartitions && <TableHead>Embedder</TableHead>}
+                  {canManagePartitions && <TableHead>Indexation Preset</TableHead>}
+                  {canManagePartitions && <TableHead>Retrieval Preset</TableHead>}
+                  <TableHead>
+                    <SortButton
+                      label="Created"
+                      active={sortColumn === "created_at"}
+                      direction={sortColumn === "created_at" ? sortDir : null}
+                      onClick={() => handleSort("created_at")}
+                    />
+                  </TableHead>
+                  {showActions && <TableHead>Actions</TableHead>}
                 </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </div>
+              </TableHeader>
+              <TableBody>
+                {visiblePartitions.length ? (
+                  visiblePartitions.map((p) => (
+                    <TableRow key={p.name}>
+                      {hasDeletablePartitions && (
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedPartitionNameSet.has(p.name)}
+                            disabled={!canDeletePartition(p)}
+                            onCheckedChange={(value) =>
+                              setSelectedPartitionNames((prev) =>
+                                value
+                                  ? Array.from(new Set([...prev, p.name]))
+                                  : prev.filter((name) => name !== p.name),
+                              )
+                            }
+                            aria-label={`Select partition ${p.name}`}
+                          />
+                        </TableCell>
+                      )}
+                      <TableCell>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Link
+                            to={partitionDetailPath(p.name)}
+                            className="block max-w-[220px] truncate font-medium text-primary hover:underline"
+                            title={p.name}
+                          >
+                            {p.name}
+                          </Link>
+                          {!canManagePartitions && (
+                            <Badge variant="outline" className="text-xs capitalize">
+                              {p.role?.toLowerCase()}
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {p.description ? (
+                          <span className="max-w-[200px] truncate block" title={p.description}>
+                            {p.description.length > 50
+                              ? `${p.description.slice(0, 50)}...`
+                              : p.description}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">--</span>
+                        )}
+                      </TableCell>
+                      <TableCell>{p.document_count}</TableCell>
+                      {canManagePartitions && (
+                        <TableCell className="text-sm">
+                          <span className="block max-w-[180px] truncate" title={resolveEmbedderName(p.embedder, embedderEndpoints)}>
+                            {resolveEmbedderName(p.embedder, embedderEndpoints)}
+                          </span>
+                        </TableCell>
+                      )}
+                      {canManagePartitions && (
+                        <TableCell>
+                          <span className="block max-w-[180px] truncate" title={p.indexation_preset}>
+                            {p.indexation_preset}
+                          </span>
+                        </TableCell>
+                      )}
+                      {canManagePartitions && (
+                        <TableCell>
+                          <span className="block max-w-[180px] truncate" title={p.retrieval_preset}>
+                            {p.retrieval_preset}
+                          </span>
+                        </TableCell>
+                      )}
+                      <TableCell className="text-sm text-muted-foreground">
+                        {p.created_at
+                          ? new Date(p.created_at).toLocaleDateString()
+                          : "--"}
+                      </TableCell>
+                      {showActions && (
+                        <TableCell>
+                          <RowActions
+                            partition={p}
+                            showUpload={canWrite(p.role)}
+                            showEdit={canManagePartitions}
+                            showDelete={canDeletePartition(p)}
+                          />
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  ))
+                ) : (
+                  <TableRow>
+                    <TableCell
+                      colSpan={
+                        (canManagePartitions ? 7 : 4) +
+                        (showActions ? 1 : 0) +
+                        (hasDeletablePartitions ? 1 : 0)
+                      }
+                      className="h-24 text-center text-muted-foreground"
+                    >
+                      {search.trim() ? "No partitions match your search." : "No partitions."}
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </>
       )}
 
       {pageCount > 1 && (
@@ -670,6 +698,24 @@ export default function PartitionListPage() {
               {createPartitionDescription}
             </DialogDescription>
           </DialogHeader>
+          {setupLoading && (
+            <p className="text-sm text-muted-foreground" role="status">
+              Loading partition setup options…
+            </p>
+          )}
+          {setupReadFailed && (
+            <QueryErrorNotice
+              title={setupInitialReadFailed
+                ? "Partition setup options could not be loaded"
+                : "Partition setup options could not be refreshed"}
+              message={setupInitialReadFailed
+                ? "Some models or presets are unavailable. Retry before using these options."
+                : "Showing previously loaded models and presets. They may be out of date."}
+              isRetrying={setupQueries.some((query) => query.isFetching)}
+              onRetry={retrySetupReads}
+              stale={!setupInitialReadFailed}
+            />
+          )}
           <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
             <div className="-mx-1 min-h-0 flex-1 space-y-4 overflow-y-auto px-1 pb-1">
               <div className="space-y-2">
@@ -798,6 +844,7 @@ export default function PartitionListPage() {
                 type="submit"
                 disabled={
                   createMutation.isPending ||
+                  (canManagePartitions && (setupLoading || setupInitialReadFailed)) ||
                   (canManagePartitions &&
                     (llmValidating || llmValidated === false || !embedder || intOr(chatHistoryDepth, 0) < 1))
                 }

@@ -18,15 +18,38 @@ class FakeLLM:
 
 @pytest.mark.parametrize("size", [50, 2000, 20000])
 def test_streaming_topic_sample_matches_existing_prompt_and_is_bounded(size):
-    chunks = [Chunk(text=str(i) + "x" * size, embedding=[1.0] * 100, metadata={"large": "y" * 1000}) for i in range(20)]
+    chunks = [
+        Chunk(
+            text=str(i) + "x" * size,
+            content=f"body-{i}-" + "c" * size,
+            embedding=[1.0] * 100,
+            metadata={"large": "y" * 1000},
+        )
+        for i in range(20)
+    ]
     sample = TopicTagSample()
     for start in range(0, len(chunks), 3):
         sample.add(chunks[start : start + 3])
     assert len(sample.chunks) <= 12
     assert sum(len(chunk.text) for chunk in sample.chunks) <= 8000
+    assert sum(len(chunk.content or "") for chunk in sample.chunks) <= 8000
+    assert sample.chunks[0].content == chunks[0].content[:8000]
     assert all(chunk.embedding is None and not chunk.metadata for chunk in sample.chunks)
     args = {"system_prompt": "topics", "filename": "people.csv", "max_tags": 7, "lang": "en"}
     assert _build_messages(chunks=sample.chunks, **args) == _build_messages(chunks=chunks, **args)
+
+
+def test_topic_sample_uses_missing_content_marker_after_content_budget_is_exhausted():
+    sample = TopicTagSample()
+    sample.add(
+        [
+            Chunk(text="short display text", content="c" * 8000),
+            Chunk(text="later display text", content="later content"),
+        ]
+    )
+
+    assert sample.chunks[1].text == "later display text"
+    assert sample.chunks[1].content is None
 
 
 @pytest.mark.asyncio
@@ -98,3 +121,56 @@ async def test_topic_tagger_parses_json_array_before_bracket_suffix():
     tagger = TopicTagger(llm, "extract topics")
 
     assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5) == ["finance"]
+
+
+class _TrackingGate:
+    """Async context manager standing in for the distributed LLM semaphore."""
+
+    def __init__(self, wait_seconds: float = 0.0) -> None:
+        self.depth = 0
+        self.entered = 0
+        self._wait_seconds = wait_seconds
+
+    async def __aenter__(self):
+        await asyncio.sleep(self._wait_seconds)
+        self.depth += 1
+        self.entered += 1
+        return self
+
+    async def __aexit__(self, *exc):
+        self.depth -= 1
+
+
+class _GateCheckingLLM(FakeLLM):
+    def __init__(self, content: str, gate: _TrackingGate) -> None:
+        super().__init__(content)
+        self._gate = gate
+        self.gate_held: list[bool] = []
+
+    async def chat(self, messages, **kwargs):
+        self.gate_held.append(self._gate.depth > 0)
+        return await super().chat(messages, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_topic_tagger_holds_llm_semaphore_around_chat():
+    gate = _TrackingGate()
+    llm = _GateCheckingLLM('["Budget"]', gate)
+    tagger = TopicTagger(llm, "topics", llm_semaphore=gate)
+
+    tags = await tagger.tag([Chunk(text="Budget report")])
+
+    assert tags == ["Budget"]
+    assert llm.gate_held == [True]
+    assert gate.entered == 1
+    assert gate.depth == 0
+
+
+@pytest.mark.asyncio
+async def test_topic_tagger_timeout_does_not_count_the_wait_for_a_permit():
+    # A permit that takes longer than the timeout to come must not time the
+    # call out: the timeout bounds the LLM call, as in the contextualizer.
+    gate = _TrackingGate(wait_seconds=0.05)
+    tagger = TopicTagger(FakeLLM('["Budget"]'), "topics", timeout_seconds=0.01, llm_semaphore=gate)
+
+    assert await tagger.tag([Chunk(text="Budget report")]) == ["Budget"]

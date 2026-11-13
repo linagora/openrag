@@ -39,6 +39,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     # Semaphore
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
+    # Language detection
+    ("LANGDETECT_MODEL", "language_detection.model", str),
     # Embedder
     ("EMBEDDER_PROVIDER", "embedder.provider", str),
     ("EMBEDDER_MODEL_NAME", "embedder.model_name", str),
@@ -61,6 +63,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("VDB_HYBRID_SEARCH", "vectordb.hybrid_search", bool),
     ("VDB_ENABLE_INSERTION", "vectordb.enable", bool),
     ("VDB_TIMEOUT", "vectordb.timeout", float),
+    ("VDB_JSON_MAX_LENGTH", "vectordb.json_max_length", int),
+    ("VDB_JSON_SAFETY_MARGIN_BYTES", "vectordb.json_safety_margin_bytes", int),
     # RDB (Postgres)
     ("POSTGRES_HOST", "rdb.host", str),
     ("POSTGRES_PORT", "rdb.port", int),
@@ -90,6 +94,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     # Verbose
     ("LOG_LEVEL", "verbose.level", str),
     ("LOG_FORMAT", "verbose.format", str),
+    ("LOG_PERSONAL_DATA", "verbose.personal_data", bool),
     # Server
     ("PREFERRED_URL_SCHEME", "server.preferred_url_scheme", str),
     ("METRICS_TOKEN", "server.metrics_token", str),
@@ -104,12 +109,12 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("DB_DIR", "paths.db_dir", str),
     # Loader
     ("IMAGE_CAPTIONING", "loader.image_captioning", bool),
-    ("IMAGE_CAPTIONING_URL", "loader.image_captioning_url", bool),
     ("SAVE_MARKDOWN", "loader.save_markdown", bool),
     ("SAVE_UPLOADED_FILES", "loader.save_uploaded_files", bool),
     ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
     ("CSV_BATCH_SIZE", "loader.csv_batch_size", int),
     ("CSV_DELIMITER", "loader.csv_delimiter", str),
+    ("XLSX_BATCH_SIZE", "loader.xlsx_batch_size", int),
     # Indexing callback
     ("INDEXING_CALLBACK_ALLOW_PRIVATE_URLS", "indexing_callback.allow_private_urls", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),

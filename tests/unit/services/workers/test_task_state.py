@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import threading
+import time
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +21,20 @@ from services.workers.task_state import (
 
 def _task_state_manager() -> Any:
     return TaskStateManager.__ray_metadata__.modified_class()
+
+
+async def _mark_job_outcome_persisted(manager: Any, task_id: str) -> None:
+    details = await manager.get_details(task_id)
+    metadata = dict(details.get("metadata") or {})
+    metadata.pop(task_state_module.TASK_JOB_OUTCOME_PENDING_METADATA_KEY, None)
+    metadata[TASK_FINISHED_AT_METADATA_KEY] = "2026-11-09T00:00:00+00:00"
+    await manager.set_details(
+        task_id,
+        file_id=details.get("file_id"),
+        partition=details.get("partition") or "default",
+        metadata=metadata,
+        user_id=details.get("user_id"),
+    )
 
 
 class _FakeWorkerRef:
@@ -111,6 +127,86 @@ async def test_reports_support_for_bounded_task_retention() -> None:
     manager = _task_state_manager()
 
     assert await manager.supports_bounded_task_retention() is True
+
+
+@pytest.mark.asyncio
+async def test_reports_support_for_pending_job_outcome_retention() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.supports_job_outcome_retention() is True
+
+
+def test_expired_terminal_outcome_without_finished_stamp_survives_recovery(monkeypatch) -> None:
+    import ray.cloudpickle as cloudpickle
+    from ray.experimental import internal_kv
+
+    key = task_state_module._recoverable_task_key("task-1")
+    payload = cloudpickle.dumps(("task-1", TaskInfo(state="COMPLETED", details={"metadata": {}}), 99.0))
+    deleted: list[bytes] = []
+    monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
+    monkeypatch.setattr(task_state_module, "_task_state_kv_namespace", lambda: b"test")
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(internal_kv, "_internal_kv_list", lambda *_args, **_kwargs: [key])
+    monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(internal_kv, "_internal_kv_del", lambda candidate, **_kwargs: deleted.append(candidate))
+
+    recovered, expiries = task_state_module._load_recoverable_tasks()
+
+    assert recovered["task-1"].state == "COMPLETED"
+    assert expiries["task-1"] == 99.0
+    assert deleted == []
+
+
+def test_finished_task_does_not_keep_pending_outcome_marker() -> None:
+    info = TaskInfo(
+        state="FAILED",
+        details={
+            "metadata": {
+                task_state_module.TASK_JOB_OUTCOME_PENDING_METADATA_KEY: True,
+                TASK_FINISHED_AT_METADATA_KEY: "2026-11-10T09:00:00+00:00",
+            }
+        },
+    )
+
+    assert task_state_module._job_outcome_pending(info) is False
+
+
+@pytest.mark.asyncio
+async def test_pending_terminal_outcome_is_saved_for_actor_recovery(monkeypatch) -> None:
+    import ray.cloudpickle as cloudpickle
+    from ray.experimental import internal_kv
+
+    key = task_state_module._recoverable_task_key("task-1")
+    storage: dict[bytes, bytes] = {}
+    monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
+    monkeypatch.setattr(task_state_module, "_task_state_kv_namespace", lambda: b"test")
+    monkeypatch.setattr(internal_kv, "_internal_kv_list", lambda *_args, **_kwargs: list(storage))
+    monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda candidate, **_kwargs: storage.get(candidate))
+    monkeypatch.setattr(
+        internal_kv,
+        "_internal_kv_put",
+        lambda candidate, payload, **_kwargs: storage.__setitem__(candidate, payload),
+    )
+    monkeypatch.setattr(internal_kv, "_internal_kv_del", lambda candidate, **_kwargs: storage.pop(candidate, None))
+
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"filename": "report.pdf"},
+        user_id=42,
+    )
+    assert await manager.set_state("task-1", "COMPLETED") is True
+
+    saved_id, saved_info, _expires_at = cloudpickle.loads(storage[key])
+    assert saved_id == "task-1"
+    assert saved_info.state == "COMPLETED"
+    assert task_state_module._job_outcome_pending(saved_info)
+
+    recovered, _expiries = task_state_module._load_recoverable_tasks()
+    assert recovered["task-1"].state == "COMPLETED"
+    assert task_state_module._job_outcome_pending(recovered["task-1"])
 
 
 @pytest.mark.asyncio
@@ -359,6 +455,47 @@ async def test_stale_refless_task_rejects_late_worker_registration() -> None:
     assert await manager.get_object_ref("task-1") is None
 
 
+class _ReadableRef:
+    read = False
+
+    def future(self) -> None:
+        self.read = True
+
+
+@pytest.mark.asyncio
+async def test_registered_ref_is_read_even_when_refused(monkeypatch) -> None:
+    """#1296: a failed result the TSM drops unread is printed by Ray as an unhandled error."""
+    monkeypatch.setattr(task_state_module.ray, "ObjectRef", _ReadableRef)
+    manager = _task_state_manager()
+    ref = _ReadableRef()
+
+    assert await manager.set_object_ref("unknown", {"ref": ref}) is False
+    assert ref.read
+
+
+def test_recovered_ref_is_read_on_restart(monkeypatch) -> None:
+    """A reconstructed actor holds the refs it recovered, and drops them like any other."""
+    monkeypatch.setattr(task_state_module.ray, "ObjectRef", _ReadableRef)
+    ref = _ReadableRef()
+    recovered = {"task-1": TaskInfo(state="SERIALIZING", object_ref={"ref": ref})}
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: (recovered, {}))
+
+    _task_state_manager()
+
+    assert ref.read
+
+
+@pytest.mark.asyncio
+async def test_has_object_ref_reports_registration_without_the_ref() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=None)
+
+    assert await manager.has_object_ref("task-1") is False
+    assert await manager.set_object_ref("task-1", {"ref": _FakeWorkerRef()}) is True
+    assert await manager.has_object_ref("task-1") is True
+    assert await manager.has_object_ref("unknown") is False
+
+
 @pytest.mark.asyncio
 async def test_pending_count_expires_stale_refless_submission_after_grace(monkeypatch) -> None:
     manager = _task_state_manager()
@@ -575,7 +712,7 @@ async def test_file_delete_fence_rejects_matching_queued_details() -> None:
     assert await manager.get_details("task-1") == {
         "file_id": "file-1",
         "partition": "tenant-a",
-        "metadata": {"filename": "report.txt"},
+        "metadata": {"filename": "report.txt", "_openrag_job_outcome_pending": True},
         "user_id": 42,
     }
 
@@ -898,7 +1035,16 @@ def test_expired_settled_cancellation_is_removed_during_recovery(monkeypatch) ->
     from ray.experimental import internal_kv
 
     key = task_state_module._recoverable_task_key("task-1")
-    payload = cloudpickle.dumps(("task-1", TaskInfo(state="CANCELLED"), 99.0))
+    payload = cloudpickle.dumps(
+        (
+            "task-1",
+            TaskInfo(
+                state="CANCELLED",
+                details={"metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-07-20T08:00:00+00:00"}},
+            ),
+            99.0,
+        )
+    )
     deleted: list[bytes] = []
 
     monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
@@ -1044,7 +1190,38 @@ async def test_rejected_submission_is_only_unfenced_after_worker_settlement(monk
     assert info.state == "FAILED"
     assert info.worker_submitted is False
     assert info.object_ref is None
+    assert task_state_module._job_outcome_pending(info)
     assert saved[-1] is info
+
+
+@pytest.mark.asyncio
+async def test_queue_admission_reserves_capacity_for_active_tasks(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_MAX_RESERVED_JOB_OUTCOMES", 1)
+    manager = _task_state_manager()
+
+    admitted = await manager.set_queued_details_v2(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    refused = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-2",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+
+    assert admitted["accepted"] is True
+    assert refused == {
+        "accepted": False,
+        "reason": task_state_module.QUEUE_REFUSED_INDEXING_CAPACITY,
+        "existing_task_id": None,
+    }
+    assert await manager.get_state("task-2") is None
+    assert set(await manager.get_all_info()) == {"task-1"}
 
 
 @pytest.mark.asyncio
@@ -1059,6 +1236,8 @@ async def test_terminal_tasks_are_evicted_once_retention_expires(monkeypatch) ->
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=7)
     await manager.set_state("done-task", "COMPLETED")
     await manager.set_failed_if_not_cancelled("failed-task", "boom")
+    await _mark_job_outcome_persisted(manager, "done-task")
+    await _mark_job_outcome_persisted(manager, "failed-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
     await manager.set_queued_details("new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=7)
@@ -1077,9 +1256,30 @@ async def test_terminal_task_retention_is_capped(monkeypatch) -> None:
         task_id = f"task-{index}"
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
         await manager.set_state(task_id, "COMPLETED")
+        await _mark_job_outcome_persisted(manager, task_id)
 
     # Settling sheds history itself, so the cap holds without another caller.
     assert set(manager.tasks) == {"task-3", "task-4"}
+
+
+@pytest.mark.asyncio
+async def test_terminal_outcomes_stay_retained_until_history_is_persisted(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 1)
+    manager = _task_state_manager()
+
+    for task_id in ("pending-1", "pending-2"):
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
+        await manager.set_state(task_id, "COMPLETED")
+
+    assert set(manager.tasks) == {"pending-1", "pending-2"}
+    for task_id in manager.tasks:
+        metadata = manager.tasks[task_id].details["metadata"]
+        assert metadata[task_state_module.TASK_JOB_OUTCOME_PENDING_METADATA_KEY] is True
+
+    await _mark_job_outcome_persisted(manager, "pending-1")
+    await manager.get_all_states()
+
+    assert set(manager.tasks) == {"pending-2"}
 
 
 @pytest.mark.asyncio
@@ -1093,6 +1293,7 @@ async def test_eviction_keeps_active_tasks_and_unsettled_cancellations(monkeypat
     await manager.set_object_ref("cancelled-task", {"ref": _FakeWorkerRef()})
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_state("completed-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "completed-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
     await manager.set_queued_details("new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=None)
@@ -1114,6 +1315,7 @@ async def test_a_settling_burst_sheds_history_with_nothing_else_running(monkeypa
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
     for index in range(4):
         await manager.set_state(f"task-{index}", "COMPLETED")
+        await _mark_job_outcome_persisted(manager, f"task-{index}")
 
     assert set(manager.tasks) == {"task-2", "task-3"}
 
@@ -1137,6 +1339,7 @@ async def test_cancellation_fence_outlives_the_receipt_window(monkeypatch) -> No
     manager = _task_state_manager()
     await manager.set_queued_details("cancelled-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
     await manager.set_cancelled_if_active("cancelled-task")
+    await _mark_job_outcome_persisted(manager, "cancelled-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
 
@@ -1162,6 +1365,8 @@ async def test_an_expired_receipt_behind_a_fence_is_still_evicted(monkeypatch) -
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=1)
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_state("done-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "cancelled-task")
+    await _mark_job_outcome_persisted(manager, "done-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
 
@@ -1183,12 +1388,15 @@ async def test_capacity_pressure_does_not_evict_an_unexpired_cancellation_tombst
     manager = _task_state_manager()
     await manager.set_queued_details("cancelled-task", file_id="f1", partition="tenant-a", metadata={}, user_id=1)
     assert await manager.set_cancelled_if_active("cancelled-task") is True
+    await _mark_job_outcome_persisted(manager, "cancelled-task")
 
     # An unrelated task settles well within the cancellation's 24h fence and
     # pushes the ledger over its 1-record cap.
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_100.0)
     await manager.set_queued_details("done-task", file_id="f2", partition="tenant-a", metadata={}, user_id=2)
     await manager.set_state("done-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "done-task")
+    assert await manager.get_state("done-task") is None
 
     assert "cancelled-task" in manager.tasks
     assert "done-task" not in manager.tasks
@@ -1224,7 +1432,13 @@ async def test_recovered_terminal_tasks_are_subject_to_retention(monkeypatch) ->
         "_load_recoverable_tasks",
         lambda: (
             {
-                "settled-cancelled-task": TaskInfo(state="CANCELLED", details={"user_id": 3}),
+                "settled-cancelled-task": TaskInfo(
+                    state="CANCELLED",
+                    details={
+                        "user_id": 3,
+                        "metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-07-20T08:00:00+00:00"},
+                    },
+                ),
                 "queued-task": TaskInfo(state="QUEUED", details={"user_id": 3}),
             },
             {},
@@ -1249,6 +1463,7 @@ async def test_expired_task_is_evicted_when_its_status_is_polled(monkeypatch) ->
     manager = _task_state_manager()
     await manager.set_queued_details("done-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
     await manager.set_state("done-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "done-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
 
@@ -1267,7 +1482,15 @@ async def test_recovery_preserves_the_original_retention_deadline(monkeypatch) -
         task_state_module,
         "_load_recoverable_tasks",
         lambda: (
-            {"old-task": TaskInfo(state="CANCELLED", details={"user_id": 3})},
+            {
+                "old-task": TaskInfo(
+                    state="CANCELLED",
+                    details={
+                        "user_id": 3,
+                        "metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-07-20T08:00:00+00:00"},
+                    },
+                )
+            },
             {"old-task": 1_060.0},
         ),
     )
@@ -1298,6 +1521,7 @@ async def test_expired_task_is_evicted_when_the_queue_is_listed(monkeypatch, rea
     manager = _task_state_manager()
     await manager.set_queued_details("done-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
     await manager.set_state("done-task", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "done-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
 
@@ -1338,6 +1562,7 @@ async def test_details_written_on_an_evicted_id_does_not_leak_a_stateless_record
     manager = _task_state_manager()
     await manager.set_queued_details("done", file_id="f", partition="p", metadata={}, user_id=7)
     await manager.set_state("done", "COMPLETED")
+    await _mark_job_outcome_persisted(manager, "done")
     details = await manager.get_details("done")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
@@ -1817,6 +2042,84 @@ async def test_admission_fence_keeps_a_serializing_task_whose_worker_is_running(
     )
 
     assert refused == {"accepted": False, "reason": "file_indexing", "existing_task_id": "task-1"}
+
+
+@pytest.mark.asyncio
+async def test_live_stage_snapshot_requires_a_fresh_worker_lease_and_is_compact() -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    await manager.set_state("task-1", "SERIALIZING")
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+
+    assert await manager.renew_worker_lease_with_stage_snapshot("task-1", tracker.snapshot()) is True
+    snapshots = await manager.get_stage_progress_snapshots(["task-1"])
+    assert snapshots["task-1"].event_tail == []
+    assert snapshots["task-1"].summary.current_stage_id == "parse"
+
+    manager.tasks["task-1"].worker_lease_expires_at = task_state_module.time.time() - 1
+    assert await manager.get_stage_progress_snapshots(["task-1"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_live_stage_snapshot_rejects_regressions_and_clears_on_terminal_state() -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    await manager.set_state("task-1", "SERIALIZING")
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+    newer = tracker.sample_elapsed()
+    assert newer is not None
+    await manager.renew_worker_lease_with_stage_snapshot("task-1", newer)
+    older = newer.model_copy(
+        update={"summary": newer.summary.model_copy(update={"snapshot_revision": newer.summary.snapshot_revision - 1})}
+    )
+    await manager.renew_worker_lease_with_stage_snapshot("task-1", older)
+    retained = await manager.get_stage_progress_snapshots(["task-1"])
+    assert retained["task-1"].summary.snapshot_revision == newer.summary.snapshot_revision
+
+    await manager.set_state("task-1", "FAILED")
+    assert await manager.get_stage_progress_snapshots(["task-1"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_live_stage_snapshot_cache_is_bounded(monkeypatch) -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    monkeypatch.setattr(task_state_module, "_POOL_SIZE", 1)
+    monkeypatch.setattr(task_state_module, "_MAX_TASKS_PER_WORKER", 1)
+    manager = _task_state_manager()
+    for task_id in ("task-1", "task-2"):
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=42)
+        await manager.set_state(task_id, "SERIALIZING")
+        tracker = StageTracker(task_id)
+        tracker.start_stage("parse", 0)
+        await manager.renew_worker_lease_with_stage_snapshot(task_id, tracker.snapshot())
+
+    snapshots = await manager.get_stage_progress_snapshots(["task-1", "task-2"])
+    assert set(snapshots) == {"task-2"}
+
+
+@pytest.mark.asyncio
+async def test_live_stage_snapshot_expires_before_the_worker_lease(monkeypatch) -> None:
+    from services.workers.stage_tracker import StageTracker
+
+    monkeypatch.setattr(task_state_module, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    manager = TaskStateManager.__ray_metadata__.modified_class(worker_lease_ttl_seconds=1.0)
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    await manager.set_state("task-1", "SERIALIZING")
+    tracker = StageTracker("task-1")
+    tracker.start_stage("parse", 0)
+    await manager.renew_worker_lease_with_stage_snapshot("task-1", tracker.snapshot())
+
+    await asyncio.sleep(0.03)
+
+    assert task_state_module._worker_lease_is_live(manager.tasks["task-1"]) is True
+    assert await manager.get_stage_progress_snapshots(["task-1"]) == {}
 
 
 @pytest.mark.asyncio
@@ -2311,3 +2614,150 @@ async def test_a_queued_orphan_picked_up_before_the_restart_is_read_keeps_runnin
     assert await manager.has_worker_settled("task-1") is False
     assert await manager.get_state("task-1") == "QUEUED"
     assert await manager.renew_worker_lease("task-1") is True
+
+
+class _StalledGcs:
+    """Stands in for a GCS whose actor-table reads hang until released."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        # Reads of these actors wait on their own event instead of ``release``.
+        self.release_actor: dict[str, threading.Event] = {}
+        self.started = threading.Event()
+        self.reads: list[str] = []
+        self.running = 0
+        self.idle = threading.Condition()
+
+    def __call__(self, actor_id: str) -> dict[str, Any]:
+        with self.idle:
+            self.reads.append(actor_id)
+            self.running += 1
+        self.started.set()
+        try:
+            # Bounded, so a read the code under test waits on does not hang the suite.
+            self.release_actor.get(actor_id, self.release).wait(timeout=10)
+        finally:
+            with self.idle:
+                self.running -= 1
+                self.idle.notify_all()
+        return {"State": "ALIVE", "NumRestarts": 3}
+
+    def release_all(self) -> None:
+        self.release.set()
+        for event in self.release_actor.values():
+            event.set()
+
+    def wait_idle(self) -> None:
+        with self.idle:
+            assert self.idle.wait_for(lambda: self.running == 0, timeout=5)
+
+
+@pytest.fixture
+def stalled_gcs(monkeypatch):
+    from ray._private import state as ray_state
+
+    gcs = _StalledGcs()
+    monkeypatch.setattr(ray_state, "actors", lambda actor_id: gcs(actor_id))
+    monkeypatch.setattr(task_state_module, "_WORKER_ACTOR_STATE_READ_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(task_state_module, "_stalled_worker_actor_state_reads", set())
+    monkeypatch.setattr(task_state_module, "_worker_actor_states", {})
+    yield gcs
+    gcs.release_all()
+    gcs.wait_idle()
+
+
+def test_a_stalled_gcs_read_holds_after_the_timeout(stalled_gcs) -> None:
+    """Read under the lock lease renewals take, so it must give up long before a worker's lease lapses."""
+    started = time.monotonic()
+
+    assert task_state_module._worker_actor_state("w1", fresh=True) is None
+
+    assert time.monotonic() - started < 2
+    assert task_state_module._worker_actor_states == {}
+
+
+def test_reads_hold_at_once_while_a_stalled_gcs_read_is_outstanding(stalled_gcs) -> None:
+    """One stall costs one timeout, not one per orphaned task in a fence pass."""
+    assert task_state_module.read_worker_actor_state("w1") is None
+
+    started = time.monotonic()
+    assert task_state_module.read_worker_actor_state("w2") is None
+    assert task_state_module._worker_actor_state("w3", fresh=True) is None
+
+    assert time.monotonic() - started < 0.1
+    assert stalled_gcs.reads == ["w1"]
+
+
+def test_reads_resume_once_the_stalled_gcs_read_returns(stalled_gcs) -> None:
+    assert task_state_module.read_worker_actor_state("w1") is None
+
+    stalled_gcs.release.set()
+    stalled_gcs.wait_idle()
+
+    assert task_state_module._worker_actor_state("w1", fresh=True) == (True, 3)
+    assert stalled_gcs.reads == ["w1", "w1"]
+
+
+@pytest.mark.asyncio
+async def test_lease_renewals_are_answered_while_an_orphan_check_hits_a_stalled_gcs(stalled_gcs) -> None:
+    """A worker whose renewals go unanswered stops itself, so a stalled read must not hold the lock."""
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+
+    settle_check = asyncio.create_task(asyncio.to_thread(asyncio.run, manager.has_worker_settled("task-1")))
+    assert await asyncio.to_thread(stalled_gcs.started.wait, 5)
+
+    started = time.monotonic()
+    assert await manager.renew_worker_lease("task-1") is True
+    assert time.monotonic() - started < 2
+    assert await settle_check is False
+
+
+def test_concurrent_reads_during_a_stall_neither_pile_up_nor_run_late(stalled_gcs) -> None:
+    """The pool actor checks registrations from many threads at once; a stall must cost at most the executor's threads."""
+    results: list[tuple[bool, int] | None] = []
+    callers = [
+        threading.Thread(target=lambda i=i: results.append(task_state_module.read_worker_actor_state(f"w{i}")))
+        for i in range(6)
+    ]
+
+    started = time.monotonic()
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=5)
+
+    assert time.monotonic() - started < 1
+    assert results == [None] * 6
+    assert len(stalled_gcs.reads) <= 2
+
+    # Reads whose callers gave up while they were still queued must never reach the GCS.
+    reads_during_stall = len(stalled_gcs.reads)
+    stalled_gcs.release.set()
+    stalled_gcs.wait_idle()
+    time.sleep(0.1)
+    assert len(stalled_gcs.reads) == reads_during_stall
+
+    assert task_state_module.read_worker_actor_state("w0") == (True, 3)
+
+
+def test_reads_hold_while_any_timed_out_read_is_still_running(stalled_gcs) -> None:
+    """Two reads stall; the gate must not reopen when only one of them returns."""
+    stalled_gcs.release_actor = {"w1": threading.Event(), "w2": threading.Event()}
+    first = threading.Thread(target=task_state_module.read_worker_actor_state, args=("w1",))
+    second = threading.Thread(target=task_state_module.read_worker_actor_state, args=("w2",))
+    # Staggered within one timeout, so both pass the gate and the later one times out last.
+    first.start()
+    time.sleep(0.05)
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert stalled_gcs.reads == ["w1", "w2"]
+
+    stalled_gcs.release_actor["w2"].set()
+    with stalled_gcs.idle:
+        assert stalled_gcs.idle.wait_for(lambda: stalled_gcs.running == 1, timeout=5)
+    time.sleep(0.05)  # lets the released read's future settle as done
+
+    assert task_state_module.read_worker_actor_state("w3") is None
+    assert stalled_gcs.reads == ["w1", "w2"]

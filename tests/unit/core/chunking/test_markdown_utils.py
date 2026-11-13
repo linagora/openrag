@@ -6,12 +6,15 @@ preserved through the move into core/.
 
 from __future__ import annotations
 
+import core.chunking.markdown_utils as markdown_utils
 import pytest
 from core.chunking.markdown_utils import (
+    PAGE_RE,
     MDElement,
     _split_to_budget,
+    attach_captions,
     chunk_table,
-    get_chunk_page_number,
+    get_page_number,
     parse_markdown_table,
     span_inside,
     split_md_elements,
@@ -22,6 +25,33 @@ from core.utils.exceptions import PipelineError
 def _mock_length(text: str) -> int:
     """Estimate token count at ~4 chars per token (matches legacy tests)."""
     return len(text) // 4
+
+
+def test_formula_truncation_marker_is_scoped_to_omitted_rows_and_columns():
+    marker = {
+        "truncated": True,
+        "omitted_cells_by_column": [{"column": "B", "row_ranges": [{"start_row": 18, "end_row": 20}]}],
+    }
+
+    assert markdown_utils._formula_truncation_marker_matches(marker, [18], {"B"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [17], {"B"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [18], {"C"})
+
+
+def test_formula_truncation_marker_pairs_rows_with_their_column():
+    # B18 and C19 were omitted; C18 and B19 were not.
+    marker = {
+        "truncated": True,
+        "omitted_cells_by_column": [
+            {"column": "B", "row_ranges": [{"start_row": 18, "end_row": 18}]},
+            {"column": "C", "row_ranges": [{"start_row": 19, "end_row": 19}]},
+        ],
+    }
+
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [18], {"C"})
+    assert markdown_utils._formula_truncation_marker_matches(marker, [19], {"C"})
+    assert not markdown_utils._formula_truncation_marker_matches(marker, [19], {"B"})
+    assert markdown_utils._formula_truncation_marker_matches(marker, [18], None)
 
 
 class TestSplitMdElements:
@@ -152,23 +182,134 @@ class TestSplitMdElements:
         assert len(images) == 1
         assert images[0].page_number == 3
 
+    def test_marker_too_long_to_be_a_page_stays_text(self):
+        # int() refuses more than 4,300 digits: such a marker used to fail the file.
+        marker = "[PAGE_" + "1" * 5_000 + "]"
+        elems = split_md_elements(f"Intro.\n{marker}\nMore.")
+        assert [e.type for e in elems] == ["text"]
+        assert marker in elems[0].content
 
-class TestGetChunkPageNumber:
-    def test_no_markers_returns_previous_page(self):
-        result = get_chunk_page_number("Just some plain text content.", previous_chunk_ending_page=1)
-        assert result == {"start_page": 1, "end_page": 1}
+    def test_a_page_has_at_most_nine_digits(self):
+        # Ten digits is past any page count; above 2**63 the page would not
+        # even fit the integer Milvus stores.
+        assert PAGE_RE.fullmatch("[PAGE_999999999]")
+        assert PAGE_RE.search("[PAGE_1000000000]") is None
 
-    def test_chunk_starts_with_marker(self):
-        result = get_chunk_page_number("[PAGE_2]Content on page 3.", previous_chunk_ending_page=1)
-        assert result == {"start_page": 3, "end_page": 3}
 
-    def test_chunk_ends_with_marker(self):
-        result = get_chunk_page_number("Content on page 1.[PAGE_1]", previous_chunk_ending_page=1)
-        assert result == {"start_page": 1, "end_page": 1}
+TABLE = "| A | B |\n|---|---|\n| 1 | 2 |"
 
-    def test_marker_in_middle(self):
-        result = get_chunk_page_number("Start on page 1.[PAGE_1]End on page 2.", previous_chunk_ending_page=1)
-        assert result == {"start_page": 1, "end_page": 2}
+
+def _captions(md: str) -> list[str]:
+    return [e.caption for e in attach_captions(split_md_elements(md)) if e.type != "text"]
+
+
+class TestAttachCaptions:
+    def test_caption_below_a_table_moves_to_its_head(self):
+        parts = attach_captions(split_md_elements(f"Intro.\n\n{TABLE}\n\n*Table 1. Totals*\n\nNext paragraph."))
+        assert [p.type for p in parts] == ["text", "table", "text"]
+        assert parts[1].caption == "*Table 1. Totals*"
+        assert parts[1].content == f"*Table 1. Totals*\n\n{TABLE}"
+        assert parts[2].content == "Next paragraph."
+
+    def test_caption_above_a_table_loses_its_heading_marks(self):
+        parts = attach_captions(split_md_elements(f"Intro.\n\n#### Tableau 2 - Totaux\n\n{TABLE}"))
+        assert parts[0].content == "Intro."
+        assert parts[1].caption == "Tableau 2 - Totaux"
+
+    def test_caption_between_two_blocks_follows_the_document_majority(self):
+        below = f"{TABLE}\n\nTable 1: First\n\nProse.\n\n{TABLE}\n\nTable 2: Second\n\n{TABLE}"
+        above = f"Table 1: First\n\n{TABLE}\n\nProse.\n\n{TABLE}\n\nTable 2: Second\n\n{TABLE}"
+        assert _captions(below) == ["Table 1: First", "Table 2: Second", ""]
+        assert _captions(above) == ["Table 1: First", "", "Table 2: Second"]
+
+    def test_page_marker_between_caption_and_block_stays_in_the_text(self):
+        parts = attach_captions(split_md_elements(f"*Table 2. Key features*\n\n[PAGE_27]\n\n{TABLE}"))
+        assert parts[0].content == "[PAGE_27]"
+        assert parts[1].caption == "*Table 2. Key features*"
+
+    @pytest.mark.parametrize(
+        "after",
+        [
+            "Table 2 below summarises the results.",
+            "Table 1.1 presents the results.",
+            "Some prose.\n\nFigure 1: A caption too far from its block",
+            "Source: Authors",
+            "Figure 1: Alpha .... 3\nFigure 2: Beta .... 7",
+            "Figure 1: Alpha 3\n\nFigure 2: Beta 7",
+        ],
+    )
+    def test_text_that_is_not_an_adjacent_caption_stays(self, after):
+        assert _captions(f"{TABLE}\n\n{after}\n\nNext.") == [""]
+
+    def test_credit_travels_with_its_caption(self):
+        assert _captions(f"{TABLE}\n\n*Figure 1. Map*\n\nSource: Authors\n\nNext.") == [
+            "*Figure 1. Map*\nSource: Authors"
+        ]
+
+    def test_heading_under_a_caption_stays_out_of_it(self):
+        parts = attach_captions(split_md_elements(f"{TABLE}\n\nTable 1: Totals\n## Findings\n\nBody."))
+        assert parts[0].caption == "Table 1: Totals"
+        assert parts[1].content == "## Findings\n\nBody."
+
+    def test_several_captions_can_label_one_block(self):
+        chart = "<image_description>\n\nTwo bar charts.\n\n</image_description>"
+        assert _captions(f"Prose.\n\nFigure 2.1: Tech firms\n\nFigure 2.2: AI investment\n\n{chart}") == [
+            "Figure 2.1: Tech firms\nFigure 2.2: AI investment"
+        ]
+
+    def test_captions_ending_in_a_year_are_not_a_list_of_figures(self):
+        md = f"Prose.\n\nFigure 1: Market share in 2022\n\nFigure 2: Market share in 2023\n\n{TABLE}\n\nProse."
+        assert _captions(md) == ["Figure 1: Market share in 2022\nFigure 2: Market share in 2023"]
+
+    @pytest.mark.parametrize(
+        "md",
+        [
+            f"{TABLE}\n\nTable 1: Regional totals\n(in millions)\n\nNext.",
+            f"Intro.\n\nTable 1: Regional totals\n(in millions)\n\n{TABLE}",
+        ],
+    )
+    def test_wrapped_caption_moves_whole(self, md):
+        assert _captions(md) == ["Table 1: Regional totals\n(in millions)"]
+
+    def test_caption_touching_a_block_that_takes_none_stays_in_the_text(self):
+        image = "<image_description>\n\nA logo.\n\n</image_description>"
+        md = f"{TABLE}\n\nFigure 2: Logo\n\n{image}\n\nProse."
+        parts = attach_captions(split_md_elements(md), takes_caption=lambda block: block.type != "image")
+        assert [p.caption for p in parts] == ["", "", "", ""]
+        assert parts[1].content == "Figure 2: Logo"
+
+    def test_caption_emitted_as_its_own_block_is_recognised(self):
+        caption_table = "| Table 5. Ranking |  |  |\n|---|--|--|\n|  |  |  |"
+        caption_image = "<image_description>\n\nFigure 1.2: Approaches\n\n</image_description>"
+        chart = "<image_description>\n\nA bar chart.\n\n</image_description>"
+        assert _captions(f"{TABLE}\n\n{caption_table}\n\nProse.") == ["Table 5. Ranking"]
+        assert _captions(f"Prose.\n\n{caption_image}\n\n{chart}") == ["Figure 1.2: Approaches"]
+
+    def test_list_of_figures_stays_a_table(self):
+        listing = "| Figure 1: Alpha 3 |\n|---|\n| Figure 2: Beta 7 |"
+        assert _captions(f"Prose.\n\n{listing}\n\nProse.") == [""]
+
+
+class TestGetPageNumber:
+    # A [PAGE_N] marker at offset P means everything before P is on page N.
+    MARKERS = [(10, 1), (20, 4)]
+
+    @pytest.mark.parametrize(
+        ("position", "page"),
+        [
+            (0, 1),  # before any marker
+            (9, 1),
+            (10, 2),  # the marker itself opens the next page
+            (19, 2),
+            (20, 5),  # pages may skip (4 -> 5)
+            (1000, 5),  # after the last marker
+        ],
+    )
+    def test_page_is_the_one_after_the_last_marker_at_or_before_the_position(self, position, page):
+        assert get_page_number(position, self.MARKERS) == page
+
+    def test_no_markers_is_page_one(self):
+        assert get_page_number(42, []) == 1
 
 
 class TestChunkTable:
@@ -306,8 +447,55 @@ class TestChunkTable:
             assert chunk.metadata["csv_column"] == "note"
             assert chunk.metadata["csv_part"] == part_number
             assert chunk.metadata["csv_parts_total"] == len(chunks)
+            assert chunk.metadata["csv_row_chunks_total"] == len(chunks)
             reconstructed.append(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0])
         assert "".join(reconstructed) == long_note
+
+    def test_csv_header_larger_than_budget_uses_smallest_viable_budget(self):
+        column_name = " ".join(f"header{number}" for number in range(20))
+        table = f"| {column_name} |\n| --- |\n| value |"
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": [column_name], "csv_row_start": 2},
+            ),
+            chunk_size=10,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert chunks
+        assert all(column_name in chunk.content for chunk in chunks)
+        assert all(chunk.metadata["csv_effective_chunk_size"] > 10 for chunk in chunks)
+        assert all(len(chunk.content.split()) <= chunk.metadata["csv_effective_chunk_size"] for chunk in chunks)
+
+    def test_continuation_reserves_label_separator_in_character_budget(self):
+        column = "column"
+        table = f"| {column} |\n| --- |\n| {'x' * 100} |"
+        chunks = chunk_table(
+            MDElement(type="table", content=table, metadata={"csv_columns": [column], "csv_row_start": 2}),
+            chunk_size=50,
+            length_function=len,
+        )
+        assert all(len(chunk.content) <= chunk.metadata.get("csv_effective_chunk_size", 50) for chunk in chunks)
+
+    def test_oversized_header_still_leaves_a_share_of_the_budget_for_cell_text(self):
+        column_name = " ".join(f"header{number}" for number in range(30))
+        cell = " ".join(f"word{number}" for number in range(400))
+        table = f"| {column_name} |\n| --- |\n| {cell} |"
+
+        chunks = chunk_table(
+            MDElement(type="table", content=table, metadata={"csv_columns": [column_name], "csv_row_start": 2}),
+            chunk_size=40,
+            length_function=lambda text: len(text.split()),
+        )
+
+        # Each part carries at least a quarter of the budget (10 words), so 400
+        # words need at most about 40 parts, not one part per word.
+        assert len(chunks) <= 45
+        reconstructed = "".join(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0] for chunk in chunks)
+        assert reconstructed == cell
 
     def test_csv_wide_row_is_grouped_by_columns_without_losing_values(self):
         columns = ["person_id", "legal_name", *(f"fact_{number}" for number in range(1, 9))]
@@ -348,6 +536,7 @@ class TestChunkTable:
             assert chunk.metadata["csv_row_number"] == 7
             assert chunk.metadata["csv_column_group"] == group_number
             assert chunk.metadata["csv_column_groups_total"] == len(chunks)
+            assert chunk.metadata["csv_row_chunks_total"] == len(chunks)
             assert chunk.metadata["csv_columns"] == group_columns
             assert len(chunk.content.split()) <= 35
             recovered.update(dict(zip(group_columns[2:], group_values[2:], strict=True)))
@@ -435,6 +624,32 @@ def test_split_to_budget_uses_logarithmic_whitespace_probes():
     assert "".join(pieces) == text
     assert all(len(piece.split()) <= 1_000 for piece in pieces)
     assert calls < 100
+
+
+def test_split_to_budget_bounds_tokenization_and_scans_boundaries_once(monkeypatch):
+    text = " ".join(f"word{number}" for number in range(2_000))
+    original_finditer = markdown_utils.re.finditer
+    finditer_calls = 0
+    tokenized_characters = 0
+
+    def counted_finditer(*args, **kwargs):
+        nonlocal finditer_calls
+        finditer_calls += 1
+        return original_finditer(*args, **kwargs)
+
+    def counted_length(value: str) -> int:
+        nonlocal tokenized_characters
+        tokenized_characters += len(value)
+        return len(value.split())
+
+    monkeypatch.setattr(markdown_utils.re, "finditer", counted_finditer)
+
+    pieces = _split_to_budget(text, budget=1, length_function=counted_length)
+
+    assert "".join(pieces) == text
+    assert all(len(piece.split()) <= 1 for piece in pieces)
+    assert finditer_calls == 1
+    assert tokenized_characters < len(text) * 20
 
 
 def test_split_to_budget_rejects_non_positive_budget():

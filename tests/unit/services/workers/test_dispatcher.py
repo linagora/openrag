@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from core.utils.exceptions import ServiceUnavailableError
@@ -362,6 +362,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
                 "filename": "report.txt",
                 "_openrag_job_created_at": "forged-created",
                 "_openrag_job_finished_at": "forged-finished",
+                "_openrag_job_outcome_pending": True,
             },
             partition="tenant-a",
             user={"id": 42},
@@ -398,6 +399,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
             "filename": "report.txt",
             "_openrag_job_created_at": "forged-created",
             "_openrag_job_finished_at": "forged-finished",
+            "_openrag_job_outcome_pending": True,
         },
         partition="tenant-a",
         user={"id": 42},
@@ -444,6 +446,28 @@ async def test_dispatch_indexing_registers_completion_with_detached_tracker() ->
         )
     tracker.track.remote.assert_called_once_with("task-1", {"ref": ref})
     tsm.set_details.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_submit_reads_the_borrowed_worker_ref() -> None:
+    """#1296: dropped unread, a failed ref makes Ray print an unhandled error in this process."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = asyncio.get_running_loop().create_future()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(ref),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.read_ref_when_settled") as read:
+        assert await dispatcher._submit_indexing_task_once("task-1", {}) is ref
+
+    read.assert_called_once_with(ref)
 
 
 @pytest.mark.asyncio
@@ -903,6 +927,42 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_returns_service_unavailable_when_capacity_is_full() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("outcome_backlog"))
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ServiceUnavailableError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=["ws-1"],
+            replace=True,
+        )
+
+    assert caught.value.code == "INDEXING_OUTCOME_BACKLOG"
+    assert caught.value.message == (
+        "Indexing is temporarily paused because task capacity is full "
+        "(queued or running work and unsaved job outcomes). Please retry shortly."
+    )
+    pool.submit.remote.assert_not_called()
+    tsm.set_object_ref.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1570,11 +1630,12 @@ async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() 
         "title": "old",
         "degraded_stages": ["caption", "topic_tag"],
     }
+    vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=_task_state_manager(),
         completion_tracker=_completion_tracker(),
-        vector_store=_vector_store(),
+        vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=_workspace_repo(),
         collection="default",
@@ -1583,6 +1644,9 @@ async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() 
     await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
 
     assert document_repo.update_file_metadata_in_db.await_args.args[2] == {"title": "new"}
+    protected_metadata = vector_store.upsert_entities.await_args.kwargs["protected_metadata"]
+    assert protected_metadata["title"] == "new"
+    assert protected_metadata["degraded_stages"] == ["caption", "topic_tag"]
 
 
 @pytest.mark.asyncio
@@ -1620,6 +1684,12 @@ async def test_copy_inherits_catalog_degraded_stages(degraded_stages: list[str])
     assert copied_metadata["partition"] == "tenant-b"
     assert copied_metadata["title"] == "Copy"
     assert copied_metadata["degraded_stages"] == degraded_stages
+    protected_metadata = vector_store.insert_entities.await_args.kwargs["protected_metadata"]
+    assert protected_metadata["file_id"] == "copy"
+    assert protected_metadata["partition"] == "tenant-b"
+    assert protected_metadata["title"] == "Copy"
+    assert protected_metadata["degraded_stages"] == degraded_stages
+    assert "indexed_at" in protected_metadata
 
 
 @pytest.mark.asyncio
@@ -1686,7 +1756,7 @@ async def test_copy_receives_grace_before_catalog_write_and_matches_afterward() 
         for offset in range(0, len(rows), batch_size):
             yield rows[offset : offset + batch_size]
 
-    async def insert(entities, collection):
+    async def insert(entities, collection, *, protected_metadata):
         copied.extend({**entity, "_id": index + 10} for index, entity in enumerate(entities))
         events = [e async for e in reconcile_partition(catalog, vectors, collection, "b", repair=True)]
         assert events[-1]["recent_chunks_skipped"] == 2
@@ -1788,12 +1858,30 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
         collection="default",
     )
 
-    with patch("ray.cancel") as cancel:
+    with patch("ray.cancel") as cancel, patch("services.workers.dispatcher.read_ref_when_settled") as read:
         result = await dispatcher.cancel_task("task-1")
 
     assert result is False
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
     cancel.assert_not_called()
+    # #1296: the ref was borrowed by the fetch and is dropped here unread.
+    read.assert_called_once_with({"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_counting_active_tasks_reads_the_refs_it_fetched() -> None:
+    """#1296: a replica that did not submit the task borrows its ref for the count, then drops it."""
+    from services.workers.task_cancellation import count_active_indexing_tasks
+    from services.workers.task_state import PENDING_TASK_DETAILS
+
+    ref = object()
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": ref}, "task-2": PENDING_TASK_DETAILS})
+
+    with patch("services.workers.task_cancellation.read_ref_when_settled") as read:
+        assert await count_active_indexing_tasks(tsm, partition="p") == 2
+
+    assert read.call_args_list == [call({"ref": ref}), call(PENDING_TASK_DETAILS)]
 
 
 @pytest.mark.asyncio

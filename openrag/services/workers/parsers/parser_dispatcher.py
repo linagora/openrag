@@ -20,6 +20,7 @@ from typing import Any
 
 from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.parsers.document_parser import DocumentParser
+from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.observability.ray_metrics import record_parse_completion, seed_parse_watchdog
@@ -59,6 +60,8 @@ _EML_ATTACHMENT_TYPES: dict[str, DocumentType] = {
     "htm": DocumentType.HTML,
     "eml": DocumentType.EML,
     "docx": DocumentType.DOCX,
+    "xlsx": DocumentType.XLSX,
+    "xlsm": DocumentType.XLSX,
     "doc": DocumentType.DOC,
     "pptx": DocumentType.PPTX,
     "pdf": DocumentType.PDF,
@@ -118,6 +121,13 @@ class ParserDispatcher(DocumentParser):
         completes a parse still has a stamp to age from.
         """
         seed_parse_watchdog(backend)
+        labels = {
+            "pymupdf": "Reading PDF with PyMuPDF",
+            "pdf_client": "Parsing PDF with the configured service",
+            "local_whisper": "Transcribing audio locally",
+            "audio_client": "Transcribing audio with the configured service",
+        }
+        report_parser_substage("parse.backend", labels.get(backend, f"Parsing with {backend}"))
         processed = await self._get(backend).parse(document)
         record_parse_completion(backend)
         return processed
@@ -324,6 +334,12 @@ _BUILDERS: dict[str, Any] = {
         "csv",
         batch_size=d._config.loader.csv_batch_size,
         delimiter=d._config.loader.csv_delimiter,
+    ),
+    "xlsx": lambda d: _create(
+        "core.indexing.parsers.tabular.xlsx_parser",
+        "xlsx",
+        batch_size=d._config.loader.xlsx_batch_size,
+        limits=d._config.loader.xlsx_limits,
     ),
 }
 

@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Sequence
+from contextlib import AbstractAsyncContextManager, nullcontext
 
 from core.llm import LLM
 from core.models.chunk import Chunk
@@ -19,18 +20,25 @@ _MAX_SAMPLE_CHUNKS = 12
 
 
 class TopicTagSample:
-    """Retain only bounded text from the first chunks, without their vectors."""
+    """Retain bounded text and optional content from the first chunks, without vectors."""
 
     def __init__(self) -> None:
         self.chunks: list[Chunk] = []
         self._remaining_chars = _MAX_PROMPT_CHARS
+        self._remaining_content_chars = _MAX_PROMPT_CHARS
 
     def add(self, chunks: Sequence[Chunk]) -> None:
         for chunk in chunks:
             if len(self.chunks) >= _MAX_SAMPLE_CHUNKS or self._remaining_chars <= 0:
                 break
             text = chunk.text[: self._remaining_chars] if chunk.text.strip() else ""
-            self.chunks.append(Chunk(text=text))
+            content = chunk.content
+            if content is not None and self._remaining_content_chars > 0:
+                content = content[: self._remaining_content_chars]
+                self._remaining_content_chars -= len(content)
+            else:
+                content = None
+            self.chunks.append(Chunk(text=text, content=content))
             self._remaining_chars -= len(text)
 
 
@@ -43,10 +51,15 @@ class TopicTagger:
         system_prompt: str,
         *,
         timeout_seconds: float | None = None,
+        llm_semaphore: AbstractAsyncContextManager[object] | None = None,
     ) -> None:
         self._llm = llm
         self._system_prompt = system_prompt
         self._timeout = timeout_seconds
+        # Optional cluster-wide LLM gate, as for ChunkContextualizer: the chat
+        # call shares the global LLM concurrency budget. Acquired outside the
+        # timeout, so time spent waiting for a permit doesn't count against it.
+        self._semaphore = llm_semaphore or nullcontext()
 
     async def tag(
         self,
@@ -77,12 +90,13 @@ class TopicTagger:
                 max_tags=max_tags,
                 lang=lang,
             )
-            operation = self._llm.chat(messages)
-            response = (
-                await asyncio.wait_for(operation, timeout=self._timeout)
-                if self._timeout is not None
-                else await operation
-            )
+            async with self._semaphore:
+                operation = self._llm.chat(messages)
+                response = (
+                    await asyncio.wait_for(operation, timeout=self._timeout)
+                    if self._timeout is not None
+                    else await operation
+                )
             return _parse_topic_tags(_chat_response_text(response), max_tags=max_tags)
         except (
             TimeoutError,

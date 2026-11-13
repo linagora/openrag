@@ -11,12 +11,14 @@ The old module ``components/indexer/loaders/pdf_loaders/docling2.py`` re-exports
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import ray
 import torch
 from core.config import load_config
-from core.indexing.image_preprocessor import pil_to_png_bytes
+from core.indexing.image_preprocessor import decode_data_uri
 from core.indexing.parsers.document_parser import BasePooledParser
+from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from core.utils.logging import get_logger
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
@@ -169,11 +171,20 @@ class DoclingLoader(BasePooledParser):
                 metadata=dict(document.metadata),
             )
 
+        report_parser_substage("parse.convert", "Converting PDF with Docling")
         async with document.as_temporary_file() as path:
             result: ConversionResult = await self._dispatch(str(path))
 
-        text_blocks = self._build_text_blocks(result)
-        image_blocks = self._build_image_blocks(result)
+        # Exporting each page re-walks the whole document: it can take minutes of
+        # CPU on a large PDF. On the loop that starves the lease renewals of every
+        # other file on this worker.
+        # A timeout or cancel cannot interrupt the thread; the event tells it to stop.
+        cancelled = threading.Event()
+        try:
+            text_blocks, image_blocks = await asyncio.to_thread(self._postprocess, result, cancelled)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
 
         return ProcessedDocument(
             document_id=document.id,
@@ -182,6 +193,16 @@ class DoclingLoader(BasePooledParser):
             metadata=dict(document.metadata),
             page_count=len(result.pages),
         )
+
+    def _postprocess(
+        self, result: ConversionResult, cancelled: threading.Event
+    ) -> tuple[list[TextBlock], list[ImageBlock]]:
+        """Build the text and image blocks off the loop.
+
+        ``cancelled`` is checked before each page and each picture: once set,
+        the caller has gone and the result is discarded, so the work stops early.
+        """
+        return self._build_text_blocks(result, cancelled), self._build_image_blocks(result, cancelled)
 
     async def _dispatch(self, file_path: str) -> ConversionResult:
         pool = self._pool()
@@ -192,34 +213,50 @@ class DoclingLoader(BasePooledParser):
         )
 
     @staticmethod
-    def _build_text_blocks(result: ConversionResult) -> list[TextBlock]:
+    def _build_text_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[TextBlock]:
         blocks: list[TextBlock] = []
         n_pages = len(result.pages)
+        if n_pages:
+            report_parser_substage("parse.text", "Extracting page text", progress=0, total=n_pages)
+        else:
+            report_parser_substage("parse.text", "Extracting page text")
         for i in range(1, n_pages + 1):
+            if cancelled is not None and cancelled.is_set():
+                break
             text = result.document.export_to_markdown(page_no=i).strip()
             blocks.append(TextBlock(text=text, page_number=i))
+            report_parser_substage("parse.text", "Extracting page text", progress=i, total=n_pages)
         return blocks
 
     @staticmethod
-    def _build_image_blocks(result: ConversionResult) -> list[ImageBlock]:
+    def _build_image_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[ImageBlock]:
+        """One ``ImageBlock`` per picture, without encoding any of them.
+
+        Docling PNG-encoded each picture into its ``data:`` URI when it generated
+        it, so those bytes are reused as they are. A picture without one keeps its
+        decoded image in ``pil_image``, which the caption stage encodes only when
+        it captions the document.
+        """
         blocks: list[ImageBlock] = []
         for idx, picture in enumerate(result.document.pictures):
+            if cancelled is not None and cancelled.is_set():
+                break
             try:
-                pil_image = picture.image.pil_image
-                if pil_image is None:
-                    continue
-                png_bytes = pil_to_png_bytes(pil_image)
+                uri = str(getattr(picture.image, "uri", None) or "")
+                png_bytes = decode_data_uri(uri) if uri.startswith("data:image/png;") else None
+                pil_image = None if png_bytes else picture.image.pil_image
             except Exception as exc:
-                logger.warning(f"Failed to encode Docling picture {idx}: {exc}")
+                logger.warning(f"Failed to read Docling picture {idx}: {exc}")
                 continue
-            ref = f"![](docling_img_{idx})"
-            blocks.append(
-                ImageBlock(
-                    image_bytes=png_bytes,
-                    mime_type="image/png",
-                    metadata={"markdown_ref": ref},
+            if png_bytes or pil_image is not None:
+                blocks.append(
+                    ImageBlock(
+                        image_bytes=png_bytes or b"",
+                        pil_image=pil_image,
+                        mime_type="image/png",
+                        metadata={"markdown_ref": f"![](docling_img_{idx})"},
+                    )
                 )
-            )
         return blocks
 
 

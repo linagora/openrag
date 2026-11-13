@@ -4,19 +4,30 @@ import asyncio
 import threading
 from contextlib import closing
 from dataclasses import replace
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from core.chunking.structured_section import StructuredSectionChunker
 from core.config.indexation import LoaderConfig
+from core.indexing.parsers.tabular.base import TabularBatchParser
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
-from core.models.document import Document, DocumentType
+from core.models.document import Document, DocumentType, TextBlock
+from core.models.stage_progress import StageEventStatus, StageFailureEffect
+from services.inference import runtime as runtime_module
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
 from services.workers.pipeline_builder import IndexingPipeline, PipelineTimeouts
+from services.workers.stage_tracker import StageTracker
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+
+@pytest.fixture(autouse=True)
+def _stub_language_detector(monkeypatch):
+    """Keep these tests off the real language detector and its model download."""
+    monkeypatch.setattr(runtime_module, "detect_language", lambda _text, **_kwargs: "en")
 
 
 class RecordingParser(CsvParser):
@@ -35,6 +46,35 @@ class RecordingParser(CsvParser):
                 yield batch
         finally:
             self.closed = True
+
+
+class RecordingXlsxParser(TabularBatchParser):
+    tabular_format = "xlsx"
+
+    def supported_types(self):
+        return ["xlsx"]
+
+    async def parse(self, document):
+        raise AssertionError("XLSX indexing must consume batches")
+
+    def iter_batches(self, document):
+        yield TextBlock(
+            text="| name |\n| --- |\n| Alice |",
+            block_type="table",
+            metadata={
+                "tabular_format": "xlsx",
+                "sheet_name": "People",
+                "table_id": "sheet:0",
+                "table_columns": ["name"],
+                "table_row_start": 2,
+                "table_row_end": 2,
+                "table_row_numbers": [2],
+                "csv_columns": ["name"],
+                "csv_row_start": 2,
+                "csv_row_end": 2,
+                "csv_row_numbers": [2],
+            },
+        )
 
 
 class FakeEmbedder:
@@ -60,7 +100,7 @@ class FakeStore:
     async def ensure_collection(self, *args, **kwargs):
         pass
 
-    async def upsert(self, chunks, *, indexed_at, vector_field=None):
+    async def upsert(self, chunks, *, indexed_at, vector_field=None, protected_metadata=None):
         self.events.append("store")
         # Only tests retain chunks so we can inspect them after the run.
         self.calls.append((list(chunks), indexed_at))
@@ -82,6 +122,43 @@ class FakeStore:
     async def delete_by_filter(self, filters):
         self.deleted_filters.append(filters)
         return 1
+
+
+def _use_workbook(pipeline, row):
+    from io import BytesIO
+
+    from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
+    from openpyxl import Workbook
+
+    class RecordingWorkbookParser(XlsxParser):
+        closed = False
+
+        async def parse(self, document):
+            raise AssertionError("Workbook ingestion must not collect all batches")
+
+        def iter_batches(self, document):
+            try:
+                with closing(super().iter_batches(document)) as batches:
+                    yield from batches
+            finally:
+                self.closed = True
+
+    workbook = Workbook()
+    workbook.active.append(["id", "name"])
+    for index in range(5):
+        workbook.active.append([index, f"Person {index}"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    row["document"] = row["document"].model_copy(
+        update={
+            "filename": "people.xlsx",
+            "content_type": DocumentType.XLSX,
+            "raw_bytes": output.getvalue(),
+            "source_path": None,
+        }
+    )
+    return replace(pipeline, parser=RecordingWorkbookParser(batch_size=2))
 
 
 @pytest.fixture
@@ -111,8 +188,15 @@ def setup_pipeline():
 
 async def test_batches_are_stored_before_reading_the_next_batch(setup_pipeline):
     pipeline, row, events = setup_pipeline
-    result = await pipeline.run(row)
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
+    result = await pipeline.run(row, stage_tracker=tracker)
     assert events == ["parse", "embed", "store"] * 3
+    parse_events = [event for event in observed if event is not None and event.stage_id == "parse"]
+    assert [event.status for event in parse_events] == [
+        StageEventStatus.STARTED,
+        StageEventStatus.COMPLETED,
+    ] * 4
     assert result is row
     assert result["stage"] == "stored"
     assert result["batch_count"] == 3
@@ -138,6 +222,67 @@ async def test_batches_are_stored_before_reading_the_next_batch(setup_pipeline):
     assert pipeline.parser.closed
 
 
+async def test_xlsx_uses_the_same_streaming_pipeline_with_sheet_metadata(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    pipeline = replace(pipeline, parser=RecordingXlsxParser())
+    row["document"] = Document(
+        id="xlsx-file",
+        filename="people.xlsx",
+        content_type=DocumentType.XLSX,
+        partition="customers",
+        raw_bytes=b"unused by fake parser",
+    )
+
+    result = await pipeline.run(row)
+
+    assert result["stage"] == "stored"
+    (([chunk], _indexed_at),) = pipeline.vector_store.calls
+    assert chunk.metadata["xlsx_batch_index"] == 1
+    assert chunk.metadata["tabular_batch_index"] == 1
+    assert chunk.metadata["sheet_name"] == "People"
+    assert chunk.metadata["table_id"] == "sheet:0"
+
+
+@pytest.mark.parametrize("chunker_name", ["structured_section", "recursive_splitter"])
+async def test_xlsx_cells_outside_tables_are_chunked_as_text(setup_pipeline, chunker_name):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
+    from core.models.chunk import ChunkType
+    from openpyxl import Workbook
+
+    pipeline, row, _ = setup_pipeline
+    if chunker_name == "recursive_splitter":
+        pipeline = replace(
+            pipeline,
+            chunker=RecursiveSplitter(chunk_size=50, chunk_overlap_rate=0.0, length_function=lambda t: len(t.split())),
+        )
+    workbook = Workbook()
+    workbook.active["A1"] = "Contrat 2026-114"
+    workbook.active["A3"] = "Client"
+    workbook.active["B3"] = "ACME"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    row["document"] = Document(
+        id="form-file",
+        filename="form.xlsx",
+        content_type=DocumentType.XLSX,
+        partition="customers",
+        raw_bytes=output.getvalue(),
+    )
+
+    result = await replace(pipeline, parser=XlsxParser()).run(row)
+
+    assert result["stage"] == "stored"
+    [chunk] = [chunk for group, _ in pipeline.vector_store.calls for chunk in group]
+    assert chunk.chunk_type is ChunkType.TEXT
+    assert "Contrat 2026-114" in chunk.text
+    assert "A3:B3: Client | ACME" in chunk.text
+    assert "Worksheet: Sheet" in chunk.text
+    assert chunk.metadata["sheet_name"] == "Sheet"
+    assert chunk.metadata["cell_ranges"] == ["'Sheet'!A1", "'Sheet'!A3:B3"]
+
+
 async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
     pipeline, row, _ = setup_pipeline
     resolved = []
@@ -152,6 +297,33 @@ async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
 
     assert row["batch_count"] == 3
     assert resolved == ["default"]
+
+
+async def test_csv_detects_language_once_after_all_batches(setup_pipeline, monkeypatch):
+    pipeline, row, _ = setup_pipeline
+    detected_samples = []
+
+    def detect_language(text, *, min_confidence=0.0):
+        detected_samples.append(text)
+        return "fr"
+
+    monkeypatch.setattr(runtime_module, "detect_language", detect_language)
+
+    async def tag_after_storing(messages):
+        assert len(pipeline.vector_store.calls) == 3
+        return '["Customers"]'
+
+    llm = SimpleNamespace(chat=AsyncMock(side_effect=tag_after_storing))
+    pipeline = replace(pipeline, topic_tagger=TopicTagger(llm, "topic prompt"))
+    row.update(filename="people.csv", indexation_config={"enable_topic_tagging": True})
+
+    await pipeline.run(row)
+
+    assert len(detected_samples) == 1
+    assert "Alice" in detected_samples[0] and "Eve" in detected_samples[0]
+    assert "Source" not in detected_samples[0]
+    assert row["language"] == "fr"
+    llm.chat.assert_awaited_once()
 
 
 async def test_csv_batches_do_not_overwrite_a_markdown_sidecar(setup_pipeline, tmp_path):
@@ -190,8 +362,11 @@ async def test_long_csv_cell_is_stored_as_labelled_continuations(setup_pipeline)
 
 
 @pytest.mark.parametrize("defer", [False, True])
-async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_pipeline, defer):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_pipeline, defer, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     pipeline = replace(pipeline, defer_replace_cleanup=defer)
     row["replace"] = True
     await pipeline.run(row)
@@ -207,8 +382,11 @@ async def test_replacement_snapshots_once_and_keeps_old_ids_until_success(setup_
 
 
 @pytest.mark.parametrize("failure", ["parse", "chunk", "embed", "store"])
-async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure, file_format):
     pipeline, row, _ = setup_pipeline
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     row["replace"] = True
     if failure == "parse":
         original = pipeline.parser.iter_batches
@@ -316,6 +494,8 @@ async def test_contextualization_is_skipped_and_recorded_as_degraded(setup_pipel
 
 async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipeline):
     pipeline, row, events = setup_pipeline
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
 
     async def tag_after_storing(messages):
         assert len(pipeline.vector_store.calls) == 3
@@ -330,7 +510,7 @@ async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipe
         topic_tagger_prompt="custom prompt",
         indexation_config={"enable_topic_tagging": True, "max_topic_tags": 2},
     )
-    await pipeline.run(row)
+    await pipeline.run(row, stage_tracker=tracker)
     llm.chat.assert_awaited_once()
     messages = llm.chat.call_args.args[0]
     assert messages[0]["content"] == "custom prompt"
@@ -339,6 +519,8 @@ async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipe
     assert "Alice" in messages[1]["content"] and "Eve" in messages[1]["content"]
     assert row["topic_tags"] == ["Customers", "Contacts"]
     assert events == ["parse", "embed", "store"] * 3
+    topic_events = [event for event in observed if event is not None and event.stage_id == "topic_tag"]
+    assert [event.status for event in topic_events] == [StageEventStatus.STARTED, StageEventStatus.COMPLETED]
     assert row["stage"] == "stored"
     assert "chunks" not in row
 
@@ -349,6 +531,8 @@ async def test_csv_does_not_tag_failed_or_empty_file(setup_pipeline, failed_csv)
     tagger = SimpleNamespace(tag=AsyncMock(return_value=[]))
     pipeline = replace(pipeline, topic_tagger=tagger)
     if failed_csv:
+        observed = []
+        tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
 
         def fail_to_read(_document):
             raise OSError("CSV read failed")
@@ -356,8 +540,11 @@ async def test_csv_does_not_tag_failed_or_empty_file(setup_pipeline, failed_csv)
 
         pipeline.parser.iter_batches = fail_to_read
         with pytest.raises(OSError, match="CSV read failed"):
-            await pipeline.run(row)
+            await pipeline.run(row, stage_tracker=tracker)
         tagger.tag.assert_not_awaited()
+        parse_events = [event for event in observed if event is not None and event.stage_id == "parse"]
+        assert [event.status for event in parse_events] == [StageEventStatus.STARTED, StageEventStatus.FAILED]
+        assert parse_events[-1].failure_effect is StageFailureEffect.TASK_FAILED
     else:
         # The real tagger returns immediately without calling the LLM for no chunks.
         llm = SimpleNamespace(chat=AsyncMock())
@@ -371,6 +558,8 @@ async def test_csv_does_not_tag_failed_or_empty_file(setup_pipeline, failed_csv)
 @pytest.mark.parametrize("failure", ["bad_response", "stage_error", "timeout"])
 async def test_csv_tag_failure_preserves_successful_indexing(setup_pipeline, failure):
     pipeline, row, _ = setup_pipeline
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
     if failure == "bad_response":
         llm = SimpleNamespace(chat=AsyncMock(return_value="not JSON"))
         tagger = TopicTagger(llm, "topics")
@@ -379,12 +568,15 @@ async def test_csv_tag_failure_preserves_successful_indexing(setup_pipeline, fai
     pipeline = replace(pipeline, topic_tagger=tagger)
     if failure == "timeout":
         pipeline = replace(pipeline, timeouts=PipelineTimeouts(topic_tag=0))
-    await pipeline.run(row)
+    await pipeline.run(row, stage_tracker=tracker)
     assert row["stage"] == "stored"
     assert row["stored_count"] > 0
     assert row["topic_tags"] == []
     assert "topic_tag" in row["degraded_stages"]
     assert pipeline.vector_store.deleted_filters == []
+    topic_events = [event for event in observed if event is not None and event.stage_id == "topic_tag"]
+    assert [event.status for event in topic_events] == [StageEventStatus.STARTED, StageEventStatus.FAILED]
+    assert topic_events[-1].failure_effect is StageFailureEffect.CONTINUED_DEGRADED
 
 
 async def test_disabled_csv_tagging_never_calls_tagger(setup_pipeline):
@@ -398,6 +590,8 @@ async def test_disabled_csv_tagging_never_calls_tagger(setup_pipeline):
 
 async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline):
     pipeline, row, _ = setup_pipeline
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
     started = asyncio.Event()
 
     async def wait_forever(*args, **kwargs):
@@ -405,7 +599,7 @@ async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline)
         await asyncio.Event().wait()
 
     pipeline = replace(pipeline, topic_tagger=SimpleNamespace(tag=wait_forever))
-    task = asyncio.create_task(pipeline.run(row))
+    task = asyncio.create_task(pipeline.run(row, stage_tracker=tracker))
     await asyncio.wait_for(started.wait(), 5)
     assert len(pipeline.vector_store.calls) == 3
     task.cancel()
@@ -413,10 +607,17 @@ async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline)
         await task
     assert len(pipeline.vector_store.deleted_filters) == 1
     assert "topic_tags" not in row and "chunks" not in row
+    topic_events = [event for event in observed if event is not None and event.stage_id == "topic_tag"]
+    assert [event.status for event in topic_events] == [StageEventStatus.STARTED, StageEventStatus.CANCELLED]
 
 
-async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline):
+@pytest.mark.parametrize("file_format", ["csv", "xlsx"])
+async def test_cancel_during_read_returns_promptly_and_defers_generator_close(setup_pipeline, file_format):
     pipeline, row, _ = setup_pipeline
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
+    if file_format == "xlsx":
+        pipeline = _use_workbook(pipeline, row)
     started, release = threading.Event(), threading.Event()
     original = pipeline.parser.iter_batches
 
@@ -426,23 +627,64 @@ async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pi
         yield from original(document)
 
     pipeline.parser.iter_batches = blocking_batches
-    task = asyncio.create_task(pipeline.run(row))
+    task = asyncio.create_task(pipeline.run(row, stage_tracker=tracker))
     try:
         assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
         await asyncio.sleep(0)
-        assert not task.done()
+        assert task.done()
+        assert not pipeline.parser.closed
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+    for _ in range(100):
+        if pipeline.parser.closed:
+            break
+        await asyncio.sleep(0.01)
     assert pipeline.parser.closed
     assert pipeline.vector_store.calls == []
+    parse_events = [event for event in observed if event is not None and event.stage_id == "parse"]
+    assert [event.status for event in parse_events] == [StageEventStatus.STARTED, StageEventStatus.CANCELLED]
+
+
+async def test_parse_timeout_returns_promptly_and_defers_generator_close(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    started, release = threading.Event(), threading.Event()
+    original = pipeline.parser.iter_batches
+
+    def blocking_batches(document):
+        try:
+            started.set()
+            release.wait(timeout=5)
+            yield from original(document)
+        finally:
+            pipeline.parser.closed = True
+
+    pipeline.parser.iter_batches = blocking_batches
+    pipeline = replace(pipeline, timeouts=PipelineTimeouts(parse=0.01))
+
+    try:
+        with pytest.raises(TimeoutError):
+            await pipeline.run(row)
+        assert await asyncio.to_thread(started.wait, 5)
+        assert not pipeline.parser.closed
+    finally:
+        release.set()
+    for _ in range(100):
+        if pipeline.parser.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert pipeline.parser.closed
 
 
 async def test_exhausted_parse_budget_stops_before_reading(setup_pipeline):
     pipeline, row, events = setup_pipeline
+    observed = []
+    tracker = StageTracker(row["task_id"], deliver=lambda event, summary, tail: observed.append(event) or True)
     pipeline = replace(pipeline, timeouts=PipelineTimeouts(parse=-1))
     with pytest.raises(TimeoutError, match="parse time budget"):
-        await pipeline.run(row)
+        await pipeline.run(row, stage_tracker=tracker)
     assert events == []
+    parse_events = [event for event in observed if event is not None and event.stage_id == "parse"]
+    assert [event.status for event in parse_events] == [StageEventStatus.STARTED, StageEventStatus.FAILED]

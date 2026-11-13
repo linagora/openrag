@@ -69,7 +69,6 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/openrag/prompts/templates/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
-| `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy, so URLs indexed through MCP are skipped. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
 |`SAVE_UPLOADED_FILES`|`bool`|`true`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
@@ -80,6 +79,16 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 :::caution
 `PyMuPDFLoader` (the default) is a lightweight PDF loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images. Set `PDFLOADER=MarkerLoader` when you need those.
 :::
+
+#### Excel workbook ingestion
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `XLSX_BATCH_SIZE` | `int` | `10000` | Positive number of data rows per parser batch for `.xlsx` and `.xlsm` workbooks. The rendered batch byte limit can flush a batch earlier. This is independent of the chunk token budget. |
+
+Set archive, worksheet, cell, and batch byte limits through `loader.xlsx_limits` in YAML; there are no individual environment-variable overrides for these limits. Unknown limit names, non-integer values, and non-positive values are rejected. Rows waiting for their table's turn in the single worksheet pass use memory first, then a temporary file in the standard `TMPDIR`; a read-only or full `TMPDIR` only makes large worksheets fall back to slower per-table reads, never changes what is indexed. Header selection is automatic per table; the former `XLSX_HEADER_ROW` and per-sheet header settings are no longer supported.
+
+See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, formula handling, hidden content, and default safety limits.
 
 #### PDF Loader
 ##### PyMuPDF Loader Configuration
@@ -251,8 +260,8 @@ After files are converted to Markdown, only the **text content** is chunked.
 
 **Chunker strategies:**
 
-* **`structured_section`** *(default)*: Cuts on the document's own structure instead of on character separators. It detects headings (Markdown `#`, plus keyword headings such as `Titre` / `Chapitre` / `Section`) and leaf units (e.g. `Article L110-1`) by matching line content, keeps each leaf atomic, greedily packs consecutive short leaves up to `CHUNK_SIZE`, and prepends the heading path so every chunk is self-describing at retrieval time. Overlap is always 0 — leaves are atomic, so replaying a tail would only duplicate whole sections, and `CHUNK_OVERLAP_RATE` is therefore ignored by this strategy. Best for structured documents (legal codes, standards, reports, technical manuals).
-* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceed `CHUNK_SIZE`, and replays `CHUNK_OVERLAP_RATE` of each chunk into the next. Set `CHUNKER=recursive_splitter` for unstructured prose, or to reproduce the chunking of earlier OpenRAG releases.
+* **`structured_section`** *(default)*: Cuts on the document's own structure instead of on character separators. It detects headings (Markdown `#`, plus keyword headings such as `Titre` / `Chapitre` / `Section`) and leaf units (e.g. `Article L110-1`) by matching line content, keeps each leaf atomic, greedily packs consecutive short leaves up to `CHUNK_SIZE`, and prepends the heading path so every chunk is self-describing at retrieval time. A numbered figure or table caption (`Table 2. …`, `Figure 1.1: …`) sitting directly above or below a table or image description is moved to the head of that block, and repeated on every piece of a split table. Overlap is always 0 — leaves are atomic, so replaying a tail would only duplicate whole sections, and `CHUNK_OVERLAP_RATE` is therefore ignored by this strategy. Best for structured documents (legal codes, standards, reports, technical manuals).
+* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while keeping chunks within `CHUNK_SIZE`, and replays `CHUNK_OVERLAP_RATE` of each chunk into the next. A single table row or image caption is never split, so it can go over. Standalone tables and oversized image descriptions are emitted in the document's reading order, as their own chunks, without welding the prose around them. Every chunk of a named file contains a `[Source: <filename>]` line, counted in `CHUNK_SIZE` (a name is shortened to take at most half of it), so a question that names a file can find it; files indexed before this was added can get it from [a script](/openrag/documentation/milvus_migration/#add-the-filename-to-chunks-already-indexed), without re-indexing. Set `CHUNKER=recursive_splitter` for unstructured prose.
 
 ### Embedding
 Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured with the following variables:
@@ -267,7 +276,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
 | `EMBEDDER_TIMEOUT` | `float` | 120.0 | Per-request HTTP timeout (in seconds) for embedding calls. Raise it for slow remote endpoints. |
 | `EMBEDDER_BATCH_SIZE` | `int` | 32 | Number of chunks sent per embedding request; large documents are split into batches of this size. |
-| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests in flight at once. |
+| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests one `embed()` call keeps in flight, when its texts span several batches of `EMBEDDER_BATCH_SIZE`. It is not a limit for the whole process: N files embedding at once send up to N times this many requests. |
 
 If you prefer to use an **external embedding service**, simply comment out the embedder service in the [docker-compose.yaml](https://github.com/linagora/openrag/blob/dev/docker-compose.yaml#L117-L153) and provide the variables above in your environment.
 
@@ -307,6 +316,8 @@ The vector database stores embeddings and is configured using the following envi
 |`VDB_HYBRID_SEARCH`| `bool` | true |To activate hybrid search (semantic similarity + Keyword search)|
 | `VDB_ENABLE_INSERTION` | bool | true | Enable or disable vector database insertion. When disabled, documents are processed but not inserted into Milvus. Useful for testing. |
 | `VDB_TIMEOUT` | float | 120.0 | Per-request timeout (seconds) applied to the Milvus sync and async clients |
+| `VDB_JSON_MAX_LENGTH` | int | 65536 | Maximum JSON metadata size in bytes per row. Must match the Milvus server's `common.JSONMaxLength` |
+| `VDB_JSON_SAFETY_MARGIN_BYTES` | int | 1024 | Bytes reserved below the limit when shortening oversized rows. Must be positive and leave at least two bytes |
 
 These variables can be overridden when using an external vector database service.
 
@@ -434,6 +445,12 @@ Enable only where every API caller is already trusted with both.
 | `VLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `VLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the VLM service |
 
+#### Language Detection
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory. When the model cannot be loaded (for example the download fails), a warning is logged once and the process uses `lite` from then on. |
+
 ### RAG Pipeline Mode
 
 | Variable | Type | Default | Description |
@@ -535,6 +552,8 @@ there too.
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
 | `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and `openai` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
+| `LOG_PERSONAL_DATA` | `bool` | `false` | Personal data in logs. Off, uvicorn's request lines (`uvicorn.access`, and WebSocket handshakes on `uvicorn.error`) keep only the client's network — `/24` for IPv4, `/48` for IPv6, no port. `true` keeps full client addresses, for troubleshooting or security investigations. Query strings are replaced with `?[REDACTED]` either way, since they can carry a user's search text or an OIDC authorization code. This covers the API's own logs; the admin-ui proxy (nginx) keeps its own access log. |
+| `TQDM_DISABLE` | `str` | (unset) | Turns off tqdm progress bars, Marker's included. Any non-empty value disables them, `0` too. The logging overlay sets it to `1`, and the Helm chart does whenever `LOG_FORMAT=json` and `env.config.TQDM_DISABLE` is not set: in JSON mode every bar refresh becomes a non-JSON log line. Marker's bars are off with `LOG_FORMAT=json` whatever this is set to. |
 
 #### Text format
 ```bash title="Logging message in the terminal..."
@@ -567,8 +586,8 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 |----------|------|---------|-------------|
 | `RAY_POOL_SIZE` | `int` | 1 | Number of indexer worker actors in the pool. Total indexing capacity = `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER`. |
 | `RAY_MAX_TASKS_PER_WORKER` | `int` | 50 | Maximum number of files processed concurrently per indexer worker actor |
-| `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. In production, [comment out this line](https://github.com/linagora/openrag/blob/ee732ea8e080dcde0107d62d12703a7525f810cd/docker-compose.yaml#L21C1-L22C1) to avoid exposing the port, as it may introduce security vulnerabilities. |
-| `RAY_DASHBOARD_HOST` | `str` | `127.0.0.1` | Interface the **embedded** Ray dashboard binds to. Defaults to loopback because the Ray dashboard/job-submission API is **unauthenticated** ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). Set to `0.0.0.0` only when the dashboard port is firewalled or sits behind an authenticating proxy. Ignored when `RAY_ADDRESS` is set. |
+| `RAY_DASHBOARD_PORT` | `int` | 8265 | Host port the Compose overlay `ray-dashboard.docker-compose.yaml` publishes the embedded Ray dashboard on, on `127.0.0.1`; inside the container the dashboard listens on Ray's default, 8265. In a [Ray cluster](/openrag/documentation/deploy_ray_cluster/), it is also the head node's `--dashboard-port`. The base Compose file does not publish the dashboard. See [Ray dashboard](/openrag/installation/docker/#ray-dashboard). |
+| `RAY_DASHBOARD_HOST` | `str` | `127.0.0.1` | Interface the **embedded** Ray dashboard binds to. Defaults to loopback because the Ray dashboard/job-submission API is **unauthenticated** ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). Set to `0.0.0.0` only when the dashboard port is firewalled or sits behind an authenticating proxy. The Compose overlay `ray-dashboard.docker-compose.yaml` sets it to `0.0.0.0`, since a published port does not reach the container's loopback. Ignored when `RAY_ADDRESS` is set. |
 | `RAY_METRICS_EXPORT_PORT` | `int` | (unset) | Port the **embedded** Ray's metrics agent listens on. Unset, Ray picks a random port, so the metrics recorded in Ray actors (indexing, and the inference calls the indexing workers make) are exported but no scrape config can reach them. The Compose monitoring overlay sets it to `8091` and scrapes it; the Helm chart sets it to `8090` on the `openrag` pod when `ray.enabled=false`. Applies under `ENABLE_RAY_SERVE=true` too. Under embedded Ray Serve with `WITH_CHAINLIT_UI`, Chainlit listens on `CHAINLIT_PORT` (default `8090`), so keep the two different. Unauthenticated and bound to every interface: never publish it on the host. Ignored when `RAY_ADDRESS` is set. |
 | `RAY_ADDRESS` | `str` | (unset) | When set, attach to an **external** Ray cluster at this address (e.g. `ray://HEAD_IP:10001`) instead of starting an embedded cluster in-process. In this mode the app does not start a local dashboard — the head node owns it. See [Ray Cluster deployment](/openrag/documentation/deploy_ray_cluster/). |
 
