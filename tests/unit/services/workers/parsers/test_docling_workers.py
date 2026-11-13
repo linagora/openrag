@@ -71,7 +71,7 @@ def _png_data_uri(payload: bytes) -> str:
 
 def _fake_conversion(n_pages: int, n_pictures: int):
     """The slice of a ``ConversionResult`` that the block builders read."""
-    document = _docling_document()
+    document = _docling_document(n_pages)
     for _ in range(n_pictures):
         _add_picture(document, 1)
     return SimpleNamespace(pages=[None] * n_pages, document=document)
@@ -200,9 +200,10 @@ def _add_picture(document: DoclingDocument, page_no: int | None, *, width: int =
     return document.add_picture(image=image, prov=_prov(page_no) if page_no else None, **kwargs)
 
 
-def _postprocess(document: DoclingDocument, n_pages: int = 3):
+def _postprocess(document: DoclingDocument):
     loader = docling_workers.DoclingLoader.__new__(docling_workers.DoclingLoader)
-    return loader._postprocess(SimpleNamespace(pages=[None] * n_pages, document=document), threading.Event())
+    result = SimpleNamespace(pages=[None] * len(document.pages), document=document)
+    return loader._postprocess(result, threading.Event())
 
 
 def test_each_picture_is_printed_as_the_ref_of_its_own_block():
@@ -235,7 +236,7 @@ def test_a_furniture_picture_does_not_stop_the_body_pictures_of_its_page_anchori
     _add_text(document, 1, "Body")
     _add_picture(document, 1)
 
-    text_blocks, _ = _postprocess(document, n_pages=1)
+    text_blocks, _ = _postprocess(document)
 
     assert "Body\n\n![](docling_img_1)" in text_blocks[0].text
 
@@ -248,7 +249,7 @@ def test_a_picture_without_provenance_has_no_page_and_does_not_shift_the_others(
     _add_text(document, 1, "Body")
     _add_picture(document, 1)
 
-    text_blocks, image_blocks = _postprocess(document, n_pages=1)
+    text_blocks, image_blocks = _postprocess(document)
 
     assert [b.page_number for b in image_blocks] == [None, 1]
     assert text_blocks[0].text == "Body\n\n![](docling_img_1)"
@@ -265,10 +266,28 @@ def test_an_unreadable_picture_prints_nothing_and_keeps_its_caption():
     _add_text(document, 1, "After")
     _add_picture(document, 1)
 
-    text_blocks, image_blocks = _postprocess(document, n_pages=1)
+    text_blocks, image_blocks = _postprocess(document)
 
     assert [b.metadata["markdown_ref"] for b in image_blocks] == ["![](docling_img_1)"]
     assert text_blocks[0].text == "Before\n\nFigure 1: lost\n\nAfter\n\n![](docling_img_1)"
+
+
+def test_every_page_docling_kept_is_exported_under_its_own_number():
+    """Page 2 left out of the document: counting ``result.pages`` from 1
+    exported a page 2 that isn't there and lost page 3 with its pictures."""
+    document = DoclingDocument(name="report")
+    for page_no in (1, 3):
+        document.add_page(page_no=page_no, size=Size(width=100, height=100))
+    _add_text(document, 1, "First page")
+    _add_text(document, 3, "Last page")
+    _add_picture(document, 3)
+
+    text_blocks, _ = _postprocess(document)
+
+    assert [(b.page_number, b.text) for b in text_blocks] == [
+        (1, "First page"),
+        (3, "Last page\n\n![](docling_img_0)"),
+    ]
 
 
 def test_the_page_text_is_docling_s_own_page_export_apart_from_the_pictures():

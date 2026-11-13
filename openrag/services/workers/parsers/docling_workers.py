@@ -319,20 +319,25 @@ class DoclingLoader(BasePooledParser):
         which the caption stage never looks for: each caption was appended at
         the end of the document, attributed to the last page, and the marker
         was indexed (#1313).
+
+        The pages are the ones the document holds, by their own number: a page
+        Docling left out leaves a gap, so counting ``result.pages`` from 1
+        would export a missing page and skip the last one.
         """
         blocks: list[TextBlock] = []
-        n_pages = len(result.pages)
+        page_numbers = sorted(result.document.pages)
+        n_pages = len(page_numbers)
         refs = refs or {}
         if n_pages:
             report_parser_substage("parse.text", "Extracting page text", progress=0, total=n_pages)
         else:
             report_parser_substage("parse.text", "Extracting page text")
-        for i in range(1, n_pages + 1):
+        for done, page_no in enumerate(page_numbers, start=1):
             if cancelled is not None and cancelled.is_set():
                 break
-            text = _page_markdown(result.document, i, refs)
-            blocks.append(TextBlock(text=text, page_number=i))
-            report_parser_substage("parse.text", "Extracting page text", progress=i, total=n_pages)
+            text = _page_markdown(result.document, page_no, refs)
+            blocks.append(TextBlock(text=text, page_number=page_no))
+            report_parser_substage("parse.text", "Extracting page text", progress=done, total=n_pages)
         return blocks
 
 
