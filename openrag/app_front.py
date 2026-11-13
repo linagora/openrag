@@ -587,6 +587,7 @@ def _chunk_field(source: dict, key: str):
 
 
 async def _format_sources(metadata_sources, only_txt=False, api_key=None):
+    """Format retrieved web and file sources as Chainlit elements."""
     if not isinstance(metadata_sources, list) or not metadata_sources:
         return [], []
 
@@ -608,6 +609,7 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
             markdown_url = quote(url, safe=_MARKDOWN_URL_SAFE_CHARS)
 
             source_label = title or url
+            source_label = " ".join(source_label.split())
             source_name = _safe_source_name(source_label, d)
             content = f"**[{_escape_markdown_text(source_label)}]({markdown_url})**"
             if snippet:
