@@ -44,26 +44,19 @@ def parse_rag_mode(value: object) -> RagMode:
         raise ValueError(f"rag_mode must be one of: {choices}") from None
 
 
-AGENTIC_STREAM_REFUSAL = "rag_mode 'agentic' doesn't stream yet: send stream: false."
-
-
-def check_agentic_request(
-    metadata: Mapping[str, Any], *, stream: bool, client_tools: bool, structured_output: bool
-) -> None:
+def check_agentic_request(metadata: Mapping[str, Any], *, client_tools: bool, structured_output: bool) -> None:
     """Refuse, with ``ValueError``, an ``agentic`` chat request asking for what the agent doesn't do.
 
     The agent runs its own tools, has no web search (its sources are the
     documents), summarizes with its own tool rather than ``use_map_reduce``,
-    answers in text, and doesn't stream yet. Each of these would otherwise be
-    dropped without a word. A request in another mode is not checked.
+    and answers in text. Each of these would otherwise be dropped without a
+    word. A request in another mode is not checked.
     """
     if parse_rag_mode(metadata.get("rag_mode")) is not RagMode.AGENTIC:
         return
     profile = metadata.get("agent_profile")
     if profile is not None and not isinstance(profile, str):
         raise ValueError("agent_profile must be a string")
-    if stream:
-        raise ValueError(AGENTIC_STREAM_REFUSAL)
     if client_tools:
         raise ValueError("rag_mode 'agentic' runs its own tools: a request can't add tools to it.")
     if metadata.get("websearch"):
@@ -174,7 +167,6 @@ class ChatOptions:
 
 
 __all__ = [
-    "AGENTIC_STREAM_REFUSAL",
     "DEFAULT_RAG_MODE",
     "ChatOptions",
     "RagMode",

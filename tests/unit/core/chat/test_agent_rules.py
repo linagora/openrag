@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from core.chat.agent import (
     LEFT_OUT_RESULT,
+    StreamedReply,
     assistant_turn,
     call_signature,
+    finish_line,
     leave_out_old_results,
+    sse_chunk,
+    text_line,
     tool_calls,
     with_instruction,
 )
@@ -149,3 +154,109 @@ def test_a_profile_is_picked_by_name_and_an_unknown_name_is_a_400():
 def test_the_default_profile_must_exist():
     with pytest.raises(ValueError, match="agentic.default_profile 'legal' is not a profile"):
         AgenticConfig(default_profile="legal")
+
+
+# --------------------------------------------------------------------------- #
+# A streamed reply, put back together
+# --------------------------------------------------------------------------- #
+
+_RECORDED = Path(__file__).parents[2] / "services/chat/fixtures/mistral_small_tool_call.sse"
+
+
+def _reassembled(lines) -> StreamedReply:
+    reply = StreamedReply()
+    for line in lines:
+        chunk = sse_chunk(line)
+        if chunk is not None:
+            reply.add(chunk)
+    return reply
+
+
+def test_a_tool_call_streamed_by_vllm_for_mistral_is_put_back_together():
+    response = _reassembled(_RECORDED.read_text().splitlines()).response()
+
+    choice = response["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["content"] is None
+    assert choice["message"]["tool_calls"] == [
+        {
+            "id": "vu6TgUHxP",
+            "type": "function",
+            "function": {
+                "name": "search_knowledge",
+                "arguments": '{"queries": ["notice period in the employment contract", "number of holidays for employees"]}',
+            },
+        }
+    ]
+    assert tool_calls(choice["message"]) == [
+        ToolCall(
+            "vu6TgUHxP",
+            "search_knowledge",
+            '{"queries": ["notice period in the employment contract", "number of holidays for employees"]}',
+        )
+    ]
+    assert response["id"] == "chatcmpl-bd1e0fc1dc53ffa8"
+
+
+def _line(delta: dict, finish_reason=None, **extra) -> str:
+    return "data: " + json.dumps(
+        {"id": "x", "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}], **extra}
+    )
+
+
+def test_calls_sent_whole_or_with_their_name_repeated_read_the_same():
+    whole = {"name": "find_files", "arguments": {"name": "acme"}}
+    lines = [
+        _line({"tool_calls": [{"id": "a", "function": whole}]}),  # whole, no index (Ollama)
+        _line({"tool_calls": [{"index": 1, "id": "b", "function": {"name": "read_file", "arguments": '{"sou'}}]}),
+        _line({"tool_calls": [{"index": 1, "function": {"name": "read_file", "arguments": 'rce": 2}'}}]}),
+        _line({}, "tool_calls"),
+    ]
+
+    calls = _reassembled(lines).response()["choices"][0]["message"]["tool_calls"]
+
+    assert [(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in calls] == [
+        ("a", "find_files", '{"name": "acme"}'),
+        ("b", "read_file", '{"source": 2}'),
+    ]
+
+
+def test_streamed_text_is_joined_and_each_chunk_gives_its_own():
+    reply = StreamedReply()
+    texts = [
+        reply.add(sse_chunk(line))
+        for line in (_line({"role": "assistant"}), _line({"content": "Three "}), _line({"content": "months."}, "stop"))
+    ]
+
+    assert texts == ["", "Three ", "months."]
+    assert reply.response()["choices"][0] == {
+        "index": 0,
+        "message": {"role": "assistant", "content": "Three months."},
+        "finish_reason": "stop",
+    }
+    assert reply.add({"choices": [], "usage": {"total_tokens": 3}}) == "", "a usage chunk adds nothing"
+
+
+@pytest.mark.parametrize("line", ["", ": comment", "data: [DONE]", "data: not json", "data: []", "event: ping"])
+def test_lines_without_a_chunk_are_skipped(line):
+    assert sse_chunk(line) is None
+
+
+def test_the_client_gets_the_text_without_the_calls_and_a_finish_of_its_own():
+    chunk = {
+        "id": "x",
+        "model": "m",
+        "usage": {"t": 1},
+        "choices": [{"index": 0, "delta": {"content": "Hi", "tool_calls": [{}]}, "finish_reason": "tool_calls"}],
+    }
+
+    assert json.loads(text_line(chunk, "Hi")[len("data: ") :]) == {
+        "id": "x",
+        "model": "m",
+        "choices": [{"index": 0, "delta": {"content": "Hi"}, "finish_reason": None}],
+    }
+    finish = json.loads(finish_line({"id": "x", "choices": [{"finish_reason": "tool_calls"}]})[len("data: ") :])
+    assert finish["choices"] == [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    assert finish["object"] == "chat.completion.chunk"
+    kept = json.loads(finish_line({"choices": [{"finish_reason": "length"}]})[len("data: ") :])
+    assert kept["choices"][0]["finish_reason"] == "length"

@@ -15,12 +15,18 @@ the edges decide what comes next.
 tools offered. LangGraph's recursion limit is the hard one, set a few steps
 past what the profile allows; should it be reached anyway, the run still ends
 with ``finalize``'s answer, never an error.
+
+When the request streams, ``agent`` and ``finalize`` write the answer's SSE
+lines with LangGraph's stream writer, and ``CompiledAgent.stream`` hands them
+on as they come.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING
+from collections.abc import AsyncIterator
+from contextlib import aclosing
+from typing import TYPE_CHECKING, Any
 
 from core.chat.state import AgentState
 from core.utils.logging import get_logger
@@ -53,35 +59,52 @@ class CompiledAgent:
         self._steps = steps
 
     async def run(self, state: AgentState, *, context: AgentContext) -> AgentState:
-        """Run the agent from *state* until it answers."""
+        """Run the agent from *state* until it answers; its last state."""
+        last = state
+        async with aclosing(self.stream(state, context=context)) as chunks:
+            async for mode, value in chunks:
+                if mode == "values":
+                    last = value
+        return last
+
+    async def stream(self, state: AgentState, *, context: AgentContext) -> AsyncIterator[tuple[str, Any]]:
+        """Run the agent from *state*: ``("custom", line)`` for each SSE line, ``("values", state)`` after each step."""
         last: AgentState = state
         try:
-            async for values in self._graph.astream(
-                state,
-                context=context,
-                stream_mode="values",
-                config={"recursion_limit": 2 * context.profile.max_tool_rounds + _SPARE_STEPS},
-            ):
-                last = values
+            async with aclosing(
+                self._graph.astream(
+                    state,
+                    context=context,
+                    stream_mode=["custom", "values"],
+                    config={"recursion_limit": 2 * context.profile.max_tool_rounds + _SPARE_STEPS},
+                )
+            ) as chunks:
+                async for mode, value in chunks:
+                    if mode == "values":
+                        last = value
+                    yield mode, value
         except GraphRecursionError:
             logger.bind(profile=context.profile.name, rounds=last.get("rounds", 0)).warning(
                 "Agent reached the graph's recursion limit; answering from what it found"
             )
-            last = {**last, **await self._steps.finalize(last, context)}
-        return last
+            lines: list[str] = []
+            update = await self._steps.finalize(last, context, emit=lines.append)
+            for line in lines:
+                yield "custom", line
+            yield "values", {**last, **update}
 
 
 def build_agent_graph(steps: AgentSteps) -> CompiledAgent:
     """Compile the ``agentic`` graph over *steps*; compiled once, run for every agentic request."""
 
     async def agent(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
-        return await steps.agent(state, runtime.context)
+        return await steps.agent(state, runtime.context, emit=runtime.stream_writer)
 
     async def tools(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
         return await steps.tools(state, runtime.context)
 
     async def finalize(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
-        return await steps.finalize(state, runtime.context)
+        return await steps.finalize(state, runtime.context, emit=runtime.stream_writer)
 
     def next_reply(state: AgentState, runtime: Runtime[AgentContext]) -> str:
         return "agent" if steps.may_call_tools(state, runtime.context) else "finalize"

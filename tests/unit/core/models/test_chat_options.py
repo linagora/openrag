@@ -87,8 +87,8 @@ def test_agent_profile_is_read_from_the_metadata():
 _AGENTIC = {"rag_mode": "agentic"}
 
 
-def _check(metadata, *, stream=False, client_tools=False, structured_output=False):
-    check_agentic_request(metadata, stream=stream, client_tools=client_tools, structured_output=structured_output)
+def _check(metadata, *, client_tools=False, structured_output=False):
+    check_agentic_request(metadata, client_tools=client_tools, structured_output=structured_output)
 
 
 def test_an_agentic_request_is_accepted_with_what_it_does():
@@ -100,7 +100,6 @@ def test_an_agentic_request_is_accepted_with_what_it_does():
 @pytest.mark.parametrize(
     ("metadata", "flags", "message"),
     [
-        (_AGENTIC, {"stream": True}, "doesn't stream yet"),
         (_AGENTIC, {"client_tools": True}, "runs its own tools"),
         ({**_AGENTIC, "websearch": True}, {}, "doesn't search the web"),
         ({**_AGENTIC, "use_map_reduce": True}, {}, "summarizes with its own tool"),
@@ -114,4 +113,4 @@ def test_an_agentic_request_asking_for_what_the_agent_doesnt_do_is_refused(metad
 
 
 def test_a_classic_request_is_not_checked():
-    _check({"websearch": True, "use_map_reduce": True}, stream=True, client_tools=True, structured_output=True)
+    _check({"websearch": True, "use_map_reduce": True}, client_tools=True, structured_output=True)

@@ -5,7 +5,8 @@ The sources are already chosen and rendered into the prompt when this runs;
 the model, and what goes into ``extra`` beside them. In ``agentic`` the model
 has already answered, at the end of the agent's loop: ``PreparedAnswer``
 carries that reply, and ``chat`` shapes it without calling the model again,
-except to retry an empty answer. AnswerService calls the
+except to retry an empty answer. Streamed, it carries the agent's stream,
+which ``chat_stream`` filters in place of the model's. AnswerService calls the
 model, strips the ``[Sources: N]`` tag and keeps the cited sources, retries an
 answer that comes back empty, and builds ``extra``. The rules it applies are
 the pure functions of ``core.chat.answer``.
@@ -56,6 +57,9 @@ class PreparedAnswer:
     #: The model's reply when it is already made (the agent's last turn, ``agentic``): ``chat``
     #: shapes it as it would its own call's. ``None`` everywhere else.
     response: dict | None = None
+    #: The reply's SSE lines when something else streams it (the agent, ``agentic``):
+    #: ``chat_stream`` filters them as it would the model's stream. ``None`` everywhere else.
+    stream: AsyncIterator[str] | None = None
 
 
 class AnswerService:
@@ -146,9 +150,9 @@ class AnswerService:
         structured_output = is_structured_output(payload)
         payload["messages"] = sanitize_messages(payload["messages"])
 
-        def filtered_stream(messages):
+        def filtered_stream(lines):
             return stream_with_source_filtering(
-                llm.stream_chat(messages, **sampling_params(payload)),
+                lines,
                 prepared.sources,
                 model_name,
                 all_sources=prepared.all_sources,
@@ -158,7 +162,12 @@ class AnswerService:
                 terminal_extra_fields=prepared.finish_trace,
             )
 
-        response_stream = filtered_stream(payload["messages"])
+        def model_stream(messages):
+            return llm.stream_chat(messages, **sampling_params(payload))
+
+        response_stream = filtered_stream(
+            prepared.stream if prepared.stream is not None else model_stream(payload["messages"])
+        )
         if prepared.retry_empty_response and not structured_output:
             fallback_extra = build_extra_payload(
                 prepared.sources, None, prepared.all_sources, include_all_retrieved=prepared.include_all_retrieved
@@ -166,7 +175,9 @@ class AnswerService:
             fallback_extra.update(prepared.extra_fields)
             response_stream = retry_empty_response_stream(
                 response_stream,
-                lambda: filtered_stream(empty_response_retry_messages(payload["messages"])),
+                # Read when the first answer came out empty: by then an agent's
+                # stream has put its conversation in the payload.
+                lambda: filtered_stream(model_stream(empty_response_retry_messages(payload["messages"]))),
                 fallback_text=empty_response_fallback(payload["messages"], self._detect_language),
                 fallback_extra=fallback_extra,
                 model_name=model_name,

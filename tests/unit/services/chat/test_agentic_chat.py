@@ -16,7 +16,7 @@ from core.config.agentic import AgenticConfig, AgentProfileConfig
 from core.models.chunk import Chunk
 from core.tools import ToolContext, ToolRegistry, tool
 from core.utils.exceptions import ConfigError, ValidationError
-from services.chat.agentic import AgenticChat, AgentSteps
+from services.chat.agentic import AgenticChat, AgentRequest, AgentSteps
 from services.chat.graphs.agentic import build_agent_graph
 
 _NOW = datetime(2026, 11, 13, 9, 30, tzinfo=UTC)
@@ -85,8 +85,8 @@ _PAYLOAD = {
 }
 
 
-async def _run(agentic: AgenticChat, llm, *, profile=None, payload=None, custom_prompt=None):
-    return await agentic.run(
+def _request(agentic: AgenticChat, llm, *, profile=None, payload=None, custom_prompt=None) -> AgentRequest:
+    return AgentRequest(
         profile=agentic.profile(profile),
         messages=[{"role": "user", "content": "q"}],
         custom_prompt=custom_prompt,
@@ -94,6 +94,10 @@ async def _run(agentic: AgenticChat, llm, *, profile=None, payload=None, custom_
         llm=llm,
         payload=payload or _PAYLOAD,
     )
+
+
+async def _run(agentic: AgenticChat, llm, **request):
+    return await agentic.run(_request(agentic, llm, **request))
 
 
 @pytest.mark.asyncio

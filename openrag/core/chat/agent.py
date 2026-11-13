@@ -7,6 +7,10 @@ again (the loop guard), its result being already in the conversation; and
 when the rounds run out or the conversation no longer fits the window, the
 model answers once more without tools, told so by ``FINALIZE_INSTRUCTION``,
 the oldest tool results left out until it fits.
+
+A streamed reply comes as chat-completion chunks: ``StreamedReply`` puts it
+back together as the reply a plain call returns, and ``text_line`` /
+``finish_line`` are the chunks the client gets of it.
 """
 
 from __future__ import annotations
@@ -105,13 +109,106 @@ def leave_out_old_results(messages: list[dict], fits: Callable[[list[dict]], boo
     return out
 
 
+class StreamedReply:
+    """A reply streamed as chat-completion chunks, put back together as a plain call returns it.
+
+    Its text deltas are joined. A tool call comes in pieces keyed by its
+    ``index``: the first carries its id and name, the next ones pieces of its
+    arguments, which are joined (vLLM's Mistral parser streams them so). A
+    call sent whole in one delta, or with its name repeated, reads the same.
+    """
+
+    def __init__(self) -> None:
+        self._text: list[str] = []
+        self._calls: dict[int, dict] = {}
+        self._base: dict = {}
+        self.finish_reason: str | None = None
+
+    def add(self, chunk: dict) -> str:
+        """Take one chunk; return the text it adds, ``""`` for none."""
+        choices = chunk.get("choices")
+        if not choices:
+            return ""
+        self._base = {key: value for key, value in chunk.items() if key not in ("choices", "usage")}
+        choice = choices[0]
+        if choice.get("finish_reason"):
+            self.finish_reason = choice["finish_reason"]
+        delta = choice.get("delta") or {}
+        for position, piece in enumerate(delta.get("tool_calls") or []):
+            if not isinstance(piece, dict):
+                continue
+            call = self._calls.setdefault(piece.get("index", position), {"id": None, "name": "", "arguments": ""})
+            function = piece.get("function") or {}
+            call["id"] = call["id"] or piece.get("id")
+            call["name"] = call["name"] or function.get("name") or ""
+            arguments = function.get("arguments")
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            if isinstance(arguments, str):
+                call["arguments"] += arguments
+        text = delta.get("content")
+        if isinstance(text, str) and text:
+            self._text.append(text)
+            return text
+        return ""
+
+    def response(self) -> dict:
+        """The reply as a chat completion, as ``chat`` returns it."""
+        message: dict = {"role": "assistant", "content": "".join(self._text) or None}
+        if self._calls:
+            message["tool_calls"] = [
+                {
+                    "id": call["id"],
+                    "type": "function",
+                    "function": {"name": call["name"], "arguments": call["arguments"]},
+                }
+                for _, call in sorted(self._calls.items())
+            ]
+        return {**self._base, "choices": [{"index": 0, "message": message, "finish_reason": self.finish_reason}]}
+
+
+def sse_chunk(line: str) -> dict | None:
+    """The chunk an SSE ``data:`` line carries; ``None`` for any other line, ``[DONE]`` included."""
+    if not line.startswith("data:"):
+        return None
+    body = line[len("data:") :].strip()
+    if not body or body == "[DONE]":
+        return None
+    try:
+        chunk = json.loads(body)
+    except ValueError:
+        return None
+    return chunk if isinstance(chunk, dict) else None
+
+
+def text_line(chunk: dict, text: str) -> str:
+    """An SSE line giving the client *text* of *chunk*, without its tool calls or finish reason."""
+    base = {key: value for key, value in chunk.items() if key not in ("choices", "usage")}
+    return "data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]})
+
+
+def finish_line(response: dict) -> str:
+    """The SSE line ending the answer *response*: its finish reason, ``stop`` if it called tools or gave none."""
+    choice = (response.get("choices") or [{}])[0]
+    reason = choice.get("finish_reason")
+    if reason in (None, "tool_calls", "function_call"):
+        reason = "stop"
+    base = {key: value for key, value in response.items() if key not in ("choices", "usage")}
+    chunk = {**base, "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": reason}]}
+    return "data: " + json.dumps(chunk)
+
+
 __all__ = [
     "FINALIZE_INSTRUCTION",
     "LEFT_OUT_RESULT",
     "MAX_CALLS_PER_ROUND",
+    "StreamedReply",
     "assistant_turn",
     "call_signature",
+    "finish_line",
     "leave_out_old_results",
+    "sse_chunk",
+    "text_line",
     "tool_calls",
     "with_instruction",
 ]

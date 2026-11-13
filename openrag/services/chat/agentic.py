@@ -14,22 +14,33 @@ tools' date arguments), the tools it offers, and the ``ToolContext`` holding
 the request's scope and the ``[Source N]`` numbers of the passages the tools
 show. The answer is the model's last reply; ``AnswerService`` then shapes it
 like any other, citations included.
+
+When the request streams, every reply of the model is streamed: its text goes
+to the client as the model writes it (``AgentStream``), its tool calls are put
+back together and run. A round is known to be the last only once the model
+has replied, so the text of a reply that then calls tools reaches the client
+too; Mistral writes none before a call.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from core.chat.agent import (
     FINALIZE_INSTRUCTION,
     MAX_CALLS_PER_ROUND,
+    StreamedReply,
     assistant_turn,
     call_signature,
+    finish_line,
     leave_out_old_results,
+    sse_chunk,
+    text_line,
     tool_calls,
     with_instruction,
 )
@@ -62,9 +73,10 @@ class AgentContext:
     """What the agent runs with besides its state, settled before the graph starts.
 
     *sampling* is what the request asked of the model (its ``metadata`` too,
-    for ``llm_override``), with the profile's temperature when it sent none. *tools_tokens* is
-    what the tool definitions take in the prompt; *max_prompt_tokens* what the
-    model's window leaves for it, ``None`` when the window is unknown.
+    for ``llm_override``), with the profile's temperature when it sent none.
+    *tools_tokens* is what the tool definitions take in the prompt;
+    *max_prompt_tokens* what the model's window leaves for it, ``None`` when
+    the window is unknown. With *stream*, the model's replies are streamed.
     """
 
     profile: AgentProfile
@@ -74,6 +86,11 @@ class AgentContext:
     sampling: dict
     tools_tokens: int = 0
     max_prompt_tokens: int | None = None
+    stream: bool = False
+
+
+#: Where a step writes the SSE lines of the answer as the model writes it.
+Emit = Callable[[str], None]
 
 
 class AgentGraph(Protocol):
@@ -81,19 +98,32 @@ class AgentGraph(Protocol):
 
     async def run(self, state: AgentState, *, context: AgentContext) -> AgentState: ...
 
+    def stream(self, state: AgentState, *, context: AgentContext) -> AsyncIterator[tuple[str, Any]]:
+        """``("custom", line)`` for each SSE line the steps write, ``("values", state)`` after each step."""
+        ...
+
 
 class AgentSteps:
-    """The bodies of the ``agentic`` graph's nodes, and the tests its edges make."""
+    """The bodies of the ``agentic`` graph's nodes, and the tests its edges make.
 
-    async def agent(self, state: AgentState, ctx: AgentContext) -> dict:
+    *emit* is where ``agent`` and ``finalize`` write the answer's SSE lines
+    when the request streams.
+    """
+
+    async def agent(self, state: AgentState, ctx: AgentContext, emit: Emit | None = None) -> dict:
         """One reply of the model, offered the tools: calls to run, or the answer."""
-        response = await ctx.llm.chat(sanitize_messages(state["messages"]), **ctx.sampling, tools=ctx.tools.schemas())
+        response = await self._reply(state["messages"], ctx, with_tools=True, emit=emit)
         message = _message(response)
         calls = tool_calls(message)
-        update: dict = {"response": response, "calls": calls}
         if calls:
-            update["messages"] = [*state["messages"], assistant_turn(message, calls)]
-        return update
+            return {
+                "response": response,
+                "calls": calls,
+                "messages": [*state["messages"], assistant_turn(message, calls)],
+            }
+        if ctx.stream and emit is not None:
+            emit(finish_line(response))
+        return {"response": response, "calls": []}
 
     async def tools(self, state: AgentState, ctx: AgentContext) -> dict:
         """Run the calls of the model's reply and add their results to the conversation.
@@ -136,15 +166,34 @@ class AgentSteps:
             "calls": [],
         }
 
-    async def finalize(self, state: AgentState, ctx: AgentContext) -> dict:
+    async def finalize(self, state: AgentState, ctx: AgentContext, emit: Emit | None = None) -> dict:
         """The answer from what the tools found, with no tools offered.
 
         The oldest tool results are left out until the conversation fits.
         """
         messages = with_instruction(state["messages"], FINALIZE_INSTRUCTION)
         messages = leave_out_old_results(messages, lambda m: self.fits(m, ctx, with_tools=False))
-        response = await ctx.llm.chat(sanitize_messages(messages), **ctx.sampling)
+        response = await self._reply(messages, ctx, with_tools=False, emit=emit)
+        if ctx.stream and emit is not None:
+            emit(finish_line(response))
         return {"response": response, "messages": messages, "calls": [], "finalized": True}
+
+    async def _reply(self, messages: list[dict], ctx: AgentContext, *, with_tools: bool, emit: Emit | None) -> dict:
+        """The model's reply to *messages*, as a chat completion.
+
+        When the request streams, the reply is streamed: its text is written
+        to *emit* as it comes, and the whole reply put back together.
+        """
+        kwargs = {**ctx.sampling, "tools": ctx.tools.schemas()} if with_tools else dict(ctx.sampling)
+        messages = sanitize_messages(messages)
+        if not ctx.stream or emit is None:
+            return await ctx.llm.chat(messages, **kwargs)
+        reply = StreamedReply()
+        async for line in ctx.llm.stream_chat(messages, **kwargs):
+            chunk = sse_chunk(line)
+            if chunk is not None and (text := reply.add(chunk)):
+                emit(text_line(chunk, text))
+        return reply.response()
 
     def wants_tools(self, state: AgentState) -> bool:
         """Whether the model's reply calls tools, rather than answering."""
@@ -166,6 +215,25 @@ class AgentSteps:
 
 
 @dataclass(frozen=True)
+class AgentRequest:
+    """A chat request as the agent takes it.
+
+    *messages* is the history without its leading system prompt, which is
+    the client's own instruction (*custom_prompt*). *payload* is the request
+    as the client sent it: its sampling settings and ``metadata`` go to every
+    call of the model; without a temperature, the profile's is used.
+    """
+
+    profile: AgentProfile
+    messages: list[dict]
+    custom_prompt: str | None
+    scope: Scope
+    llm: LLM
+    payload: dict
+    max_prompt_tokens: int | None = None
+
+
+@dataclass(frozen=True)
 class AgentRun:
     """What the agent did for a request."""
 
@@ -177,6 +245,53 @@ class AgentRun:
     sources: list[Chunk]
     rounds: int
     finalized: bool
+
+    @classmethod
+    def of(cls, state: AgentState, ctx: AgentContext) -> AgentRun:
+        run = cls(
+            response=_without_tool_calls(state["response"]),
+            messages=state["messages"],
+            sources=ctx.tool_context.sources.entries,
+            rounds=state.get("rounds", 0),
+            finalized=state.get("finalized", False),
+        )
+        logger.bind(
+            profile=ctx.profile.name, rounds=run.rounds, finalized=run.finalized, sources=len(run.sources)
+        ).info("Agent answered")
+        return run
+
+
+class AgentStream:
+    """The agent's run for a streaming request: the answer's SSE lines as the model writes them, then ``[DONE]``.
+
+    The tools run before the answer's text comes, so ``sources`` is complete
+    by then; it grows while they run. ``run`` is set once the lines are out.
+    """
+
+    def __init__(self, chunks: AsyncIterator[tuple[str, Any]], ctx: AgentContext) -> None:
+        self._chunks = chunks
+        self._ctx = ctx
+        self.run: AgentRun | None = None
+
+    @property
+    def sources(self) -> list[Chunk]:
+        """Every passage the tools have shown so far, in ``[Source N]`` order."""
+        return self._ctx.tool_context.sources.entries
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        return self._lines()
+
+    async def _lines(self) -> AsyncIterator[str]:
+        state: AgentState | None = None
+        async with aclosing(self._chunks) as chunks:
+            async for mode, value in chunks:
+                if mode == "custom":
+                    yield value
+                else:
+                    state = value
+        if state is not None and "response" in state:
+            self.run = AgentRun.of(state, self._ctx)
+        yield "data: [DONE]"
 
 
 class AgenticChat:
@@ -212,59 +327,47 @@ class AgenticChat:
         """The profile named *name*, the default for ``None``; an unknown name is a 400."""
         return self._profiles.get(name)
 
-    async def run(
-        self,
-        *,
-        profile: AgentProfile,
-        messages: list[dict],
-        custom_prompt: str | None,
-        scope: Scope,
-        llm: LLM,
-        payload: dict,
-        max_prompt_tokens: int | None = None,
-    ) -> AgentRun:
-        """Let the agent answer *messages*, the history without its leading system prompt (*custom_prompt*).
+    async def run(self, request: AgentRequest) -> AgentRun:
+        """Let the agent answer *request*."""
+        state, ctx = await self._start(request, stream=False)
+        return AgentRun.of(await self._graph.run(state, context=ctx), ctx)
 
-        *payload* is the request as the client sent it: its sampling settings
-        and ``metadata`` go to every call of the model. Without a temperature,
-        the profile's is used.
-        """
+    async def stream(self, request: AgentRequest) -> AgentStream:
+        """Let the agent answer *request*, streaming its answer."""
+        state, ctx = await self._start(request, stream=True)
+        return AgentStream(self._graph.stream(state, context=ctx), ctx)
+
+    async def _start(self, request: AgentRequest, *, stream: bool) -> tuple[AgentState, AgentContext]:
+        """The agent's first state, and the context it runs with."""
+        profile = request.profile
         template = await self._prompt_service.resolve_prompt(PromptType.AGENT.value, names=[profile.prompt_name])
         now = self._clock()
         system_prompt = template.format(
             current_date=now.strftime(_DATE_FORMAT),
             calendar_anchors=calendar_anchors(now),
-            custom_prompt=custom_prompt_block(custom_prompt),
+            custom_prompt=custom_prompt_block(request.custom_prompt),
         )
-        sampling = sampling_params(payload)
+        sampling = sampling_params(request.payload)
         if sampling.get("temperature") is None and profile.temperature is not None:
             sampling["temperature"] = profile.temperature
         tools = self._tools[profile.name]
-        tool_context = ToolContext(scope=scope)
+        tool_context = ToolContext(scope=request.scope)
         context = AgentContext(
             profile=profile,
-            llm=llm,
+            llm=request.llm,
             tools=tools,
             tool_context=tool_context,
             sampling=sampling,
             tools_tokens=tool_definition_tokens({"tools": tools.schemas()}, get_num_tokens()),
-            max_prompt_tokens=max_prompt_tokens,
+            max_prompt_tokens=request.max_prompt_tokens,
+            stream=stream,
         )
-        state = await self._graph.run(
-            {"messages": [{"role": "system", "content": system_prompt}, *messages], "rounds": 0, "calls_made": []},
-            context=context,
-        )
-        run = AgentRun(
-            response=_without_tool_calls(state["response"]),
-            messages=state["messages"],
-            sources=tool_context.sources.entries,
-            rounds=state.get("rounds", 0),
-            finalized=state.get("finalized", False),
-        )
-        logger.bind(profile=profile.name, rounds=run.rounds, finalized=run.finalized, sources=len(run.sources)).info(
-            "Agent answered"
-        )
-        return run
+        state: AgentState = {
+            "messages": [{"role": "system", "content": system_prompt}, *request.messages],
+            "rounds": 0,
+            "calls_made": [],
+        }
+        return state, context
 
 
 def _message(response: dict) -> dict:
@@ -290,4 +393,13 @@ def _without_tool_calls(response: dict) -> dict:
     return response
 
 
-__all__ = ["AgentContext", "AgentGraph", "AgentRun", "AgentSteps", "AgenticChat"]
+__all__ = [
+    "AgentContext",
+    "AgentGraph",
+    "AgentRequest",
+    "AgentRun",
+    "AgentSteps",
+    "AgentStream",
+    "AgenticChat",
+    "Emit",
+]

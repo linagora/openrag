@@ -40,7 +40,7 @@ from core.chat.budget import fit_prompt
 from core.chat.history import history_window, latest_user_query, split_leading_system_prompt
 from core.chat.routing import Route, resolve_route
 from core.chat.scope import Scope
-from core.models.chat import AGENTIC_STREAM_REFUSAL, ChatOptions, RagMode
+from core.models.chat import ChatOptions, RagMode
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import documents_context
@@ -50,6 +50,7 @@ from core.utils.exceptions import ContextWindowExceededError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens
 from services.capabilities.contextualize import record_contextualization, record_not_run
+from services.chat.agentic import AgentRequest
 from services.chat.classic import ChatContext
 from services.orchestrators.answer_service import PreparedAnswer
 
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
     from services.capabilities.contextualize import QueryContextualizer
     from services.capabilities.retrieve import SourceRetriever
     from services.capabilities.scope import ScopeResolver
-    from services.chat.agentic import AgenticChat
+    from services.chat.agentic import AgenticChat, AgentStream
     from services.chat.classic import ClassicGraph
     from services.chat.prompt_settings import PartitionPromptSettings
     from services.orchestrators.answer_service import AnswerService
@@ -489,11 +490,13 @@ class ChatService:
         request_id: str | None,
         max_prompt_tokens: int | None,
         request_started: float,
+        stream: bool = False,
     ) -> PreparedAnswer:
         """Find the sources of a chat request and render them into its prompt.
 
         A request with no partition and no web search goes to the model as it
-        is. *max_prompt_tokens*: see ``chat``.
+        is. *max_prompt_tokens*: see ``chat``. In ``agentic``, the agent finds
+        the sources and answers; with *stream*, its answer is streamed.
         """
         options = ChatOptions.from_metadata(payload.get("metadata"))
         if options.rag_mode is RagMode.AGENTIC and resolve_route(partitions, options).has_documents:
@@ -504,6 +507,7 @@ class ChatService:
                 prepare_sources=prepare_sources,
                 llm=llm,
                 max_prompt_tokens=max_prompt_tokens,
+                stream=stream,
             )
         original_query = latest_user_query(payload.get("messages", []))
         trace = (
@@ -576,12 +580,15 @@ class ChatService:
         prepare_sources: PrepareSources,
         llm: LLM,
         max_prompt_tokens: int | None,
+        stream: bool,
     ) -> PreparedAnswer:
         """Let the agent find the sources and answer; ``AnswerService`` then shapes its answer.
 
         The history and the scope are settled as for ``classic``. The sources
         are every passage the tools showed, numbered as the model saw them, so
-        its ``[Sources: N]`` citations map back to them.
+        its ``[Sources: N]`` citations map back to them. With *stream*, the
+        agent runs as the client reads: its answer's text goes out as the model
+        writes it, and the sources are added as the tools find them.
         """
         profile = self._agentic.profile(options.agent_profile)
         messages = history_window(payload["messages"], self._resolve_chat_history_depth(partitions))
@@ -591,7 +598,7 @@ class ChatService:
         scope = await self._scope.resolve(
             partitions, workspace=options.workspace, attachment_ids=list(options.attachment_ids)
         )
-        run = await self._agentic.run(
+        request = AgentRequest(
             profile=profile,
             messages=messages,
             custom_prompt=custom_prompt,
@@ -600,8 +607,23 @@ class ChatService:
             payload=payload,
             max_prompt_tokens=max_prompt_tokens,
         )
-        sources = prepare_sources([chunk.to_langchain() for chunk in run.sources], [])
         include_all_retrieved = options.include_all_retrieved_sources
+        extra_fields = {"attachments": scope.attachment_ids} if options.attachments_sent else {}
+        if stream:
+            sources: list = []
+            answer_payload = dict(payload)
+            lines = _agent_lines(await self._agentic.stream(request), sources, answer_payload, prepare_sources)
+            return PreparedAnswer(
+                payload=answer_payload,
+                sources=sources,
+                all_sources=sources if include_all_retrieved else None,
+                include_all_retrieved=include_all_retrieved,
+                citation_protocol_active=True,
+                extra_fields=extra_fields,
+                stream=lines,
+            )
+        run = await self._agentic.run(request)
+        sources = prepare_sources([chunk.to_langchain() for chunk in run.sources], [])
         return PreparedAnswer(
             # The conversation the model last saw: an empty answer is retried on it.
             payload={**payload, "messages": run.messages},
@@ -609,7 +631,7 @@ class ChatService:
             all_sources=sources if include_all_retrieved else None,
             include_all_retrieved=include_all_retrieved,
             citation_protocol_active=True,
-            extra_fields={"attachments": scope.attachment_ids} if options.attachments_sent else {},
+            extra_fields=extra_fields,
             response=run.response,
         )
 
@@ -657,12 +679,8 @@ class ChatService:
         """Streaming chat completion → SSE strings with filtered sources (*max_prompt_tokens*: see ``chat``).
 
         The sources are prepared once the caller starts iterating, so a failure
-        there reaches it inside the stream. ``agentic`` doesn't stream yet: the
-        request schema refuses it, and so does this.
+        there reaches it inside the stream.
         """
-        options = ChatOptions.from_metadata(payload.get("metadata"))
-        if options.rag_mode is RagMode.AGENTIC and resolve_route(partitions, options).has_documents:
-            raise ValidationError(AGENTIC_STREAM_REFUSAL)
         request_started = time.perf_counter()
         llm = self._resolve_llm(partitions)
         prepared = await self._prepare_answer(
@@ -673,6 +691,7 @@ class ChatService:
             request_id=request_id,
             max_prompt_tokens=max_prompt_tokens,
             request_started=request_started,
+            stream=True,
         )
         async for sse_line in self._answer.chat_stream(prepared, llm=llm, model_name=model_name):
             yield sse_line
@@ -700,6 +719,25 @@ class ChatService:
             citation_protocol_active=partitions is not None,
         )
         return await self._answer.complete(prepared, llm=llm)
+
+
+async def _agent_lines(
+    agent: AgentStream, sources: list, payload: dict, prepare_sources: PrepareSources
+) -> AsyncIterator[str]:
+    """The agent's answer lines, keeping *sources* and *payload* up to date as they go out.
+
+    *sources* gets the source link of each passage the tools show, before the
+    line that follows it: the answer's citations are read against it. Once
+    the agent is done, *payload* holds the conversation the model last saw,
+    which an empty answer is retried on.
+    """
+    async for line in agent:
+        shown = agent.sources
+        if len(shown) > len(sources):
+            sources.extend(prepare_sources([chunk.to_langchain() for chunk in shown[len(sources) :]], []))
+        if agent.run is not None:
+            payload["messages"] = agent.run.messages
+        yield line
 
 
 __all__ = ["ChatService"]

@@ -313,10 +313,21 @@ async def stream_with_source_filtering(
     a clean completion; if nothing was ever streamed there is no tail to salvage,
     so a mid-stream error is re-raised to surface the real failure instead of a
     silent empty ``[DONE]``.
+
+    ``sources`` is read at the answer's first text and again at its end, not
+    when the stream starts: in ``agentic`` the list fills while the agent's
+    tools run, before the model writes the answer.
     """
-    if buffer_size is None:
-        buffer_size = max(_MIN_STREAM_LOOKAHEAD, _min_sources_tag_buffer_size(len(sources)))
+    fixed_buffer_size = buffer_size
+
+    def lookahead() -> int:
+        if fixed_buffer_size is not None:
+            return fixed_buffer_size
+        return max(_MIN_STREAM_LOOKAHEAD, _min_sources_tag_buffer_size(len(sources)))
+
+    buffer_size = lookahead()
     include_inline_markers = citation_protocol_active and bool(sources)
+    seen_text = False
     pending = ""
     # Stripping all of `pending` at every delta would be quadratic in the answer
     # length. Only `tail`, its end, is stripped: what is cut off its front (at a
@@ -378,6 +389,10 @@ async def stream_with_source_filtering(
                 chunk_template = data
 
             if content:
+                if not seen_text:
+                    seen_text = True
+                    buffer_size = lookahead()
+                    include_inline_markers = citation_protocol_active and bool(sources)
                 chunk_template = data
                 pending += content
                 tail += content
@@ -472,7 +487,7 @@ async def stream_with_source_filtering(
     if citation_protocol_active:
         final_clean, citations = extract_and_strip_sources_block(
             pending,
-            include_inline_markers=include_inline_markers,
+            include_inline_markers=bool(sources),
         )
         final_clean = final_clean.rstrip()
     else:

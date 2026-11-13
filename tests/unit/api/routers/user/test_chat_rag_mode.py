@@ -25,6 +25,10 @@ class RecordingChatService:
         self.calls["chat"] = kwargs
         return {"choices": [], "extra": {}}
 
+    async def chat_stream(self, **kwargs: Any):
+        self.calls["chat_stream"] = kwargs
+        yield "data: [DONE]\n\n"
+
     async def complete(self, **kwargs: Any) -> dict:
         self.calls["complete"] = kwargs
         return {"choices": [], "extra": {}}
@@ -86,6 +90,15 @@ async def test_any_other_mode_is_refused_before_anything_runs(client, service, m
 
 
 @pytest.mark.asyncio
+async def test_an_agentic_request_streams(client, service):
+    async with client:
+        response = await client.post("/v1/chat/completions", json={**_chat("agentic"), "stream": True})
+
+    assert response.status_code == 200, response.text
+    assert service.calls["chat_stream"]["payload"]["metadata"]["rag_mode"] == "agentic"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("rag_mode", "sent", "forwarded"),
     [
@@ -106,7 +119,6 @@ async def test_an_agentic_request_forwards_only_a_temperature_it_sent(client, se
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"stream": True}, "doesn't stream yet"),
         ({"tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}]}, "runs its own tools"),
         ({"metadata": {"rag_mode": "agentic", "websearch": True}}, "doesn't search the web"),
         ({"response_format": {"type": "json_object"}}, "answers in text"),

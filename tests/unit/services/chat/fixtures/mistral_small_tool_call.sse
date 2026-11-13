@@ -1,0 +1,39 @@
+: Recorded 2026-11-13 from vLLM 0.28.0 serving Mistral-Small-3.2-24B-Instruct-2506-FP8 (Mistral tool-call parser), offered a search_knowledge tool.
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"vu6TgUHxP","function":{"arguments":"{\"","name":"search_knowledge"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"queries"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\":"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" [\""},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"notice"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" period"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" in"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" the"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" employment contract\","},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" \""},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"number"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" of"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" holidays"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" for"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":" employees"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"]"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","system_fingerprint":"vllm-0.28.0-70cf62e2","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"}"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-bd1e0fc1dc53ffa8","created":1794566738,"model":"Mistral-Small-3.2-24B-Instruct-2506-FP8","object":"chat.completion.chunk","system_fingerprint":"vllm-0.28.0-70cf62e2","choices":[{"finish_reason":"tool_calls","index":0,"delta":{}}]}
+
+data: [DONE]
+

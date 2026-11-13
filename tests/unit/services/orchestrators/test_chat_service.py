@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import core.utils.text as text_utils
@@ -3708,17 +3709,80 @@ async def test_agentic_chat_with_an_unknown_profile_is_a_400_before_the_model_is
     assert llm.chat_calls == []
 
 
+# The reply vLLM streamed for Mistral Small when offered search_knowledge: one call, two queries.
+_RECORDED_CALL = (Path(__file__).parents[1] / "chat/fixtures/mistral_small_tool_call.sse").read_text().splitlines()
+
+
+def _answer_stream(*pieces: str) -> list[str]:
+    def chunk(delta, finish_reason=None):
+        return "data: " + json.dumps(
+            {"id": "a", "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+        )
+
+    return [chunk({"content": piece}) for piece in pieces] + [chunk({}, "stop"), "data: [DONE]"]
+
+
+async def _agentic_stream(svc, **metadata) -> tuple[str, dict, list[str]]:
+    """The streamed answer's text, the ``extra`` it ends with, and its lines."""
+    lines = [
+        line
+        async for line in svc.chat_stream(
+            partitions=["p"],
+            payload=_agentic_payload(**metadata),
+            prepare_sources=_source_ids,
+            model_name="openrag-p",
+        )
+    ]
+    chunks = [json.loads(line[len("data: ") :]) for line in lines if line.startswith("data: {")]
+    text = "".join((c.get("choices") or [{}])[0].get("delta", {}).get("content") or "" for c in chunks)
+    extra = [c["extra"] for c in chunks if "presented_sources" in c.get("extra", {})][-1]
+    return text, extra, lines
+
+
 @pytest.mark.asyncio
-async def test_agentic_chat_does_not_stream_yet():
+async def test_agentic_chat_streams_its_answer_once_the_tools_have_run():
+    llm = FakeLLM(stream_sequences=[_RECORDED_CALL, _answer_stream("Three ", "months.", "\n\n[Sources: 1]")])
+    retrieval = FakeRetrieval(list(_NOTICE))
+
+    text, extra, lines = await _agentic_stream(_svc(llm=llm, retrieval=retrieval))
+
+    assert text == "Three months."
+    assert extra["presented_sources"] == [{"id": "c1"}, {"id": "c2"}]
+    assert extra["cited_sources"] == [{"id": "c1"}]
+    assert lines[-1].strip() == "data: [DONE]"
+    assert not any("tool_calls" in line or "search_knowledge" in line for line in lines), (
+        "the agent's calls are its own"
+    )
+    assert llm.chat_calls == [], "every reply of the model is streamed"
+    assert "tools" in llm.stream_calls[0][1] and "tools" in llm.stream_calls[1][1]
+    searched = [q.query for q in retrieval.retrieve_multi_calls[0]["search_queries"].query_list]
+    assert searched == ["notice period in the employment contract", "number of holidays for employees"]
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_streamed_retries_an_empty_answer_on_the_agents_conversation():
+    llm = FakeLLM(
+        stream_sequences=[_RECORDED_CALL, _answer_stream("[Sources: 1]"), _answer_stream("Three months. [Sources: 1]")]
+    )
+
+    text, extra, _lines = await _agentic_stream(_svc(llm=llm, retrieval=FakeRetrieval(list(_NOTICE))))
+
+    assert text == "Three months."
+    assert extra["cited_sources"] == [{"id": "c1"}]
+    retry_messages, retry_kwargs = llm.stream_calls[2]
+    assert "tools" not in retry_kwargs
+    assert [m["role"] for m in retry_messages] == ["system", "user", "assistant", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_streamed_with_an_unknown_profile_fails_before_the_model_is_called():
     llm = FakeLLM()
 
-    with pytest.raises(ValidationError, match="doesn't stream yet"):
-        async for _ in _svc(llm=llm).chat_stream(
-            partitions=["p"], payload=_agentic_payload(), prepare_sources=_source_ids, model_name="openrag-p"
-        ):
-            pass
+    with pytest.raises(ValidationError) as error:
+        await _agentic_stream(_svc(llm=llm), agent_profile="lawyer")
 
-    assert llm.chat_calls == [] and llm.stream_calls == []
+    assert error.value.status_code == 400
+    assert llm.stream_calls == []
 
 
 @pytest.mark.asyncio
