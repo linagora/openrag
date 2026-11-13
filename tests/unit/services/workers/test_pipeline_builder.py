@@ -1980,6 +1980,37 @@ async def test_release_keeps_everything_the_caption_substitution_reads():
     assert [image.metadata.get("markdown_ref") for image in images] == refs
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("captioning", ["off", "failed"])
+async def test_refs_of_uncaptioned_images_never_reach_the_chunker(captioning):
+    """Left in the text, ``![](docling_img_0)`` was chunked, embedded and
+    indexed as content, pointing at bytes released after the caption decision."""
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="before ![](docling_img_0) after", page_number=1)],
+        images=[ImageBlock(image_bytes=b"\x89PNG", page_number=1, metadata={"markdown_ref": "![](docling_img_0)"})],
+    )
+
+    class FailingVLM(FakeVLM):
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            raise RuntimeError("VLM down")
+
+    chunker = FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=chunker,
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=None if captioning == "off" else FailingVLM(),
+    )
+
+    await pipeline.run(_row(document))
+
+    [(chunked, _)] = chunker.calls
+    assert [block.text for block in chunked.text_blocks] == ["before  after"]
+
+
 class ServingEmbedder(FakeEmbedder):
     """An embedder whose endpoint reports its own window; the last value repeats."""
 

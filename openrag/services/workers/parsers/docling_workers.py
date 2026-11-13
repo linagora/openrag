@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Mapping
+from typing import Any
 
 import ray
 import torch
@@ -32,10 +34,22 @@ from docling.datamodel.pipeline_options import (
     TableStructureOptions,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling_core.transforms.serializer.base import BaseDocSerializer, SerializationResult
+from docling_core.transforms.serializer.markdown import (
+    MarkdownDocSerializer,
+    MarkdownParams,
+    MarkdownPictureSerializer,
+)
+from docling_core.types.doc.document import DoclingDocument, PictureItem
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
 logger = get_logger()
+
+# What docling-core prints where a picture's image goes (``image_placeholder``).
+# ``_PictureRefSerializer`` swaps it for the picture's own ref before the page
+# text is assembled, so it never reaches the page text.
+_IMAGE_PLACEHOLDER = "<!-- image -->"
 
 
 def _docling_num_gpus(config) -> float:
@@ -55,6 +69,44 @@ def _docling_num_gpus(config) -> float:
     except Exception as exc:
         logger.warning("Failed to query Ray cluster GPU resources; falling back to CUDA check", error=str(exc))
         return requested_gpus if torch.cuda.is_available() else 0
+
+
+class _PictureRefSerializer(MarkdownPictureSerializer):
+    """Prints a picture as the ``markdown_ref`` of the ``ImageBlock`` built from it.
+
+    ``refs`` maps a picture's ``self_ref`` to that ref, so the caption stage finds
+    each picture's ref exactly where the picture is, whatever else the page
+    holds (#1313). A picture with no block, its image unreadable, prints nothing
+    in its image's place; its caption, if any, stays.
+    """
+
+    def __init__(self, refs: Mapping[str, str]) -> None:
+        self._refs = refs
+
+    def serialize(
+        self,
+        *,
+        item: PictureItem,
+        doc_serializer: BaseDocSerializer,
+        doc: DoclingDocument,
+        **kwargs: Any,
+    ) -> SerializationResult:
+        result = super().serialize(item=item, doc_serializer=doc_serializer, doc=doc, **kwargs)
+        # docling-core joins a picture's caption, image and chart table with a
+        # blank line, the image part being the placeholder alone.
+        ref = self._refs.get(item.self_ref, "")
+        parts = [ref if part == _IMAGE_PLACEHOLDER else part for part in result.text.split("\n\n")]
+        return result.model_copy(update={"text": "\n\n".join(part for part in parts if part)})
+
+
+def _page_markdown(document: DoclingDocument, page_no: int, refs: Mapping[str, str]) -> str:
+    """``document.export_to_markdown(page_no=page_no)``, each picture printed as its ref."""
+    serializer = MarkdownDocSerializer(
+        doc=document,
+        picture_serializer=_PictureRefSerializer(refs),
+        params=MarkdownParams(pages={page_no}, image_placeholder=_IMAGE_PLACEHOLDER),
+    )
+    return serializer.serialize().text.strip()
 
 
 @ray.remote
@@ -138,7 +190,10 @@ class DoclingLoader(BasePooledParser):
     Materialises ``Document.raw_bytes`` to a temporary file, dispatches to the
     named ``DoclingPool`` actor, and converts the ``ConversionResult`` into a
     ``ProcessedDocument`` with one ``TextBlock`` per page and one ``ImageBlock``
-    per picture.  Image captioning is left to the downstream caption stage.
+    per picture.  Image captioning is left to the downstream caption stage:
+    each picture is printed in its page's text as the ref of its block, and
+    each block keeps its picture's page (``prov[0].page_no``), so the stage can
+    land every caption where the figure was.
     """
 
     def __init__(self) -> None:
@@ -199,10 +254,57 @@ class DoclingLoader(BasePooledParser):
     ) -> tuple[list[TextBlock], list[ImageBlock]]:
         """Build the text and image blocks off the loop.
 
+        The image blocks are built first: the page text prints each picture as
+        the ref of its block, looked up by the picture's ``self_ref``.
+
         ``cancelled`` is checked before each page and each picture: once set,
         the caller has gone and the result is discarded, so the work stops early.
         """
-        return self._build_text_blocks(result, cancelled), self._build_image_blocks(result, cancelled)
+        blocks: list[ImageBlock] = []
+        refs: dict[str, str] = {}
+        page_refs: dict[int, list[str]] = {}
+        for idx, picture in enumerate(result.document.pictures):
+            if cancelled.is_set():
+                break
+            # Docling indexes pages from 1, like OpenRAG's TextBlock/Marker blocks.
+            page_no = picture.prov[0].page_no if picture.prov else None
+            block = self._build_image_block(picture, idx, page_no)
+            if block is not None:
+                ref = block.metadata["markdown_ref"]
+                refs[picture.self_ref] = ref
+                if page_no is not None:
+                    page_refs.setdefault(page_no, []).append(ref)
+                blocks.append(block)
+        return self._build_text_blocks(result, refs, page_refs, cancelled), blocks
+
+    @staticmethod
+    def _build_image_block(picture: Any, idx: int, page_no: int | None) -> ImageBlock | None:
+        """The ``ImageBlock`` of one picture, without encoding it; ``None`` if unreadable.
+
+        Docling PNG-encoded each picture into its ``data:`` URI when it generated
+        it, so those bytes are reused as they are. A picture without one keeps its
+        decoded image in ``pil_image``, which the caption stage encodes only when
+        it captions the document. A picture Docling generated no image for has
+        no block, and nothing failed, so nothing is logged.
+        """
+        if picture.image is None:
+            return None
+        try:
+            uri = str(getattr(picture.image, "uri", None) or "")
+            png_bytes = decode_data_uri(uri) if uri.startswith("data:image/png;") else None
+            pil_image = None if png_bytes else picture.image.pil_image
+        except Exception as exc:
+            logger.warning(f"Failed to read Docling picture {idx}: {exc}")
+            return None
+        if not png_bytes and pil_image is None:
+            return None
+        return ImageBlock(
+            image_bytes=png_bytes or b"",
+            pil_image=pil_image,
+            page_number=page_no,
+            mime_type="image/png",
+            metadata={"markdown_ref": f"![](docling_img_{idx})"},
+        )
 
     async def _dispatch(self, file_path: str) -> ConversionResult:
         pool = self._pool()
@@ -213,50 +315,45 @@ class DoclingLoader(BasePooledParser):
         )
 
     @staticmethod
-    def _build_text_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[TextBlock]:
+    def _build_text_blocks(
+        result: ConversionResult,
+        refs: Mapping[str, str] | None = None,
+        page_refs: Mapping[int, list[str]] | None = None,
+        cancelled: threading.Event | None = None,
+    ) -> list[TextBlock]:
+        """One ``TextBlock`` per page, each picture printed as its ref (``refs``).
+
+        ``export_to_markdown`` would print ``<!-- image -->`` for every picture,
+        which the caption stage never looks for: each caption was appended at
+        the end of the document, attributed to the last page, and the marker
+        was indexed (#1313).
+
+        A picture the page export leaves out (outside the body layer, like a
+        logo) has its ref put at the end of its page (``page_refs``): appended
+        after the last page instead, its caption was chunked with that page's
+        text, which then took the caption's page number.
+
+        The pages are the ones the document holds, by their own number: a page
+        Docling left out leaves a gap, so counting ``result.pages`` from 1
+        would export a missing page and skip the last one.
+        """
         blocks: list[TextBlock] = []
-        n_pages = len(result.pages)
+        page_numbers = sorted(result.document.pages)
+        n_pages = len(page_numbers)
+        refs = refs or {}
+        page_refs = page_refs or {}
         if n_pages:
             report_parser_substage("parse.text", "Extracting page text", progress=0, total=n_pages)
         else:
             report_parser_substage("parse.text", "Extracting page text")
-        for i in range(1, n_pages + 1):
+        for done, page_no in enumerate(page_numbers, start=1):
             if cancelled is not None and cancelled.is_set():
                 break
-            text = result.document.export_to_markdown(page_no=i).strip()
-            blocks.append(TextBlock(text=text, page_number=i))
-            report_parser_substage("parse.text", "Extracting page text", progress=i, total=n_pages)
-        return blocks
-
-    @staticmethod
-    def _build_image_blocks(result: ConversionResult, cancelled: threading.Event | None = None) -> list[ImageBlock]:
-        """One ``ImageBlock`` per picture, without encoding any of them.
-
-        Docling PNG-encoded each picture into its ``data:`` URI when it generated
-        it, so those bytes are reused as they are. A picture without one keeps its
-        decoded image in ``pil_image``, which the caption stage encodes only when
-        it captions the document.
-        """
-        blocks: list[ImageBlock] = []
-        for idx, picture in enumerate(result.document.pictures):
-            if cancelled is not None and cancelled.is_set():
-                break
-            try:
-                uri = str(getattr(picture.image, "uri", None) or "")
-                png_bytes = decode_data_uri(uri) if uri.startswith("data:image/png;") else None
-                pil_image = None if png_bytes else picture.image.pil_image
-            except Exception as exc:
-                logger.warning(f"Failed to read Docling picture {idx}: {exc}")
-                continue
-            if png_bytes or pil_image is not None:
-                blocks.append(
-                    ImageBlock(
-                        image_bytes=png_bytes or b"",
-                        pil_image=pil_image,
-                        mime_type="image/png",
-                        metadata={"markdown_ref": f"![](docling_img_{idx})"},
-                    )
-                )
+            text = _page_markdown(result.document, page_no, refs)
+            left_out = [ref for ref in page_refs.get(page_no, ()) if ref not in text]
+            text = "\n\n".join([text, *left_out]).strip()
+            blocks.append(TextBlock(text=text, page_number=page_no))
+            report_parser_substage("parse.text", "Extracting page text", progress=done, total=n_pages)
         return blocks
 
 

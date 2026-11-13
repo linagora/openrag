@@ -349,3 +349,30 @@ def _replace_markdown_ref(text_blocks: list[TextBlock], image: ImageBlock, wrapp
         text_blocks[index] = block.model_copy(update={"text": block.text.replace(markdown_ref, wrapped_caption)})
         replaced = True
     return replaced
+
+
+def drop_uncaptioned_image_refs(processed_document: ProcessedDocument) -> ProcessedDocument:
+    """Take the refs of the images left uncaptioned out of the text.
+
+    A parser marks where each image was with a ref in the text, such as
+    ``![](docling_img_3)``, for the caption stage to swap for the caption. An
+    image left uncaptioned, because captioning is off or failed on it, still has
+    its ref there: it would be chunked, embedded and returned by extractText as
+    if it were content, while it points at bytes nothing can read any more. Its
+    alt text, when it has one, takes its place. A remote image keeps its link,
+    which still resolves (#1294).
+    """
+    replacements = {
+        ref: (image.metadata.get("alt") or "").strip()
+        for image in processed_document.images
+        if (ref := image.metadata.get("markdown_ref")) and not image.caption and not image.source_url
+    }
+    if not replacements:
+        return processed_document
+    text_blocks: list[TextBlock] = []
+    for block in processed_document.text_blocks:
+        text = block.text
+        for ref, alt in replacements.items():
+            text = text.replace(ref, alt)
+        text_blocks.append(block if text == block.text else block.model_copy(update={"text": text}))
+    return processed_document.model_copy(update={"text_blocks": text_blocks})
