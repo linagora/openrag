@@ -35,7 +35,9 @@
    (no env.existingSecret, the "values" provider): envFrom loads the Secret
    after the ConfigMap, so its copy wins. With any other Secret, env.secrets
    never reaches the pod, and the Secret's own values are out of the chart's
-   sight. The defaults are the app's (conf/config.yaml). */ -}}
+   sight. openrag.extraEnv wins over both, since the container env overrides
+   envFrom. An extraEnv entry with valueFrom cannot be read at render time and
+   goes unchecked. The defaults are the app's (conf/config.yaml). */ -}}
 {{- if $embeddedRay -}}
 {{- $resources := .Values.openrag.resources | default dict -}}
 {{- $podGpus := int (dig "limits" "nvidia.com/gpu" (dig "requests" "nvidia.com/gpu" 0 $resources) $resources) -}}
@@ -43,6 +45,9 @@
 {{- $env := deepCopy (.Values.env.config | default dict) -}}
 {{- if and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") -}}
 {{- $env = mergeOverwrite $env (.Values.env.secrets | default dict) -}}
+{{- end -}}
+{{- range $entry := .Values.openrag.extraEnv | default list -}}
+{{- if hasKey $entry "value" -}}{{- $_ := set $env $entry.name (toString $entry.value) -}}{{- end -}}
 {{- end -}}
 {{- $pools := list
   (dict "name" "Marker" "poolKey" "MARKER_POOL_SIZE" "gpusKey" "MARKER_NUM_GPUS" "count" (int (dig "MARKER_POOL_SIZE" "1" $env)) "size" (float64 (dig "MARKER_NUM_GPUS" "0.01" $env)))
@@ -130,6 +135,18 @@ spec:
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
       automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.openrag "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
+      {{- if .Values.openrag.runtimeClassName }}
+      runtimeClassName: {{ .Values.openrag.runtimeClassName }}
+      {{- end }}
+      {{- with .Values.openrag.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openrag.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openrag.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if or .Values.openrag.extraInitContainers .Values.ray.enabled }}
       initContainers:
         {{- with .Values.openrag.extraInitContainers }}
@@ -192,10 +209,33 @@ spec:
           livenessProbe:
             {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
-          {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
+          {{- $embeddedRay := eq (include "openrag-stack.embeddedRay" .) "true" }}
+          {{- /* The chart owns RAY_METRICS_EXPORT_PORT: the ray-metrics port and the
+             PodMonitor follow it, so a second entry would move the export away from
+             them. The chart reads the others from env.config to pick the Ray mode,
+             probes and migrations, and POSTGRES_AUTO_CREATE_DB from
+             postgresProvisioning.autoCreateDatabase, so an API-only value would
+             contradict them. */}}
+          {{- range .Values.openrag.extraEnv }}
+          {{- if and $embeddedRay (eq (toString .name) "RAY_METRICS_EXPORT_PORT") }}
+          {{- fail "openrag.extraEnv sets RAY_METRICS_EXPORT_PORT, which the chart pins for the embedded Ray: the ray-metrics port and the PodMonitor follow it. Remove it from openrag.extraEnv." }}
+          {{- end }}
+          {{- if eq (toString .name) "POSTGRES_AUTO_CREATE_DB" }}
+          {{- fail "openrag.extraEnv sets POSTGRES_AUTO_CREATE_DB, which the chart sets from postgresProvisioning.autoCreateDatabase. Set postgresProvisioning.autoCreateDatabase instead." }}
+          {{- end }}
+          {{- if has (toString .name) (list "RAY_ADDRESS" "ENABLE_RAY_SERVE" "POSTGRES_RUN_MIGRATIONS") }}
+          {{- fail (printf "openrag.extraEnv sets %s, which the chart reads from env.config to render the Ray mode, probes and migrations. Set it in env.config instead." .name) }}
+          {{- end }}
+          {{- end }}
+          {{- if or $embeddedRay .Values.openrag.extraEnv }}
           env:
+            {{- if $embeddedRay }}
             - name: RAY_METRICS_EXPORT_PORT
               value: {{ include "openrag-stack.rayMetricsPort" . | quote }}
+            {{- end }}
+            {{- with .Values.openrag.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           envFrom:
             - configMapRef:

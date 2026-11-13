@@ -104,6 +104,8 @@ def _gpus(count: int) -> tuple[str, ...]:
         (("--set-string", "env.config.MARKER_NUM_GPUS=1", "--set-string", "env.config.DOCLING_NUM_GPUS=0"), "Whisper"),
         # env.secrets wins over env.config at runtime.
         (("--set-string", "env.secrets.MARKER_POOL_SIZE=2"), "Marker"),
+        # openrag.extraEnv lands in the container env, which wins over envFrom.
+        (("--set-json", 'openrag.extraEnv=[{"name":"MARKER_NUM_GPUS","value":"2"}]'), "Marker"),
         # Fits if Docling starts first (0.6 + 0.4 on each card), but not if Marker
         # does: both 0.4 land on the first card and the second 0.6 has no room.
         (
@@ -121,6 +123,7 @@ def _gpus(count: int) -> tuple[str, ...]:
         "docling-counts",
         "whisper-counts",
         "pool-from-secrets",
+        "gpus-from-extra-env",
         "start-order",
     ],
 )
