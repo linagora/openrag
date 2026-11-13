@@ -8,6 +8,7 @@ import pytest
 from core.utils.exceptions import (
     EmbeddingAPIError,
     EmbeddingResponseError,
+    EmbeddingTimeoutError,
     InferenceConnectionError,
     InferenceError,
     InferenceTimeoutError,
@@ -717,3 +718,75 @@ async def test_generate_is_counted_as_a_completion_not_a_chat(recorded_inference
     client = TestOllamaClient()._make_client(lambda req: _completions_response("done"))
     await client.generate("say something")
     assert [c["operation"] for c in recorded_inference] == ["completion"]
+
+
+class TestOllamaQueryBudget:
+    """Search embeds on ``query_timeout`` with one retry; indexing keeps ``timeout``
+    with two (#1078)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self):
+        import tenacity
+
+        restore = []
+        for method in (OllamaEmbedder._embed_batch, OllamaEmbedder._embed_query_batch):
+            restore.append((method.retry, method.retry.wait))
+            method.retry.wait = tenacity.wait_none()
+        yield
+        for retrying, wait in restore:
+            retrying.wait = wait
+
+    def _timing_out(self):
+        calls: list[dict] = []
+
+        async def post(*args, **post_kwargs):
+            calls.append(post_kwargs)
+            raise httpx.TimeoutException("timed out")
+
+        embedder = OllamaEmbedder(
+            endpoint="http://ollama:11434", model_name="nomic-embed-text", timeout=60.0, query_timeout=7.0
+        )
+        embedder._client = AsyncMock()
+        embedder._client.post = post
+        return embedder, calls
+
+    @pytest.mark.asyncio
+    async def test_a_query_is_sent_with_the_query_timeout_and_retried_once(self):
+        embedder, calls = self._timing_out()
+
+        with pytest.raises(EmbeddingTimeoutError):
+            await embedder.embed_query(["what is the leave policy?"])
+
+        assert [call.get("timeout") for call in calls] == [7.0, 7.0]
+
+    @pytest.mark.asyncio
+    async def test_indexing_keeps_the_client_timeout_and_two_retries(self):
+        embedder, calls = self._timing_out()
+
+        with pytest.raises(EmbeddingTimeoutError):
+            await embedder.embed(["a chunk"])
+
+        assert len(calls) == 3
+        assert all("timeout" not in call for call in calls)
+
+    @pytest.mark.asyncio
+    async def test_no_query_sends_no_request(self):
+        embedder, calls = self._timing_out()
+
+        assert await embedder.embed_query([]) == []
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_more_queries_than_one_batch_take_the_indexing_path(self):
+        requests: list[list[str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            batch = json.loads(request.content)["input"]
+            requests.append(batch)
+            return httpx.Response(200, json={"data": [{"index": i, "embedding": [0.0]} for i in range(len(batch))]})
+
+        embedder = OllamaEmbedder(endpoint="http://ollama:11434", model_name="nomic-embed-text", batch_size=2)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        assert len(await embedder.embed_query(["a", "b", "c"])) == 3
+        assert requests == [["a", "b"], ["c"]]
