@@ -83,8 +83,9 @@ class FakeJobService:
         self.detail_checks: list[str] = []
         self.pending_checks: list[int | None] = []
 
-    async def get_task_details(self, task_id: str):
+    async def get_task_details(self, task_id: str, *, require_owner_identity: bool = False):
         self.detail_checks.append(task_id)
+        self.require_owner_identity = require_owner_identity
         return self.details
 
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
@@ -200,6 +201,7 @@ async def test_require_task_owner_reads_task_details_through_job_service():
 
     assert details == {"user_id": 7, "filename": "a.pdf"}
     assert job_service.detail_checks == ["task-1"]
+    assert job_service.require_owner_identity is True
 
 
 @pytest.mark.asyncio
@@ -215,6 +217,22 @@ async def test_require_task_owner_allows_admin_for_another_users_task():
     )
 
     assert details == {"user_id": 2, "filename": "b.pdf"}
+    assert job_service.require_owner_identity is False
+
+
+@pytest.mark.asyncio
+async def test_require_task_owner_allows_admin_when_actor_details_have_no_owner_id():
+    job_service = FakeJobService(details={"partition": "p"})
+
+    details = await require_task_owner(
+        task_id="task-2",
+        user={"id": 1, "is_admin": True},
+        job_service=job_service,
+        auth_service=AuthService,
+    )
+
+    assert details == {"partition": "p"}
+    assert job_service.require_owner_identity is False
 
 
 @pytest.mark.asyncio
@@ -493,3 +511,54 @@ async def test_quota_allows_when_indexed_plus_pending_is_under_limit():
         config=_config(default_file_quota=10),
     )
     assert user["id"] == 7
+
+
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.parametrize("role", ["viewer", "editor", "owner"])
+@pytest.mark.asyncio
+async def test_ensure_partition_role_refuses_a_reserved_partition_name(partition, role):
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            partition=partition,
+            user={"id": 7, "is_admin": False},
+            user_partitions=[{"partition": partition, "role": "owner"}],
+            required_role=role,
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing={partition}),
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_super_admin_may_read_through_a_reserved_name(monkeypatch):
+    import api.dependencies.auth as auth_dependencies
+
+    monkeypatch.setattr(auth_dependencies, "SUPER_ADMIN_MODE", True)
+    assert await ensure_partition_role(
+        partition="all",
+        user={"id": 1, "is_admin": True},
+        user_partitions=[],
+        required_role="viewer",
+        auth_service=FakeAuthService,
+        partition_service=FakePartitionService(existing=set()),
+    )
+
+
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.parametrize("role", ["editor", "owner"])
+@pytest.mark.asyncio
+async def test_super_admin_cannot_change_a_reserved_partition(monkeypatch, partition, role):
+    """The store reads `all` as every partition: deleting file X in it deleted X everywhere."""
+    import api.dependencies.auth as auth_dependencies
+
+    monkeypatch.setattr(auth_dependencies, "SUPER_ADMIN_MODE", True)
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            partition=partition,
+            user={"id": 1, "is_admin": True},
+            user_partitions=[],
+            required_role=role,
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing={"all"}),
+        )
+    assert exc.value.status_code == 403

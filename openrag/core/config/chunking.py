@@ -17,7 +17,9 @@ class ChunkerConfig(ConfigMixin):
     # structure (headings, leaf markers) and prepends the heading path, so a
     # chunk stays self-describing for retrieval instead of being an arbitrary
     # character-window cut. ``recursive_splitter`` remains available for
-    # unstructured prose.
+    # unstructured prose: it splits character windows for chunk_size, and
+    # emits standalone tables and image descriptions in the document's
+    # reading order.
     name: str = "structured_section"
     contextual_retrieval: bool = True
     contextualization_timeout: int = 120
@@ -45,7 +47,6 @@ class ChunkerConfig(ConfigMixin):
     # ``create_chunker`` derive it from the embedder actually used by the
     # partition (half its window). Set it explicitly only to override that.
     hard_max_tokens: int | None = Field(default=None, gt=0)
-    prepend_heading_path: bool = True
     # Layout of the source document, deciding whether a *page* is a meaningful
     # chunk boundary. "auto" detects it from the parsed pages (see
     # StructuredSectionChunker._looks_paginated); "paginated" and "flowing"

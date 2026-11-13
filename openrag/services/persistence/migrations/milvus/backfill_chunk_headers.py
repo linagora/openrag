@@ -37,15 +37,20 @@ from core.config import load_config
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens
 from pymilvus import MilvusClient, MilvusException
-from services.storage.milvus_store import MAX_SECTION_ID, SECTION_ID_KEYS, _changed_by_float64
+from services.storage.milvus_store import (
+    MAX_SECTION_ID,
+    SECTION_ID_KEYS,
+    _changed_by_float64,
+    _milvus_preserves_dynamic_int64,
+)
 
 logger = get_logger()
 
 # A row can reach about 130 KB, so a page stays well below Milvus's message limit.
 DEFAULT_BATCH_SIZE = 200
 
-# What contextualization writes, the same in every release so far. Matching the whole
-# form means a body that merely quotes "* filename: " still gets the header.
+# What contextualization wrote up to v2.3.4. Matching the whole form means a body that
+# merely quotes "* filename: " still gets the header.
 _FILENAME_LINE = re.compile(r"^\* filename: .*\n\n\[CHUNK_START\]", re.MULTILINE)
 
 # What Milvus returns for a row it refuses: a deleted chunk, or one now too long.
@@ -67,12 +72,20 @@ def _is_body(content: Any, body: str) -> bool:
     return isinstance(content, str) and (body.startswith(content) or content.startswith(body))
 
 
+def _is_enveloped(content: Any, text: str) -> bool:
+    """Whether *text* is contextualization wrapped around *content*, the chunker's text.
+    That text already has the chunker's header, so there is nothing to add."""
+    return isinstance(content, str) and f"[CHUNK_START]\n\n{content}" in text
+
+
 def _needs_filename(row: dict[str, Any], header_for: Callable[[dict[str, Any]], str | None]) -> bool:
     text = row.get("text") or ""
     header = row.get("header")
+    if _is_enveloped(row.get("content"), text):
+        return False
     # Upload metadata can use the names ``header`` and ``content`` too, so they only
     # count when they match the text. ``content`` matching all of it is structured_section
-    # with ``prepend_heading_path`` off, which was asked not to carry a preamble.
+    # with the former ``prepend_heading_path`` off, which was asked not to carry a preamble.
     if (header and text.startswith(f"{header}\n\n")) or _is_body(row.get("content"), text):
         return False
     own_header = header_for(row)
@@ -109,6 +122,15 @@ def _with_header(row: dict[str, Any], header: str, length_function: Callable[[st
     return entity
 
 
+def _is_added_line(header: Any, row: dict[str, Any]) -> bool:
+    """Whether *header* is a line ``_with_header`` writes: ``[Source: <name>]``, with the
+    chunk's filename, maybe shortened. Anything else that starts the text is the
+    document's own, even when an upload's ``header`` has the same value."""
+    if not isinstance(header, str) or not header.startswith("[Source: ") or not header.endswith("]"):
+        return False
+    return str(row.get("filename") or "").startswith(header[len("[Source: ") : -1])
+
+
 def _without_header(
     row: dict[str, Any], header_for: Callable[[dict[str, Any]], str | None], length_function: Callable[[str], int]
 ) -> dict[str, Any] | None:
@@ -120,7 +142,11 @@ def _without_header(
         return None
     for header in (row.get("header"), header_for(row)):
         prefix = f"{header}\n\n"
-        if not header or not text.startswith(prefix) or _is_body(row.get("content"), text[len(prefix) :]):
+        if (
+            not _is_added_line(header, row)
+            or not text.startswith(prefix)
+            or _is_body(row.get("content"), text[len(prefix) :])
+        ):
             continue
         entity = {"_id": row["_id"], "text": text[len(prefix) :], **_folded_section_ids(row)}
         if row.get("header") == header:
@@ -241,7 +267,8 @@ def run(
         if number % _PROGRESS_EVERY_PAGES == 0:
             logger.info(f"  {stats['scanned']} chunk(s) scanned, {stats['changed']} changed")
 
-    if rounded:
+    # Asked only here because most runs have nothing to report.
+    if rounded and not _milvus_preserves_dynamic_int64(client.get_server_version()):
         logger.bind(rounded={file_id: sorted(keys) for file_id, keys in rounded.items()}).warning(
             "Rewriting these files' chunks rounds integers beyond ±2**53 in their metadata. "
             "PostgreSQL keeps the exact values."

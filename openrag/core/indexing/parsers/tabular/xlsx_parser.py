@@ -1,0 +1,1746 @@
+"""Sheet-aware XLSX extraction with bounded preflight and Markdown batches."""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import re
+import zipfile
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterator
+from contextlib import closing, contextmanager, nullcontext
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal, localcontext
+from itertools import chain, islice
+from pathlib import Path
+from typing import Any
+
+from core.indexing.parsers.registry import parser_registry
+from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row, normalize_headers
+from core.indexing.parsers.tabular.xlsx_row_router import route_sheet_tables
+from core.indexing.parsers.tabular.xlsx_validation import SheetInfo, TableRegion, XlsxLimits, limit, validate_ooxml
+from core.models.document import Document, ProcessedDocument, TextBlock
+from core.utils.consts import XLSX_TEXT_NUMBER_FORMAT_KINDS
+from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
+from core.utils.logging import get_logger
+
+logger = get_logger()
+
+
+@dataclass(frozen=True)
+class _FormulaValue:
+    """A cached scalar paired with its inert Excel formula text."""
+
+    cached: Any
+    formula: str
+    display_format: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _FormattedValue:
+    """A raw scalar paired with bounded, non-executable display metadata."""
+
+    raw: Any
+    display_format: dict[str, Any]
+
+
+_A1_REFERENCE = re.compile(
+    r"^(?:(?P<sheet>'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*)!)?"
+    r"(?P<start_col_abs>\$?)(?P<start_col>[A-Z]{1,3})(?P<start_row_abs>\$?)"
+    r"(?P<start_row>[1-9][0-9]*)"
+    r"(?::(?P<end_col_abs>\$?)(?P<end_col>[A-Z]{1,3})(?P<end_row_abs>\$?)"
+    r"(?P<end_row>[1-9][0-9]*))?$",
+    re.IGNORECASE,
+)
+_MAX_FORMULA_SOURCE_COLUMNS = 64
+_MAX_INDIVIDUAL_FORMULA_CELLS = 16
+_MAX_INDIVIDUAL_FORMULA_SOURCE_COLUMNS = 8
+_MAX_NUMBER_FORMAT_GROUPS = 64
+_MAX_NUMBER_FORMAT_RANGES = 32
+_MAX_NUMBER_FORMAT_CODE_LENGTH = 128
+
+
+def _raw_cell_value(value: Any) -> Any:
+    if isinstance(value, _FormulaValue):
+        return value.cached
+    if isinstance(value, _FormattedValue):
+        return value.raw
+    return value
+
+
+def _cell_display_format(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, (_FormulaValue, _FormattedValue)):
+        return value.display_format
+    return None
+
+
+def _rendered_header_key(value: str) -> str:
+    """Return the canonical cell text produced by the Markdown renderer."""
+    return markdown_row([value])[2:-2]
+
+
+def _normalize_unique_headers(values: list[str]) -> list[str]:
+    """Normalize headers and retain unique Markdown-rendered identities."""
+    headers = normalize_headers([value.strip() for value in values])
+    reserved = {_rendered_header_key(name) for name in headers}
+    used = set()
+    for index, name in enumerate(headers):
+        candidate, suffix = name, 2
+        candidate_key = _rendered_header_key(candidate)
+        if candidate_key in used:
+            candidate = f"{name}_{suffix}"
+            candidate_key = _rendered_header_key(candidate)
+            while candidate_key in reserved or candidate_key in used:
+                suffix += 1
+                candidate = f"{name}_{suffix}"
+                candidate_key = _rendered_header_key(candidate)
+        headers[index] = candidate
+        used.add(candidate_key)
+    return headers
+
+
+_HEADER_ALIGNMENT_ROWS = 3
+
+
+def _aligned_with_following(occupied: list[int], following: list[list[str]]) -> bool:
+    """Whether data in the next few rows sits under most of these header columns.
+
+    One sparse record must not disqualify a header, so a column counts as
+    aligned when any of the next ``_HEADER_ALIGNMENT_ROWS`` nonempty rows fills
+    it, and a majority of the header's columns must be aligned.
+    """
+    window = following[:_HEADER_ALIGNMENT_ROWS]
+    if not occupied or not window:
+        return False
+    aligned = sum(any(column < len(values) and values[column] for values in window) for column in occupied)
+    return aligned * 2 > len(occupied)
+
+
+def _detect_header(rows, byte_limit, start_row=1):
+    """Skip obvious title/preamble rows, retaining ambiguous first rows.
+
+    Look ahead at most 32 physical rows and one batch worth of text. Promote a
+    later row only when it is a wider textual row followed by aligned data
+    (see ``_aligned_with_following``).
+    Equal-width layouts remain ambiguous and keep the first nonempty row.
+    Replay buffered rows so physical coordinates remain unchanged.
+    """
+    buffered = []
+    size = 0
+    for row in rows:
+        buffered.append(row)
+        size += sum(len(_cell_text(v).encode("utf-8")) for v in row)
+        if len(buffered) >= 32 or size >= byte_limit:
+            break
+    nonempty = [
+        (i, row, [_cell_text(v).strip() for v in row])
+        for i, row in enumerate(buffered, start_row)
+        if any(_cell_text(v).strip() for v in row)
+    ]
+    selected = None
+    promoted = False
+    if nonempty:
+        selected = nonempty[0][0]
+        for index, (number, raw, values) in enumerate(nonempty[1:], 1):
+            labels = [value for value in values if value]
+            occupied = [column for column, value in enumerate(values) if value]
+            earlier = nonempty[:index]
+            wider_than_preamble = all(
+                sum(bool(value) for value in earlier_values) < len(occupied) for _, _, earlier_values in earlier
+            )
+            repeated_value_preamble = all(
+                len({value for value in earlier_values if value}) == 1 for _, _, earlier_values in earlier
+            )
+            # Width alone is not enough evidence: a narrow first data record
+            # followed by wider records is a valid table and must not lose its
+            # first row. A blank physical row is the structural boundary that
+            # distinguishes an optional preamble from the table below it.
+            separated_from_preamble = number > nonempty[index - 1][0] + 1
+            if (
+                len(set(labels)) < 2
+                or not all(
+                    isinstance(_raw_cell_value(value), str) for value in raw if _raw_cell_value(value) is not None
+                )
+                or not (wider_than_preamble or repeated_value_preamble)
+                or not separated_from_preamble
+            ):
+                continue
+            if index + 1 >= len(nonempty):
+                break
+            if _aligned_with_following(occupied, [values for _, _, values in nonempty[index + 1 :]]):
+                selected = number
+                promoted = True
+                break
+    candidates = []
+    for index, (number, raw, values) in enumerate(nonempty[:-1]):
+        occupied = [column for column, value in enumerate(values) if value]
+        if not occupied or not all(
+            isinstance(_raw_cell_value(value), str) for value in raw if _raw_cell_value(value) is not None
+        ):
+            continue
+        if _aligned_with_following(occupied, [values for _, _, values in nonempty[index + 1 :]]):
+            candidates.append(number)
+
+    # A header that does not reach the outermost columns holding data leaves
+    # those columns with generated names; that is not a confident result.
+    narrower_than_data = False
+    if selected is not None:
+        header_values = next(values for number, _, values in nonempty if number == selected)
+        header_columns = [column for column, value in enumerate(header_values) if value]
+        data_columns = [
+            column
+            for number, _, values in nonempty
+            if number > selected
+            for column, value in enumerate(values)
+            if value
+        ]
+        narrower_than_data = bool(data_columns) and (
+            min(data_columns) < header_columns[0] or max(data_columns) > header_columns[-1]
+        )
+    if selected is None:
+        detection = {
+            "mode": "automatic",
+            "status": "not_found",
+            "selected_row": None,
+            "candidate_rows": [],
+            "reason": "no_nonempty_row",
+            "note": "No nonempty row was available for automatic header detection.",
+        }
+    elif promoted:
+        detection = {
+            "mode": "automatic",
+            "status": "confident",
+            "selected_row": selected,
+            "candidate_rows": list(dict.fromkeys([nonempty[0][0], *candidates, selected])),
+            "reason": "separated_wider_text_row",
+            "note": "A wider textual row after a blank separator was selected as the header.",
+        }
+    else:
+        first_number, first_raw, first_values = nonempty[0]
+        occupied = [column for column, value in enumerate(first_values) if value]
+        following_raw = nonempty[1][1] if len(nonempty) > 1 else []
+        typed_following = bool(occupied) and any(
+            column < len(following_raw)
+            and (value := following_raw[column]) is not None
+            and not isinstance(_raw_cell_value(value), str)
+            for column in occupied
+        )
+        textual_first = bool(occupied) and all(
+            isinstance(_raw_cell_value(value), str) for value in first_raw if _raw_cell_value(value) is not None
+        )
+        unique_first = len({first_values[column] for column in occupied}) == len(occupied)
+        confident = textual_first and unique_first and typed_following
+        detection = {
+            "mode": "automatic",
+            "status": "confident" if confident else "ambiguous",
+            "selected_row": selected,
+            "candidate_rows": list(dict.fromkeys([first_number, *candidates])),
+            "reason": "text_header_followed_by_typed_data" if confident else "first_nonempty_row_retained",
+            "note": (
+                "A textual first row followed by typed data was selected as the header."
+                if confident
+                else "The first nonempty row was retained conservatively because no structural evidence "
+                "identified a safer header row. Define the range as an Excel Table when this is not intended."
+            ),
+        }
+    if narrower_than_data and detection["status"] == "confident":
+        detection.update(
+            status="ambiguous",
+            reason="header_narrower_than_data",
+            note=detection["note"] + " Data was found in columns outside the header, which received generated names.",
+        )
+    return selected, chain(buffered, rows), detection
+
+
+def _column_name(number: int) -> str:
+    result = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        result = chr(65 + remainder) + result
+    return result or "A"
+
+
+def _column_number(label: str) -> int:
+    number = 0
+    for char in label.upper():
+        number = number * 26 + ord(char) - 64
+    return number
+
+
+def _r1c1_cell(
+    column: int,
+    row: int,
+    *,
+    target_column: int,
+    target_row: int,
+    absolute_column: bool,
+    absolute_row: bool,
+) -> str:
+    if absolute_row:
+        rendered_row = f"R{row}"
+    else:
+        offset = row - target_row
+        rendered_row = "R" if offset == 0 else f"R[{offset}]"
+    if absolute_column:
+        rendered_column = f"C{column}"
+    else:
+        offset = column - target_column
+        rendered_column = "C" if offset == 0 else f"C[{offset}]"
+    return rendered_row + rendered_column
+
+
+def _sheet_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def _analyze_formula(
+    formula: str,
+    *,
+    target_row: int,
+    target_column: int,
+    sheet_name: str,
+    visible_columns: list[int],
+    headers: list[str],
+    table_start_row: int = 1,
+    table_end_row: int = 1_048_576,
+) -> dict[str, Any]:
+    """Normalize inert A1 references and map same-table inputs to headers."""
+    from openpyxl.formula import Tokenizer
+    from openpyxl.formula.tokenizer import TokenizerError
+
+    header_by_column = dict(zip(visible_columns, headers, strict=True))
+    pattern_parts: list[str] = []
+    semantic_parts: list[str] = []
+    source_columns: list[dict[str, str]] = []
+    seen_sources: set[tuple[str, str]] = set()
+    all_source_columns: set[int] = set()
+    unresolved: list[str] = []
+    try:
+        tokens = Tokenizer(formula).items
+    except TokenizerError:
+        tokens = []
+    if not tokens:
+        return {
+            "pattern": formula,
+            "semantic_expression": f"{headers[visible_columns.index(target_column)]} = {formula.lstrip('=')}",
+            "source_columns": [],
+            "unresolved_references": [formula],
+        }
+    for token in tokens:
+        value = token.value
+        if token.type != "OPERAND" or token.subtype != "RANGE":
+            pattern_parts.append(value)
+            semantic_parts.append(value)
+            continue
+        match = _A1_REFERENCE.fullmatch(value)
+        if match is None:
+            pattern_parts.append(value)
+            semantic_parts.append(value)
+            unresolved.append(value)
+            continue
+        referenced_sheet = _sheet_name(match.group("sheet"))
+        prefix = f"{match.group('sheet')}!" if match.group("sheet") else ""
+        start_column = _column_number(match.group("start_col"))
+        start_row = int(match.group("start_row"))
+        start_pattern = _r1c1_cell(
+            start_column,
+            start_row,
+            target_column=target_column,
+            target_row=target_row,
+            absolute_column=bool(match.group("start_col_abs")),
+            absolute_row=bool(match.group("start_row_abs")),
+        )
+        end_column = start_column
+        end_pattern = None
+        if match.group("end_col"):
+            end_column = _column_number(match.group("end_col"))
+            end_pattern = _r1c1_cell(
+                end_column,
+                int(match.group("end_row")),
+                target_column=target_column,
+                target_row=target_row,
+                absolute_column=bool(match.group("end_col_abs")),
+                absolute_row=bool(match.group("end_row_abs")),
+            )
+        pattern_parts.append(prefix + start_pattern + (f":{end_pattern}" if end_pattern else ""))
+        same_sheet = referenced_sheet is None or referenced_sheet == sheet_name
+        start_reference_row = start_row
+        end_reference_row = int(match.group("end_row")) if match.group("end_row") else start_row
+        within_table_rows = (
+            table_start_row <= min(start_reference_row, end_reference_row)
+            and max(start_reference_row, end_reference_row) <= table_end_row
+        )
+        referenced_headers = []
+        if same_sheet and within_table_rows:
+            lower, upper = sorted((start_column, end_column))
+            start_index = bisect_left(visible_columns, lower)
+            end_index = bisect_right(visible_columns, upper)
+            referenced_columns = visible_columns[start_index:end_index]
+            referenced_headers = [header_by_column[column] for column in referenced_columns]
+            all_source_columns.update(referenced_columns)
+            for column, header in zip(referenced_columns, referenced_headers, strict=True):
+                key = (_column_name(column), header)
+                if key not in seen_sources and len(source_columns) < _MAX_FORMULA_SOURCE_COLUMNS:
+                    source_columns.append({"column": key[0], "header": key[1]})
+                    seen_sources.add(key)
+        # A range that reaches hidden or out-of-table columns must not be
+        # described as its visible intersection: keep it verbatim, unresolved.
+        complete_mapping = (
+            same_sheet and within_table_rows and len(referenced_headers) == abs(end_column - start_column) + 1
+        )
+        if complete_mapping:
+            semantic_parts.append(
+                referenced_headers[0]
+                if len(referenced_headers) == 1
+                else f"{referenced_headers[0]}:{referenced_headers[-1]}"
+            )
+        else:
+            semantic_parts.append(value)
+            unresolved.append(value)
+    target_header = header_by_column[target_column]
+    result = {
+        "pattern": "=" + "".join(pattern_parts),
+        "semantic_expression": f"{target_header} = {''.join(semantic_parts)}",
+        "source_columns": source_columns,
+    }
+    if len(all_source_columns) > len(source_columns):
+        result["source_column_count"] = len(all_source_columns)
+        result["source_columns_truncated"] = True
+    if unresolved:
+        result["unresolved_references"] = list(dict.fromkeys(unresolved))
+    return result
+
+
+def _sheet_notes(sheet: SheetInfo, max_tables: int) -> str:
+    """Searchable lines telling the reader what the worksheet's extraction left out or reshaped."""
+    notes = ""
+    if sheet.hidden_rows:
+        notes += f"\nHidden worksheet rows excluded: {len(sheet.hidden_rows)} (hidden or collapsed rows)."
+    if sheet.filtered_rows:
+        notes += f"\nRows hidden by an active filter are included: {len(sheet.filtered_rows)}."
+    if sheet.merged_table_blocks:
+        notes += (
+            f"\nThis worksheet has {sheet.merged_table_blocks} separate blocks, more than the {max_tables}-table "
+            "limit: blocks sharing the same columns are indexed as one table, so their later header rows appear "
+            "as data rows."
+        )
+    return notes
+
+
+def _worksheet_context(sheet_name: str) -> str:
+    """Render the worksheet identity as searchable, single-line chunk context."""
+    # Chunkers strip block text, so trailing whitespace in a name such as
+    # "Budget " must not end the context. ``sheet_name`` keeps the exact name.
+    safe_name = sheet_name.replace("\r\n", " ").replace("\r", " ").replace("\n", " ").strip()
+    return f"\n\nWorksheet: {safe_name}"
+
+
+def _safe_number_format(value: Any, format_code: Any) -> dict[str, Any] | None:
+    """Describe a small, deterministic subset of Excel display formats.
+
+    Format codes are data, never templates to execute. Complex custom,
+    conditional, colored, text, and locale-dependent formats are deliberately
+    left uninterpreted so retrieval cannot mistake an approximation for the
+    exact Excel rendering.
+    """
+    if value is None or isinstance(value, (bool, str)) or not isinstance(format_code, str):
+        return None
+    code = format_code.strip()
+    if (
+        not code
+        or code.lower() == "general"
+        or len(code) > _MAX_NUMBER_FORMAT_CODE_LENGTH
+        or any(ord(character) < 32 for character in code)
+        or "@" in code
+        or '"' in code
+        or ";" in code
+    ):
+        return None
+
+    if isinstance(value, (datetime, date, time, timedelta)):
+        date_code = re.sub(r"\\.|_.|\*.", "", code)
+        date_brackets = re.findall(r"\[([^]]+)]", date_code)
+        if any(token.lower() not in {"h", "m", "s"} for token in date_brackets):
+            return None
+        date_code = re.sub(r"\[[^]]+]", "", date_code)
+        if not date_code or re.fullmatch(r"[ymdhsapAMP/ .,:+-]+", date_code) is None:
+            return None
+    if isinstance(value, datetime):
+        kind = "date" if value.time() == time() else "datetime"
+        return {"kind": kind, "format_code": code, "display_example": _cached_cell_text(value)}
+    if isinstance(value, date):
+        return {"kind": "date", "format_code": code, "display_example": value.isoformat()}
+    if isinstance(value, time):
+        return {"kind": "time", "format_code": code, "display_example": value.isoformat()}
+    if isinstance(value, timedelta):
+        return {"kind": "duration", "format_code": code, "display_example": str(value)}
+    if not isinstance(value, (int, float, Decimal)):
+        return None
+
+    section = code
+    bracket_tokens = re.findall(r"\[([^]]+)]", section)
+    if any(not token.startswith("$") for token in bracket_tokens):
+        return None
+    currency_symbol = None
+    for token in bracket_tokens:
+        symbol, separator, locale = token[1:].partition("-")
+        if symbol and symbol not in "$€£¥₹₩":
+            return None
+        if separator and (not locale or len(locale) > 16 or re.fullmatch(r"[A-Za-z0-9-]+", locale) is None):
+            return None
+        if symbol:
+            currency_symbol = symbol
+            break
+    without_brackets = re.sub(r"\[[^]]+]", "", section)
+    if currency_symbol is None:
+        currency_symbol = next((symbol for symbol in "$€£¥₹₩" if symbol in without_brackets), None)
+
+    simplified = re.sub(r"\[[^]]+]", "", section)
+    # Escaped literals carry display meaning: keep the literal so the allowed
+    # character check below rejects formats such as ``0.0\k\g`` instead of
+    # inventing an example without the unit, while ``#,##0\ €`` stays valid.
+    # Padding (``_x``) and fill (``*x``) directives are layout only. One pass,
+    # so an escaped ``\_`` is not mistaken for a padding directive.
+    simplified = re.sub(
+        r"\\(.)|_.|\*.",
+        lambda match: match.group(1) if match.group(1) is not None else "",
+        simplified,
+    )
+    allowed = set("0#,.%Ee+- $€£¥₹₩")
+    if (
+        not simplified
+        or any(character not in allowed for character in simplified)
+        or "?" in simplified
+        or simplified.count("%") > 1
+        or simplified.rstrip("% ").endswith(",")
+    ):
+        return None
+    canonical = simplified
+    for symbol in "$€£¥₹₩":
+        canonical = canonical.replace(symbol, "")
+    canonical = canonical.replace(" ", "")
+    if re.fullmatch(r"[#0]+(?:,[#0]{3})*(?:\.0+)?(?:[Ee][+-]?0+)?%?", canonical) is None:
+        return None
+    decimal_match = re.search(r"\.(0+)", canonical)
+    if decimal_match and any(character != "0" for character in decimal_match.group(1)):
+        return None
+    decimal_places = len(decimal_match.group(1)) if decimal_match else 0
+    if decimal_places > 12:
+        return None
+    uses_grouping = "," in canonical.split(".", 1)[0]
+    is_percentage = "%" in canonical
+    scientific_match = re.search(r"[Ee][+-]?(0+)", canonical)
+    is_scientific = scientific_match is not None
+    if not any(character in simplified for character in "0#?"):
+        return None
+
+    try:
+        displayed_value = Decimal(str(value)) * (100 if is_percentage else 1)
+        with localcontext() as context:
+            context.rounding = ROUND_HALF_UP
+            if is_scientific:
+                assert scientific_match is not None
+                display = f"{displayed_value:.{decimal_places}E}"
+                exponent_width = len(scientific_match.group(1))
+                mantissa, exponent = display.split("E", 1)
+                sign = exponent[0] if exponent[0] in "+-" else "+"
+                digits = exponent[1:] if exponent[0] in "+-" else exponent
+                display = f"{mantissa}E{sign}{digits.zfill(exponent_width)}"
+            else:
+                display = format(displayed_value, f"{',' if uses_grouping else ''}.{decimal_places}f")
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    currency_position = None
+    if currency_symbol:
+        symbol_position = section.find(currency_symbol)
+        if symbol_position < 0 and bracket_tokens:
+            symbol_position = section.find("[")
+        placeholder_position = min(position for position in (section.find("0"), section.find("#")) if position >= 0)
+        currency_position = "prefix" if symbol_position < placeholder_position else "suffix"
+        if currency_position == "prefix":
+            separator = (
+                " " if any(character.isspace() for character in section[symbol_position:placeholder_position]) else ""
+            )
+            display = f"{currency_symbol}{separator}{display}"
+        else:
+            separator = (
+                " " if any(character.isspace() for character in section[placeholder_position:symbol_position]) else ""
+            )
+            display = f"{display}{separator}{currency_symbol}"
+    if is_percentage:
+        display += "%"
+    kind = (
+        "percentage"
+        if is_percentage
+        else "currency"
+        if currency_symbol
+        else "scientific"
+        if is_scientific
+        else "number"
+    )
+    result = {
+        "kind": kind,
+        "format_code": simplified.strip() if bracket_tokens else code,
+        "decimal_places": decimal_places,
+        "uses_grouping": uses_grouping,
+        "display_example": display,
+    }
+    if currency_symbol:
+        result["currency_symbol"] = currency_symbol
+        result["currency_position"] = currency_position
+    return result
+
+
+# A formula whose cached result is an empty string: the cached reader reports
+# data_type "str" with no value, unlike an uncalculated formula ("n").
+_CALCULATED_EMPTY = object()
+
+
+def _formatted_value(cell) -> Any:
+    value = cell.value
+    if value is None and getattr(cell, "data_type", None) == "str":
+        return _CALCULATED_EMPTY
+    display_format = _safe_number_format(value, getattr(cell, "number_format", None))
+    return _FormattedValue(value, display_format) if display_format else value
+
+
+def _value_rows(cell_rows, uncached_string_formulas=frozenset()):
+    for cells in cell_rows:
+        yield tuple(
+            None
+            if cell is None or (getattr(cell, "row", None), getattr(cell, "column", None)) in uncached_string_formulas
+            else _formatted_value(cell)
+            for cell in cells
+        )
+
+
+def _cached_cell_text(value: Any) -> str:
+    value = _raw_cell_value(value)
+    if value is None:
+        return ""
+    elif isinstance(value, bool):
+        return "true" if value else "false"
+    # OpenPyXL exposes integral numbers and dates with different Python types.
+    elif isinstance(value, datetime) and value.time() == time():
+        return value.date().isoformat()
+    elif isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    elif isinstance(value, timedelta):
+        return str(value)
+    elif isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _cell_text(value: Any) -> str:
+    formula = value.formula if isinstance(value, _FormulaValue) else None
+    rendered = _cached_cell_text(value)
+    if formula is None:
+        return rendered
+    if rendered:
+        return f"{rendered} [formula: {formula}]"
+    return f"[formula: {formula}; cached value unavailable]"
+
+
+def _cell_line(physical_row: int, values: list[str], visible_columns: list[int]) -> tuple[int, str, str]:
+    """Render one row of loose cells, cited by the span of its nonempty cells."""
+    occupied = [index for index, value in enumerate(values) if value.strip()]
+    first = f"{_column_name(visible_columns[occupied[0]])}{physical_row}"
+    last = f"{_column_name(visible_columns[occupied[-1]])}{physical_row}"
+    cell_range = first if first == last else f"{first}:{last}"
+    return physical_row, cell_range, f"- {cell_range}: " + " | ".join(values[index].strip() for index in occupied)
+
+
+def _has_text(values: list[str]) -> bool:
+    """Treat cells containing only formatting whitespace as empty."""
+    return any(value.strip() for value in values)
+
+
+@contextmanager
+def _document_source(document: Document):
+    if document.source_path is not None:
+        yield Path(document.source_path)
+        return
+    if document.raw_bytes is None:
+        raise PipelineError("XLSX parsing requires binary workbook content", code="INVALID_XLSX", status_code=422)
+    with io.BytesIO(document.raw_bytes) as stream:
+        yield stream
+
+
+def _formula_text(cell) -> str | None:
+    """Return stable formula text from regular, shared, or array formulas."""
+    if getattr(cell, "data_type", None) != "f":
+        return None
+    value = cell.value
+    text = value if isinstance(value, str) else getattr(value, "text", None)
+    if not isinstance(text, str) or not text:
+        return None
+    return text if text.startswith("=") else f"={text}"
+
+
+def _without_calculated_empty(value_rows):
+    """Index formulas calculated to an empty string as empty cells."""
+    for values in value_rows:
+        yield tuple(None if value is _CALCULATED_EMPTY else value for value in values)
+
+
+def _rows_with_formulas(value_rows, formula_rows):
+    """Merge cached values with formula text while both readers stream."""
+    for values, formula_cells in zip(value_rows, formula_rows, strict=True):
+        yield tuple(
+            None
+            if value is _CALCULATED_EMPTY
+            else _FormulaValue(_raw_cell_value(value), formula, _cell_display_format(value))
+            if (formula := _formula_text(cell)) is not None
+            else value
+            for value, cell in zip(values, formula_cells, strict=True)
+        )
+
+
+def _single_line(value: Any) -> str:
+    return str(value).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+
+def _formula_context(groups: list[dict[str, Any]]) -> str:
+    if not groups:
+        return ""
+    lines = ["Formula context (calculated columns):"]
+    for group in groups:
+        target = _single_line(group["target_header"])
+        semantic = _single_line(group["semantic_expression"])
+        pattern = _single_line(group["pattern"])
+        lines.append(f"- {group['target_column']} ({target}), {group['range']}: {semantic} [pattern: {pattern}]")
+    return "\n\n" + "\n".join(lines)
+
+
+def _compact_formula_batch(
+    rows: list[tuple[Any, ...]],
+    row_numbers: list[int],
+    *,
+    sheet_name: str,
+    visible_columns: list[int],
+    headers: list[str],
+    table_start_row: int,
+    table_end_row: int,
+    group_repeated: bool = True,
+) -> tuple[list[list[str]], list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Group repeated relative formulas and retain isolated expressions inline.
+
+    ``group_repeated=False`` is the bounded fallback used when generalized
+    context would make an otherwise valid parser batch exceed its byte limit.
+    """
+    records: list[dict[str, Any]] = []
+    for row_number, row in zip(row_numbers, rows, strict=True):
+        for position, value in enumerate(row):
+            if not isinstance(value, _FormulaValue):
+                continue
+            target_column_number = visible_columns[position]
+            analysis = _analyze_formula(
+                value.formula,
+                target_row=row_number,
+                target_column=target_column_number,
+                sheet_name=sheet_name,
+                visible_columns=visible_columns,
+                headers=headers,
+                table_start_row=table_start_row,
+                table_end_row=table_end_row,
+            )
+            records.append(
+                {
+                    "row": row_number,
+                    "position": position,
+                    "target": f"{_column_name(target_column_number)}{row_number}",
+                    "target_column": _column_name(target_column_number),
+                    "target_header": headers[position],
+                    "formula": value.formula,
+                    "cached_value_available": value.cached is not None,
+                    **analysis,
+                }
+            )
+
+    grouped_records: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for record in records:
+        sources = tuple((source["column"], source["header"]) for source in record["source_columns"])
+        key = (
+            record["target_column"],
+            record["target_header"],
+            record["pattern"],
+            sources,
+        )
+        grouped_records.setdefault(key, []).append(record)
+
+    candidates: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for matching in grouped_records.values():
+        matching.sort(key=lambda record: record["row"])
+        segments: list[list[dict[str, Any]]] = []
+        for record in matching:
+            if not segments or record["row"] != segments[-1][-1]["row"] + 1:
+                segments.append([record])
+            else:
+                segments[-1].append(record)
+        for segment in segments:
+            if len(segment) < 2:
+                continue
+            first, last = segment[0], segment[-1]
+            group = {
+                "target_column": first["target_column"],
+                "target_header": first["target_header"],
+                "range": f"{first['target_column']}{first['row']}:{first['target_column']}{last['row']}",
+                "pattern": first["pattern"],
+                "semantic_expression": first["semantic_expression"],
+                "source_columns": first["source_columns"],
+                "start_row": first["row"],
+                "end_row": last["row"],
+                "formula_count": len(segment),
+            }
+            unresolved = list(
+                dict.fromkeys(ref for record in segment for ref in record.get("unresolved_references", []))
+            )
+            if unresolved:
+                group["unresolved_references"] = unresolved
+            if any(record["semantic_expression"] != first["semantic_expression"] for record in segment):
+                # Absolute A1 references from another worksheet can vary per
+                # row. The normalized pattern describes every row without
+                # presenting the first row's reference as a constant.
+                group["semantic_expression"] = f"{first['target_header']} = {first['pattern'].lstrip('=')}"
+            if first.get("source_columns_truncated"):
+                group["source_column_count"] = first["source_column_count"]
+                group["source_columns_truncated"] = True
+            candidates.append((group, segment))
+
+    accepted = candidates if group_repeated else []
+    formula_groups = [group for group, _ in accepted]
+    grouped_targets = {record["target"] for _, segment in accepted for record in segment}
+    individual_cells = []
+    for record in records:
+        if record["target"] in grouped_targets:
+            continue
+        cell = {key: value for key, value in record.items() if key != "position"}
+        sources = cell.get("source_columns", [])
+        if len(sources) > _MAX_INDIVIDUAL_FORMULA_SOURCE_COLUMNS:
+            cell["source_column_count"] = cell.get("source_column_count", len(sources))
+            cell["source_columns"] = sources[:_MAX_INDIVIDUAL_FORMULA_SOURCE_COLUMNS]
+            cell["source_columns_truncated"] = True
+        individual_cells.append(cell)
+    if len(individual_cells) > _MAX_INDIVIDUAL_FORMULA_CELLS:
+        omitted = len(individual_cells) - _MAX_INDIVIDUAL_FORMULA_CELLS
+        omitted_cells = individual_cells[_MAX_INDIVIDUAL_FORMULA_CELLS:]
+        individual_cells = individual_cells[:_MAX_INDIVIDUAL_FORMULA_CELLS]
+        individual_cells.append(_omitted_formula_marker(omitted, omitted_cells))
+    rendered_rows: list[list[str]] = []
+    for row_number, row in zip(row_numbers, rows, strict=True):
+        rendered = []
+        for position, value in enumerate(row):
+            target = f"{_column_name(visible_columns[position])}{row_number}"
+            if isinstance(value, _FormulaValue) and target in grouped_targets:
+                cached = _cached_cell_text(value)
+                rendered.append(cached or "[cached value unavailable]")
+            else:
+                rendered.append(_cell_text(value))
+        rendered_rows.append(rendered)
+    context = _formula_context(formula_groups)
+    return rendered_rows, formula_groups, individual_cells, context
+
+
+def _row_ranges(row_numbers: list[int]) -> list[dict[str, int]]:
+    ranges: list[dict[str, int]] = []
+    for row in sorted(set(row_numbers)):
+        if not ranges or row != ranges[-1]["end_row"] + 1:
+            ranges.append({"start_row": row, "end_row": row})
+        else:
+            ranges[-1]["end_row"] = row
+    return ranges
+
+
+# The truncation marker is copied onto every chunk it concerns, so its size is
+# bounded: at most this many row ranges in total, over at most this many named
+# columns (further columns share one "*" entry).
+_MAX_OMITTED_FORMULA_RANGES = 64
+_MAX_OMITTED_FORMULA_COLUMNS = 32
+
+
+def _omitted_formula_marker(omitted_count: int, omitted_cells: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe omitted individual formulas by (column, rows), with a bounded size.
+
+    Rows are recorded per target column, so a chunk matches only when it holds
+    an omitted cell's row and column together. Past the bounds, the closest row
+    ranges are joined (and extra columns pooled under "*"): the marker may then
+    cover rows without an omitted formula, never miss one, and says so with
+    ``omitted_ranges_coalesced``.
+    """
+    rows_by_column: dict[str, list[int]] = {}
+    for cell in omitted_cells:
+        rows_by_column.setdefault(cell["target_column"], []).append(cell["row"])
+    columns = sorted(rows_by_column, key=lambda column: (len(column), column))
+    coalesced = False
+    if len(columns) > _MAX_OMITTED_FORMULA_COLUMNS:
+        kept, pooled = columns[: _MAX_OMITTED_FORMULA_COLUMNS - 1], columns[_MAX_OMITTED_FORMULA_COLUMNS - 1 :]
+        rows_by_column["*"] = [row for column in pooled for row in rows_by_column[column]]
+        columns = [*kept, "*"]
+        coalesced = True
+    ranges = {
+        column: [(item["start_row"], item["end_row"]) for item in _row_ranges(rows_by_column[column])]
+        for column in columns
+    }
+    excess = sum(map(len, ranges.values())) - _MAX_OMITTED_FORMULA_RANGES
+    if excess > 0:
+        # Join the `excess` narrowest gaps; each column keeps at least one range.
+        gaps = sorted(
+            (spans[index + 1][0] - spans[index][1], column, index)
+            for column, spans in ranges.items()
+            for index in range(len(spans) - 1)
+        )
+        joined = {(column, index) for _, column, index in gaps[:excess]}
+        for column, spans in ranges.items():
+            merged = [spans[0]]
+            for index, span in enumerate(spans[1:]):
+                if (column, index) in joined:
+                    merged[-1] = (merged[-1][0], span[1])
+                else:
+                    merged.append(span)
+            ranges[column] = merged
+        coalesced = True
+    marker: dict[str, Any] = {
+        "truncated": True,
+        "omitted_count": omitted_count,
+        "omitted_cells_by_column": [
+            {"column": column, "row_ranges": [{"start_row": start, "end_row": end} for start, end in ranges[column]]}
+            for column in columns
+        ],
+    }
+    if coalesced:
+        marker["omitted_ranges_coalesced"] = True
+    return marker
+
+
+def _compact_number_formats(
+    rows: list[tuple[Any, ...]],
+    row_numbers: list[int],
+    *,
+    visible_columns: list[int],
+    headers: list[str],
+) -> tuple[list[dict[str, Any]], str, bool]:
+    """Group safe display semantics without replacing indexed raw scalars."""
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row_number, row in zip(row_numbers, rows, strict=True):
+        for position, value in enumerate(row):
+            display_format = _cell_display_format(value)
+            if not display_format:
+                continue
+            signature = tuple(sorted((key, item) for key, item in display_format.items() if key != "display_example"))
+            target_column = _column_name(visible_columns[position])
+            key = (target_column, headers[position], signature)
+            group = grouped.setdefault(
+                key,
+                {
+                    "target_column": target_column,
+                    "target_header": headers[position],
+                    **display_format,
+                    "rows": [],
+                    "example_raw": _cached_cell_text(value),
+                },
+            )
+            group["rows"].append(row_number)
+
+    # A group with more than _MAX_NUMBER_FORMAT_RANGES separate row ranges is
+    # split into several groups, so each group's ranges stay exact: a chunk
+    # receives a format only when it holds one of the formatted rows.
+    result: list[dict[str, Any]] = []
+    truncated = False
+    for group in grouped.values():
+        rows_for_group = group.pop("rows")
+        ranges = _row_ranges(rows_for_group)
+        for start in range(0, len(ranges), _MAX_NUMBER_FORMAT_RANGES):
+            if len(result) == _MAX_NUMBER_FORMAT_GROUPS:
+                truncated = True
+                break
+            part = ranges[start : start + _MAX_NUMBER_FORMAT_RANGES]
+            first, last = part[0]["start_row"], part[-1]["end_row"]
+            result.append(
+                {
+                    **group,
+                    "start_row": first,
+                    "end_row": last,
+                    "cell_count": sum(item["end_row"] - item["start_row"] + 1 for item in part),
+                    "range": f"{group['target_column']}{first}:{group['target_column']}{last}",
+                    "row_ranges": part,
+                }
+            )
+        if truncated:
+            break
+
+    if not result:
+        return [], "", truncated
+    text_groups = [group for group in result if group["kind"] in XLSX_TEXT_NUMBER_FORMAT_KINDS]
+    if not text_groups:
+        return result, "", truncated
+    lines = ["Display format context (raw values remain indexed):"]
+    for group in text_groups:
+        location = (
+            group["range"] if len(group["row_ranges"]) == 1 else f"{group['cell_count']} cells in {group['range']}"
+        )
+        lines.append(
+            f"- {group['target_column']} ({_single_line(group['target_header'])}), {location}: "
+            f"{group['kind']} format {_single_line(group['format_code'])}; example raw "
+            f"{_single_line(group['example_raw'])} -> display {_single_line(group['display_example'])}"
+        )
+    if truncated:
+        lines.append(f"- Additional safe display formats omitted after {_MAX_NUMBER_FORMAT_GROUPS} groups.")
+    return result, "\n\n" + "\n".join(lines), truncated
+
+
+def _table_columns(table: TableRegion, info: SheetInfo) -> list[int]:
+    """Worksheet columns extracted for a table: visible, and not a blank spacer."""
+    return [
+        column
+        for column in range(table.start_column, table.end_column + 1)
+        if column not in info.hidden_columns and column not in table.spacer_columns
+    ]
+
+
+def _visible_rows(rows, table: TableRegion, info: SheetInfo):
+    """Mask hidden cells and expand source-backed vertical row-header merges."""
+    visible_columns = _table_columns(table, info)
+    visible_offsets = [column - table.start_column for column in visible_columns]
+    column_positions = {column: index for index, column in enumerate(visible_columns)}
+    merge_starts: dict[int, list[tuple[int, int]]] = {}
+    for start_row, end_row, start_column, end_column in info.merged_ranges:
+        if (
+            start_row < end_row
+            and start_column == end_column
+            and start_column in column_positions
+            and table.start_row <= start_row <= table.end_row
+        ):
+            merge_starts.setdefault(start_row, []).append((start_column, min(end_row, table.end_row)))
+    active_merges: dict[int, tuple[int, Any]] = {}
+    width = len(visible_columns)
+    for row_number, row in enumerate(rows, start=table.start_row):
+        if row_number in info.hidden_rows:
+            # Keep a placeholder so downstream physical row coordinates do not shift.
+            yield (None,) * width
+            continue
+        projected = [row[offset] for offset in visible_offsets]
+        active_merges = {
+            column: (end_row, value) for column, (end_row, value) in active_merges.items() if row_number <= end_row
+        }
+        for column, (end_row, value) in active_merges.items():
+            projected[column_positions[column]] = value
+        for column, end_row in merge_starts.get(row_number, []):
+            value = projected[column_positions[column]]
+            source_value = getattr(value, "value", value)
+            if _raw_cell_value(source_value) is not None:
+                active_merges[column] = (end_row, value)
+        yield tuple(projected)
+
+
+def _column_header_hierarchy(
+    info: SheetInfo,
+    table: TableRegion,
+    visible_columns: list[int],
+    preamble_values: list[tuple[int, list[str]]],
+    leaf_headers: list[str],
+) -> tuple[list[str], list[dict[str, Any]], list[int]]:
+    """Flatten explicit horizontal merged groups without mistaking a title for one."""
+    positions = {column: index for index, column in enumerate(visible_columns)}
+    prefixes: list[list[str]] = [[] for _ in visible_columns]
+    hierarchy_rows: list[int] = []
+    ranges_by_row = {
+        row_number: [
+            (start_column, end_column)
+            for start_row, end_row, start_column, end_column in info.merged_ranges
+            if start_row == end_row == row_number
+            and start_column < end_column
+            and start_column in positions
+            and any(column in positions for column in range(start_column, end_column + 1))
+        ]
+        for row_number, _ in preamble_values
+    }
+    has_partial_group = any(
+        ranges and not (len(ranges) == 1 and ranges[0] == (visible_columns[0], visible_columns[-1]))
+        for ranges in ranges_by_row.values()
+    )
+    for row_number, values in preamble_values:
+        ranges = ranges_by_row[row_number]
+        # One merged cell spanning the complete table is a title, not a parent
+        # for every column unless another row supplies explicit child groups.
+        if len(ranges) == 1 and ranges[0] == (visible_columns[0], visible_columns[-1]) and not has_partial_group:
+            continue
+        applied = False
+        for start_column, end_column in ranges:
+            label = values[positions[start_column]].strip()
+            if not label:
+                continue
+            for column in visible_columns:
+                if start_column <= column <= end_column:
+                    prefixes[positions[column]].append(label)
+                    applied = True
+        if applied:
+            hierarchy_rows.append(row_number)
+    flattened = []
+    hierarchy = []
+    for leaf, parents in zip(leaf_headers, prefixes, strict=True):
+        path = [*parents, leaf]
+        flattened.append(" / ".join(path))
+        hierarchy.append({"column": leaf, "path": path})
+    return flattened, hierarchy, hierarchy_rows
+
+
+def _worksheet_scan(sheet, formula_sheet):
+    """``open_scan`` for :func:`route_sheet_tables` over one worksheet's two readers."""
+
+    @contextmanager
+    def open_scan(min_row: int, max_row: int, min_column: int, max_column: int):
+        """Yield the value and formula row iterators over one rectangle."""
+        window = {
+            "min_row": min_row,
+            "max_row": max_row,
+            "min_col": min_column,
+            "max_col": max_column,
+            "values_only": False,
+        }
+        with closing(sheet.iter_rows(**window)) as value_rows:
+            if formula_sheet is None:
+                yield value_rows, None
+                return
+            with closing(formula_sheet.iter_rows(**window)) as formula_rows:
+                yield value_rows, formula_rows
+
+    return open_scan
+
+
+def _table_row_pipeline(info: SheetInfo):
+    """``make_pipeline`` for :func:`route_sheet_tables`: raw cells to row values.
+
+    Maps one input row to one output row; the router relies on that.
+    """
+
+    def make_pipeline(table: TableRegion, value_rows, formula_rows):
+        """Return the table's row pipeline over the given raw row iterators."""
+        visible_rows = _value_rows(_visible_rows(value_rows, table, info), info.uncached_string_formulas)
+        if formula_rows is None:
+            return _without_calculated_empty(visible_rows)
+        return _rows_with_formulas(visible_rows, _visible_rows(formula_rows, table, info))
+
+    return make_pipeline
+
+
+def _openpyxl_sheets(document: Document, source, infos: list[SheetInfo], limits: XlsxLimits):
+    from openpyxl import load_workbook
+
+    # OpenPyXL parses cells only here: disabling VBA retention makes the safety
+    # boundary explicit for .xlsm inputs.  Macros are never executed by
+    # OpenPyXL and are never written back out by this ingestion path.
+    workbook = load_workbook(source, read_only=True, data_only=True, keep_links=False, keep_vba=False)
+    needs_formulas = any(info.formula_cells for info in infos if not info.hidden and info.columns)
+    formula_source_manager = _document_source(document) if needs_formulas else nullcontext(None)
+    formula_workbook = None
+    try:
+        with formula_source_manager as formula_source:
+            try:
+                formula_workbook = (
+                    load_workbook(
+                        formula_source,
+                        read_only=True,
+                        data_only=False,
+                        keep_links=False,
+                        keep_vba=False,
+                    )
+                    if formula_source is not None
+                    else None
+                )
+                for info in infos:
+                    if info.hidden or not info.columns:
+                        continue
+                    sheet = workbook[info.name]
+                    # Exporters may declare A1:A1 or a huge dimension. Use inspected cells.
+                    sheet.reset_dimensions()
+                    formula_sheet = None
+                    if info.formula_cells:
+                        if formula_workbook is None:
+                            raise PipelineError("XLSX formula reader is unavailable", code="INVALID_XLSX")
+                        formula_sheet = formula_workbook[info.name]
+                        formula_sheet.reset_dimensions()
+                    # One scan of each reader serves every table of the sheet,
+                    # whether the tables are stacked, side by side or interleaved.
+                    for table, rows in route_sheet_tables(
+                        list(info.tables),
+                        _worksheet_scan(sheet, formula_sheet),
+                        _table_row_pipeline(info),
+                        with_formulas=formula_sheet is not None,
+                        spool_limit=limits.max_spool_bytes,
+                        spool_memory_limit=limits.max_spool_memory_bytes,
+                        # The same traversal budget preflight applies to a sheet.
+                        max_scan_area=limits.max_sheet_area,
+                        has_columns=lambda table, info=info: bool(_table_columns(table, info)),
+                    ):
+                        yield info, table, rows
+            finally:
+                if formula_workbook is not None:
+                    formula_workbook.close()
+    finally:
+        workbook.close()
+
+
+@parser_registry.register("xlsx")
+class XlsxParser(TabularBatchParser):
+    """Extract visible worksheets; limits bound accepted input, not exact RSS."""
+
+    tabular_format = "xlsx"
+
+    def __init__(
+        self,
+        *,
+        batch_size: int = 10_000,
+        limits: XlsxLimits | dict[str, int] | None = None,
+    ) -> None:
+        if type(batch_size) is not int or batch_size < 1:
+            raise ConfigError("XLSX batch_size must be a positive integer")
+        self.batch_size = batch_size
+        try:
+            self.limits = XlsxLimits(**limits) if isinstance(limits, dict) else limits or XlsxLimits()
+        except TypeError as exc:
+            raise ConfigError(f"Invalid XLSX limits: {exc}") from exc
+
+    def supported_types(self) -> list[str]:
+        return ["xlsx", "xlsm"]
+
+    async def parse(self, document: Document) -> ProcessedDocument:
+        return await asyncio.to_thread(self._parse, document)
+
+    def iter_batches(self, document: Document) -> Iterator[TextBlock]:
+        from openpyxl.utils.exceptions import InvalidFileException
+
+        with _document_source(document) as source:
+            infos = validate_ooxml(
+                source,
+                self.limits,
+                allow_macros=Document.type_extension(document.filename, document.metadata.get("mimetype")) == "xlsm",
+            )
+            with closing(self._iter_sheets(document, source, infos)) as batches:
+                try:
+                    yield from batches
+                except PipelineError:
+                    raise
+                except (
+                    InvalidFileException,
+                    OSError,
+                    KeyError,
+                    IndexError,
+                    TypeError,
+                    ValueError,
+                    SyntaxError,
+                    zipfile.BadZipFile,
+                ) as exc:
+                    raise PipelineError(
+                        "File is not a valid XLSX workbook", code="INVALID_XLSX", status_code=422
+                    ) from exc
+
+    def _iter_sheets(self, document, source, infos):
+        content_rows_seen = 0
+        # Cells outside any table, grouped per worksheet: (row, range, line).
+        pending_cells: list[tuple[int, str, str]] = []
+        pending_sheet = None
+        hidden_count = sum(info.hidden for info in infos)
+        with closing(_openpyxl_sheets(document, source, infos, self.limits)) as sheets:
+            for sheet, table, row_iterator in sheets:
+                if pending_cells and sheet is not pending_sheet:
+                    for cells_block in self._cell_blocks(document, pending_sheet, hidden_count, pending_cells):
+                        content_rows_seen += len(cells_block.metadata["cell_row_numbers"])
+                        yield cells_block
+                visible_columns = _table_columns(table, sheet)
+                visible_column_count = len(visible_columns)
+                if visible_column_count == 0:
+                    continue
+                preamble = []
+                preamble_rows = []
+                preamble_values: list[tuple[int, list[str]]] = []
+                preamble_bytes = 0
+                header_rendered: list[str] = []
+                header_hierarchy: list[dict[str, Any]] = []
+                header_hierarchy_rows: list[int] = []
+                header_detection: dict[str, Any]
+                # Excel Tables declare their column names. They label the table
+                # when it has no header row, or when its header row is hidden or
+                # blank (hidden cells are never extracted, the declared names are).
+                use_declared_names = table.declared_column_names is not None and table.header_row_hint is None
+                selected_header_row = table.header_row_hint
+                if selected_header_row is not None:
+                    # A structural hint (Excel Table header, merged header leaf)
+                    # can name a row that is hidden or blank within this table's
+                    # columns. Look ahead to it, bounded by the merged-header depth,
+                    # and detect the header automatically instead of rejecting.
+                    lookahead = list(islice(row_iterator, selected_header_row - table.start_row + 1))
+                    row_iterator = chain(lookahead, row_iterator)
+                    hinted = lookahead[-1] if len(lookahead) == selected_header_row - table.start_row + 1 else ()
+                    if not _has_text([_cell_text(value) for value in hinted]):
+                        use_declared_names = table.declared_column_names is not None
+                        selected_header_row = None
+                if use_declared_names:
+                    header_source = "structural_hint"
+                    without_header = table.header_row_hint is None
+                    header_detection = {
+                        "mode": "structural",
+                        "status": "confident",
+                        "selected_row": None,
+                        "candidate_rows": [],
+                        "reason": "excel_table_without_header_row" if without_header else "excel_table_header_unusable",
+                        "note": (
+                            "The Excel Table declares no header row; its column names are used and every row is data."
+                            if without_header
+                            else "The Excel Table header row is hidden or blank; its declared column names are used."
+                        ),
+                    }
+                elif selected_header_row is not None:
+                    header_source = "structural_hint"
+                    header_detection = {
+                        "mode": "structural",
+                        "status": "confident",
+                        "selected_row": selected_header_row,
+                        "candidate_rows": [selected_header_row],
+                        "reason": "validated_table_or_merged_header",
+                        "note": "Validated workbook structure identified the header row.",
+                    }
+                else:
+                    selected_header_row, row_iterator, header_detection = _detect_header(
+                        row_iterator, self.limits.max_batch_bytes, table.start_row
+                    )
+                    header_source = "automatic"
+                if use_declared_names:
+                    # Rows before the data (an absorbed title, a hidden or blank
+                    # header row) are context; blank ones add nothing.
+                    selected_header_row = table.data_start_row
+                header_values = None
+                header_row = table.start_row
+                for physical_row, values in enumerate(row_iterator, start=table.start_row):
+                    if use_declared_names and physical_row >= selected_header_row:
+                        names = [table.declared_column_names[column - table.start_column] for column in visible_columns]
+                        header_values = _normalize_unique_headers(normalize_headers([name.strip() for name in names]))
+                        header_row = None
+                        # This row is data: put it back in front of the stream.
+                        row_iterator = chain([values], row_iterator)
+                        break
+                    rendered = [_cell_text(value) for value in values]
+                    rendered.extend([""] * (visible_column_count - len(rendered)))
+                    if selected_header_row is not None and physical_row < selected_header_row:
+                        preamble_values.append((physical_row, rendered))
+                        values_text = list(dict.fromkeys(value.strip() for value in rendered if value.strip()))
+                        if values_text:
+                            text = " ; ".join(values_text)
+                            preamble_bytes += len(text.encode("utf-8"))
+                            if preamble_bytes >= self.limits.max_batch_bytes:
+                                raise limit("XLSX sheet context exceeds the batch byte limit")
+                            preamble.append(f"Row {physical_row}: {text}")
+                            preamble_rows.append(physical_row)
+                        continue
+                    if selected_header_row is not None and not _has_text(rendered):
+                        raise PipelineError(
+                            f"XLSX sheet {sheet.name!r}: selected header row {selected_header_row} is empty",
+                            code="INVALID_XLSX",
+                            status_code=422,
+                        )
+                    if _has_text(rendered):
+                        if any(len(value) > self.limits.max_cell_chars for value in rendered):
+                            raise limit("XLSX header text exceeds the character limit")
+                        if sum(len(value.encode("utf-8")) for value in rendered) >= self.limits.max_batch_bytes:
+                            raise limit("XLSX header exceeds the batch byte limit")
+                        leaf_headers = normalize_headers([value.strip() for value in rendered])
+                        flattened, header_hierarchy, header_hierarchy_rows = _column_header_hierarchy(
+                            sheet, table, visible_columns, preamble_values, leaf_headers
+                        )
+                        header_values = _normalize_unique_headers(flattened)
+                        for index, hierarchy in enumerate(header_hierarchy):
+                            hierarchy["column"] = header_values[index]
+                        header_row = physical_row
+                        header_rendered = rendered
+                        break
+                if not header_values:
+                    if selected_header_row is not None and not use_declared_names:
+                        raise PipelineError(
+                            f"XLSX sheet {sheet.name!r}: selected header row {selected_header_row} is missing",
+                            code="INVALID_XLSX",
+                            status_code=422,
+                        )
+                    continue
+                data_row_start = table.data_start_row if use_declared_names else header_row + 1
+                if sheet.missing_formula_values:
+                    logger.bind(sheet_name=sheet.name, missing_formula_values=sheet.missing_formula_values).warning(
+                        "XLSX formula text was indexed without a cached result; formulas are not recalculated"
+                    )
+                header_lines = [markdown_row(header_values), markdown_row(["---"] * len(header_values))]
+                worksheet_context = _worksheet_context(sheet.name) + _sheet_notes(sheet, self.limits.max_tables)
+                sheet_context = (
+                    "\n\nWorksheet context (before column headers):\n" + "\n".join(preamble) if preamble else ""
+                )
+                context = worksheet_context + sheet_context
+                header_bytes = len(("\n".join(header_lines) + context).encode("utf-8"))
+                if header_bytes >= self.limits.max_batch_bytes:
+                    raise limit("XLSX header exceeds the batch byte limit")
+                batch_rows: list[tuple[Any, ...]] = []
+                row_numbers, batch_bytes = [], header_bytes
+                row_header_positions = sorted(
+                    {
+                        visible_columns.index(start_column)
+                        for start_row, end_row, start_column, end_column in sheet.merged_ranges
+                        if start_row < end_row
+                        and start_column == end_column
+                        and start_column in visible_columns
+                        and start_row >= data_row_start
+                        and start_row <= table.end_row
+                    }
+                )
+                row_header_paths: dict[str, list[str]] = {}
+                table_rows_emitted = 0
+                # One-based batch number within this table; chunkers index a
+                # large worksheet context once, with the table's first batch.
+                table_batches = [0]
+
+                def block():
+                    def render(group_repeated: bool, include_display_context: bool = True):
+                        rendered_rows, formula_groups, formula_cells, formula_context = _compact_formula_batch(
+                            batch_rows,
+                            row_numbers,
+                            sheet_name=sheet.name,
+                            visible_columns=visible_columns,
+                            headers=header_values,
+                            table_start_row=header_row if header_row is not None else table.start_row,
+                            table_end_row=table.end_row,
+                            group_repeated=group_repeated,
+                        )
+                        number_format_groups, display_context, number_formats_truncated = _compact_number_formats(
+                            batch_rows,
+                            row_numbers,
+                            visible_columns=visible_columns,
+                            headers=header_values,
+                        )
+                        if not include_display_context:
+                            display_context = ""
+                        lines = [*header_lines, *(markdown_row(row) for row in rendered_rows)]
+                        block_bytes = len(
+                            (
+                                "\n".join(lines) + display_context + worksheet_context + sheet_context + formula_context
+                            ).encode("utf-8")
+                        )
+                        return (
+                            lines,
+                            formula_groups,
+                            formula_cells,
+                            formula_context,
+                            number_format_groups,
+                            display_context,
+                            number_formats_truncated,
+                            block_bytes,
+                        )
+
+                    (
+                        lines,
+                        formula_groups,
+                        formula_cells,
+                        formula_context,
+                        number_format_groups,
+                        display_context,
+                        number_formats_truncated,
+                        block_bytes,
+                    ) = render(True)
+                    if block_bytes > self.limits.max_batch_bytes:
+                        # Generalized formula context is normally smaller than
+                        # repeated inline expressions, but short runs can add
+                        # overhead. Preserve ingestion and formula information
+                        # by reverting this bounded batch to individual cells.
+                        (
+                            lines,
+                            formula_groups,
+                            formula_cells,
+                            formula_context,
+                            number_format_groups,
+                            display_context,
+                            number_formats_truncated,
+                            block_bytes,
+                        ) = render(False)
+                    if block_bytes > self.limits.max_batch_bytes and display_context:
+                        # Display hints are supplemental. Keep their structured
+                        # metadata, but never reject a valid batch solely because
+                        # the human-readable examples exceed the byte budget.
+                        (
+                            lines,
+                            formula_groups,
+                            formula_cells,
+                            formula_context,
+                            number_format_groups,
+                            display_context,
+                            number_formats_truncated,
+                            block_bytes,
+                        ) = render(False, include_display_context=False)
+                    if block_bytes > self.limits.max_batch_bytes:
+                        raise limit("XLSX batch exceeds the batch byte limit")
+                    table_batches[0] += 1
+                    return self._block(
+                        document,
+                        sheet,
+                        table,
+                        hidden_count,
+                        header_values,
+                        header_row,
+                        lines,
+                        row_numbers,
+                        worksheet_context,
+                        sheet_context,
+                        preamble_rows,
+                        header_source,
+                        header_detection,
+                        header_hierarchy,
+                        header_hierarchy_rows,
+                        [header_values[index] for index in row_header_positions],
+                        row_header_paths,
+                        formula_groups,
+                        formula_cells,
+                        formula_context,
+                        number_format_groups,
+                        display_context,
+                        number_formats_truncated,
+                        table_batch_index=table_batches[0],
+                    )
+
+                for physical_row, values in enumerate(row_iterator, start=data_row_start):
+                    rendered = [_cell_text(value) for value in values]
+                    if not _has_text(rendered):
+                        continue
+                    if any(len(value) > self.limits.max_cell_chars for value in rendered):
+                        raise limit("XLSX cell text exceeds the character limit")
+                    rendered.extend([""] * (len(header_values) - len(rendered)))
+                    if len(rendered) > len(header_values):
+                        raise PipelineError("XLSX reader returned more columns than inspected", code="INVALID_XLSX")
+                    if (
+                        header_bytes + sum(len(value.encode("utf-8")) for value in rendered)
+                        >= self.limits.max_batch_bytes
+                    ):
+                        raise limit(f"XLSX row {physical_row} exceeds the batch byte limit")
+                    row = markdown_row(rendered)
+                    path = [rendered[index] for index in row_header_positions if rendered[index]]
+                    row_bytes = len(row.encode("utf-8")) + 1 + sum(len(value.encode("utf-8")) for value in path)
+                    if header_bytes + row_bytes > self.limits.max_batch_bytes:
+                        raise limit(f"XLSX row {physical_row} exceeds the batch byte limit")
+                    if row_numbers and batch_bytes + row_bytes > self.limits.max_batch_bytes:
+                        yield block()
+                        batch_rows, row_numbers, batch_bytes = [], [], header_bytes
+                        row_header_paths = {}
+                    batch_rows.append(tuple(values))
+                    row_numbers.append(physical_row)
+                    if path:
+                        row_header_paths[str(physical_row)] = path
+                    batch_bytes += row_bytes
+                    table_rows_emitted += 1
+                    if len(row_numbers) == self.batch_size:
+                        yield block()
+                        batch_rows, row_numbers, batch_bytes = [], [], header_bytes
+                        row_header_paths = {}
+                if row_numbers:
+                    yield block()
+                content_rows_seen += table_rows_emitted
+                if table_rows_emitted and header_source == "automatic" and header_detection["status"] == "ambiguous":
+                    # Logged only for real tables: a region emitted as worksheet
+                    # cells has no header, so its detection result is moot.
+                    logger.bind(
+                        sheet_name=sheet.name,
+                        table_index=table.index,
+                        selected_row=header_detection["selected_row"],
+                        candidate_rows=header_detection["candidate_rows"],
+                        reason=header_detection["reason"],
+                    ).warning("XLSX automatic header detection is ambiguous")
+                if not table_rows_emitted:
+                    # A region with no data rows is a footnote, a total, or a
+                    # form-like group of cells, not a table. Its only nonempty
+                    # row would otherwise be consumed as a header and lost.
+                    region_rows = [(number, values) for number, values in preamble_values if _has_text(values)]
+                    if header_rendered:
+                        region_rows.append((header_row, header_rendered))
+                    for number, values in region_rows:
+                        pending_cells.append(_cell_line(number, values, visible_columns))
+                    pending_sheet = sheet
+                    # Emit filled blocks now; only one partial block stays buffered.
+                    for cells_block in self._cell_blocks(
+                        document, pending_sheet, hidden_count, pending_cells, final=False
+                    ):
+                        content_rows_seen += len(cells_block.metadata["cell_row_numbers"])
+                        yield cells_block
+            for cells_block in self._cell_blocks(document, pending_sheet, hidden_count, pending_cells):
+                content_rows_seen += len(cells_block.metadata["cell_row_numbers"])
+                yield cells_block
+        if not content_rows_seen:
+            raise NoIndexableContentError("XLSX contains no visible worksheet with indexable content")
+
+    def _cell_blocks(self, document, sheet, hidden_count, cells, *, final=True):
+        """Group one worksheet's loose cells into bounded text blocks.
+
+        Emitted cells are removed from ``cells``. Unless ``final``, the last,
+        possibly partial block is kept so later regions of the sheet can join it.
+        """
+        if not cells:
+            return
+        sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
+        worksheet_context = _worksheet_context(sheet.name) + _sheet_notes(sheet, self.limits.max_tables)
+        heading = "Worksheet cells outside tables:\n"
+        overhead = len((heading + worksheet_context).encode("utf-8"))
+        batches: list[list[tuple[int, str, str]]] = [[]]
+        size = overhead
+        for cell in cells:
+            physical_row, _, line = cell
+            line_bytes = len(line.encode("utf-8")) + 1
+            if overhead + line_bytes >= self.limits.max_batch_bytes:
+                raise limit(f"XLSX row {physical_row} exceeds the batch byte limit")
+            if batches[-1] and size + line_bytes >= self.limits.max_batch_bytes:
+                batches.append([])
+                size = overhead
+            batches[-1].append(cell)
+            size += line_bytes
+        if not final:
+            batches.pop()
+        del cells[: sum(len(batch) for batch in batches)]
+        for batch in batches:
+            yield TextBlock(
+                text=heading + "\n".join(line for _, _, line in batch) + worksheet_context,
+                block_type="text",
+                metadata={
+                    "tabular_format": "xlsx",
+                    "xlsx_content_kind": "cells",
+                    "workbook_filename": document.filename,
+                    "sheet_name": sheet.name,
+                    "worksheet_context": worksheet_context,
+                    "sheet_index": sheet.index,
+                    "worksheet_table_count": len(sheet.tables),
+                    "cell_ranges": [sheet_ref + cell_range for _, cell_range, _ in batch],
+                    "cell_row_numbers": sorted({row for row, _, _ in batch}),
+                    "hidden_sheet": False,
+                    "hidden_sheets_skipped": hidden_count,
+                    "hidden_rows_skipped": len(sheet.hidden_rows),
+                    "filtered_rows_included": len(sheet.filtered_rows),
+                    "worksheet_blocks_merged": sheet.merged_table_blocks,
+                    "hidden_columns_skipped": len(sheet.hidden_columns),
+                    "spreadsheet_backend": "openpyxl",
+                },
+            )
+
+    def _block(
+        self,
+        document,
+        sheet,
+        table: TableRegion,
+        hidden_count,
+        headers,
+        header_row,
+        lines,
+        row_numbers,
+        worksheet_context,
+        sheet_context,
+        preamble_rows,
+        header_source,
+        header_detection,
+        header_hierarchy,
+        header_hierarchy_rows,
+        row_header_columns,
+        row_header_paths,
+        formula_groups,
+        formula_cells,
+        formula_context,
+        number_format_groups,
+        display_context,
+        number_formats_truncated,
+        *,
+        table_batch_index: int,
+    ):
+        sheet_ref = "'" + sheet.name.replace("'", "''") + "'!"
+        visible_columns = _table_columns(table, sheet)
+        first_column = _column_name(visible_columns[0])
+        last_column = _column_name(visible_columns[-1])
+        metadata = {
+            "tabular_format": "xlsx",
+            "workbook_filename": document.filename,
+            "sheet_name": sheet.name,
+            "worksheet_context": worksheet_context,
+            "sheet_index": sheet.index,
+            "table_id": f"sheet:{sheet.index}:table:{table.index}",
+            "table_index": table.index,
+            "table_batch_index": table_batch_index,
+            "worksheet_table_count": len(sheet.tables),
+            "table_columns": list(headers),
+            "table_header_row": header_row,
+            "table_header_source": header_source,
+            "table_header_detection": dict(header_detection),
+            "table_header_detection_status": header_detection["status"],
+            "table_start_row": header_row if header_row is not None else (table.data_start_row or table.start_row),
+            "table_end_row": table.end_row,
+            "table_start_column": visible_columns[0],
+            "table_end_column": visible_columns[-1],
+            "table_worksheet_column_indices": visible_columns,
+            "table_range": (
+                f"{sheet_ref}{first_column}{header_row}:{last_column}{table.end_row}"
+                if header_row is not None
+                else f"{sheet_ref}{first_column}{table.data_start_row or table.start_row}:{last_column}{table.end_row}"
+            ),
+            "table_region_range": f"{sheet_ref}{first_column}{table.start_row}:{last_column}{table.end_row}",
+            "table_region_start_row": table.start_row,
+            "table_row_start": row_numbers[0],
+            "table_row_end": row_numbers[-1],
+            "table_row_numbers": list(row_numbers),
+            "cell_range": f"{sheet_ref}{first_column}{row_numbers[0]}:{last_column}{row_numbers[-1]}",
+            "table_header_range": (
+                f"{sheet_ref}{first_column}{header_row}:{last_column}{header_row}" if header_row is not None else None
+            ),
+            "hidden_sheet": False,
+            "hidden_sheets_skipped": hidden_count,
+            "hidden_rows_skipped": len(sheet.hidden_rows),
+            "filtered_rows_included": len(sheet.filtered_rows),
+            "worksheet_blocks_merged": sheet.merged_table_blocks,
+            "hidden_columns_skipped": len(sheet.hidden_columns),
+            "formula_policy": "compact_groups_and_individual_formulas",
+            "sheet_formula_cells": sheet.formula_cells,
+            "sheet_missing_formula_values": sheet.missing_formula_values,
+            "spreadsheet_backend": "openpyxl",
+            "xlsx_content_kind": "table",
+            # Transitional aliases keep existing chunking/retrieval operational.
+            "csv_columns": list(headers),
+            "csv_row_start": row_numbers[0],
+            "csv_row_end": row_numbers[-1],
+            "csv_row_numbers": list(row_numbers),
+            "csv_bad_rows": 0,
+        }
+        if header_hierarchy_rows:
+            metadata.update(
+                table_header_hierarchy=header_hierarchy,
+                table_header_hierarchy_rows=list(header_hierarchy_rows),
+            )
+        if row_header_columns:
+            metadata.update(
+                table_row_header_columns=list(row_header_columns),
+                table_row_header_paths=dict(row_header_paths),
+                table_merged_row_headers_expanded=True,
+            )
+        if formula_groups:
+            metadata["formula_groups"] = list(formula_groups)
+        if formula_cells:
+            metadata["formula_cells"] = list(formula_cells)
+        if formula_context:
+            metadata["formula_context"] = formula_context
+        if number_format_groups:
+            metadata["number_format_groups"] = list(number_format_groups)
+        if display_context:
+            metadata["number_format_context"] = display_context
+        if number_formats_truncated:
+            metadata["number_format_groups_truncated"] = True
+        if sheet_context:
+            metadata.update(sheet_context=sheet_context, sheet_context_row_numbers=list(preamble_rows))
+        return TextBlock(
+            text="\n".join(lines) + display_context + worksheet_context + sheet_context + formula_context,
+            block_type="table",
+            metadata=metadata,
+        )
+
+    def _parse(self, document: Document) -> ProcessedDocument:
+        # The compatibility API collects blocks; production ingestion uses iter_batches.
+        return ProcessedDocument(
+            document_id=document.id, text_blocks=list(self.iter_batches(document)), metadata=dict(document.metadata)
+        )

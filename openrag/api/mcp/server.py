@@ -371,8 +371,8 @@ async def delete_file(partition: str, file_id: str) -> dict:
     description=(
         "Update metadata fields of an existing indexed file without re-uploading it. "
         "Pass a JSON object with only the fields to change (e.g. author, title). "
-        "To move the file to another partition, include a 'partition' key — "
-        "you must have editor access to both the source and destination partitions."
+        "It does not move the file: to put it in another partition, copy it there, "
+        "then delete it from this one."
     )
 )
 async def update_file_metadata(partition: str, file_id: str, metadata: dict) -> dict:

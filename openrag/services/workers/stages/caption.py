@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import MutableMapping
+import threading
+from collections.abc import Callable, MutableMapping
 from contextlib import nullcontext
 from typing import Any
 
+from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
+from core.utils.logging import get_logger
+from core.utils.progress import gather_with_progress
 from core.vlm.vlm import VLM
 from services.inference.runtime import get_vlm_semaphore
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials, stage_timeout
-from tqdm.asyncio import tqdm
+
+logger = get_logger()
 
 _PADDING_RE = re.compile(r"[ \t]{2,}")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -174,11 +179,18 @@ async def caption_stage(
         if prompt is not None:
             prompt = str(prompt)
 
-        effective_timeout = stage_timeout(timeout, len(processed_document.images), per_item_timeout=per_image_timeout)
+        image_count = len(processed_document.images)
+        effective_timeout = stage_timeout(timeout, image_count, per_item_timeout=per_image_timeout)
+        failures: list[Exception] = []
         row["processed_document"] = await run_with_optional_timeout(
-            lambda: _caption_document(processed_document, vlm, prompt, max_concurrency),
+            lambda: _caption_document(processed_document, vlm, prompt, max_concurrency, on_failure=failures.append),
             effective_timeout,
         )
+        if failures:
+            row.setdefault("degraded_stages", {})["caption"] = (
+                f"{len(failures)}/{_captionable_count(processed_document.images)} image(s) failed captioning: "
+                f"{failures[0]}"
+            )
         row["stage"] = "captioned"
         row.pop("error", None)
         return row
@@ -190,13 +202,60 @@ async def caption_stage(
         scrub_credentials(row)
 
 
+def _captionable_count(images: list[ImageBlock]) -> int:
+    """Count the images actually sent to the VLM: remote ones without bytes are skipped."""
+    return sum(1 for image in images if image.image_bytes)
+
+
+async def _encode_deferred_images(images: list[ImageBlock]) -> None:
+    """PNG-encode the images a parser handed over decoded, off the event loop.
+
+    A figure-heavy PDF takes seconds to minutes of CPU to encode. It is paid
+    here, not at parse, so a document that is never captioned never pays it.
+    A cancel cannot interrupt the thread; the event tells it to stop.
+    """
+    if all(image.pil_image is None for image in images):
+        return
+    cancelled = threading.Event()
+    try:
+        await asyncio.to_thread(_encode_in_place, images, cancelled)
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
+
+
+def _encode_in_place(images: list[ImageBlock], cancelled: threading.Event) -> None:
+    for image in images:
+        if cancelled.is_set():
+            return
+        # Dropped as it is encoded, so the decoded figures and their PNGs are
+        # never all held at once.
+        pil_image, image.pil_image = image.pil_image, None
+        if pil_image is None or image.image_bytes:
+            continue
+        try:
+            image.image_bytes = pil_to_png_bytes(pil_image)
+        except Exception as exc:  # noqa: BLE001 - one unreadable figure must not cost the others their captions
+            # Left without bytes, it is skipped like a remote image: uncaptioned,
+            # its ref kept in the text.
+            ref = image.metadata.get("markdown_ref") or "without a ref"
+            logger.warning(f"Failed to encode image {ref}: {exc}")
+
+
 async def _caption_document(
     processed_document: ProcessedDocument,
     vlm: VLM,
     prompt: str | None,
     max_concurrency: int | None,
+    *,
+    on_failure: Callable[[Exception], None] | None = None,
 ) -> ProcessedDocument:
     """Return a copy of ``processed_document`` with captions materialized.
+
+    Each image degrades on its own: a failed image is left uncaptioned and
+    reported to ``on_failure`` while the others keep their captions. Only when
+    every image sent to the VLM fails does this raise (the first failure), so
+    the caller's stage-level fallback still applies.
 
     ``max_concurrency`` has no default on purpose. It defaulted to ``None`` when
     the cap was introduced, and the second caller — the file-serializer path
@@ -208,6 +267,7 @@ async def _caption_document(
     images = processed_document.images
     if not images:
         return processed_document
+    await _encode_deferred_images(images)
 
     # Per-document fan-out bound. One task per image is created either way, but
     # only this many contend for the shared VLM gate at a time. Without it a
@@ -219,32 +279,50 @@ async def _caption_document(
         asyncio.Semaphore(max_concurrency) if max_concurrency is not None and max_concurrency > 0 else nullcontext()
     )
 
-    async def caption_one(image: ImageBlock) -> str:
+    async def caption_one(image: ImageBlock) -> str | None:
+        if not image.image_bytes:
+            # A remote markdown image (only ``source_url``) is never fetched:
+            # it stays uncaptioned and its link stays in the text (#1294).
+            return None
         # Bound the fan-out cluster-wide so every indexer actor shares one VLM budget.
         async with limiter, get_vlm_semaphore():
             return await vlm.caption_image(image.image_bytes, prompt=prompt)
 
-    # tqdm.gather is built on as_completed, so a failing child does not clean up
-    # sibling tasks for us. Drain them explicitly so failed documents do not keep
-    # using the shared VLM semaphore in the background.
+    # gather cancels and awaits every child if it is itself cancelled (stage
+    # timeout), so nothing keeps holding the shared VLM semaphore afterwards.
     label = processed_document.metadata.get("filename") or processed_document.document_id
-    tasks = [asyncio.ensure_future(caption_one(image)) for image in images]
-    try:
-        captions = await tqdm.gather(*tasks, desc=f"Captioning images of *{label}*")
-    except asyncio.CancelledError:
-        await _cancel_and_drain(tasks)
-        raise
-    except Exception:
-        await _cancel_and_drain(tasks)
-        raise
+    results = await gather_with_progress(
+        *(caption_one(image) for image in images),
+        desc=f"Captioning images of *{label}*",
+        return_exceptions=True,
+    )
+    failures: list[Exception] = []
+    for result in results:
+        if isinstance(result, Exception):
+            failures.append(result)
+        elif isinstance(result, BaseException):
+            raise result
+    captionable = _captionable_count(images)
+    if failures and len(failures) == captionable:
+        raise failures[0]
+    if failures:
+        logger.bind(filename=label, stage="caption").warning(
+            f"{len(failures)}/{captionable} image(s) failed captioning; keeping the other captions: {failures[0]}"
+        )
+    if on_failure is not None:
+        for failure in failures:
+            on_failure(failure)
 
     # Caption fetching fans out concurrently above; the text-block mutation
     # below stays sequential and in image order so the markdown-ref replacement
     # and append ordering are deterministic.
     text_blocks = list(processed_document.text_blocks)
     captioned_images: list[ImageBlock] = []
-    for image, raw_caption in zip(images, captions, strict=True):
-        caption = squeeze_padding(raw_caption)
+    for image, result in zip(images, results, strict=True):
+        if result is None or isinstance(result, Exception):
+            captioned_images.append(image)
+            continue
+        caption = squeeze_padding(result)
         wrapped = wrap_caption(caption)
         captioned_images.append(image.model_copy(update={"caption": caption}))
         if not _replace_markdown_ref(text_blocks, image, wrapped):
@@ -256,13 +334,6 @@ async def _caption_document(
             "images": captioned_images,
         }
     )
-
-
-async def _cancel_and_drain(tasks: list[asyncio.Task[str]]) -> None:
-    for task in tasks:
-        if not task.done():
-            task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _replace_markdown_ref(text_blocks: list[TextBlock], image: ImageBlock, wrapped_caption: str) -> bool:

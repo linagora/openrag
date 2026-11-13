@@ -8,6 +8,8 @@ fuzzy ranking, task assembly and URL-indexation guards in isolation.
 from __future__ import annotations
 
 import asyncio
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -127,7 +129,8 @@ class FakeJobs:
         self._details = details
         self._tasks = tasks if tasks is not None else []
 
-    async def get_task_details(self, task_id):
+    async def get_task_details(self, task_id, *, require_owner_identity=False):
+        self.require_owner_identity = require_owner_identity
         return self._details
 
     async def list_tasks(self, *, is_admin, user_id, task_status=None):
@@ -416,6 +419,20 @@ async def test_task_status_admin_bypasses_owner():
     assert "error" not in out
 
 
+@pytest.mark.parametrize(("is_admin", "expected"), [(False, True), (True, False)])
+@pytest.mark.asyncio
+async def test_task_status_forwards_owner_identity_requirement(is_admin: bool, expected: bool) -> None:
+    jobs = FakeJobs(details={"user_id": 1})
+
+    await _service(jobs=jobs, indexing=FakeIndexing(state="COMPLETED")).get_task_status(
+        task_id="t1",
+        user_id=1,
+        is_admin=is_admin,
+    )
+
+    assert jobs.require_owner_identity is expected
+
+
 @pytest.mark.asyncio
 async def test_task_status_failed_redacts_error_for_non_admin():
     jobs = FakeJobs(details={"user_id": 1})
@@ -517,6 +534,18 @@ async def test_delete_file_admin_wildcard_bypasses_membership():
         partition="a", file_id="f1", allowed_partitions=["all"], user_id=1
     )
     assert indexing.deleted == [("f1", "a")]
+
+
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.asyncio
+async def test_admin_wildcard_cannot_delete_in_a_reserved_partition(partition):
+    """The store reads `all` as every partition: deleting file X in it deleted X everywhere."""
+    indexing = FakeIndexing()
+    with pytest.raises(PermissionError, match="reserved"):
+        await _service(partitions=FakePartitions(exists=True), indexing=indexing).delete_file(
+            partition=partition, file_id="f1", allowed_partitions=["all"], user_id=1
+        )
+    assert indexing.deleted == []
 
 
 @pytest.mark.asyncio
@@ -981,13 +1010,207 @@ async def test_safe_download_resolves_the_httpx_idna_hostname(monkeypatch, tmp_p
     assert sent_hosts == ["xn--fa-hia.example"]
 
 
+@pytest.mark.asyncio
+async def test_index_url_keeps_file_io_off_the_event_loop(monkeypatch):
+    """Creating the temp file, opening it, writing each chunk and the content
+    sniff must all run in a worker thread, where no event loop is running."""
+    from services.orchestrators import mcp_service as mcp_mod
+
+    calls: list[tuple[str, bool]] = []
+
+    def on_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return True
+
+    class RecordingHandle:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+        def __getattr__(self, name):
+            return getattr(self._fh, name)
+
+        def read(self, *args):
+            calls.append(("read", on_loop()))
+            return self._fh.read(*args)
+
+        def write(self, data):
+            calls.append(("write", on_loop()))
+            return self._fh.write(data)
+
+        def close(self):
+            calls.append(("close", on_loop()))
+            self._fh.close()
+
+    real_named_temporary_file = mcp_mod.tempfile.NamedTemporaryFile
+    real_path_open = Path.open
+
+    def recording_named_temporary_file(*args, **kwargs):
+        calls.append(("NamedTemporaryFile", on_loop()))
+        return real_named_temporary_file(*args, **kwargs)
+
+    def recording_path_open(self, *args, **kwargs):
+        calls.append(("open", on_loop()))
+        return RecordingHandle(real_path_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(mcp_mod.tempfile, "NamedTemporaryFile", recording_named_temporary_file)
+    monkeypatch.setattr(Path, "open", recording_path_open)
+
+    def handler(request):
+        return httpx.Response(200, content=_PDF_HEADER + b"data")
+
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing()
+    svc = _service(partitions=parts, indexing=indexing)
+
+    async def _resolves_ok(host):
+        return None
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", _resolves_ok)
+
+    await svc.index_url(
+        url="https://example.com/report.pdf",
+        partition="p1",
+        file_id="f7",
+        allowed_partitions=["p1"],
+        user_id=7,
+    )
+    index_url_calls = list(calls)
+    monkeypatch.undo()
+    downloaded = Path(indexing.added[0]["file_path"])
+    assert downloaded.read_bytes() == _PDF_HEADER + b"data"
+    downloaded.unlink(missing_ok=True)
+
+    recorded = {name for name, _ in index_url_calls}
+    assert {"NamedTemporaryFile", "open", "write", "read", "close"} <= recorded
+    assert [call for call in index_url_calls if call[1]] == []
+
+
+async def _cancel_while_blocked(task: asyncio.Task, gate: dict[str, threading.Event]) -> None:
+    """Cancel ``task`` while its worker thread is blocked, then let the thread finish."""
+    assert await asyncio.to_thread(gate["entered"].wait, 5), "the worker thread never started"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate["release"].set()
+    assert await asyncio.to_thread(gate["finished"].wait, 5), "the worker thread never finished"
+
+
+async def _until_removed(path: Path) -> bool:
+    """Wait for the cleanup that runs once the worker thread has finished."""
+    for _ in range(200):
+        if not path.exists():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+def _index_url_task(svc) -> asyncio.Task:
+    return asyncio.ensure_future(
+        svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f8",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+    )
+
+
+# A worker thread cannot be interrupted: cancelling the await returns at once
+# while the thread goes on. A temp file the thread creates or opens after the
+# request was cancelled must still be removed.
+@pytest.mark.asyncio
+async def test_index_url_removes_the_temp_file_created_after_a_cancel(monkeypatch):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    gate = {"entered": threading.Event(), "release": threading.Event(), "finished": threading.Event()}
+    created: list[Path] = []
+    real_create = mcp_mod._create_download_target
+
+    def blocked_create(suffix):
+        gate["entered"].set()
+        gate["release"].wait(5)
+        created.append(real_create(suffix))
+        gate["finished"].set()
+        return created[-1]
+
+    monkeypatch.setattr(mcp_mod, "_create_download_target", blocked_create)
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+
+    await _cancel_while_blocked(_index_url_task(svc), gate)
+
+    assert await _until_removed(created[0]), f"temp file left behind: {created[0]}"
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_the_download_opened_after_a_cancel(monkeypatch):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    gate = {"entered": threading.Event(), "release": threading.Event(), "finished": threading.Event()}
+    opened: list[Path] = []
+    real_path_open = Path.open
+
+    def blocked_open(self, mode="r", *args, **kwargs):
+        if mode != "wb":
+            return real_path_open(self, mode, *args, **kwargs)
+        opened.append(self)
+        gate["entered"].set()
+        gate["release"].wait(5)
+        try:
+            return real_path_open(self, mode, *args, **kwargs)
+        finally:
+            gate["finished"].set()
+
+    def handler(request):
+        return httpx.Response(200, content=_PDF_HEADER + b"data")
+
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", blocked_open)
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+
+    async def _resolves_ok(host):
+        return None
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", _resolves_ok)
+
+    await _cancel_while_blocked(_index_url_task(svc), gate)
+
+    assert opened, "the download was never opened"
+    assert await _until_removed(opened[0]), f"download left behind: {opened[0]}"
+
+
 # ---------------------------------------------------------------------------
 # Metadata hardening + input bounds
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_update_metadata_strips_protected_keys_keeps_move():
+async def test_update_metadata_strips_protected_keys():
     indexing = FakeIndexing()
     await _service(partitions=FakePartitions(exists=True), indexing=indexing).update_file_metadata(
         partition="a",
@@ -997,34 +1220,41 @@ async def test_update_metadata_strips_protected_keys_keeps_move():
             "source": "/evil",
             "created_by": 999,
             "degraded_stages": ["caption"],
-            "partition": "dest",
         },
         allowed_partitions=["all"],
         user_id=1,
     )
     _file_id, sent_md, _partition, _user = indexing.updated[0]
     assert sent_md["author"] == "x"
-    assert sent_md["partition"] == "dest"  # authorized move control preserved
     assert "source" not in sent_md and "created_by" not in sent_md and "degraded_stages" not in sent_md
 
 
 @pytest.mark.asyncio
-async def test_update_metadata_move_requires_editor_on_destination():
-    # Non-wildcard caller: editor on source but only viewer on the move target.
-    class P(FakePartitions):
-        async def list_members(self, partition):
-            role = "viewer" if partition == "dest" else "editor"
-            return [{"user_id": 5, "role": role}]
+async def test_update_metadata_refuses_another_partition():
+    from unittest.mock import MagicMock
 
-    svc = _service(partitions=P(exists=True))
-    with pytest.raises(PermissionError):
+    from services.orchestrators.indexing_service import IndexingService
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.updated: list = []
+
+        async def update_file_metadata(self, *args):
+            self.updated.append(args)
+
+    dispatcher = Dispatcher()
+    indexing = IndexingService(document_repo=MagicMock(), workspace_repo=MagicMock(), dispatcher=dispatcher)
+    svc = _service(partitions=FakePartitions(exists=True), indexing=indexing)
+    with pytest.raises(ValidationError) as exc:
         await svc.update_file_metadata(
             partition="src",
             file_id="f1",
             metadata={"partition": "dest"},
-            allowed_partitions=["src", "dest"],
+            allowed_partitions=["all"],
             user_id=5,
         )
+    assert exc.value.code == "PARTITION_CHANGE_UNSUPPORTED"
+    assert dispatcher.updated == []
 
 
 @pytest.mark.asyncio

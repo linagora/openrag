@@ -43,6 +43,7 @@ class _FakeClient:
         self.upsert_calls = 0
         self.flushed = 0
         self.iterators: list[_FakeIterator] = []
+        self.server_version = "3.0.2"
 
     def query_iterator(self, collection_name, filter, batch_size, output_fields):
         self.filters.append(filter)
@@ -64,6 +65,9 @@ class _FakeClient:
 
     def flush(self, collection_name):
         self.flushed += 1
+
+    def get_server_version(self):
+        return self.server_version
 
 
 def _run(client: _FakeClient, **kwargs: Any):
@@ -101,8 +105,34 @@ def test_adds_the_header_to_text_and_nothing_else():
             {"header": "[Source: report.pdf | Page: 3]", "text": "[Source: report.pdf | Page: 3]\n\nbody"},
             id="already-has-a-header",
         ),
-        pytest.param({"text": wrap_chunk_with_context("body", "report.pdf", "a context")}, id="contextualized"),
-        pytest.param({"text": wrap_chunk_with_context("body", "report.pdf")}, id="contextualization-failed"),
+        pytest.param(
+            {"text": "[CONTEXT]\n\na context\n\n* filename: report.pdf\n\n[CHUNK_START]\n\nbody\n\n[CHUNK_END]"},
+            id="contextualized-by-an-earlier-release",
+        ),
+        pytest.param(
+            {"text": "* filename: report.pdf\n\n[CHUNK_START]\n\nbody\n\n[CHUNK_END]"},
+            id="contextualization-failed-in-an-earlier-release",
+        ),
+        pytest.param(
+            {
+                "header": "[Source: report.pdf]",
+                "content": "[Source: report.pdf]\n\nbody",
+                "text": wrap_chunk_with_context("[Source: report.pdf]\n\nbody", "a context"),
+            },
+            id="contextualized",
+        ),
+        pytest.param(
+            {
+                "header": "[Source: report.pdf | Page: 3]",
+                "content": "[Source: report.pdf | Page: 3]\n\nbody",
+                "text": wrap_chunk_with_context("[Source: report.pdf | Page: 3]\n\nbody"),
+            },
+            id="contextualization-failed",
+        ),
+        pytest.param(
+            {"content": "[Source: report.pdf]\n\nbo", "text": wrap_chunk_with_context("[Source: report.pdf]\n\nbody")},
+            id="contextualized-content-cut-short",
+        ),
         pytest.param({"content": "alpha beta"}, id="prepend-heading-path-off"),
         pytest.param({"content": "alpha"}, id="prepend-heading-path-off-content-cut-short"),
         pytest.param({"content": "alpha beta gamma"}, id="prepend-heading-path-off-text-cut-short"),
@@ -206,6 +236,26 @@ def test_other_integers_a_partial_upsert_rounds_are_reported():
         _run(client)
 
     assert logger.bind.call_args.kwargs["rounded"] == {"f": ["external_ref"]}
+
+
+@pytest.mark.parametrize(
+    ("server_version", "warns"),
+    [
+        pytest.param("3.0-20261030-af15c80751", False, id="tested-3.0.5-build"),
+        pytest.param("v3.0.5", False, id="3.0.5"),
+        pytest.param("3.0.2", True, id="older"),
+        pytest.param("3.0-some-other-build", True, id="unrecognized-build"),
+    ],
+)
+def test_integers_are_only_reported_on_servers_that_round_them(server_version, warns):
+    client = _FakeClient([_row(external_ref=2**60 + 1)])
+    client.server_version = server_version
+
+    with patch.object(backfill, "logger") as logger:
+        _run(client)
+
+    assert logger.bind.called is warns
+    assert client.rows[1]["text"].startswith("[Source: report.pdf]")
 
 
 def test_a_refused_chunk_does_not_cost_the_rest_of_its_batch():
@@ -337,6 +387,18 @@ def test_revert_leaves_headers_a_chunker_wrote(header, content):
     assert stats["unchanged"] == 1
 
 
+def test_revert_leaves_a_contextualized_chunk():
+    body = "[Source: report.pdf]\n\nbody"
+    client = _FakeClient(
+        [_row(text=wrap_chunk_with_context(body, "a context"), header="[Source: report.pdf]", content=body)]
+    )
+
+    stats = _run(client, revert=True)
+
+    assert client.written == []
+    assert stats["unchanged"] == 1
+
+
 def test_revert_leaves_a_document_that_starts_with_its_own_source_line():
     client = _FakeClient([_row(text="[Source: report.pdf]\n\nbody")])
 
@@ -344,3 +406,43 @@ def test_revert_leaves_a_document_that_starts_with_its_own_source_line():
 
     assert client.written == []
     assert stats["unchanged"] == 1
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param("Introduction", id="plain-text"),
+        pytest.param("[Source: other.pdf]", id="source-line-naming-another-file"),
+        pytest.param(5, id="not-a-string"),
+    ],
+)
+def test_revert_leaves_an_upload_header_that_starts_the_text(header):
+    client = _FakeClient([_row(text=f"{header}\n\nbody", header=header)])
+
+    stats = _run(client, revert=True)
+
+    assert client.written == []
+    assert stats["unchanged"] == 1
+
+
+def test_revert_keeps_an_upload_header_and_removes_only_the_line_it_added():
+    original = _row(text="Introduction\n\nbody", header="Note")
+    client = _FakeClient([original])
+    _run(client)
+
+    _run(client, revert=True)
+
+    assert client.rows[1]["text"] == original["text"]
+    assert client.rows[1]["header"] == "Note"
+
+
+def test_revert_recognizes_a_line_shortened_under_another_chunk_size():
+    long_name = "report " * 200 + ".pdf"
+    header = source_header(long_name, 50, _words)
+    assert header != source_header(long_name, 512, _words)
+    client = _FakeClient([_row(text=f"{header}\n\nbody", header=header, filename=long_name)])
+
+    _run(client, revert=True)
+
+    assert client.rows[1]["text"] == "body"
+    assert client.rows[1]["header"] is None

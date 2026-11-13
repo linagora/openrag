@@ -1,4 +1,4 @@
-import { request } from "./client";
+import { ApiError, request } from "./client";
 import {
   listPartitions,
   listPartitionMembers,
@@ -117,20 +117,40 @@ export interface UserMembership {
   added_at: string | null;
 }
 
-export async function listUserMemberships(userId: number): Promise<UserMembership[]> {
+export interface UserMembershipsResult {
+  memberships: UserMembership[];
+  unavailablePartitions: string[];
+}
+
+export async function listUserMemberships(userId: number): Promise<UserMembershipsResult> {
   const { partitions } = await listPartitions();
   const rows = await Promise.all(
     partitions.map(async (p) => {
       try {
         const { members } = await listPartitionMembers(p.name);
         const m = members.find((mm) => mm.user_id === userId);
-        return m ? { partition: p.name, role: m.role as PartitionRole, added_at: m.added_at } : null;
-      } catch {
-        return null;
+        return {
+          membership: m ? { partition: p.name, role: m.role as PartitionRole, added_at: m.added_at } : null,
+          unavailable: false,
+        };
+      } catch (error) {
+        // A 403 means the caller cannot inspect this partition, so the result
+        // is incomplete. A 404 means it disappeared after the initial list and
+        // cannot contain a current membership. Other failures must propagate.
+        if (error instanceof ApiError && error.status === 403) {
+          return { membership: null, unavailable: true };
+        }
+        if (error instanceof ApiError && error.status === 404) {
+          return { membership: null, unavailable: false };
+        }
+        throw error;
       }
     }),
   );
-  return rows.filter((r): r is UserMembership => r !== null);
+  return {
+    memberships: rows.flatMap((row) => row.membership ? [row.membership] : []),
+    unavailablePartitions: rows.flatMap((row, index) => row.unavailable ? [partitions[index].name] : []),
+  };
 }
 
 export function grantMembership(partition: string, userId: number, role: PartitionRole) {

@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING
 
 from core.models.user import PartitionRole, UserPartition
 from core.ports.partition_membership_repo import PartitionMembershipRepository
+from core.utils.consts import is_reserved_partition_name
+from core.utils.exceptions import ValidationError
 
 if TYPE_CHECKING:
     import asyncpg
@@ -202,6 +204,12 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
 
     async def add_partition_member(self, partition: str, user_id: int, role: str) -> bool:
         """TODO(phase-9): remove. Creates the partition row on first use."""
+        if is_reserved_partition_name(partition):
+            raise ValidationError(
+                f"Partition name '{partition}' is reserved.",
+                status_code=400,
+                code="RESERVED_PARTITION_NAME",
+            )
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 exists = await conn.fetchval(
@@ -233,35 +241,51 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
                 )
         return created is not None
 
-    async def remove_partition_member(self, partition: str, user_id: int) -> bool:
-        """TODO(phase-9): remove."""
-        result = await self.pool.execute(
-            """
-            DELETE FROM partition_memberships
-            WHERE partition_name = $1 AND user_id = $2
-            """,
-            partition,
-            user_id,
-        )
-        return result.endswith(" 1")
+    async def remove_partition_member(self, partition: str, user_id: int) -> str:
+        """TODO(phase-9): remove.
+
+        Returns ``"ok"``, ``"not_member"``, or ``"last_owner"`` when the user
+        is the partition's only owner (nothing is deleted then).
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if await self._is_last_owner(conn, partition, user_id):
+                    return "last_owner"
+                result = await conn.execute(
+                    """
+                    DELETE FROM partition_memberships
+                    WHERE partition_name = $1 AND user_id = $2
+                    """,
+                    partition,
+                    user_id,
+                )
+        return "ok" if result.endswith(" 1") else "not_member"
 
     async def update_partition_member_role(
         self,
         partition: str,
         user_id: int,
         new_role: str,
-    ) -> bool:
-        """TODO(phase-9): remove."""
-        result = await self.pool.execute(
-            """
-            UPDATE partition_memberships SET role = $3
-            WHERE partition_name = $1 AND user_id = $2
-            """,
-            partition,
-            user_id,
-            new_role,
-        )
-        return result.endswith(" 1")
+    ) -> str:
+        """TODO(phase-9): remove.
+
+        Returns ``"ok"``, ``"not_member"``, or ``"last_owner"`` when this
+        would demote the partition's only owner (nothing is updated then).
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if new_role != PartitionRole.OWNER.value and await self._is_last_owner(conn, partition, user_id):
+                    return "last_owner"
+                result = await conn.execute(
+                    """
+                    UPDATE partition_memberships SET role = $3
+                    WHERE partition_name = $1 AND user_id = $2
+                    """,
+                    partition,
+                    user_id,
+                    new_role,
+                )
+        return "ok" if result.endswith(" 1") else "not_member"
 
     async def user_is_partition_member(self, user_id: int, partition: str) -> bool:
         """TODO(phase-9): remove."""
@@ -298,6 +322,21 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
         ]
 
     # ── Helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _is_last_owner(conn: asyncpg.Connection, partition: str, user_id: int) -> bool:
+        # Lock the partition's owner rows (FOR UPDATE) so two concurrent
+        # removals or demotions of different owners serialize: the second one
+        # re-reads the owners after the first commits and sees it is now last.
+        rows = await conn.fetch(
+            """
+            SELECT user_id FROM partition_memberships
+            WHERE partition_name = $1 AND role = 'owner'
+            FOR UPDATE
+            """,
+            partition,
+        )
+        return {r["user_id"] for r in rows} == {user_id}
 
     @staticmethod
     def _row_to_user_partition(row: asyncpg.Record) -> UserPartition:

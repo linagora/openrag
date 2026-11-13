@@ -62,6 +62,127 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
+
+The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any
+earlier 2.3.x. Workers of the old release keep a handle to the replaced actor, so
+a file they are still indexing loses its state writes and stays `SERIALIZING`.
+On a shared Ray cluster (`ray.enabled: true`, or an external cluster), stop
+traffic and wait until no indexing task is active before the first 2.3.5 replica
+starts, as in
+[Upgrades that change the indexer generation](/openrag/documentation/kubernetes/#upgrades-that-change-the-indexer-generation).
+On an external cluster, retire the `v13` generation there. With Ray inside the
+OpenRAG pod or container, nothing extra is needed.
+
+## OpenRAG 2.3.5 on Kubernetes: recreate the Ray pods
+
+With `LOG_FORMAT=json` (the chart's default), the chart now sets
+`TQDM_DISABLE=1`, unless `env.config.TQDM_DISABLE` is set, so progress bars stop
+breaking the JSON log stream. With `ray.enabled: true`, KubeRay does not
+recreate Ray pods when the chart changes, and the pods already running keep
+their bars. After `helm upgrade`, at a time when no indexing is running, scale
+OpenRAG down, delete every Ray pod, head included, and scale OpenRAG back up once
+the new pods are Ready: an OpenRAG pod connected to the old Ray head does not
+reconnect on its own.
+
+```bash
+NS=openrag            # the release namespace
+FULLNAME=openrag      # fullnameOverride; `kubectl get raycluster -n $NS` shows it as <FULLNAME>-raycluster
+REPLICAS=$(kubectl get deploy -n "$NS" "$FULLNAME-openrag" -o jsonpath='{.spec.replicas}')
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
+kubectl wait -n "$NS" pod -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance="$FULLNAME" \
+  --for=delete --timeout=10m
+kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
+# Wait for KubeRay to create the new pods, then for them to be Ready (fails after 10m).
+until kubectl get pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster" -o name | grep -q .; do sleep 5; done
+kubectl wait -n "$NS" pod -l ray.io/cluster="$FULLNAME-raycluster" --for=condition=Ready --timeout=10m
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas="$REPLICAS"
+kubectl rollout status -n "$NS" deploy/"$FULLNAME-openrag"   # before resuming indexing
+```
+
+The same applies after any upgrade that changes an `env.config` value read by
+Ray: the Ray containers read it only when they start.
+
+## OpenRAG 2.3.5 on Kubernetes: settings the chart refuses with the embedded Ray
+
+With `ray.enabled: false`, no `RAY_ADDRESS` and `ray.externalCluster: false` (the
+default), each OpenRAG pod starts its own Ray. From OpenRAG 2.3.5, the chart refuses two kinds of settings that break
+indexing in that mode. `helm upgrade` then stops before it changes anything, and
+the error names the setting.
+
+| The chart refuses | Why | What to change |
+|---|---|---|
+| `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. | Keep `openrag.replicas: 1`, or share one Ray cluster: `ray.enabled: true` together with `env.config.RAY_ADDRESS` or `env.config.ENABLE_RAY_SERVE=true` (see [Notes](/openrag/documentation/kubernetes/#notes)), or an external cluster through `env.config.RAY_ADDRESS`, with `ray.externalCluster: true` when `RAY_ADDRESS` comes from a Secret the chart cannot read. |
+| Marker, Docling and Whisper workers that don't fit the OpenRAG pod's GPUs | Each worker reserves its `*_NUM_GPUS` of the pod's GPUs (`MARKER_POOL_SIZE` × `MARKER_NUM_GPUS`, `DOCLING_POOL_SIZE` × `DOCLING_NUM_GPUS`, `WHISPER_N_WORKERS` × `WHISPER_NUM_GPUS`). Ray keeps a fraction of a GPU on a single card, and takes a reservation of 1 or more as whole cards, so three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and files sent to them fail after the parser's timeout. A preset can select Marker or Docling even when `PDFLOADER` names another parser, and Whisper transcribes audio by default, so the check applies to every deployment with a GPU in the pod, whatever order the workers start in. | Lower the pool sizes or the `*_NUM_GPUS` values, or give the pod more GPUs. A reservation above 1 must be a whole number. |
+
+The chart can check the GPU settings only where it can read them: in `env.config`,
+and in `env.secrets` when it renders the Secret itself. A `MARKER_*`, `DOCLING_*` or
+`WHISPER_*` value in an `env.existingSecret` or in a secret from an external secrets
+operator is not checked, and it overrides `env.config` at runtime. Keep these
+settings in `env.config` only, removed from that Secret, or check the fit yourself.
+
+The chart also drops `RAY_NUM_GPUS` from its defaults: OpenRAG never read it, so a
+copy in your values does nothing.
+
+With the embedded Ray, the OpenRAG Deployment now uses the `Recreate` strategy: an
+upgrade stops the old pod before it starts the new one. A rolling update ran both
+for a moment, each with its own Ray, and the new pod's job reconciler could mark
+the old pod's queued jobs failed for good. Expect the API to be unavailable while
+the new pod starts. With a shared Ray cluster, the rolling update is unchanged.
+
+## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
+
+With `ray.enabled: true`, the Ray head installs the Python dependencies into the
+`<fullname>-venv` volume when it first starts. They take about 7 GB, which left
+little room in the former 10Gi default. From OpenRAG 2.3.5, that default is
+20Gi, and an install that fails stops the Ray head's `init-venv-sync` init
+container instead of being marked complete.
+
+`helm upgrade` resizes the existing volume, which fails unless its StorageClass
+sets `allowVolumeExpansion: true`. On a StorageClass that does not, keep
+`persistence.volumes.venv.size: 10Gi` in your values, or delete the volume and
+let the upgrade create it again.
+
+If an earlier install failed, the volume can hold a half-installed environment
+already marked complete, and the pods start on it. To install it again, delete
+`/app/.venv/.ready` in the Ray head and restart the Ray head pod, then the Ray
+workers and the OpenRAG pod.
+
+## OpenRAG 2.3.5: Milvus 3.0.5
+
+The tested upgrade from Milvus 3.0.2 to 3.0.5 needs no Milvus data migration
+with the default message queue. Stop writes and take a verified backup first.
+Milvus 3.0.5 removes server-side row-level security (RLS); if you rely on RLS,
+hold the upgrade until an equivalent authorization control is in place and
+validated. Follow the [Milvus 3.0.2 to 3.0.5 upgrade procedure](/openrag/documentation/milvus_migration/#upgrade-from-milvus-302-to-305).
+
+## OpenRAG 2.3.5: how new chunks name their file
+
+Two changes to chunks indexed after the upgrade. Chunks already indexed don't change.
+
+- Contextualized chunks no longer have a `* filename:` line. The chunker's `[Source: ...]` header now names the file once, using the sanitized filename.
+- `structured_section` no longer has a `prepend_heading_path` option. A preset that still sets it to `false` keeps loading and ignores it, so its new chunks get a header, which leaves less room for each chunk's body and can move chunk boundaries.
+
+## OpenRAG 2.3.5: a partition named `all`
+
+Search and chat use `all` to mean every partition you can access (`partitions=all`,
+`openrag-all`). From 2.3.5 it is a reserved partition name, in any case and with or
+without surrounding spaces. A partition can no longer be created with that name, and
+the files of one that already exists are no longer reachable through the API after
+the upgrade.
+
+Only an instance that ran 2.2.2 or earlier can have one. Check before you upgrade, in
+the OpenRAG database:
+
+```sql
+SELECT partition FROM partitions WHERE lower(trim(partition)) = 'all';
+```
+
+If it returns a row, upload that partition's files again into a partition with another
+name before you upgrade. Don't delete or copy files out of the `all` partition first:
+on 2.3.4 and earlier, those operations also reach files with the same ID in other
+partitions.
+
 ## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
 
 From OpenRAG 2.3.4, `recursive_splitter` puts the filename at the start of every
@@ -156,7 +277,7 @@ finishes. Each procedure has three parts:
 
 | Change | Impact on an existing deployment |
 |---|---|
-| Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` while OpenRAG reports ready, and uploads fail. The old `vector` field is dropped. |
+| Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` and uploads fail. OpenRAG 2.3.0 to 2.3.4 still report ready; from 2.3.5, `/ready` fails with `checks.milvus: migration_required`. The old `vector` field is dropped. |
 | New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job if you enabled it. |
 | Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
 | `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`, unless unauthenticated scrapes are enabled (see [Metrics scraping](#metrics-scraping)). |
@@ -413,10 +534,9 @@ all three to `v2.3.0`, or remove them to take the chart's default. The 2.3.0
 chart's readiness probe calls `/ready`, which 2.2.x images do not serve: a 2.2.x
 image under the new chart never becomes Ready, and the rollout stops.
 
-If your values pin `milvus.image.all.tag`, set it to `v3.0.2` or remove the
-override. Charts 0.6.4 and 0.6.5 pinned it to `v3.0.1`. If you keep that pin, the
-migration runs on v3.0.1, which cannot compact the segments the migration
-creates.
+If your values contain `milvus.image.all.tag`, remove the override. The 2.3.0
+chart defaults to Milvus v3.0.2; a copied image tag takes precedence over that
+default.
 
 #### vLLM engine overrides
 
@@ -608,9 +728,10 @@ kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
 kubectl rollout restart -n "$NS" deploy/"$FULLNAME-openrag"
 ```
 
-Once the PostgreSQL migrations are applied, the pod becomes Ready, but searches
-answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5:
-readiness does not check the Milvus schema version.
+Once the PostgreSQL migrations are applied, searches answer `503` with
+`VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5. OpenRAG 2.3.0 to
+2.3.4 report the pod Ready anyway. From 2.3.5 it stays unready until step 5, and
+`/ready` reports `checks.milvus: migration_required`.
 
 #### 5. Migrate the Milvus collection
 
@@ -690,9 +811,10 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded, except section
-  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
-  neighbours. PostgreSQL keeps each file's original upload metadata.
+- On Milvus 3.0.2 and older or unverified builds, copying a chunk's metadata can
+  round integers above 2^53; the tested Milvus 3.0.5 build preserves them. The
+  copy folds section IDs below 2^53 so each chunk stays linked to its neighbours.
+  PostgreSQL keeps each file's original upload metadata.
 
 Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
@@ -1007,9 +1129,10 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded, except section
-  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
-  neighbours. PostgreSQL keeps each file's original upload metadata.
+- On Milvus 3.0.2 and older or unverified builds, copying a chunk's metadata can
+  round integers above 2^53; the tested Milvus 3.0.5 build preserves them. The
+  copy folds section IDs below 2^53 so each chunk stays linked to its neighbours.
+  PostgreSQL keeps each file's original upload metadata.
 
 Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).

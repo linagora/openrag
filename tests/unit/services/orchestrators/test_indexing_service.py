@@ -755,6 +755,41 @@ async def test_update_metadata_injects_file_id():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["p2", "missing", "all", "", None, "P1", " p1", "p1 ", 1, ["p1"], {"name": "p1"}])
+async def test_update_metadata_refuses_another_partition(target):
+    disp = FakeDispatcher()
+    with pytest.raises(ValidationError) as exc:
+        await _service(disp=disp).update_metadata("f1", {"author": "bob", "partition": target}, "p1", {"id": 1})
+    assert exc.value.status_code == 400
+    assert exc.value.code == "PARTITION_CHANGE_UNSUPPORTED"
+    assert disp.updated == []
+
+
+@pytest.mark.asyncio
+async def test_update_metadata_naming_the_file_partition_is_an_update():
+    disp = FakeDispatcher()
+    await _service(disp=disp).update_metadata("f1", {"author": "bob", "partition": "p1"}, "p1", {"id": 1})
+    assert disp.updated[0][1] == {"author": "bob", "partition": "p1", "file_id": "f1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+async def test_a_file_in_a_reserved_partition_is_neither_updated_nor_deleted(partition):
+    """The store reads `all` as every partition: file X there is file X everywhere."""
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+
+    with pytest.raises(ValidationError) as update:
+        await svc.update_metadata("f1", {"author": "bob"}, partition, {"id": 1})
+    with pytest.raises(ValidationError) as delete:
+        await svc.delete_file("f1", partition)
+
+    for exc in (update, delete):
+        assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
+    assert (disp.updated, disp.deleted) == ([], [])
+
+
+@pytest.mark.asyncio
 async def test_update_metadata_cannot_override_content_hash():
     disp = FakeDispatcher()
     svc = _service(disp=disp)
@@ -786,6 +821,26 @@ async def test_copy_file_sets_target_fields():
     assert partition == "p-src"
     assert md == {"k": "v", "file_id": "dst", "partition": "p-dst", "content_sha256": None}
     assert user == {"id": 2}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "target"), [("all", "p-dst"), ("ALL", "p-dst"), ("p-src", "all"), ("p-src", " All ")]
+)
+async def test_copy_file_refuses_a_reserved_partition(source, target):
+    """The store reads `all` as every partition: copying file X from there copies X's chunks from everywhere."""
+    disp = FakeDispatcher()
+    with pytest.raises(ValidationError) as exc:
+        await _service(disp=disp).copy_file(
+            source_file_id="src",
+            source_partition=source,
+            target_file_id="dst",
+            target_partition=target,
+            metadata={},
+            user={"id": 1},
+        )
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
+    assert disp.copied == []
 
 
 @pytest.mark.asyncio

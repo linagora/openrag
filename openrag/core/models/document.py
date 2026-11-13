@@ -22,6 +22,7 @@ class DocumentType(str, Enum):
     PDF = "pdf"
     TEXT = "text"
     CSV = "csv"
+    XLSX = "xlsx"
     HTML = "html"
     MARKDOWN = "markdown"
     IMAGE = "image"
@@ -38,6 +39,10 @@ _EXTENSION_TYPES: dict[str, DocumentType] = {
     "pdf": DocumentType.PDF,
     "txt": DocumentType.TEXT,
     "csv": DocumentType.CSV,
+    "xlsx": DocumentType.XLSX,
+    # Macro-enabled OOXML workbooks use the same safe, read-only tabular
+    # parser.  The parser never retains or executes VBA.
+    "xlsm": DocumentType.XLSX,
     "md": DocumentType.MARKDOWN,
     "html": DocumentType.HTML,
     "htm": DocumentType.HTML,
@@ -93,24 +98,31 @@ class ImageBlock(BaseModel):
     - Locally-extracted images set ``image_bytes`` (raw PNG / JPEG bytes)
       and leave ``source_url`` as ``None``.
     - Remote images parsed from a markdown ``![](http://…)`` ref leave
-      ``image_bytes`` empty and set ``source_url`` to the URL. A
-      downstream fetch stage may populate ``image_bytes`` later — but see
-      the lifetime note below: such a stage has to run *before* the caption
-      decision.
+      ``image_bytes`` empty and set ``source_url`` to the URL. Nothing
+      fetches it: the caption stage skips an image without bytes, so it
+      stays uncaptioned and its ref stays in the text.
     - The :attr:`image_url` property is the unified VLM-friendly form:
       a ``data:`` URI built from the bytes when present, otherwise the
       ``source_url`` as-is.
 
-    Lifetime of ``image_bytes`` during indexing:
-    - ``IndexingPipeline`` clears it (``_release_image_bytes``) as soon as the
+    Deferred encoding:
+    - A parser that holds a decoded PIL image may set ``pil_image`` and leave
+      ``image_bytes`` empty. PNG-encoding a large figure costs up to a quarter
+      of a second of CPU, and the caption stage is the only reader of the
+      bytes, so it encodes ``pil_image`` into ``image_bytes`` only when it
+      captions the document.
+
+    Lifetime of ``image_bytes`` and ``pil_image`` during indexing:
+    - ``IndexingPipeline`` clears both (``_release_image_bytes``) as soon as the
       caption decision resolves — whether captioning ran, was skipped or
       failed — because the payloads outlast the file itself and survived embed
-      and store. A stage added after that point reads ``b""``, not the image.
-      Everything else on this block survives: ``caption``, ``page_number``,
-      ``mime_type``, ``source_url`` and ``metadata``.
+      and store. A stage added after that point reads ``b""`` and ``None``, not
+      the image. Everything else on this block survives: ``caption``,
+      ``page_number``, ``mime_type``, ``source_url`` and ``metadata``.
     """
 
     image_bytes: bytes = Field(default=b"", exclude=True, repr=False)
+    pil_image: Any = Field(default=None, exclude=True, repr=False)
     source_url: str | None = None
     page_number: int | None = None
     caption: str | None = None
@@ -303,6 +315,7 @@ _DEFAULT_TEMPFILE_SUFFIX: dict[DocumentType, str] = {
     DocumentType.PDF: ".pdf",
     DocumentType.DOCX: ".docx",
     DocumentType.PPTX: ".pptx",
+    DocumentType.XLSX: ".xlsx",
     DocumentType.DOC: ".doc",
     DocumentType.AUDIO: ".wav",
     DocumentType.VIDEO: ".mp4",

@@ -93,50 +93,77 @@ class PptxParser(DocumentParser):
                 logger.warning("Capping PPTX slide processing at %d slides", _MAX_SLIDES)
                 break
             md = ""
-            title = slide.shapes.title
-
-            for shape in slide.shapes:
-                if self._is_picture(shape):
-                    # Bound pictures decoded into memory across the whole deck.
-                    if len(images) >= _MAX_IMAGES:
-                        continue
+            try:
+                title = slide.shapes.title
+                for shape in slide.shapes:
+                    # python-pptx reads a shape's parts lazily, so a damaged one
+                    # raises only here. Skip that shape, not the whole deck.
                     try:
-                        with Image.open(BytesIO(shape.image.blob), formats=UPLOADED_IMAGE_FORMATS) as im:
-                            im = ensure_png_compatible_mode(im)
-                            png_bytes = pil_to_png_bytes(im)
-                        ref = _image_ref(len(images))
-                        images.append(
-                            ImageBlock(
-                                image_bytes=png_bytes,
-                                page_number=slide_num,
-                                mime_type="image/png",
-                                metadata={"markdown_ref": ref},
-                            )
-                        )
-                        md += ref
+                        md += self._shape_to_markdown(shape, title, slide_num, images, Image)
                     except Exception as exc:
-                        logger.warning("Skipping unreadable PPTX picture: %s", exc)
-                elif self._is_table(shape):
-                    md += "\n" + self._table_to_markdown(shape.table) + "\n"
-                elif getattr(shape, "has_chart", False):
-                    md += self._chart_to_markdown(shape.chart)
-                elif getattr(shape, "has_text_frame", False):
-                    if shape == title:
-                        md += "# " + shape.text.lstrip() + "\n"
-                    else:
-                        md += shape.text + "\n"
+                        logger.warning("Skipping unreadable PPTX shape: %s", exc)
+            except Exception as exc:
+                # A shape python-pptx cannot even build, such as a placeholder of
+                # an unknown type, raises from slide.shapes itself: keep what was
+                # read before it.
+                logger.warning("Stopping at an unreadable PPTX shape on slide %d: %s", slide_num, exc)
 
             md = md.strip()
-            if slide.has_notes_slide:
-                notes_frame = slide.notes_slide.notes_text_frame
-                if notes_frame is not None:
-                    md += "\n\n### Notes:\n" + notes_frame.text
-                md = md.strip()
+            try:
+                if slide.has_notes_slide:
+                    notes_frame = slide.notes_slide.notes_text_frame
+                    if notes_frame is not None:
+                        md += "\n\n### Notes:\n" + notes_frame.text
+            except Exception as exc:
+                logger.warning("Skipping unreadable PPTX notes on slide %d: %s", slide_num, exc)
+            md = md.strip()
 
             if md:
                 slides.append((slide_num, md))
 
         return len(presentation.slides), slides, images
+
+    def _shape_to_markdown(
+        self, shape: Any, title: Any, slide_num: int, images: list[ImageBlock], pil_image: Any
+    ) -> str:
+        """One shape's Markdown. A picture is also appended to ``images``."""
+        if self._is_picture(shape):
+            # Bound pictures decoded into memory across the whole deck.
+            if len(images) >= _MAX_IMAGES:
+                return ""
+            try:
+                with pil_image.open(BytesIO(shape.image.blob), formats=UPLOADED_IMAGE_FORMATS) as im:
+                    im = ensure_png_compatible_mode(im)
+                    png_bytes = pil_to_png_bytes(im)
+            except Exception as exc:
+                logger.warning("Skipping unreadable PPTX picture: %s", exc)
+                return ""
+            ref = _image_ref(len(images))
+            images.append(
+                ImageBlock(
+                    image_bytes=png_bytes,
+                    page_number=slide_num,
+                    mime_type="image/png",
+                    metadata={"markdown_ref": ref},
+                )
+            )
+            return ref
+        if self._is_table(shape):
+            return "\n" + self._table_to_markdown(shape.table) + "\n"
+        if getattr(shape, "has_chart", False):
+            # Resolving the chart part fails on a missing or dangling r:id, and
+            # on one that points at a part that is not a chart.
+            try:
+                chart = shape.chart
+            except Exception as exc:
+                logger.warning("Skipping unreadable PPTX chart: %s", exc)
+                return "\n\n[unsupported chart]\n\n"
+            return self._chart_to_markdown(chart)
+        if getattr(shape, "has_text_frame", False):
+            if shape == title:
+                return "# " + shape.text.lstrip() + "\n"
+            return shape.text + "\n"
+        return ""
 
     @staticmethod
     def _is_picture(shape: Any) -> bool:

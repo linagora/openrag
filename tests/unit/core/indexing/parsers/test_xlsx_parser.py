@@ -1,0 +1,3920 @@
+from __future__ import annotations
+
+from datetime import date
+from io import BytesIO
+
+import pytest
+from core.indexing.parsers.tabular import xlsx_parser as module
+from core.indexing.parsers.tabular.xlsx_parser import XlsxLimits, XlsxParser
+from core.indexing.parsers.tabular.xlsx_validation import MACRO_MAIN_TYPE, MAIN_TYPE, TableRegion, _merged_header_depth
+from core.models.document import Document, DocumentType
+from core.utils.exceptions import NoIndexableContentError, PipelineError
+from openpyxl import Workbook
+from openpyxl.worksheet.table import Table
+
+
+def _workbook_bytes() -> bytes:
+    workbook = Workbook()
+    people = workbook.active
+    people.title = "People"
+    people.append([])
+    people.append(["name", "", "active", "joined"])
+    people.append(["Alice", "Paris", True, date(2025, 1, 2)])
+    people.append([])
+    people.append(["Bob", "Lyon", False, date(2025, 2, 3)])
+
+    projects = workbook.create_sheet("Projects")
+    projects.append(["name", "summary", ""])
+    projects.append(["Access", "Public-service accessibility", "owner@example.org"])
+
+    hidden = workbook.create_sheet("Hidden")
+    hidden.sheet_state = "hidden"
+    hidden.append(["secret"])
+    hidden.append(["must not be indexed"])
+
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def test_extracts_visible_sheets_with_physical_rows_and_stable_metadata():
+    parser = XlsxParser(batch_size=1)
+    document = Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes())
+
+    blocks = list(parser.iter_batches(document))
+
+    assert [block.metadata["sheet_name"] for block in blocks] == ["People", "People", "Projects"]
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[3], [5], [2]]
+    assert blocks[0].metadata["table_columns"] == ["name", "column_2", "active", "joined"]
+    assert blocks[0].metadata["table_id"] == "sheet:0:table:0"
+    assert blocks[2].metadata["table_id"] == "sheet:1:table:0"
+    assert blocks[2].metadata["table_columns"] == ["name", "summary", "column_3"]
+    assert blocks[0].metadata["cell_range"] == "'People'!A3:D3"
+    assert blocks[0].metadata["worksheet_context"] == "\n\nWorksheet: People"
+    assert blocks[2].metadata["worksheet_context"] == "\n\nWorksheet: Projects"
+    assert "Worksheet: People" in blocks[0].text
+    assert "Worksheet: Projects" in blocks[2].text
+    assert "2025-01-02" in blocks[0].text
+    assert "true" in blocks[0].text
+    assert "must not be indexed" not in "\n".join(block.text for block in blocks)
+
+
+def test_reader_is_openpyxl_only():
+    [block] = list(XlsxParser().iter_batches(_document([["name"], ["Alice"]])))
+
+    assert block.metadata["spreadsheet_backend"] == "openpyxl"
+    assert "spreadsheet_fallback_used" not in block.metadata
+
+
+def test_hidden_worksheets_skip_region_inference(monkeypatch):
+    from core.indexing.parsers.tabular import xlsx_validation
+
+    workbook = Workbook()
+    workbook.active.append(["name", "value"])
+    workbook.active.append(["visible", 1])
+    hidden = workbook.create_sheet("Hidden")
+    hidden.sheet_state = "hidden"
+    for row in range(1, 50, 2):
+        hidden.cell(row, 1, "hidden")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    original = xlsx_validation._combine_regions
+    calls = []
+
+    def track_regions(*args):
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(xlsx_validation, "_combine_regions", track_regions)
+    infos = xlsx_validation.validate_ooxml(BytesIO(output.getvalue()), XlsxLimits())
+    assert len(calls) == 1
+    assert infos[0].tables
+    assert not infos[1].tables
+
+
+def test_worksheet_name_is_searchable_without_a_table_preamble():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Research O'Brien"
+    sheet.append(["dataset_id", "dataset"])
+    sheet.append(["DAT-001", "Public services"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    [chunk] = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=100,
+        length_function=lambda text: len(text.split()),
+    )
+
+    expected_context = "\n\nWorksheet: Research O'Brien"
+    assert block.metadata["sheet_name"] == "Research O'Brien"
+    assert block.metadata["worksheet_context"] == expected_context
+    assert block.text.endswith(expected_context)
+    assert chunk.content.endswith(expected_context)
+    assert chunk.metadata["cell_range"] == "'Research O''Brien'!A2:B2"
+
+
+@pytest.mark.parametrize("sheet_name", ["Budget ", " Budget\t", " "])
+@pytest.mark.parametrize("chunker_name", ["recursive_splitter", "structured_section"])
+def test_sheet_names_with_surrounding_whitespace_chunk_when_split(sheet_name, chunker_name):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.chunking.structured_section import StructuredSectionChunker
+    from core.models.document import ProcessedDocument
+
+    workbook = Workbook()
+    workbook.active.title = sheet_name
+    workbook.active.append(["id", "label", "amount"])
+    for index in range(200):
+        workbook.active.append([index, f"line {index}", index * 10])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    def words(text):
+        return len(text.split())
+
+    chunker = (
+        RecursiveSplitter(chunk_size=200, length_function=words)
+        if chunker_name == "recursive_splitter"
+        else StructuredSectionChunker(chunk_size=200, min_tokens=0, max_tokens=400, length_function=words)
+    )
+    chunks = [
+        chunk
+        for block in XlsxParser().iter_batches(Document(raw_bytes=output.getvalue()))
+        for chunk in chunker.chunk(
+            ProcessedDocument(document_id="budget", text_blocks=[block], metadata=dict(block.metadata))
+        )
+    ]
+
+    assert len(chunks) > 1
+    assert all(chunk.metadata["sheet_name"] == sheet_name for chunk in chunks)
+    assert all(f"Worksheet: {sheet_name.strip()}".strip() in chunk.text for chunk in chunks)
+
+
+def test_xlsx_chunking_accepts_a_trailing_context_stripped_of_whitespace():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    formula_context = "\n\nFormula context:\n- total = quantity+price "
+    table = "| quantity | price |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\nWorksheet: Sheet" + formula_context
+    metadata = {
+        "tabular_format": "xlsx",
+        "sheet_name": "Sheet",
+        "worksheet_context": "\n\nWorksheet: Sheet",
+        "formula_context": formula_context,
+        "table_start_column": 1,
+        "table_worksheet_column_indices": [1, 2],
+        "table_columns": ["quantity", "price"],
+        "table_row_numbers": [2, 3],
+    }
+
+    chunks = chunk_table(
+        MDElement(type="table", content=table.strip(), metadata=metadata),
+        chunk_size=12,
+        length_function=lambda text: len(text.split()),
+    )
+
+    assert len(chunks) > 1
+    assert all("Worksheet: Sheet" in chunk.content for chunk in chunks)
+
+
+def test_detects_and_extracts_each_table_region_with_exact_coordinates():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Dashboard"
+    for row in (("person_id", "name"), ("P-1", "Alice")):
+        sheet.append(row)
+    # Two blank columns: a single blank column would join equal-height halves.
+    sheet["E1"], sheet["F1"] = "office_id", "city"
+    sheet["E2"], sheet["F2"] = "O-1", "Paris"
+    sheet["L30"], sheet["M30"] = "metric", "value"
+    sheet["L31"], sheet["M31"] = "latency", 42
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_id"] for block in blocks] == [
+        "sheet:0:table:0",
+        "sheet:0:table:1",
+        "sheet:0:table:2",
+    ]
+    assert all(block.metadata["worksheet_table_count"] == 3 for block in blocks)
+    assert [block.metadata["table_range"] for block in blocks] == [
+        "'Dashboard'!A1:B2",
+        "'Dashboard'!E1:F2",
+        "'Dashboard'!L30:M31",
+    ]
+    assert [block.metadata["table_header_range"] for block in blocks] == [
+        "'Dashboard'!A1:B1",
+        "'Dashboard'!E1:F1",
+        "'Dashboard'!L30:M30",
+    ]
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[2], [2], [31]]
+    assert "latency" in blocks[2].text
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunk_table(
+            MDElement(type="table", content=block.text, metadata=block.metadata),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+    ]
+    assert [chunk.metadata["table_id"] for chunk in chunks] == [
+        "sheet:0:table:0",
+        "sheet:0:table:1",
+        "sheet:0:table:2",
+    ]
+
+
+def test_excel_table_ranges_separate_horizontally_touching_tables():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Touching"
+    rows = [
+        ["person_id", "name", "office_id", "city"],
+        ["P-1", "Alice", "O-1", "Paris"],
+        ["P-2", "Bob", "O-2", "Lyon"],
+    ]
+    for row in rows:
+        sheet.append(row)
+    sheet.add_table(Table(displayName="PeopleTable", ref="A1:B3"))
+    sheet.add_table(Table(displayName="OfficesTable", ref="C1:D3"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_range"] for block in blocks] == [
+        "'Touching'!A1:B3",
+        "'Touching'!C1:D3",
+    ]
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["person_id", "name"],
+        ["office_id", "city"],
+    ]
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[2, 3], [2, 3]]
+    assert all(block.metadata["worksheet_table_count"] == 2 for block in blocks)
+    assert all(block.metadata["table_header_source"] == "structural_hint" for block in blocks)
+    assert all(block.metadata["table_header_detection_status"] == "confident" for block in blocks)
+    assert all(
+        block.metadata["table_header_detection"]["reason"] == "validated_table_or_merged_header" for block in blocks
+    )
+
+
+def test_excel_table_ranges_separate_vertically_touching_tables():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["person_id", "name"])
+    sheet.append(["P-1", "Alice"])
+    sheet.append(["P-2", "Bob"])
+    sheet.append(["office_id", "city"])
+    sheet.append(["O-1", "Paris"])
+    sheet.append(["O-2", "Lyon"])
+    sheet.add_table(Table(displayName="PeopleVertical", ref="A1:B3"))
+    sheet.add_table(Table(displayName="OfficesVertical", ref="A4:B6"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_range"] for block in blocks] == ["'Sheet'!A1:B3", "'Sheet'!A4:B6"]
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["person_id", "name"],
+        ["office_id", "city"],
+    ]
+
+
+def test_excel_table_boundary_does_not_discard_adjacent_unstructured_content():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["person_id", "name", "office_id", "city"])
+    sheet.append(["P-1", "Alice", "O-1", "Paris"])
+    sheet.append(["P-2", "Bob", "O-2", "Lyon"])
+    sheet.add_table(Table(displayName="DefinedPeople", ref="A1:B3"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_range"] for block in blocks] == ["'Sheet'!A1:B3", "'Sheet'!C1:D3"]
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["person_id", "name"],
+        ["office_id", "city"],
+    ]
+
+
+def test_merged_title_stays_with_its_explicit_table_and_not_a_later_region():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.merge_cells("A1:B1")
+    sheet["A1"] = "People title"
+    sheet.append(["person_id", "name"])
+    sheet.append(["P-1", "Alice"])
+    sheet.append(["P-2", "Bob"])
+    sheet.append([])
+    sheet.append(["office_id", "city"])
+    sheet.append(["O-1", "Paris"])
+    sheet.append(["O-2", "Lyon"])
+    sheet.add_table(Table(displayName="TitledPeople", ref="A2:B4"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_range"] for block in blocks] == ["'Sheet'!A2:B4", "'Sheet'!A6:B8"]
+    assert blocks[0].metadata["table_region_range"] == "'Sheet'!A1:B4"
+    assert blocks[0].metadata["table_header_range"] == "'Sheet'!A2:B2"
+    assert blocks[0].metadata["sheet_context"].endswith("Row 1: People title")
+    assert "People title" not in blocks[1].text
+
+
+def test_unrelated_note_is_not_absorbed_as_an_explicit_table_title():
+    from core.indexing.parsers.tabular.xlsx_validation import _combine_regions
+
+    unrelated = TableRegion(0, 1, 1, 1, 1)
+    title = TableRegion(1, 1, 1, 3, 3)
+    table = TableRegion(0, 2, 3, 3, 4, header_row_hint=2)
+
+    regions = _combine_regions([unrelated, title], [table], [(1, 1, 3, 4)])
+
+    assert len(regions) == 2
+    assert regions[0].start_column == 1
+    assert regions[1].start_row == 1 and regions[1].start_column == 3
+
+
+def test_plain_contiguous_cells_are_not_split_without_source_boundaries():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["person_id", "name", "office_id", "city"])
+    sheet.append(["P-1", "Alice", "O-1", "Paris"])
+    sheet.append(["P-2", "Bob", "O-2", "Lyon"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_range"] == "'Sheet'!A1:D3"
+    assert block.metadata["table_columns"] == ["person_id", "name", "office_id", "city"]
+
+
+def test_touching_excel_tables_keep_formula_groups_scoped_to_their_own_headers():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["quantity", "price", "total", "hours", "rate", "cost"])
+    for row_number in range(2, 5):
+        sheet.append([row_number, 10, f"=A{row_number}*B{row_number}", row_number, 20, f"=D{row_number}*E{row_number}"])
+    sheet.add_table(Table(displayName="SalesTable", ref="A1:C4"))
+    sheet.add_table(Table(displayName="LabourTable", ref="D1:F4"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [
+        ["quantity", "price", "total"],
+        ["hours", "rate", "cost"],
+    ]
+    assert [block.metadata["formula_groups"][0]["range"] for block in blocks] == ["C2:C4", "F2:F4"]
+    assert [block.metadata["formula_groups"][0]["semantic_expression"] for block in blocks] == [
+        "total = quantity*price",
+        "cost = hours*rate",
+    ]
+
+
+def test_rejects_overlapping_excel_table_definitions_before_reader_opens(monkeypatch):
+    from xml.etree import ElementTree as ET
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["person_id", "name", "office_id", "city"])
+    sheet.append(["P-1", "Alice", "O-1", "Paris"])
+    sheet.add_table(Table(displayName="PeopleOverlap", ref="A1:B2"))
+    sheet.add_table(Table(displayName="OfficesOverlap", ref="C1:D2"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(raw_bytes=output.getvalue())
+
+    def overlap_second_table(xml):
+        root = ET.fromstring(xml)
+        root.set("ref", "B1:D2")
+        return ET.tostring(root, encoding="unicode")
+
+    document = _edit_xml(document, overlap_second_table, target="xl/tables/table2.xml")
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="overlapping ranges") as error:
+        list(XlsxParser().iter_batches(document))
+    assert error.value.code == "INVALID_XLSX"
+
+
+def test_chunked_offset_table_keeps_absolute_worksheet_citations():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["L30"], sheet["M30"] = "metric", "value"
+    sheet["L31"], sheet["M31"] = "latency", "long value " * 20
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=20,
+        length_function=lambda text: len(text.split()),
+    )
+
+    assert len(chunks) > 1
+    ranges = {chunk.metadata["cell_range"] for chunk in chunks}
+    assert ranges == {"'Sheet'!L31:L31", "'Sheet'!M31:M31"}
+    assert all(chunk.metadata["table_id"] == "sheet:0:table:0" for chunk in chunks)
+
+
+def test_merged_table_titles_are_context_not_column_headers():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.merge_cells("A1:B1")
+    sheet["A1"] = "People"
+    sheet.append(["id", "name"])
+    sheet.append(["P-1", "Alice"])
+    sheet.append([])
+    sheet.merge_cells("A5:B5")
+    sheet["A5"] = "Offices"
+    sheet.append(["id", "city"])
+    sheet.append(["O-1", "Paris"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [["id", "name"], ["id", "city"]]
+    assert [block.metadata["table_header_row"] for block in blocks] == [2, 6]
+    assert [block.metadata["table_range"] for block in blocks] == ["'Sheet'!A2:B3", "'Sheet'!A6:B7"]
+    assert [block.metadata["table_region_range"] for block in blocks] == ["'Sheet'!A1:B3", "'Sheet'!A5:B7"]
+    assert [block.metadata["sheet_context_row_numbers"] for block in blocks] == [[1], [5]]
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[3], [7]]
+
+
+def test_merged_title_and_blank_spacer_do_not_select_the_blank_row_as_header():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Regional Report"
+    sheet.merge_cells("A1:E1")
+    sheet["A1"] = "Regional access programme — quarterly export"
+    sheet.append([])
+    sheet.append(["record_id", "service_name", "region", "contact_policy", "summary"])
+    sheet.append(["REG-001", "Screen-reader help desk", "Île-de-France", "Contact allowed", "Summary"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_header_row"] == 3
+    assert block.metadata["table_columns"] == ["record_id", "service_name", "region", "contact_policy", "summary"]
+    assert block.metadata["table_row_numbers"] == [4]
+    assert block.metadata["table_header_source"] == "automatic"
+
+
+def test_merged_column_header_groups_are_flattened_with_hierarchy_metadata():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Directory"
+    sheet.merge_cells("A1:B1")
+    sheet["A1"] = "Person"
+    sheet.merge_cells("C1:D1")
+    sheet["C1"] = "Contact"
+    sheet.append(["id", "name", "allowed", "email"])
+    sheet.append(["P-1", "Alice", True, "alice@example.org"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_columns"] == [
+        "Person / id",
+        "Person / name",
+        "Contact / allowed",
+        "Contact / email",
+    ]
+    assert block.metadata["table_header_hierarchy_rows"] == [1]
+    assert block.metadata["table_header_hierarchy"] == [
+        {"column": "Person / id", "path": ["Person", "id"]},
+        {"column": "Person / name", "path": ["Person", "name"]},
+        {"column": "Contact / allowed", "path": ["Contact", "allowed"]},
+        {"column": "Contact / email", "path": ["Contact", "email"]},
+    ]
+    assert block.metadata["table_header_row"] == 2
+    assert block.metadata["table_row_numbers"] == [3]
+    assert "| Person / id | Person / name | Contact / allowed | Contact / email |" in block.text
+
+
+def test_nested_merged_column_headers_select_leaf_row_and_preserve_full_paths():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Directory"
+    sheet.merge_cells("A1:D1")
+    sheet["A1"] = "Directory"
+    sheet.merge_cells("A2:B2")
+    sheet["A2"] = "Person"
+    sheet.merge_cells("C2:D2")
+    sheet["C2"] = "Contact"
+    sheet.append(["id", "name", "allowed", "email"])
+    sheet.append(["P-1", "Alice", True, "alice@example.org"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_header_row"] == 3
+    assert block.metadata["table_header_hierarchy_rows"] == [1, 2]
+    assert block.metadata["table_columns"] == [
+        "Directory / Person / id",
+        "Directory / Person / name",
+        "Directory / Contact / allowed",
+        "Directory / Contact / email",
+    ]
+    assert block.metadata["table_header_hierarchy"] == [
+        {"column": "Directory / Person / id", "path": ["Directory", "Person", "id"]},
+        {"column": "Directory / Person / name", "path": ["Directory", "Person", "name"]},
+        {
+            "column": "Directory / Contact / allowed",
+            "path": ["Directory", "Contact", "allowed"],
+        },
+        {
+            "column": "Directory / Contact / email",
+            "path": ["Directory", "Contact", "email"],
+        },
+    ]
+    assert block.metadata["table_row_numbers"] == [4]
+
+
+def test_merged_header_hierarchy_is_scoped_to_each_separated_table():
+    workbook = Workbook()
+    sheet = workbook.active
+    for top_row, prefix, record in ((1, "Person", "P-1"), (6, "Office", "O-1")):
+        sheet.merge_cells(start_row=top_row, start_column=1, end_row=top_row, end_column=2)
+        sheet.cell(top_row, 1, prefix)
+        sheet.merge_cells(start_row=top_row, start_column=3, end_row=top_row, end_column=4)
+        sheet.cell(top_row, 3, "Details")
+        sheet.cell(top_row + 1, 1, "id")
+        sheet.cell(top_row + 1, 2, "name")
+        sheet.cell(top_row + 1, 3, "status")
+        sheet.cell(top_row + 1, 4, "summary")
+        sheet.cell(top_row + 2, 1, record)
+        sheet.cell(top_row + 2, 2, prefix)
+        sheet.cell(top_row + 2, 3, "active")
+        sheet.cell(top_row + 2, 4, f"{prefix} summary")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert blocks[0].metadata["table_columns"][0] == "Person / id"
+    assert blocks[1].metadata["table_columns"][0] == "Office / id"
+    assert blocks[0].metadata["table_id"] == "sheet:0:table:0"
+    assert blocks[1].metadata["table_id"] == "sheet:0:table:1"
+    assert "Office / id" not in blocks[0].text
+    assert "Person / id" not in blocks[1].text
+
+
+def test_vertical_merged_row_headers_are_expanded_and_paths_follow_chunks():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["region", "country", "amount"])
+    sheet["A2"] = "Europe"
+    sheet["B2"] = "France"
+    sheet["C2"] = 10
+    sheet["B3"] = "Germany"
+    sheet["C3"] = 20
+    sheet.merge_cells("A2:A3")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser(batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert all("Europe" in block.text for block in blocks)
+    assert all(block.metadata["table_row_header_columns"] == ["region"] for block in blocks)
+    assert blocks[0].metadata["table_row_header_paths"] == {"2": ["Europe"]}
+    assert blocks[1].metadata["table_row_header_paths"] == {"3": ["Europe"]}
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunk_table(
+            MDElement(type="table", content=block.text, metadata=block.metadata),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+    ]
+    assert [chunk.metadata["table_row_header_paths"] for chunk in chunks] == [
+        {"2": ["Europe"]},
+        {"3": ["Europe"]},
+    ]
+
+
+def test_nested_vertical_merged_row_headers_preserve_hierarchical_paths():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["region", "country", "city", "amount"])
+    rows = [
+        ["Europe", "France", "Paris", 10],
+        [None, None, "Lyon", 20],
+        [None, "Germany", "Berlin", 30],
+        [None, None, "Hamburg", 40],
+    ]
+    for row in rows:
+        sheet.append(row)
+    sheet.merge_cells("A2:A5")
+    sheet.merge_cells("B2:B3")
+    sheet.merge_cells("B4:B5")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_row_header_columns"] == ["region", "country"]
+    assert block.metadata["table_row_header_paths"] == {
+        "2": ["Europe", "France"],
+        "3": ["Europe", "France"],
+        "4": ["Europe", "Germany"],
+        "5": ["Europe", "Germany"],
+    }
+    assert "| Europe | France | Paris | 10 |" in block.text
+    assert "| Europe | France | Lyon | 20 |" in block.text
+    assert "| Europe | Germany | Berlin | 30 |" in block.text
+    assert "| Europe | Germany | Hamburg | 40 |" in block.text
+
+
+def test_merged_row_header_expansion_is_scoped_to_separated_tables():
+    workbook = Workbook()
+    sheet = workbook.active
+    for header_row, region, amounts in ((1, "Europe", (10, 20)), (5, "Asia", (30, 40))):
+        sheet.cell(header_row, 1, "region")
+        sheet.cell(header_row, 2, "amount")
+        sheet.cell(header_row + 1, 1, region)
+        sheet.cell(header_row + 1, 2, amounts[0])
+        sheet.cell(header_row + 2, 2, amounts[1])
+        sheet.merge_cells(
+            start_row=header_row + 1,
+            start_column=1,
+            end_row=header_row + 2,
+            end_column=1,
+        )
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert blocks[0].metadata["table_row_header_paths"] == {"2": ["Europe"], "3": ["Europe"]}
+    assert blocks[1].metadata["table_row_header_paths"] == {"6": ["Asia"], "7": ["Asia"]}
+    assert "Asia" not in blocks[0].text
+    assert "Europe" not in blocks[1].text
+
+
+def test_detects_extracts_and_chunks_ten_tables_in_one_worksheet():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Ten Tables"
+    expected_ranges = []
+    for table_index in range(10):
+        header_row = table_index * 3 + 1
+        data_row = header_row + 1
+        sheet.cell(header_row, 1, "id")
+        sheet.cell(header_row, 2, "value")
+        sheet.cell(data_row, 1, f"T-{table_index + 1:02d}")
+        sheet.cell(data_row, 2, table_index + 1)
+        expected_ranges.append(f"'Ten Tables'!A{header_row}:B{data_row}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 10
+    assert [block.metadata["table_index"] for block in blocks] == list(range(10))
+    assert [block.metadata["table_range"] for block in blocks] == expected_ranges
+    assert all(block.metadata["worksheet_table_count"] == 10 for block in blocks)
+    assert all(block.metadata["sheet_name"] == "Ten Tables" for block in blocks)
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunk_table(
+            MDElement(type="table", content=block.text, metadata=block.metadata),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+    ]
+    assert len(chunks) == 10
+    assert [chunk.metadata["table_id"] for chunk in chunks] == [f"sheet:0:table:{index}" for index in range(10)]
+    assert [chunk.metadata["cell_range"] for chunk in chunks] == [
+        f"'Ten Tables'!A{index * 3 + 2}:B{index * 3 + 2}" for index in range(10)
+    ]
+
+
+def test_multiple_tables_across_sheets_keep_sheet_identity_and_context_when_chunked():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    workbook.active.title = "North Region"
+    workbook.create_sheet("South Region")
+    expected = []
+    for sheet_index, sheet in enumerate(workbook.worksheets):
+        for table_index in range(2):
+            title_row = table_index * 4 + 1
+            header_row = title_row + 1
+            data_row = title_row + 2
+            title = f"{sheet.title} table {table_index + 1} context"
+            sheet.merge_cells(start_row=title_row, start_column=1, end_row=title_row, end_column=2)
+            sheet.cell(title_row, 1, title)
+            sheet.cell(header_row, 1, "id")
+            sheet.cell(header_row, 2, "value")
+            sheet.cell(data_row, 1, f"S{sheet_index}-T{table_index}")
+            sheet.cell(data_row, 2, title)
+            expected.append((sheet_index, sheet.title, table_index, title, data_row))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 4
+    for block, (sheet_index, sheet_name, table_index, title, data_row) in zip(blocks, expected, strict=True):
+        assert block.metadata["sheet_index"] == sheet_index
+        assert block.metadata["sheet_name"] == sheet_name
+        assert block.metadata["table_index"] == table_index
+        assert block.metadata["table_id"] == f"sheet:{sheet_index}:table:{table_index}"
+        assert block.metadata["worksheet_table_count"] == 2
+        assert block.metadata["worksheet_context"] == f"\n\nWorksheet: {sheet_name}"
+        assert block.metadata["sheet_context_row_numbers"] == [data_row - 2]
+        assert title in block.metadata["sheet_context"]
+        assert f"Worksheet: {sheet_name}" in block.text
+        assert title in block.text
+
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunk_table(
+            MDElement(type="table", content=block.text, metadata=block.metadata),
+            chunk_size=100,
+            length_function=lambda text: len(text.split()),
+        )
+    ]
+    assert len(chunks) == 4
+    for chunk, (_, sheet_name, table_index, title, _) in zip(chunks, expected, strict=True):
+        assert chunk.metadata["sheet_name"] == sheet_name
+        assert chunk.metadata["table_index"] == table_index
+        assert chunk.metadata["worksheet_context"] == f"\n\nWorksheet: {sheet_name}"
+        assert title in chunk.metadata["sheet_context"]
+        assert f"Worksheet: {sheet_name}" in chunk.content
+        assert title in chunk.content
+
+
+def test_blank_cells_inside_a_table_do_not_split_its_region():
+    document = _document(
+        [
+            ["id", "optional", "summary"],
+            ["A-1", None, "First"],
+            ["A-2", "present", "Second"],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["worksheet_table_count"] == 1
+    assert block.metadata["table_range"] == "'Sheet'!A1:C3"
+    assert block.metadata["table_row_numbers"] == [2, 3]
+
+
+def test_distant_single_row_with_matching_columns_is_not_lost():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sparse Records"
+    sheet.append(["record_id", "name", "topic", "summary"])
+    sheet.append(["SP-001", "Near record", "Accessibility", "Record near the top."])
+    sheet.append(["SP-002", "Second record", "Healthcare", "Another ordinary record."])
+    sheet.cell(1000, 1, "SP-999")
+    sheet.cell(1000, 2, "Distant Needle")
+    sheet.cell(1000, 3, "Medical access")
+    sheet.cell(1000, 4, "Distant physical row.")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["worksheet_table_count"] == 1
+    assert block.metadata["table_range"] == "'Sparse Records'!A1:D1000"
+    assert block.metadata["table_row_numbers"] == [2, 3, 1000]
+    assert "SP-999" in block.text
+
+
+def test_typed_rows_after_a_blank_spacer_continue_the_previous_table():
+    document = _document(
+        [
+            ["Nom", "Salaire"],
+            ["Alice", 3000],
+            ["Bob", 3100],
+            [],
+            ["Carol", 3200],
+            ["Dan", 3300],
+            ["Eve", 3400],
+            [],
+            [],
+            ["Fay", date(2025, 1, 2)],
+            ["Gus", 3600],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["Nom", "Salaire"]
+    assert block.metadata["table_row_numbers"] == [2, 3, 5, 6, 7, 10, 11]
+    assert "| Carol | 3200 |" in block.text
+
+
+def test_hidden_typed_row_does_not_turn_a_new_table_into_a_continuation():
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in (["Nom", "Salaire"], ["Alice", 3000], [], [99, 1], ["Produit", "Prix"], ["Pomme", 2]):
+        sheet.append(row)
+    sheet.row_dimensions[4].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [["Nom", "Salaire"], ["Produit", "Prix"]]
+    assert all("99" not in block.text for block in blocks)
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_columns"),
+    [
+        # A text first row may be the header of an independent table.
+        (
+            [["Nom", "Salaire"], ["Alice", 3000], [], ["Produit", "Prix"], ["Pomme", 2]],
+            [["Nom", "Salaire"], ["Produit", "Prix"]],
+        ),
+        # A different column span is a different table.
+        (
+            [["Nom", "Salaire", "Ville"], ["Alice", 3000, "Paris"], [], ["Bob", 3100], ["Cam", 3200]],
+            [["Nom", "Salaire", "Ville"], ["Bob", "3100"]],
+        ),
+    ],
+)
+def test_blank_spacer_continuation_requires_typed_data_with_the_same_columns(rows, expected_columns):
+    blocks = [
+        block for block in XlsxParser().iter_batches(_document(rows)) if block.metadata["xlsx_content_kind"] == "table"
+    ]
+
+    assert [block.metadata["table_columns"] for block in blocks] == expected_columns
+
+
+def test_one_blank_spacer_column_does_not_split_a_table():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Nom", "Age", None, "Ville", "Salaire", "Brut"])
+    for row_number, (name, age, city, salary) in enumerate(
+        [("Alice", 30, "Paris", 3000), ("Bob", 31, "Lyon", 3100)], start=2
+    ):
+        sheet.append([name, age, None, city, salary, f"=E{row_number}*1.25"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_columns"] == ["Nom", "Age", "Ville", "Salaire", "Brut"]
+    assert block.metadata["table_range"] == "'Sheet'!A1:F3"
+    # The spacer is not a column of the table, but citations keep worksheet columns.
+    assert block.metadata["table_worksheet_column_indices"] == [1, 2, 4, 5, 6]
+    assert "| Alice | 30 | Paris | 3000 |" in block.text
+    assert block.metadata["formula_groups"][0]["semantic_expression"] == "Brut = Salaire*1.25"
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=40,
+        length_function=lambda text: len(text.split()),
+    )
+    assert chunks
+    assert all("|  |" not in chunk.content.split("\n", 1)[0] for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # Halves that do not cover the same rows are separate tables.
+        [["Nom", "Age", None, "Produit", "Prix"], ["Alice", 30, None, "Pomme", 2], [None, None, None, "Poire", 3]],
+        # Two blank columns are a deliberate separation.
+        [["Nom", "Age", None, None, "Ville"], ["Alice", 30, None, None, "Paris"]],
+    ],
+)
+def test_spacer_column_join_requires_one_column_and_the_same_rows(rows):
+    blocks = list(XlsxParser().iter_batches(_document(rows)))
+
+    assert len(blocks) == 2
+    assert blocks[0].metadata["table_columns"] == ["Nom", "Age"]
+
+
+def test_excel_table_in_a_spacer_column_keeps_both_sides_separate():
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in (["Nom", "Age", "Code", "Ville", "Pays"], ["Alice", 30, "X", "Paris", "FR"]):
+        sheet.append(row)
+    sheet.add_table(Table(displayName="Codes", ref="C1:C2"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [["Nom", "Age"], ["Code"], ["Ville", "Pays"]]
+
+
+def test_style_only_cells_do_not_create_false_table_regions():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "value"])
+    sheet.append([1, "kept"])
+    sheet["Z100"].number_format = "0.00"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["worksheet_table_count"] == 1
+    assert block.metadata["table_range"] == "'Sheet'!A1:B2"
+
+
+def test_rejects_excessive_detected_table_fragmentation_before_reader_opens(monkeypatch):
+    workbook = Workbook()
+    sheet = workbook.active
+    for column in (1, 4, 7):
+        sheet.cell(1, column, "id")
+        sheet.cell(2, column, column)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="table count exceeds") as error:
+        list(XlsxParser(limits={"max_tables": 2}).iter_batches(Document(raw_bytes=output.getvalue())))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+def _xlsx(workbook) -> Document:
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return Document(filename="workbook.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+def test_blocks_past_the_table_limit_are_merged_by_column_band():
+    """200 blocks in two column bands exceed a limit of 3; instead of rejecting the
+    workbook, the blocks of each band become one table."""
+    workbook = Workbook()
+    for row in range(1, 400, 2):
+        workbook.active.cell(row, 1, f"item-{row}")
+        workbook.active.cell(row, 4, f"other-{row}")
+
+    blocks = list(XlsxParser(limits={"max_tables": 3}).iter_batches(_xlsx(workbook)))
+
+    tables = {block.metadata["table_id"] for block in blocks}
+    assert len(tables) == 2
+    assert all(block.metadata["worksheet_blocks_merged"] == 400 for block in blocks)
+    text = "\n".join(block.text for block in blocks)
+    assert "item-399" in text and "other-399" in text
+    assert "more than the 3-table limit" in text
+
+
+def test_layouts_that_still_exceed_the_table_limit_after_merging_are_rejected_during_scan(monkeypatch):
+    """Five column bands cannot fit a limit of 3 even after merging."""
+    workbook = Workbook()
+    for row in range(1, 40, 2):
+        for column in (1, 4, 7, 10, 13):
+            workbook.active.cell(row, column, f"v{row}-{column}")
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="table count exceeds"):
+        list(XlsxParser(limits={"max_tables": 3}).iter_batches(_xlsx(workbook)))
+
+
+def test_repeated_blocks_with_their_own_header_index_every_row_past_the_limit():
+    """Reported on #1246: one block per week (`Day | Hours` + 3 rows, two blank
+    rows between) rejected the whole workbook once it passed the table limit, and
+    every other sheet with it."""
+    workbook = Workbook()
+    weeks = workbook.active
+    weeks.title = "Weeks"
+    row = 1
+    for week in range(300):
+        weeks.cell(row, 1, "Day")
+        weeks.cell(row, 2, "Hours")
+        for day in range(1, 4):
+            weeks.cell(row + day, 1, f"w{week}-d{day}")
+            weeks.cell(row + day, 2, week * 10 + day)
+        row += 6
+    other = workbook.create_sheet("Summary")
+    other.append(["total"])
+    other.append([42])
+
+    blocks = list(XlsxParser().iter_batches(_xlsx(workbook)))
+
+    week_blocks = [block for block in blocks if block.metadata["sheet_name"] == "Weeks"]
+    assert {block.metadata["table_id"] for block in week_blocks} == {"sheet:0:table:0"}
+    assert week_blocks[0].metadata["table_columns"] == ["Day", "Hours"]
+    assert week_blocks[0].metadata["worksheet_blocks_merged"] == 300
+    week_text = "\n".join(block.text for block in week_blocks)
+    assert all(f"| w{week}-d3 |" in week_text for week in (0, 150, 299))
+    assert any(block.metadata["sheet_name"] == "Summary" for block in blocks)
+
+
+def test_merged_blocks_never_cross_an_excel_table():
+    workbook = Workbook()
+    sheet = workbook.active
+    for top in range(1, 30, 3):  # 10 single-row blocks above the Excel Table
+        sheet.cell(top, 1, f"above {top}")
+        sheet.cell(top, 2, top)
+    sheet.cell(32, 1, "Name")
+    sheet.cell(32, 2, "Score")
+    for row in range(33, 37):
+        sheet.cell(row, 1, f"declared {row}")
+        sheet.cell(row, 2, row)
+    sheet.add_table(Table(displayName="Declared", ref="A32:B36"))
+    for top in range(40, 70, 3):  # 10 single-row blocks below it
+        sheet.cell(top, 1, f"below {top}")
+        sheet.cell(top, 2, top)
+
+    blocks = list(XlsxParser(limits={"max_tables": 4}).iter_batches(_xlsx(workbook)))
+
+    ranges = sorted({(block.metadata["table_start_row"], block.metadata["table_end_row"]) for block in blocks})
+    assert ranges == [(1, 28), (32, 36), (40, 67)]
+
+
+def test_partially_mapped_formula_range_keeps_full_reference():
+    result = module._analyze_formula(
+        "=SUM(A12:C12)",
+        target_row=12,
+        target_column=4,
+        sheet_name="Sheet",
+        visible_columns=[1, 3, 4],
+        headers=["first", "third", "total"],
+        table_start_row=10,
+        table_end_row=15,
+    )
+    assert result["semantic_expression"] == "total = SUM(A12:C12)"
+    assert result["unresolved_references"] == ["A12:C12"]
+
+
+def test_filled_down_cross_sheet_formula_groups_keep_all_references():
+    rows = [
+        (module._FormulaValue(1, "=Other!A2"),),
+        (module._FormulaValue(2, "=Other!A3"),),
+    ]
+    _, groups, cells, _ = module._compact_formula_batch(
+        rows,
+        [2, 3],
+        sheet_name="Sheet",
+        visible_columns=[1],
+        headers=["total"],
+        table_start_row=1,
+        table_end_row=3,
+    )
+    assert not cells
+    assert len(groups) == 1
+    assert groups[0]["pattern"] == "=Other!RC"
+    assert groups[0]["semantic_expression"] == "total = Other!RC"
+    assert groups[0]["unresolved_references"] == ["Other!A2", "Other!A3"]
+
+
+def test_hidden_typed_cell_does_not_merge_two_tables():
+    workbook = Workbook()
+    sheet = workbook.active
+    for row, values in enumerate(
+        [["person", "secret"], ["Alice", 1], [None, None], ["city", 42], ["Paris", 2]], start=1
+    ):
+        for column, value in enumerate(values, start=1):
+            if value is not None:
+                sheet.cell(row, column, value)
+    sheet.column_dimensions["B"].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [block.metadata["table_columns"] for block in blocks] == [["person"], ["city"]]
+    assert "Paris" in blocks[1].text
+
+
+def test_escaped_unit_number_format_is_not_interpreted():
+    assert module._safe_number_format(123, r"0\k\g") is None
+
+
+def test_table_limit_applies_per_visible_worksheet():
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for week in range(4):
+        sheet = workbook.create_sheet(f"Week {week + 1}")
+        for block in range(3):
+            sheet.cell(block * 4 + 1, 1, "id")
+            sheet.cell(block * 4 + 1, 2, "value")
+            sheet.cell(block * 4 + 2, 1, f"W{week}-{block}")
+            sheet.cell(block * 4 + 2, 2, block)
+    hidden = workbook.create_sheet("Archive")
+    hidden.sheet_state = "hidden"
+    for block in range(5):
+        hidden.cell(block * 4 + 1, 1, "id")
+        hidden.cell(block * 4 + 2, 1, f"old-{block}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser(limits={"max_tables": 3}).iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 12
+    assert {block.metadata["sheet_name"] for block in blocks} == {f"Week {week + 1}" for week in range(4)}
+
+
+def test_many_stacked_tables_use_one_sheet_scan(monkeypatch):
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Weeks"
+    for week in range(150):
+        row = week * 6 + 1
+        sheet.cell(row, 1, "Day")
+        sheet.cell(row, 2, "Hours")
+        for day in range(3):
+            sheet.cell(row + day + 1, 1, f"week-{week}-day-{day}")
+            sheet.cell(row + day + 1, 2, day + 1)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    original = ReadOnlyWorksheet.iter_rows
+    scans = []
+
+    def track_scan(self, *args, **kwargs):
+        scans.append(self.title)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "iter_rows", track_scan)
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 150
+    assert scans == ["Weeks"]
+    assert "week-0-day-0" in blocks[0].text
+    assert "week-149-day-2" in blocks[-1].text
+    assert blocks[-1].metadata["worksheet_table_count"] == 150
+
+
+def test_stacked_tables_keep_formulas_scoped_with_one_scan_per_reader(monkeypatch):
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row, name in ((1, "first"), (6, "second")):
+        sheet.cell(row, 1, "name")
+        sheet.cell(row, 2, "calculation")
+        sheet.cell(row + 1, 1, name)
+        sheet.cell(row + 1, 2, f"=A{row + 1}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    original = ReadOnlyWorksheet.iter_rows
+    scans = []
+
+    def track_scan(self, *args, **kwargs):
+        scans.append(self.title)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "iter_rows", track_scan)
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert len(scans) == 2
+    assert "first" in blocks[0].text and "=A2" in blocks[0].text
+    assert "second" in blocks[1].text and "=A7" in blocks[1].text
+    assert blocks[0].metadata["table_id"] != blocks[1].metadata["table_id"]
+
+
+def test_merged_header_coverage_uses_intervals_not_single_columns():
+    import time as clock
+
+    from core.indexing.parsers.tabular.xlsx_validation import _merged_header_depth
+
+    region = TableRegion(0, 1, 3, 1, 4096)
+    # Adjacent merges cover the region together; huge merges cost no expansion.
+    assert _merged_header_depth(region, {1: [(1, 2000), (2001, 4096)]}, {2}, set()) == 1
+    assert _merged_header_depth(region, {1: [(1, 2000), (2002, 4096)]}, {2}, set()) == 0
+    crafted = {1: [(1, 4096)] * 100_000}
+    started = clock.perf_counter()
+    assert _merged_header_depth(region, crafted, {2}, set()) == 1
+    assert clock.perf_counter() - started < 1
+
+
+def test_region_count_is_bounded_before_regions_are_combined(monkeypatch):
+    from core.indexing.parsers.tabular import xlsx_validation
+
+    workbook = Workbook()
+    for column in range(1, 20, 3):
+        workbook.active.cell(1, column, "id")
+        workbook.active.cell(2, column, column)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    monkeypatch.setattr(xlsx_validation, "_combine_regions", lambda *_: pytest.fail("combined before the bound"))
+    with pytest.raises(PipelineError, match="table count exceeds"):
+        list(XlsxParser(limits={"max_tables": 3}).iter_batches(Document(raw_bytes=output.getvalue())))
+
+
+def test_chartsheet_traversal_stops_at_the_metadata_budget(monkeypatch):
+    import zipfile
+
+    from core.indexing.parsers.tabular import xlsx_validation
+
+    document = _workbook_with_drawings(chartsheet=True)
+    with zipfile.ZipFile(BytesIO(document.raw_bytes)) as archive:
+        names = set(archive.namelist())
+        relationships = list(xlsx_validation.fromstring(archive.read("xl/_rels/workbook.xml.rels")))
+        fixed = sum(archive.getinfo(name).file_size for name in xlsx_validation.READER_FIXED_PARTS if name in names)
+        reads = []
+        original_read = archive.read
+        monkeypatch.setattr(archive, "read", lambda name: reads.append(name) or original_read(name))
+        sheet_rels = sum(archive.getinfo(name).file_size for name in names if name.startswith("xl/worksheets/_rels/"))
+        # Room for the fixed parts and sheet relationships, not the chart sheet.
+        limits = XlsxLimits(max_metadata_bytes=fixed + sheet_rels + 1)
+        with pytest.raises(PipelineError, match="metadata exceeds the memory limit"):
+            xlsx_validation._reader_loaded_parts(archive, names, relationships, limits)
+    assert not [name for name in reads if name.endswith(".rels")]
+
+
+def _excel_table_document(rows, ref, *, title=None, hide_row=None, header_row_count=None):
+    import re
+
+    workbook = Workbook()
+    sheet = workbook.active
+    if title is not None:
+        sheet["A1"] = title
+        sheet.merge_cells("A1:B1")
+    for row in rows:
+        sheet.append(row)
+    sheet.add_table(Table(displayName="Data", ref=ref))
+    if hide_row is not None:
+        sheet.row_dimensions[hide_row].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(filename="table.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+    if header_row_count is not None:
+        document = _edit_xml(
+            document,
+            lambda xml: re.sub(r'headerRowCount="\d"', f'headerRowCount="{header_row_count}"', xml)
+            if "headerRowCount" in xml
+            else xml.replace("<table ", f'<table headerRowCount="{header_row_count}" ', 1),
+            target="xl/tables/table1.xml",
+        )
+    return document
+
+
+def test_hidden_excel_table_header_uses_declared_column_names():
+    document = _excel_table_document([["id", "name"], [1, "Alice"], [2, "Bob"]], "A1:B3", hide_row=1)
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["id", "name"]
+    assert block.metadata["table_row_numbers"] == [2, 3]
+    assert block.metadata["table_header_detection"]["reason"] == "excel_table_header_unusable"
+
+
+def test_excel_table_exceeding_configured_column_limit_is_a_limit_error():
+    document = _excel_table_document([["id", "name"], [1, "Alice"]], "A1:B2")
+
+    with pytest.raises(PipelineError) as error:
+        list(XlsxParser(limits={"max_columns": 1}).iter_batches(document))
+
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+@pytest.mark.parametrize("title", [None, "Inventaire"])
+def test_excel_table_without_header_row_indexes_every_row(title):
+    first = 2 if title else 1
+    document = _excel_table_document(
+        [["Column1", "Column2"], [1, "Alice"], [2, "Bob"]],
+        f"A{first}:B{first + 2}",
+        title=title,
+        header_row_count=0,
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["Column1", "Column2"]
+    assert block.metadata["table_row_numbers"] == [first, first + 1, first + 2]
+    assert block.metadata["table_header_row"] is None
+    assert block.metadata["table_header_detection"]["reason"] == "excel_table_without_header_row"
+    assert block.metadata["table_start_row"] == first
+    assert block.metadata["table_range"].startswith(f"'Sheet'!A{first}:")
+    assert "| 1 | Alice |" in block.text
+    if title:
+        assert block.metadata["sheet_context_row_numbers"] == [1]
+
+
+def test_merged_header_hint_on_a_row_blank_within_the_table_falls_back():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "Report"
+    sheet.merge_cells("A1:B1")
+    # Row 2 holds content only outside the table's columns.
+    sheet["E2"] = "aside"
+    sheet.append(["id", "name"])
+    sheet.append([1, "Alice"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    [table] = [block for block in blocks if block.metadata["xlsx_content_kind"] == "table"]
+    assert table.metadata["table_columns"] == ["id", "name"]
+    assert table.metadata["table_row_numbers"] == [4]
+    assert any("aside" in block.text for block in blocks)
+
+
+def test_rejects_non_xlsx_archives_and_resource_amplification():
+    document = Document(filename="fake.xlsx", content_type=DocumentType.XLSX, raw_bytes=b"not a zip")
+    with pytest.raises(PipelineError, match="valid XLSX"):
+        list(XlsxParser().iter_batches(document))
+
+    document = Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes())
+    parser = XlsxParser(limits=XlsxLimits(max_uncompressed_bytes=1))
+    with pytest.raises(PipelineError, match="extraction limit"):
+        list(parser.iter_batches(document))
+
+
+def test_rejects_workbook_without_visible_content():
+    workbook = Workbook()
+    workbook.active["C3"].number_format = "0.00"
+    hidden = workbook.create_sheet("Hidden")
+    hidden.sheet_state = "hidden"
+    hidden.append(["secret"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    document = Document(filename="empty.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+    with pytest.raises(NoIndexableContentError, match="no visible worksheet"):
+        list(XlsxParser().iter_batches(document))
+
+
+def test_single_text_cell_is_indexed_instead_of_being_taken_as_a_header():
+    [block] = list(XlsxParser().iter_batches(_document([["header"]])))
+
+    assert block.block_type == "text"
+    assert block.metadata["xlsx_content_kind"] == "cells"
+    assert block.metadata["cell_ranges"] == ["'Sheet'!A1"]
+    assert "- A1: header" in block.text
+
+
+def _loose_cells_workbook():
+    workbook = Workbook()
+    salaries = workbook.active
+    salaries.title = "Salaires"
+    for row in (["Nom", "Ville", "Salaire"], ["Alice", "Paris", 100], ["Bob", "Lyon", 200]):
+        salaries.append(row)
+    salaries["A5"] = "Source: comptabilite interne"
+    salaries["E7"] = "Total general"
+    salaries["F7"] = 300
+    contract = workbook.create_sheet("Contrat")
+    contract["A1"] = "Contrat 2026-114"
+    contract["A3"] = "Client"
+    contract["B3"] = "ACME"
+    contract["D5"] = "Montant"
+    contract["E5"] = 12000
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return Document(filename="loose.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+def test_regions_without_data_rows_are_indexed_as_worksheet_cells():
+    table, salary_cells, contract_cells = list(XlsxParser().iter_batches(_loose_cells_workbook()))
+
+    assert table.block_type == "table"
+    assert table.metadata["xlsx_content_kind"] == "table"
+    assert table.metadata["table_row_numbers"] == [2, 3]
+
+    # Footnotes and totals outside the table keep their sheet and coordinates.
+    assert salary_cells.block_type == "text"
+    assert salary_cells.metadata["xlsx_content_kind"] == "cells"
+    assert salary_cells.metadata["sheet_name"] == "Salaires"
+    assert salary_cells.metadata["cell_ranges"] == ["'Salaires'!A5", "'Salaires'!E7:F7"]
+    assert salary_cells.metadata["cell_row_numbers"] == [5, 7]
+    assert "- A5: Source: comptabilite interne" in salary_cells.text
+    assert "- E7:F7: Total general | 300" in salary_cells.text
+    assert "csv_columns" not in salary_cells.metadata
+
+    # A form-like sheet has no table at all; its label/value pairs stay together
+    # in one block instead of failing the workbook.
+    assert contract_cells.metadata["sheet_name"] == "Contrat"
+    assert contract_cells.metadata["cell_ranges"] == ["'Contrat'!A1", "'Contrat'!A3:B3", "'Contrat'!D5:E5"]
+    assert contract_cells.text == (
+        "Worksheet cells outside tables:\n"
+        "- A1: Contrat 2026-114\n"
+        "- A3:B3: Client | ACME\n"
+        "- D5:E5: Montant | 12000\n\n"
+        "Worksheet: Contrat"
+    )
+
+
+def test_ambiguous_header_warning_is_only_logged_for_emitted_tables():
+    from loguru import logger
+
+    records: list[str] = []
+    sink_id = logger.add(records.append, level="WARNING", format="{message}")
+    try:
+        list(XlsxParser().iter_batches(_loose_cells_workbook()))
+        cells_warnings = [record for record in records if "header detection is ambiguous" in record]
+        records.clear()
+        list(XlsxParser().iter_batches(_document([["code", "label"], ["A-1", "First"]])))
+        table_warnings = [record for record in records if "header detection is ambiguous" in record]
+    finally:
+        logger.remove(sink_id)
+
+    assert cells_warnings == []
+    assert len(table_warnings) == 1
+
+
+def test_worksheet_cells_are_split_into_bounded_blocks():
+    # Alternating column spans keep each note in its own region.
+    workbook = Workbook()
+    for index in range(6):
+        workbook.active.cell(1 + index * 2, 1, f"note {index} " + "x" * 40)
+        if index % 2:
+            workbook.active.cell(1 + index * 2, 2, index)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(filename="notes.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+    blocks = list(XlsxParser(limits=XlsxLimits(max_batch_bytes=200)).iter_batches(document))
+
+    assert len(blocks) > 1
+    assert all(block.metadata["xlsx_content_kind"] == "cells" for block in blocks)
+    assert all(len(block.text.encode("utf-8")) < 200 for block in blocks)
+    assert [row for block in blocks for row in block.metadata["cell_row_numbers"]] == [1, 3, 5, 7, 9, 11]
+
+
+def test_names_a_trailing_header_cell_when_its_column_contains_data():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["name"])
+    sheet.append(["Alice", "unexpected"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    document = Document(filename="wide.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["name", "column_2"]
+    assert "unexpected" in block.text
+
+
+def _document(rows):
+    workbook = Workbook()
+    for row in rows:
+        workbook.active.append(row)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return Document(filename="sample.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+def _edit_xml(document, edit, target="xl/worksheets/sheet1.xml"):
+    import zipfile
+
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            data = source.read(name)
+            if name == target:
+                data = edit(data.decode()).encode()
+            dest.writestr(name, data)
+    return document.model_copy(update={"raw_bytes": output.getvalue()})
+
+
+def _replace_part(document, target, data):
+    import zipfile
+
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            dest.writestr(name, data if name == target else source.read(name))
+    return document.model_copy(update={"raw_bytes": output.getvalue()})
+
+
+def _macro_enabled_document(document, *, filename="sample.xlsm"):
+    """Turn a normal workbook into a minimal macro-enabled OOXML package.
+
+    The project payload is deliberately inert test data.  It proves that the
+    parser accepts the macro workbook route while never retaining or executing
+    its VBA project.
+    """
+    import zipfile
+
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "[Content_Types].xml":
+                data = data.replace(MAIN_TYPE.encode(), MACRO_MAIN_TYPE.encode())
+            dest.writestr(name, data)
+        dest.writestr("xl/vbaProject.bin", b"inert test VBA payload")
+    return document.model_copy(update={"filename": filename, "raw_bytes": output.getvalue()})
+
+
+def _marked_as_encrypted(document):
+    """Mark ZIP headers encrypted without needing an encryption implementation."""
+    payload = bytearray(document.raw_bytes)
+    start = 0
+    while (offset := payload.find(b"PK\x03\x04", start)) >= 0:
+        payload[offset + 6] |= 1
+        start = offset + 4
+    start = 0
+    while (offset := payload.find(b"PK\x01\x02", start)) >= 0:
+        payload[offset + 8] |= 1
+        start = offset + 4
+    return document.model_copy(update={"raw_bytes": bytes(payload)})
+
+
+def _transcode_xml_parts(document, xml_encoding):
+    """Rewrite OOXML text parts with an explicit encoding and BOM."""
+    import codecs
+    import zipfile
+
+    codec, declaration_encoding, bom = {
+        "utf-8-bom": ("utf-8", "UTF-8", codecs.BOM_UTF8),
+        "utf-16-le": ("utf-16-le", "UTF-16", codecs.BOM_UTF16_LE),
+        "utf-16-be": ("utf-16-be", "UTF-16", codecs.BOM_UTF16_BE),
+    }[xml_encoding]
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            data = source.read(name)
+            if name.endswith((".xml", ".rels")):
+                text = data.decode("utf-8")
+                if text.startswith("<?xml"):
+                    text = text.split("?>", 1)[1]
+                declaration = f'<?xml version="1.0" encoding="{declaration_encoding}"?>'
+                data = bom + (declaration + text).encode(codec)
+            dest.writestr(name, data)
+    return document.model_copy(update={"raw_bytes": output.getvalue()})
+
+
+def test_accepts_workbook_content_type_declared_as_default():
+    from xml.etree import ElementTree as ET
+
+    def use_default(xml):
+        root = ET.fromstring(xml)
+        for node in list(root):
+            if node.get("PartName") == "/xl/workbook.xml":
+                root.remove(node)
+            elif node.get("Extension", "").lower() == "xml":
+                node.set("ContentType", MAIN_TYPE)
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(_document([["name"], ["Alice"]]), use_default, target="[Content_Types].xml")
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert block.metadata["table_row_numbers"] == [2]
+    assert "Alice" in block.text
+
+
+def test_rejects_competing_workbook_declarations_before_opening(monkeypatch):
+    from xml.etree import ElementTree as ET
+
+    def add_competing_workbook(xml):
+        root = ET.fromstring(xml)
+        ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+        ET.SubElement(
+            root,
+            f"{{{ns}}}Override",
+            {
+                "PartName": "/xl/alternate.xml",
+                "ContentType": MAIN_TYPE,
+            },
+        )
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(_document([["name"], ["Alice"]]), add_competing_workbook, target="[Content_Types].xml")
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="competing or invalid workbook declarations"):
+        list(XlsxParser().iter_batches(doc))
+
+
+def test_indexes_xlsm_cells_without_retaining_or_executing_macros(monkeypatch):
+    document = _macro_enabled_document(_document([["name"], ["Alice"]]))
+
+    import openpyxl
+
+    original_load_workbook = openpyxl.load_workbook
+    calls = []
+
+    def tracking_load_workbook(*args, **kwargs):
+        calls.append(kwargs.get("keep_vba"))
+        return original_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", tracking_load_workbook)
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert "Alice" in block.text
+    assert "inert test VBA payload" not in block.text
+    assert calls == [False]
+
+
+def test_rejects_macro_payload_disguised_as_xlsx():
+    document = _macro_enabled_document(_document([["name"], ["Alice"]]), filename="sample.xlsx")
+
+    with pytest.raises(PipelineError, match="must use the .xlsm extension") as error:
+        list(XlsxParser().iter_batches(document))
+
+    assert error.value.code == "INVALID_XLSX"
+
+
+def test_rejects_encrypted_xlsx_archives_before_openpyxl_runs(monkeypatch):
+    document = _marked_as_encrypted(_document([["name"], ["Alice"]]))
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("encrypted workbook reached OpenPyXL"))
+
+    with pytest.raises(PipelineError, match="Encrypted XLSX archives are unsupported") as error:
+        list(XlsxParser().iter_batches(document))
+
+    assert error.value.code == "INVALID_XLSX"
+
+
+def test_renders_numbers_dates_unicode_and_blank_columns():
+    from datetime import datetime, time
+
+    doc = _document(
+        [
+            [None, "id", "date", "timestamp", "time", "active", "text"],
+            [None, 12, date(2025, 1, 2), datetime(2025, 1, 2, 12, 30), time(9, 15), True, "café René 東京"],
+        ]
+    )
+    [block] = list(XlsxParser().iter_batches(doc))
+    assert "| 12 | 2025-01-02 | 2025-01-02T12:30:00 | 09:15:00 | true | café René 東京 |" in block.text
+    assert block.metadata["table_start_column"] == 2
+    assert block.metadata["table_header_range"] == "'Sheet'!B1:G1"
+
+
+@pytest.mark.parametrize("xml_encoding", ["utf-8-bom", "utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("use_shared_strings", [False, True])
+def test_preserves_unicode_from_bom_marked_ooxml_parts(xml_encoding, use_shared_strings):
+    rows = [
+        ["kind", "value"],
+        ["composed", "café"],
+        ["decomposed", "cafe\u0301"],
+        ["right-to-left", "مرحبا שלום"],
+        ["cjk", "東京 李明"],
+        ["emoji", "👩🏽‍💻 🧪"],
+        ["embedded-bom", "prefix\ufeffsuffix"],
+    ]
+    document = _document(rows)
+    if use_shared_strings:
+        document = _with_shared_strings(document)
+    document = _transcode_xml_parts(document, xml_encoding)
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_row_numbers"] == list(range(2, 8))
+    for _, value in rows[1:]:
+        assert value in block.text
+
+
+def test_preserves_error_cells_and_reports_missing_formula_caches():
+    doc = _document([["error", "formula"], ["#DIV/0!", "=1+1"]])
+    [block] = list(XlsxParser().iter_batches(doc))
+    assert "#DIV/0!" in block.text
+    assert "[formula: =1+1; cached value unavailable]" in block.text
+    assert block.metadata["sheet_formula_cells"] == 1
+    assert block.metadata["sheet_missing_formula_values"] == 1
+    assert block.metadata["spreadsheet_backend"] == "openpyxl"
+
+
+def test_string_formula_without_cache_is_not_treated_as_empty():
+    doc = _document([["name", "formula"], ["Alice", '=CONCAT("a","b")']])
+
+    def remove_cache(xml):
+        original = '<c r="B2"><f>CONCAT("a","b")</f><v></v></c>'
+        assert original in xml
+        return xml.replace(original, '<c r="B2" t="str"><f>CONCAT("a","b")</f></c>')
+
+    doc = _edit_xml(doc, remove_cache)
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert '=CONCAT("a","b")' in block.text
+    assert "cached value unavailable" in block.text
+    assert block.metadata["sheet_missing_formula_values"] == 1
+
+
+def _template_formula_document(*, extra_uncalculated: bool):
+    import re
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["qty", "double"])
+    sheet.append([3, '=IF(A2="","",A2*2)'])
+    for row in range(3, 2002):
+        sheet.cell(row, 2, f'=IF(A{row}="","",A{row}*2)')
+    if extra_uncalculated:
+        sheet.cell(2003, 1, "uncalculated")
+        sheet.cell(2003, 2, "=A2+1")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(filename="template.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+    def calculate(xml):
+        # As Excel saves it: the first row holds a number, the empty rows an
+        # empty string result (t="str" with an empty cached value).
+        xml = xml.replace(
+            '<c r="B2"><f>IF(A2="","",A2*2)</f><v></v></c>', '<c r="B2"><f>IF(A2="","",A2*2)</f><v>6</v></c>'
+        )
+        return re.sub(
+            r'<c r="B(\d+)"><f>(IF\(A\1=[^<]*)</f><v></v></c>', r'<c r="B\1" t="str"><f>\2</f><v></v></c>', xml
+        )
+
+    return _edit_xml(document, calculate)
+
+
+@pytest.mark.parametrize("extra_uncalculated", [False, True])
+def test_formulas_calculated_to_empty_strings_are_empty_cells(extra_uncalculated):
+    blocks = list(XlsxParser().iter_batches(_template_formula_document(extra_uncalculated=extra_uncalculated)))
+
+    rows = [row for block in blocks for row in block.metadata["table_row_numbers"]]
+    assert rows == ([2, 2003] if extra_uncalculated else [2])
+    text = "".join(block.text for block in blocks)
+    assert '| 3 | 6 [formula: =IF(A2="","",A2*2)] |' in text
+    # Only a formula that was never calculated reports a missing cached value.
+    assert text.count("cached value unavailable") == (1 if extra_uncalculated else 0)
+    assert blocks[0].metadata["sheet_missing_formula_values"] == (1 if extra_uncalculated else 0)
+    assert blocks[0].metadata["sheet_formula_cells"] == (2 if extra_uncalculated else 1)
+
+
+def test_cached_formula_values_are_returned_without_execution():
+    doc = _document([["formula"], ["=1+1"]])
+    doc = _edit_xml(
+        doc, lambda xml: xml.replace("<v />", "<v>2</v>").replace("<v/>", "<v>2</v>").replace("<v></v>", "<v>2</v>")
+    )
+    [block] = list(XlsxParser().iter_batches(doc))
+    assert "| 2 [formula: =1+1] |" in block.text
+    assert block.metadata["formula_policy"] == "compact_groups_and_individual_formulas"
+    assert block.metadata["sheet_formula_cells"] == 1
+    assert block.metadata["sheet_missing_formula_values"] == 0
+
+
+def test_short_repeated_formula_runs_always_get_generalized_context():
+    doc = _document(
+        [
+            ["input", "total"],
+            [1, "=A2+1"],
+            [2, "=A3+1"],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert block.metadata["formula_groups"] == [
+        {
+            "target_column": "B",
+            "target_header": "total",
+            "range": "B2:B3",
+            "pattern": "=RC[-1]+1",
+            "semantic_expression": "total = input+1",
+            "source_columns": [{"column": "A", "header": "input"}],
+            "start_row": 2,
+            "end_row": 3,
+            "formula_count": 2,
+        }
+    ]
+    assert "B (total), B2:B3: total = input+1" in block.text
+    assert "[formula:" not in block.text
+
+
+def test_formula_group_context_falls_back_to_inline_when_batch_budget_is_exhausted(monkeypatch):
+    original_formula_context = module._formula_context
+
+    def oversized_formula_context(groups):
+        context = original_formula_context(groups)
+        return context + ("x" * 1_000 if groups else "")
+
+    monkeypatch.setattr(module, "_formula_context", oversized_formula_context)
+    doc = _document(
+        [
+            ["input", "total"],
+            [1, "=A2+1"],
+            [2, "=A3+1"],
+        ]
+    )
+
+    [block] = list(XlsxParser(limits=XlsxLimits(max_batch_bytes=300)).iter_batches(doc))
+
+    assert "formula_groups" not in block.metadata
+    assert len(block.metadata["formula_cells"]) == 2
+    assert "[formula: =A2+1; cached value unavailable]" in block.text
+    assert "[formula: =A3+1; cached value unavailable]" in block.text
+
+
+def test_formulas_only_in_hidden_rows_or_columns_do_not_open_formula_reader(monkeypatch):
+    import openpyxl
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "value", "hidden helper"])
+    sheet.append(["visible", 1, "=B2*2"])
+    sheet.append(["hidden", "=1+1", None])
+    sheet.column_dimensions["C"].hidden = True
+    sheet.row_dimensions[3].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    original_load_workbook = openpyxl.load_workbook
+    data_only_calls = []
+
+    def tracking_load_workbook(*args, **kwargs):
+        data_only_calls.append(kwargs.get("data_only"))
+        return original_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", tracking_load_workbook)
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert data_only_calls == [True]
+    assert block.metadata["sheet_formula_cells"] == 0
+    assert block.metadata["sheet_missing_formula_values"] == 0
+    assert "formula:" not in block.text
+
+
+def test_visible_formula_opens_cached_value_and_formula_readers(monkeypatch):
+    import openpyxl
+
+    original_load_workbook = openpyxl.load_workbook
+    data_only_calls = []
+
+    def tracking_load_workbook(*args, **kwargs):
+        data_only_calls.append(kwargs.get("data_only"))
+        return original_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", tracking_load_workbook)
+
+    [block] = list(XlsxParser().iter_batches(_document([["formula"], ["=1+1"]])))
+
+    assert data_only_calls == [True, False]
+    assert block.metadata["sheet_formula_cells"] == 1
+    assert "[formula: =1+1; cached value unavailable]" in block.text
+
+
+@pytest.mark.parametrize(
+    ("formula", "pattern", "semantic", "sources", "unresolved"),
+    [
+        (
+            "=$A2+B$1+$C$3",
+            "=RC1+R1C[-1]+R3C3",
+            "total = quantity+unit_price+total",
+            [
+                {"column": "A", "header": "quantity"},
+                {"column": "B", "header": "unit_price"},
+                {"column": "C", "header": "total"},
+            ],
+            None,
+        ),
+        (
+            "='Rates Sheet'!$B$2*A2",
+            "='Rates Sheet'!R2C2*RC[-2]",
+            "total = 'Rates Sheet'!$B$2*quantity",
+            [{"column": "A", "header": "quantity"}],
+            ["'Rates Sheet'!$B$2"],
+        ),
+        (
+            "=Table1[Amount]*A2",
+            "=Table1[Amount]*RC[-2]",
+            "total = Table1[Amount]*quantity",
+            [{"column": "A", "header": "quantity"}],
+            ["Table1[Amount]"],
+        ),
+    ],
+)
+def test_formula_analysis_normalizes_references_without_guessing_unresolved_inputs(
+    formula, pattern, semantic, sources, unresolved
+):
+    analysis = module._analyze_formula(
+        formula,
+        target_row=2,
+        target_column=3,
+        sheet_name="Data",
+        visible_columns=[1, 2, 3],
+        headers=["quantity", "unit_price", "total"],
+    )
+
+    assert analysis["pattern"] == pattern
+    assert analysis["semantic_expression"] == semantic
+    assert analysis["source_columns"] == sources
+    assert analysis.get("unresolved_references") == unresolved
+
+
+def test_formula_analysis_bounds_dependency_metadata_for_broad_ranges():
+    headers = [f"field_{index}" for index in range(1, 72)]
+
+    analysis = module._analyze_formula(
+        "=SUM(A2:BR2)",
+        target_row=2,
+        target_column=71,
+        sheet_name="Data",
+        visible_columns=list(range(1, 72)),
+        headers=headers,
+    )
+
+    assert analysis["pattern"] == "=SUM(RC[-70]:RC[-1])"
+    assert analysis["semantic_expression"] == "field_71 = SUM(field_1:field_70)"
+    assert len(analysis["source_columns"]) == 64
+    assert analysis["source_column_count"] == 70
+    assert analysis["source_columns_truncated"] is True
+
+
+def test_formula_analysis_does_not_map_another_table_to_local_headers():
+    analysis = module._analyze_formula(
+        "=A2+A20",
+        target_row=12,
+        target_column=2,
+        sheet_name="Data",
+        visible_columns=[1, 2],
+        headers=["quantity", "total"],
+        table_start_row=10,
+        table_end_row=15,
+    )
+
+    assert analysis["semantic_expression"] == "total = A2+A20"
+    assert analysis["source_columns"] == []
+    assert analysis["unresolved_references"] == ["A2", "A20"]
+
+
+def test_formula_analysis_maps_only_visible_columns_in_a_same_table_range():
+    analysis = module._analyze_formula(
+        "=SUM(A12:C12)",
+        target_row=13,
+        target_column=2,
+        sheet_name="Data",
+        visible_columns=[2],
+        headers=["included"],
+        table_start_row=10,
+        table_end_row=15,
+    )
+
+    assert analysis["source_columns"] == [{"column": "B", "header": "included"}]
+
+
+def test_formula_individual_metadata_is_bounded_with_a_truncation_marker():
+    rows = [["input", "result"]]
+    rows.extend([number, f"=A{number + 1}+{number}"] for number in range(1, 20))
+
+    [block] = list(XlsxParser().iter_batches(_document(rows)))
+
+    formula_cells = block.metadata["formula_cells"]
+    assert len(formula_cells) == 17
+    assert formula_cells[-1] == {
+        "truncated": True,
+        "omitted_count": 3,
+        "omitted_cells_by_column": [{"column": "B", "row_ranges": [{"start_row": 18, "end_row": 20}]}],
+    }
+
+
+def test_formula_truncation_marker_size_is_bounded_without_missing_omitted_cells():
+    from core.chunking.markdown_utils import _formula_truncation_marker_matches
+
+    # Alternating formula rows, across 40 columns: thousands of single-row ranges.
+    omitted = [
+        {"row": row, "target_column": module._column_name(column)}
+        for column in range(1, 41)
+        for row in range(2, 2000, 2)
+    ]
+
+    marker = module._omitted_formula_marker(len(omitted), omitted)
+
+    entries = marker["omitted_cells_by_column"]
+    assert marker["omitted_ranges_coalesced"] is True
+    assert sum(len(entry["row_ranges"]) for entry in entries) <= 64
+    assert len(entries) <= 32 and entries[-1]["column"] == "*"
+    for cell in omitted:
+        assert _formula_truncation_marker_matches(marker, [cell["row"]], {cell["target_column"]})
+
+
+def test_formula_only_rows_remain_searchable_without_cached_results():
+    doc = _document([["calculation"], ["=SUM(1,2,3)"]])
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert "[formula: =SUM(1,2,3); cached value unavailable]" in block.text
+    assert block.metadata["table_row_numbers"] == [2]
+
+
+def test_formula_heavy_sheet_streams_cached_results_and_expressions_across_batches():
+    from xml.etree import ElementTree as ET
+
+    rows = [["input", "calculation"]]
+    for number in range(1, 251):
+        excel_row = number + 1
+        rows.append([number, f"=A{excel_row}^2/7"])
+    doc = _document(rows)
+
+    def add_cached_results(xml):
+        root = ET.fromstring(xml)
+        for cell in root.findall(".//{*}c"):
+            formula = cell.find("{*}f")
+            if formula is None:
+                continue
+            physical_row = int(cell.get("r")[1:])
+            input_value = physical_row - 1
+            cell.find("{*}v").text = repr(input_value**2 / 7)
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(doc, add_cached_results)
+    blocks = list(XlsxParser(batch_size=37).iter_batches(doc))
+
+    assert len(blocks) == 7
+    assert [row for block in blocks for row in block.metadata["table_row_numbers"]] == list(range(2, 252))
+    assert "| 1 | 0.14285714285714285 |" in blocks[0].text
+    assert "| 250 | 8928.57142857143 |" in blocks[-1].text
+    assert "[formula:" not in blocks[0].text
+    assert blocks[0].metadata["formula_groups"] == [
+        {
+            "target_column": "B",
+            "target_header": "calculation",
+            "range": "B2:B38",
+            "pattern": "=RC[-1]^2/7",
+            "semantic_expression": "calculation = input^2/7",
+            "source_columns": [{"column": "A", "header": "input"}],
+            "start_row": 2,
+            "end_row": 38,
+            "formula_count": 37,
+        }
+    ]
+    assert "calculation = input^2/7" in blocks[0].text
+    assert all(block.metadata["sheet_formula_cells"] == 250 for block in blocks)
+    assert all(block.metadata["sheet_missing_formula_values"] == 0 for block in blocks)
+
+
+def test_repeated_formulas_are_compacted_with_semantic_dependencies_and_exceptions():
+    from xml.etree import ElementTree as ET
+
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    rows = [["quantity", "unit_price", "total"]]
+    for number in range(1, 26):
+        excel_row = number + 1
+        suffix = "+1" if excel_row == 13 else ""
+        rows.append([number, number * 10, f"=A{excel_row}+B{excel_row}{suffix}"])
+    doc = _document(rows)
+
+    def add_cached_results(xml):
+        root = ET.fromstring(xml)
+        for cell in root.findall(".//{*}c"):
+            formula = cell.find("{*}f")
+            if formula is None:
+                continue
+            row_number = int(cell.get("r")[1:])
+            number = row_number - 1
+            cell.find("{*}v").text = str(number + number * 10 + (1 if row_number == 13 else 0))
+        return ET.tostring(root, encoding="unicode")
+
+    [block] = list(XlsxParser().iter_batches(_edit_xml(doc, add_cached_results)))
+
+    assert block.metadata["formula_groups"] == [
+        {
+            "target_column": "C",
+            "target_header": "total",
+            "range": "C2:C12",
+            "pattern": "=RC[-2]+RC[-1]",
+            "semantic_expression": "total = quantity+unit_price",
+            "source_columns": [
+                {"column": "A", "header": "quantity"},
+                {"column": "B", "header": "unit_price"},
+            ],
+            "start_row": 2,
+            "end_row": 12,
+            "formula_count": 11,
+        },
+        {
+            "target_column": "C",
+            "target_header": "total",
+            "range": "C14:C26",
+            "pattern": "=RC[-2]+RC[-1]",
+            "semantic_expression": "total = quantity+unit_price",
+            "source_columns": [
+                {"column": "A", "header": "quantity"},
+                {"column": "B", "header": "unit_price"},
+            ],
+            "start_row": 14,
+            "end_row": 26,
+            "formula_count": 13,
+        },
+    ]
+    [exception] = block.metadata["formula_cells"]
+    assert exception["target"] == "C13"
+    assert exception["formula"] == "=A13+B13+1"
+    assert exception["pattern"] == "=RC[-2]+RC[-1]+1"
+    assert exception["semantic_expression"] == "total = quantity+unit_price+1"
+    assert "133 [formula: =A13+B13+1]" in block.text
+    assert "[formula: =A2+B2]" not in block.text
+    assert "C (total), C2:C12: total = quantity+unit_price" in block.text
+
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=90,
+        length_function=lambda text: len(text.split()),
+    )
+    assert len(chunks) > 1
+    for chunk in chunks:
+        chunk_rows = set(chunk.metadata["table_row_numbers"])
+        for group in chunk.metadata.get("formula_groups", []):
+            assert any(group["start_row"] <= row <= group["end_row"] for row in chunk_rows)
+            assert group["target_column"] == "C"
+        for cell in chunk.metadata.get("formula_cells", []):
+            assert cell["row"] in chunk_rows
+
+
+def test_formula_groups_remain_scoped_to_detected_tables_and_worksheets():
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "Operations"
+    second = workbook.create_sheet("Finance")
+    for sheet in (first, second):
+        sheet.append(["quantity", "price", "total"])
+        for row_number in range(2, 22):
+            sheet.append([row_number, row_number * 10, f"=A{row_number}+B{row_number}"])
+    # Two blank columns keep the second table separate.
+    first["F1"], first["G1"], first["H1"] = "hours", "rate", "cost"
+    for row_number in range(2, 22):
+        first.cell(row_number, 6, row_number)
+        first.cell(row_number, 7, row_number * 100)
+        first.cell(row_number, 8, f"=F{row_number}*G{row_number}")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert [(block.metadata["sheet_name"], block.metadata["table_id"]) for block in blocks] == [
+        ("Operations", "sheet:0:table:0"),
+        ("Operations", "sheet:0:table:1"),
+        ("Finance", "sheet:1:table:0"),
+    ]
+    assert [block.metadata["formula_groups"][0]["range"] for block in blocks] == [
+        "C2:C21",
+        "H2:H21",
+        "C2:C21",
+    ]
+    assert [block.metadata["formula_groups"][0]["semantic_expression"] for block in blocks] == [
+        "total = quantity+price",
+        "cost = hours*rate",
+        "total = quantity+price",
+    ]
+    assert "Worksheet: Operations" in blocks[0].text
+    assert "Worksheet: Operations" in blocks[1].text
+    assert "Worksheet: Finance" in blocks[2].text
+
+
+def test_preserves_precise_numbers_and_mathematical_symbols():
+    precise = 0.123456789012345
+    notation = "σ² = ∑(xᵢ − μ)² / n; x ≤ μ ± √2; Δ ≈ 10⁻⁶"
+    doc = _document([["ratio", "notation"], [precise, notation]])
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert str(precise) in block.text
+    assert notation in block.text
+
+
+@pytest.mark.parametrize("dimension", ["A1:A1", "A1:XFD1048576"])
+def test_untrusted_dimension_neither_truncates_nor_expands_rows(dimension):
+    import re
+
+    doc = _document([["name", "city"], ["Alice", "Paris"], ["Bob", "Lyon"]])
+    doc = _edit_xml(doc, lambda xml: re.sub(r'<dimension ref="[^"]+"', f'<dimension ref="{dimension}"', xml))
+    [block] = list(XlsxParser().iter_batches(doc))
+    assert block.metadata["table_row_numbers"] == [2, 3]
+    assert block.metadata["table_columns"] == ["name", "city"]
+    assert "Bob" in block.text
+
+
+def test_sparse_rectangle_rejected_before_reader_allocation(monkeypatch):
+    doc = _document([["id"], ["value"]])
+    doc = _edit_xml(doc, lambda xml: xml.replace('r="2"', 'r="1048576"').replace('r="A2"', 'r="XFD1048576"'))
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="row/column limits"):
+        list(XlsxParser().iter_batches(doc))
+
+
+@pytest.mark.parametrize("reference", ["E1048576", "XFD1", "XFD1048576"])
+def test_far_empty_styled_cells_do_not_reject_the_workbook(reference):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "value"])
+    sheet.append([1, "kept"])
+    sheet[reference].number_format = "0.00"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_range"] == "'Sheet'!A1:B2"
+    assert block.metadata["table_row_numbers"] == [2]
+
+
+def test_content_beyond_the_column_limit_is_still_rejected(monkeypatch):
+    doc = _edit_xml(_document([["id", "value"], [1, "kept"]]), lambda xml: xml.replace('r="B2"', 'r="XFD2"'))
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="row/column limits") as error:
+        list(XlsxParser().iter_batches(doc))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+def test_cell_outside_the_excel_grid_is_invalid():
+    doc = _edit_xml(_document([["id"], ["value"]]), lambda xml: xml.replace('r="A2"', 'r="XFE2"'))
+    with pytest.raises(PipelineError, match="outside the worksheet grid") as error:
+        list(XlsxParser().iter_batches(doc))
+    assert error.value.code == "INVALID_XLSX"
+
+
+def test_whole_row_merge_past_the_column_limit_is_clamped():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "Rapport annuel"
+    sheet.merge_cells("A1:XFD1")
+    sheet.append(["id", "value"])
+    sheet.append([1, "kept"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert any("Rapport annuel" in block.text for block in blocks)
+    assert any(block.metadata.get("table_row_numbers") == [3] for block in blocks)
+
+
+@pytest.mark.parametrize("shape", ["hyperlinks", "cell_runs"])
+def test_preflight_releases_completed_elements_of_any_kind(shape):
+    import tracemalloc
+
+    from core.indexing.parsers.tabular.xlsx_validation import validate_ooxml
+
+    def edit(xml):
+        if shape == "hyperlinks":
+            # Many children under one element that is neither a row nor a cell.
+            links = "".join(
+                f'<hyperlink ref="A{index % 1000 + 1}" display="link {index}"/>' for index in range(200_000)
+            )
+            return xml.replace("<pageMargins", f"<hyperlinks>{links}</hyperlinks><pageMargins")
+        # Many empty rich-text runs inside one inline-string cell.
+        runs = "<r><t></t></r>" * 100_000
+        return xml.replace(
+            '<c r="B2" t="inlineStr"><is><t>kept</t></is></c>',
+            f'<c r="B2" t="inlineStr"><is><t>kept</t>{runs}</is></c>',
+        )
+
+    document = _document([["id", "value"], [1, "kept"]])
+    document = _edit_xml(
+        document,
+        lambda xml: xml.replace('<c r="B2" t="s"><v>2</v></c>', '<c r="B2" t="inlineStr"><is><t>kept</t></is></c>'),
+    )
+    document = _edit_xml(document, edit)
+
+    # Repetitive synthetic XML compresses far beyond real workbooks.
+    limits = XlsxLimits(max_compression_ratio=100_000)
+    tracemalloc.start()
+    try:
+        [info] = validate_ooxml(BytesIO(document.raw_bytes), limits)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert info.tables[0].end_row == 2
+    # Retaining the children would cost tens of MiB here.
+    assert peak < 16 * 1024 * 1024
+    [block] = list(XlsxParser(limits=limits).iter_batches(document))
+    assert "| 1 | kept |" in block.text
+
+
+def test_batch_bytes_bound_accumulation_without_losing_rows():
+    doc = _document([["text"], *[["café & < > | " * 10] for _ in range(7)]])
+    blocks = list(XlsxParser(batch_size=10_000, limits=XlsxLimits(max_batch_bytes=800)).iter_batches(doc))
+    assert len(blocks) > 1
+    assert all(len(block.text.encode()) <= 800 for block in blocks)
+    assert [row for block in blocks for row in block.metadata["table_row_numbers"]] == list(range(2, 9))
+
+
+def test_single_row_larger_than_byte_budget_fails_explicitly():
+    doc = _document([["text"], ["x" * 200]])
+    with pytest.raises(PipelineError, match="batch byte limit"):
+        list(XlsxParser(limits=XlsxLimits(max_batch_bytes=100)).iter_batches(doc))
+
+
+def test_oversized_row_is_rejected_before_markdown_allocation(monkeypatch):
+    original = module.markdown_row
+
+    def bounded_markdown_row(cells):
+        if any(len(cell) >= 200 for cell in cells):
+            pytest.fail("oversized data row reached Markdown rendering")
+        return original(cells)
+
+    monkeypatch.setattr(module, "markdown_row", bounded_markdown_row)
+    with pytest.raises(PipelineError, match="batch byte limit"):
+        list(XlsxParser(limits={"max_batch_bytes": 100}).iter_batches(_document([["text"], ["x" * 200]])))
+
+
+def test_header_names_are_unique_even_with_generated_name_collisions():
+    doc = _document([["column_3", "name", None, "name", "name_2"], [1, 2, 3, 4, 5]])
+    [block] = list(XlsxParser().iter_batches(doc))
+    assert block.metadata["table_columns"] == ["column_3", "name", "column_3_2", "name_3", "name_2"]
+
+
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        (["Name", "Name "], ["Name", "Name_2"]),
+        (["Full\r\nName", "Full\nName"], ["Full\r\nName", "Full\nName_2"]),
+    ],
+)
+def test_rendered_header_names_remain_unique_through_recursive_chunking(headers, expected):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.models.document import ProcessedDocument
+
+    doc = _document([headers, ["Alice", "Bob"]])
+    [block] = list(XlsxParser().iter_batches(doc))
+    processed = ProcessedDocument(document_id=doc.id, text_blocks=[block], metadata={"source": doc.filename})
+
+    chunks = RecursiveSplitter(chunk_size=100, length_function=lambda text: len(text.split())).chunk(
+        processed, partition="p1"
+    )
+
+    assert block.metadata["table_columns"] == expected
+    assert chunks
+    assert all(chunk.metadata["table_columns"] == expected for chunk in chunks)
+
+
+def test_whitespace_only_cells_do_not_become_headers_or_data():
+    doc = _document([["name", "   "], ["Alice", "\t"], [" ", "\t"], ["Bob", "Lyon"]])
+
+    [block] = list(XlsxParser().iter_batches(doc))
+
+    assert block.metadata["table_columns"] == ["name", "column_2"]
+    assert block.metadata["table_row_numbers"] == [2, 4]
+    assert "Alice" in block.text and "Bob" in block.text
+
+
+def test_rejects_case_insensitive_duplicate_sheet_names_before_reader_opens(monkeypatch):
+    doc = _edit_xml(
+        Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes()),
+        lambda xml: xml.replace('name="Projects"', 'name="people"'),
+        target="xl/workbook.xml",
+    )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="sheet names are missing or duplicated"):
+        list(XlsxParser().iter_batches(doc))
+
+
+def test_rejects_duplicate_workbook_relationship_ids_before_reader_opens(monkeypatch):
+    from xml.etree import ElementTree as ET
+
+    def duplicate_identifier(xml):
+        root = ET.fromstring(xml)
+        relationship = next(iter(root))
+        ET.SubElement(root, relationship.tag, relationship.attrib)
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(
+        _document([["name"], ["Alice"]]),
+        duplicate_identifier,
+        target="xl/_rels/workbook.xml.rels",
+    )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="duplicate identifiers"):
+        list(XlsxParser().iter_batches(doc))
+
+
+def test_rejects_two_sheets_pointing_to_the_same_worksheet(monkeypatch):
+    from xml.etree import ElementTree as ET
+
+    def duplicate_target(xml):
+        root = ET.fromstring(xml)
+        worksheets = [node for node in root if node.get("Type", "").endswith("/worksheet")]
+        worksheets[1].set("Target", worksheets[0].get("Target"))
+        return ET.tostring(root, encoding="unicode")
+
+    doc = _edit_xml(
+        Document(filename="people.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes()),
+        duplicate_target,
+        target="xl/_rels/workbook.xml.rels",
+    )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="duplicate target"):
+        list(XlsxParser().iter_batches(doc))
+
+
+def test_early_consumer_close_closes_workbook(monkeypatch):
+    import openpyxl
+
+    original = openpyxl.load_workbook
+    closed = []
+
+    def load(*args, **kwargs):
+        workbook = original(*args, **kwargs)
+        close = workbook.close
+
+        def record_close():
+            close()
+            closed.append(True)
+
+        workbook.close = record_close
+        return workbook
+
+    monkeypatch.setattr(openpyxl, "load_workbook", load)
+    batches = XlsxParser(batch_size=1).iter_batches(_document([["a"], [1], [2]]))
+    next(batches)
+    batches.close()
+    assert closed == [True]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda xml: xml.replace('r="2"', 'r="1000000000"'),
+        lambda xml: xml.replace('r="A2"', 'r="A1"'),
+        lambda xml: xml[:-10],
+    ],
+)
+def test_malformed_coordinates_or_xml_raise_domain_error(edit):
+    doc = _edit_xml(_document([["a"], [1]]), edit)
+    with pytest.raises(PipelineError):
+        list(XlsxParser().iter_batches(doc))
+
+
+def test_mismatched_xml_encoding_is_rejected_before_reader_opens(monkeypatch):
+    doc = _edit_xml(
+        _document([["name"], ["René"]]),
+        lambda xml: '<?xml version="1.0" encoding="UTF-16"?>' + xml,
+    )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+
+    with pytest.raises(PipelineError, match="valid XLSX") as error:
+        list(XlsxParser().iter_batches(doc))
+
+    assert error.value.code == "INVALID_XLSX"
+
+
+def test_header_and_sheet_limits():
+    doc = _document([["long_header"], [1]])
+    with pytest.raises(PipelineError, match="character limit"):
+        list(XlsxParser(limits=XlsxLimits(max_cell_chars=3)).iter_batches(doc))
+    doc = Document(filename="many.xlsx", content_type=DocumentType.XLSX, raw_bytes=_workbook_bytes())
+    with pytest.raises(PipelineError, match="worksheet count"):
+        list(XlsxParser(limits=XlsxLimits(max_sheets=1)).iter_batches(doc))
+
+
+@pytest.mark.parametrize("end_row, should_fail", [(4, False), (5, True)])
+def test_sparse_excel_table_range_respects_traversal_limit_before_reader_opens(end_row, should_fail, monkeypatch):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "name"])
+    sheet.append([1, "Alice"])
+    sheet.add_table(Table(displayName="SparseTable", ref=f"A1:B{end_row}"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    document = Document(filename="sparse.xlsx", raw_bytes=output.getvalue())
+    parser = XlsxParser(limits=XlsxLimits(max_sheet_area=8))
+    if should_fail:
+        monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+        with pytest.raises(PipelineError, match="worksheet rectangle exceeds the traversal limit") as error:
+            list(parser.iter_batches(document))
+        assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+    else:
+        assert any("Alice" in block.text for block in parser.iter_batches(document))
+
+
+@pytest.mark.parametrize(
+    "headers,values",
+    [
+        (["question", "answer"], ["question " * 780, "answer " * 2000]),
+        (["id", "name"], ["identifier " * 2000, "person " * 4000]),
+        (["a|b\nc", "other"], ["value " * 2000, "other " * 2000]),
+    ],
+)
+def test_oversized_xlsx_cells_are_lossless_bounded_and_have_exact_citations(headers, values):
+    from core.chunking.markdown_utils import MDElement, chunk_table
+    from core.indexing.parsers.tabular.base import markdown_row
+
+    [block] = list(XlsxParser().iter_batches(_document([headers, values])))
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=300,
+        length_function=lambda text: len(text.split()),
+    )
+    assert 1 < len(chunks) < 100
+    assert all(len(chunk.content.split()) <= 300 for chunk in chunks)
+    for column_index, value in enumerate(values, start=1):
+        parts = []
+        for chunk in chunks:
+            if chunk.metadata["table_column_indices"] != [column_index]:
+                continue
+            assert chunk.metadata["table_row_numbers"] == [2]
+            letter = chr(64 + column_index)
+            assert chunk.metadata["cell_range"] == f"'Sheet'!{letter}2:{letter}2"
+            body = chunk.content.splitlines()[2].split("|")[1].strip()
+            if " continuation " in body:
+                body = body.split("] ", 1)[1]
+            parts.append(body)
+        expected = markdown_row([value]).split("|")[1].strip()
+        # Markdown rendering trims cell-edge whitespace; internal words survive.
+        assert " ".join(parts).split() == expected.split()
+
+
+def test_xlsx_multirow_chunk_citations_do_not_retain_batch_end():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    [block] = list(XlsxParser().iter_batches(_document([["name"], ["Alice"], ["Bob"], ["Claire"]])))
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata), chunk_size=50, length_function=len
+    )
+    assert len(chunks) == 3
+    assert [chunk.metadata["cell_range"] for chunk in chunks] == [f"'Sheet'!A{i}:A{i}" for i in (2, 3, 4)]
+
+
+def _with_shared_strings(document):
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    strings = []
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            content = source.read(name)
+            root = ET.fromstring(content) if name.endswith((".xml", ".rels")) else None
+            if name == "xl/worksheets/sheet1.xml":
+                for cell in root.findall(".//{*}c"):
+                    if cell.get("t") != "inlineStr":
+                        continue
+                    text = "".join(t.text or "" for t in cell.findall(".//{*}t"))
+                    if text not in strings:
+                        strings.append(text)
+                    cell.remove(cell.find("{*}is"))
+                    cell.set("t", "s")
+                    ET.SubElement(cell, f"{{{namespace}}}v").text = str(strings.index(text))
+            elif name == "[Content_Types].xml":
+                ET.SubElement(
+                    root,
+                    "{http://schemas.openxmlformats.org/package/2006/content-types}Override",
+                    PartName="/xl/sharedStrings.xml",
+                    ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml",
+                )
+            elif name == "xl/_rels/workbook.xml.rels":
+                ET.SubElement(
+                    root,
+                    "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship",
+                    Id="rIdShared",
+                    Target="sharedStrings.xml",
+                    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings",
+                )
+            if root is not None:
+                content = ET.tostring(root)
+            dest.writestr(name, content)
+        root = ET.Element(f"{{{namespace}}}sst")
+        for text in strings:
+            ET.SubElement(ET.SubElement(root, f"{{{namespace}}}si"), f"{{{namespace}}}t").text = text
+        dest.writestr("xl/sharedStrings.xml", ET.tostring(root))
+    return document.model_copy(update={"raw_bytes": output.getvalue()})
+
+
+def test_shared_string_count_is_bounded_before_openpyxl_loads_sheet(monkeypatch):
+    doc = _with_shared_strings(_document([["text"], *[["long shared text " * 10] for _ in range(10)]]))
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="shared string count"):
+        list(XlsxParser(limits=XlsxLimits(max_shared_strings=1)).iter_batches(doc))
+
+
+def test_default_limits_accept_an_export_of_unique_text_columns():
+    """60k rows x 5 columns of unique text is 300k shared strings but only ~11 MB
+    of XML. The default count limit used to reject the whole workbook while the
+    same data indexed as CSV; the byte limit is what bounds OpenPyXL's memory."""
+    import zipfile
+
+    from core.indexing.parsers.tabular.xlsx_validation import _shared_string_count
+
+    entries = 300_000
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED) as archive:
+        with archive.open("xl/sharedStrings.xml", "w") as stream:
+            stream.write(b'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">')
+            for index in range(entries):
+                stream.write(f"<si><t>item {index} lorem ipsum</t></si>".encode())
+            stream.write(b"</sst>")
+    content_types = [
+        {
+            "PartName": "/xl/sharedStrings.xml",
+            "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml",
+        }
+    ]
+    with zipfile.ZipFile(payload) as archive:
+        assert archive.getinfo("xl/sharedStrings.xml").file_size < XlsxLimits().max_shared_strings_bytes
+        assert _shared_string_count(archive, content_types, XlsxLimits()) == entries
+
+
+@pytest.mark.parametrize("rich_text", [False, True])
+def test_oversized_shared_string_is_rejected_before_reader_opens(monkeypatch, rich_text):
+    doc = _with_shared_strings(_document([["name"], ["abcdef"]]))
+    if rich_text:
+        from xml.etree import ElementTree as ET
+
+        def make_rich_text(xml):
+            root = ET.fromstring(xml)
+            entries = [item for item in root.findall("{*}si") if item.findtext("{*}t") == "abcdef"]
+            assert len(entries) == 1
+            item = entries[0]
+            item.remove(item.find("{*}t"))
+            ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            for text in ("abc", "def"):
+                run = ET.SubElement(item, f"{{{ns}}}r")
+                ET.SubElement(run, f"{{{ns}}}t").text = text
+            assert [part.text for part in item.findall("{*}r/{*}t")] == ["abc", "def"]
+            return ET.tostring(root, encoding="unicode")
+
+        doc = _edit_xml(
+            doc,
+            make_rich_text,
+            "xl/sharedStrings.xml",
+        )
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="shared string exceeds the character limit"):
+        list(XlsxParser(limits=XlsxLimits(max_cell_chars=5)).iter_batches(doc))
+
+
+def test_shared_strings_are_preserved():
+    doc = _with_shared_strings(_document([["name", "city"], ["René", "Paris"], ["René", "Paris"]]))
+    [block] = list(XlsxParser().iter_batches(doc))
+    assert block.text.count("René") == 2
+
+
+@pytest.mark.parametrize("strategy", ["recursive", "structured"])
+def test_both_chunkers_preserve_xlsx_identity_across_sheets_and_split_cells(strategy):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.chunking.structured_section import StructuredSectionChunker
+    from core.models.chunk import ChunkType
+    from core.models.document import ProcessedDocument
+
+    workbook = Workbook()
+    workbook.active.title = "First"
+    for sheet in (workbook.active, workbook.create_sheet("Second")):
+        sheet.append(["a|b\nc", "name"])
+        sheet.append([f"{sheet.title} " * 1500, "person " * 2000])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    doc = Document(id="same-file", filename="source.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+    blocks = list(XlsxParser().iter_batches(doc))
+    processed = ProcessedDocument(document_id=doc.id, text_blocks=blocks, metadata={"source": doc.filename})
+
+    def count(text):
+        return len(text.split())
+
+    chunker = (
+        RecursiveSplitter(chunk_size=300, length_function=count)
+        if strategy == "recursive"
+        else StructuredSectionChunker(chunk_size=200, max_tokens=300, min_tokens=0, length_function=count)
+    )
+    chunks = chunker.chunk(processed, partition="p1")
+    assert 4 < len(chunks) < 100
+    assert {c.metadata["table_id"] for c in chunks} == {"sheet:0:table:0", "sheet:1:table:0"}
+    for chunk in chunks:
+        assert chunk.chunk_type == ChunkType.TABLE
+        assert chunk.document_id == doc.id and chunk.partition == "p1"
+        assert chunk.token_count <= 300
+        assert chunk.metadata["table_row_numbers"] == [2]
+        assert chunk.metadata["cell_range"].endswith(("A2:A2", "B2:B2"))
+        assert chunk.metadata["cell_range"].startswith(f"'{chunk.metadata['sheet_name']}'!")
+        assert f"Worksheet: {chunk.metadata['sheet_name']}" in chunk.text
+        assert "XLSX row 2" in chunk.text
+        assert "CSV row" not in chunk.text
+        assert "&#124;" in chunk.text or chunk.metadata["table_columns"] == ["name"]
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+
+
+def test_explicit_header_skips_report_title_and_preserves_physical_citations():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Report"
+    sheet.append(["Annual report"])
+    sheet.merge_cells("A1:B1")
+    sheet.append([])
+    sheet.append(["name", "city"])
+    sheet.append(["Alice", "Paris"])
+    sheet.append([])
+    sheet.append(["René", "Lyon"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    blocks = list(XlsxParser(batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+    assert [b.metadata["table_row_numbers"] for b in blocks] == [[4], [6]]
+    assert all(b.metadata["table_columns"] == ["name", "city"] for b in blocks)
+    assert all(b.metadata["table_header_range"] == "'Report'!A3:B3" for b in blocks)
+    assert blocks[1].metadata["cell_range"] == "'Report'!A6:B6"
+    assert all("Annual report" in b.text for b in blocks)
+    assert all(b.metadata["sheet_context_row_numbers"] == [1] for b in blocks)
+    assert "René" in blocks[1].text
+
+
+def test_merged_range_limit_rejects_workbooks_before_openpyxl_reads_them():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["one", "two", "three", "four"])
+    sheet.merge_cells("A1:B1")
+    sheet.merge_cells("C1:D1")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    with pytest.raises(PipelineError, match="merged-cell count exceeds"):
+        list(XlsxParser(limits=XlsxLimits(max_merged_ranges=1)).iter_batches(Document(raw_bytes=output.getvalue())))
+
+
+def test_merged_range_limit_is_shared_across_worksheets():
+    workbook = Workbook()
+    workbook.active.merge_cells("A1:B1")
+    workbook.create_sheet("Second").merge_cells("A1:B1")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    with pytest.raises(PipelineError, match="merged-cell count exceeds"):
+        list(XlsxParser(limits=XlsxLimits(max_merged_ranges=1)).iter_batches(Document(raw_bytes=output.getvalue())))
+
+
+def test_hidden_merged_header_leaf_falls_back_to_automatic_detection():
+    region = TableRegion(0, 1, 4, 1, 2)
+
+    assert _merged_header_depth(region, {1: [(1, 2)]}, {2}, {2}) == 0
+    assert _merged_header_depth(region, {1: [(1, 2)]}, {2}, set()) == 1
+
+
+@pytest.mark.parametrize("repeated", [False, True])
+def test_auto_header_skips_title_and_preserves_rows(repeated):
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Quarterly report"] * (3 if repeated else 1))
+    ws.append([])
+    ws.append(["id", "name", "summary"])
+    ws.append(["R-1", "Alice", "First"])
+    ws.append(["R-2", "Bob", "Second"])
+    output = BytesIO()
+    wb.save(output)
+    blocks = list(XlsxParser(batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+    assert [b.metadata["table_row_numbers"] for b in blocks] == [[4], [5]]
+    assert all(b.metadata["table_header_row"] == 3 for b in blocks)
+    assert all(b.metadata["table_columns"] == ["id", "name", "summary"] for b in blocks)
+
+
+def test_auto_header_skips_multiple_narrow_preamble_rows():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Regional report", "Quarter 4"])
+    sheet.append(["Prepared by", "Accessibility team"])
+    sheet.append([])
+    sheet.append(["id", "service", "region", "policy"])
+    sheet.append(["R-1", "Screen reader desk", "West", "Contact allowed"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_header_row"] == 4
+    assert block.metadata["table_row_numbers"] == [5]
+    assert block.metadata["sheet_context_row_numbers"] == [1, 2]
+    assert block.metadata["table_columns"] == ["id", "service", "region", "policy"]
+    assert block.metadata["table_header_source"] == "automatic"
+    assert block.metadata["table_header_detection_status"] == "confident"
+    assert block.metadata["table_header_detection"]["reason"] == "separated_wider_text_row"
+
+
+def test_auto_header_survives_a_gap_in_the_first_data_row():
+    document = _document(
+        [
+            ["KPI", "Valeur"],
+            ["CA", 1000],
+            ["Marge", 100],
+            [],
+            ["Nom", "Ville", "Pays", "Note"],
+            ["Alice", None, "FR", 3],
+            ["Bob", "Lyon", "FR", 4],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["Nom", "Ville", "Pays", "Note"]
+    assert block.metadata["table_header_row"] == 5
+    assert block.metadata["table_row_numbers"] == [6, 7]
+    assert block.metadata["sheet_context_row_numbers"] == [1, 2, 3]
+    assert block.metadata["table_header_detection"]["reason"] == "separated_wider_text_row"
+    assert "| Alice |  | FR | 3 |" in block.text
+
+
+def test_auto_header_is_not_promoted_over_mostly_unaligned_rows():
+    document = _document(
+        [
+            ["Rapport", None, None, None],
+            [],
+            ["Nom", "Ville", "Pays", "Note"],
+            ["Alice", None, None, None],
+            ["Bob", None, None, None],
+        ]
+    )
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_header_detection_status"] == "ambiguous"
+
+
+def test_auto_header_narrower_than_its_data_is_ambiguous():
+    document = _document([["Nom", "Age"], ["Alice", 30, "extra"], ["Bob", 31, "x"]])
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_columns"] == ["Nom", "Age", "column_3"]
+    assert block.metadata["table_header_detection_status"] == "ambiguous"
+    assert block.metadata["table_header_detection"]["reason"] == "header_narrower_than_data"
+    assert "outside the header" in block.metadata["table_header_detection"]["note"]
+
+
+def test_auto_header_reports_ambiguous_equal_width_text_rows_without_dropping_data():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    document = _document([["code", "label"], ["A-1", "First"], ["A-2", "Second"]])
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_row_numbers"] == [2, 3]
+    assert block.metadata["table_header_source"] == "automatic"
+    assert block.metadata["table_header_detection_status"] == "ambiguous"
+    assert block.metadata["table_header_detection"]["candidate_rows"] == [1, 2]
+    assert block.metadata["table_header_detection"]["reason"] == "first_nonempty_row_retained"
+    assert "A-1" in block.text
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=8,
+        length_function=lambda text: len(text.split()),
+    )
+    assert chunks
+    assert all(chunk.metadata["table_header_detection_status"] == "ambiguous" for chunk in chunks)
+    assert all(chunk.metadata["table_header_detection"]["selected_row"] == 1 for chunk in chunks)
+
+
+def test_auto_header_reports_confidence_when_text_labels_are_followed_by_typed_data():
+    document = _document([["id", "amount", "active"], ["R-1", 42, True], ["R-2", 7, False]])
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_header_detection"] == {
+        "mode": "automatic",
+        "status": "confident",
+        "selected_row": 1,
+        "candidate_rows": [1],
+        "reason": "text_header_followed_by_typed_data",
+        "note": "A textual first row followed by typed data was selected as the header.",
+    }
+
+
+def test_auto_header_preserves_single_column_and_explicit_title():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["name"])
+    ws.append(["Alice"])
+    ws.append(["Bob"])
+    output = BytesIO()
+    wb.save(output)
+    block = next(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_row_numbers"] == [2, 3]
+
+
+def test_auto_header_scan_is_bounded_and_replays_all_rows():
+    rows = iter([["title"]] + [[""]] * 31 + [["id", "name"], ["1", "Alice"]])
+    selected, replay, detection = module._detect_header(rows, 1024)
+    assert selected == 1
+    assert detection["status"] == "ambiguous"
+    assert len(list(replay)) == 34
+    rows = iter([["title"], ["id", "name"], ["1", "Alice"]])
+    selected, replay, detection = module._detect_header(rows, 1)
+    assert selected == 1
+    assert detection["reason"] == "first_nonempty_row_retained"
+    assert list(replay) == [["title"], ["id", "name"], ["1", "Alice"]]
+
+
+def test_auto_header_keeps_ambiguous_header_and_does_not_skip_numeric_data():
+    original = [["name", "name"], [1, 2], [3, 4]]
+    selected, replay, detection = module._detect_header(iter(original), 1024)
+    assert selected == 1
+    assert detection == {
+        "mode": "automatic",
+        "status": "ambiguous",
+        "selected_row": 1,
+        "candidate_rows": [1],
+        "reason": "first_nonempty_row_retained",
+        "note": (
+            "The first nonempty row was retained conservatively because no structural evidence identified "
+            "a safer header row. Define the range as an Excel Table when this is not intended."
+        ),
+    }
+    assert list(replay) == original
+
+
+def test_auto_header_keeps_equal_width_text_rows_ambiguous():
+    original = [["code", "label"], ["A-1", "First"], ["A-2", "Second"]]
+    selected, replay, detection = module._detect_header(iter(original), 1024)
+    assert selected == 1
+    assert detection["status"] == "ambiguous"
+    assert detection["candidate_rows"] == [1, 2]
+    assert list(replay) == original
+
+
+def test_auto_header_does_not_consume_a_narrow_first_data_record():
+    document = _document([["record"], ["HL-001", "Alice"], ["HL-002", "Bob"]])
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.metadata["table_header_row"] == 1
+    assert block.metadata["table_row_numbers"] == [2, 3]
+    assert "HL-001" in block.text
+
+
+@pytest.mark.parametrize("target", ["xl/theme/theme1.xml", "docProps/core.xml"])
+def test_eager_openpyxl_metadata_is_bounded_before_reader_opens(target, monkeypatch):
+    document = _replace_part(_document([["id"], [1]]), target, bytes(range(251)) * 100)
+
+    def unexpected_reader(*args):
+        pytest.fail("Oversized eager metadata must be rejected before opening the reader")
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", unexpected_reader)
+    with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
+        list(XlsxParser(limits={"max_metadata_bytes": 20_000}).iter_batches(document))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+def test_aggregate_eager_metadata_is_bounded_before_reader_opens(monkeypatch):
+    document = _document([["id"], [1]])
+    document = _replace_part(document, "xl/theme/theme1.xml", bytes(range(251)) * 60)
+    document = _replace_part(document, "docProps/core.xml", bytes(range(250, -1, -1)) * 60)
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
+        list(XlsxParser(limits={"max_metadata_bytes": 30_000}).iter_batches(document))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+def test_worksheet_relationship_metadata_is_bounded_before_reader_opens(monkeypatch):
+    import zipfile
+
+    document = _document([["id"], [1]])
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            dest.writestr(name, source.read(name))
+        dest.writestr("xl/worksheets/_rels/sheet1.xml.rels", bytes(range(251)) * 120)
+    document = document.model_copy(update={"raw_bytes": output.getvalue()})
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
+        list(XlsxParser(limits={"max_metadata_bytes": 30_000}).iter_batches(document))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+def _add_part(document, target, data):
+    import zipfile
+
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(document.raw_bytes)) as source,
+        zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for name in source.namelist():
+            dest.writestr(name, source.read(name))
+        dest.writestr(target, data)
+    return document.model_copy(update={"raw_bytes": output.getvalue()})
+
+
+def _incompressible(size):
+    import random
+
+    return random.Random(0).randbytes(size)
+
+
+def _workbook_with_drawings(*, chartsheet: bool):
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.comments import Comment
+    from openpyxl.drawing.image import Image
+    from PIL import Image as PILImage
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in (["key", "value"], ["a", 1], ["b", 2]):
+        sheet.append(row)
+    sheet["A1"].comment = Comment("note", "author")
+    image = BytesIO()
+    PILImage.new("RGB", (4, 4)).save(image, "PNG")
+    sheet.add_image(Image(image), "D2")
+    chart = BarChart()
+    chart.add_data(Reference(sheet, min_col=2, min_row=1, max_row=3), titles_from_data=True)
+    sheet.add_chart(chart, "F2")
+    if chartsheet:
+        sheet_chart = BarChart()
+        sheet_chart.add_data(Reference(sheet, min_col=2, min_row=1, max_row=3))
+        workbook.create_chartsheet("Chart").add_chart(sheet_chart)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return Document(filename="drawings.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+@pytest.mark.parametrize("chartsheet", [False, True])
+def test_metadata_budget_covers_every_part_the_reader_materializes(chartsheet, monkeypatch):
+    import zipfile
+
+    from core.indexing.parsers.tabular import xlsx_validation
+    from openpyxl import load_workbook
+
+    document = _workbook_with_drawings(chartsheet=chartsheet)
+    opened = set()
+    original_open = zipfile.ZipFile.open
+
+    def recording_open(self, name, *args, **kwargs):
+        opened.add(getattr(name, "filename", name))
+        return original_open(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", recording_open)
+    workbook = load_workbook(BytesIO(document.raw_bytes), read_only=True, data_only=True, keep_links=False)
+    for sheet in workbook.worksheets:
+        if hasattr(sheet, "iter_rows"):
+            list(sheet.iter_rows())
+    workbook.close()
+    monkeypatch.setattr(zipfile.ZipFile, "open", original_open)
+
+    with zipfile.ZipFile(BytesIO(document.raw_bytes)) as archive:
+        names = set(archive.namelist())
+        relationships = list(xlsx_validation.fromstring(archive.read("xl/_rels/workbook.xml.rels")))
+        counted = xlsx_validation._reader_loaded_parts(archive, names, relationships, XlsxLimits())
+    streamed = {name for name in opened if name.startswith("xl/worksheets/sheet") or name == "xl/sharedStrings.xml"}
+    # The reader also probes optional parts that are absent from the package.
+    assert (opened & names) - streamed <= counted
+    # Worksheet comments, drawings and media are never opened in read-only mode.
+    assert not {"xl/comments/comment1.xml", "xl/media/image1.png", "xl/drawings/drawing1.xml"} & counted
+    assert chartsheet == ("xl/chartsheets/sheet1.xml" in counted)
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["xl/pivotCache/pivotCacheRecords1.xml", "xl/comments/comment1.xml", "xl/media/image1.png"],
+)
+def test_large_parts_the_reader_never_opens_do_not_count_as_metadata(target):
+    document = _workbook_with_drawings(chartsheet=False)
+    data = _incompressible(100_000)
+    document = _add_part(document, target, data) if "pivot" in target else _replace_part(document, target, data)
+
+    blocks = list(XlsxParser(limits={"max_metadata_bytes": 30_000}).iter_batches(document))
+
+    assert blocks[0].metadata["table_columns"] == ["key", "value"]
+
+
+def test_chartsheet_parts_count_as_metadata_before_reader_opens(monkeypatch):
+    document = _replace_part(_workbook_with_drawings(chartsheet=True), "xl/charts/chart2.xml", _incompressible(40_000))
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    with pytest.raises(PipelineError, match="metadata exceeds the memory limit") as error:
+        list(XlsxParser(limits={"max_metadata_bytes": 30_000}).iter_batches(document))
+    assert error.value.code == "XLSX_LIMIT_EXCEEDED"
+
+
+@pytest.mark.parametrize("target", ["xl/styles.xml", "docProps/core.xml"])
+def test_malformed_backend_metadata_raises_domain_error(target):
+    document = _replace_part(_document([["id"], [1]]), target, b"<broken")
+
+    with pytest.raises(PipelineError, match="valid XLSX workbook") as error:
+        list(XlsxParser().iter_batches(document))
+    assert error.value.code == "INVALID_XLSX"
+    assert error.value.status_code == 422
+
+
+@pytest.mark.parametrize("strategy", ["recursive", "structured"])
+def test_preamble_is_searchable_in_each_split_chunk(strategy):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.chunking.structured_section import StructuredSectionChunker
+    from core.models.document import ProcessedDocument
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Quarterly | report", "Quarterly | report"])
+    ws.append([])
+    ws.append(["id", "description"])
+    for i in range(8):
+        ws.append([str(i), "Long description " * 100])
+    output = BytesIO()
+    wb.save(output)
+    blocks = list(XlsxParser(batch_size=2).iter_batches(Document(raw_bytes=output.getvalue())))
+    assert all(b.metadata["sheet_context_row_numbers"] == [1] for b in blocks)
+    assert all(b.text.count("Quarterly | report") == 1 for b in blocks)
+    processed = ProcessedDocument(document_id="test", text_blocks=blocks, metadata={"source": "report.xlsx"})
+
+    def count(text):
+        return len(text.split())
+
+    chunker = (
+        RecursiveSplitter(chunk_size=100, length_function=count)
+        if strategy == "recursive"
+        else StructuredSectionChunker(chunk_size=80, max_tokens=100, min_tokens=0, length_function=count)
+    )
+    chunks = chunker.chunk(processed, partition="default")
+    assert len(chunks) > 4
+    for chunk in chunks:
+        assert "Quarterly | report" in chunk.text
+        assert chunk.token_count <= 100
+        assert chunk.metadata["sheet_context_row_numbers"] == [1]
+        assert all(r >= 4 for r in chunk.metadata["table_row_numbers"])
+
+
+def test_blank_preamble_does_not_create_context():
+    blocks = list(XlsxParser().iter_batches(Document(raw_bytes=_workbook_bytes())))
+    assert "sheet_context" not in blocks[0].metadata
+    assert blocks[0].metadata["worksheet_context"] == "\n\nWorksheet: People"
+    assert blocks[0].text.endswith("\n\nWorksheet: People")
+
+
+def test_explicit_preamble_retains_multiple_rows_and_values():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Report"])
+    ws.append(["Period: 2026", "Period: 2026"])
+    ws.append([])
+    ws.append(["id", "value", "unit"])
+    ws.append([1, 2, "EUR"])
+    output = BytesIO()
+    wb.save(output)
+    block = next(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    assert block.metadata["table_header_row"] == 4
+    assert block.metadata["sheet_context_row_numbers"] == [1, 2]
+    assert "Row 1: Report" in block.text
+    assert block.text.count("Period: 2026") == 1
+
+
+def test_excessive_preamble_fails_without_truncation():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Title " * 100])
+    # A merged title spanning the table makes the next row a structural header.
+    ws.merge_cells("A1:B1")
+    ws.append(["id", "value"])
+    ws.append([1, 2])
+    output = BytesIO()
+    wb.save(output)
+    with pytest.raises(PipelineError, match="context exceeds"):
+        list(XlsxParser(limits={"max_batch_bytes": 100}).iter_batches(Document(raw_bytes=output.getvalue())))
+
+
+def test_sheet_context_larger_than_chunk_budget_is_indexed_in_its_own_chunks():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    context = "\n\nWorksheet context (before column headers):\nRow 1: " + "title " * 100
+    table = "| id |\n| --- |\n| 1 |\n| 2 |"
+    element = MDElement(
+        type="table",
+        content=table + context,
+        metadata={
+            "tabular_format": "xlsx",
+            "sheet_name": "Sheet",
+            "sheet_context": context,
+            "sheet_context_row_numbers": [1],
+            "table_columns": ["id"],
+            "csv_columns": ["id"],
+            "table_row_start": 2,
+            "table_row_end": 3,
+            "table_row_numbers": [2, 3],
+            "cell_range": "'Sheet'!A2:A3",
+        },
+    )
+
+    chunks = chunk_table(element, chunk_size=20, length_function=lambda text: len(text.split()))
+
+    context_chunks = [chunk for chunk in chunks if chunk.type == "text"]
+    table_chunks = [chunk for chunk in chunks if chunk.type == "table"]
+    assert len(context_chunks) > 1
+    assert sum(chunk.content.count("title") for chunk in context_chunks) == 100
+    assert all(len(chunk.content.split()) <= 20 for chunk in chunks)
+    assert all(chunk.metadata["xlsx_content_kind"] == "sheet_context" for chunk in context_chunks)
+    assert all("table_columns" not in chunk.metadata and "cell_range" not in chunk.metadata for chunk in context_chunks)
+    assert table_chunks
+    assert all("title" not in chunk.content for chunk in table_chunks)
+    assert all("Worksheet context (row 1) is indexed in separate chunks." in chunk.content for chunk in table_chunks)
+    assert all("sheet_context" not in chunk.metadata for chunk in table_chunks)
+    assert all(chunk.metadata["sheet_context_indexed_separately"] for chunk in table_chunks)
+
+
+@pytest.mark.parametrize("chunker_name", ["recursive_splitter", "structured_section"])
+def test_long_worksheet_note_is_indexed_once_across_table_batches(chunker_name):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.chunking.structured_section import StructuredSectionChunker
+    from core.models.chunk import ChunkType
+    from core.models.document import ProcessedDocument
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "Note: " + " ".join(f"word{index}" for index in range(300))
+    sheet.append([])
+    sheet.append(["id", "label", "amount", "double"])
+    for index in range(300):
+        sheet.append([index, f"line {index}", index * 10, f"=C{index + 4}*2"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    def words(text):
+        return len(text.split())
+
+    chunker = (
+        RecursiveSplitter(chunk_size=200, length_function=words)
+        if chunker_name == "recursive_splitter"
+        else StructuredSectionChunker(chunk_size=200, min_tokens=0, max_tokens=200, length_function=words)
+    )
+    blocks = list(XlsxParser(batch_size=100).iter_batches(Document(raw_bytes=output.getvalue())))
+    assert [block.metadata["table_batch_index"] for block in blocks] == [1, 2, 3]
+    chunks = [
+        chunk
+        for block in blocks
+        for chunk in chunker.chunk(
+            ProcessedDocument(document_id="note", text_blocks=[block], metadata=dict(block.metadata))
+        )
+    ]
+
+    note_chunks = [chunk for chunk in chunks if chunk.metadata.get("xlsx_content_kind") == "sheet_context"]
+    table_chunks = [chunk for chunk in chunks if chunk.metadata.get("xlsx_content_kind") == "table"]
+    assert note_chunks and all(chunk.chunk_type is ChunkType.TEXT for chunk in note_chunks)
+    assert all(chunk.metadata["table_batch_index"] == 1 for chunk in note_chunks)
+    assert sum(chunk.text.count("word299") for chunk in chunks) == 1
+    assert all("Worksheet: Sheet" in chunk.text for chunk in note_chunks)
+    assert all(chunk.chunk_type is ChunkType.TABLE for chunk in table_chunks)
+    rows = sorted(row for chunk in table_chunks for row in chunk.metadata["table_row_numbers"])
+    assert set(rows) == set(range(4, 304))
+    # Each chunk keeps its own scoped metadata; the block's is not merged back.
+    table_only = ("table_columns", "csv_columns", "table_row_numbers", "formula_groups", "cell_range")
+    assert all(not set(table_only) & set(chunk.metadata) for chunk in note_chunks)
+    assert all("sheet_context" not in chunk.metadata for chunk in table_chunks)
+    assert all(chunk.metadata["sheet_context_indexed_separately"] for chunk in table_chunks)
+    for chunk in table_chunks:
+        rows_in_chunk = set(chunk.metadata["table_row_numbers"])
+        for group in chunk.metadata["formula_groups"]:
+            assert rows_in_chunk & set(range(group["start_row"], group["end_row"] + 1))
+
+
+def test_xlsx_context_and_separator_must_leave_a_positive_table_budget():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    context = "\n\nWorksheet: Sheet"
+    table = "| name |\n| --- |\n| Alice |"
+    element = MDElement(
+        type="table",
+        content=table + context,
+        metadata={
+            "tabular_format": "xlsx",
+            "worksheet_context": context,
+            "sheet_name": "Sheet",
+            "table_columns": ["name"],
+            "csv_columns": ["name"],
+            "table_row_start": 2,
+            "table_row_end": 2,
+            "table_row_numbers": [2],
+        },
+    )
+    with pytest.raises(PipelineError, match="sheet context exceeds chunk token budget"):
+        chunk_table(element, chunk_size=len(context) + 1, length_function=len)
+
+
+def test_xlsx_continuation_restores_context_to_expanded_chunk_budget():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    column = " ".join(f"header{number}" for number in range(12))
+    value = " ".join(f"value{number}" for number in range(4))
+    context = "\n\nWorksheet context:\nQuarterly report"
+    table = f"| {column} |\n| --- |\n| {value} |"
+    element = MDElement(
+        type="table",
+        content=table + context,
+        metadata={
+            "tabular_format": "xlsx",
+            "sheet_context": context,
+            "sheet_name": "Sheet",
+            "table_columns": [column],
+            "csv_columns": [column],
+            "table_row_start": 2,
+            "table_row_end": 2,
+            "table_row_numbers": [2],
+        },
+    )
+
+    def count_words(text):
+        return len(text.split())
+
+    chunks = chunk_table(element, chunk_size=10, length_function=count_words)
+
+    assert len(chunks) == 4
+    assert all(chunk.content.endswith(context) for chunk in chunks)
+    assert all(count_words(chunk.content) > 10 for chunk in chunks)
+    assert all(
+        count_words(chunk.content)
+        <= chunk.metadata["csv_effective_chunk_size"] + count_words("\n") + count_words(context)
+        for chunk in chunks
+    )
+
+
+@pytest.mark.parametrize("state", ["", "Visible", "veryhidden", "invalid"])
+def test_invalid_sheet_visibility_is_rejected_before_reader_opens(state, monkeypatch):
+    document = _edit_xml(
+        _document([["id", "value"], [1, "kept"]]),
+        lambda xml: xml.replace('state="visible"', f'state="{state}"'),
+        "xl/workbook.xml",
+    )
+
+    def unexpected_reader(*args):
+        pytest.fail("Invalid workbook metadata must be rejected before opening the reader")
+
+    monkeypatch.setattr(module, "_openpyxl_sheets", unexpected_reader)
+    with pytest.raises(PipelineError, match="invalid visibility state") as error:
+        list(XlsxParser().iter_batches(document))
+    assert error.value.code == "INVALID_XLSX"
+
+
+def test_very_hidden_sheet_is_excluded_and_false_zero_rows_keep_exact_citations():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "O'Brien directory"
+    sheet.append(["count", "active"])
+    sheet.append([0, False])
+    sheet.append([])
+    sheet.append([1, True])
+    hidden = workbook.create_sheet("Private")
+    hidden.sheet_state = "veryHidden"
+    hidden.append(["secret"])
+    hidden.append(["must not be indexed"])
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    blocks = list(XlsxParser(batch_size=1).iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert len(blocks) == 2
+    assert "| 0 | false |" in blocks[0].text
+    assert "| 1 | true |" in blocks[1].text
+    assert [block.metadata["table_row_numbers"] for block in blocks] == [[2], [4]]
+    assert [block.metadata["cell_range"] for block in blocks] == [
+        "'O''Brien directory'!A2:B2",
+        "'O''Brien directory'!A4:B4",
+    ]
+    assert all(block.metadata["hidden_sheets_skipped"] == 1 for block in blocks)
+    assert all("must not be indexed" not in block.text for block in blocks)
+
+
+def test_hidden_rows_and_columns_are_not_indexed():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "internal_note", "public_value"])
+    sheet.append(["R-1", "row secret", "hidden row value"])
+    sheet.append(["R-2", "column secret", "visible value"])
+    sheet.row_dimensions[2].hidden = True
+    sheet.column_dimensions["B"].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_columns"] == ["id", "public_value"]
+    assert block.metadata["table_row_numbers"] == [3]
+    assert "visible value" in block.text
+    assert "row secret" not in block.text
+    assert "hidden row value" not in block.text
+    assert "internal_note" not in block.text
+    assert "column secret" not in block.text
+    assert block.metadata["hidden_rows_skipped"] == 1
+    assert "Hidden worksheet rows excluded: 1 (hidden or collapsed rows)." in block.text
+    assert block.metadata["filtered_rows_included"] == 0
+    assert block.metadata["hidden_columns_skipped"] == 1
+    assert block.metadata["table_worksheet_column_indices"] == [1, 3]
+
+
+def _filtered_ticket_sheet(*, filter_mode: bool = True):
+    """20 tickets saved with the filter set to Status = Open: the closed ones are hidden."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "status"])
+    for number in range(1, 21):
+        sheet.append([f"T-{number}", "open" if number % 4 == 0 else "closed"])
+    sheet.auto_filter.ref = "A1:B21"
+    sheet.sheet_properties.filterMode = filter_mode
+    for row in range(2, 22):
+        if sheet.cell(row, 2).value == "closed":
+            sheet.row_dimensions[row].hidden = True
+    return workbook, sheet
+
+
+def test_rows_hidden_by_an_active_filter_are_indexed():
+    """Reported on #1246: a sheet saved with a filter applied indexed only the rows
+    the filter showed, so counting closed tickets gave a confident wrong answer."""
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook, _ = _filtered_ticket_sheet()
+    [block] = list(XlsxParser().iter_batches(_xlsx(workbook)))
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=1000,
+        length_function=len,
+    )
+
+    assert block.metadata["table_row_numbers"] == list(range(2, 22))
+    assert block.text.count("| closed |") == 15
+    assert block.metadata["filtered_rows_included"] == 15
+    assert block.metadata["hidden_rows_skipped"] == 0
+    assert all("Rows hidden by an active filter are included: 15." in chunk.content for chunk in chunks)
+
+
+def test_rows_hidden_by_hand_on_a_filtered_sheet_stay_excluded():
+    workbook, sheet = _filtered_ticket_sheet()
+    sheet.append(["T-99", "draft"])  # row 22, outside the filter range A1:B21
+    sheet.row_dimensions[22].hidden = True
+
+    [block] = list(XlsxParser().iter_batches(_xlsx(workbook)))
+
+    assert "T-99" not in block.text
+    assert block.metadata["filtered_rows_included"] == 15
+    assert block.metadata["hidden_rows_skipped"] == 1
+    assert "Hidden worksheet rows excluded: 1 (hidden or collapsed rows)." in block.text
+
+
+def test_hidden_rows_under_a_filter_excel_does_not_mark_active_stay_excluded():
+    """Without ``filterMode`` the file does not say a filter hid them; do not guess."""
+    workbook, _ = _filtered_ticket_sheet(filter_mode=False)
+
+    [block] = list(XlsxParser().iter_batches(_xlsx(workbook)))
+
+    assert block.text.count("| closed |") == 0
+    assert block.metadata["filtered_rows_included"] == 0
+    assert block.metadata["hidden_rows_skipped"] == 15
+
+
+def test_rows_hidden_by_an_excel_table_filter_are_indexed():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "status"])
+    for number in range(1, 11):
+        sheet.append([f"T-{number}", "open" if number % 2 else "closed"])
+    table = Table(displayName="Tickets", ref="A1:B11")
+    sheet.add_table(table)
+    sheet.sheet_properties.filterMode = True
+    for row in range(2, 12):
+        if sheet.cell(row, 2).value == "closed":
+            sheet.row_dimensions[row].hidden = True
+    document = _xlsx(workbook)
+    import zipfile
+
+    with zipfile.ZipFile(BytesIO(document.raw_bytes)) as archive:
+        table_xml = next(archive.read(name) for name in archive.namelist() if name.startswith("xl/tables/"))
+    assert b"<autoFilter" in table_xml  # the table's own filter, not the sheet's
+
+    [block] = list(XlsxParser().iter_batches(document))
+
+    assert block.text.count("| closed |") == 5
+    assert block.metadata["filtered_rows_included"] == 5
+
+
+def test_hidden_columns_keep_physical_cell_coordinates_after_chunking():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Report"
+    sheet.append(["id", "secret", "description"])
+    sheet.append(["R-1", "classified", "public"])
+    sheet.column_dimensions["B"].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=200,
+        length_function=lambda text: len(text.split()),
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].metadata["cell_range"] == "'Report'!A2:C2"
+    assert chunks[0].metadata["table_worksheet_column_indices"] == [1, 3]
+    assert "classified" not in chunks[0].content
+
+
+def test_hidden_unused_columns_beyond_parser_limit_do_not_reject_workbook():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id"])
+    sheet.append(["R-1"])
+    sheet.column_dimensions.group("B", "XFD", hidden=True)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert block.metadata["table_columns"] == ["id"]
+    assert block.metadata["table_row_numbers"] == [2]
+    assert block.metadata["hidden_columns_skipped"] == 4095
+
+
+def test_preserves_safe_number_formats_as_compact_context_without_replacing_raw_values():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Formatted"
+    sheet.append(["amount", "rate", "rounded", "measured", "reported_on"])
+    sheet.append([1234.5, 0.08125, 12.345, 0.000012345, date(2026, 11, 3)])
+    sheet["A2"].number_format = "$#,##0.00"
+    sheet["B2"].number_format = "0.00%"
+    sheet["C2"].number_format = "0.0"
+    sheet["D2"].number_format = "0.00E+00"
+    sheet["E2"].number_format = "yyyy-mm-dd"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert "| 1234.5 | 0.08125 | 12.345 | 1.2345e-05 | 2026-11-03 |" in block.text
+    assert "Display format context (raw values remain indexed):" in block.text
+    groups = {group["target_header"]: group for group in block.metadata["number_format_groups"]}
+    assert groups["amount"]["kind"] == "currency"
+    assert groups["amount"]["format_code"] == "$#,##0.00"
+    assert groups["amount"]["display_example"] == "$1,234.50"
+    assert groups["amount"]["example_raw"] == "1234.5"
+    assert groups["rate"]["display_example"] == "8.13%"
+    assert groups["rounded"]["display_example"] == "12.3"
+    assert groups["measured"]["display_example"] == "1.23E-05"
+    assert groups["reported_on"]["kind"] == "date"
+    assert groups["reported_on"]["display_example"] == "2026-11-03"
+
+
+def test_does_not_interpret_conditional_text_or_custom_unit_formats():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["conditional", "unit", "plain"])
+    sheet.append([-2.5, 12.5, 7])
+    sheet["A2"].number_format = "[Red][<0]0.00;0.00"
+    sheet["B2"].number_format = '0.0 "kg"'
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    assert "number_format_groups" not in block.metadata
+    assert "Display format context" not in block.text
+    assert "| -2.5 | 12.5 | 7 |" in block.text
+
+
+def test_normalizes_safe_currency_locale_and_rejects_unknown_bracket_payloads():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["localized_amount", "untrusted_format"])
+    sheet.append([99.5, 12.5])
+    sheet["A2"].number_format = "[$€-fr-FR] #,##0.00"
+    sheet["B2"].number_format = "[$instruction-evil]0.00"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    [group] = block.metadata["number_format_groups"]
+    assert group["target_header"] == "localized_amount"
+    assert group["kind"] == "currency"
+    assert group["currency_symbol"] == "€"
+    assert group["format_code"] == "#,##0.00"
+    assert group["display_example"] == "€ 99.50"
+    assert "instruction" not in block.text
+
+
+def _wide_formatted_chunks(number_format, columns=30, rows=300):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.models.document import ProcessedDocument
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append([f"col{column}" for column in range(columns)])
+    for row in range(rows):
+        sheet.append([(row + 1) * (column + 1) * 1.5 for column in range(columns)])
+        if number_format:
+            for column in range(columns):
+                sheet.cell(row + 2, column + 1).number_format = number_format
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    def words(text):
+        return len(text.split())
+
+    chunker = RecursiveSplitter(chunk_size=512, chunk_overlap_rate=0, length_function=words)
+    return [
+        chunk
+        for block in XlsxParser().iter_batches(Document(raw_bytes=output.getvalue()))
+        for chunk in chunker.chunk(
+            ProcessedDocument(document_id="wide", text_blocks=[block], metadata=dict(block.metadata))
+        )
+    ], words
+
+
+def test_plain_number_formats_do_not_multiply_wide_table_chunks():
+    general, _ = _wide_formatted_chunks(None)
+    formatted, _ = _wide_formatted_chunks("#,##0.00")
+
+    assert len(formatted) == len(general)
+    # Rows stay whole: no chunk is a column group of a row.
+    assert all(len(chunk.metadata["table_columns"]) == 30 for chunk in formatted)
+    assert all("Display format context" not in chunk.text for chunk in formatted)
+    # The display groups remain available in metadata.
+    assert all(chunk.metadata["number_format_groups"] for chunk in formatted)
+
+
+def test_percentage_context_is_bounded_to_a_share_of_each_chunk():
+    general, words = _wide_formatted_chunks(None)
+    percentages, _ = _wide_formatted_chunks("0.00%")
+
+    assert len(percentages) < 2 * len(general)
+    assert all(len(chunk.metadata["table_columns"]) == 30 for chunk in percentages)
+    for chunk in percentages:
+        context = chunk.metadata.get("number_format_context", "")
+        assert "percentage format" in context
+        assert words(context) <= 512 * 0.2
+        assert chunk.token_count <= 512
+    # Not every column's line fits the share; the rest is kept in metadata.
+    assert all(chunk.metadata.get("supplemental_context_truncated") for chunk in percentages)
+    assert all(len(chunk.metadata["number_format_groups"]) == 30 for chunk in percentages)
+
+
+def test_number_format_groups_with_many_row_ranges_stay_exact():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "rate"])
+    for row in range(2, 102):
+        sheet.append([row, 0.5])
+        if row % 2 == 0:
+            sheet.cell(row, 2).number_format = "0.0%"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+
+    groups = block.metadata["number_format_groups"]
+    # 50 separate formatted rows: split into groups of at most 32 exact ranges.
+    assert [len(group["row_ranges"]) for group in groups] == [32, 18]
+    assert all("row_ranges_truncated" not in group for group in groups)
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=16,
+        length_function=lambda text: len(text.split()),
+    )
+    for chunk in chunks:
+        formatted = {row for row in chunk.metadata["table_row_numbers"] if row % 2 == 0}
+        has_rate = "rate" in chunk.metadata["table_columns"]
+        assert bool(chunk.metadata.get("number_format_groups")) == (has_rate and bool(formatted))
+    assert any(
+        "rate" in chunk.metadata["table_columns"] and not chunk.metadata.get("number_format_groups") for chunk in chunks
+    )
+
+
+def test_number_format_context_is_scoped_to_chunk_rows_and_columns():
+    from core.chunking.markdown_utils import MDElement, chunk_table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Mixed"
+    sheet.append(["id", "rate", "amount"])
+    sheet.append(["A", 0.125, 10])
+    sheet.append(["B", 5000, 20])
+    sheet["B2"].number_format = "0.0%"
+    sheet["B3"].number_format = "0.0E+00"
+    for coordinate in ("C2", "C3"):
+        sheet[coordinate].number_format = "$0.00"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    chunks = chunk_table(
+        MDElement(type="table", content=block.text, metadata=block.metadata),
+        chunk_size=55,
+        length_function=lambda text: len(text.split()),
+    )
+
+    assert chunks
+    # Rows first: display context no longer forces the table into column groups.
+    assert all(chunk.metadata["table_columns"] == ["id", "rate", "amount"] for chunk in chunks)
+    for chunk in chunks:
+        # Only percentages and currencies are stated in text; the rest stays in metadata.
+        assert "scientific format" not in chunk.content
+        if 3 in chunk.metadata["table_row_numbers"]:
+            assert any(group["kind"] == "scientific" for group in chunk.metadata["number_format_groups"])
+        selected_columns = set(chunk.metadata["table_columns"])
+        formats = chunk.metadata.get("number_format_groups", [])
+        assert all(group["target_header"] in selected_columns for group in formats)
+        context = chunk.metadata.get("number_format_context", "")
+        if "rate" not in selected_columns:
+            assert "percentage format" not in context
+        if "amount" not in selected_columns:
+            assert "currency format" not in context
+        row_numbers = chunk.metadata["table_row_numbers"]
+        if row_numbers == [2]:
+            assert "scientific format" not in context
+        if row_numbers == [3]:
+            assert "percentage format" not in context
+
+
+def _side_by_side_workbook() -> Document:
+    """Three side-by-side tables on one sheet, with what a shared scan must keep
+    per table: formulas, a vertically merged row header and hidden rows."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Blocks"
+    for column, header in enumerate(["Group", "Month", "Sales"], start=1):
+        sheet.cell(1, column, header)
+    for column, header in enumerate(["Item", "Qty", "Double"], start=6):
+        sheet.cell(1, column, header)
+    for column, header in enumerate(["City", "Pop"], start=11):
+        sheet.cell(1, column, header)
+    for row in range(2, 62):
+        sheet.cell(row, 2, f"m{row}")
+        sheet.cell(row, 3, row * 10)
+        sheet.cell(row, 6, f"item {row}")
+        sheet.cell(row, 7, row)
+        sheet.cell(row, 8, f"=G{row}*2")
+        sheet.cell(row, 11, f"city {row}")
+        sheet.cell(row, 12, row * 1000)
+    for top in range(2, 62, 10):
+        sheet.cell(top, 1, f"group {top}")
+        sheet.merge_cells(start_row=top, start_column=1, end_row=top + 9, end_column=1)
+    for row in (15, 16, 40):
+        sheet.row_dimensions[row].hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return Document(filename="blocks.xlsx", content_type=DocumentType.XLSX, raw_bytes=output.getvalue())
+
+
+def _batch_signature(blocks):
+    return [(block.text, block.metadata) for block in blocks]
+
+
+def test_side_by_side_tables_are_read_with_one_scan_per_reader(monkeypatch):
+    """Read-only OpenPyXL parses whole rows whatever column window is asked for,
+    so a scan per table parsed the sheet once per table (twice with formulas)."""
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+    document = _side_by_side_workbook()
+    scans = []
+    original_iter_rows = ReadOnlyWorksheet.iter_rows
+
+    def counting_iter_rows(self, *args, **kwargs):
+        scans.append((self.title, kwargs.get("min_col"), kwargs.get("max_col")))
+        return original_iter_rows(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "iter_rows", counting_iter_rows)
+    blocks = list(XlsxParser().iter_batches(document))
+
+    assert len({block.metadata["table_id"] for block in blocks}) == 3
+    # One value scan and one formula scan over the tables' bounding box.
+    assert scans == [("Blocks", 1, 12), ("Blocks", 1, 12)]
+
+
+def test_shared_scan_output_matches_one_scan_per_table():
+    """A spool budget of one byte hands every waiting table back to its own scan,
+    which is how each table was read before; the rows must not change."""
+    document = _side_by_side_workbook()
+    shared = list(XlsxParser().iter_batches(document))
+    per_table = list(XlsxParser(limits=XlsxLimits(max_spool_bytes=1)).iter_batches(document))
+
+    assert _batch_signature(shared) == _batch_signature(per_table)
+    by_table = {block.metadata["table_id"]: block for block in shared}
+    # Per-table state survived the shared scan: hidden rows split the formula
+    # groups, and the merged row header is repeated through its rows.
+    formulas = by_table["sheet:0:table:1"].metadata["formula_groups"]
+    assert [group["range"] for group in formulas] == ["H2:H14", "H17:H39", "H41:H61"]
+    assert "| group 12 | m13 | 130 |" in by_table["sheet:0:table:0"].text
+    assert {15, 16, 40}.isdisjoint(by_table["sheet:0:table:2"].metadata["table_row_numbers"])
+
+
+def test_a_sheet_outside_the_traversal_budget_is_rejected_before_merging_blocks(monkeypatch):
+    """A wide first row followed by many one-cell blocks passes the row and cell
+    limits, but each column-band merge costs the table width: the area limit
+    must stop the scan before that work adds up, not after it."""
+    from core.indexing.parsers.tabular import xlsx_validation
+
+    merges = 0
+    original_fold = xlsx_validation._fold_column_band
+
+    def counting_fold(*args, **kwargs):
+        nonlocal merges
+        merges += 1
+        return original_fold(*args, **kwargs)
+
+    monkeypatch.setattr(xlsx_validation, "_fold_column_band", counting_fold)
+    monkeypatch.setattr(module, "_openpyxl_sheets", lambda *_: pytest.fail("reader must not open"))
+    workbook = Workbook()
+    sheet = workbook.active
+    for column in range(1, 41):
+        sheet.cell(1, column, f"h{column}")
+    for row in range(3, 2001, 2):
+        sheet.cell(row, 1 + row % 4 // 2, f"v{row}")
+
+    with pytest.raises(PipelineError, match="traversal limit"):
+        list(XlsxParser(limits={"max_tables": 2, "max_sheet_area": 1000}).iter_batches(_xlsx(workbook)))
+    assert merges < 30  # stopped near row 25 (25 x 40 > 1000), not after ~1,000 blocks

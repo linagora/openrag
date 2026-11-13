@@ -214,13 +214,16 @@ def test_recycling_a_slot_kills_what_its_child_started():
                 pass
 
 
-def _initialized_marker_worker(monkeypatch, pdftext_workers: int):
+def _initialized_marker_worker(monkeypatch, pdftext_workers: int, log_format: str = "text"):
     """A MarkerWorker through its real __init__, minus the models and pools."""
     import core.config
     import core.utils.logging
 
     log = _RecordingLogger()
-    config = SimpleNamespace(loader=SimpleNamespace(marker_max_processes=1, marker_pdftext_workers=pdftext_workers))
+    config = SimpleNamespace(
+        loader=SimpleNamespace(marker_max_processes=1, marker_pdftext_workers=pdftext_workers),
+        verbose=SimpleNamespace(format=log_format),
+    )
     monkeypatch.setattr(core.config, "load_config", lambda: config)
     monkeypatch.setattr(core.utils.logging, "get_logger", lambda: log)
     monkeypatch.setenv("RAY_ADDRESS", "")
@@ -245,6 +248,28 @@ def test_marker_runs_pdftext_with_one_worker_whatever_is_configured(monkeypatch,
             ("warning", "MARKER_PDFTEXT_WORKERS=4 is ignored: Marker runs pdftext with one worker. Remove the setting.")
         ]
     )
+
+
+@pytest.mark.parametrize(("env", "disabled"), [(None, False), ("", False), ("1", True), ("0", True)])
+def test_marker_bars_follow_tqdm_disable(monkeypatch, env, disabled):
+    """Surya passes disable= explicitly, which beats TQDM_DISABLE, so the actor
+    maps it to Marker's own switch with tqdm's reading: non-empty = off (#1297)."""
+    if env is None:
+        monkeypatch.delenv("TQDM_DISABLE", raising=False)
+    else:
+        monkeypatch.setenv("TQDM_DISABLE", env)
+    worker, _ = _initialized_marker_worker(monkeypatch, 1)
+
+    assert worker.converter_config["disable_tqdm"] is disabled
+
+
+def test_marker_bars_are_off_with_json_logs_without_tqdm_disable(monkeypatch):
+    """A deployment that sets LOG_FORMAT=json itself, without TQDM_DISABLE,
+    still keeps Marker's bars out of the JSON stream (#1297)."""
+    monkeypatch.delenv("TQDM_DISABLE", raising=False)
+    worker, _ = _initialized_marker_worker(monkeypatch, 1, log_format="json")
+
+    assert worker.converter_config["disable_tqdm"] is True
 
 
 def test_pdftext_with_one_worker_starts_no_process(monkeypatch, tmp_path):
@@ -1207,3 +1232,92 @@ async def test_other_failures_cross_both_hops_unchanged(monkeypatch):
         await loader._convert_pdf("/tmp/doc.pdf")
 
     assert raised.value is produced
+
+
+# ---------------------------------------------------------------------------
+# MarkerLoader.parse keeps the event loop free while building image blocks
+# ---------------------------------------------------------------------------
+
+
+async def test_parse_splits_the_pages_off_the_event_loop(monkeypatch):
+    """Post-processing a long PDF must not starve other coroutines (worker lease
+    renewals) running on the same loop."""
+    from core.models.document import Document, DocumentType
+
+    loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
+
+    ticks = 0
+    # Ticks seen when the split starts and ends: only that span counts, not the
+    # temporary-file write around the dispatch.
+    window: list[int] = []
+
+    async def _fake_dispatch(path):
+        return "<page1>{1}[PAGE_SEP]text", {"_page_1_Picture_0.png": object()}
+
+    def _slow_split(markdown):
+        window.append(ticks)
+        time.sleep(0.5)
+        window.append(ticks)
+        return [(1, "text")]
+
+    monkeypatch.setattr(loader, "_dispatch", _fake_dispatch)
+    monkeypatch.setattr(loader, "_split_pages", _slow_split)
+
+    document = Document(id="d", filename="f.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF")
+
+    async def _ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    task = asyncio.create_task(_ticker())
+    try:
+        await loader.parse(document)
+    finally:
+        task.cancel()
+
+    during_split = window[1] - window[0]
+    assert during_split >= 20, f"event loop was blocked while splitting the pages (ticks={during_split})"
+
+
+async def test_parse_hands_the_figures_over_unencoded(monkeypatch):
+    """Only the caption stage reads the bytes, and a partition may not caption:
+    the figures stay decoded for it to encode if it runs."""
+    from core.models.document import Document, DocumentType
+
+    loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
+    # Not images at all: encoding either of them would fail and drop its block.
+    figures = {"_page_0_Picture_0.png": object(), "_page_2_Figure_1.jpeg": object()}
+
+    async def _fake_dispatch(path):
+        return "<page1>{1}[PAGE_SEP]text", figures
+
+    monkeypatch.setattr(loader, "_dispatch", _fake_dispatch)
+
+    document = Document(id="d", filename="f.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF")
+    parsed = await loader.parse(document)
+
+    assert [image.pil_image for image in parsed.images] == list(figures.values())
+    assert all(image.image_bytes == b"" for image in parsed.images)
+    assert [image.metadata["markdown_ref"] for image in parsed.images] == [f"![]({key})" for key in figures]
+    assert [image.page_number for image in parsed.images] == [1, 3]
+
+
+def test_a_page_separator_too_long_to_be_a_page_stays_text():
+    """int() refuses more than 4,300 digits, and the PDF's own text can hold the
+    separator's shape: such a number used to fail the file."""
+    forged = "{" + "9" * 5_000 + "}[PAGE_SEP]"
+    pages = marker_workers.MarkerLoader._split_pages(
+        "[PAGE_SEP]one " + forged + " still one{1}[PAGE_SEP]two{2}[PAGE_SEP]"
+    )
+
+    assert [page for page, _ in pages] == [1, 2]
+    assert forged in pages[0][1]
+
+
+def test_a_page_separator_has_at_most_nine_digits():
+    pages = marker_workers.MarkerLoader._split_pages("[PAGE_SEP]a{999999999}[PAGE_SEP]b{1000000000}[PAGE_SEP]")
+
+    assert [page for page, _ in pages] == [999_999_999, 1_000_000_000]
+    assert "{1000000000}[PAGE_SEP]" in pages[1][1]
