@@ -424,14 +424,18 @@ describe("DocumentListPage", () => {
     ));
   });
 
-  it("clears document dates when an upload is cancelled", async () => {
+  it.each(["Cancel", "Close", "Escape"])("clears document dates when dismissed with %s", async (dismissal) => {
     renderDocuments(["/documents?partition=docs&upload=1"]);
     const file = new File(["report"], "report.txt");
     await userEvent.upload(await screen.findByLabelText("Files"), file);
     fireEvent.change(screen.getByLabelText("Document date for report.txt (optional)"), {
       target: { value: "2026-01-01" },
     });
-    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    if (dismissal === "Escape") {
+      await userEvent.keyboard("{Escape}");
+    } else {
+      await userEvent.click(screen.getByRole("button", { name: dismissal }));
+    }
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
     expect(screen.queryByLabelText("Document date for report.txt (optional)")).toBeNull();
     await userEvent.upload(screen.getByLabelText("Files"), file);

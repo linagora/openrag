@@ -488,7 +488,16 @@ export default function DocumentListPage() {
         description="Files indexed in a partition"
         actions={
           writable && selected ? (
-            <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
+            <Dialog
+              open={uploadOpen}
+              onOpenChange={(open) => {
+                setUploadOpen(open);
+                if (!open && !uploading) {
+                  setFiles([]);
+                  if (fileRef.current) fileRef.current.value = "";
+                }
+              }}
+            >
               {uploadPausedReason ? (
                 <TooltipProvider>
                   <Tooltip>
