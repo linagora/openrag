@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -358,6 +358,97 @@ describe("DocumentListPage", () => {
     act(() => action.onClick({} as ReactMouseEvent<HTMLButtonElement>));
 
     expect(screen.getByTestId("location").textContent).toBe("/jobs");
+  });
+
+  it("sends each selected document date as midnight UTC and leaves unknown dates absent", async () => {
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
+    renderDocuments(["/documents?partition=docs&upload=1"]);
+    const files = [
+      new File(["first"], "first.txt", { type: "text/plain", lastModified: 1700000000000 }),
+      new File(["second"], "second.txt", { type: "text/plain", lastModified: 1700000000000 }),
+      new File(["unknown"], "unknown.txt", { type: "text/plain", lastModified: 1700000000000 }),
+    ];
+    await userEvent.upload(await screen.findByLabelText("Files"), files);
+    fireEvent.change(screen.getByLabelText("Document date for first.txt (optional)"), {
+      target: { value: "2026-03-08" },
+    });
+    fireEvent.change(screen.getByLabelText("Document date for second.txt (optional)"), {
+      target: { value: "2024-02-29" },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(3));
+    expect(uploadFileMock).toHaveBeenNthCalledWith(1, "docs", "new-file-id", files[0], {
+      filename: "first.txt", mimetype: "text/plain", created_at: "2026-03-08T00:00:00Z",
+    });
+    expect(uploadFileMock).toHaveBeenNthCalledWith(2, "docs", "new-file-id", files[1], {
+      filename: "second.txt", mimetype: "text/plain", created_at: "2024-02-29T00:00:00Z",
+    });
+    expect(uploadFileMock).toHaveBeenNthCalledWith(3, "docs", "new-file-id", files[2], {
+      filename: "unknown.txt", mimetype: "text/plain",
+    });
+  });
+
+  it("omits a document date that the uploader clears", async () => {
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
+    renderDocuments(["/documents?partition=docs&upload=1"]);
+    const file = new File(["report"], "report.txt");
+    await userEvent.upload(await screen.findByLabelText("Files"), file);
+    const date = screen.getByLabelText("Document date for report.txt (optional)");
+    fireEvent.change(date, { target: { value: "2026-01-01" } });
+    fireEvent.change(date, { target: { value: "" } });
+
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledWith(
+      "docs", "new-file-id", file, { filename: "report.txt" },
+    ));
+  });
+
+  it("does not carry dates to replacement files with the same name", async () => {
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
+    renderDocuments(["/documents?partition=docs&upload=1"]);
+    await userEvent.upload(await screen.findByLabelText("Files"), new File(["old"], "report.txt"));
+    fireEvent.change(screen.getByLabelText("Document date for report.txt (optional)"), {
+      target: { value: "2026-01-01" },
+    });
+    const replacement = new File(["replacement"], "report.txt");
+    await userEvent.upload(screen.getByLabelText("Files"), replacement);
+    expect((screen.getByLabelText("Document date for report.txt (optional)") as HTMLInputElement).value).toBe("");
+
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledWith(
+      "docs", "new-file-id", replacement, { filename: "report.txt" },
+    ));
+  });
+
+  it("clears document dates when an upload is cancelled", async () => {
+    renderDocuments(["/documents?partition=docs&upload=1"]);
+    const file = new File(["report"], "report.txt");
+    await userEvent.upload(await screen.findByLabelText("Files"), file);
+    fireEvent.change(screen.getByLabelText("Document date for report.txt (optional)"), {
+      target: { value: "2026-01-01" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    expect(screen.queryByLabelText("Document date for report.txt (optional)")).toBeNull();
+    await userEvent.upload(screen.getByLabelText("Files"), file);
+    expect((screen.getByLabelText("Document date for report.txt (optional)") as HTMLInputElement).value).toBe("");
+    expect(uploadFileMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a document date outside the server's supported year range", async () => {
+    renderDocuments(["/documents?partition=docs&upload=1"]);
+    await userEvent.upload(await screen.findByLabelText("Files"), new File(["report"], "report.txt"));
+    const date = screen.getByLabelText("Document date for report.txt (optional)") as HTMLInputElement;
+    fireEvent.change(date, { target: { value: "10000-01-01" } });
+    expect(date.checkValidity()).toBe(false);
+
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    expect(uploadFileMock).not.toHaveBeenCalled();
   });
 
   it("refreshes the active Jobs count as soon as uploads are accepted", async () => {
