@@ -21,7 +21,12 @@ from core.models.catalog import (
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
-from core.utils.exceptions import ConflictError, ServiceUnavailableError, mark_indexing_worker_may_be_running
+from core.utils.exceptions import (
+    ConflictError,
+    DocumentNotFoundError,
+    ServiceUnavailableError,
+    mark_indexing_worker_may_be_running,
+)
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
@@ -729,7 +734,7 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
-            return
+            raise DocumentNotFoundError(f"File '{file_id}' not found in partition '{partition}'.")
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
@@ -757,7 +762,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 output_fields=["*"],
             )
             if not rows:
-                return
+                raise DocumentNotFoundError(f"No indexed chunks found for file '{file_id}' in partition '{partition}'.")
 
             public_metadata = strip_internal_metadata(metadata)
             indexed_at = datetime.now(UTC)

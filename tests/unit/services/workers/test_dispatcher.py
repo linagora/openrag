@@ -6,7 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from core.utils.exceptions import ServiceUnavailableError
+from core.utils.exceptions import DocumentNotFoundError, ServiceUnavailableError
 from ray.exceptions import ActorUnavailableError
 from services.workers.task_state import PENDING_TASK_DETAILS, SUBMITTED_TASK_WITHOUT_REF
 
@@ -848,6 +848,48 @@ async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
         content_sha256="abc123",
         claim_token=repo.claim_content_sha256.await_args.kwargs["claim_token"],
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["catalog", "chunks"])
+async def test_copy_file_refuses_missing_source_without_writing(missing) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    store = _vector_store()
+    if missing == "catalog":
+        repo.get_file_metadata.return_value = None
+    else:
+        store.query_chunks_by_filter.return_value = []
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(DocumentNotFoundError) as exc:
+        await dispatcher.copy_file(
+            "file-1",
+            {"file_id": "copy-1", "partition": "tenant-b", "content_sha256": "abc123"},
+            "tenant-a",
+            user=None,
+        )
+
+    assert exc.value.status_code == 404
+    assert "file-1" in exc.value.message
+    assert "tenant-a" in exc.value.message
+    store.insert_entities.assert_not_awaited()
+    repo.add_file_to_partition.assert_not_awaited()
+    if missing == "catalog":
+        store.query_chunks_by_filter.assert_not_awaited()
+        repo.claim_content_sha256.assert_not_awaited()
+    else:
+        # An unsuccessful copy must release its reservation so a retry can proceed.
+        repo.release_content_sha256_claim.assert_awaited_once_with(**repo.claim_content_sha256.await_args.kwargs)
 
 
 @pytest.mark.asyncio
@@ -1713,12 +1755,13 @@ async def test_metadata_mutation_aborts_when_catalog_row_is_missing(operation: s
     if operation == "update":
         await dispatcher.update_file_metadata("missing", {"title": "new"}, "tenant-a", user=None)
     else:
-        await dispatcher.copy_file(
-            "missing",
-            {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
-            "tenant-a",
-            user=None,
-        )
+        with pytest.raises(DocumentNotFoundError):
+            await dispatcher.copy_file(
+                "missing",
+                {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
+                "tenant-a",
+                user=None,
+            )
 
     vector_store.query_chunks_by_filter.assert_not_awaited()
     vector_store.upsert_entities.assert_not_awaited()
