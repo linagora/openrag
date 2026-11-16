@@ -29,6 +29,7 @@ from api.schemas.admin.model_endpoint_schemas import (
     validate_vlm_extra,
 )
 from core.config.model_endpoints import ModelEndpointRow
+from core.llm.reasoning import validate_reasoning_extra
 from core.utils.exceptions import ValidationError
 from core.utils.logging import get_logger
 from di.providers import get_config, get_model_endpoint_service
@@ -123,6 +124,16 @@ def _reject_non_llm_token_budgets(model_type: str, extra: dict | None) -> None:
         return
     try:
         validate_llm_token_extra(extra)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
+def _reject_invalid_reasoning_extra(model_type: str, extra: dict | None) -> None:
+    """Apply the reasoning-level rules on update to the endpoints whose client reads them: LLMs and VLMs."""
+    if model_type not in ("llm", "vlm"):
+        return
+    try:
+        validate_reasoning_extra(extra)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
 
@@ -239,6 +250,7 @@ async def update_model_endpoint(
     fields = body.model_dump(exclude_unset=True)
     acknowledge_indexed_data = bool(fields.pop("acknowledge_indexed_data", False))
     _reject_non_llm_token_budgets(model_type, fields.get("extra"))
+    _reject_invalid_reasoning_extra(model_type, fields.get("extra"))
     _reject_invalid_vlm_extra(model_type, fields.get("extra"))
     await _reject_invalid_stt_fields(model_type, name, fields, service)
     if "name" in fields:

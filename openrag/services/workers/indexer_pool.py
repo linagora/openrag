@@ -1655,6 +1655,9 @@ def _global_llm_endpoint_config(cfg: Any) -> Any | None:
     enable_thinking = getattr(llm_cfg, "enable_thinking", None)
     if enable_thinking is not None:
         extra["enable_thinking"] = enable_thinking
+    reasoning_effort = getattr(llm_cfg, "reasoning_effort", None)
+    if reasoning_effort is not None:
+        extra["reasoning_effort"] = reasoning_effort
     return ModelEndpointConfig(
         endpoint=endpoint,
         model_name=model_name,
@@ -1703,6 +1706,9 @@ def _global_vlm_endpoint_config(cfg: Any) -> Any | None:
     enable_thinking = getattr(vlm_cfg, "enable_thinking", None)
     if enable_thinking is not None:
         extra["enable_thinking"] = enable_thinking
+    reasoning_effort = getattr(vlm_cfg, "reasoning_effort", None)
+    if reasoning_effort is not None:
+        extra["reasoning_effort"] = reasoning_effort
     return ModelEndpointConfig(
         endpoint=endpoint,
         model_name=model_name,

@@ -12,6 +12,7 @@ from core.config.model_endpoints import (
     MOSS_SPEAKER_AWARE_KEY,
     STT_LANGUAGE_KEY,
 )
+from core.llm.reasoning import validate_reasoning_extra
 from core.utils.redaction import RedactedExtraRepr, redact_secret_mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
@@ -180,10 +181,10 @@ class CreateModelEndpointRequest(RedactedExtraRepr, BaseModel):
         validation, in which case the request is rejected regardless).
         """
         if info.data.get("model_type") == "vlm":
-            return validate_vlm_extra(value)
+            return validate_vlm_extra(validate_reasoning_extra(value))
         if info.data.get("model_type") != "llm":
             return value
-        return validate_llm_token_extra(value)
+        return validate_llm_token_extra(validate_reasoning_extra(value))
 
     @model_validator(mode="after")
     def validate_stt_endpoint(self) -> CreateModelEndpointRequest:

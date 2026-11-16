@@ -300,6 +300,27 @@ class TestOllamaClient:
             await client.chat([{"role": "user", "content": "hi"}])
 
     @pytest.mark.asyncio
+    async def test_the_reasoning_level_goes_with_chat_requests_as_ollama_s_v1_reads_it(self):
+        bodies: list[dict] = []
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(req.content))
+            if "/chat/" in str(req.url):
+                return _chat_response() if not bodies[-1]["stream"] else httpx.Response(200, text="data: [DONE]\n")
+            return _completions_response()
+
+        client = self._make_client(capture, reasoning_effort="low", reasoning_effort_map={"xhigh": "high"})
+        await client.chat([{"role": "user", "content": "hi"}])
+        _ = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}], reasoning_effort="xhigh")]
+        await client.generate("say something")
+
+        chat, streamed, completion = bodies
+        assert chat["reasoning_effort"] == "low", "the endpoint's when the request sends none"
+        assert streamed["reasoning_effort"] == "high", "the request's, rewritten by the map"
+        assert "reasoning_effort" not in completion
+        assert "reasoning_effort_map" not in chat, "the map is the client's, never sent"
+
+    @pytest.mark.asyncio
     async def test_defaults_forwarded(self):
         captured: dict = {}
 

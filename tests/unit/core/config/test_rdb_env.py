@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import pytest
 from core.config import load_config
+from pydantic import ValidationError
 
 
 def test_postgres_provisioning_flags_can_be_overridden_from_env(monkeypatch, tmp_path):
@@ -35,3 +37,22 @@ def test_vlm_timeout_can_be_overridden_independently_of_llm_timeout(monkeypatch,
 
     assert settings.vlm.timeout == 180.0
     assert settings.llm.timeout == 60
+
+
+def test_llm_and_vlm_reasoning_effort_can_be_set_from_env(monkeypatch, tmp_path):
+    (tmp_path / "config.yaml").write_text("retriever:\n  type: single\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "low")
+    monkeypatch.setenv("VLM_REASONING_EFFORT", "none")
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.llm.reasoning_effort == "low"
+    assert settings.vlm.reasoning_effort == "none"
+
+
+def test_a_reasoning_effort_that_is_not_openai_s_fails_the_config(monkeypatch, tmp_path):
+    (tmp_path / "config.yaml").write_text("retriever:\n  type: single\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "max")
+
+    with pytest.raises(ValidationError, match="reasoning_effort"):
+        load_config(config_path=tmp_path)

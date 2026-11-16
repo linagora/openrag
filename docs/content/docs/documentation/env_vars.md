@@ -391,6 +391,7 @@ These are external services to provide !!!
 | `MODEL` | str | _(required)_ | Model identifier for the LLM |
 | `API_KEY` | str | _(unset)_ | API key for authenticating with the LLM service |
 | `LLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
+| `LLM_REASONING_EFFORT` | str | _(unset)_ | OpenAI's `reasoning_effort` for the LLM endpoint (`none`, `minimal`, `low`, `medium`, `high` or `xhigh`), sent with each chat request that names no level. Copied into the endpoint's `extra` only when the endpoint is first created; edit an existing one on the Models page. Unset sends no level, the model's own default. Any other value fails startup. |
 | `LLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the LLM service |
 | `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` | bool | `false` | Honor a client-supplied `base_url`/`api_key` in `metadata.llm_override`. Off by default; read the trade-off below before enabling. |
 | `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback context window of the LLM answering a request. An LLM endpoint's own **Max context size** (Model Endpoints) wins; without one, the `max_model_len` the endpoint reports on `/v1/models` is used (vLLM reports it, most gateways and hosted APIs don't), and this value only when neither is known. The admin UI shows which one applies to each endpoint. Requests whose prompt (with the `tools` definitions and tool-call history a client sends) + `max_tokens` exceed the window are rejected with a **413** error, as are those the answer instructions push over it (`CONTEXT_WINDOW_EXCEEDED`, sent as an error event on a streaming request). The documents and web results given to the LLM are cut to fit what the window leaves, so a value smaller than the model's real window means the LLM gets fewer chunks than the retrieval preset's `top_n`. |
@@ -443,6 +444,7 @@ Enable only where every API caller is already trusted with both.
 | `VLM_MODEL` | str | _(required)_ | Model identifier for the VLM |
 | `VLM_API_KEY` | str | _(unset)_ | API key for authenticating with the VLM service |
 | `VLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
+| `VLM_REASONING_EFFORT` | str | _(unset)_ | OpenAI's `reasoning_effort` for the VLM endpoint (`none`, `minimal`, `low`, `medium`, `high` or `xhigh`), sent with each chat request that names no level. Copied into the endpoint's `extra` only when the endpoint is first created; edit an existing one on the Models page. Unset sends no level, the model's own default. Any other value fails startup. |
 | `VLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the VLM service |
 
 #### Language Detection

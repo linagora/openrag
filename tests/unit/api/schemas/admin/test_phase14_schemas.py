@@ -236,6 +236,28 @@ def test_create_model_endpoint_accepts_valid_llm_token_budgets():
     assert request.extra["max_output_tokens"] == 2048
 
 
+@pytest.mark.parametrize("model_type", ["llm", "vlm"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"reasoning_effort": "max"},
+        {"reasoning_effort_map": {"turbo": "high"}},
+        {"reasoning_effort_map": {"low": ""}},
+    ],
+)
+def test_create_model_endpoint_rejects_a_reasoning_setting_no_request_could_use(model_type, extra):
+    with pytest.raises(ValidationError, match="reasoning_effort"):
+        CreateModelEndpointRequest(name="default", model_type=model_type, endpoint="http://host", extra=extra)
+
+
+def test_create_model_endpoint_accepts_a_reasoning_level_and_map():
+    extra = {"reasoning_effort": "low", "reasoning_effort_map": {"xhigh": "max", "none": None}}
+
+    request = CreateModelEndpointRequest(name="default", model_type="llm", endpoint="http://host", extra=extra)
+
+    assert request.extra == extra
+
+
 def test_create_preset_accepts_indexation_and_retrieval_configs():
     """Preset creation accepts both supported preset families."""
     indexation = CreatePresetRequest(name="fast", preset_type="indexation", config={"chunk_size": 512})

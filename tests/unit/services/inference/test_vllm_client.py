@@ -225,6 +225,73 @@ class TestVLLMClient:
         assert captured["chat_template_kwargs"] == {"custom": "value", "enable_thinking": enable_thinking}
 
     @pytest.mark.asyncio
+    async def test_the_endpoint_s_reasoning_level_goes_with_chat_requests_only(self):
+        bodies: list[dict] = []
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(req.content))
+            if "/chat/" in str(req.url):
+                return _chat_response() if not bodies[-1]["stream"] else httpx.Response(200, text="data: [DONE]\n")
+            return _completions_response()
+
+        client = self._make_client(capture, reasoning_effort="low")
+        await client.chat([{"role": "user", "content": "hi"}])
+        _ = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+        await client.generate("say something")
+
+        chat, streamed, completion = bodies
+        assert chat["reasoning_effort"] == "low"
+        assert streamed["reasoning_effort"] == "low"
+        assert "reasoning_effort" not in completion, "a text completion has no reasoning level"
+
+    @pytest.mark.asyncio
+    async def test_the_request_s_reasoning_level_wins_and_the_map_rewrites_it(self):
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        client = self._make_client(
+            capture, reasoning_effort="low", reasoning_effort_map={"xhigh": "high", "none": None}
+        )
+        await client.chat([{"role": "user", "content": "hi"}], reasoning_effort="xhigh")
+        assert captured["reasoning_effort"] == "high"
+
+        captured.clear()
+        await client.chat([{"role": "user", "content": "hi"}], reasoning_effort="none")
+        assert "reasoning_effort" not in captured, "a level mapped to null is not sent"
+
+    @pytest.mark.asyncio
+    async def test_no_reasoning_level_is_sent_by_default(self):
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture).chat([{"role": "user", "content": "hi"}])
+
+        assert "reasoning_effort" not in captured
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_a_reasoning_level_leaves_the_endpoint_s_enable_thinking_out(self, enable_thinking):
+        # vLLM sets the template's enable_thinking from the level, and an explicit
+        # one would override it: "high" on an endpoint with thinking off must think.
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        client = self._make_client(capture, enable_thinking=enable_thinking)
+        await client.chat([{"role": "user", "content": "hi"}], reasoning_effort="high")
+
+        assert captured["reasoning_effort"] == "high"
+        assert "chat_template_kwargs" not in captured
+
+    @pytest.mark.asyncio
     async def test_chat_template_kwargs_omitted_by_default(self):
         captured: dict = {}
 

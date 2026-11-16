@@ -1162,6 +1162,7 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
             model="mistral",
             api_key="llm-key",
             enable_thinking=False,
+            reasoning_effort="low",
         ),
         chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
         semaphore=SimpleNamespace(llm_semaphore=7),
@@ -1180,6 +1181,7 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
     assert contextualizer._llm._model == "mistral"
     assert contextualizer._llm._api_key == "llm-key"
     assert contextualizer._llm._enable_thinking is False
+    assert contextualizer._llm._reasoning_effort == "low"
     # _batch_size drives the per-document loop; _llm.chat is gated by the
     # injected cluster-wide "llmSemaphore".
     assert contextualizer._semaphore._name == "llmSemaphore"

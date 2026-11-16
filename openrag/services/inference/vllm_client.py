@@ -28,6 +28,7 @@ from core.config.endpoints import (
 )
 from core.embeddings import Embedder, embedder_registry
 from core.llm import LLM, llm_registry
+from core.llm.reasoning import REASONING_EFFORT_KEY, resolve_reasoning_effort
 from core.observability.inference_metrics import record_inference, record_usage_from_response
 from core.utils.exceptions import (
     EmbeddingAPIError,
@@ -266,9 +267,13 @@ class VLLMClient(LLM):
         api_key: str = "",
         timeout: float = 240.0,
         enable_thinking: bool | None = None,
+        reasoning_effort: str | None = None,
+        reasoning_effort_map: Mapping[str, str | None] | None = None,
         max_retries: int = 2,
         **kwargs,
     ) -> None:
+        # reasoning_effort and its map are taken here, not left in
+        # self._defaults, so that only chat requests carry the level.
         # max_retries is accepted (not forwarded into self._defaults) purely to
         # stop it from leaking into the request body: LLMParamsConfig carries it
         # as a config field, but retry attempts are fixed by the @with_retry
@@ -281,6 +286,8 @@ class VLLMClient(LLM):
         self._model = model_name
         self._api_key = api_key
         self._enable_thinking = enable_thinking
+        self._reasoning_effort = reasoning_effort
+        self._reasoning_effort_map = dict(reasoning_effort_map) if reasoning_effort_map else None
         self._defaults: dict = kwargs
         self._allow_custom_endpoint = custom_endpoint_override_enabled()
         # Authorization per request, not on the client: httpx merges client-level
@@ -296,6 +303,7 @@ class VLLMClient(LLM):
             endpoint=self._endpoint,
             timeout=timeout,
             enable_thinking=self._enable_thinking,
+            reasoning_effort=self._reasoning_effort,
         ).debug(f"{type(self).__name__} ready")
 
     def _resolve_overrides(self, kwargs: dict) -> tuple[str, str, dict[str, str], bool]:
@@ -428,7 +436,16 @@ class VLLMClient(LLM):
         override actually work.
         """
         payload_kwargs = {**self._defaults, **kwargs} if use_defaults else dict(kwargs)
-        fallback_thinking = self._enable_thinking if use_defaults else None
+        resolve_reasoning_effort(
+            payload_kwargs,
+            self._reasoning_effort if use_defaults else None,
+            self._reasoning_effort_map if use_defaults else None,
+        )
+        # A reasoning level turns thinking on or off itself (vLLM sets the
+        # template's enable_thinking from it), and an explicit enable_thinking
+        # would override it there: the endpoint's is left out.
+        reasoning = REASONING_EFFORT_KEY in payload_kwargs
+        fallback_thinking = self._enable_thinking if use_defaults and not reasoning else None
         enable_thinking = payload_kwargs.pop("enable_thinking", fallback_thinking)
         # False must be sent too: Qwen3 templates think unless told not to.
         if enable_thinking is not None:

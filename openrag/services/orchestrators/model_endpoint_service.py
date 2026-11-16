@@ -27,6 +27,7 @@ from core.config.model_endpoints import (
     is_placeholder_api_key,
     material_embedder_changes,
 )
+from core.llm.reasoning import REASONING_EFFORT_KEY
 from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.redaction import preserve_existing_secrets
@@ -165,6 +166,13 @@ def _with_enable_thinking(extra: dict[str, Any], enable_thinking: bool | None) -
     if enable_thinking is None:
         return extra
     return {**extra, "enable_thinking": enable_thinking}
+
+
+def _with_reasoning_effort(extra: dict[str, Any], reasoning_effort: str | None) -> dict[str, Any]:
+    """Add the default reasoning level only when one is configured."""
+    if reasoning_effort is None:
+        return extra
+    return {**extra, REASONING_EFFORT_KEY: reasoning_effort}
 
 
 def _sampling_params(llm_cfg: Any) -> dict[str, Any]:
@@ -500,18 +508,24 @@ class ModelEndpointService:
                 "endpoint": os.getenv("LLM_ENDPOINT", s.llm.base_url),
                 "model_name": os.getenv("LLM_MODEL", s.llm.model),
                 "timeout": s.llm.timeout,
-                "extra": _with_enable_thinking(
-                    _with_sampling_params(_with_api_key({"implementation": "vllm"}, s.llm.api_key), s.llm),
-                    s.llm.enable_thinking,
+                "extra": _with_reasoning_effort(
+                    _with_enable_thinking(
+                        _with_sampling_params(_with_api_key({"implementation": "vllm"}, s.llm.api_key), s.llm),
+                        s.llm.enable_thinking,
+                    ),
+                    s.llm.reasoning_effort,
                 ),
             },
             "vlm": {
                 "endpoint": os.getenv("VLM_ENDPOINT", s.vlm.base_url),
                 "model_name": os.getenv("VLM_MODEL", s.vlm.model),
                 "timeout": s.vlm.timeout,
-                "extra": _with_enable_thinking(
-                    _with_sampling_params(_with_api_key({"implementation": "vllm"}, s.vlm.api_key), s.vlm),
-                    s.vlm.enable_thinking,
+                "extra": _with_reasoning_effort(
+                    _with_enable_thinking(
+                        _with_sampling_params(_with_api_key({"implementation": "vllm"}, s.vlm.api_key), s.vlm),
+                        s.vlm.enable_thinking,
+                    ),
+                    s.vlm.reasoning_effort,
                 ),
             },
             "reranker": {

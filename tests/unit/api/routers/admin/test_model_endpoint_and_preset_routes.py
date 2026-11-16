@@ -1316,3 +1316,23 @@ async def test_update_stt_endpoint_rejects_extra_only_update_without_stored_mode
     assert response.status_code == 422
     assert "model_name is required" in response.text
     assert model_service.calls == [("get", {"name": "default", "model_type": "stt"})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_type", ["llm", "vlm"])
+async def test_update_rejects_a_reasoning_level_that_is_not_openai_s(async_client_factory, model_type):
+    """The update schema has no model_type, so the route checks the level, as it does the budgets."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put(
+            f"/model-endpoints/{model_type}/default", json={"extra": {"reasoning_effort": "max"}}
+        )
+
+    assert response.status_code == 422
+    assert "reasoning_effort" in response.text
+    assert model_service.calls == []

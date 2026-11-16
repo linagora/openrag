@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 import httpx
 from core.embeddings import Embedder, embedder_registry
 from core.llm import LLM, llm_registry
+from core.llm.reasoning import resolve_reasoning_effort
 from core.utils.exceptions import (
     EmbeddingAPIError,
     EmbeddingConnectionError,
@@ -70,17 +71,23 @@ class OllamaClient(LLM):
         model_name: str,
         *,
         timeout: float = 240.0,
+        reasoning_effort: str | None = None,
+        reasoning_effort_map: Mapping[str, str | None] | None = None,
         max_retries: int = 2,
         **kwargs,
     ) -> None:
         # See VLLMClient.__init__: accepted here purely so it doesn't fall into
         # **kwargs and leak into the request body — retry attempts are fixed by
         # the @with_retry decorator on each method, not by a per-instance value.
+        # Likewise the reasoning level, which only chat requests carry: Ollama's
+        # /v1 reads reasoning_effort, and maps the levels its models lack itself.
         del max_retries
         self._endpoint = endpoint.rstrip("/")
         if not self._endpoint.endswith("/v1"):
             self._endpoint = f"{self._endpoint}/v1"
         self._model = model_name
+        self._reasoning_effort = reasoning_effort
+        self._reasoning_effort_map = dict(reasoning_effort_map) if reasoning_effort_map else None
         self._defaults: dict = kwargs
         self._client = httpx.AsyncClient(
             timeout=timeout,
@@ -115,6 +122,7 @@ class OllamaClient(LLM):
     @with_retry(max_attempts=3)
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
         payload = {**self._defaults, **kwargs, "model": self._model, "messages": messages, "stream": False}
+        resolve_reasoning_effort(payload, self._reasoning_effort, self._reasoning_effort_map)
         payload.pop("metadata", None)
         _strip_falsy_logprobs(payload)
         log_llm_call(caller="OllamaClient.chat", model=self._model, endpoint=self._endpoint, messages=messages)
@@ -140,6 +148,7 @@ class OllamaClient(LLM):
             "messages": messages,
             "stream": True,
         }
+        resolve_reasoning_effort(payload, self._reasoning_effort, self._reasoning_effort_map)
         forward_usage = _request_stream_usage(payload, add_for_metrics=True)
         payload.pop("metadata", None)
         _strip_falsy_logprobs(payload)

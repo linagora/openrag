@@ -19,9 +19,12 @@ _llm_params: &llm_params
   # null omits chat_template_kwargs; set false for Qwen-style models when
   # reasoning traces should be disabled. Leave unset for Mistral tokenizers.
   enable_thinking: null
+  # OpenAI's reasoning_effort (none, minimal, low, medium, high, xhigh), copied
+  # into the endpoint when it is first created; null sends no level.
+  reasoning_effort: null
 
 # --- LLM ---
-# Env: BASE_URL, MODEL, API_KEY, LLM_ENABLE_THINKING
+# Env: BASE_URL, MODEL, API_KEY, LLM_ENABLE_THINKING, LLM_REASONING_EFFORT
 llm:
   <<: *llm_params
   base_url: ""
@@ -29,7 +32,8 @@ llm:
   api_key: ""
 
 # --- VLM (Vision Language Model) ---
-# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY, VLM_ENABLE_THINKING, VLM_TIMEOUT
+# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY, VLM_ENABLE_THINKING, VLM_REASONING_EFFORT,
+#      VLM_TIMEOUT
 vlm:
   <<: *llm_params
   base_url: ""

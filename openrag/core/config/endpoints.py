@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from typing import Literal
 
+from core.llm.reasoning import ReasoningEffort
 from pydantic import Field, field_validator
 
 from .base import ConfigMixin
@@ -52,6 +53,9 @@ class LLMParamsConfig(ConfigMixin):
     # clients that want logprobs opt in per request (see OpenAIChatCompletionRequest).
     logprobs: bool = False
     enable_thinking: bool | None = None
+    # OpenAI's reasoning_effort, copied into the endpoint when it is first
+    # created; None sends no level (the model's own default).
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class LLMConfig(LLMParamsConfig):

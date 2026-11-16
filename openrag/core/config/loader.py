@@ -31,11 +31,13 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("MODEL", "llm.model", str),
     ("API_KEY", "llm.api_key", str),
     ("LLM_ENABLE_THINKING", "llm.enable_thinking", bool),
+    ("LLM_REASONING_EFFORT", "llm.reasoning_effort", str),
     # VLM
     ("VLM_BASE_URL", "vlm.base_url", str),
     ("VLM_MODEL", "vlm.model", str),
     ("VLM_API_KEY", "vlm.api_key", str),
     ("VLM_ENABLE_THINKING", "vlm.enable_thinking", bool),
+    ("VLM_REASONING_EFFORT", "vlm.reasoning_effort", str),
     ("VLM_TIMEOUT", "vlm.timeout", float),
     # Semaphore
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
