@@ -15,6 +15,7 @@ from dataclasses import replace
 import pytest
 from core.chat.agent import FINALIZE_INSTRUCTION, LEFT_OUT_RESULT, MAX_CALLS_PER_ROUND
 from core.chat.agent_profile import AgentProfile
+from core.chat.agent_trace import AgentTrace
 from core.chat.scope import Scope
 from core.models.chunk import Chunk
 from core.tools import ToolContext, ToolRegistry, tool
@@ -483,3 +484,111 @@ async def test_streamed_or_not_the_agent_takes_the_same_trajectory(max_tool_roun
         c.id for c in plain_ctx.tool_context.sources.entries
     ]
     assert [{k: v for k, v in call.items() if k != "stream"} for call in streamed_ctx.llm.calls] == plain_ctx.llm.calls
+
+
+# --------------------------------------------------------------------------- #
+# Tracing: what the agent did, for extra.agent_trace
+# --------------------------------------------------------------------------- #
+
+
+class TracedLookup:
+    """``lookup(word)`` shown as a passage is, recording into the call's retrieval trace as a search does."""
+
+    def __init__(self) -> None:
+        self.traces: list = []
+
+    @tool("lookup", "Look a word up.")
+    async def lookup(self, ctx: ToolContext, word: str) -> str:
+        self.traces.append(ctx.trace)
+        if ctx.trace is not None:
+            ctx.trace.record_stage("final", status="complete", candidates=[])
+        number = ctx.sources.number(Chunk(id=word, text=word, metadata={}), key=word)
+        return f"1 excerpt.\n\n[Source {number}]\nabout {word}"
+
+
+def _traced(ctx: AgentContext) -> tuple[AgentContext, AgentTrace]:
+    trace = AgentTrace(
+        request_id="req",
+        profile=ctx.profile.name,
+        max_tool_rounds=ctx.profile.max_tool_rounds,
+        max_prompt_tokens=ctx.max_prompt_tokens,
+    )
+    return replace(ctx, trace=trace), trace
+
+
+def _finished(trace: AgentTrace) -> dict:
+    return trace.finish(configuration_fingerprint="fp", total_seconds=1.0)
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["plain", "streamed"])
+@pytest.mark.asyncio
+async def test_traced_each_step_is_recorded_and_each_call_searches_into_a_trace_of_its_own(stream):
+    lookup = TracedLookup()
+    replies = (_calls("acme", "orange"), _answer("ACME and Orange. [Sources: 1, 2]"))
+    llm = StreamingLLM(*replies) if stream else ScriptedLLM(*replies)
+    ctx, trace = _traced(replace(_context(llm, lookup), stream=stream))
+
+    await (_stream(ctx) if stream else _run(ctx))
+
+    out = _finished(trace)
+    assert [(step["step"], step["round"]) for step in out["steps"]] == [("agent", 1), ("tools", 1), ("agent", 2)]
+    assert (out["rounds"], out["finalized"]) == (1, False)
+    first_reply = out["steps"][0]
+    assert first_reply["tool_calls"] == 2
+    assert out["steps"][2]["finish_reason"] == "stop"
+    assert first_reply["prompt_tokens"] > 0
+    calls = out["steps"][1]["calls"]
+    assert [(call["arguments"], call["status"], call["sources"]) for call in calls] == [
+        ({"word": "acme"}, "ok", [1]),
+        ({"word": "orange"}, "ok", [2]),
+    ]
+    assert [call["retrieval_trace"]["request_id"] for call in calls] == ["req:round:1:call:1", "req:round:1:call:2"]
+    assert lookup.traces[0] is not lookup.traces[1]
+    assert ctx.tool_context.trace is None, "the request's tool context is left as it was"
+    assert [chunk.id for chunk in ctx.tool_context.sources.entries] == ["acme", "orange"], "one source list"
+
+
+@pytest.mark.asyncio
+async def test_untraced_a_tool_gets_no_trace():
+    lookup = TracedLookup()
+
+    await _run(_context(ScriptedLLM(_calls("acme"), _answer("ACME. [Sources: 1]")), lookup))
+
+    assert lookup.traces == [None]
+
+
+@pytest.mark.asyncio
+async def test_traced_a_call_answered_without_running_is_refused():
+    lookup = TracedLookup()
+    ctx, trace = _traced(_context(ScriptedLLM(_calls("acme"), _calls("acme"), _answer("ACME. [Sources: 1]")), lookup))
+
+    await _run(ctx)
+
+    second_round = _finished(trace)["steps"][3]
+    assert second_round["step"] == "tools"
+    assert [(call["status"], call["duration_seconds"], call["retrieval_trace"]) for call in second_round["calls"]] == [
+        ("refused", None, None)
+    ]
+    assert len(lookup.traces) == 1
+
+
+@pytest.mark.parametrize(
+    ("context", "steps", "reason"),
+    [
+        ({"max_tool_rounds": 1}, None, "no rounds left"),
+        ({"max_prompt_tokens": 5}, None, "window full"),
+        ({"max_tool_rounds": 1}, Unbounded(), "recursion limit"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_traced_finalize_is_recorded_with_why_the_model_answers_without_tools(context, steps, reason):
+    ctx, trace = _traced(_context(Tireless(), **context))
+
+    await _run(ctx, steps)
+
+    out = _finished(trace)
+    assert out["finalized"] is True
+    assert (out["steps"][-1]["step"], out["steps"][-1]["reason"]) == ("finalize", reason)
+    assert [step["reason"] for step in out["steps"][:-1] if step["step"] != "tools"] == [None] * (
+        len([s for s in out["steps"][:-1] if s["step"] != "tools"])
+    )

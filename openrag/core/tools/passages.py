@@ -8,6 +8,7 @@ citation tag or a separator, and a file name or id can't add a line.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from core.prompts import SOURCE_SEPARATOR, describe_source
@@ -17,6 +18,9 @@ if TYPE_CHECKING:
     from core.models.chunk import Chunk
 
 _MAX_ID_CHARS = 150
+
+#: A passage's marker, on its own line: a chunk's text can't forge one (``passage`` defangs it).
+_MARKER = re.compile(r"^\[Source (\d+)\]$", re.MULTILINE)
 
 
 def passage(number: int, chunk: Chunk, *, excerpt_chars: int | None = None) -> str:
@@ -40,6 +44,11 @@ def passages(blocks: list[str]) -> str:
     return SOURCE_SEPARATOR.join(blocks)
 
 
+def shown_sources(text: str) -> list[int]:
+    """The ``[Source N]`` numbers *text* shows passages under, in its order, each once."""
+    return list(dict.fromkeys(int(number) for number in _MARKER.findall(text)))
+
+
 def excerpt(text: str, max_chars: int) -> str:
     """*text* on one line, cut to at most *max_chars* characters at a word boundary, ``…`` marking the cut."""
     flat = " ".join(text.split())
@@ -55,4 +64,4 @@ def one_line(value: object) -> str:
     return neutralize_prompt_control_tokens(flat)
 
 
-__all__ = ["excerpt", "one_line", "passage", "passages"]
+__all__ = ["excerpt", "one_line", "passage", "passages", "shown_sources"]

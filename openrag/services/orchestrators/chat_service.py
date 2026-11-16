@@ -36,6 +36,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
 
+from core.chat.agent_trace import AgentTrace
 from core.chat.budget import fit_prompt
 from core.chat.history import history_window, latest_user_query, split_leading_system_prompt
 from core.chat.routing import Route, resolve_route
@@ -508,6 +509,8 @@ class ChatService:
                 llm=llm,
                 max_prompt_tokens=max_prompt_tokens,
                 stream=stream,
+                request_id=request_id,
+                request_started=request_started,
             )
         original_query = latest_user_query(payload.get("messages", []))
         trace = (
@@ -581,6 +584,8 @@ class ChatService:
         llm: LLM,
         max_prompt_tokens: int | None,
         stream: bool,
+        request_id: str | None = None,
+        request_started: float | None = None,
     ) -> PreparedAnswer:
         """Let the agent find the sources and answer; ``AnswerService`` then shapes its answer.
 
@@ -588,7 +593,9 @@ class ChatService:
         are every passage the tools showed, numbered as the model saw them, so
         its ``[Sources: N]`` citations map back to them. With *stream*, the
         agent runs as the client reads: its answer's text goes out as the model
-        writes it, and the sources are added as the tools find them.
+        writes it, and the sources are added as the tools find them. With
+        ``include_retrieval_trace``, what the agent did goes in
+        ``extra.agent_trace`` once the answer is complete.
         """
         profile = self._agentic.profile(options.agent_profile)
         messages = history_window(payload["messages"], self._resolve_chat_history_depth(partitions))
@@ -598,6 +605,22 @@ class ChatService:
         scope = await self._scope.resolve(
             partitions, workspace=options.workspace, attachment_ids=list(options.attachment_ids)
         )
+        trace = None
+        finish_trace = None
+        if options.include_retrieval_trace:
+            trace = AgentTrace(
+                request_id=request_id or str(uuid.uuid4()),
+                profile=profile.name,
+                max_tool_rounds=profile.max_tool_rounds,
+                max_prompt_tokens=max_prompt_tokens,
+            )
+            fingerprint = await self._agent_configuration_fingerprint(scope.partitions)
+            started = request_started if request_started is not None else time.perf_counter()
+
+            def finish_trace() -> dict:
+                total = time.perf_counter() - started
+                return {"agent_trace": trace.finish(configuration_fingerprint=fingerprint, total_seconds=total)}
+
         request = AgentRequest(
             profile=profile,
             messages=messages,
@@ -606,6 +629,7 @@ class ChatService:
             llm=llm,
             payload=payload,
             max_prompt_tokens=max_prompt_tokens,
+            trace=trace,
         )
         include_all_retrieved = options.include_all_retrieved_sources
         extra_fields = {"attachments": scope.attachment_ids} if options.attachments_sent else {}
@@ -620,6 +644,7 @@ class ChatService:
                 include_all_retrieved=include_all_retrieved,
                 citation_protocol_active=True,
                 extra_fields=extra_fields,
+                finish_trace=finish_trace,
                 stream=lines,
             )
         run = await self._agentic.run(request)
@@ -632,8 +657,22 @@ class ChatService:
             include_all_retrieved=include_all_retrieved,
             citation_protocol_active=True,
             extra_fields=extra_fields,
+            finish_trace=finish_trace,
             response=run.response,
         )
+
+    async def _agent_configuration_fingerprint(self, partitions: list[str] | None) -> str:
+        """The fingerprint of the retrieval configuration the agent's searches run with, as ``classic``'s trace has it.
+
+        ``unavailable`` when it can't be resolved: a trace never fails a request.
+        """
+        if not partitions:
+            return "unavailable"
+        try:
+            return str(await self._retrieval.resolved_configuration_fingerprint(partitions))
+        except Exception:  # noqa: BLE001 - telemetry must never fail a request
+            logger.opt(exception=True).debug("Agent trace: the retrieval configuration fingerprint is unavailable")
+            return "unavailable"
 
     async def chat(
         self,

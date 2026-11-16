@@ -52,7 +52,9 @@ class ToolContext:
     tool never widens it, whatever the model asks for. A ``partitions`` of
     ``["all"]`` is a super admin's every partition; ``None`` is no partition
     at all (a web-only request). *user* is who asks, when the caller knows:
-    what they may read is already the scope.
+    what they may read is already the scope. *trace*, when the request is
+    traced, is the retrieval trace the call's search records into: each call
+    gets its own.
     """
 
     scope: Scope

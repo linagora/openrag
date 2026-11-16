@@ -92,7 +92,7 @@ class CompiledAgent:
             )
             log_step("agentic", "finalize", reason="recursion limit")
             lines: list[str] = []
-            update = await self._steps.finalize(last, context, emit=lines.append)
+            update = await self._steps.finalize(last, context, emit=lines.append, reason="recursion limit")
             for line in lines:
                 yield "custom", line
             yield "values", {**last, **update}

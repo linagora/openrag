@@ -3677,6 +3677,8 @@ async def test_agentic_chat_answers_from_what_its_tools_found():
     assert result.startswith("2 excerpts, best match first.")
     assert "[Source 1]\nPartition: default | File id: \nThe notice period is three months." in result
     assert retrieval.retrieve_multi_calls[0]["partitions"] == ["p"]
+    assert "agent_trace" not in out["extra"], "only when the request asks for a trace"
+    assert "trace" not in retrieval.retrieve_multi_calls[0]
 
 
 @pytest.mark.asyncio
@@ -3806,3 +3808,83 @@ async def test_agentic_is_ignored_without_documents():
 
     assert out["choices"][0]["message"]["content"] == "Hello."
     assert "tools" not in llm.chat_calls[0][1]
+
+
+class _TracingRetrieval(FakeRetrieval):
+    """Records each search into the trace it is given, as the retrieval pipeline does; knows its fingerprint."""
+
+    async def retrieve_multi(self, **kwargs):
+        chunks = await super().retrieve_multi(**kwargs)
+        trace = kwargs.get("trace")
+        if trace is not None:
+            trace.record_stage("final", status="complete", candidates=trace.project_chunks("final", chunks))
+        return chunks
+
+    async def resolved_configuration_fingerprint(self, partitions, *, contextualizer_prompt=None):
+        return "agent-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_traced_returns_what_the_agent_did():
+    llm = FakeLLM(chat_responses=[_SEARCH, "Three months.\n\n[Sources: 1]"])
+
+    out = await _svc(llm=llm, retrieval=_TracingRetrieval(list(_NOTICE))).chat(
+        partitions=["p"],
+        payload=_agentic_payload(include_retrieval_trace=True),
+        prepare_sources=_source_ids,
+        model_name="openrag-p",
+        request_id="req-1",
+    )
+
+    assert out["choices"][0]["message"]["content"] == "Three months."
+    assert "retrieval_trace" not in out["extra"], "the agent's searches are in its own trace"
+    trace = out["extra"]["agent_trace"]
+    assert (trace["request_id"], trace["profile"], trace["configuration_fingerprint"]) == (
+        "req-1",
+        "default",
+        "agent-fingerprint",
+    )
+    assert [(step["step"], step["round"]) for step in trace["steps"]] == [("agent", 1), ("tools", 1), ("agent", 2)]
+    (call,) = trace["steps"][1]["calls"]
+    assert (call["tool"], call["arguments"], call["status"]) == (
+        "search_knowledge",
+        {"queries": ["notice period"]},
+        "ok",
+    )
+    assert call["sources"] == [1, 2]
+    final = next(stage for stage in call["retrieval_trace"]["stages"] if stage["name"] == "final")
+    assert [candidate["id"] for candidate in final["candidates"]] == ["c1", "c2"]
+    assert trace["timings"]["total"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_traced_without_a_known_fingerprint_says_so():
+    llm = FakeLLM(chat_responses=["Hello! [Sources: none]"])
+
+    out = await _svc(llm=llm, retrieval=FakeRetrieval(list(_NOTICE))).chat(
+        partitions=["p"],
+        payload=_agentic_payload(include_retrieval_trace=True),
+        prepare_sources=_source_ids,
+        model_name="openrag-p",
+    )
+
+    trace = out["extra"]["agent_trace"]
+    assert trace["configuration_fingerprint"] == "unavailable"
+    assert [step["step"] for step in trace["steps"]] == ["agent"]
+
+
+@pytest.mark.asyncio
+async def test_agentic_chat_streamed_and_traced_ends_with_what_the_agent_did():
+    llm = FakeLLM(stream_sequences=[_RECORDED_CALL, _answer_stream("Three ", "months.", "\n\n[Sources: 1]")])
+
+    text, extra, lines = await _agentic_stream(
+        _svc(llm=llm, retrieval=_TracingRetrieval(list(_NOTICE))), include_retrieval_trace=True
+    )
+
+    assert text == "Three months."
+    trace = extra["agent_trace"]
+    assert [step["step"] for step in trace["steps"]] == ["agent", "tools", "agent"]
+    (call,) = trace["steps"][1]["calls"]
+    assert call["arguments"]["queries"][0] == "notice period in the employment contract"
+    assert call["retrieval_trace"] is not None
+    assert sum("agent_trace" in line for line in lines) == 1, "once, at the end"

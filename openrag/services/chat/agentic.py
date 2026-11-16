@@ -21,15 +21,19 @@ it is clear no tool call follows (the sentence a model writes before a call is
 shown as thinking), and its tool calls are put back together and run. Each
 call is announced when it starts and when it ends (``step_line``), so a client
 can show the agent at work before the answer comes.
+
+When the request asks for a trace, the steps record what they do into the
+context's ``AgentTrace`` (``core.chat.agent_trace``): each reply of the model,
+each round of calls, and each call's search in a retrieval trace of its own.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -38,14 +42,17 @@ from core.chat.agent import (
     MAX_CALLS_PER_ROUND,
     ReplyLines,
     assistant_turn,
+    call_arguments,
     call_signature,
     finish_line,
     leave_out_old_results,
+    result_summary,
     sse_chunk,
     step_line,
     tool_calls,
 )
 from core.chat.agent_profile import AgentProfile, AgentProfiles
+from core.chat.agent_trace import CallRecord
 from core.chat.answer import sampling_params
 from core.chat.history import sanitize_messages
 from core.models.prompt import PromptType
@@ -57,6 +64,7 @@ from core.utils.text import get_num_tokens
 from services.chat.classic import messages_tokens
 
 if TYPE_CHECKING:
+    from core.chat.agent_trace import AgentTrace
     from core.chat.scope import Scope
     from core.chat.state import AgentState
     from core.config.root import Settings
@@ -79,6 +87,7 @@ class AgentContext:
     *tools_tokens* is what the tool definitions take in the prompt;
     *max_prompt_tokens* what the model's window leaves for it, ``None`` when
     the window is unknown. With *stream*, the model's replies are streamed.
+    With *trace*, the steps record what they do into it.
     """
 
     profile: AgentProfile
@@ -89,13 +98,11 @@ class AgentContext:
     tools_tokens: int = 0
     max_prompt_tokens: int | None = None
     stream: bool = False
+    trace: AgentTrace | None = None
 
 
 #: Where a step writes the SSE lines the client gets as the agent works.
 Emit = Callable[[str], None]
-
-#: Characters of a tool result the client is told of when the call ends: its first line.
-_RESULT_SUMMARY_CHARS = 200
 
 
 class AgentGraph(Protocol):
@@ -118,7 +125,16 @@ class AgentSteps:
 
     async def agent(self, state: AgentState, ctx: AgentContext, emit: Emit | None = None) -> dict:
         """One reply of the model, offered the tools: calls to run, or the answer."""
+        started = time.perf_counter()
         response = await self._reply(state["messages"], ctx, with_tools=True, emit=emit)
+        if ctx.trace is not None:
+            ctx.trace.reply(
+                "agent",
+                round=state.get("rounds", 0) + 1,
+                duration_seconds=time.perf_counter() - started,
+                prompt_tokens=self.prompt_tokens(state["messages"], ctx, with_tools=True),
+                response=response,
+            )
         message = _message(response)
         calls = tool_calls(message)
         if calls:
@@ -136,11 +152,14 @@ class AgentSteps:
 
         Calls run concurrently. One already made this turn is answered with an
         error instead of running again, as are those past ``MAX_CALLS_PER_ROUND``.
-        Streamed, each call is announced as it starts and as it ends.
+        Streamed, each call is announced as it starts and as it ends. Traced,
+        each call that runs gets a retrieval trace of its own for its search.
         """
+        started = time.perf_counter()
+        calls = state.get("calls", [])
         made = list(state.get("calls_made", []))
         planned: list[ToolCall | ToolResult] = []
-        for index, call in enumerate(state.get("calls", [])):
+        for index, call in enumerate(calls):
             signature = call_signature(call)
             if index >= MAX_CALLS_PER_ROUND:
                 planned.append(
@@ -158,16 +177,27 @@ class AgentSteps:
         round_number = state.get("rounds", 0) + 1
         announce = emit if ctx.stream else None
         if announce is not None:
-            for call in state.get("calls", []):
+            for call in calls:
                 announce(step_line(_call_started(call, round_number)))
+        trace = ctx.trace
 
-        async def answer(item: ToolCall | ToolResult) -> ToolResult:
-            result = await run_tool(ctx.tools, item, ctx.tool_context) if isinstance(item, ToolCall) else item
+        async def answer(index: int, item: ToolCall | ToolResult) -> CallRecord:
+            if isinstance(item, ToolResult):
+                record = CallRecord(calls[index], item, refused=True)
+            else:
+                search = trace.search(round_number, index) if trace is not None else None
+                tool_context = replace(ctx.tool_context, trace=search) if search is not None else ctx.tool_context
+                call_started = time.perf_counter()
+                result = await run_tool(ctx.tools, item, tool_context)
+                record = CallRecord(item, result, duration_seconds=time.perf_counter() - call_started, search=search)
             if announce is not None:
-                announce(step_line(_call_ended(result, round_number)))
-            return result
+                announce(step_line(_call_ended(record.result, round_number)))
+            return record
 
-        results = await asyncio.gather(*(answer(item) for item in planned))
+        records = await asyncio.gather(*(answer(index, item) for index, item in enumerate(planned)))
+        results = [record.result for record in records]
+        if trace is not None:
+            trace.tools(round=round_number, duration_seconds=time.perf_counter() - started, calls=records)
         rounds = round_number
         logger.bind(
             profile=ctx.profile.name,
@@ -182,15 +212,28 @@ class AgentSteps:
             "calls": [],
         }
 
-    async def finalize(self, state: AgentState, ctx: AgentContext, emit: Emit | None = None) -> dict:
+    async def finalize(
+        self, state: AgentState, ctx: AgentContext, emit: Emit | None = None, *, reason: str | None = None
+    ) -> dict:
         """The answer from what the tools found, with no tools offered.
 
         The model is told so after the tool results, where it reads it last;
-        the oldest results are left out until the conversation fits.
+        the oldest results are left out until the conversation fits. *reason*
+        is why, for the trace: ``why_finalize``'s when not given.
         """
+        started = time.perf_counter()
         messages = [*state["messages"], {"role": "user", "content": FINALIZE_INSTRUCTION}]
         messages = leave_out_old_results(messages, lambda m: self.fits(m, ctx, with_tools=False))
         response = await self._reply(messages, ctx, with_tools=False, emit=emit)
+        if ctx.trace is not None:
+            ctx.trace.reply(
+                "finalize",
+                round=state.get("rounds", 0) + 1,
+                duration_seconds=time.perf_counter() - started,
+                prompt_tokens=self.prompt_tokens(messages, ctx, with_tools=False),
+                response=response,
+                reason=reason or self.why_finalize(state, ctx),
+            )
         if ctx.stream and emit is not None:
             emit(finish_line(response))
         return {"response": response, "messages": messages, "calls": [], "finalized": True}
@@ -230,12 +273,16 @@ class AgentSteps:
         return "no rounds left" if state.get("rounds", 0) >= ctx.profile.max_tool_rounds else "window full"
 
     @staticmethod
-    def fits(messages: list[dict], ctx: AgentContext, *, with_tools: bool) -> bool:
+    def prompt_tokens(messages: list[dict], ctx: AgentContext, *, with_tools: bool) -> int:
+        """What *messages*, and the tool definitions *with_tools*, take of the window."""
+        return messages_tokens(messages) + (ctx.tools_tokens if with_tools else 0)
+
+    @classmethod
+    def fits(cls, messages: list[dict], ctx: AgentContext, *, with_tools: bool) -> bool:
         """Whether *messages*, and the tool definitions *with_tools*, fit the window."""
         if ctx.max_prompt_tokens is None:
             return True
-        tokens = messages_tokens(messages) + (ctx.tools_tokens if with_tools else 0)
-        return tokens <= ctx.max_prompt_tokens
+        return cls.prompt_tokens(messages, ctx, with_tools=with_tools) <= ctx.max_prompt_tokens
 
 
 @dataclass(frozen=True)
@@ -245,7 +292,8 @@ class AgentRequest:
     *messages* is the history without its leading system prompt, which is
     the client's own instruction (*custom_prompt*). *payload* is the request
     as the client sent it: its sampling settings and ``metadata`` go to every
-    call of the model; without a temperature, the profile's is used.
+    call of the model; without a temperature, the profile's is used. With
+    *trace*, what the agent does is recorded into it.
     """
 
     profile: AgentProfile
@@ -255,6 +303,7 @@ class AgentRequest:
     llm: LLM
     payload: dict
     max_prompt_tokens: int | None = None
+    trace: AgentTrace | None = None
 
 
 @dataclass(frozen=True)
@@ -387,6 +436,7 @@ class AgenticChat:
             tools_tokens=tool_definition_tokens({"tools": tools.schemas()}, get_num_tokens()),
             max_prompt_tokens=request.max_prompt_tokens,
             stream=stream,
+            trace=request.trace,
         )
         state: AgentState = {
             "messages": [{"role": "system", "content": system_prompt}, *request.messages],
@@ -403,23 +453,24 @@ def _message(response: dict) -> dict:
 
 def _call_started(call: ToolCall, round_number: int) -> dict:
     """The event a client gets when *call* starts: the tool and what the model asked of it."""
-    try:
-        arguments: Any = json.loads(call.arguments or "{}")
-    except ValueError:
-        arguments = call.arguments
-    return {"type": "tool_call", "round": round_number, "id": call.id, "tool": call.name, "arguments": arguments}
+    return {
+        "type": "tool_call",
+        "round": round_number,
+        "id": call.id,
+        "tool": call.name,
+        "arguments": call_arguments(call),
+    }
 
 
 def _call_ended(result: ToolResult, round_number: int) -> dict:
     """The event a client gets when a call ends: whether it failed, and the first line of what it returned."""
-    first_line = (result.content or "").strip().split("\n", 1)[0]
     return {
         "type": "tool_result",
         "round": round_number,
         "id": result.call_id,
         "tool": result.name,
         "status": "error" if result.is_error else "ok",
-        "summary": first_line[:_RESULT_SUMMARY_CHARS],
+        "summary": result_summary(result),
     }
 
 

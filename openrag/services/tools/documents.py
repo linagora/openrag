@@ -24,6 +24,7 @@ from core.utils.exceptions import PartitionNotFoundError
 from pydantic import Field
 
 if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
     from services.capabilities.retrieve import SourceRetriever
     from services.capabilities.summarize import Summarizer
     from services.chat.prompt_settings import PartitionPromptSettings
@@ -123,7 +124,7 @@ class DocumentTools:
         search = SearchQueries(
             query_list=[Query(query=text, temporal_filters=dates or None, date_order=order) for text in queries]
         )
-        chunks = await self._search(search, ctx.scope)
+        chunks = await self._search(search, ctx.scope, trace=ctx.trace)
         if not chunks:
             advice = "the question reworded, with the terms the documents would use and abbreviations spelled out"
             return f"No passage matched. Try {advice}{', or wider dates' if dates else ''}."
@@ -141,7 +142,7 @@ class DocumentTools:
         if not ctx.allows_file(partition, file_id):
             raise ToolError(f"File '{file_id}' of partition '{partition}' is not among this conversation's documents.")
         search = SearchQueries(query_list=[Query(query=text) for text in queries])
-        chunks = await self._search(search, Scope(partitions=[partition], file_ids=[file_id]))
+        chunks = await self._search(search, Scope(partitions=[partition], file_ids=[file_id]), trace=ctx.trace)
         if not chunks:
             return f"No passage of file '{file_id}' matched. Try other words."
         return self._located(ctx, chunks, f"{len(chunks)} excerpts of file '{file_id}', best match first.")
@@ -186,7 +187,7 @@ class DocumentTools:
                     f"File '{file_id}' of partition '{partition}' is not among this conversation's documents."
                 )
             search = SearchQueries(query_list=[Query(query=question)])
-            chunks = await self._search(search, Scope(partitions=[partition], file_ids=[file_id]))
+            chunks = await self._search(search, Scope(partitions=[partition], file_ids=[file_id]), trace=ctx.trace)
             if not chunks:
                 return f"No passage of file '{file_id}' matches the question."
 
@@ -223,11 +224,22 @@ class DocumentTools:
             raise ToolError(f"[Source {number}] is not among this conversation's documents.")
         return chunk
 
-    async def _search(self, search: SearchQueries, scope: Scope) -> list[Chunk]:
-        """The chunks for *search* in *scope*, cut to the ``top_n`` its partitions' presets set."""
+    async def _search(
+        self, search: SearchQueries, scope: Scope, *, trace: RetrievalTraceBuilder | None = None
+    ) -> list[Chunk]:
+        """The chunks for *search* in *scope*, cut to the ``top_n`` its partitions' presets set.
+
+        With *trace* (the call's, when the request is traced), the search records its stages into it.
+        """
         try:
             chunks, _web = await self._retriever.retrieve(
-                search, route=Route.DOCUMENTS, scope=scope, top_k=None, retrieval_top_k=None, overrides={}
+                search,
+                route=Route.DOCUMENTS,
+                scope=scope,
+                top_k=None,
+                retrieval_top_k=None,
+                overrides={},
+                trace=trace,
             )
         except PartitionNotFoundError as e:
             raise ToolError(e.message) from e

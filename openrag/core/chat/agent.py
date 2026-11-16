@@ -22,8 +22,9 @@ import json
 import time
 import uuid
 from collections.abc import Callable
+from typing import Any
 
-from core.tools import ToolCall
+from core.tools import ToolCall, ToolResult
 from core.utils.stream_progress import AGENT_STEP, reasoning_text
 
 #: Calls a round runs; the model is told to make the others again if it still needs them.
@@ -108,6 +109,23 @@ def call_signature(call: ToolCall) -> str:
     except ValueError:
         arguments = call.arguments
     return f"{call.name}:{arguments}"
+
+
+#: Characters of a tool's answer a client is shown when the call ends: its first line.
+RESULT_SUMMARY_CHARS = 200
+
+
+def call_arguments(call: ToolCall) -> Any:
+    """*call*'s arguments as a client is shown them: parsed JSON, or the raw text when it doesn't parse."""
+    try:
+        return json.loads(call.arguments or "{}")
+    except ValueError:
+        return call.arguments
+
+
+def result_summary(result: ToolResult) -> str:
+    """What a client is shown of a tool's answer: its first line, cut at ``RESULT_SUMMARY_CHARS``."""
+    return (result.content or "").strip().split("\n", 1)[0][:RESULT_SUMMARY_CHARS]
 
 
 def leave_out_old_results(messages: list[dict], fits: Callable[[list[dict]], bool]) -> list[dict]:
