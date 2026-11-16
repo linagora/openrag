@@ -754,6 +754,7 @@ async def test_chainlit_keeps_source_names_unique_after_sanitizing(monkeypatch):
         ("rapport_annuel_2026.pdf", "rapport_annuel_2026.pdf"),
         ("report.pdf (page: 3)", "report.pdf (page: 3)"),
         ("C++_style_guide.pdf", "C++_style_guide.pdf"),
+        ("report=final.pdf", "report=final.pdf"),
     ],
 )
 def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_name, expected):
@@ -784,7 +785,10 @@ def test_chainlit_neutralizes_active_source_name_markdown(monkeypatch, source_na
     assert module._safe_source_name(source_name, {}) == expected
 
 
-@pytest.mark.parametrize("source_name", ["1)", "12.", "-", "+", "#", "- ___", r"\___"])
+@pytest.mark.parametrize(
+    "source_name",
+    ["1)", "12.", "-", "+", "#", "- ___", r"\___", "=", "==", "  ===  ", "--"],
+)
 def test_chainlit_source_names_stay_plain_text_in_sources_block(monkeypatch, source_name):
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_block_marker_source_name_test")
     safe_name = module._safe_source_name(source_name, {})
