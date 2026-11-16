@@ -51,7 +51,7 @@ _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
 # Chainlit inserts source names into Markdown link labels. Strip only characters
 # that can break or restyle that label so ordinary filenames stay recognizable.
 _MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]*`\\<>", " "))
-_MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"^(?:(?:#{1,6}|[-+]|\d{1,9}[.)])\s+)+")
+_MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"^(?:(?:#{1,6}|[-+]|\d{1,9}[.)])(?:\s+|$))+")
 _MARKDOWN_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:-\s*){3,}|(?:_\s*){3,}|(?:\*\s*){3,})$")
 
 
@@ -121,11 +121,18 @@ def _safe_source_name(value: str, existing: dict) -> str:
     """Build a Markdown-inert name that Chainlit can match to its element."""
     value = _neutralize_source_name_delimiters(value)
     value = value.lstrip()
-    if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value):
-        value = ""
-    else:
-        value = _MARKDOWN_BLOCK_PREFIX_RE.sub("", value)
-    base = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split()) or "source"
+    while True:
+        value = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split())
+        if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value):
+            value = ""
+            break
+
+        stripped = _MARKDOWN_BLOCK_PREFIX_RE.sub("", value)
+        if stripped == value:
+            break
+        value = stripped
+
+    base = value or "source"
     candidate = base
     suffix = 2
     while candidate in existing:
