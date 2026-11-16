@@ -228,8 +228,15 @@
                 "id": "WebSearch",
                 "icon": "globe",
                 "description": "Augment the RAG context with live web search results.\nCombines document and web sources for more comprehensive answers."
+            },
+            {
+                "id": "Agent",
+                "icon": "bot",
+                "description": "An agent searches and reads your documents with tools, in several steps, before it answers.\nSuited to questions spanning several documents, or about files you name.\nSlower than a plain search.",
+                "persistent": true
             }
         ],
+        "thinking": "Thinking",
         "searching": "Searching for relevant documents...",
         "sources_label": "Sources",
         "profile_description_all": "You are interacting with the **{name}** LLM.\nThe LLM's answers will be grounded on **all** partitions.",

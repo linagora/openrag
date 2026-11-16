@@ -58,6 +58,18 @@ def test_the_schema_is_what_the_model_fills_in_without_the_context():
     assert parameters["additionalProperties"] is False
 
 
+def test_an_optional_parameter_is_shown_as_its_type_and_a_null_is_still_accepted():
+    spec = tool_spec(Library().search)
+
+    order = spec.schema()["function"]["parameters"]["properties"]["order"]
+
+    assert order == {"enum": ["newest", "oldest"], "type": "string"}, "no anyOf with null, no default: null"
+    assert spec.params.model_validate({"queries": ["x"], "order": None}).order is None
+    assert tool_spec(Library().read).schema()["function"]["parameters"]["properties"]["title"]["default"] == "", (
+        "a default other than null is kept"
+    )
+
+
 def test_the_schema_drops_titles_but_keeps_a_property_called_title():
     parameters = tool_spec(Library().read).schema()["function"]["parameters"]
 

@@ -3750,9 +3750,19 @@ async def test_agentic_chat_streams_its_answer_once_the_tools_have_run():
     assert extra["presented_sources"] == [{"id": "c1"}, {"id": "c2"}]
     assert extra["cited_sources"] == [{"id": "c1"}]
     assert lines[-1].strip() == "data: [DONE]"
-    assert not any("tool_calls" in line or "search_knowledge" in line for line in lines), (
-        "the agent's calls are its own"
-    )
+    assert [line.strip() for line in lines].count("data: [DONE]") == 1, "nothing before the end closes the stream"
+    assert not any("tool_calls" in line for line in lines), "the agent's calls are its own"
+    steps = [
+        json.loads(line[6:])["extra"]["agent_step"]
+        for line in lines
+        if line.startswith("data: {") and "agent_step" in line
+    ]
+    assert [(step["type"], step["tool"]) for step in steps] == [
+        ("tool_call", "search_knowledge"),
+        ("tool_result", "search_knowledge"),
+    ], "the client sees the agent at work, through the citation filter and the retry"
+    assert steps[0]["arguments"]["queries"][0] == "notice period in the employment contract"
+    assert steps[1]["status"] == "ok"
     assert llm.chat_calls == [], "every reply of the model is streamed"
     assert "tools" in llm.stream_calls[0][1] and "tools" in llm.stream_calls[1][1]
     searched = [q.query for q in retrieval.retrieve_multi_calls[0]["search_queries"].query_list]

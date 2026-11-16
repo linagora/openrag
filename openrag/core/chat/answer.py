@@ -19,6 +19,7 @@ from contextlib import aclosing
 from core.chat.smalltalk import acknowledgement_language, is_casual_reply
 from core.utils.logging import get_logger
 from core.utils.source_filtering import filter_sources_by_citations
+from core.utils.stream_progress import is_progress
 
 logger = get_logger()
 
@@ -129,6 +130,13 @@ async def retry_empty_response_stream(
                         for buffered_line in buffered:
                             yield buffered_line
                         buffered.clear()
+                        continue
+
+                    if isinstance(data, dict) and is_progress(data):
+                        # Thinking and agent steps are not answer text: the client
+                        # sees them as they come, even when the answer is retried.
+                        buffered.pop()
+                        yield line
                         continue
 
                     event_extra = data.get("extra")

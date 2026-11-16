@@ -1259,3 +1259,28 @@ async def test_stream_with_a_number_too_long_to_be_an_index_cites_no_source():
     result = await _collect(stream_with_source_filtering(_fake_stream(lines), [{"file": "a.pdf"}], "test-model"))
     assert _collect_content(result) == "The answer."
     assert _parse_finish_sources(result) == [{"file": "a.pdf"}]
+
+
+@pytest.mark.asyncio
+async def test_thinking_and_agent_steps_pass_the_filter_as_they_came():
+    thinking = 'data: {"id": "c", "choices": [{"index": 0, "delta": {"reasoning_content": "Let me see."}}]}\n\n'
+    step = (
+        'data: {"id": "agent-step", "choices": [{"index": 0, "delta": {}, "finish_reason": null}], '
+        '"extra": {"agent_step": {"type": "tool_call", "tool": "search_knowledge"}}}\n\n'
+    )
+    lines = [
+        thinking,
+        step,
+        _make_chunk("Here is the answer."),
+        _make_chunk("\n[Sources: 1]"),
+        _make_finish(),
+        DONE_LINE,
+    ]
+
+    result = await _collect(stream_with_source_filtering(_fake_stream(lines), [{"file": "a.pdf"}], "test-model"))
+
+    first, second = (json.loads(line[len("data: ") :]) for line in result[:2])
+    assert first["choices"][0]["delta"] == {"reasoning_content": "Let me see."}
+    assert first["extra"] == {}
+    assert second["extra"] == {"agent_step": {"type": "tool_call", "tool": "search_knowledge"}}
+    assert _collect_content(result) == "Here is the answer."

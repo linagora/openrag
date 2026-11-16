@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from core.chat.routing import Route
 from core.models.query import Query, SearchQueries
 from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder
+from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.chat.scope import Scope
@@ -23,6 +24,19 @@ if TYPE_CHECKING:
     from core.websearch import WebResult
     from services.capabilities.web_search import WebSearch
     from services.orchestrators.retrieval_service import RetrievalService
+
+
+logger = get_logger()
+
+
+def searched_as(query: Query) -> str:
+    """A sub-query as it is searched: its text, then its date filter and its order when it has them."""
+    text = query.query
+    if date_filter := query.to_milvus_filter():
+        text += f" | {date_filter}"
+    if query.date_order:
+        text += f" | {query.date_order} first"
+    return text
 
 
 class SourceRetriever:
@@ -49,7 +63,17 @@ class SourceRetriever:
         *top_k* caps the chunks (map-reduce sets it), *retrieval_top_k* and
         *overrides* are the request's diagnostic retrieval settings, and
         *resolved_plan* the retrieval plan already resolved for the trace.
+
+        Each search is logged at debug, the queries as they are searched: in
+        ``classic`` the rewritten queries, in ``agentic`` those of a tool call.
         """
+        logger.bind(
+            queries=[searched_as(q) for q in queries.query_list],
+            partitions=scope.partitions,
+            **({"files": scope.file_ids} if scope.file_ids is not None else {}),
+            documents=route.has_documents,
+            web=route.has_web,
+        ).debug("Search")
         if not route.has_documents:
             return [], await self._web.search([q.query for q in queries.query_list])
         documents = self._documents(

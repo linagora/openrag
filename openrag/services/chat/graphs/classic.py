@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from core.chat.state import ClassicState
 from services.chat.classic import ChatContext, ClassicSteps
+from services.chat.graphs.step_log import log_step
 
 # Importing langgraph warns (pending deprecation) that its checkpoint
 # serializer's defaults will change. No graph uses a checkpointer, and with
@@ -50,27 +51,36 @@ def build_classic_graph(steps: ClassicSteps) -> CompiledStateGraph:
     """Compile the ``classic`` graph over *steps*; compiled once, run for every chat request."""
 
     async def route(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "route")
         return await steps.route(state, runtime.context)
 
     async def contextualize(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "contextualize")
         return await steps.contextualize(state, runtime.context)
 
     async def trace_config(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "trace_config")
         return await steps.trace_config(state, runtime.context)
 
     async def small_talk(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "small_talk")
         return await steps.small_talk(state, runtime.context)
 
     async def retrieve(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        queries = state.get("queries")
+        log_step("classic", "retrieve", queries=len(queries.query_list) if queries else 0)
         return await steps.retrieve(state, runtime.context)
 
     async def budget(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "budget")
         return await steps.budget(state, runtime.context)
 
     async def summarize(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "summarize")
         return await steps.summarize(state, runtime.context)
 
     async def prompt(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "prompt")
         return await steps.prompt(state, runtime.context)
 
     def after_route(state: ClassicState, runtime: Runtime[ChatContext]) -> str:

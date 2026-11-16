@@ -7,6 +7,7 @@ offered, which calls ran, how the turn ended.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from dataclasses import replace
@@ -136,8 +137,9 @@ async def test_when_the_rounds_run_out_the_model_answers_without_tools():
     assert len(llm.calls) == 3
     last = llm.calls[-1]
     assert "tools" not in last
-    assert last["messages"][0]["content"].endswith(FINALIZE_INSTRUCTION)
-    assert _roles(last["messages"])[-1] == "tool", "it answers from the results it read"
+    assert last["messages"][-1] == {"role": "user", "content": FINALIZE_INSTRUCTION}, "read last, after the results"
+    assert _roles(last["messages"])[-2] == "tool", "it answers from the results it read"
+    assert last["messages"][0] == llm.calls[0]["messages"][0], "the system prompt is unchanged"
     assert state["response"]["choices"][0]["message"]["content"] == "What I found. [Sources: 1]"
 
 
@@ -169,6 +171,32 @@ async def test_a_round_runs_at_most_its_cap_of_calls():
 
 
 @pytest.mark.asyncio
+async def test_the_calls_of_a_round_run_at_once_and_their_results_keep_the_call_order():
+    class Slow:
+        def __init__(self) -> None:
+            self.all_started = asyncio.Barrier(3)
+            self.finished: list[str] = []
+
+        @tool("lookup", "Look a word up.")
+        async def lookup(self, ctx: ToolContext, word: str) -> str:
+            # Each call waits for the three to have started: run one after another, the first never would.
+            await asyncio.wait_for(self.all_started.wait(), 1)
+            await asyncio.sleep({"a": 0.03, "b": 0.02, "c": 0.01}[word])
+            self.finished.append(word)
+            return f"about {word}"
+
+    toys = Slow()
+    llm = ScriptedLLM(_calls("a", "b", "c"), _answer("done"))
+
+    state = await _run(_context(llm, toys))
+
+    assert toys.finished == ["c", "b", "a"], "the last call finished first: they ran at once"
+    results = [m for m in state["messages"] if m["role"] == "tool"]
+    assert [m["content"] for m in results] == ["about a", "about b", "about c"]
+    assert [m["tool_call_id"] for m in results] == ["call00000", "call00001", "call00002"]
+
+
+@pytest.mark.asyncio
 async def test_a_failing_tool_is_an_error_the_model_reads():
     class Broken:
         @tool("lookup", "Look a word up.")
@@ -194,7 +222,10 @@ async def test_when_the_window_is_full_the_model_answers_with_old_results_left_o
     assert len(llm.calls) == 2
     last = llm.calls[-1]
     assert "tools" not in last
-    assert last["messages"][-1] == {"role": "tool", "tool_call_id": "call00000", "content": LEFT_OUT_RESULT}
+    assert last["messages"][-2:] == [
+        {"role": "tool", "tool_call_id": "call00000", "content": LEFT_OUT_RESULT},
+        {"role": "user", "content": FINALIZE_INSTRUCTION},
+    ]
 
 
 @pytest.mark.asyncio
@@ -207,14 +238,15 @@ async def test_a_conversation_too_long_for_the_tools_is_answered_without_them():
     assert "tools" not in llm.calls[0]
 
 
+class Unbounded(AgentSteps):
+    """Steps whose round limit never stops the loop: only LangGraph's recursion limit can."""
+
+    def may_call_tools(self, state, ctx):
+        return True
+
+
 @pytest.mark.asyncio
 async def test_the_recursion_limit_ends_with_an_answer_not_an_error():
-    class Unbounded(AgentSteps):
-        """Steps whose round limit never stops the loop: only LangGraph's recursion limit can."""
-
-        def may_call_tools(self, state, ctx):
-            return True
-
     llm = Tireless()
 
     state = await _run(_context(llm, max_tool_rounds=2), Unbounded())
@@ -222,6 +254,34 @@ async def test_the_recursion_limit_ends_with_an_answer_not_an_error():
     assert state["finalized"] is True
     assert state["response"]["choices"][0]["message"]["content"] == "What I found. [Sources: 1]"
     assert "tools" not in llm.calls[-1]
+
+
+@pytest.mark.asyncio
+async def test_each_step_is_logged_as_it_starts_with_the_calls_a_tools_round_runs(logged_steps):
+    llm = ScriptedLLM(_calls("acme", "orange"), _answer("ACME and Orange. [Sources: 1, 2]"))
+
+    await _run(_context(llm))
+
+    assert logged_steps == [
+        ("agentic:agent", {"round": 1}),
+        ("agentic:tools", {"round": 1, "calls": 2, "tools": 'lookup {"word": "acme"}, lookup {"word": "orange"}'}),
+        ("agentic:agent", {"round": 2}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("context", "steps", "reason"),
+    [
+        ({"max_tool_rounds": 1}, None, "no rounds left"),
+        ({"max_prompt_tokens": 5}, None, "window full"),
+        ({"max_tool_rounds": 1}, Unbounded(), "recursion limit"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_finalize_is_logged_with_why_the_model_answers_without_tools(logged_steps, context, steps, reason):
+    await _run(_context(Tireless(), **context), steps)
+
+    assert logged_steps[-1] == ("agentic:finalize", {"reason": reason})
 
 
 # --------------------------------------------------------------------------- #
@@ -276,24 +336,102 @@ async def _stream(ctx: AgentContext, steps: AgentSteps | None = None) -> tuple[l
     return lines, state
 
 
+def _steps(lines: list[str]) -> list[dict]:
+    return [chunk["extra"]["agent_step"] for chunk in map(_parsed, lines) if "agent_step" in chunk.get("extra", {})]
+
+
+def _parsed(line: str) -> dict:
+    return json.loads(line[6:])
+
+
 def _texts(lines: list[str]) -> list[str]:
-    return [json.loads(line[6:])["choices"][0]["delta"].get("content") for line in lines]
+    """The answer's text of each line that is not an agent step."""
+    return [
+        chunk["choices"][0]["delta"].get("content")
+        for chunk in map(_parsed, lines)
+        if "agent_step" not in chunk.get("extra", {})
+    ]
 
 
 @pytest.mark.asyncio
-async def test_streamed_the_answer_goes_out_word_by_word_and_the_tool_round_not_at_all():
+async def test_streamed_the_answer_goes_out_word_by_word_after_each_call_is_announced():
     llm = StreamingLLM(_calls("acme"), _answer("ACME is a client. [Sources: 1]"))
     ctx = replace(_context(llm), stream=True)
 
     lines, state = await _stream(ctx)
 
+    assert _steps(lines) == [
+        {"type": "tool_call", "round": 1, "id": "call00000", "tool": "lookup", "arguments": {"word": "acme"}},
+        {
+            "type": "tool_result",
+            "round": 1,
+            "id": "call00000",
+            "tool": "lookup",
+            "status": "ok",
+            "summary": "[Source 1] about acme",
+        },
+    ]
     assert _texts(lines) == ["ACME", " is", " a", " client.", " [Sources:", " 1]", None]
     assert json.loads(lines[-1][6:])["choices"][0]["finish_reason"] == "stop"
-    assert not any("tool_calls" in line for line in lines)
+    assert not any("tool_calls" in line for line in lines), "the model's calls are the agent's, not the client's"
     assert all(call.get("stream") for call in llm.calls), "every reply is streamed"
     assert state["rounds"] == 1
     assert state["messages"][2]["tool_calls"][0]["function"] == {"name": "lookup", "arguments": '{"word": "acme"}'}
     assert [chunk.id for chunk in ctx.tool_context.sources.entries] == ["acme"]
+
+
+class Thinker(ScriptedLLM):
+    """Thinks before each reply and says what it will do before calling a tool, as kimi-k3 does."""
+
+    async def stream_chat(self, messages, **kwargs):
+        self.calls.append({"messages": copy.deepcopy(messages), "stream": True, **kwargs})
+        yield _chunk({"role": "assistant", "reasoning_content": "Let me see.", "content": ""})
+        if len(self.calls) == 1:
+            yield _chunk({"content": "I'll look ACME up."})
+            call = {"index": 0, "id": "call00000", "type": "function", "function": {"name": "lookup", "arguments": ""}}
+            yield _chunk({"tool_calls": [call]})
+            yield _chunk({"tool_calls": [{"index": 0, "function": {"arguments": '{"word": "acme"}'}}]})
+            yield _chunk({}, "tool_calls")
+        else:
+            yield _chunk({"content": "ACME is a client. [Sources: 1]"})
+            yield _chunk({}, "stop")
+        yield "data: [DONE]"
+
+
+def _seen(lines: list[str]) -> list[tuple[str, object]]:
+    """What the client sees of each line: thinking, a step, the answer's text, the finish."""
+    seen = []
+    for chunk in map(_parsed, lines):
+        if "agent_step" in chunk.get("extra", {}):
+            seen.append(("step", chunk["extra"]["agent_step"]["type"]))
+            continue
+        choice = chunk["choices"][0]
+        if choice["finish_reason"]:
+            seen.append(("finish", choice["finish_reason"]))
+        elif "reasoning_content" in choice["delta"]:
+            seen.append(("thinking", choice["delta"]["reasoning_content"]))
+        else:
+            seen.append(("answer", choice["delta"]["content"]))
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_streamed_the_client_sees_the_agent_think_and_call_then_the_answer():
+    llm = Thinker()
+
+    lines, state = await _stream(replace(_context(llm), stream=True))
+
+    assert _seen(lines) == [
+        ("thinking", "Let me see."),
+        ("thinking", "I'll look ACME up."),  # said before a call: not the answer
+        ("step", "tool_call"),
+        ("step", "tool_result"),
+        ("thinking", "Let me see."),
+        ("answer", "ACME is a client. [Sources: 1]"),
+        ("finish", "stop"),
+    ]
+    assert state["messages"][2]["content"] == "I'll look ACME up.", "the model still reads what it said"
+    assert state["response"]["choices"][0]["message"]["content"] == "ACME is a client. [Sources: 1]"
 
 
 @pytest.mark.asyncio

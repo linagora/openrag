@@ -228,8 +228,15 @@
                 "id": "WebSearch",
                 "icon": "globe",
                 "description": "Enrichit la recherche documentaire avec des résultats web en temps réel.\nCombine vos documents et le web pour des réponses plus complètes."
+            },
+            {
+                "id": "Agent",
+                "icon": "bot",
+                "description": "Un agent cherche et lit vos documents avec des outils, en plusieurs étapes, avant de répondre.\nAdapté aux questions qui portent sur plusieurs documents, ou sur des fichiers que vous nommez.\nPlus lent qu'une recherche simple.",
+                "persistent": true
             }
         ],
+        "thinking": "Réflexion",
         "searching": "Recherche de documents pertinents...",
         "sources_label": "Sources",
         "profile_description_all": "Vous interagissez avec le LLM **{name}**.\nLes réponses du LLM seront basées sur **toutes** les partitions.",

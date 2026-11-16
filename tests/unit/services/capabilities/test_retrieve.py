@@ -9,6 +9,7 @@ from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries
 from core.models.retrieval_trace import TraceCandidate
 from core.retrieval.trace import TRACE_FILE_SCOPE_KIND_KEY, RetrievalDiagnosticsContext, RetrievalTraceBuilder
+from core.utils.logging import get_logger
 from core.websearch import WebResult
 from services.capabilities.retrieve import SourceRetriever
 from services.capabilities.web_search import WebSearch
@@ -45,6 +46,48 @@ QUERIES = SearchQueries(query_list=[Query(query="notice"), Query(query="probatio
 async def _retrieve(retriever, route, scope=Scope(["p"]), trace=None):
     return await retriever.retrieve(
         QUERIES, route=route, scope=scope, top_k=None, retrieval_top_k=None, overrides={}, trace=trace
+    )
+
+
+@pytest.mark.asyncio
+async def test_each_search_is_logged_with_its_queries_as_they_are_searched():
+    queries = SearchQueries(
+        query_list=[
+            Query(query="notice period"),
+            Query(
+                query="meeting notes",
+                temporal_filters=[{"field": "created_at", "operator": ">=", "value": "2026-03-01"}],
+                date_order="newest",
+            ),
+        ]
+    )
+    records: list[dict] = []
+    logger = get_logger()
+    sink = logger.add(
+        lambda m: records.append(m.record["extra"]) if m.record["message"] == "Search" else None, level="DEBUG"
+    )
+    try:
+        await _retriever().retrieve(
+            queries,
+            route=Route.DOCUMENTS,
+            scope=Scope(["legal"], ["contract"]),
+            top_k=None,
+            retrieval_top_k=None,
+            overrides={},
+        )
+    finally:
+        logger.remove(sink)
+
+    (record,) = records
+    assert record["queries"] == [
+        "notice period",
+        'meeting notes | created_at >= ISO "2026-03-01T00:00:00+00:00" | newest first',
+    ]
+    assert (record["partitions"], record["files"], record["documents"], record["web"]) == (
+        ["legal"],
+        ["contract"],
+        True,
+        False,
     )
 
 

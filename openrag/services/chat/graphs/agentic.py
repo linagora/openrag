@@ -16,9 +16,10 @@ tools offered. LangGraph's recursion limit is the hard one, set a few steps
 past what the profile allows; should it be reached anyway, the run still ends
 with ``finalize``'s answer, never an error.
 
-When the request streams, ``agent`` and ``finalize`` write the answer's SSE
-lines with LangGraph's stream writer, and ``CompiledAgent.stream`` hands them
-on as they come.
+When the request streams, the nodes write the client's SSE lines with
+LangGraph's stream writer (``agent`` and ``finalize`` the model's thinking
+and text, ``tools`` each call's start and end), and ``CompiledAgent.stream``
+hands them on as they come.
 """
 
 from __future__ import annotations
@@ -28,9 +29,11 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
+from core.chat.agent import describe_call
 from core.chat.state import AgentState
 from core.utils.logging import get_logger
 from services.chat.agentic import AgentContext, AgentSteps
+from services.chat.graphs.step_log import log_step
 
 # See graphs.classic: the import's pending-deprecation warning about the
 # checkpoint serializer is dropped, any other is raised again.
@@ -87,6 +90,7 @@ class CompiledAgent:
             logger.bind(profile=context.profile.name, rounds=last.get("rounds", 0)).warning(
                 "Agent reached the graph's recursion limit; answering from what it found"
             )
+            log_step("agentic", "finalize", reason="recursion limit")
             lines: list[str] = []
             update = await self._steps.finalize(last, context, emit=lines.append)
             for line in lines:
@@ -98,12 +102,22 @@ def build_agent_graph(steps: AgentSteps) -> CompiledAgent:
     """Compile the ``agentic`` graph over *steps*; compiled once, run for every agentic request."""
 
     async def agent(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
+        log_step("agentic", "agent", round=state.get("rounds", 0) + 1)
         return await steps.agent(state, runtime.context, emit=runtime.stream_writer)
 
     async def tools(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
-        return await steps.tools(state, runtime.context)
+        calls = state.get("calls", [])
+        log_step(
+            "agentic",
+            "tools",
+            round=state.get("rounds", 0) + 1,
+            calls=len(calls),
+            tools=", ".join(describe_call(call) for call in calls),
+        )
+        return await steps.tools(state, runtime.context, emit=runtime.stream_writer)
 
     async def finalize(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
+        log_step("agentic", "finalize", reason=steps.why_finalize(state, runtime.context))
         return await steps.finalize(state, runtime.context, emit=runtime.stream_writer)
 
     def next_reply(state: AgentState, runtime: Runtime[AgentContext]) -> str:

@@ -42,11 +42,7 @@ _NOT_OTHER_METADATA = UPLOAD_METADATA_SERVER_KEYS | {
 _MAX_OTHER_METADATA = 10
 _MAX_TOPICS = 20
 
-_FIND_FILES = (
-    "Find files by their name, dates or type among the files this conversation can see. Give words from the "
-    "file name, not a sentence. Lists files, not their content: search_file searches one, get_file_info "
-    "describes one, and search_knowledge finds files by what they say."
-)
+_FIND_FILES = "Find files by name, dates or type. Lists files, not their content."
 _GET_FILE_INFO = "Describe one file: its names, type, size, dates, number of passages and topics."
 
 UploadedAfter = Annotated[
@@ -77,7 +73,8 @@ class FileTools:
         self,
         ctx: ToolContext,
         name: Annotated[
-            str | None, Field(max_length=300, description='Words from the file name, e.g. "contrat acme 2024".')
+            str | None,
+            Field(max_length=300, description='Words from the file name, not a sentence, e.g. "contrat acme 2024".'),
         ] = None,
         file_types: Annotated[
             list[Annotated[str, Field(min_length=1, max_length=20)]] | None,

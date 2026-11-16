@@ -1,5 +1,7 @@
 """Shaping the model's answer into the response: citations, the empty-answer retry, extra."""
 
+import json
+
 import pytest
 from core.chat.answer import (
     build_extra_payload,
@@ -86,6 +88,52 @@ async def test_empty_response_retry_closes_streams_before_retry_and_on_disconnec
 
     assert retry_opened_after == [["initial"]]
     assert close_order == ["initial", "retry"]
+
+
+async def _lines(*lines):
+    for line in lines:
+        yield line
+
+
+def _sse(**delta) -> str:
+    return "data: " + json.dumps({"choices": [{"index": 0, "delta": delta, "finish_reason": None}]}) + "\n\n"
+
+
+_STOP = 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+_STEP = 'data: {"choices":[{"delta":{},"finish_reason":null}],"extra":{"agent_step":{"type":"tool_call"}}}\n\n'
+
+
+@pytest.mark.asyncio
+async def test_thinking_and_agent_steps_reach_the_client_before_the_answer_and_through_a_retry():
+    seen: list[str] = []
+    retried: list[bool] = []
+
+    def retry():
+        retried.append(bool(seen))  # what came before the retry was already out
+        return _lines(_sse(reasoning_content="Once more."), _sse(content="Three months."), _STOP, "data: [DONE]\n\n")
+
+    stream = retry_empty_response_stream(
+        _lines(
+            _sse(role="assistant"),
+            _sse(reasoning_content="Thinking"),
+            _STEP,
+            _sse(content=" "),
+            _STOP,
+            "data: [DONE]\n\n",
+        ),
+        retry,
+        fallback_text="Please try again.",
+        fallback_extra={},
+        model_name="m",
+    )
+    async for line in stream:
+        seen.append(line)
+
+    assert seen[:2] == [_sse(reasoning_content="Thinking"), _STEP], "out as they came, not held for the answer"
+    assert retried == [True]
+    assert _sse(reasoning_content="Once more.") in seen and _sse(content="Three months.") in seen
+    assert "Please try again." not in "".join(seen)
+    assert [line.strip() for line in seen].count("data: [DONE]") == 1
 
 
 def test_empty_response_retry_messages_adds_a_system_message_when_there_is_none():

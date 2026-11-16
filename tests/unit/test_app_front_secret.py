@@ -4,6 +4,7 @@ default secret.
 """
 
 import importlib
+import json
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -41,11 +42,16 @@ def _stub_chainlit_elements(module):
     )
 
 
-@pytest.mark.asyncio
-async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_chat_policy(monkeypatch):
-    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_shared_chat_policy_test")
+async def _chainlit_run(monkeypatch, content: str, command: str | None, module_name: str, chunks=None):
+    """Chainlit handling one message: the request it sends, the sources it formats, the steps it shows, the answer.
+
+    *chunks* is the stream the server answers with; by default, one chunk with sources and no text.
+    """
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name=module_name)
     captured_request = {}
     formatted_sources = None
+    steps = []
+    answers = []
 
     class UserSession:
         def __init__(self):
@@ -58,8 +64,13 @@ async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_ch
             self.values[key] = value
 
     class Step:
-        def __init__(self, **_kwargs):
-            pass
+        def __init__(self, name="", type="undefined", parent_id=None, default_open=False, **_kwargs):
+            self.name, self.type, self.parent_id = name, type, parent_id
+            self.default_open = default_open
+            self.id = f"step-{len(steps)}"
+            self.input, self.output, self.is_error = "", "", False
+            self.start = self.end = None
+            steps.append(self)
 
         async def __aenter__(self):
             return self
@@ -67,10 +78,20 @@ async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_ch
         async def __aexit__(self, *_args):
             return None
 
+        async def send(self):
+            return self
+
+        async def update(self):
+            return None
+
+        async def stream_token(self, token):
+            self.output += token
+
     class Message:
         def __init__(self, content="", **_kwargs):
             self.content = content
             self.elements = []
+            answers.append(self)
 
         async def send(self):
             return None
@@ -82,19 +103,24 @@ async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_ch
             self.content += token
 
     class Stream:
-        sent = False
+        def __init__(self):
+            self._chunks = list(
+                chunks
+                if chunks is not None
+                else [
+                    SimpleNamespace(
+                        extra={"sources": [{"filename": "irrelevant.txt"}], "cited_sources": []}, choices=[]
+                    )
+                ]
+            )
 
         def __aiter__(self):
             return self
 
         async def __anext__(self):
-            if self.sent:
+            if not self._chunks:
                 raise StopAsyncIteration
-            self.sent = True
-            return SimpleNamespace(
-                extra={"sources": [{"filename": "irrelevant.txt"}], "cited_sources": []},
-                choices=[],
-            )
+            return self._chunks.pop(0)
 
     class Completions:
         async def create(self, **kwargs):
@@ -114,14 +140,103 @@ async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_ch
     monkeypatch.setattr(module, "AsyncOpenAI", FakeAsyncOpenAI)
     monkeypatch.setattr(module, "_format_sources", capture_sources)
 
+    await module.on_message(SimpleNamespace(content=content, command=command))
+    return SimpleNamespace(
+        request=captured_request, sources=formatted_sources, steps=steps, answer=answers[0].content if answers else None
+    )
+
+
+async def _chainlit_request(monkeypatch, content: str, command: str | None, module_name: str):
+    """The chat request Chainlit sends for a message, and the sources it then formats."""
+    run = await _chainlit_run(monkeypatch, content, command, module_name)
+    return run.request, run.sources
+
+
+def _delta(content=None, **delta):
+    return SimpleNamespace(extra={}, choices=[SimpleNamespace(delta=SimpleNamespace(content=content, **delta))])
+
+
+def _event(**event):
+    return SimpleNamespace(extra={"agent_step": event}, choices=[SimpleNamespace(delta=SimpleNamespace(content=None))])
+
+
+@pytest.mark.asyncio
+async def test_the_model_s_thinking_and_tool_calls_are_shown_as_steps_before_the_answer(monkeypatch):
+    chunks = [
+        _delta(reasoning_content="Let me "),
+        _delta(reasoning_content="search."),
+        _event(type="tool_call", id="c1", tool="search_knowledge", arguments={"queries": ["préavis"]}),
+        _event(type="tool_result", id="c1", tool="search_knowledge", status="ok", summary="10 excerpts."),
+        _delta(reasoning="Found it."),  # OpenRouter's key
+        _delta("Three "),
+        _delta("months."),
+        SimpleNamespace(extra={"cited_sources": [{"filename": "contract.pdf"}]}, choices=[]),
+    ]
+
+    run = await _chainlit_run(monkeypatch, "Notice period?", "Agent", "app_front_steps_test", chunks)
+
+    searching, thinking, call, thinking_again = run.steps
+    assert [s.parent_id for s in run.steps[1:]] == [searching.id] * 3, "inside the search step"
+    assert (thinking.type, thinking.output) == ("llm", "Let me search.")
+    assert (call.name, call.type, call.input, call.output) == (
+        "search_knowledge",
+        "tool",
+        '{"queries": ["préavis"]}',
+        "10 excerpts.",
+    )
+    assert thinking_again.output == "Found it."
+    assert all(s.start and s.end for s in run.steps[1:]), "each step ends, the last when the answer starts"
+    assert all(s.default_open for s in run.steps), "the search step and those inside it show open"
+    assert run.answer == "Three months."
+    assert run.sources == [{"filename": "contract.pdf"}], "sources come from the final chunk, not from a step"
+
+
+@pytest.mark.asyncio
+async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_chat_policy(monkeypatch):
     claim = "Albendazole is used to treat lymphatic filariasis."
-    await module.on_message(SimpleNamespace(content=claim, command=None))
+    captured_request, formatted_sources = await _chainlit_request(
+        monkeypatch, claim, None, "app_front_shared_chat_policy_test"
+    )
 
     assert captured_request["model"] == "openrag-scifact"
     assert captured_request["stream"] is True
     assert captured_request["messages"][-1] == {"role": "user", "content": claim}
     assert "require_retrieval" not in captured_request["metadata"]
+    assert "rag_mode" not in captured_request["metadata"], "without the Agent command, the server's default mode"
     assert formatted_sources == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "rag_mode", "flag"),
+    [
+        ("Agent", "agentic", None),
+        ("DeepSearch", None, "use_map_reduce"),
+        ("WebSearch", None, "websearch"),
+        ("SpokenStyleAnswer", None, "spoken_style_answer"),
+    ],
+)
+async def test_the_agent_command_asks_for_the_agentic_mode(monkeypatch, command, rag_mode, flag):
+    captured_request, _ = await _chainlit_request(
+        monkeypatch, "What changed in the contract?", command, f"app_front_command_{command}_test"
+    )
+
+    metadata = captured_request["metadata"]
+    assert metadata.get("rag_mode") == rag_mode
+    assert [key for key in ("use_map_reduce", "websearch", "spoken_style_answer") if metadata[key]] == (
+        [flag] if flag else []
+    ), "a message takes one command: the agent never gets the flags it refuses"
+
+
+@pytest.mark.parametrize("translation", ["en-US.json", "fr.json"])
+def test_the_agent_command_is_offered_in_each_language(monkeypatch, translation):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name=f"app_front_i8n_{translation}_test")
+    path = Path(__file__).resolve().parents[2] / "i8n" / translation
+    commands = {command["id"]: command for command in json.loads(path.read_text())["app"]["commands"]}
+
+    agent = commands[module.AGENT_COMMAND]
+    assert agent["persistent"] is True, "it stays on for the conversation, like a mode"
+    assert agent["icon"] and agent["description"]
 
 
 def test_no_hardcoded_default_secret_assignment_in_source():

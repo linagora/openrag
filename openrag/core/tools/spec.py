@@ -65,7 +65,7 @@ class ToolSpec:
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": _without_titles(self.params.model_json_schema()),
+                "parameters": _optional_shown_plainly(_without_titles(self.params.model_json_schema())),
             },
         }
 
@@ -141,6 +141,28 @@ def _without_titles(schema: Any, *, in_properties: bool = False) -> Any:
         for key, value in schema.items()
         if in_properties or key != "title"
     }
+
+
+_NULL = {"type": "null"}
+
+
+def _optional_shown_plainly(parameters: dict[str, Any]) -> dict[str, Any]:
+    """*parameters* with each ``X | None = None`` parameter shown as ``X``.
+
+    Pydantic shows one as ``anyOf: [X, {"type": "null"}]`` with ``default:
+    null``, which the model is sent with every reply. Leaving it out of
+    ``required`` already says it is optional; a null the model sends anyway
+    is still accepted, as the arguments are validated by the full model.
+    """
+    properties = {}
+    for name, prop in parameters.get("properties", {}).items():
+        branches = prop.get("anyOf")
+        if "default" in prop and prop["default"] is None and isinstance(branches, list) and _NULL in branches:
+            others = [branch for branch in branches if branch != _NULL]
+            if len(others) == 1:
+                prop = {**others[0], **{key: value for key, value in prop.items() if key not in ("anyOf", "default")}}
+        properties[name] = prop
+    return {**parameters, "properties": properties} if "properties" in parameters else parameters
 
 
 class ToolRegistry:

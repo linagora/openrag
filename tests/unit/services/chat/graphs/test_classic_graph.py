@@ -92,6 +92,23 @@ async def test_a_question_is_contextualized_retrieved_and_fitted():
 
 
 @pytest.mark.asyncio
+async def test_each_step_is_logged_as_it_starts_with_the_number_of_queries_searched(logged_steps):
+    queries = SearchQueries(query_list=[Query(query="a"), Query(query="b")])
+    steps = RecordingSteps(route=_NOT_CASUAL, contextualize={"queries": queries}, retrieve=_FOUND)
+
+    await _run(steps, _context())
+
+    assert logged_steps == [
+        ("classic:route", {}),
+        ("classic:contextualize", {}),
+        ("classic:trace_config", {}),
+        ("classic:retrieve", {"queries": 2}),
+        ("classic:budget", {}),
+        ("classic:prompt", {}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_small_talk_skips_the_contextualizer_and_the_search():
     steps = RecordingSteps(route={"casual": _HELLO, "acknowledgement_candidate": False, "retrieval_forced": False})
 

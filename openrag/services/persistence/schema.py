@@ -132,6 +132,7 @@ _PROMPT_TYPE_VALUES = (
     "spoken_style_answer",
     "topic_tagger",
     "asr_transcription",
+    "agent",
 )
 _PROMPT_TYPE_IN = "prompt_type IN (" + ",".join(f"'{v}'" for v in _PROMPT_TYPE_VALUES) + ")"
 

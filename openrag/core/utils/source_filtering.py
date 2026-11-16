@@ -10,6 +10,7 @@ import unicodedata
 from collections.abc import Callable
 
 from core.utils.logging import get_logger
+from core.utils.stream_progress import AGENT_STEP
 
 logger = get_logger()
 
@@ -448,11 +449,13 @@ async def stream_with_source_filtering(
                         folded_len += folded
                         stripped_len = len(tail)
             elif not finish_reason:
-                # Neither content nor finish_reason (role preamble, usage-only or
-                # keep-alive chunk): pass it through untouched. A finish-only chunk
+                # Neither content nor finish_reason (role preamble, reasoning, an
+                # agent step, usage-only or keep-alive chunk): pass it through
+                # untouched, an agent step keeping its event. A finish-only chunk
                 # is intentionally *not* re-emitted here — the terminal flush emits
                 # the finish chunk so it can carry `extra.sources`.
-                data["extra"] = {}
+                step = data.get("extra", {}).get(AGENT_STEP) if isinstance(data.get("extra"), dict) else None
+                data["extra"] = {AGENT_STEP: step} if step is not None else {}
                 yield f"data: {json.dumps(data)}\n\n"
     except Exception as exc:
         # Upstream raised mid-stream (timeout, connection drop, worker restart):

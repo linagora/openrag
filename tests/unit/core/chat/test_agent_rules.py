@@ -7,16 +7,19 @@ from pathlib import Path
 
 import pytest
 from core.chat.agent import (
+    HELD_TEXT_CHARS,
     LEFT_OUT_RESULT,
+    ReplyLines,
     StreamedReply,
     assistant_turn,
     call_signature,
+    describe_call,
     finish_line,
     leave_out_old_results,
     sse_chunk,
+    step_line,
     text_line,
     tool_calls,
-    with_instruction,
 )
 from core.chat.agent_profile import AgentProfiles
 from core.config.agentic import DEFAULT_AGENT_TOOLS, AgenticConfig, AgentProfileConfig
@@ -89,15 +92,13 @@ def test_two_calls_are_the_same_whatever_the_order_or_spacing_of_their_arguments
     assert call_signature(ToolCall("d", "x", "not json")) == "x:not json"
 
 
-def test_the_instruction_joins_the_system_prompt_or_becomes_one():
-    messages = [{"role": "system", "content": "Rules.\n"}, {"role": "user", "content": "q"}]
-
-    assert with_instruction(messages, "Answer now.")[0] == {"role": "system", "content": "Rules.\n\nAnswer now."}
-    assert messages[0]["content"] == "Rules.\n", "the caller's messages are not changed"
-    assert with_instruction([{"role": "user", "content": "q"}], "Answer now.")[0] == {
-        "role": "system",
-        "content": "Answer now.",
-    }
+def test_a_call_is_described_with_its_arguments_compact_and_capped():
+    assert describe_call(ToolCall("a", "search_knowledge", '{ "queries" : ["préavis"] }')) == (
+        'search_knowledge {"queries": ["préavis"]}'
+    )
+    assert describe_call(ToolCall("b", "read_file", "not json")) == "read_file not json"
+    long = describe_call(ToolCall("c", "search_knowledge", json.dumps({"queries": ["x" * 400]})))
+    assert len(long) == len("search_knowledge ") + 300 and long.endswith("…")
 
 
 def test_the_oldest_tool_results_are_left_out_until_the_conversation_fits():
@@ -260,3 +261,72 @@ def test_the_client_gets_the_text_without_the_calls_and_a_finish_of_its_own():
     assert finish["object"] == "chat.completion.chunk"
     kept = json.loads(finish_line({"choices": [{"finish_reason": "length"}]})[len("data: ") :])
     assert kept["choices"][0]["finish_reason"] == "length"
+
+
+# --------------------------------------------------------------------------- #
+# What the client sees of a streamed reply
+# --------------------------------------------------------------------------- #
+
+_KIMI = Path(__file__).parents[2] / "services/chat/fixtures/kimi_k3_thinking_tool_call.sse"
+
+
+def _seen(lines: list[str]) -> list[tuple[str, str]]:
+    """Each line as (``thinking`` | ``answer``, its text)."""
+    out = []
+    for line in lines:
+        delta = json.loads(line[len("data: ") :])["choices"][0]["delta"]
+        out.append(
+            ("thinking", delta["reasoning_content"]) if "reasoning_content" in delta else ("answer", delta["content"])
+        )
+    return out
+
+
+def _play(chunks: list[dict]) -> tuple[ReplyLines, list[str]]:
+    reply = ReplyLines()
+    lines = [line for chunk in chunks for line in reply.add(chunk)]
+    return reply, lines + reply.end()
+
+
+def _delta(finish_reason=None, **delta) -> dict:
+    return {"id": "x", "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+
+
+def test_kimi_s_thinking_and_its_sentence_before_the_call_are_shown_as_thinking():
+    chunks = [c for c in map(sse_chunk, _KIMI.read_text().splitlines()) if c is not None]
+
+    reply, lines = _play(chunks)
+
+    seen = _seen(lines)
+    assert {kind for kind, _ in seen} == {"thinking"}, "nothing of a reply that calls a tool is the answer"
+    thinking = "".join(text for _, text in seen)
+    assert thinking.startswith("The user is asking about")
+    assert thinking.endswith("I'll search your documents for information on digital sovereignty.")
+    call = reply.reply.response()["choices"][0]["message"]["tool_calls"][0]["function"]
+    assert call["name"] == "search_knowledge"
+    assert json.loads(call["arguments"])["queries"][0] == "digital sovereignty"
+
+
+def test_a_short_answer_is_held_to_the_end_then_given_as_the_answer():
+    reply, lines = _play([_delta(reasoning="Easy."), _delta(content="Three "), _delta(content="months.")])
+
+    assert _seen(lines) == [("thinking", "Easy."), ("answer", "Three "), ("answer", "months.")]
+    assert reply.reply.response()["choices"][0]["message"]["content"] == "Three months."
+
+
+def test_a_long_answer_streams_once_past_the_held_text():
+    words = [_delta(content="word ") for _ in range(HELD_TEXT_CHARS // 5 + 3)]
+    reply = ReplyLines()
+
+    per_chunk = [reply.add(chunk) for chunk in words]
+
+    released = next(i for i, lines in enumerate(per_chunk) if lines)
+    assert released == HELD_TEXT_CHARS // 5 - 1 and len(per_chunk[released]) == released + 1
+    assert all(len(lines) == 1 for lines in per_chunk[released + 1 :]), "then each piece goes out as it comes"
+    assert reply.end() == []
+
+
+def test_step_lines_carry_their_event_in_extra():
+    chunk = json.loads(step_line({"type": "tool_call", "tool": "find_files", "arguments": {"name": "été"}})[6:])
+
+    assert chunk["extra"] == {"agent_step": {"type": "tool_call", "tool": "find_files", "arguments": {"name": "été"}}}
+    assert chunk["choices"] == [{"index": 0, "delta": {}, "finish_reason": None}]

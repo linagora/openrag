@@ -15,16 +15,18 @@ the request's scope and the ``[Source N]`` numbers of the passages the tools
 show. The answer is the model's last reply; ``AnswerService`` then shapes it
 like any other, citations included.
 
-When the request streams, every reply of the model is streamed: its text goes
-to the client as the model writes it (``AgentStream``), its tool calls are put
-back together and run. A round is known to be the last only once the model
-has replied, so the text of a reply that then calls tools reaches the client
-too; Mistral writes none before a call.
+When the request streams, every reply of the model is streamed
+(``AgentStream``): its thinking goes to the client as it comes, its text once
+it is clear no tool call follows (the sentence a model writes before a call is
+shown as thinking), and its tool calls are put back together and run. Each
+call is announced when it starts and when it ends (``step_line``), so a client
+can show the agent at work before the answer comes.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -34,15 +36,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 from core.chat.agent import (
     FINALIZE_INSTRUCTION,
     MAX_CALLS_PER_ROUND,
-    StreamedReply,
+    ReplyLines,
     assistant_turn,
     call_signature,
     finish_line,
     leave_out_old_results,
     sse_chunk,
-    text_line,
+    step_line,
     tool_calls,
-    with_instruction,
 )
 from core.chat.agent_profile import AgentProfile, AgentProfiles
 from core.chat.answer import sampling_params
@@ -89,8 +90,11 @@ class AgentContext:
     stream: bool = False
 
 
-#: Where a step writes the SSE lines of the answer as the model writes it.
+#: Where a step writes the SSE lines the client gets as the agent works.
 Emit = Callable[[str], None]
+
+#: Characters of a tool result the client is told of when the call ends: its first line.
+_RESULT_SUMMARY_CHARS = 200
 
 
 class AgentGraph(Protocol):
@@ -106,8 +110,9 @@ class AgentGraph(Protocol):
 class AgentSteps:
     """The bodies of the ``agentic`` graph's nodes, and the tests its edges make.
 
-    *emit* is where ``agent`` and ``finalize`` write the answer's SSE lines
-    when the request streams.
+    *emit* is where the steps write the client's SSE lines when the request
+    streams: ``agent`` and ``finalize`` the model's thinking and text,
+    ``tools`` each call's start and end.
     """
 
     async def agent(self, state: AgentState, ctx: AgentContext, emit: Emit | None = None) -> dict:
@@ -125,11 +130,12 @@ class AgentSteps:
             emit(finish_line(response))
         return {"response": response, "calls": []}
 
-    async def tools(self, state: AgentState, ctx: AgentContext) -> dict:
+    async def tools(self, state: AgentState, ctx: AgentContext, emit: Emit | None = None) -> dict:
         """Run the calls of the model's reply and add their results to the conversation.
 
         Calls run concurrently. One already made this turn is answered with an
         error instead of running again, as are those past ``MAX_CALLS_PER_ROUND``.
+        Streamed, each call is announced as it starts and as it ends.
         """
         made = list(state.get("calls_made", []))
         planned: list[ToolCall | ToolResult] = []
@@ -148,11 +154,20 @@ class AgentSteps:
                 made.append(signature)
                 planned.append(call)
 
+        round_number = state.get("rounds", 0) + 1
+        announce = emit if ctx.stream else None
+        if announce is not None:
+            for call in state.get("calls", []):
+                announce(step_line(_call_started(call, round_number)))
+
         async def answer(item: ToolCall | ToolResult) -> ToolResult:
-            return await run_tool(ctx.tools, item, ctx.tool_context) if isinstance(item, ToolCall) else item
+            result = await run_tool(ctx.tools, item, ctx.tool_context) if isinstance(item, ToolCall) else item
+            if announce is not None:
+                announce(step_line(_call_ended(result, round_number)))
+            return result
 
         results = await asyncio.gather(*(answer(item) for item in planned))
-        rounds = state.get("rounds", 0) + 1
+        rounds = round_number
         logger.bind(
             profile=ctx.profile.name,
             round=rounds,
@@ -169,9 +184,10 @@ class AgentSteps:
     async def finalize(self, state: AgentState, ctx: AgentContext, emit: Emit | None = None) -> dict:
         """The answer from what the tools found, with no tools offered.
 
-        The oldest tool results are left out until the conversation fits.
+        The model is told so after the tool results, where it reads it last;
+        the oldest results are left out until the conversation fits.
         """
-        messages = with_instruction(state["messages"], FINALIZE_INSTRUCTION)
+        messages = [*state["messages"], {"role": "user", "content": FINALIZE_INSTRUCTION}]
         messages = leave_out_old_results(messages, lambda m: self.fits(m, ctx, with_tools=False))
         response = await self._reply(messages, ctx, with_tools=False, emit=emit)
         if ctx.stream and emit is not None:
@@ -188,12 +204,15 @@ class AgentSteps:
         messages = sanitize_messages(messages)
         if not ctx.stream or emit is None:
             return await ctx.llm.chat(messages, **kwargs)
-        reply = StreamedReply()
+        lines = ReplyLines()
         async for line in ctx.llm.stream_chat(messages, **kwargs):
             chunk = sse_chunk(line)
-            if chunk is not None and (text := reply.add(chunk)):
-                emit(text_line(chunk, text))
-        return reply.response()
+            if chunk is not None:
+                for out in lines.add(chunk):
+                    emit(out)
+        for out in lines.end():
+            emit(out)
+        return lines.reply.response()
 
     def wants_tools(self, state: AgentState) -> bool:
         """Whether the model's reply calls tools, rather than answering."""
@@ -204,6 +223,10 @@ class AgentSteps:
         return state.get("rounds", 0) < ctx.profile.max_tool_rounds and self.fits(
             state["messages"], ctx, with_tools=True
         )
+
+    def why_finalize(self, state: AgentState, ctx: AgentContext) -> str:
+        """Why the model answers without tools: its rounds ran out, or the conversation outgrew the window."""
+        return "no rounds left" if state.get("rounds", 0) >= ctx.profile.max_tool_rounds else "window full"
 
     @staticmethod
     def fits(messages: list[dict], ctx: AgentContext, *, with_tools: bool) -> bool:
@@ -373,6 +396,28 @@ class AgenticChat:
 def _message(response: dict) -> dict:
     choices = response.get("choices") or [{}]
     return choices[0].get("message") or {}
+
+
+def _call_started(call: ToolCall, round_number: int) -> dict:
+    """The event a client gets when *call* starts: the tool and what the model asked of it."""
+    try:
+        arguments: Any = json.loads(call.arguments or "{}")
+    except ValueError:
+        arguments = call.arguments
+    return {"type": "tool_call", "round": round_number, "id": call.id, "tool": call.name, "arguments": arguments}
+
+
+def _call_ended(result: ToolResult, round_number: int) -> dict:
+    """The event a client gets when a call ends: whether it failed, and the first line of what it returned."""
+    first_line = (result.content or "").strip().split("\n", 1)[0]
+    return {
+        "type": "tool_result",
+        "round": round_number,
+        "id": result.call_id,
+        "tool": result.name,
+        "status": "error" if result.is_error else "ok",
+        "summary": first_line[:_RESULT_SUMMARY_CHARS],
+    }
 
 
 def _refused(call: ToolCall, reason: str) -> ToolResult:

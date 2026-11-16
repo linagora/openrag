@@ -35,24 +35,18 @@ DEFAULT_EXCERPT_CHARS = 400
 #: Passages ``read_file`` may add on each side of the one asked for.
 MAX_NEIGHBOURS = 3
 
+# What the model is shown of each tool, sent with every reply it makes: what the
+# tool does and what only it needs. How the tools work together is the prompt's.
 _SEARCH_KNOWLEDGE = (
-    "Search the documents this conversation can see. Send 1 to 3 queries in one call when the question "
-    "has distinct parts; they are searched together. Keep the distinctive words, in the documents' language. "
-    "Put dates in created_after / created_before, not in the queries. Returns excerpts numbered [Source N], "
-    "best match first: they locate information; read_file reads one in full before you rely on it."
+    "Search the documents. Returns excerpts numbered [Source N], best match first. The queries of a call "
+    "share its dates: parts of the question with different periods take separate calls."
 )
-_SEARCH_FILE = (
-    "Search inside one file, named by the partition and file id shown with each source. "
-    "Returns excerpts numbered [Source N], best match first."
-)
-_READ_FILE = (
-    "Read in full a passage a search returned, [Source N], with the passages just before and after it "
-    "in its file, in reading order. Read a passage before relying on its excerpt."
-)
+_SEARCH_FILE = "Search inside one file, named by the partition and file id shown with a source."
+_READ_FILE = "Read a [Source N] in full, with the passages around it in its file, in reading order."
 _SUMMARIZE = (
-    "Condense passages for a question: give the [Source N] numbers to summarize, or one file (partition and "
-    "file id), whose passages best matching the question are taken. Keeps the relevant ones, each as a short "
-    "summary under its own [Source N]; says how many were not relevant."
+    'Only for a question about a file as a whole, e.g. "what is this report about?": summarizes the file '
+    "(partition and file id), or the [Source N] of its passages. For any other question, read the passages "
+    "instead. Returns the relevant ones as short summaries, each under its [Source N]."
 )
 
 #: Sources ``summarize`` takes in one call.
@@ -60,7 +54,16 @@ MAX_SUMMARIZED_SOURCES = 20
 
 Queries = Annotated[
     list[Annotated[str, Field(min_length=1, max_length=500)]],
-    Field(min_length=1, max_length=3, description="1 to 3 search queries, one per distinct need."),
+    Field(
+        min_length=1,
+        max_length=3,
+        description=(
+            "1 to 3 queries, one per distinct part of the question, not rephrasings of one. Each is a full "
+            "question or sentence in the documents' language, not keywords: the search ranks passages by meaning. "
+            "It doesn't see the conversation: keep the user's wording, pronouns replaced by what they name. "
+            'E.g. "How much is invested in digital sovereignty?", not "digital sovereignty".'
+        ),
+    ),
 ]
 CreatedAfter = Annotated[
     date | None, Field(description="Only documents created on or after this date (YYYY-MM-DD, UTC).")
@@ -70,7 +73,10 @@ CreatedBefore = Annotated[
 ]
 Order = Annotated[
     DateOrder | None,
-    Field(description='Show the newest or oldest documents first, e.g. "newest" for "the last meeting".'),
+    Field(
+        description='"newest" for "the last X", "oldest" for "the first X"; the query then names the kind '
+        'of document, e.g. "meeting notes".'
+    ),
 ]
 Neighbours = Annotated[int, Field(ge=0, le=MAX_NEIGHBOURS)]
 
@@ -119,8 +125,8 @@ class DocumentTools:
         )
         chunks = await self._search(search, ctx.scope)
         if not chunks:
-            advice = "fewer, more distinctive words, in the documents' language"
-            return f"No passage matched. Try other queries: {advice}{', or wider dates' if dates else ''}."
+            advice = "the question reworded, with the terms the documents would use and abbreviations spelled out"
+            return f"No passage matched. Try {advice}{', or wider dates' if dates else ''}."
         shown = f"{order} document first" if order else "best match first"
         return self._located(ctx, order_chunks_by_date(chunks, order), f"{len(chunks)} excerpts, {shown}.")
 

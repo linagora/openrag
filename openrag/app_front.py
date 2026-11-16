@@ -13,6 +13,7 @@ import chainlit as cl
 import httpx
 from chainlit.config import config as cl_config
 from chainlit.context import get_context
+from chainlit.utils import utc_now
 from core.auth.chainlit import (
     CHAINLIT_AUTH_COOKIE_NAME,
     CHAINLIT_LOGOUT_COOKIE_MAX_AGE_SECONDS,
@@ -699,28 +700,95 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
     return elements, source_names
 
 
+#: The command that answers with the agent (``metadata.rag_mode: agentic``), declared in ``i8n/*.json``.
+#: A message takes one command, so the agent never gets DeepSearch or WebSearch, which it refuses.
+AGENT_COMMAND = "Agent"
+
+
+class _ModelAtWork:
+    """What the model shows while it works, as open steps under *parent_id*: its thinking, streamed, and each tool call.
+
+    A thinking model streams its reasoning as ``delta.reasoning_content``; the
+    agent tells of each tool call in ``extra.agent_step`` when it starts
+    (the tool and its arguments) and when it ends (what it found). Thinking
+    after a tool call opens a new "Thinking" step, so the steps read in order.
+    """
+
+    def __init__(self, parent_id: str | None) -> None:
+        self._parent_id = parent_id
+        self._thinking = None
+        self._calls: dict[str, object] = {}
+
+    async def think(self, text: str) -> None:
+        if self._thinking is None:
+            self._thinking = await self._open(
+                cl.Step(name=t("thinking"), type="llm", parent_id=self._parent_id, default_open=True)
+            )
+        await self._thinking.stream_token(text)
+
+    async def step(self, event: dict) -> None:
+        await self._stop_thinking()
+        if event.get("type") == "tool_call":
+            call = cl.Step(
+                name=str(event.get("tool", "tool")), type="tool", parent_id=self._parent_id, default_open=True
+            )
+            call.input = json.dumps(event.get("arguments"), ensure_ascii=False)
+            self._calls[str(event.get("id"))] = await self._open(call)
+        elif event.get("type") == "tool_result" and (call := self._calls.pop(str(event.get("id")), None)):
+            call.output = str(event.get("summary") or "")
+            call.is_error = event.get("status") == "error"
+            await self._close(call)
+
+    async def done(self) -> None:
+        """End every step still open: the answer has started, or the stream has ended."""
+        await self._stop_thinking()
+        for call in self._calls.values():
+            await self._close(call)
+        self._calls.clear()
+
+    async def _stop_thinking(self) -> None:
+        if self._thinking is not None:
+            await self._close(self._thinking)
+            self._thinking = None
+
+    @staticmethod
+    async def _open(step):
+        step.start = utc_now()
+        await step.send()
+        return step
+
+    @staticmethod
+    async def _close(step) -> None:
+        step.end = utc_now()
+        await step.update()
+
+
 @cl.on_message
 async def on_message(message: cl.Message):
     messages: list = cl.user_session.get("messages", [])
     model: str = cl.user_session.get("chat_profile")
 
     messages.append({"role": "user", "content": message.content})
+    metadata = {
+        "use_map_reduce": message.command == "DeepSearch",
+        "spoken_style_answer": message.command == "SpokenStyleAnswer",
+        "websearch": message.command == "WebSearch",
+    }
+    if message.command == AGENT_COMMAND:
+        metadata["rag_mode"] = "agentic"
     data = {
         "model": model,
         "messages": messages,
         "temperature": 0.2,
         "stream": True,
         "frequency_penalty": 0.4,
-        "metadata": {
-            "use_map_reduce": message.command == "DeepSearch",
-            "spoken_style_answer": message.command == "SpokenStyleAnswer",
-            "websearch": message.command == "WebSearch",
-        },
+        "metadata": metadata,
     }
 
-    async with cl.Step(name=t("searching")):
+    async with cl.Step(name=t("searching"), default_open=True) as searching:
         response_content = ""
         sources, elements, source_names = None, None, None
+        at_work = _ModelAtWork(getattr(searching, "id", None))
         # Create message content to display
         msg = cl.Message(content="")
         await msg.send()
@@ -743,13 +811,22 @@ async def on_message(message: cl.Message):
                 if isinstance(extra, str):
                     extra = json.loads(extra)
                 if extra:
+                    if "agent_step" in extra:
+                        await at_work.step(extra["agent_step"])
+                        continue
                     sources = extra.get("cited_sources")
 
-                if chunk.choices and chunk.choices[0].delta.content:
-                    token = chunk.choices[0].delta.content
+                delta = chunk.choices[0].delta if chunk.choices else None
+                thinking = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                if thinking:
+                    await at_work.think(thinking)
+                if delta is not None and delta.content:
+                    await at_work.done()
+                    token = delta.content
                     response_content += token
                     await msg.stream_token(token)
 
+            await at_work.done()
             await msg.update()
             messages.append({"role": "assistant", "content": response_content})
             cl.user_session.set("messages", messages)
