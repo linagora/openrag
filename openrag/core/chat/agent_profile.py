@@ -22,6 +22,8 @@ class AgentProfile:
     #: Used when the request sends no temperature.
     temperature: float | None
     max_tool_rounds: int
+    #: Used when the request sends no reasoning_effort.
+    reasoning_effort: str | None = None
 
     @classmethod
     def from_config(cls, name: str, config: AgentProfileConfig) -> AgentProfile:
@@ -31,6 +33,7 @@ class AgentProfile:
             tools=tuple(config.tools),
             temperature=config.temperature,
             max_tool_rounds=config.max_tool_rounds,
+            reasoning_effort=config.reasoning_effort,
         )
 
 

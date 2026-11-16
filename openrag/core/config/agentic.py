@@ -8,6 +8,7 @@ answer.
 
 from __future__ import annotations
 
+from core.llm.reasoning import ReasoningEffort
 from pydantic import Field, model_validator
 
 from .base import ConfigMixin
@@ -32,6 +33,8 @@ class AgentProfileConfig(ConfigMixin):
     tools: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENT_TOOLS), min_length=1)
     #: Used when the request sends no temperature; ``None`` then leaves the endpoint's own.
     temperature: float | None = Field(default=0.2, ge=0, le=2)
+    #: OpenAI's reasoning_effort, used when the request sends none; ``None`` then leaves the endpoint's.
+    reasoning_effort: ReasoningEffort | None = None
     #: Rounds of tool calls before the agent must answer from what it found.
     max_tool_rounds: int = Field(default=6, ge=1, le=20)
 

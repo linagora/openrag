@@ -142,3 +142,27 @@ async def test_text_completions_check_the_mode_too(client, service, rag_mode, st
 
     assert response.status_code == status_code, response.text
     assert ("complete" in service.calls) is (status_code == 200)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rag_mode", ["classic", "agentic"])
+@pytest.mark.parametrize(("sent", "forwarded"), [({}, None), ({"reasoning_effort": "low"}, "low")])
+async def test_a_reasoning_level_is_forwarded_only_when_the_request_sends_one(
+    client, service, rag_mode, sent, forwarded
+):
+    async with client:
+        response = await client.post("/v1/chat/completions", json={**_chat(rag_mode), **sent})
+
+    assert response.status_code == 200, response.text
+    assert service.calls["chat"]["payload"].get("reasoning_effort") == forwarded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", ["max", "HIGH", ""])
+async def test_a_reasoning_level_that_is_not_openai_s_is_refused(client, service, level):
+    async with client:
+        response = await client.post("/v1/chat/completions", json={**_chat("classic"), "reasoning_effort": level})
+
+    assert response.status_code == 422
+    assert "reasoning_effort" in response.text
+    assert service.calls == {}

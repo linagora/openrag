@@ -2,6 +2,7 @@ import math
 from typing import Any, Literal
 
 from core.chat.answer import is_structured_output
+from core.llm.reasoning import ReasoningEffort
 from core.models.chat import RagMode, check_agentic_request, parse_rag_mode
 from core.utils import consts
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -80,6 +81,15 @@ class OpenAIChatCompletionRequest(BaseModel):
     max_tokens: int | None = Field(None)
     logprobs: bool | None = Field(False)
     top_logprobs: int | None = Field(None)
+    reasoning_effort: ReasoningEffort | None = Field(
+        None,
+        description=(
+            "OpenAI's reasoning_effort: how much a thinking model reasons before it answers. Sent to the "
+            "model as reasoning_effort, rewritten by the LLM endpoint's reasoning_effort_map when it has one. "
+            "Without it, an agentic request gets its agent profile's, then the endpoint's default; none at all "
+            "leaves the model's own. Every reply of the agent, and classic's answer, use it."
+        ),
+    )
     response_format: dict[str, Any] | None = Field(
         None,
         examples=[{"type": "json_object"}],

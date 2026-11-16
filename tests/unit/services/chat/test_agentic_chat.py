@@ -160,6 +160,25 @@ async def test_the_request_s_temperature_wins_and_the_profile_s_fills_in(
     assert llm.calls[0].get("temperature") == used
 
 
+@pytest.mark.parametrize(
+    ("requested", "profile_level", "used"),
+    [
+        ("high", "low", "high"),  # the request's, when it sends one
+        (None, "low", "low"),  # the profile's otherwise
+        (None, None, None),  # neither: the endpoint's default, then the model's own
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_request_s_reasoning_level_wins_and_the_profile_s_fills_in(requested, profile_level, used):
+    profiles = {"default": AgentProfileConfig(tools=["lookup"], reasoning_effort=profile_level)}
+    payload = dict(_PAYLOAD) if requested is None else {**_PAYLOAD, "reasoning_effort": requested}
+    llm = LLM(_reply(lookup='{"word": "acme"}'), _reply("ok"))
+
+    await _run(_agentic(profiles), llm, payload=payload)
+
+    assert [call.get("reasoning_effort") for call in llm.calls] == [used, used], "every reply of the agent"
+
+
 @pytest.mark.asyncio
 async def test_the_run_returns_the_answer_and_every_passage_the_tools_showed():
     llm = LLM(_reply(lookup='{"word": "acme"}'), _reply("ACME. [Sources: 1]"))

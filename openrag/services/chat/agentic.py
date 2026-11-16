@@ -74,7 +74,8 @@ class AgentContext:
     """What the agent runs with besides its state, settled before the graph starts.
 
     *sampling* is what the request asked of the model (its ``metadata`` too,
-    for ``llm_override``), with the profile's temperature when it sent none.
+    for ``llm_override``), with the profile's temperature and reasoning_effort
+    when it sent none.
     *tools_tokens* is what the tool definitions take in the prompt;
     *max_prompt_tokens* what the model's window leaves for it, ``None`` when
     the window is unknown. With *stream*, the model's replies are streamed.
@@ -373,6 +374,8 @@ class AgenticChat:
         sampling = sampling_params(request.payload)
         if sampling.get("temperature") is None and profile.temperature is not None:
             sampling["temperature"] = profile.temperature
+        if sampling.get("reasoning_effort") is None and profile.reasoning_effort is not None:
+            sampling["reasoning_effort"] = profile.reasoning_effort
         tools = self._tools[profile.name]
         tool_context = ToolContext(scope=request.scope)
         context = AgentContext(
