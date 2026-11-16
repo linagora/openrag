@@ -137,7 +137,7 @@ When `RAY_ADDRESS` is set, the app **attaches** to the external cluster and does
 
 ### Retire an old indexer actor generation
 
-Detached indexer actors survive an API-only rollout when OpenRAG uses an external Ray cluster. When an upgrade changes the indexer actor protocol, stop traffic to API replicas using the old generation, then retire that generation from a checkout of the new release.
+Detached indexer actors survive an API-only rollout when OpenRAG uses an external Ray cluster. When an upgrade changes the indexer actor generation, stop traffic to API replicas using the old generation, then retire that generation from a checkout of the new release.
 
 The first transition is from the original unversioned actors to `v2`. Those actors cannot report whether they are idle, so verify that the old API replicas and indexing jobs have stopped before confirming their removal:
 
@@ -148,12 +148,12 @@ PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
   --confirm-legacy-idle
 ```
 
-Protocol-aware generations drain automatically. For example, a future `v2` retirement rejects new submissions, waits for all accepted jobs to settle, and only then removes the dispatcher and workers:
+Protocol-aware generations drain automatically. Retiring the previous `v19` generation rejects new submissions, waits for all accepted jobs to settle, and only then removes its dispatcher and workers:
 
 ```bash
 PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
   --ray-address "${RAY_ADDRESS}" \
-  --generation v2 \
+  --generation v19 \
   --timeout 3600
 ```
 

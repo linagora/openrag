@@ -66,11 +66,13 @@ class JobService:
         *,
         job_repo: Any = None,
         stage_progress_manager: Any = None,
+        worker_pool_info: dict[str, int] | None = None,
     ) -> None:
         self._tsm = task_state_manager
         self._timeout = timeout
         self._job_repo = job_repo
         self._stage_progress_manager = stage_progress_manager
+        self._worker_pool_info = worker_pool_info
 
     async def _call(self, submit: Any, task_description: str) -> Any:
         """Route TaskStateManager calls through the centralized Ray helper.
@@ -165,7 +167,12 @@ class JobService:
             "total_failed": status_counts.get("FAILED", 0),
         }
 
-        worker_info = await self._call(lambda: self._tsm.get_pool_info.remote(), "get_pool_info")
+        if self._worker_pool_info is None:
+            worker_info = await self._call(lambda: self._tsm.get_pool_info.remote(), "get_pool_info")
+        else:
+            # A detached TaskStateManager may predate a Ray actor generation
+            # change and still report the settings it loaded when it started.
+            worker_info = self._worker_pool_info
         return {"workers": self._format_pool_info(worker_info), "tasks": task_summary}
 
     async def get_active_task_counts(self) -> dict[str, int]:

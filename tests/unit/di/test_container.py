@@ -459,6 +459,25 @@ _OPTIONAL_PHASE_PROVIDERS = {"get_model_endpoint_service", "get_preset_service",
 class TestPhase8OrchestratorWiring:
     """8F: all orchestrators wired consistently (container + providers)."""
 
+    def test_job_service_uses_worker_capacity_from_current_settings(self, monkeypatch):
+        from services.workers import bootstrap
+
+        settings = _settings()
+        container = ServiceContainer(settings)
+        monkeypatch.setattr(ServiceContainer, "job_repo", property(lambda _self: object()))
+        monkeypatch.setattr(bootstrap, "get_task_state_manager", lambda: object())
+        monkeypatch.setattr(bootstrap, "get_stage_progress_manager", lambda: object())
+
+        service = container.job_service
+        pool_size = settings.ray.indexer.pool_size
+        max_tasks_per_worker = settings.ray.indexer.max_tasks_per_worker
+
+        assert service._worker_pool_info == {
+            "pool_size": pool_size,
+            "max_tasks_per_worker": max_tasks_per_worker,
+            "total_capacity": pool_size * max_tasks_per_worker,
+        }
+
     async def test_default_and_named_searchers_filter_deleted_documents(self, monkeypatch):
         from unittest.mock import AsyncMock, MagicMock
 

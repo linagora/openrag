@@ -172,7 +172,7 @@ for a moment, each with its own Ray, and the new pod's job reconciler could mark
 the old pod's queued jobs failed for good. Expect the API to be unavailable while
 the new pod starts. With a shared Ray cluster, the rolling update is unchanged.
 
-## OpenRAG 2.3.5: fewer files indexed at once by default
+## Next OpenRAG release: fewer files indexed at once by default
 
 `RAY_MAX_TASKS_PER_WORKER`, the number of files each indexer worker processes at
 once, now defaults to 10 instead of 50, in the configuration and in the chart. With
@@ -183,6 +183,18 @@ serves chat when Ray is embedded.
 
 To keep the previous behaviour, set `RAY_MAX_TASKS_PER_WORKER=50` (under
 `env.config` on Kubernetes).
+
+This also moves detached indexer actors from `v19` to `v20`: Ray fixes a
+worker's concurrency when it is created, so existing `v19` workers keep the old
+limit across an API-only rollout. Embedded Ray recreates them with the OpenRAG
+pod. For KubeRay, follow the Ray pod restart procedure above. For an external
+Ray cluster, stop traffic to the old API replicas and retire `v19` before
+starting the new release; see
+[Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
+
+The currently published `v2.3.5` app and Ray images still run v19. The new
+actor generation and queue-capacity reporting take effect with images built
+from this change; the chart and image tags are updated together in the release.
 
 ## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
 
