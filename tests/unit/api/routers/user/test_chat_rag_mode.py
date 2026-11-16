@@ -122,6 +122,14 @@ async def test_an_agentic_request_forwards_only_a_temperature_it_sent(client, se
         ({"tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}]}, "runs its own tools"),
         ({"metadata": {"rag_mode": "agentic", "websearch": True}}, "doesn't search the web"),
         ({"response_format": {"type": "json_object"}}, "answers in text"),
+        (
+            {"metadata": {"rag_mode": "agentic", "include_retrieval_trace": True, "compare_original_query": True}},
+            "doesn't rewrite the question",
+        ),
+        (
+            {"metadata": {"rag_mode": "agentic", "include_retrieval_trace": True, "retrieval_top_k": 50}},
+            "searches with each partition's retrieval preset",
+        ),
     ],
 )
 async def test_an_agentic_request_asking_for_what_the_agent_doesnt_do_is_refused(client, service, change, message):

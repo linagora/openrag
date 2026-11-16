@@ -95,6 +95,8 @@ def test_an_agentic_request_is_accepted_with_what_it_does():
     _check(_AGENTIC)
     # Off flags are fine: clients such as the chat UI send them all, false.
     _check({**_AGENTIC, "websearch": False, "use_map_reduce": False, "agent_profile": "legal"})
+    _check({**_AGENTIC, "include_retrieval_trace": True, "compare_original_query": False})
+    _check({**_AGENTIC, "retrieval_disable_reranker": False, "retrieval_top_k": None})
 
 
 @pytest.mark.parametrize(
@@ -105,6 +107,18 @@ def test_an_agentic_request_is_accepted_with_what_it_does():
         ({**_AGENTIC, "use_map_reduce": True}, {}, "summarizes with its own tool"),
         (_AGENTIC, {"structured_output": True}, "answers in text"),
         ({**_AGENTIC, "agent_profile": ["a"]}, {}, "agent_profile must be a string"),
+        ({**_AGENTIC, "compare_original_query": True}, {}, "doesn't rewrite the question: drop compare_original_query"),
+        (
+            {**_AGENTIC, "bypass_query_contextualization": True},
+            {},
+            "drop bypass_query_contextualization, or",
+        ),
+        ({**_AGENTIC, "retrieval_top_k": 50}, {}, "retrieval preset: drop retrieval_top_k, or"),
+        (
+            {**_AGENTIC, "retrieval_similarity_threshold": 0.4, "retrieval_disable_reranker": True},
+            {},
+            "drop retrieval_similarity_threshold, retrieval_disable_reranker, or",
+        ),
     ],
 )
 def test_an_agentic_request_asking_for_what_the_agent_doesnt_do_is_refused(metadata, flags, message):

@@ -134,9 +134,10 @@ class OpenAIChatCompletionRequest(BaseModel):
             "'rag_mode' picks how a partition-backed request finds its sources: 'classic' (the default) runs "
             "the fixed contextualize, retrieve, answer pipeline; 'agentic' lets the model search and read the "
             "documents with tools, then answer. Any other value is rejected. Ignored in direct LLM mode. "
-            "'agentic' refuses a request's own 'tools', 'websearch', 'use_map_reduce' "
-            "and a JSON 'response_format'. 'agent_profile' names the agent it runs (the configured default "
-            "otherwise); an unknown name is a 400. An 'agentic' request without 'temperature' gets its agent's."
+            "'agentic' refuses a request's own 'tools', 'websearch', 'use_map_reduce', a JSON 'response_format', "
+            "'compare_original_query', 'bypass_query_contextualization' and the 'retrieval_*' overrides. "
+            "'agent_profile' names the agent it runs (the configured default otherwise); an unknown name is a "
+            "400. An 'agentic' request without 'temperature' gets its agent's."
         ),
     )
 

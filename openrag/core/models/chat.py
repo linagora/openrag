@@ -49,8 +49,11 @@ def check_agentic_request(metadata: Mapping[str, Any], *, client_tools: bool, st
 
     The agent runs its own tools, has no web search (its sources are the
     documents), summarizes with its own tool rather than ``use_map_reduce``,
-    and answers in text. Each of these would otherwise be dropped without a
-    word. A request in another mode is not checked.
+    and answers in text. It doesn't rewrite the question, so there is no
+    rewriting to compare or bypass, and its searches run with each
+    partition's preset, without the ``retrieval_*`` diagnostic overrides.
+    Each of these would otherwise be dropped without a word. A request in
+    another mode is not checked.
     """
     if parse_rag_mode(metadata.get("rag_mode")) is not RagMode.AGENTIC:
         return
@@ -67,6 +70,22 @@ def check_agentic_request(metadata: Mapping[str, Any], *, client_tools: bool, st
         )
     if structured_output:
         raise ValueError("rag_mode 'agentic' answers in text: drop response_format, or use rag_mode 'classic'.")
+    rewriting = [
+        key for key in ("compare_original_query", "bypass_query_contextualization") if metadata.get(key) is True
+    ]
+    if rewriting:
+        raise ValueError(
+            f"rag_mode 'agentic' doesn't rewrite the question: drop {' and '.join(rewriting)}, or use rag_mode 'classic'."
+        )
+    overrides = [key for key in ("retrieval_top_k", "retrieval_similarity_threshold") if metadata.get(key) is not None]
+    overrides += [
+        key for key in ("retrieval_disable_reranker", "retrieval_disable_expansion") if metadata.get(key) is True
+    ]
+    if overrides:
+        raise ValueError(
+            f"rag_mode 'agentic' searches with each partition's retrieval preset: drop {', '.join(overrides)}, "
+            "or use rag_mode 'classic'."
+        )
 
 
 @dataclass(frozen=True)
