@@ -21,6 +21,7 @@ Timestamps: UTC (`+00:00`). Week starts Monday.
 - Rewrite the last `user:` line as one standalone descriptive sentence.
 - Use earlier turns only to resolve pronouns or add context directly relevant to the query; do not inject unrelated history.
 - For independent questions: minimal changes (grammar, missing keywords).
+- When the last message only refines the previous question (a keyword, a correction, an abbreviation spelled out), often after the assistant found nothing or asked for more keywords, rewrite that previous question with it. The query is the previous question, refined; never the bare keyword.
 - Do not answer. Only reformulate.
 
 # Sub-queries — when to split
@@ -105,6 +106,12 @@ user: What is albendazole used for?
 assistant: Albendazole treats lymphatic filariasis and several worm infections. Would you like the recommended dosages?
 user: ok
 {{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Recommended dosages of albendazole","temporal_filters":null,"date_order":null}}]}}
+
+Chat history:
+user: What does the GDPR say about data retention?
+assistant: The documents don't mention the GDPR. Could you clarify your question or give additional keywords?
+user: General Data Protection Regulation
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"What the General Data Protection Regulation says about data retention","temporal_filters":null,"date_order":null}}]}}
 
 User: "Cool, and what was Product B revenue in Q1?"
 {{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Product B revenue in Q1","temporal_filters":null,"date_order":null}}]}}

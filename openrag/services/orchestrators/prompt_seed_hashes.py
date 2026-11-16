@@ -30,7 +30,8 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
         "8a3b0fc89b47a189b8e696f9383ad1f1f5023759b1ab3e01636c9455694c0b4e",  # v2.2.2
         "d7b5f06862e57587c6bc2965af4a70dcc5327dfccae8172c32ab02623878f6f6",  # v2.3.0-v2.3.1
         "2a950346e27dd815fd42af0849caf0065f615c3bef4bff6d61d1621b39fcd066",  # v2.3.2
-        "6dd246ecb0cd47cfe8ccb707e015dbcf3b70882592088b37e3a9f12e5954516e",  # current (date_order)
+        "6dd246ecb0cd47cfe8ccb707e015dbcf3b70882592088b37e3a9f12e5954516e",  # date_order, unreleased
+        "521f7ceb3f5ffc366ccd0c2dbbe93ae2912a5b37f4be24cb7ae7f457b4d6c287",  # current (a refining keyword rewrites the previous question)
     ),
     "spoken_style_answer": (
         "36d3df218283f91de2ca62693afcdd9b844ba5645fba929a98c7b7ddd0d320b1",  # v2.1.0-v2.1.1
@@ -40,7 +41,8 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
     "sys_prompt": (
         "b5faacb19c176961965882bdf2f30c6dec7973de26c26c7bf18dd8f9088c07a7",  # v2.1.0-v2.1.1
         "3f0e6c8d2e385eda15715c83f54d701cfe83fe4ffddc2cbfd6ba398ac1c599dd",  # v2.2.0-v2.3.2
-        "e8668be88af50f77e1d6b2f52407c20341de0bb65647185c2f4a88c1dcef0410",  # current (provenance line)
+        "e8668be88af50f77e1d6b2f52407c20341de0bb65647185c2f4a88c1dcef0410",  # provenance line, unreleased
+        "93cc6fa1c1c4982d1190a32504f3058c88c28b9c680c29ee24c1831ab15a5794",  # current (a refining keyword asks the previous question)
     ),
     "asr_transcription": (
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # v2.2.0-v2.3.2 and current
