@@ -6,7 +6,7 @@ import re
 
 import pytest
 from core.chunking.registry import chunking_registry
-from core.chunking.structured_section import StructuredSectionChunker, _Unit
+from core.chunking.structured_section import StructuredSectionChunker, _greedy_split, _Unit
 from core.models.chunk import ChunkType
 from core.models.document import ProcessedDocument, TextBlock
 
@@ -259,6 +259,41 @@ def test_split_caption_never_ends_on_its_own_heading():
     for chunk in captions:
         last = [line for line in chunk.text.splitlines() if line.strip()][-1]
         assert not last.lstrip().startswith("#"), f"heading stranded at chunk end: {last!r}"
+
+
+def test_greedy_split_does_not_rehome_heading_past_max_tokens():
+    pieces = _greedy_split("alpha beta\n\n### Heading\n\ngamma delta", 2, 2, _words)
+
+    assert pieces == ["alpha beta", "### Heading", "gamma delta"]
+    assert all(_words(piece) <= 2 for piece in pieces), pieces
+
+
+def test_greedy_split_rehomes_heading_when_receiver_still_fits():
+    pieces = _greedy_split("alpha beta\n\n### Heading\n\ngamma delta", 4, 4, _words)
+
+    assert pieces == ["alpha beta", "### Heading\n\ngamma delta"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_rehomes_intact_heading_after_sentence_split_when_it_fits():
+    pieces = _greedy_split("alpha beta.\n### Heading.\ngamma delta.", 2, 4, _words)
+
+    assert pieces == ["alpha beta.", "### Heading.\n\ngamma delta."]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_does_not_rehome_hard_wrapped_heading_fragment():
+    pieces = _greedy_split("#### **Article L700-2 w1 details", 2, 4, _words)
+
+    assert pieces == ["#### **Article", "L700-2 w1", "details"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_distinguishes_fragment_from_duplicate_source_heading():
+    text = "#### **Article L700-2 w1 details\n\n#### **Article\n\nalpha beta"
+    pieces = _greedy_split(text, 2, 4, _words)
+
+    assert pieces == ["#### **Article", "L700-2 w1", "details", "#### **Article\n\nalpha beta"]
 
 
 def test_breakless_paragraph_splits_on_clauses_not_mid_sentence():

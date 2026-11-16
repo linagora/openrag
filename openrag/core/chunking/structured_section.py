@@ -1223,7 +1223,7 @@ _SPLIT_LADDER = (_SENTENCE_RE, *_CLAUSE_RES)
 def _greedy_split(text: str, target: int, max_tokens: int, length_function: Callable[[str], int]) -> list[str]:
     """Pack paragraphs (then sentences for an over-``max`` paragraph) to ``target``."""
 
-    def descend(item: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
+    def descend(item: str, levels: tuple[re.Pattern[str], ...]) -> list[tuple[str, bool]]:
         """Split one over-``max`` item on the strongest separator it actually
         contains, then keep the weaker ones in reserve for its own oversize
         pieces. Word-wrapping is the last resort because it is the only step
@@ -1232,16 +1232,18 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
             parts = splitter.split(item)
             if len(parts) > 1:
                 return pack(parts, " ", levels[i + 1 :])
-        return _hard_wrap(item, target, length_function)
+        return [(piece, True) for piece in _hard_wrap(item, target, length_function)]
 
-    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
-        out: list[str] = []
+    def pack(
+        items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]
+    ) -> list[tuple[str, bool]]:
+        out: list[tuple[str, bool]] = []
         buf: list[str] = []
         size = 0
         for item in items:
             it = length_function(item)
             if buf and size + it > target:
-                out.append(joiner.join(buf))
+                out.append((joiner.join(buf), False))
                 buf, size = [], 0
             if it > max_tokens and not buf:
                 out.extend(descend(item, levels))
@@ -1249,38 +1251,60 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
             buf.append(item)
             size += it
         if buf:
-            out.append(joiner.join(buf))
+            out.append((joiner.join(buf), False))
         return out
 
     sanitized = sanitize_text(text, max_consecutive_newlines=2)
-    return _rehome_trailing_headings(pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER))
+    pieces_with_origin = pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER)
+    pieces = [piece for piece, _ in pieces_with_origin]
+    # Word wrapping can create Markdown-looking fragments. Sentence and clause
+    # splits keep intact heading lines eligible for rehoming.
+    source_heading_positions: set[tuple[int, int]] = set()
+    for piece_index, (piece, was_word_wrapped) in enumerate(pieces_with_origin):
+        if was_word_wrapped:
+            continue
+        source_heading_positions.update(
+            (piece_index, line_index)
+            for line_index, line in enumerate(piece.rstrip().splitlines())
+            if _CAPTION_HEADING_RE.match(line)
+        )
+    return _rehome_trailing_headings(pieces, max_tokens, length_function, source_heading_positions)
 
 
-def _rehome_trailing_headings(pieces: list[str]) -> list[str]:
+def _rehome_trailing_headings(
+    pieces: list[str],
+    max_tokens: int,
+    length_function: Callable[[str], int],
+    source_heading_positions: set[tuple[int, int]],
+) -> list[str]:
     """Move a heading stranded at a piece's end onto the following piece.
 
     Splitting long *prose* rarely lands on a heading, but VLM image captions
     carry their own ``###`` sub-headings, so packing paragraphs could end a
     piece on one — stranding the heading away from the content it introduces
     (worst case: a piece that is an ``<image_description>`` opener plus a bare
-    heading). Rule 4 of the strategy is that a heading always travels with its
-    body, so hand it forward rather than leaving it orphaned.
+    heading). Headings from word-wrapped pieces do not count: word wrapping can
+    produce a Markdown-looking fragment. If the combined piece does not fit,
+    leave the heading in place to preserve the hard ceiling.
     """
     out = list(pieces)
     # Walk backwards so a run of consecutive headings cascades forward in one
-    # pass, and so a piece that is *only* a heading (the worst case — packing
-    # can emit a bare ``### Key Trends`` as its own 3-token piece) empties out
-    # and is dropped below rather than being left as a heading-only chunk.
+    # pass when the combined piece fits. Pieces containing only moved headings
+    # then empty out and are filtered below; a heading stays in place when
+    # moving it would exceed the ceiling.
     for i in range(len(out) - 2, -1, -1):
         lines = out[i].rstrip().splitlines()
         cut = len(lines)
-        while cut > 0 and _CAPTION_HEADING_RE.match(lines[cut - 1]):
+        while cut > 0 and _CAPTION_HEADING_RE.match(lines[cut - 1]) and (i, cut - 1) in source_heading_positions:
             cut -= 1
         if cut == len(lines):
             continue
         moved = "\n\n".join(line.strip() for line in lines[cut:])
+        receiver = f"{moved}\n\n{out[i + 1].lstrip()}"
+        if length_function(receiver) > max_tokens:
+            continue
         out[i] = "\n".join(lines[:cut]).rstrip()
-        out[i + 1] = f"{moved}\n\n{out[i + 1].lstrip()}"
+        out[i + 1] = receiver
     return [piece for piece in out if piece.strip()]
 
 
