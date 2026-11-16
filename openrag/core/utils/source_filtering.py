@@ -35,7 +35,9 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 #
 # The label up to its colon, with marks allowed before and after each bracket
 # and around "Sources".
-_SOURCES_LABEL = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+:\s*+[*_`]*+\[?[ \t]*+"
+_SOURCES_LABEL_PREFIX = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+"
+_SOURCES_LABEL = _SOURCES_LABEL_PREFIX + r":\s*+[*_`]*+\[?[ \t]*+"
+_SOURCES_LABEL_COLON_RE = re.compile(_SOURCES_LABEL_PREFIX + r":", re.IGNORECASE)
 # Any whitespace but a newline may end the line, as the final rstrip() removes
 # all of it: a no-break space after a tag must not hide the tag from the strip.
 _SOURCES_TAG_TAIL = r"(?:[.*_`]|[^\S\n])*+(?=\n|$)"
@@ -75,6 +77,17 @@ _UNCLOSED_SOURCE_NUMS_RE = re.compile(
     re.IGNORECASE,
 )
 _DANGLING_SOURCE_RE = re.compile(r"(?<![ \t])[ \t]*+\[\s*Sources?\s*(?=\n|$)", re.IGNORECASE)
+
+
+def neutralize_sources_tags(text: str) -> str:
+    """Break source labels that the citation parser currently recognizes."""
+
+    def break_tag(match: re.Match[str]) -> str:
+        return _SOURCES_LABEL_COLON_RE.sub(lambda label: label.group(0)[:-1] + " ", match.group(0), count=1)
+
+    for pattern in (_SOURCES_NUMS_RE, _SOURCES_NONE_RE, _SOURCES_EMPTY_RE):
+        text = pattern.sub(break_tag, text)
+    return text
 
 
 def _sanitize_log_preview(text: str, max_length: int = 150) -> str:

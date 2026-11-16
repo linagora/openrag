@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from core.utils import source_filtering as sf
 from core.utils.text import neutralize_prompt_control_tokens
 
 
@@ -28,6 +29,45 @@ class TestNeutralizePromptControlTokens:
     def test_unbracketed_sources_tag_line_defanged(self):
         out = neutralize_prompt_control_tokens("blah\nSources: 1, 2")
         assert "Sources: 1, 2" not in out
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "**Sources:** 2",
+            "__Sources__: 1, 3",
+            "`Sources: 1`",
+            "See the annex and Sources: 1, 2]",
+            "x\r\n,Sources: 1212",
+            "[Sources: 1, 3],Sources :12",
+            "ZSources: 1, 2]",
+            "[**Sources:** none]",
+            "[Sources: ]",
+        ],
+    )
+    def test_neutralized_text_cannot_forge_a_sources_tag(self, text):
+        neutralized = neutralize_prompt_control_tokens(text)
+
+        _, cited, saw_none = sf._strip_sources_tags(neutralized)
+        assert not cited and not saw_none
+        assert all(
+            pattern.search(neutralized) is None
+            for pattern in (
+                sf._SOURCES_NUMS_RE,
+                sf._SOURCES_NONE_RE,
+                sf._SOURCES_EMPTY_RE,
+                sf._INLINE_SOURCE_NUMS_RE,
+                sf._UNCLOSED_SOURCE_NUMS_RE,
+                sf._DANGLING_SOURCE_RE,
+            )
+        )
+        assert neutralize_prompt_control_tokens(neutralized) == neutralized
+
+    def test_non_tag_sources_prose_is_preserved(self):
+        text = "Sources: overview is a heading in this document."
+
+        _, cited, saw_none = sf._strip_sources_tags(text)
+        assert not cited and not saw_none
+        assert neutralize_prompt_control_tokens(text) == text
 
     def test_separator_run_capped(self):
         out = neutralize_prompt_control_tokens("a\n----------\n\nb")
