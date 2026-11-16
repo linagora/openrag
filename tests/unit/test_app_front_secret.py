@@ -784,6 +784,18 @@ def test_chainlit_neutralizes_active_source_name_markdown(monkeypatch, source_na
     assert module._safe_source_name(source_name, {}) == expected
 
 
+@pytest.mark.parametrize("source_name", ["1)", "12.", "-", "+", "#", "- ___", r"\___"])
+def test_chainlit_source_names_stay_plain_text_in_sources_block(monkeypatch, source_name):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_block_marker_source_name_test")
+    safe_name = module._safe_source_name(source_name, {})
+
+    for markdown in (safe_name, f"Sources: \n{safe_name}"):
+        tokens = MarkdownIt("commonmark").parse(markdown)
+
+        assert [token.type for token in tokens] == ["paragraph_open", "inline", "paragraph_close"]
+        assert tokens[1].content == markdown
+
+
 @pytest.mark.parametrize("source_name", ["#report.pdf", "1.report.pdf"])
 def test_chainlit_preserves_non_block_source_name_prefixes(monkeypatch, source_name):
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_prefix_test")
