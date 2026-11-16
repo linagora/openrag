@@ -268,6 +268,23 @@ def test_greedy_split_does_not_rehome_heading_past_max_tokens():
     assert all(_words(piece) <= 2 for piece in pieces), pieces
 
 
+def test_greedy_split_counts_joiner_when_packing_to_target():
+    pieces = _greedy_split("a\n\n### H\n\nb", 6, 6, len)
+
+    assert pieces == ["a", "### H", "b"]
+    assert all(len(piece) <= 6 for piece in pieces), pieces
+
+
+def test_greedy_split_keeps_hard_limit_when_target_is_larger():
+    pieces = _greedy_split("aa\n\nbb", 8, 4, len)
+    wrapped = _greedy_split("aa bb cc dd", 8, 4, len)
+
+    assert pieces == ["aa", "bb"]
+    assert all(len(piece) <= 4 for piece in pieces), pieces
+    assert wrapped == ["aa", "bb", "cc", "dd"]
+    assert all(len(piece) <= 4 for piece in wrapped), wrapped
+
+
 def test_greedy_split_rehomes_heading_when_receiver_still_fits():
     pieces = _greedy_split("alpha beta\n\n### Heading\n\ngamma delta", 4, 4, _words)
 

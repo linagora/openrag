@@ -1223,6 +1223,8 @@ _SPLIT_LADDER = (_SENTENCE_RE, *_CLAUSE_RES)
 def _greedy_split(text: str, target: int, max_tokens: int, length_function: Callable[[str], int]) -> list[str]:
     """Pack paragraphs (then sentences for an over-``max`` paragraph) to ``target``."""
 
+    packing_target = min(target, max_tokens)
+
     def descend(item: str, levels: tuple[re.Pattern[str], ...]) -> list[tuple[str, bool]]:
         """Split one over-``max`` item on the strongest separator it actually
         contains, then keep the weaker ones in reserve for its own oversize
@@ -1232,24 +1234,20 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
             parts = splitter.split(item)
             if len(parts) > 1:
                 return pack(parts, " ", levels[i + 1 :])
-        return [(piece, True) for piece in _hard_wrap(item, target, length_function)]
+        return [(piece, True) for piece in _hard_wrap(item, packing_target, length_function)]
 
-    def pack(
-        items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]
-    ) -> list[tuple[str, bool]]:
+    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[tuple[str, bool]]:
         out: list[tuple[str, bool]] = []
         buf: list[str] = []
-        size = 0
         for item in items:
             it = length_function(item)
-            if buf and size + it > target:
+            if buf and length_function(joiner.join([*buf, item])) > packing_target:
                 out.append((joiner.join(buf), False))
-                buf, size = [], 0
+                buf = []
             if it > max_tokens and not buf:
                 out.extend(descend(item, levels))
                 continue
             buf.append(item)
-            size += it
         if buf:
             out.append((joiner.join(buf), False))
         return out
