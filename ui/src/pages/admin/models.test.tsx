@@ -1138,4 +1138,42 @@ describe("ModelsPage LLM context size", () => {
       timeout: 4000,
     });
   });
+
+  it("shows an endpoint's reasoning level in its own field, its map left in Extra", async () => {
+    listModelEndpointsMock.mockReset().mockResolvedValue([
+      llm("vllm-qwen", {
+        is_default: true,
+        extra: { reasoning_effort: "low", reasoning_effort_map: { xhigh: "high" } },
+      }),
+    ] as never);
+    const user = userEvent.setup();
+    renderPage();
+    await openLlmTab(user);
+    await user.click(within(cardFor("vllm-qwen")).getByRole("button", { name: /Edit/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("combobox", { name: "Reasoning effort" }).textContent).toBe("low");
+    const extra = within(dialog).getByDisplayValue(/reasoning_effort_map/) as HTMLTextAreaElement;
+    expect(JSON.parse(extra.value)).toEqual({ reasoning_effort_map: { xhigh: "high" } });
+  });
+
+  it("saves the selected reasoning level into the endpoint's extra", async () => {
+    listModelEndpointsMock.mockReset().mockResolvedValue([llm("vllm-qwen", { is_default: true })] as never);
+    updateModelEndpointMock.mockReset().mockResolvedValue(llm("vllm-qwen") as never);
+    const user = userEvent.setup();
+    renderPage();
+    await openLlmTab(user);
+    await user.click(within(cardFor("vllm-qwen")).getByRole("button", { name: /Edit/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("combobox", { name: "Reasoning effort" }).textContent).toBe("Model default");
+    await user.click(within(dialog).getByRole("combobox", { name: "Reasoning effort" }));
+    await user.click(await screen.findByRole("option", { name: "high" }));
+    await user.click(within(dialog).getByRole("button", { name: "Update" }));
+    const confirm = await screen.findByRole("alertdialog");
+    await user.click(within(confirm).getByRole("button", { name: "Update" }));
+
+    await waitFor(() => expect(updateModelEndpointMock).toHaveBeenCalled());
+    expect(updateModelEndpointMock.mock.calls[0][2]).toMatchObject({ extra: { reasoning_effort: "high" } });
+  });
 });

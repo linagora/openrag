@@ -321,6 +321,37 @@ export function mergeModelEndpointLlmContext(
   return result;
 }
 
+// OpenAI's reasoning_effort levels, from no reasoning to the most. An LLM
+// endpoint's default level is stored in `extra` and edited as its own select,
+// kept out of the raw "Extra (JSON)" box like the token budgets. Its
+// `reasoning_effort_map` stays in Extra. Backend: core/llm/reasoning.py.
+export const REASONING_EFFORT_KEY = "reasoning_effort";
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === "string" && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+/** Pull an LLM endpoint's default reasoning level out of `extra` ("" for none).
+ *  A value that is no level stays in `extra`, so a save never drops it unseen. */
+export function splitModelEndpointReasoningEffort(extra: Record<string, unknown>): {
+  reasoningEffort: ReasoningEffort | "";
+  extra: Record<string, unknown>;
+} {
+  const { [REASONING_EFFORT_KEY]: effort, ...rest } = extra;
+  if (!isReasoningEffort(effort)) return { reasoningEffort: "", extra };
+  return { reasoningEffort: effort, extra: rest };
+}
+
+/** Put the selected level back into `extra`; none leaves `extra` as it is. */
+export function mergeModelEndpointReasoningEffort(
+  extra: Record<string, unknown>,
+  reasoningEffort: ReasoningEffort | "",
+): Record<string, unknown> {
+  return reasoningEffort ? { ...extra, [REASONING_EFFORT_KEY]: reasoningEffort } : extra;
+}
+
 /** Pull the optional STT language hint out of `extra` into its own form field. */
 export function splitModelEndpointSttLanguage(extra: Record<string, unknown>): {
   languageHint: string;

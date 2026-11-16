@@ -5,6 +5,7 @@ import {
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointLlmContext,
   mergeModelEndpointMossSpeakerAware,
+  mergeModelEndpointReasoningEffort,
   mergeModelEndpointSttLanguage,
   pickDefaultEndpoint,
   prepareModelEndpointExtraForSubmit,
@@ -13,6 +14,7 @@ import {
   splitModelEndpointApiKeyExtra,
   splitModelEndpointLlmContext,
   splitModelEndpointMossSpeakerAware,
+  splitModelEndpointReasoningEffort,
   splitModelEndpointSttLanguage,
   validateModelEndpoint,
 } from "./models";
@@ -328,6 +330,32 @@ describe("LLM context token-budget extra fields", () => {
       api_key: "sk-x",
       max_output_tokens: 512,
     });
+  });
+});
+
+describe("LLM reasoning-effort extra field", () => {
+  it("splits a default level out of extra into its own field", () => {
+    expect(
+      splitModelEndpointReasoningEffort({ implementation: "vllm", reasoning_effort: "low", reasoning_effort_map: {} }),
+    ).toEqual({
+      reasoningEffort: "low",
+      extra: { implementation: "vllm", reasoning_effort_map: {} },
+    });
+  });
+
+  it("leaves a value that is no OpenAI level in extra, so a save never drops it unseen", () => {
+    expect(splitModelEndpointReasoningEffort({ reasoning_effort: "max" })).toEqual({
+      reasoningEffort: "",
+      extra: { reasoning_effort: "max" },
+    });
+  });
+
+  it("puts the selected level back, and leaves extra as it is without one", () => {
+    expect(mergeModelEndpointReasoningEffort({ implementation: "vllm" }, "high")).toEqual({
+      implementation: "vllm",
+      reasoning_effort: "high",
+    });
+    expect(mergeModelEndpointReasoningEffort({ implementation: "vllm" }, "")).toEqual({ implementation: "vllm" });
   });
 });
 

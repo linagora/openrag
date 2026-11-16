@@ -29,8 +29,10 @@ import {
   mergeModelEndpointImplementation,
   mergeModelEndpointLlmContext,
   mergeModelEndpointMossSpeakerAware,
+  mergeModelEndpointReasoningEffort,
   mergeModelEndpointSttLanguage,
   prepareModelEndpointExtraForSubmit,
+  REASONING_EFFORTS,
   refetchWhileDetecting,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
@@ -39,6 +41,7 @@ import {
   splitModelEndpointImplementation,
   splitModelEndpointLlmContext,
   splitModelEndpointMossSpeakerAware,
+  splitModelEndpointReasoningEffort,
   splitModelEndpointSttLanguage,
   validateModelEndpoint,
   VENDOR_OPTIONS_BY_TYPE,
@@ -49,6 +52,7 @@ import type {
   CreateModelEndpointRequest,
   UpdateModelEndpointRequest,
   ModelType,
+  ReasoningEffort,
 } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
 import { QueryErrorNotice } from "@/components/shared/query-error-notice";
@@ -651,6 +655,8 @@ function EndpointDialog({
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [languageHint, setLanguageHint] = useState("");
   const [mossSpeakerAware, setMossSpeakerAware] = useState(false);
+  // An LLM endpoint's default reasoning level; "" sends none (the model's own).
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | "">("");
   const [vendor, setVendor] = useState("");
   // What `vendor` was when the form opened — the baseline the save's stamped
   // `implementation` is compared against. A ref, not state: it is read at
@@ -758,10 +764,15 @@ function EndpointDialog({
         // endpoints — the budget fields are LLM-only, and splitting for non-LLM
         // types would drop any same-named keys from their extra on save (they are
         // re-merged only when isLlm below), silently deleting them.
-        const { llmContext, extra: displayExtra } =
+        const { llmContext, extra: budgetExtra } =
           source.model_type === "llm"
             ? splitModelEndpointLlmContext(implExtra)
             : { llmContext: { maxContextSize: "", maxOutputTokens: "" }, extra: implExtra };
+        // The reasoning level is carved out for LLM endpoints only, like the budgets.
+        const { reasoningEffort: storedReasoningEffort, extra: displayExtra } =
+          source.model_type === "llm"
+            ? splitModelEndpointReasoningEffort(budgetExtra)
+            : { reasoningEffort: "" as const, extra: budgetExtra };
         setName(editing ? source.name : (seed?.name ?? source.name));
         setEndpoint(source.endpoint);
         setModelName(source.model_name || "");
@@ -771,6 +782,7 @@ function EndpointDialog({
         setApiKey(editing ? displayApiKey : "");
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
+        setReasoningEffort(storedReasoningEffort);
         setLanguageHint(storedLanguageHint);
         setMossSpeakerAware(storedMossSpeakerAware);
         setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[source.model_type]);
@@ -796,6 +808,7 @@ function EndpointDialog({
         setApiKey("");
         setMaxContextSize("");
         setMaxOutputTokens("");
+        setReasoningEffort("");
         setLanguageHint("");
         setMossSpeakerAware(false);
         setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
@@ -841,7 +854,9 @@ function EndpointDialog({
     let editingRawExtra: Record<string, unknown> | null = null;
     if (editingImplExtra) {
       editingRawExtra =
-        editing?.model_type === "llm" ? splitModelEndpointLlmContext(editingImplExtra).extra : editingImplExtra;
+        editing?.model_type === "llm"
+          ? splitModelEndpointReasoningEffort(splitModelEndpointLlmContext(editingImplExtra).extra).extra
+          : editingImplExtra;
     }
     if (
       editing &&
@@ -1095,6 +1110,7 @@ function EndpointDialog({
     }
     if (isLlm) {
       extra = mergeModelEndpointLlmContext(extra, { maxContextSize, maxOutputTokens });
+      extra = mergeModelEndpointReasoningEffort(extra, reasoningEffort);
     }
     if (isStt) {
       extra = mergeModelEndpointSttLanguage(extra, languageHint);
@@ -1235,6 +1251,39 @@ function EndpointDialog({
               <p className="col-span-2 text-xs text-muted-foreground">
                 Token budgets for this endpoint. Leave blank to use the value shown. Applied whenever this
                 endpoint answers a request — as the default LLM, or as a partition&apos;s chat LLM preset.
+              </p>
+            </div>
+          )}
+          {isLlm && (
+            <div className="space-y-2">
+              <LabelWithInfo
+                label="Reasoning effort"
+                tooltip={
+                  "How much a thinking model reasons before it answers (OpenAI's reasoning_effort). Sent with " +
+                  "every chat request OpenRAG makes to this endpoint without a level of its own: query rewriting, " +
+                  "answers, chunk contextualization, and the agent's replies unless its profile sets one. Model " +
+                  "default sends none. For a backend that takes fewer levels, add a reasoning_effort_map to Extra, " +
+                  'e.g. {"low": "high"} for Mistral\'s API; a level mapped to null is not sent.'
+                }
+              />
+              <Select
+                value={reasoningEffort || "default"}
+                onValueChange={(value) => setReasoningEffort(value === "default" ? "" : (value as ReasoningEffort))}
+              >
+                <SelectTrigger className="w-full" aria-label="Reasoning effort">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">Model default</SelectItem>
+                  {REASONING_EFFORTS.map((level) => (
+                    <SelectItem key={level} value={level}>
+                      {level}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Thinking counts toward the output tokens: raise them with the level.
               </p>
             </div>
           )}
