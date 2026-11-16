@@ -53,6 +53,7 @@ _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
 _MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]*`\\<>", " "))
 _MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"^(?:(?:#{1,6}|[-+]|\d{1,9}[.)])(?:\s+|$))+")
 _MARKDOWN_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:-\s*){3,}|(?:_\s*){3,}|(?:\*\s*){3,})$")
+_MARKDOWN_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)$")
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
@@ -123,7 +124,7 @@ def _safe_source_name(value: str, existing: dict) -> str:
     value = value.lstrip()
     while True:
         value = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split())
-        if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value):
+        if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value) or _MARKDOWN_SETEXT_UNDERLINE_RE.fullmatch(value):
             value = ""
             break
 
