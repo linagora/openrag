@@ -31,7 +31,7 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
         "d7b5f06862e57587c6bc2965af4a70dcc5327dfccae8172c32ab02623878f6f6",  # v2.3.0-v2.3.1
         "2a950346e27dd815fd42af0849caf0065f615c3bef4bff6d61d1621b39fcd066",  # v2.3.2
         "6dd246ecb0cd47cfe8ccb707e015dbcf3b70882592088b37e3a9f12e5954516e",  # date_order, unreleased
-        "521f7ceb3f5ffc366ccd0c2dbbe93ae2912a5b37f4be24cb7ae7f457b4d6c287",  # current (a refining keyword rewrites the previous question)
+        "0d28a1ee1e0a7544bce66558fc15ba4d74125eafa9d436e220621ad4874b06b7",  # current (a refining keyword rewrites the previous question; abbreviations spelled out)
     ),
     "spoken_style_answer": (
         "36d3df218283f91de2ca62693afcdd9b844ba5645fba929a98c7b7ddd0d320b1",  # v2.1.0-v2.1.1
@@ -48,7 +48,7 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # v2.2.0-v2.3.2 and current
     ),
     "agent": (
-        "a1ccc28f8238d97a96bee7b569c40e348cc52f1ea660bc7bd2e7f24dbdd5d84d",  # current (agentic mode)
+        "61ab6e56a2d340712b9de826215ed835e4410ae45c97248370e1fb028a61ffd1",  # current (agentic mode)
     ),
     "chunk_contextualizer": (
         "35cc087891c587627f572d4876890c3a78a59e3141b217d05ffd77750ffd1af6",  # v2.1.0-v2.3.2 and current

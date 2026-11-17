@@ -21,6 +21,7 @@ Timestamps: UTC (`+00:00`). Week starts Monday.
 - Rewrite the last `user:` line as one standalone descriptive sentence.
 - Use earlier turns only to resolve pronouns or add context directly relevant to the query; do not inject unrelated history.
 - For independent questions: minimal changes (grammar, missing keywords).
+- Spell out an abbreviation or acronym in parentheses after it when you know what it stands for here: "AI industry" → "AI (artificial intelligence) industry". The documents may use either form, and the search can miss a short one. Leave one that could stand for several things as written, unless the conversation says which.
 - When the last message only refines the previous question (a keyword, a correction, an abbreviation spelled out), often after the assistant found nothing or asked for more keywords, rewrite that previous question with it. The query is the previous question, refined; never the bare keyword.
 - Do not answer. Only reformulate.
 

@@ -65,7 +65,9 @@ Queries = Annotated[
             "1 to 3 queries, one per distinct part of the question, not rephrasings of one. Each is a full "
             "question or sentence in the documents' language, not keywords: the search ranks passages by meaning. "
             "It doesn't see the conversation: keep the user's wording, pronouns replaced by what they name. "
-            'E.g. "How much is invested in digital sovereignty?", not "digital sovereignty".'
+            "Write every abbreviation or acronym with its full form in parentheses after it: the search misses "
+            "documents that only use the other form. "
+            'E.g. "How much is invested in AI (artificial intelligence)?", not "AI investment".'
         ),
     ),
 ]
