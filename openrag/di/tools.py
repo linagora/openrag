@@ -40,7 +40,7 @@ def create_tool_registry(
             prompt_settings=prompt_settings,
             summarizer=summarizer,
         ),
-        FileTools(document_repo=document_repo, topic_tags=topic_tags),
+        FileTools(document_repo=document_repo, retriever=retriever, topic_tags=topic_tags),
     )
 
 

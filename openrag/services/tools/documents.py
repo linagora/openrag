@@ -87,6 +87,15 @@ Order = Annotated[
 Neighbours = Annotated[int, Field(ge=0, le=MAX_NEIGHBOURS)]
 
 
+def created_between(after: date | None, before: date | None) -> list[TemporalPredicate]:
+    """The search's filter on the documents' own date: on or after *after*, before *before*."""
+    return [
+        TemporalPredicate(operator=operator, value=day.isoformat())
+        for operator, day in ((">=", after), ("<", before))
+        if day is not None
+    ]
+
+
 class DocumentTools:
     """``search_knowledge``, ``search_file``, ``read_file`` and ``summarize``.
 
@@ -121,11 +130,7 @@ class DocumentTools:
             raise ToolError("This conversation has no documents to search.")
         if created_after and created_before and created_after >= created_before:
             raise ToolError("created_after must be earlier than created_before.")
-        dates = [
-            TemporalPredicate(operator=operator, value=day.isoformat())
-            for operator, day in ((">=", created_after), ("<", created_before))
-            if day is not None
-        ]
+        dates = created_between(created_after, created_before)
         search = SearchQueries(
             query_list=[Query(query=text, temporal_filters=dates or None, date_order=order) for text in queries]
         )
