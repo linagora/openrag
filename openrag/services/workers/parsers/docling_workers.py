@@ -143,10 +143,15 @@ class _PageMarkdownSerializer(MarkdownDocSerializer):
     lookups, the excluded refs and the caption refs, from a ``_PageIndex``.
 
     The base class rebuilds both lookups by walking the whole document once per
-    instance, which is once per page.
+    instance, which is once per page. ``index`` is required, so every instance
+    has one; ``model_copy`` keeps it.
     """
 
-    _index: _PageIndex | None = PrivateAttr(default=None)
+    _index: _PageIndex = PrivateAttr()
+
+    def __init__(self, *, index: _PageIndex, **data: Any) -> None:
+        super().__init__(**data)
+        self._index = index
 
     @property
     def _captions_of_some_item(self) -> set[str]:
@@ -175,8 +180,7 @@ class _PageIndex:
         self.params = MarkdownParams(image_placeholder=_IMAGE_PLACEHOLDER)
         # Constructing a serializer validates ``document``, which walks the whole
         # tree; each page's serializer is a copy of this one, which does not.
-        self._serializer = _PageMarkdownSerializer(doc=document, params=self.params)
-        self._serializer._index = self
+        self._serializer = _PageMarkdownSerializer(doc=document, params=self.params, index=self)
 
         # The same lookups as ``DocSerializer._captions_of_some_item`` and
         # ``DocSerializer.get_excluded_refs``, the page condition kept apart.
