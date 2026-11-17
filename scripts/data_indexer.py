@@ -111,6 +111,9 @@ print(dir_path.is_dir())
 
 for file_path in dir_path.glob("**/*"):
     logger.info(f"file: {file_path}")
+    if not file_path.resolve().is_relative_to(dir_path):
+        logger.warning(f'"{file_path}" links outside {dir_path}, skipped')
+        continue
     if file_path.is_file():
         file_ext = file_path.suffix[1:]  # Get the file extension without the dot
         filename = file_path.name  # Get the filename without the directory path

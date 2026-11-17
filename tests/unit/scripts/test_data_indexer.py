@@ -98,3 +98,27 @@ def test_data_indexer_does_not_retry_unrelated_service_unavailable(monkeypatch, 
     runpy.run_path(str(_SCRIPT), run_name="__main__")
 
     assert uploads == ["report.pdf"]
+
+
+def test_data_indexer_uploads_only_files_inside_the_given_directory(monkeypatch, tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "private.txt").write_bytes(b"not for indexing")
+    source = tmp_path / "documents"
+    source.mkdir()
+    (source / "report.pdf").write_bytes(b"pdf contents")
+    (source / "alias.pdf").symlink_to(source / "report.pdf")
+    (source / "private.txt").symlink_to(elsewhere / "private.txt")
+    (source / "elsewhere").symlink_to(elsewhere, target_is_directory=True)
+    uploads = []
+
+    def post(_url, *, files, **_kwargs):
+        filename, stream, _content_type = files["file"]
+        uploads.append((filename, stream.read()))
+        return _Response(201, {"task_id": "task-1"})
+
+    _prepare_script(monkeypatch, source, post)
+
+    runpy.run_path(str(_SCRIPT), run_name="__main__")
+
+    assert sorted(uploads) == [("alias.pdf", b"pdf contents"), ("report.pdf", b"pdf contents")]
