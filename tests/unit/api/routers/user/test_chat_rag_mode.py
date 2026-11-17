@@ -9,6 +9,7 @@ from api.dependencies import model_limits
 from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
 from api.error_handlers import register_error_handlers
 from api.routers.user import chat
+from core.config.retrieval import RAGConfig
 from core.config.root import Settings
 from di.providers import get_chat_service, get_config, get_partition_service
 from fastapi import FastAPI
@@ -44,8 +45,7 @@ def service() -> RecordingChatService:
     return RecordingChatService()
 
 
-@pytest.fixture
-def client(async_client_factory, monkeypatch, service):
+def _client(async_client_factory, monkeypatch, service, settings: Settings):
     monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
     app = FastAPI()
     register_error_handlers(app)
@@ -54,8 +54,19 @@ def client(async_client_factory, monkeypatch, service):
     app.dependency_overrides[current_user_or_admin_partitions_list] = lambda: ["p"]
     app.dependency_overrides[get_chat_service] = lambda: service
     app.dependency_overrides[get_partition_service] = FakePartitionService
-    app.dependency_overrides[get_config] = lambda: Settings()
+    app.dependency_overrides[get_config] = lambda: settings
     return async_client_factory(app)
+
+
+@pytest.fixture
+def client(async_client_factory, monkeypatch, service):
+    return _client(async_client_factory, monkeypatch, service, Settings())
+
+
+@pytest.fixture
+def agentic_by_default(async_client_factory, monkeypatch, service):
+    """A deployment whose ``rag.default_mode`` is ``agentic``."""
+    return _client(async_client_factory, monkeypatch, service, Settings(rag=RAGConfig(default_mode="agentic")))
 
 
 def _chat(rag_mode: object, model: str | None = "openrag-p") -> dict:
@@ -174,3 +185,74 @@ async def test_a_reasoning_level_that_is_not_openai_s_is_refused(client, service
     assert response.status_code == 422
     assert "reasoning_effort" in response.text
     assert service.calls == {}
+
+
+# --------------------------------------------------------------------------- #
+# rag.default_mode: the mode of a request that names none
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_by_default_a_request_naming_no_mode_runs_classic(client, service):
+    async with client:
+        response = await client.post("/v1/chat/completions", json=_chat(...))
+
+    assert response.status_code == 200, response.text
+    payload = service.calls["chat"]["payload"]
+    assert "rag_mode" not in payload["metadata"]
+    assert payload["temperature"] == 0.3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_with_agentic_as_the_default_a_request_naming_no_mode_runs_the_agent(agentic_by_default, service, stream):
+    async with agentic_by_default:
+        response = await agentic_by_default.post("/v1/chat/completions", json={**_chat(...), "stream": stream})
+
+    assert response.status_code == 200, response.text
+    payload = service.calls["chat_stream" if stream else "chat"]["payload"]
+    assert payload["metadata"]["rag_mode"] == "agentic"
+    assert "temperature" not in payload, "the agent profile's temperature applies, as for a request naming agentic"
+
+
+@pytest.mark.asyncio
+async def test_with_agentic_as_the_default_a_request_naming_classic_runs_classic(agentic_by_default, service):
+    async with agentic_by_default:
+        response = await agentic_by_default.post("/v1/chat/completions", json=_chat("classic"))
+
+    assert response.status_code == 200, response.text
+    assert service.calls["chat"]["payload"]["metadata"]["rag_mode"] == "classic"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}]},
+        {"metadata": {"websearch": True}},
+        {"metadata": {"use_map_reduce": True}},
+        {"response_format": {"type": "json_object"}},
+    ],
+    ids=["tools", "websearch", "map-reduce", "json"],
+)
+async def test_with_agentic_as_the_default_a_request_the_agent_cant_serve_runs_classic(
+    agentic_by_default, service, change
+):
+    async with agentic_by_default:
+        response = await agentic_by_default.post("/v1/chat/completions", json={**_chat(...), **change})
+
+    assert response.status_code == 200, response.text
+    payload = service.calls["chat"]["payload"]
+    assert payload["metadata"].get("rag_mode") is None
+    assert payload["temperature"] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_with_agentic_as_the_default_text_completions_run_classic(agentic_by_default, service):
+    async with agentic_by_default:
+        response = await agentic_by_default.post(
+            "/v1/completions", json={"model": "openrag-p", "prompt": "notice period?", "metadata": {}}
+        )
+
+    assert response.status_code == 200, response.text
+    assert "rag_mode" not in service.calls["complete"]["payload"]["metadata"]

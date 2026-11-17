@@ -143,20 +143,46 @@ class OpenAIChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_rag_mode(self) -> "OpenAIChatCompletionRequest":
+        self._check_agentic(self.metadata or {})
+        if parse_rag_mode((self.metadata or {}).get("rag_mode")) is RagMode.AGENTIC:
+            self._leave_temperature_to_the_agent()
+        return self
+
+    def apply_default_rag_mode(self, default: str) -> None:
+        """Give a request that names no ``rag_mode`` the deployment's *default* (``rag.default_mode``).
+
+        A default of ``agentic`` holds only for a request the agent can serve:
+        one asking for what it doesn't do (its own tools, web search,
+        map-reduce, a JSON answer, ``classic``'s diagnostics) runs ``classic``,
+        as it did before, where naming ``agentic`` would be a 422. The mode is
+        written into ``metadata``, so what runs next reads it as if the client
+        had sent it.
+        """
+        metadata = self.metadata or {}
+        if metadata.get("rag_mode") is not None or parse_rag_mode(default) is not RagMode.AGENTIC:
+            return
+        agentic = {**metadata, "rag_mode": RagMode.AGENTIC.value}
+        try:
+            self._check_agentic(agentic)
+        except ValueError:
+            return
+        self.metadata = agentic
+        self._leave_temperature_to_the_agent()
+
+    def _check_agentic(self, metadata: dict) -> None:
         extra = self.model_extra or {}
         check_agentic_request(
-            self.metadata or {},
+            metadata,
             client_tools=bool(extra.get("tools") or extra.get("functions")),
             structured_output=is_structured_output({"response_format": self.response_format}),
         )
-        if parse_rag_mode((self.metadata or {}).get("rag_mode")) is RagMode.AGENTIC and (
-            "temperature" not in self.model_fields_set
-        ):
-            # The 0.3 default is classic's. An agentic request that sends no
-            # temperature gets its agent profile's: dropped here, the payload
-            # (dumped without None) carries none, and the agent fills it in.
+
+    def _leave_temperature_to_the_agent(self) -> None:
+        # The 0.3 default is classic's. An agentic request that sends no
+        # temperature gets its agent profile's: dropped here, the payload
+        # (dumped without None) carries none, and the agent fills it in.
+        if "temperature" not in self.model_fields_set:
             self.temperature = None
-        return self
 
     @model_validator(mode="after")
     def _ignore_top_logprobs_without_logprobs(self) -> "OpenAIChatCompletionRequest":

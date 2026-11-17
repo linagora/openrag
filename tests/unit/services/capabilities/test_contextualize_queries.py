@@ -36,9 +36,9 @@ class FakeLLM:
         return {"choices": [{"message": {"content": content}}]}
 
 
-def _contextualizer(*, llm=None, mode="SimpleRag", prompt_service=None, partitions=None, clock=None):
+def _contextualizer(*, llm=None, query_rewrite=False, prompt_service=None, partitions=None, clock=None):
     config = SimpleNamespace(
-        rag=SimpleNamespace(mode=mode, max_contextualized_query_len=512),
+        rag=SimpleNamespace(query_rewrite=query_rewrite, max_contextualized_query_len=512),
         partitions=partitions or {},
         paths=_PROMPT_CFG.paths,
         prompts=_PROMPT_CFG.prompts,
@@ -52,9 +52,9 @@ def _contextualizer(*, llm=None, mode="SimpleRag", prompt_service=None, partitio
     )
 
 
-@pytest.mark.parametrize(("mode", "rewrites"), [("SimpleRag", False), ("ChatBotRag", True), ("other", False)])
-def test_only_chatbotrag_rewrites_the_queries(mode, rewrites):
-    assert _contextualizer(mode=mode).rewrites_queries is rewrites
+@pytest.mark.parametrize("rewrites", [False, True])
+def test_rewrites_queries_follows_rag_query_rewrite(rewrites):
+    assert _contextualizer(query_rewrite=rewrites).rewrites_queries is rewrites
 
 
 @pytest.mark.asyncio
@@ -64,7 +64,7 @@ async def test_the_dates_come_from_the_clock_it_is_given():
     Milvus filter requires."""
     payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
     llm = FakeLLM(chat_responses=[payload])
-    ctx = _contextualizer(llm=llm, mode="ChatBotRag", clock=lambda: datetime(2026, 9, 16, 23, 30, tzinfo=UTC))
+    ctx = _contextualizer(llm=llm, query_rewrite=True, clock=lambda: datetime(2026, 9, 16, 23, 30, tzinfo=UTC))
 
     await ctx.contextualize([{"role": "user", "content": "what did I receive today?"}])
 
@@ -83,14 +83,14 @@ _TOOL_TURN = [
 
 @pytest.mark.asyncio
 async def test_simplerag_uses_last_message():
-    sq = await _contextualizer(mode="SimpleRag").contextualize([{"role": "user", "content": "what is X?"}])
+    sq = await _contextualizer(query_rewrite=False).contextualize([{"role": "user", "content": "what is X?"}])
     assert [q.query for q in sq.query_list] == ["what is X?"]
 
 
 @pytest.mark.asyncio
 async def test_chatbotrag_parses_json():
     payload = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
-    ctx = _contextualizer(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    ctx = _contextualizer(llm=FakeLLM(chat_responses=[payload]), query_rewrite=True)
     sq = await ctx.contextualize([{"role": "user", "content": "hi"}])
     assert sq.query_list[0].query == "rewritten"
     assert sq.requires_retrieval is True
@@ -99,7 +99,7 @@ async def test_chatbotrag_parses_json():
 @pytest.mark.asyncio
 async def test_chatbotrag_can_skip_retrieval():
     payload = json.dumps({"intent": "capability", "requires_retrieval": False, "query_list": []})
-    ctx = _contextualizer(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    ctx = _contextualizer(llm=FakeLLM(chat_responses=[payload]), query_rewrite=True)
     sq = await ctx.contextualize([{"role": "user", "content": "How can you help me?"}])
     assert sq.intent == "capability"
     assert sq.requires_retrieval is False
@@ -110,7 +110,7 @@ async def test_chatbotrag_can_skip_retrieval():
 async def test_contextualizer_prompt_distinguishes_social_acknowledgement_from_factual_acceptance():
     payload = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
     llm = FakeLLM(chat_responses=[payload])
-    ctx = _contextualizer(llm=llm, mode="ChatBotRag")
+    ctx = _contextualizer(llm=llm, query_rewrite=True)
 
     await ctx.contextualize(
         [
@@ -140,7 +140,7 @@ async def test_query_hint_preserves_acknowledgement_rules_with_a_stored_contextu
 
     payload = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
     llm = FakeLLM(chat_responses=[payload])
-    ctx = _contextualizer(llm=llm, mode="ChatBotRag", prompt_service=StoredPromptService())
+    ctx = _contextualizer(llm=llm, query_rewrite=True, prompt_service=StoredPromptService())
 
     await ctx.contextualize(
         [
@@ -156,7 +156,7 @@ async def test_query_hint_preserves_acknowledgement_rules_with_a_stored_contextu
 
 @pytest.mark.asyncio
 async def test_chatbotrag_falls_back_on_garbage():
-    ctx = _contextualizer(llm=FakeLLM(chat_responses=["not json", "still not json"]), mode="ChatBotRag")
+    ctx = _contextualizer(llm=FakeLLM(chat_responses=["not json", "still not json"]), query_rewrite=True)
     sq = await ctx.contextualize([{"role": "user", "content": "raw question"}])
     assert sq.query_list[0].query == "raw question"  # fallback to raw user query
 
@@ -165,12 +165,12 @@ async def test_chatbotrag_falls_back_on_garbage():
 async def test_renders_history_with_a_content_free_turn():
     """The chat-history string is built over *every* message, so the assistant
     turn that carries ``tool_calls`` — no ``content`` at all once the router
-    dumps with ``exclude_none=True`` — reaches it too. ChatBotRag is the default
-    ``rag.mode``, so the SimpleRag early return is no shield: reading the key
-    unguarded 500s on a plain tool-call replay.
+    dumps with ``exclude_none=True`` — reaches it too. Query rewriting is the
+    default (``rag.query_rewrite``), so the pass-through early return is no
+    shield: reading the key unguarded 500s on a plain tool-call replay.
     """
     llm = FakeLLM(chat_responses=['{"requires_retrieval": true, "query_list": [{"query": "q"}]}'])
-    ctx = _contextualizer(llm=llm, mode="ChatBotRag")
+    ctx = _contextualizer(llm=llm, query_rewrite=True)
 
     sq = await ctx.contextualize(
         [
@@ -205,7 +205,7 @@ async def test_query_contextualizer_name_from_retrieval_preset_reaches_resolver(
     rec = RecordingPromptService()
     ctx = _contextualizer(
         llm=FakeLLM(chat_responses=[payload, payload]),
-        mode="ChatBotRag",
+        query_rewrite=True,
         prompt_service=rec,
         partitions={"p": SimpleNamespace(retrieval=SimpleNamespace(query_contextualizer_prompt_name="myctx"))},
     )
@@ -227,7 +227,7 @@ async def test_hands_the_contextualizer_precomputed_calendar_anchors():
     """
     payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
     llm = FakeLLM(chat_responses=[payload])
-    ctx = _contextualizer(llm=llm, mode="ChatBotRag")
+    ctx = _contextualizer(llm=llm, query_rewrite=True)
 
     await ctx.contextualize([{"role": "user", "content": "résume mes échanges de la semaine dernière"}])
 
@@ -241,7 +241,7 @@ async def test_hands_the_contextualizer_precomputed_calendar_anchors():
 
 @pytest.mark.asyncio
 async def test_searches_the_request_of_the_user_not_the_tool_result():
-    ctx = _contextualizer(mode="SimpleRag")
+    ctx = _contextualizer(query_rewrite=False)
     sq = await ctx.contextualize(_TOOL_TURN)
     assert sq.query_list[0].query == "Reply to the last email of Claire"
 
@@ -249,7 +249,7 @@ async def test_searches_the_request_of_the_user_not_the_tool_result():
 @pytest.mark.asyncio
 async def test_leaves_the_tool_results_out_of_the_history():
     llm = FakeLLM(chat_responses=['{"requires_retrieval": true, "query_list": [{"query": "q"}]}'])
-    ctx = _contextualizer(llm=llm, mode="ChatBotRag")
+    ctx = _contextualizer(llm=llm, query_rewrite=True)
     await ctx.contextualize(_TOOL_TURN)
     history = llm.chat_calls[0][0][1]["content"]
     assert "2 emails" not in history, "the data the app gave do not shape the search"
@@ -265,7 +265,7 @@ async def test_keeps_the_contextualizers_date_order():
             "query_list": [{"query": "meeting notes", "temporal_filters": None, "date_order": "newest"}],
         }
     )
-    ctx = _contextualizer(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    ctx = _contextualizer(llm=FakeLLM(chat_responses=[payload]), query_rewrite=True)
     out = await ctx.contextualize([{"role": "user", "content": "résume le dernier meeting que j'ai eu"}])
     assert out.query_list[0].date_order == "newest"
     assert out.date_order == "newest"

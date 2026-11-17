@@ -457,7 +457,9 @@ Enable only where every API caller is already trusted with both.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `RAG_MODE` | `str` | `ChatBotRag` | How the pipeline turns the conversation into search queries. `ChatBotRag` (default) uses the LLM and the chat history to generate contextualized search queries; `SimpleRag` skips query generation and searches directly on the raw last user message. |
+| `RAG_DEFAULT_MODE` | `str` | `classic` | The `rag_mode` of a chat request that names none in `metadata.rag_mode`: `classic` (rewrite the question into search queries, retrieve, answer) or `agentic` (the model searches and reads the documents with tools, then answers). With `agentic`, a request the agent can't serve (its own `tools`, `websearch`, `use_map_reduce`, a JSON `response_format`, `classic`'s query and retrieval diagnostics) runs `classic`; a request naming a mode gets that mode, and text completions always run `classic`. Lets clients that send no `metadata`, such as Open WebUI, use the agent. Any other value fails startup. |
+| `RAG_QUERY_REWRITE` | `bool` | `true` | In `classic`, whether the LLM rewrites the conversation and its history into contextualized search queries (with their date filters), or (`false`) the latest user message is searched as it is. |
+| `RAG_MODE` | `str` | _(unset)_ | Deprecated: use `RAG_QUERY_REWRITE`. `ChatBotRag` is `RAG_QUERY_REWRITE=true`, `SimpleRag` is `false`. When set, it wins over `RAG_QUERY_REWRITE` and logs a warning at startup; any other value fails startup. |
 
 ### Retriever Configuration
 

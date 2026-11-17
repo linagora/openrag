@@ -5,6 +5,7 @@ import pytest
 from api.dependencies.retrieval_diagnostics import RetrievalDiagnosticsGuard
 from api.routers.user.chat import openai_chat_completion, openai_completion
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
+from core.config.retrieval import RAGConfig
 from fastapi import HTTPException
 
 
@@ -34,7 +35,7 @@ async def test_chat_router_forwards_http_request_id(monkeypatch):
         user_partitions=[],
         service=_Service(),
         partition_service=None,
-        config=SimpleNamespace(llm=SimpleNamespace(model="direct-model")),
+        config=SimpleNamespace(llm=SimpleNamespace(model="direct-model"), rag=RAGConfig()),
         diagnostics_guard=RetrievalDiagnosticsGuard("2/minute"),
     )
 
@@ -69,7 +70,7 @@ async def test_chat_diagnostics_require_admin_privileges(metadata):
             user_partitions=["legal"],
             service=None,
             partition_service=None,
-            config=None,
+            config=SimpleNamespace(rag=RAGConfig()),
             diagnostics_guard=RetrievalDiagnosticsGuard("2/minute"),
         )
 

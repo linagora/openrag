@@ -1,8 +1,8 @@
 """The ``contextualize`` step: the conversation rewritten into search queries.
 
-With ``rag.mode: ChatBotRag`` the contextualizer prompt asks the LLM for the
-sub-queries, their date filters and date order, the intent and whether the
-turn needs retrieval at all; with ``SimpleRag`` the latest user message is
+With ``rag.query_rewrite`` (the default) the contextualizer prompt asks the
+LLM for the sub-queries, their date filters and date order, the intent and
+whether the turn needs retrieval at all; without it the latest user message is
 searched as it is. The trace helpers record what was searched, and are also
 used when contextualization is bypassed or never runs.
 """
@@ -12,7 +12,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from datetime import datetime
-from enum import Enum
 from typing import TYPE_CHECKING
 
 from core.chat.history import latest_user_query
@@ -35,11 +34,6 @@ if TYPE_CHECKING:
     from services.orchestrators.prompt_service import PromptService
 
 logger = get_logger()
-
-
-class RAGMODE(Enum):
-    SIMPLERAG = "SimpleRag"
-    CHATBOTRAG = "ChatBotRag"
 
 
 class QueryContextualizer:
@@ -65,13 +59,13 @@ class QueryContextualizer:
         self._llm = llm
         self._detect_language = detect_language
         self._clock = clock
-        self._rag_mode = config.rag.mode
+        self._query_rewrite = config.rag.query_rewrite
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
 
     @property
     def rewrites_queries(self) -> bool:
-        """Whether the LLM rewrites the conversation (``ChatBotRag``) rather than passing it through."""
-        return self._rag_mode == RAGMODE.CHATBOTRAG.value
+        """Whether the LLM rewrites the conversation (``rag.query_rewrite``) rather than passing it through."""
+        return self._query_rewrite
 
     def _prompt_name(self, partitions: list[str] | None) -> str | None:
         """The contextualizer prompt the partition's retrieval preset names.
@@ -98,7 +92,7 @@ class QueryContextualizer:
         """The search queries for *messages*; the latest user message when the LLM fails twice."""
         llm = llm or self._llm
         last_user = latest_user_query(messages) or (messages[-1].get("content") or "")
-        if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
+        if not self._query_rewrite:
             queries = SearchQueries(query_list=[Query(query=last_user)])
             record_contextualization(trace, queries, original_query=last_user)
             return queries

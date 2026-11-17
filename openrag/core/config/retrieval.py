@@ -1,12 +1,16 @@
-"""Retrieval, reranker, RAG mode, map-reduce, and web search configuration."""
+"""Retrieval, reranker, RAG (default mode, query rewriting), map-reduce, and web search configuration."""
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import functools
+import logging
+from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .base import ConfigMixin
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Reranker
@@ -88,10 +92,54 @@ class RetrieverConfig(ConfigMixin):
 # ---------------------------------------------------------------------------
 
 
+#: What the deprecated ``rag.mode`` (``RAG_MODE``) said, as ``rag.query_rewrite``.
+_QUERY_REWRITE_BY_MODE = {"ChatBotRag": True, "SimpleRag": False}
+
+
 class RAGConfig(ConfigMixin):
-    mode: str = "ChatBotRag"
+    #: The ``rag_mode`` of a chat request that names none (``metadata.rag_mode``).
+    default_mode: Literal["classic", "agentic"] = "classic"
+    #: ``classic``: the LLM rewrites the conversation into search queries, or
+    #: (false) the latest user message is searched as it is.
+    query_rewrite: bool = True
     chat_history_depth: int = 4
     max_contextualized_query_len: int = 512
+
+    @model_validator(mode="before")
+    @classmethod
+    def _query_rewrite_from_mode(cls, data: Any) -> Any:
+        """``rag.mode`` (``RAG_MODE``), deprecated: ``ChatBotRag`` is ``query_rewrite: true``, ``SimpleRag`` false.
+
+        It wins over ``query_rewrite``, so a deployment that sets it keeps the
+        behaviour it chose, whatever the shipped config says.
+        """
+        if not isinstance(data, dict) or "mode" not in data:
+            return data
+        data = dict(data)
+        mode = data.pop("mode")
+        if mode is None:
+            return data
+        if mode not in _QUERY_REWRITE_BY_MODE:
+            raise ValueError(
+                f"rag.mode (RAG_MODE) must be ChatBotRag or SimpleRag, not {mode!r}. It is deprecated: "
+                "set rag.query_rewrite (RAG_QUERY_REWRITE) instead."
+            )
+        data["query_rewrite"] = _QUERY_REWRITE_BY_MODE[mode]
+        _warn_deprecated_mode(mode)
+        return data
+
+
+@functools.cache
+def _warn_deprecated_mode(mode: str) -> None:
+    """Warn once per process: the config is loaded more than once."""
+    rewrite = str(_QUERY_REWRITE_BY_MODE[mode]).lower()
+    logger.warning(
+        "rag.mode (RAG_MODE) is deprecated: %s sets rag.query_rewrite to %s, over any value given there. "
+        "Replace it with RAG_QUERY_REWRITE=%s.",
+        mode,
+        rewrite,
+        rewrite,
+    )
 
 
 # ---------------------------------------------------------------------------

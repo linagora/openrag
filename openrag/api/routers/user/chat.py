@@ -204,6 +204,7 @@ async def openai_chat_completion(
             detail="The last message must be a non-empty user message or a tool result with its tool_call_id",
         )
 
+    request.apply_default_rag_mode(config.rag.default_mode)
     options = ChatOptions.from_metadata(request.metadata)
     if options.include_retrieval_trace or options.compare_original_query or options.bypass_query_contextualization:
         await diagnostics_guard.authorize(user)

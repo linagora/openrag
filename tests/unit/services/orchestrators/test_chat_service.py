@@ -159,9 +159,9 @@ class FakeWorkspace:
         return [fid for fid in file_ids if fid in allowed]
 
 
-def _config(mode="SimpleRag"):
+def _config(query_rewrite=False):
     return SimpleNamespace(
-        rag=SimpleNamespace(mode=mode, chat_history_depth=4, max_contextualized_query_len=512),
+        rag=SimpleNamespace(query_rewrite=query_rewrite, chat_history_depth=4, max_contextualized_query_len=512),
         reranker=SimpleNamespace(top_k=5),
         chunker=SimpleNamespace(chunk_size=512),
         map_reduce=SimpleNamespace(initial_batch_size=2, expansion_batch_size=2, max_total_documents=4),
@@ -185,12 +185,19 @@ class FakeDocumentRepo:
 
 
 def _svc(
-    *, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None, prompt_service=None
+    *,
+    llm=None,
+    retrieval=None,
+    web=None,
+    query_rewrite=False,
+    llm_factory=None,
+    workspace=None,
+    prompt_service=None,
 ) -> ChatService:
     return create_chat_service(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
-        config=_config(mode),
+        config=_config(query_rewrite),
         web_search_service=web or FakeWeb(),
         workspace_service=workspace or FakeWorkspace(),
         prompt_service=prompt_service or _disk_prompt_service(),
@@ -413,7 +420,7 @@ async def test_chat_query_generation_uses_partition_chat_llm():
     default_llm = FakeLLM()
     query_json = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
     preset_llm = FakeLLM(chat_responses=[query_json, "preset answer [Sources: none]"])
-    svc = _svc(mode="ChatBotRag", llm=default_llm, llm_factory=RecordingFactory({"mistral": preset_llm}))
+    svc = _svc(query_rewrite=True, llm=default_llm, llm_factory=RecordingFactory({"mistral": preset_llm}))
     svc._config.partitions = {"p": _partition(chat_llm="mistral")}
     out = await svc.chat(
         partitions=["p"],
@@ -975,7 +982,7 @@ async def test_casual_answer_never_sends_more_than_the_window_leaves():
     """The casual answer's own instructions count against the window too."""
     llm = FakeLLM()
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     async def sent(max_prompt_tokens):
         await svc.chat(
@@ -999,7 +1006,7 @@ async def test_casual_answer_never_sends_more_than_the_window_leaves():
 async def test_window_counts_an_empty_assistant_turn_as_sent(question):
     """An empty assistant turn reaches the model as a placeholder, and the window counts the placeholder."""
     llm = FakeLLM()
-    svc = _svc(mode="ChatBotRag", retrieval=FakeRetrieval(chunks=[]), llm=llm)
+    svc = _svc(query_rewrite=True, retrieval=FakeRetrieval(chunks=[]), llm=llm)
     svc._config.partitions = {"p": _partition_cfg(top_n=5)}
     history = [
         {"role": "user", "content": "q"},
@@ -1116,7 +1123,7 @@ async def test_chat_recovers_context_markers_as_citations():
 async def test_chat_casual_greeting_uses_the_dedicated_openrag_prompt_without_retrieval():
     llm = FakeLLM(chat_responses=["Bonjour ! Je peux vous aider."])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     out = await svc.chat(
         partitions=["p"],
@@ -1159,7 +1166,7 @@ async def test_chat_casual_greeting_uses_the_dedicated_openrag_prompt_without_re
 async def test_exact_capability_question_uses_casual_response_without_retrieval(operation, message, language):
     llm = FakeLLM(chat_responses=["I can help with indexed documents."])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
     kwargs = {
         "partitions": ["p"],
         "payload": {"messages": [{"role": "user", "content": message}], "metadata": {}},
@@ -1183,7 +1190,7 @@ async def test_exact_capability_question_uses_casual_response_without_retrieval(
 @pytest.mark.asyncio
 async def test_chat_casual_response_prompt_takes_priority_over_spoken_style():
     llm = FakeLLM(chat_responses=["You're welcome!"])
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
 
     await svc.chat(
         partitions=["p"],
@@ -1204,7 +1211,7 @@ async def test_chat_casual_response_prompt_takes_priority_over_spoken_style():
 
 @pytest.mark.asyncio
 async def test_chat_casual_response_preserves_the_safely_wrapped_client_system_prompt():
-    svc = _svc(mode="ChatBotRag")
+    svc = _svc(query_rewrite=True)
 
     result = await svc._prepare_chat(
         ["p"],
@@ -1261,7 +1268,7 @@ def test_casual_response_prompt_uses_configured_assistant_name_without_vendor_at
 
 @pytest.mark.asyncio
 async def test_chat_casual_greeting_uses_assistant_name_from_runtime_configuration():
-    svc = _svc(mode="ChatBotRag")
+    svc = _svc(query_rewrite=True)
     svc._config.server.assistant_name = "Marianne"
 
     result = await svc._prepare_chat(
@@ -1277,7 +1284,7 @@ async def test_chat_casual_greeting_uses_assistant_name_from_runtime_configurati
 @pytest.mark.asyncio
 @pytest.mark.parametrize("assistant_name", ["Acme {AI}", "Acme {custom_prompt}"])
 async def test_chat_casual_greeting_preserves_literal_braces_in_assistant_name(assistant_name):
-    svc = _svc(mode="ChatBotRag")
+    svc = _svc(query_rewrite=True)
     svc._config.server.assistant_name = assistant_name
 
     result = await svc._prepare_chat(
@@ -1307,7 +1314,7 @@ async def test_chat_mixed_request_still_retrieves_documents():
     )
     llm = FakeLLM(chat_responses=[query_json, "Revenue was 10 million. [Sources: 1]"])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     out = await svc.chat(
         partitions=["p"],
@@ -1340,7 +1347,7 @@ async def test_chat_trace_persists_exact_contextualized_query():
         ],
     }
     llm = FakeLLM(chat_responses=[json.dumps(generated), "answer"])
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
 
     out = await svc.chat(
         partitions=["p"],
@@ -1370,7 +1377,7 @@ async def test_chat_trace_persists_exact_contextualized_query():
 @pytest.mark.asyncio
 async def test_chat_trace_records_contextualizer_parse_fallback():
     llm = FakeLLM(chat_responses=["not json", "still not json", "answer"])
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
 
     out = await svc.chat(
         partitions=["p"],
@@ -1393,7 +1400,7 @@ async def test_chat_trace_records_contextualizer_parse_fallback():
 async def test_chat_contextualization_bypass_retrieves_exact_original_query_without_rewrite():
     llm = FakeLLM(chat_responses=["answer"])
     retrieval = FakeRetrieval([Chunk(id="actual", text="actual", metadata={"_id": "actual"})])
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     out = await svc.chat(
         partitions=["p"],
@@ -1432,7 +1439,7 @@ async def test_chat_contextualization_bypass_retrieves_exact_original_query_with
 @pytest.mark.asyncio
 async def test_chat_forwards_bounded_retrieval_diagnostic_overrides():
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
 
     await svc.chat(
         partitions=["p"],
@@ -1462,7 +1469,7 @@ async def test_chat_forwards_bounded_retrieval_diagnostic_overrides():
 
 @pytest.mark.asyncio
 async def test_chat_trace_uses_http_request_id():
-    svc = _svc(mode="SimpleRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=FakeRetrieval(chunks=[]))
+    svc = _svc(query_rewrite=False, llm=FakeLLM(chat_responses=["answer"]), retrieval=FakeRetrieval(chunks=[]))
 
     out = await svc.chat(
         partitions=["p"],
@@ -1486,7 +1493,7 @@ async def test_traced_chat_uses_prompt_aware_retrieval_configuration_fingerprint
             return "prompt-aware-fingerprint"
 
     retrieval = PromptAwareRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
 
     out = await svc.chat(
         partitions=["p"],
@@ -1518,7 +1525,7 @@ async def test_traced_chat_reuses_one_resolved_plan_for_fingerprint_and_executio
             return self.plan
 
     retrieval = PlanAwareRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
 
     out = await svc.chat(
         partitions=["p"],
@@ -1564,7 +1571,7 @@ async def test_retrieval_diagnostics_stops_before_answer_generation(
     )
     llm = FakeLLM(chat_responses=[contextualized] if query_mode != "original" else [])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     result = await svc.diagnose_retrieval(
         partitions=["p"],
@@ -1609,7 +1616,7 @@ async def test_contextualized_trace_fingerprints_the_prompt_identity_used_by_the
 
     retrieval = PromptAwareRetrieval()
     svc = _svc(
-        mode="ChatBotRag",
+        query_rewrite=True,
         llm=FakeLLM(chat_responses=[generated, "answer"]),
         retrieval=retrieval,
     )
@@ -1639,7 +1646,7 @@ async def test_original_query_comparison_never_changes_actual_documents():
         }
     )
     retrieval = FakeRetrieval([Chunk(id="actual", text="actual")])
-    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=[generated, "answer"]), retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=FakeLLM(chat_responses=[generated, "answer"]), retrieval=retrieval)
 
     out = await svc.chat(
         partitions=["p"],
@@ -1693,7 +1700,7 @@ async def test_original_query_comparison_never_changes_actual_documents():
 async def test_non_allowlisted_social_messages_retrieve_despite_contextualizer_casual_intent(message, intent):
     query_json = json.dumps({"intent": intent, "requires_retrieval": False, "query_list": []})
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=[query_json]), retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=FakeLLM(chat_responses=[query_json]), retrieval=retrieval)
 
     result = await svc._prepare_chat(
         ["p"],
@@ -1709,7 +1716,7 @@ async def test_non_allowlisted_social_messages_retrieve_despite_contextualizer_c
 async def test_ok_after_social_history_uses_contextualizer_gratitude_decision():
     llm = FakeLLM(chat_responses=[json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     result = await svc._prepare_chat(
         ["p"],
@@ -1734,7 +1741,7 @@ async def test_ok_after_social_history_uses_contextualizer_gratitude_decision():
 async def test_explicit_retrieval_metadata_still_forces_retrieval_for_acknowledgement():
     llm = FakeLLM(chat_responses=[json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     await svc._prepare_chat(
         ["p"],
@@ -1767,7 +1774,7 @@ async def test_ack_after_factual_offer_still_retrieves_the_accepted_request(ackn
         ]
     )
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     await svc._prepare_chat(
         ["p"],
@@ -1792,7 +1799,7 @@ async def test_ack_after_factual_offer_still_retrieves_the_accepted_request(ackn
 @pytest.mark.parametrize("reaction", ["👍", "👍🏻", "👍🏼", "👍🏽", "👍🏾", "👍🏿", "👍️"])
 async def test_thumb_reaction_keeps_simple_rag_casual_behavior(reaction):
     retrieval = FakeRetrieval()
-    svc = _svc(mode="SimpleRag", retrieval=retrieval)
+    svc = _svc(query_rewrite=False, retrieval=retrieval)
 
     await svc._prepare_chat(
         ["p"],
@@ -1827,7 +1834,7 @@ async def test_empty_contextualized_casual_answer_retries_in_the_same_language(o
         return None
 
     monkeypatch.setattr(chat_factory, "detect_language", detect_test_language)
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
     kwargs = {
         "partitions": ["p"],
         "payload": {
@@ -1895,7 +1902,7 @@ async def test_empty_retrieval_answer_after_source_tag_retries(operation):
         ],
     )
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
     kwargs = {
         "partitions": ["p"],
         "payload": {"messages": [{"role": "user", "content": "ok"}], "metadata": {}},
@@ -1936,7 +1943,7 @@ async def test_empty_response_retry_returns_fallback_if_retry_is_still_empty(ope
         chat_responses=[contextualizer_result, "", ""],
         stream_sequences=[empty_stream, empty_stream],
     )
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
     kwargs = {
         "partitions": ["p"],
         "payload": {"messages": [{"role": "user", "content": "ok"}], "metadata": {}},
@@ -1972,7 +1979,7 @@ async def test_empty_response_retry_failure_returns_fallback_and_marks_truncatio
         chat_responses=[contextualizer_result, "", RuntimeError("retry failed")],
         stream_sequences=[empty_stream, [RuntimeError("retry failed")]],
     )
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
     kwargs = {
         "partitions": ["p"],
         "payload": {"messages": [{"role": "user", "content": "ok"}], "metadata": {}},
@@ -2015,7 +2022,7 @@ async def test_partial_retry_stream_failure_keeps_partial_text_and_truncation_fl
             ],
         ],
     )
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
 
     events = [
         json.loads(line[6:])
@@ -2048,7 +2055,7 @@ async def test_empty_length_completion_uses_fallback_without_retry(operation):
         chat_responses=[contextualizer_result, {"content": "", "finish_reason": "length"}, "unexpected retry"],
         stream_sequences=[length_stream, ['data: {"choices":[{"delta":{"content":"unexpected retry"}}]}\n\n']],
     )
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
     kwargs = {
         "partitions": ["p"],
         "payload": {"messages": [{"role": "user", "content": "How does this work?"}], "metadata": {}},
@@ -2103,7 +2110,7 @@ async def test_empty_filtered_or_function_call_response_is_preserved(
         chat_responses=[contextualizer_result, {"content": "", "finish_reason": finish_reason, **message_fields}],
         stream_sequences=[filtered_stream],
     )
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
     kwargs = {
         "partitions": ["p"],
         "payload": {"messages": [{"role": "user", "content": "Explain this."}], "metadata": {}},
@@ -2140,7 +2147,7 @@ async def test_truncated_empty_contextualized_casual_stream_does_not_retry():
         chat_responses=[json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})],
         stream_lines=['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'],
     )
-    svc = _svc(mode="ChatBotRag", llm=llm)
+    svc = _svc(query_rewrite=True, llm=llm)
 
     events = [
         json.loads(line[6:])
@@ -2191,7 +2198,7 @@ async def test_chat_fails_closed_to_retrieval_for_incomplete_or_inconsistent_cas
 ):
     llm = FakeLLM(chat_responses=[json.dumps(contextualizer_result)])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     await svc._prepare_chat(
         ["p"],
@@ -2400,7 +2407,7 @@ async def test_explicit_websearch_forces_retrieval_for_allowlisted_casual_messag
     llm = FakeLLM(chat_responses=[query_json])
     retrieval = FakeRetrieval(chunks=[])
     web = FakeWeb()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval, web=web)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval, web=web)
 
     await svc._prepare_chat(
         ["p"],
@@ -2419,7 +2426,7 @@ async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
     query_json = json.dumps({"requires_retrieval": False, "query_list": []})
     llm = FakeLLM(chat_responses=[query_json])
     retrieval = FakeRetrieval(chunks=[])
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     await svc._prepare_chat(
         ["p"],
@@ -2793,7 +2800,7 @@ async def test_chat_attachments_force_retrieval_even_when_classifier_skips():
     query_json = json.dumps({"requires_retrieval": False, "query_list": []})
     llm = FakeLLM(chat_responses=[query_json, "answer [Sources: none]"])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     await svc.chat(
         partitions=["p1"],
@@ -3016,7 +3023,7 @@ async def test_complete_conversational_request_uses_openrag_prompt_without_retri
     query_json = json.dumps({"requires_retrieval": False, "query_list": []})
     llm = FakeLLM(chat_responses=[query_json], gen_text="I am OpenRAG.\n[Sources: none]")
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
 
     out = await svc.complete(
         partitions=["p"],
@@ -3185,7 +3192,7 @@ async def test_chat_stream_finalizes_trace_after_upstream_stream_closes(monkeypa
 
 @pytest.mark.asyncio
 async def test_empty_casual_trace_records_the_actual_no_retrieval_decision():
-    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]))
+    svc = _svc(query_rewrite=True, llm=FakeLLM(chat_responses=["answer"]))
 
     out = await svc.chat(
         partitions=["p"],
@@ -3255,7 +3262,7 @@ async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
 async def test_allowlisted_or_normalized_empty_chat_bypasses_contextualization_and_retrieval(message):
     llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": True, "query_list": [{"query": "wrong"}]})])
     retrieval = FakeRetrieval()
-    svc = _svc(llm=llm, retrieval=retrieval, mode="ChatBotRag")
+    svc = _svc(llm=llm, retrieval=retrieval, query_rewrite=True)
 
     result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": message}], "metadata": {}})
 
@@ -3277,7 +3284,7 @@ async def test_factual_chat_retrieves_when_contextualizer_mislabels_it_casual(op
     message = "Puis-je saisir l'administration par voie électronique ?"
     llm = FakeLLM(chat_responses=[json.dumps({"intent": intent, "requires_retrieval": False, "query_list": []})])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
     kwargs = {
         "partitions": ["p"],
         "payload": {
@@ -3312,7 +3319,7 @@ async def test_partition_chat_retrieves_factual_statement_regardless_of_classifi
     claim = "A deficiency of vitamin B12 increases blood levels of homocysteine."
     llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
     metadata = {"include_all_retrieved_sources": True}
     if require_retrieval is not None:
         metadata["require_retrieval"] = require_retrieval
@@ -3347,7 +3354,7 @@ async def test_text_completion_retrieval_remains_opt_in(require_retrieval):
     claim = "A deficiency of vitamin B12 increases blood levels of homocysteine."
     llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
     metadata = {"include_all_retrieved_sources": True}
     if require_retrieval is not None:
         metadata["require_retrieval"] = require_retrieval
@@ -3375,7 +3382,7 @@ async def test_text_completion_retrieval_remains_opt_in(require_retrieval):
 async def test_only_explicit_json_true_forces_retrieval_for_casual_or_normalized_empty_chat(message, require_retrieval):
     llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})])
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    svc = _svc(query_rewrite=True, llm=llm, retrieval=retrieval)
     metadata = {}
     if require_retrieval is not None:
         metadata["require_retrieval"] = require_retrieval
@@ -3398,7 +3405,7 @@ async def test_only_explicit_json_true_forces_retrieval_for_casual_or_normalized
 async def test_require_retrieval_preserves_workspace_scope():
     retrieval = FakeRetrieval()
     svc = _svc(
-        mode="ChatBotRag",
+        query_rewrite=True,
         retrieval=retrieval,
         llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
         workspace=FakeWorkspace(scope=WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["allowed-file"])),
@@ -3419,7 +3426,7 @@ async def test_require_retrieval_preserves_workspace_scope():
 async def test_require_retrieval_does_not_bypass_missing_workspace():
     retrieval = FakeRetrieval()
     svc = _svc(
-        mode="ChatBotRag",
+        query_rewrite=True,
         retrieval=retrieval,
         workspace=FakeWorkspace(scope=None),
         llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
@@ -3446,7 +3453,7 @@ async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(h
     }
     retrieval = FakeRetrieval(chunks=[])
     svc = _svc(
-        mode="ChatBotRag",
+        query_rewrite=True,
         retrieval=retrieval,
         llm=FakeLLM(
             chat_responses=[
@@ -3494,7 +3501,7 @@ async def test_the_contextualizer_reads_the_clock_in_utc(monkeypatch):
     monkeypatch.setattr(chat_factory, "datetime", FrozenDatetime)
     payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
     llm = FakeLLM(chat_responses=[payload])
-    svc = _svc(llm=llm, mode="ChatBotRag")
+    svc = _svc(llm=llm, query_rewrite=True)
 
     await svc._contextualizer.contextualize([{"role": "user", "content": "what did I receive today?"}])
 
@@ -3519,7 +3526,7 @@ _TOOL_TURN = [
 async def test_chat_after_a_tool_result_retrieves_for_a_short_request():
     retrieval = FakeRetrieval()
     llm = FakeLLM(chat_responses=["Claire asks..."])
-    svc = _svc(retrieval=retrieval, llm=llm, mode="SimpleRag")
+    svc = _svc(retrieval=retrieval, llm=llm, query_rewrite=False)
     # "thanks" alone is a casual message answered without retrieval; the result
     # of a tool call is not a casual turn
     messages = [{"role": "user", "content": "thanks"}, *_TOOL_TURN[1:]]

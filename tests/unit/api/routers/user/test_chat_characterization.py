@@ -633,7 +633,9 @@ def _settings(scenario: Scenario) -> Settings:
     settings = base.model_copy(
         update={
             "llm": base.llm.model_copy(update={"model": "direct-llm"}),
-            "rag": base.rag.model_copy(update={"mode": scenario.rag_mode, "chat_history_depth": 4}),
+            "rag": base.rag.model_copy(
+                update={"query_rewrite": scenario.rag_mode == "ChatBotRag", "chat_history_depth": 4}
+            ),
             "reranker": base.reranker.model_copy(update={"top_k": 5}),
             "map_reduce": base.map_reduce.model_copy(
                 update={"initial_batch_size": 2, "expansion_batch_size": 1, "max_total_documents": 4}

@@ -378,9 +378,16 @@ retriever:
   allow_filterless_fallback: true
 
 # --- RAG ---
-# Env: RAG_MODE
+# Env: RAG_DEFAULT_MODE, RAG_QUERY_REWRITE
+#      (RAG_MODE, deprecated: ChatBotRag is RAG_QUERY_REWRITE=true, SimpleRag false)
 rag:
-  mode: ChatBotRag
+  # The rag_mode of a chat request that names none: classic or agentic. With
+  # agentic, a request the agent can't serve (its own tools, websearch,
+  # use_map_reduce, a JSON response_format, classic's diagnostics) runs classic.
+  default_mode: classic
+  # classic: the LLM rewrites the conversation into search queries; false
+  # searches the latest user message as it is.
+  query_rewrite: true
   chat_history_depth: 4
   max_contextualized_query_len: 512
 
