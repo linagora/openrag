@@ -59,6 +59,21 @@ def test_run_as_root_the_file_goes_to_the_owner_of_its_folder(backup, monkeypatc
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file ownership")
+def test_when_the_owner_cannot_be_set_no_file_is_left_behind(backup, monkeypatch, tmp_path):
+    def refuse(fd, uid, gid):
+        raise PermissionError("chown refused")
+
+    monkeypatch.setattr(backup.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(backup.os, "fchown", refuse)
+    path = tmp_path / "backup.openrag"
+
+    with pytest.raises(PermissionError):
+        backup.open_output_file(str(path), logging.getLogger("test"))
+
+    assert not path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file ownership")
 def test_run_as_another_user_the_ownership_is_left_alone(backup, monkeypatch, tmp_path):
     monkeypatch.setattr(backup.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(backup.os, "fchown", lambda *args: pytest.fail("fchown must not run"))

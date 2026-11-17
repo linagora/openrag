@@ -173,8 +173,11 @@ def _create_owner_only(file_name: str) -> None:
     fd = os.open(file_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if hasattr(os, "geteuid") and os.geteuid() == 0:
-            folder = os.stat(os.path.dirname(os.path.abspath(file_name)))
+            folder = os.stat(os.path.dirname(file_name) or ".")
             os.fchown(fd, folder.st_uid, folder.st_gid)
+    except OSError:
+        os.unlink(file_name)
+        raise
     finally:
         os.close(fd)
 
