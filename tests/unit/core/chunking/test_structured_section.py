@@ -306,6 +306,19 @@ def test_greedy_split_does_not_rehome_hard_wrapped_heading_fragment():
     assert all(_words(piece) <= 4 for piece in pieces), pieces
 
 
+def test_greedy_split_does_not_rehome_sentence_split_heading_fragment():
+    pieces = _greedy_split("## Scope. alpha beta. gamma delta epsilon", 2, 4, _words)
+
+    assert pieces == ["## Scope.", "alpha beta.", "gamma delta epsilon"]
+
+
+def test_greedy_split_rehomes_complete_heading_from_word_wrapped_item():
+    pieces = _greedy_split("### Heading\nalpha beta gamma", 2, 4, _words)
+
+    assert pieces == ["### Heading\n\nalpha beta", "gamma"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
 def test_greedy_split_distinguishes_fragment_from_duplicate_source_heading():
     text = "#### **Article L700-2 w1 details\n\n#### **Article\n\nalpha beta"
     pieces = _greedy_split(text, 2, 4, _words)

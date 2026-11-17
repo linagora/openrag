@@ -1225,7 +1225,7 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
 
     packing_target = min(target, max_tokens)
 
-    def descend(item: str, levels: tuple[re.Pattern[str], ...]) -> list[tuple[str, bool]]:
+    def descend(item: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
         """Split one over-``max`` item on the strongest separator it actually
         contains, then keep the weaker ones in reserve for its own oversize
         pieces. Word-wrapping is the last resort because it is the only step
@@ -1234,38 +1234,51 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
             parts = splitter.split(item)
             if len(parts) > 1:
                 return pack(parts, " ", levels[i + 1 :])
-        return [(piece, True) for piece in _hard_wrap(item, packing_target, length_function)]
+        return _hard_wrap(item, packing_target, length_function)
 
-    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[tuple[str, bool]]:
-        out: list[tuple[str, bool]] = []
+    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
+        out: list[str] = []
         buf: list[str] = []
         for item in items:
             it = length_function(item)
             if buf and length_function(joiner.join([*buf, item])) > packing_target:
-                out.append((joiner.join(buf), False))
+                out.append(joiner.join(buf))
                 buf = []
             if it > max_tokens and not buf:
                 out.extend(descend(item, levels))
                 continue
             buf.append(item)
         if buf:
-            out.append((joiner.join(buf), False))
+            out.append(joiner.join(buf))
         return out
 
     sanitized = sanitize_text(text, max_consecutive_newlines=2)
-    pieces_with_origin = pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER)
-    pieces = [piece for piece, _ in pieces_with_origin]
-    # Word wrapping can create Markdown-looking fragments. Sentence and clause
-    # splits keep intact heading lines eligible for rehoming.
+    pieces = pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER)
+
+    # A heading is eligible only when the emitted line is the same complete
+    # line at the same word position in the sanitized source. This keeps
+    # sentence-split prefixes and word-wrap fragments ineligible, while still
+    # recognizing an intact heading from a word-wrapped paragraph. The word
+    # span distinguishes identical text that appears elsewhere in the source.
+    source_heading_spans: set[tuple[int, int, str]] = set()
+    word_offset = 0
+    for line in sanitized.splitlines():
+        word_count = len(line.split())
+        if _CAPTION_HEADING_RE.match(line):
+            source_heading_spans.add((word_offset, word_offset + word_count, line))
+        word_offset += word_count
+
     source_heading_positions: set[tuple[int, int]] = set()
-    for piece_index, (piece, was_word_wrapped) in enumerate(pieces_with_origin):
-        if was_word_wrapped:
-            continue
-        source_heading_positions.update(
-            (piece_index, line_index)
-            for line_index, line in enumerate(piece.rstrip().splitlines())
-            if _CAPTION_HEADING_RE.match(line)
-        )
+    word_offset = 0
+    for piece_index, piece in enumerate(pieces):
+        for line_index, line in enumerate(piece.rstrip().splitlines()):
+            word_count = len(line.split())
+            if (
+                _CAPTION_HEADING_RE.match(line)
+                and (word_offset, word_offset + word_count, line) in source_heading_spans
+            ):
+                source_heading_positions.add((piece_index, line_index))
+            word_offset += word_count
     return _rehome_trailing_headings(pieces, max_tokens, length_function, source_heading_positions)
 
 
@@ -1287,9 +1300,9 @@ def _rehome_trailing_headings(
     """
     out = list(pieces)
     # Walk backwards so a run of consecutive headings cascades forward in one
-    # pass when the combined piece fits. Pieces containing only moved headings
-    # then empty out and are filtered below; a heading stays in place when
-    # moving it would exceed the ceiling.
+    # pass when the combined piece fits. Only complete source lines are moved;
+    # pieces containing only moved headings then empty out and are filtered
+    # below. A heading stays in place when moving it would exceed the ceiling.
     for i in range(len(out) - 2, -1, -1):
         lines = out[i].rstrip().splitlines()
         cut = len(lines)
