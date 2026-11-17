@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import itertools
+import random
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -18,12 +20,15 @@ from docling_core.types.doc.base import BoundingBox, Size
 from docling_core.types.doc.document import (
     ContentLayer,
     DoclingDocument,
+    GraphData,
     ImageRef,
+    NodeItem,
     PictureItem,
     PictureTabularChartData,
     ProvenanceItem,
     TableCell,
     TableData,
+    TextItem,
 )
 from docling_core.types.doc.labels import DocItemLabel, GroupLabel
 from PIL import Image
@@ -396,19 +401,156 @@ def _document_a_page_export_treats_specially() -> tuple[DoclingDocument, dict[st
     return document, refs
 
 
+def _docling_core_page_export(document: DoclingDocument, page_no: int, refs: dict[str, str]) -> str:
+    serializer = MarkdownDocSerializer(
+        doc=document,
+        picture_serializer=docling_workers._PictureRefSerializer(refs),
+        params=MarkdownParams(pages={page_no}, image_placeholder=docling_workers._IMAGE_PLACEHOLDER),
+    )
+    return serializer.serialize().text.strip()
+
+
 def test_each_page_export_is_the_one_docling_core_makes_for_that_page():
     document, refs = _document_a_page_export_treats_specially()
     index = docling_workers._PageIndex(document)
 
     for page_no in sorted(document.pages):
-        reference = MarkdownDocSerializer(
-            doc=document,
-            picture_serializer=docling_workers._PictureRefSerializer(refs),
-            params=MarkdownParams(pages={page_no}, image_placeholder=docling_workers._IMAGE_PLACEHOLDER),
-        )
-        assert docling_workers._page_markdown(document, page_no, refs, index) == reference.serialize().text.strip()
+        expected = _docling_core_page_export(document, page_no, refs)
+        assert docling_workers._page_markdown(document, page_no, refs, index) == expected
     # Without an index, _page_markdown builds its own.
     assert docling_workers._page_markdown(document, 3, refs) == docling_workers._page_markdown(document, 3, refs, index)
+
+
+class _RandomDocument:
+    """A document built at random through docling-core's API: pages with gaps,
+    sections, nested lists and list items made of inline groups, pictures and
+    tables captioned on any page, charts, text inside pictures, furniture, items
+    without provenance, and the item types the fallback serializer prints."""
+
+    def __init__(self, rng: random.Random, n_pages: int) -> None:
+        self.rng = rng
+        self.document = DoclingDocument(name="random")
+        self.pages = sorted(rng.sample(range(1, n_pages + 3), n_pages))
+        for page_no in self.pages:
+            self.document.add_page(page_no=page_no, size=Size(width=100, height=100))
+        self.page_no = self.pages[0]
+        self.counter = itertools.count()
+        for _ in range(rng.randint(0, 40)):
+            self.element(None)
+
+    def prov(self) -> ProvenanceItem | None:
+        if self.rng.random() < 0.05:
+            return None
+        if self.rng.random() < 0.25:  # move to the next page, now and then to any page
+            if self.rng.random() < 0.2:
+                self.page_no = self.rng.choice(self.pages)
+            else:
+                self.page_no = self.pages[min(self.pages.index(self.page_no) + 1, len(self.pages) - 1)]
+        return _prov(self.page_no)
+
+    def layer(self) -> ContentLayer | None:
+        return ContentLayer.FURNITURE if self.rng.random() < 0.08 else None
+
+    def text(self, parent: NodeItem | None = None) -> None:
+        labels = [DocItemLabel.TEXT] * 6 + [DocItemLabel.FOOTNOTE, DocItemLabel.PAGE_HEADER, DocItemLabel.CAPTION]
+        label = self.rng.choice(labels)
+        text = f"t{next(self.counter)} a_b <i>"
+        item = self.document.add_text(
+            label=label, text=text, prov=self.prov(), parent=parent, content_layer=self.layer()
+        )
+        if item.prov and self.rng.random() < 0.1:  # text that continues on another page
+            item.prov.append(_prov(self.rng.choice(self.pages)))
+
+    def caption(self, prefix: str) -> TextItem | None:
+        if self.rng.random() >= 0.6:
+            return None
+        return self.document.add_text(
+            label=DocItemLabel.CAPTION, text=f"{prefix}{next(self.counter)}", prov=self.prov()
+        )
+
+    def list_group(self, parent: NodeItem | None, depth: int) -> None:
+        group = self.document.add_list_group(parent=parent, content_layer=self.layer())
+        enumerated = self.rng.random() < 0.5
+        for _ in range(self.rng.randint(0, 5)):
+            if self.rng.random() < 0.15:
+                item = self.document.add_list_item(text="", enumerated=enumerated, prov=self.prov(), parent=group)
+                inline = self.document.add_inline_group(parent=item)
+                for _ in range(self.rng.randint(1, 3)):
+                    self.text(inline)
+            else:
+                text = f"li{next(self.counter)}"
+                item = self.document.add_list_item(text=text, enumerated=enumerated, prov=self.prov(), parent=group)
+            if depth < 2 and self.rng.random() < 0.2:
+                self.list_group(item, depth + 1)
+
+    def element(self, parent: NodeItem | None, depth: int = 0) -> None:
+        kind = self.rng.random()
+        document = self.document
+        if kind < 0.35:
+            self.text(parent)
+        elif kind < 0.42:
+            document.add_heading(text=f"h{next(self.counter)}", prov=self.prov(), parent=parent)
+        elif kind < 0.45:
+            document.add_title(text=f"T{next(self.counter)}", prov=self.prov(), parent=parent)
+        elif kind < 0.55:
+            self.list_group(parent, 0)
+        elif kind < 0.6:
+            inline = document.add_inline_group(parent=parent)
+            for _ in range(self.rng.randint(0, 3)):
+                self.text(inline)
+        elif kind < 0.68 and depth < 2:
+            label = self.rng.choice([GroupLabel.SECTION, GroupLabel.CHAPTER, GroupLabel.UNSPECIFIED])
+            group = document.add_group(label=label, parent=parent, content_layer=self.layer())
+            for _ in range(self.rng.randint(0, 4)):
+                self.element(group, depth + 1)
+        elif kind < 0.8:
+            caption = self.caption("cap")
+            chart = self.rng.random() < 0.05
+            annotations = [PictureTabularChartData(title="chart", chart_data=_table_data())] if chart else None
+            picture = document.add_picture(
+                caption=caption, prov=self.prov(), parent=parent, content_layer=self.layer(), annotations=annotations
+            )
+            if self.rng.random() < 0.3:
+                self.text(picture)
+        elif kind < 0.88:
+            caption = self.caption("tcap")
+            document.add_table(
+                data=_table_data(), caption=caption, prov=self.prov(), parent=parent, content_layer=self.layer()
+            )
+        elif kind < 0.92:
+            document.add_formula(text=f"x^{next(self.counter)}", prov=self.prov(), parent=parent)
+        elif kind < 0.95:
+            document.add_code(text=f"code{next(self.counter)}", prov=self.prov(), parent=parent)
+        elif kind < 0.975:
+            document.add_key_values(graph=GraphData(cells=[], links=[]), prov=self.prov(), parent=parent)
+        else:
+            document.add_form(graph=GraphData(cells=[], links=[]), prov=self.prov(), parent=parent)
+
+
+def test_each_page_export_matches_docling_core_on_random_documents():
+    # _PageIndex reproduces parts of docling-core (get_excluded_refs, the
+    # _captions_of_some_item lookup, the traversal in get_parts). The seeds are
+    # fixed, so a docling-core upgrade that changes any of them fails here.
+    compared, differ = 0, []
+    for seed in range(200):
+        rng = random.Random(seed)
+        document = _RandomDocument(rng, rng.randint(1, 6)).document
+        pictures = enumerate(document.pictures)
+        refs = {picture.self_ref: f"![](docling_img_{i})" for i, picture in pictures if rng.random() < 0.7}
+        index = docling_workers._PageIndex(document)
+        for page_no in sorted(document.pages):
+            compared += 1
+            exported = docling_workers._page_markdown(document, page_no, refs, index)
+            if exported != _docling_core_page_export(document, page_no, refs):
+                differ.append((seed, page_no))
+    assert compared > 600
+    assert differ == []
+
+
+def test_a_page_serializer_cannot_be_built_without_an_index():
+    document, _ = _document_a_page_export_treats_specially()
+    with pytest.raises(TypeError, match="index"):
+        docling_workers._PageMarkdownSerializer(doc=document)
 
 
 def test_exporting_every_page_reads_each_item_a_bounded_number_of_times(monkeypatch):
