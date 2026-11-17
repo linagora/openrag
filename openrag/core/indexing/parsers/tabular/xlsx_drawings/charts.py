@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from xml.etree.ElementTree import Element
 
+from ..xlsx_validation import xml_true
 from .shapes import ShapeText
 
 # Plot elements of ``c:plotArea`` and the readable name of each.
@@ -304,7 +305,8 @@ def _data_labels(series: Element) -> tuple[DataRef | None, tuple[tuple[int, str]
     formula = None
     shown = labels.find(".//{*}showDataLabelsRange")
     source = series.find("{*}extLst/{*}ext/{*}datalabelsRange")
-    if source is not None and shown is not None and shown.get("val", "1").lower() in {"1", "true"}:
+    # An absent val means true here (CT_Boolean's default).
+    if source is not None and shown is not None and xml_true(shown.get("val", "1")):
         formula_node = _child(source, "f")
         formula = (formula_node.text or "").strip() or None if formula_node is not None else None
         cache = _child(source, "dlblRangeCache")
@@ -315,7 +317,7 @@ def _data_labels(series: Element) -> tuple[DataRef | None, tuple[tuple[int, str]
         if index is None or not index.isdigit():
             continue
         point = int(index)
-        if _val(label, "delete") in {"1", "true"}:
+        if xml_true(_val(label, "delete")):
             points.pop(point, None)
             refs.pop(point, None)
             continue
@@ -508,7 +510,8 @@ def parse_chart(root: Element) -> Chart:
     return Chart(
         title,
         tuple(plots),
-        plot_visible_only=plot_visible_only not in {"0", "false"},
+        # Absent means true (CT_Boolean's default); " 0 " is as false as "0".
+        plot_visible_only=plot_visible_only is None or plot_visible_only.strip().lower() not in {"0", "false"},
         unsupported_plots=tuple(unsupported),
         title_ref=title_ref,
         pivot_table=pivot_table,

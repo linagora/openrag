@@ -2196,11 +2196,12 @@ def test_a_title_or_name_read_from_a_hidden_sheet_is_reported_in_full_mode():
 _A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
 
 
-def _text_box(text, *, cells=((5, 1), (7, 3)), hidden=False, textlink="", grouped=False) -> str:
+def _text_box(text, *, cells=((5, 1), (7, 3)), hidden=False, textlink="", grouped=False, flag="1") -> str:
     (from_col, from_row), (to_col, to_row) = cells
+    hidden_attribute = f' hidden="{flag}"' if hidden else ""
     shape = (
         f'<sp macro="" textlink="{textlink}"><nvSpPr><cNvPr id="9" name="TextBox 1"'
-        f'{' hidden="1"' if hidden else ""}/><cNvSpPr txBox="1"/></nvSpPr><spPr/>'
+        f'{hidden_attribute}/><cNvSpPr txBox="1"/></nvSpPr><spPr/>'
         f"<txBody><a:bodyPr/>{''.join(f'<a:p><a:r><a:t>{line}</a:t></a:r></a:p>' for line in text.split(chr(10)))}"
         "</txBody></sp>"
     )
@@ -2289,15 +2290,24 @@ def test_text_boxes_are_indexed_when_charts_are_off():
     assert _kinds(_blocks(raw, mode="off")) == ["table", "text_box"]
 
 
-def test_hidden_text_boxes_and_links_to_hidden_cells_are_withheld():
+def _pad_hidden_rows(raw: bytes, flag: str) -> bytes:
+    """Write the worksheet's hidden row and column flags as ``flag`` (" 1 " is as hidden as "1")."""
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        sheet = archive.read("xl/worksheets/sheet1.xml").decode()
+    assert 'hidden="1"' in sheet
+    return _replace_parts(raw, {"xl/worksheets/sheet1.xml": sheet.replace('hidden="1"', f'hidden="{flag}"')})
+
+
+@pytest.mark.parametrize("flag", ["1", " 1 ", "true"])
+def test_hidden_text_boxes_and_links_to_hidden_cells_are_withheld(flag):
     workbook = Workbook()
     sheet = _data_sheet(workbook)
     sheet.row_dimensions[3].hidden = True
     _add_chart(sheet, sheet)
     raw = _with_text_boxes(
-        _save(workbook),
+        _pad_hidden_rows(_save(workbook), flag),
         _text_box("Visible note"),
-        _text_box("Hidden note", hidden=True),
+        _text_box("Hidden note", hidden=True, flag=flag),
         _text_box("101.5", textlink="$B$3"),
     )
 
@@ -2487,12 +2497,13 @@ def test_text_data_labels_keep_the_chart_data_over_an_indexed_table():
     assert "Supplier strike" in chart.text
 
 
-def test_a_chart_plotting_cells_its_table_left_out_keeps_its_data():
+@pytest.mark.parametrize("off", ["0", " 0 ", "false", " FALSE "])
+def test_a_chart_plotting_cells_its_table_left_out_keeps_its_data(off):
     """plotVisOnly off: the chart shows a row hidden by hand, which no table indexed."""
     workbook = _data_with_hidden_row(3)
     months = ("Data!$A$2:$A$4", ["Jan", "Feb", "Mar"])
     xml = _chart_xml([_plot("barChart", [_series("2025", months, ("Data!$B$2:$B$4", [100, 101.5, 3]))])]).replace(
-        '<c:plotVisOnly val="1"/>', '<c:plotVisOnly val="0"/>'
+        '<c:plotVisOnly val="1"/>', f'<c:plotVisOnly val="{off}"/>'
     )
     raw = _replace_parts(_save(workbook), {"xl/charts/chart1.xml": xml})
     (chart,) = _charts(raw, max_chart_points_from_tables=1)
@@ -2619,7 +2630,7 @@ def test_chart_reads_within_the_budget_read_every_range():
     assert "| May | 9 |" in far.text and far.metadata["chart_ranges_not_read"] == 0
 
 
-def _hide_frame(raw: bytes, *, grouped: bool = False) -> bytes:
+def _hide_frame(raw: bytes, *, grouped: bool = False, flag: str = "1") -> bytes:
     """Hide the first chart frame in Excel: itself, or the group it is moved into."""
     import re
 
@@ -2628,18 +2639,19 @@ def _hide_frame(raw: bytes, *, grouped: bool = False) -> bytes:
     frame = re.search(r"<graphicFrame>.*?</graphicFrame>", drawing, flags=re.DOTALL).group(0)
     if grouped:
         group = (
-            '<grpSp><nvGrpSpPr><cNvPr id="7" name="Group" hidden="1"/><cNvGrpSpPr/></nvGrpSpPr><grpSpPr/>'
+            f'<grpSp><nvGrpSpPr><cNvPr id="7" name="Group" hidden="{flag}"/><cNvGrpSpPr/></nvGrpSpPr><grpSpPr/>'
             f"<grpSp><nvGrpSpPr><cNvPr id='8' name='Inner'/><cNvGrpSpPr/></nvGrpSpPr><grpSpPr/>{frame}</grpSp></grpSp>"
         )
         drawing = drawing.replace(frame, group, 1)
     else:
-        drawing = drawing.replace('name="Chart 1"/>', 'name="Chart 1" hidden="1"/>', 1)
+        drawing = drawing.replace('name="Chart 1"/>', f'name="Chart 1" hidden="{flag}"/>', 1)
     return _replace_parts(raw, {"xl/drawings/drawing1.xml": drawing})
 
 
+@pytest.mark.parametrize("flag", ["1", " 1 ", "true"])
 @pytest.mark.parametrize("grouped", [False, True])
-def test_a_chart_hidden_in_excel_is_withheld_without_hidden_data(grouped):
-    raw = _hide_frame(_workbook_with_chart(_monthly_revenue(), charts=2), grouped=grouped)
+def test_a_chart_hidden_in_excel_is_withheld_without_hidden_data(grouped, flag):
+    raw = _hide_frame(_workbook_with_chart(_monthly_revenue(), charts=2), grouped=grouped, flag=flag)
 
     withheld = _charts(raw, mode="without_hidden_data")
     full = _charts(raw)

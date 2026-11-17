@@ -318,6 +318,16 @@ def _merged_header_depth(
     return depth if leaf_row in populated_rows and leaf_row not in hidden_rows else 0
 
 
+def xml_true(value: str | None) -> bool:
+    """An XML Schema boolean attribute: ``1`` or ``true``, surrounding whitespace allowed.
+
+    ``hidden=" 1 "`` is as hidden as ``hidden="1"`` (OpenPyXL reads it so):
+    comparing the raw text let padded flags show hidden rows, columns,
+    charts and text boxes.
+    """
+    return value is not None and value.strip().lower() in {"1", "true"}
+
+
 def invalid(message: str):
     return PipelineError(message, code="INVALID_XLSX", status_code=422)
 
@@ -961,7 +971,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 advance_explicit_tables(current_row)
                                 row_content_columns = set()
                                 row_typed_columns = set()
-                                if element.get("hidden", "0").lower() in {"1", "true"}:
+                                if xml_true(element.get("hidden")):
                                     if sheet_filter_active:
                                         filter_candidate_rows.add(current_row)
                                     else:
@@ -996,7 +1006,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 cell_has_formula = True
                             elif tag == "t" and element.text:
                                 cell_has_inline_text = True
-                        if tag == "col" and element.get("hidden", "0").lower() in {"1", "true"}:
+                        if tag == "col" and xml_true(element.get("hidden")):
                             start_column = int(element.get("min", "0"))
                             end_column = int(element.get("max", "0"))
                             if start_column < 1 or end_column < start_column or end_column > 16_384:
@@ -1098,7 +1108,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 if start_row == end_row and end_column > start_column:
                                     merged_columns_by_row.setdefault(start_row, []).append((start_column, end_column))
                         if tag == "sheetPr" and len(stack) == 2:
-                            sheet_filter_active = element.get("filterMode", "0").lower() in {"1", "true"}
+                            sheet_filter_active = xml_true(element.get("filterMode"))
                         if tag == "autoFilter" and len(stack) == 2:
                             # Only the worksheet's own filter; custom sheet views
                             # nest theirs and are not what the file shows.

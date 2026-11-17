@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from xml.etree.ElementTree import Element
 
+from ..xlsx_validation import xml_true
+
 # A text box is a label or a note: a long text in one is cut, not copied whole.
 MAX_SHAPE_TEXT = 4000
 
@@ -40,7 +42,7 @@ def shape_text(shape: Element) -> ShapeText | None:
     if not text:
         return None
     properties = shape.find("{*}nvSpPr/{*}cNvPr")
-    hidden = properties is not None and properties.get("hidden", "0").lower() in {"1", "true"}
+    hidden = properties is not None and xml_true(properties.get("hidden"))
     return ShapeText(text, hidden, (shape.get("textlink") or "").strip() or None)
 
 

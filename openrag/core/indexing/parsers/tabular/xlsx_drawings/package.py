@@ -30,7 +30,7 @@ from core.utils.exceptions import PipelineError
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring
 
-from ..xlsx_validation import _related_part_path, _rels_path
+from ..xlsx_validation import _related_part_path, _rels_path, xml_true
 from .shapes import ShapeText, shape_text
 
 _CHART_URI = "http://schemas.openxmlformats.org/drawingml/2006/chart"
@@ -130,7 +130,7 @@ def _anchor_range(anchor: Element) -> str | None:
 
 
 def _hidden(properties: Element | None) -> bool:
-    return properties is not None and properties.get("hidden", "0").lower() in {"1", "true"}
+    return properties is not None and xml_true(properties.get("hidden"))
 
 
 def _drawn(element: Element, hidden: bool = False):
@@ -251,7 +251,7 @@ def locate_charts(
     if workbook is None:
         return inventory
     properties = workbook.find("{*}workbookPr")
-    inventory.date1904 = properties is not None and properties.get("date1904", "0").lower() in {"1", "true"}
+    inventory.date1904 = properties is not None and xml_true(properties.get("date1904"))
     for defined in workbook.findall("{*}definedNames/{*}definedName"):
         scope = defined.get("localSheetId")
         name = defined.get("name", "")
