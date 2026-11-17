@@ -45,11 +45,12 @@ def test_download_404_when_chunk_missing():
     assert client.get("/static/123").status_code == 404
 
 
-def test_download_403_when_user_lacks_partition_access():
+def test_download_in_another_partition_answers_like_a_missing_chunk():
     chunk = {"metadata": {"partition": "other-tenant", "source": "/data/secret.pdf"}}
-    client = _client(chunk, ["p1"])
-    r = client.get("/static/123")
-    assert r.status_code == 403
+    denied = _client(chunk, ["p1"]).get("/static/123")
+    missing = _client(None, ["p1"]).get("/static/123")
+    assert denied.status_code == 404
+    assert denied.json() == missing.json()
 
 
 def test_download_404_when_source_path_escapes_data_dir():
