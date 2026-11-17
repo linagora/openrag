@@ -191,6 +191,20 @@ async def test_cancelling_parse_stops_building_the_blocks(monkeypatch, slow_step
     assert done == settled < total
 
 
+def test_a_parse_cancelled_before_the_page_export_does_not_index_the_document(monkeypatch):
+    """Cancelled while its pictures decode, a parse reaches the page export with
+    the event already set, and stops there without reading the whole document."""
+
+    def _no_index(_document):
+        raise AssertionError("the page index was built for a cancelled parse")
+
+    monkeypatch.setattr(docling_workers, "_PageIndex", _no_index)
+    cancelled = threading.Event()
+    cancelled.set()
+    result = SimpleNamespace(document=_docling_document(3))
+    assert docling_workers.DoclingLoader._build_text_blocks(result, cancelled=cancelled) == []
+
+
 # ----------------------------------------------------------------------------------
 # #1313: the caption stage substitutes a caption for the picture's ``markdown_ref``
 # wherever it occurs in the page text. ``export_to_markdown`` printed

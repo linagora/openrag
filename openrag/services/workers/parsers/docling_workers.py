@@ -533,10 +533,14 @@ class DoclingLoader(BasePooledParser):
             report_parser_substage("parse.text", "Extracting page text", progress=0, total=n_pages)
         else:
             report_parser_substage("parse.text", "Extracting page text")
-        index = _PageIndex(result.document) if n_pages else None
+        index: _PageIndex | None = None
         for done, page_no in enumerate(page_numbers, start=1):
             if cancelled is not None and cancelled.is_set():
                 break
+            if index is None:
+                # Built after the first check, so a parse cancelled before the
+                # export starts never reads the whole document.
+                index = _PageIndex(result.document)
             text = _page_markdown(result.document, page_no, refs, index)
             left_out = [ref for ref in page_refs.get(page_no, ()) if ref not in text]
             text = "\n\n".join([text, *left_out]).strip()
