@@ -781,7 +781,6 @@ async def on_message(message: cl.Message):
         "messages": messages,
         "temperature": 0.2,
         "stream": True,
-        "frequency_penalty": 0.4,
         "metadata": metadata,
     }
 

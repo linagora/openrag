@@ -42,13 +42,13 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
         "b5faacb19c176961965882bdf2f30c6dec7973de26c26c7bf18dd8f9088c07a7",  # v2.1.0-v2.1.1
         "3f0e6c8d2e385eda15715c83f54d701cfe83fe4ffddc2cbfd6ba398ac1c599dd",  # v2.2.0-v2.3.2
         "e8668be88af50f77e1d6b2f52407c20341de0bb65647185c2f4a88c1dcef0410",  # provenance line, unreleased
-        "93cc6fa1c1c4982d1190a32504f3058c88c28b9c680c29ee24c1831ab15a5794",  # current (a refining keyword asks the previous question)
+        "fb993e7d07f2dbbcfbff390dfff2bbfc7833ae0bf37c9630669f600467b8d1d9",  # current (a refining keyword asks the previous question; developed answers)
     ),
     "asr_transcription": (
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # v2.2.0-v2.3.2 and current
     ),
     "agent": (
-        "20f9b236caf361d2603da086aa97c93d3150021c1c84c2594a875f4366aad198",  # current (agentic mode)
+        "a1ccc28f8238d97a96bee7b569c40e348cc52f1ea660bc7bd2e7f24dbdd5d84d",  # current (agentic mode)
     ),
     "chunk_contextualizer": (
         "35cc087891c587627f572d4876890c3a78a59e3141b217d05ffd77750ffd1af6",  # v2.1.0-v2.3.2 and current

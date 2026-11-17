@@ -3681,7 +3681,7 @@ async def test_agentic_chat_answers_from_what_its_tools_found():
     second_messages, _ = llm.chat_calls[1]
     assert second_messages[-1]["role"] == "tool"
     result = second_messages[-1]["content"]
-    assert result.startswith("2 excerpts, best match first.")
+    assert result.startswith("2 passages in full, best match first."), "the default profile's best passages in full"
     assert "[Source 1]\nPartition: default | File id: \nThe notice period is three months." in result
     assert retrieval.retrieve_multi_calls[0]["partitions"] == ["p"]
     assert "agent_trace" not in out["extra"], "only when the request asks for a trace"

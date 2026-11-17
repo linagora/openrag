@@ -604,7 +604,7 @@ SCENARIOS = [
     Scenario(
         "sources_trimmed_to_window",
         _chat("openrag-legal", QUESTION, max_tokens=1000),
-        window=1665,
+        window=1703,
     ),
     Scenario(
         "partition_chat_llm",

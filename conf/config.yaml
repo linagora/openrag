@@ -395,8 +395,10 @@ rag:
 # The agents a request can pick with metadata.agent_profile. Each one: its prompt
 # (a prompt of type `agent` in the library; null for the type's default), the
 # tools it is offered, its temperature and reasoning_effort (each when the request
-# sends none; reasoning_effort null leaves the LLM endpoint's), and the rounds of
-# tool calls it may make before it must answer from what it found.
+# sends none; reasoning_effort null leaves the LLM endpoint's), the rounds of
+# tool calls it may make before it must answer from what it found, and how many
+# of a search's best-ranked hits it is shown in full (full_passages; the others
+# are excerpts of about 400 characters, which read_file shows in full).
 agentic:
   default_profile: default
   profiles:
@@ -406,6 +408,7 @@ agentic:
       temperature: 0.2
       reasoning_effort: null
       max_tool_rounds: 6
+      full_passages: 4
 
 # --- Web Search ---
 # Env: WEBSEARCH_PROVIDER, WEBSEARCH_API_TOKEN, WEBSEARCH_BASE_URL,

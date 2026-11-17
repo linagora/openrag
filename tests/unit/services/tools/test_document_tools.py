@@ -102,8 +102,17 @@ def _tools(retriever=None, *, top_n: int = 5, summarizer=None):
     return registry, service
 
 
-def _ctx(partitions=("p",), **scope) -> ToolContext:
-    return ToolContext(user={"id": 1}, scope=Scope(partitions=list(partitions) if partitions else None, **scope))
+def _ctx(partitions=("p",), *, full_passages=0, **scope) -> ToolContext:
+    return ToolContext(
+        user={"id": 1},
+        scope=Scope(partitions=list(partitions) if partitions else None, **scope),
+        full_passages=full_passages,
+    )
+
+
+def _blocks(content: str) -> list[str]:
+    """The passages a search's answer shows, after its first line."""
+    return content.split("\n\n", 1)[1].split("----------")
 
 
 async def _call(registry, ctx, name: str, **arguments):
@@ -170,6 +179,52 @@ async def test_search_knowledge_shows_numbered_excerpts_with_where_they_come_fro
     assert len(first) < 600
     assert "[Source 2]" in second
     assert ctx.sources.get(1).id == "f-1"
+
+
+_LONG = "word " * 200
+
+
+async def test_search_knowledge_shows_its_best_passages_in_full_and_the_others_as_excerpts():
+    chunks = [_chunk(n, text=f"passage {n} " + _LONG) for n in (1, 2, 3, 4)]
+    registry, _ = _tools(FakeRetriever(chunks))
+
+    result = await _call(registry, _ctx(full_passages=2), "search_knowledge", queries=["q"])
+
+    assert result.content.startswith("4 passages, best match first: the first 2 in full, the others as excerpts.")
+    blocks = _blocks(result.content)
+    assert [(f"passage {n} " + _LONG).strip() in block for n, block in zip((1, 2, 3, 4), blocks, strict=True)] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+    assert all(block.rstrip().endswith("…") and len(block) < 600 for block in blocks[2:])
+
+
+async def test_after_a_date_order_the_best_match_is_the_one_in_full():
+    best = _chunk(1, text=_LONG, created_at="2026-01-01T00:00:00+00:00")
+    newer = _chunk(2, text=_LONG, created_at="2026-05-01T00:00:00+00:00")
+    registry, _ = _tools(FakeRetriever([best, newer]))
+    ctx = _ctx(full_passages=1)
+
+    result = await _call(registry, ctx, "search_knowledge", queries=["the last meeting"], order="newest")
+
+    assert result.content.startswith(
+        "2 passages, newest document first: the best match in full, the other as an excerpt."
+    )
+    shown_first, shown_second = _blocks(result.content)
+    assert shown_first.rstrip().endswith("…"), "the newer is shown first, as an excerpt"
+    assert _LONG.strip() in shown_second, "the best match is in full, wherever the date puts it"
+    assert ctx.sources.entries == [newer, best]
+
+
+async def test_a_search_with_no_more_hits_than_it_shows_in_full_shows_them_all_in_full():
+    registry, _ = _tools(FakeRetriever([_chunk(1, text=_LONG), _chunk(2, text=_LONG)]))
+
+    result = await _call(registry, _ctx(full_passages=4), "search_knowledge", queries=["q"])
+
+    assert result.content.startswith("2 passages in full, best match first.")
+    assert all(_LONG.strip() in block for block in _blocks(result.content))
 
 
 async def test_search_knowledge_shows_no_more_than_the_presets_top_n():
@@ -277,6 +332,17 @@ async def test_search_file_searches_only_that_file():
 
     assert result.content.startswith("1 excerpts of file 'f', best match first.")
     assert retriever.calls[0]["scope"] == Scope(partitions=["p"], file_ids=["f"])
+
+
+async def test_search_file_shows_its_best_passages_in_full_too():
+    registry, _ = _tools(FakeRetriever([_chunk(1, text=_LONG), _chunk(2, text=_LONG), _chunk(3, text=_LONG)]))
+
+    result = await _call(registry, _ctx(full_passages=1), "search_file", partition="p", file_id="f", queries=["q"])
+
+    assert result.content.startswith(
+        "3 passages of file 'f', best match first: the first in full, the others as excerpts."
+    )
+    assert [_LONG.strip() in block for block in _blocks(result.content)] == [True, False, False]
 
 
 @pytest.mark.parametrize(

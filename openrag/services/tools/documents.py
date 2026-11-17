@@ -1,8 +1,10 @@
 """The agent's tools over the documents: search them all, search one file, read around a passage, summarize.
 
-Searching *locates*: it returns excerpts, numbered ``[Source N]``, best match
-first. Reading proves: ``read_file`` returns a passage in full with the ones
-around it in the file. Both go through chat retrieval, so the partition's
+Searching *locates*: it returns passages, numbered ``[Source N]``, best match
+first, the best-ranked in full (``ToolContext.full_passages``, the agent
+profile's) and the others as excerpts, so a model that answers without reading
+still answers from the best passages in full. Reading proves: ``read_file``
+returns a passage in full with the ones around it in the file. Both go through chat retrieval, so the partition's
 retrieval preset (reranker, ``top_n``) applies as in ``classic``, and both stay
 within the request's scope (``ToolContext.scope``), whatever the model asks for.
 ``summarize`` condenses passages for a question with ``classic``'s map-reduce.
@@ -39,8 +41,9 @@ MAX_NEIGHBOURS = 3
 # What the model is shown of each tool, sent with every reply it makes: what the
 # tool does and what only it needs. How the tools work together is the prompt's.
 _SEARCH_KNOWLEDGE = (
-    "Search the documents. Returns excerpts numbered [Source N], best match first. The queries of a call "
-    "share its dates: parts of the question with different periods take separate calls."
+    "Search the documents. Returns passages numbered [Source N], best match first; its first line says which "
+    "are in full and which are excerpts. The queries of a call share its dates: parts of the question with "
+    "different periods take separate calls."
 )
 _SEARCH_FILE = "Search inside one file, named by the partition and file id shown with a source."
 _READ_FILE = "Read a [Source N] in full, with the passages around it in its file, in reading order."
@@ -128,8 +131,8 @@ class DocumentTools:
         if not chunks:
             advice = "the question reworded, with the terms the documents would use and abbreviations spelled out"
             return f"No passage matched. Try {advice}{', or wider dates' if dates else ''}."
-        shown = f"{order} document first" if order else "best match first"
-        return self._located(ctx, order_chunks_by_date(chunks, order), f"{len(chunks)} excerpts, {shown}.")
+        # The best-ranked are shown in full whatever order they are shown in.
+        return self._located(ctx, order_chunks_by_date(chunks, order), ranked=chunks, order=order)
 
     @tool("search_file", _SEARCH_FILE)
     async def search_file(
@@ -145,7 +148,7 @@ class DocumentTools:
         chunks = await self._search(search, Scope(partitions=[partition], file_ids=[file_id]), trace=ctx.trace)
         if not chunks:
             return f"No passage of file '{file_id}' matched. Try other words."
-        return self._located(ctx, chunks, f"{len(chunks)} excerpts of file '{file_id}', best match first.")
+        return self._located(ctx, chunks, ranked=chunks, of=f" of file '{file_id}'")
 
     @tool("read_file", _READ_FILE)
     async def read_file(
@@ -245,8 +248,37 @@ class DocumentTools:
             raise ToolError(e.message) from e
         return chunks[: self._prompt_settings.top_n(scope.partitions)]
 
-    def _located(self, ctx: ToolContext, chunks: list[Chunk], heading: str) -> str:
-        blocks = [passage(ctx.sources.number(c, key=c.id), c, excerpt_chars=self._excerpt_chars) for c in chunks]
+    def _located(
+        self, ctx: ToolContext, chunks: list[Chunk], *, ranked: list[Chunk], order: str | None = None, of: str = ""
+    ) -> str:
+        """*chunks* as a search shows them: the ``ctx.full_passages`` best of *ranked* in full, the others as excerpts.
+
+        The first line says which are which: after an *order* by date the ones
+        in full aren't the first shown.
+        """
+        # TODO: pick the passages shown in full by their scores instead of a fixed
+        # count: those the reranker (or, without one, the retrieval) scored close
+        # to the best hit, so a clear winner comes alone and a close field comes in
+        # full. Relative to the best, since the scores' scale depends on the
+        # provider; the retrieval's own score still needs keeping (`_dict_to_chunk`
+        # drops it).
+        full = {chunk.id for chunk in ranked[: ctx.full_passages]}
+        blocks = [
+            passage(ctx.sources.number(c, key=c.id), c, excerpt_chars=None if c.id in full else self._excerpt_chars)
+            for c in chunks
+        ]
+        shown = f"{order} document first" if order else "best match first"
+        if not full:
+            heading = f"{len(chunks)} excerpts{of}, {shown}."
+        elif len(full) == len(chunks):
+            heading = f"{len(chunks)} passages{of} in full, {shown}."
+        else:
+            if order:
+                which = "the best match" if len(full) == 1 else f"the {len(full)} best matches"
+            else:
+                which = "the first" if len(full) == 1 else f"the first {len(full)}"
+            rest = "the other as an excerpt" if len(chunks) - len(full) == 1 else "the others as excerpts"
+            heading = f"{len(chunks)} passages{of}, {shown}: {which} in full, {rest}."
         return f"{heading}\n\n{passages(blocks)}"
 
     async def _neighbours(self, chunk: Chunk, *, before: int, after: int) -> tuple[list[Chunk], list[Chunk]]:

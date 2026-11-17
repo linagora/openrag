@@ -24,6 +24,8 @@ class AgentProfile:
     max_tool_rounds: int
     #: Used when the request sends no reasoning_effort.
     reasoning_effort: str | None = None
+    #: The best-ranked hits of each search shown in full, the others as excerpts.
+    full_passages: int = 0
 
     @classmethod
     def from_config(cls, name: str, config: AgentProfileConfig) -> AgentProfile:
@@ -34,6 +36,7 @@ class AgentProfile:
             temperature=config.temperature,
             max_tool_rounds=config.max_tool_rounds,
             reasoning_effort=config.reasoning_effort,
+            full_passages=config.full_passages,
         )
 
 

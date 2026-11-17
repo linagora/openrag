@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from core.chat.scope import Scope
+from core.config import load_config
 from core.config.agentic import AgenticConfig, AgentProfileConfig
 from core.models.chunk import Chunk
 from core.tools import ToolContext, ToolRegistry, tool
@@ -23,8 +24,12 @@ _NOW = datetime(2026, 11, 13, 9, 30, tzinfo=UTC)
 
 
 class Toolset:
+    def __init__(self) -> None:
+        self.contexts: list[ToolContext] = []
+
     @tool("lookup", "Look a word up.")
     async def lookup(self, ctx: ToolContext, word: str) -> str:
+        self.contexts.append(ctx)
         number = ctx.sources.number(Chunk(id=word, text=f"about {word}", metadata={}), key=word)
         return f"[Source {number}] about {word}"
 
@@ -63,14 +68,14 @@ def _reply(content=None, **calls) -> dict:
     return {"choices": [{"message": message, "finish_reason": "tool_calls" if tool_calls else "stop"}]}
 
 
-def _agentic(profiles=None, prompts=None) -> AgenticChat:
+def _agentic(profiles=None, prompts=None, toolset=None) -> AgenticChat:
     config = SimpleNamespace(
         agentic=AgenticConfig(profiles=profiles or {"default": AgentProfileConfig(tools=["lookup", "find_files"])})
     )
     return AgenticChat(
         config=config,
         prompt_service=prompts or Prompts(),
-        registry=ToolRegistry.from_toolsets(Toolset()),
+        registry=ToolRegistry.from_toolsets(toolset or Toolset()),
         graph=build_agent_graph(AgentSteps()),
         clock=lambda: _NOW,
     )
@@ -202,6 +207,23 @@ async def test_tool_calls_in_the_answer_never_reach_the_client():
     assert run.finalized is True
     assert "tool_calls" not in run.response["choices"][0]["message"]
     assert run.response["choices"][0]["finish_reason"] == "stop", "so an empty answer is retried, as any other"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_passages", [0, 4])
+async def test_the_tools_show_as_many_passages_in_full_as_the_profile_says(full_passages):
+    toolset = Toolset()
+    profiles = {"default": AgentProfileConfig(tools=["lookup"], full_passages=full_passages)}
+    llm = LLM(_reply(lookup='{"word": "acme"}'), _reply("ACME. [Sources: 1]"))
+
+    await _run(_agentic(profiles, toolset=toolset), llm)
+
+    assert [ctx.full_passages for ctx in toolset.contexts] == [full_passages]
+
+
+def test_by_default_an_agent_is_shown_the_four_best_passages_of_a_search_in_full():
+    assert AgentProfileConfig().full_passages == 4
+    assert load_config().agentic.profiles["default"].full_passages == 4
 
 
 def test_an_unknown_profile_is_a_400():

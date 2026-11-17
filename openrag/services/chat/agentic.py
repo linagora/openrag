@@ -426,7 +426,7 @@ class AgenticChat:
         if sampling.get("reasoning_effort") is None and profile.reasoning_effort is not None:
             sampling["reasoning_effort"] = profile.reasoning_effort
         tools = self._tools[profile.name]
-        tool_context = ToolContext(scope=request.scope)
+        tool_context = ToolContext(scope=request.scope, full_passages=profile.full_passages)
         context = AgentContext(
             profile=profile,
             llm=request.llm,

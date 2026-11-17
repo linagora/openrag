@@ -54,13 +54,15 @@ class ToolContext:
     at all (a web-only request). *user* is who asks, when the caller knows:
     what they may read is already the scope. *trace*, when the request is
     traced, is the retrieval trace the call's search records into: each call
-    gets its own.
+    gets its own. *full_passages* is how many of a search's best-ranked hits
+    are shown in full, the others as excerpts: the agent profile's.
     """
 
     scope: Scope
     user: dict | None = None
     sources: SourceList = field(default_factory=SourceList)
     trace: RetrievalTraceBuilder | None = None
+    full_passages: int = 0
 
     def allows_partition(self, partition: str) -> bool:
         partitions = self.scope.partitions or []

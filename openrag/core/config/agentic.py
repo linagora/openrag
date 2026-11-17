@@ -37,6 +37,9 @@ class AgentProfileConfig(ConfigMixin):
     reasoning_effort: ReasoningEffort | None = None
     #: Rounds of tool calls before the agent must answer from what it found.
     max_tool_rounds: int = Field(default=6, ge=1, le=20)
+    #: The best-ranked hits of each search shown in full, the others as excerpts:
+    #: a model that answers without reading still answers from those in full.
+    full_passages: int = Field(default=4, ge=0, le=20)
 
 
 class AgenticConfig(ConfigMixin):
