@@ -22,7 +22,14 @@ from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
 from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
-from core.utils.exceptions import AuthError, ConfigError, DocumentNotFoundError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import (
+    AuthError,
+    ConfigError,
+    DocumentNotFoundError,
+    PartitionNotFoundError,
+    ValidationError,
+    VDBFileIDAlreadyExistsError,
+)
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -399,9 +406,15 @@ class IndexingService:
     ) -> None:
         _refuse_reserved_partition(source_partition)
         _refuse_reserved_partition(target_partition)
-        # Refuse a missing source before creating or pinning the destination.
+        # Refuse a missing source, or a destination file_id already taken,
+        # before creating or pinning the destination. The dispatcher refuses a
+        # taken file_id again at the catalog write, for a copy that loses a race.
         if not await self._document_repo.file_exists_in_partition(file_id=source_file_id, partition=source_partition):
             raise DocumentNotFoundError(f"File '{source_file_id}' not found in partition '{source_partition}'.")
+        if await self._document_repo.file_exists_in_partition(file_id=target_file_id, partition=target_partition):
+            raise VDBFileIDAlreadyExistsError(
+                f"File '{target_file_id}' already exists in partition '{target_partition}'."
+            )
         # Same guard as update_metadata (#713): the copy carries caller-supplied
         # metadata onto the new rows, so a spoofed ``source`` would land there too.
         metadata, dropped = strip_protected_metadata(metadata)
