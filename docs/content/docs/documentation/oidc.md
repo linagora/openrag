@@ -404,6 +404,14 @@ user's current memberships — must succeed: if it fails, the login is refused w
 (`OIDC group sync failed`, cause in the server log) rather than opening a session with rights the IdP
 has withdrawn. The user can retry once the database is reachable.
 
+Sync follows the IdP even when that takes a partition's **last owner** away (a role lowered, or the
+membership pruned), unlike the membership API, which refuses that with a 409. The partition keeps its
+documents, editors and viewers, but nobody can manage its members, change its presets or delete it
+until it has an owner again; a warning naming the partition is logged (`partition has no owner left`). To restore
+one, give a user the partition's owner group in the IdP: their next login makes them owner. A
+super-admin (`SUPER_ADMIN_MODE=true`) can also add an owner through the API meanwhile. When ownership
+moves from one user to another in the IdP, the partition is ownerless only until the new owner logs in.
+
 > **`is_admin` is never derived from groups.** Admin remains an explicit operator action
 > (`POST /users/` or `PATCH /users/{id}`), the same hard boundary as [Claim Mapping](#claim-mapping-optional).
 > The role vocabulary here is strictly the partition roles `viewer`/`editor`/`owner`.
