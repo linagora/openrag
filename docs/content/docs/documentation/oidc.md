@@ -399,6 +399,11 @@ A group that names a partition which does not exist yet is **skipped with a warn
 blocks the login. Create the partition first (any indexing call auto-creates it), then the next
 login will attach the membership.
 
+A sync step that would *take access away* — lowering a role, removing a membership, or reading the
+user's current memberships — must succeed: if it fails, the login is refused with a 500
+(`OIDC group sync failed`, cause in the server log) rather than opening a session with rights the IdP
+has withdrawn. The user can retry once the database is reachable.
+
 > **`is_admin` is never derived from groups.** Admin remains an explicit operator action
 > (`POST /users/` or `PATCH /users/{id}`), the same hard boundary as [Claim Mapping](#claim-mapping-optional).
 > The role vocabulary here is strictly the partition roles `viewer`/`editor`/`owner`.

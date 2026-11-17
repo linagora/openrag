@@ -773,17 +773,72 @@ async def test_membership_sync_unknown_partition_is_isolated():
     assert (1, "ghost") not in [(u, p) for (u, p, _) in repo.assigned]
 
 
+class _FailingWritesRepo(FakeMembershipRepo):
+    """Membership store whose role updates and removals fail."""
+
+    async def update_partition_role(self, user_id, partition, role):
+        raise RuntimeError("db down")
+
+    async def remove_partition(self, user_id, partition):
+        raise RuntimeError("db down")
+
+
 @pytest.mark.asyncio
-async def test_membership_sync_survives_list_failure():
+async def test_membership_sync_fails_the_login_when_memberships_cannot_be_read():
     class Boom(FakeMembershipRepo):
         async def list_user_partitions(self, user_id):
             raise RuntimeError("db down")
 
-    repo = Boom()
+    svc = _service(cfg=_group_cfg(), membership_repo=Boom())
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner"]})
+    assert ei.value.status_code == 500
+    assert "db down" not in ei.value.message
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_fails_the_login_when_a_role_cannot_be_lowered():
+    repo = _FailingWritesRepo(seed=[(1, "alpha", "owner")])
     svc = _service(cfg=_group_cfg(), membership_repo=repo)
-    # Must not raise.
-    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner"]})
-    assert repo.assigned == []
+    with pytest.raises(OIDCFlowError):
+        await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/viewer"]})
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_fails_the_login_when_a_stale_membership_cannot_be_removed():
+    repo = _FailingWritesRepo(seed=[(1, "stale", "editor")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    with pytest.raises(OIDCFlowError):
+        await svc._sync_oidc_memberships(User(id=1), {"groups": []})
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_skips_a_role_that_cannot_be_raised():
+    repo = _FailingWritesRepo(seed=[(1, "alpha", "viewer")])
+    svc = _service(cfg=_group_cfg(), membership_repo=repo)
+    # The user keeps less access than the token grants: the login goes on.
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner", "/openrag/beta/editor"]})
+    assert repo.assigned == [(1, "beta", "editor")]
+
+
+@pytest.mark.asyncio
+async def test_callback_creates_no_session_when_group_sync_cannot_take_access_away():
+    user = User(id=7, external_user_id="kc-alice")
+    srepo = FakeSessionRepo()
+    client = FakeOIDCClient(bundle=_bundle(claims={"sub": "kc-alice", "groups": ["/openrag/alpha/viewer"]}))
+    svc = _service(
+        user_repo=FakeUserRepo({"kc-alice": user}),
+        session_repo=srepo,
+        client=client,
+        cfg=_group_cfg(),
+        membership_repo=_FailingWritesRepo(seed=[(7, "alpha", "owner")]),
+    )
+
+    state, cookie = await _login_and_get_state(svc)
+    with pytest.raises(OIDCFlowError):
+        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert srepo.created == []
 
 
 class _RacingUserRepo(FakeUserRepo):
