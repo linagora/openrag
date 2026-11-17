@@ -1294,9 +1294,9 @@ def _rehome_trailing_headings(
     carry their own ``###`` sub-headings, so packing paragraphs could end a
     piece on one — stranding the heading away from the content it introduces
     (worst case: a piece that is an ``<image_description>`` opener plus a bare
-    heading). Headings from word-wrapped pieces do not count: word wrapping can
-    produce a Markdown-looking fragment. If the combined piece does not fit,
-    leave the heading in place to preserve the hard ceiling.
+    heading). A word-wrapped fragment that only looks like a heading does not
+    count; only complete source lines are eligible. If the combined piece does
+    not fit, leave the heading in place to preserve the hard ceiling.
     """
     out = list(pieces)
     # Walk backwards so a run of consecutive headings cascades forward in one
@@ -1311,11 +1311,16 @@ def _rehome_trailing_headings(
         if cut == len(lines):
             continue
         moved = "\n\n".join(line.strip() for line in lines[cut:])
-        receiver = f"{moved}\n\n{out[i + 1].lstrip()}"
+        receiver_index = i + 1
+        while receiver_index < len(out) and not out[receiver_index].strip():
+            receiver_index += 1
+        if receiver_index == len(out):
+            continue
+        receiver = f"{moved}\n\n{out[receiver_index].lstrip()}"
         if length_function(receiver) > max_tokens:
             continue
         out[i] = "\n".join(lines[:cut]).rstrip()
-        out[i + 1] = receiver
+        out[receiver_index] = receiver
     return [piece for piece in out if piece.strip()]
 
 
