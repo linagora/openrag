@@ -514,8 +514,31 @@ elif AUTH_MODE == "oidc":
         return await _chainlit_user_from_browser_cookies(headers)
 
 
+async def _end_openrag_session(session_token: str) -> None:
+    """End the OpenRAG session on the server: deleting the cookie alone leaves it valid.
+
+    ``/auth/logout`` answers with a redirect to the IdP, which is not followed:
+    only the OpenRAG session ends here. A failure is logged, never raised, so the
+    logout itself always completes.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            response = await client.get(
+                f"{INTERNAL_BASE_URL}/auth/logout",
+                headers={"Cookie": f"{OPENRAG_SESSION_COOKIE_NAME}={session_token}"},
+            )
+    except httpx.HTTPError as e:
+        logger.warning("Could not end the OpenRAG session on Chat logout", error=str(e))
+        return
+    if response.is_error:
+        logger.warning("Could not end the OpenRAG session on Chat logout", status=response.status_code)
+
+
 @cl.on_logout
 async def on_logout(request, response):
+    session_token = request.cookies.get(OPENRAG_SESSION_COOKIE_NAME)
+    if AUTH_MODE == "oidc" and session_token:
+        await _end_openrag_session(session_token)
     _clear_chat_logout_cookies(request, response)
     return {"success": True}
 

@@ -307,6 +307,71 @@ async def test_chainlit_logout_signal_cookie_is_cross_site_compatible_on_https(m
     assert "Secure" in logout_cookie
 
 
+def _route_api_calls(monkeypatch, module, handler):
+    real_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(module.httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
+
+
+def _cleared_cookies(response):
+    cookies = [value.decode() for key, value in response.raw_headers if key.lower() == b"set-cookie"]
+    return [cookie.split("=", 1)[0] for cookie in cookies if "Max-Age=0" in cookie]
+
+
+@pytest.mark.asyncio
+async def test_chainlit_logout_ends_the_oidc_session_on_the_server(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_logout_ends_session_test")
+    calls = []
+
+    def api(request):
+        calls.append((request.url.path, request.headers.get("cookie")))
+        return httpx.Response(302, headers={"location": "https://idp.example/logout"})
+
+    _route_api_calls(monkeypatch, module, api)
+    request = SimpleNamespace(cookies={module.OPENRAG_SESSION_COOKIE_NAME: "oidc-session-token"}, headers={})
+    response = Response()
+
+    returned = await module.on_logout(request, response)
+
+    assert returned == {"success": True}
+    assert calls == [("/auth/logout", f"{module.OPENRAG_SESSION_COOKIE_NAME}=oidc-session-token")]
+    assert module.OPENRAG_SESSION_COOKIE_NAME in _cleared_cookies(response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auth_mode", "cookies"),
+    [("oidc", {}), ("token", {"openrag_session": "stale-cookie"})],
+)
+async def test_chainlit_logout_without_an_oidc_session_calls_nothing(monkeypatch, auth_mode, cookies):
+    module = _load_app_front(monkeypatch, auth_mode=auth_mode, module_name=f"app_front_logout_no_session_{auth_mode}")
+    _route_api_calls(monkeypatch, module, lambda request: pytest.fail(f"unexpected call to {request.url}"))
+
+    returned = await module.on_logout(SimpleNamespace(cookies=cookies, headers={}), Response())
+
+    assert returned == {"success": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unreachable", "server error"])
+async def test_chainlit_logout_completes_when_the_session_cannot_be_ended(monkeypatch, failure):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name=f"app_front_logout_failure_{failure[0]}")
+
+    def api(request):
+        if failure == "unreachable":
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(500)
+
+    _route_api_calls(monkeypatch, module, api)
+    request = SimpleNamespace(cookies={module.OPENRAG_SESSION_COOKIE_NAME: "oidc-session-token"}, headers={})
+    response = Response()
+
+    returned = await module.on_logout(request, response)
+
+    assert returned == {"success": True}
+    assert module.OPENRAG_SESSION_COOKIE_NAME in _cleared_cookies(response)
+
+
 @pytest.mark.asyncio
 async def test_chat_start_handles_expired_handoff_without_exception_log(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_chat_start_expired_handoff_test")
