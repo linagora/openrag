@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from core.config import load_config
 from core.config.infrastructure import RayIndexerConfig
 from pydantic import ValidationError
 
@@ -14,6 +15,18 @@ def test_ray_indexer_config_defaults() -> None:
     cfg = RayIndexerConfig()
     assert cfg.pool_size == 1
     assert cfg.max_tasks_per_worker == 10
+
+
+def test_ray_indexer_max_tasks_per_worker_can_be_overridden_by_env(monkeypatch, tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "ray:\n  indexer:\n    max_tasks_per_worker: 10\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RAY_MAX_TASKS_PER_WORKER", "50")
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.ray.indexer.max_tasks_per_worker == 50
 
 
 def test_shipped_files_in_flight_default_matches_the_model() -> None:
