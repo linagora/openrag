@@ -162,6 +162,23 @@ def dump_vdb_part(
         logger.info(f"{cnt} chunks written")
 
 
+def _create_owner_only(file_name: str) -> None:
+    """Create ``file_name`` empty, readable and writable by its owner only.
+
+    A backup holds every exported partition's documents. The documented
+    commands run this script as root in a container, writing to a mounted host
+    folder; the file is then given to that folder's owner, so the operator who
+    owns the folder can still read and copy it.
+    """
+    fd = os.open(file_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            folder = os.stat(os.path.dirname(os.path.abspath(file_name)))
+            os.fchown(fd, folder.st_uid, folder.st_gid)
+    finally:
+        os.close(fd)
+
+
 def open_output_file(file_name: str, logger: Any) -> IO[str]:
     """
     Opens output file for writing
@@ -180,6 +197,7 @@ def open_output_file(file_name: str, logger: Any) -> IO[str]:
         raise Exception(f"File '{file_name}' already exists.")
 
     try:
+        _create_owner_only(file_name)
         if file_name.endswith(".xz"):
             import lzma
 
