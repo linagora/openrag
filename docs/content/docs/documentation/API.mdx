@@ -269,6 +269,11 @@ PUT /indexer/partition/{partition}/file/{file_id}
 
 Replace an existing file in the partition. Deletes the current entry and creates a new indexing task.
 
+The new version keeps the metadata of the previous one (`created_at`, `title`,
+`relationship_id`, any custom key); keys sent in `metadata` replace those values,
+and a key left out is kept, as with the metadata PATCH. The file name, size,
+content hash and `mimetype` come from the new file.
+
 **Parameters:** Same as POST endpoint
 **Request Body:** Same as POST endpoint
 **Responses:**

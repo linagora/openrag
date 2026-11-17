@@ -374,6 +374,8 @@ async def delete_file(
 - Deletes the existing file
 - Uploads and indexes the new file
 - Preserves the file_id
+- Keeps the previous version's metadata; keys sent in `metadata` replace it
+  (file name, size and `mimetype` come from the new file)
 
 **Metadata Format:**
 JSON string containing file metadata. Example:
