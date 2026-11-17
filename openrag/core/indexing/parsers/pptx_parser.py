@@ -88,10 +88,19 @@ class PptxParser(DocumentParser):
         slides: list[tuple[int, str]] = []
         images: list[ImageBlock] = []
 
-        for slide_num, slide in enumerate(presentation.slides, start=1):
+        slide_ids = self._slide_ids(presentation)
+        for slide_num, slide_id in enumerate(slide_ids, start=1):
             if slide_num > _MAX_SLIDES:
                 logger.warning("Capping PPTX slide processing at %d slides", _MAX_SLIDES)
                 break
+            # An entry whose r:id names no relationship, or one whose target is
+            # not a slide, cannot be resolved. Skip that slide; the others keep
+            # their own numbers.
+            try:
+                slide = presentation.part.related_slide(slide_id.rId)
+            except Exception as exc:
+                logger.warning("Skipping unreadable PPTX slide %d: %s", slide_num, exc)
+                continue
             md = ""
             try:
                 title = slide.shapes.title
@@ -121,7 +130,18 @@ class PptxParser(DocumentParser):
             if md:
                 slides.append((slide_num, md))
 
-        return len(presentation.slides), slides, images
+        return len(slide_ids), slides, images
+
+    @staticmethod
+    def _slide_ids(presentation: Any) -> list[Any]:
+        """The deck's slide-list entries (``p:sldId``), in order.
+
+        ``presentation.slides`` resolves every entry when python-pptx builds it,
+        to rename the slide parts, so one dangling ``r:id`` raises before the
+        first slide is read (#1394). Each entry is resolved on its own instead.
+        """
+        sld_id_lst = presentation._element.sldIdLst
+        return [] if sld_id_lst is None else list(sld_id_lst.sldId_lst)
 
     def _shape_to_markdown(
         self, shape: Any, title: Any, slide_num: int, images: list[ImageBlock], pil_image: Any
