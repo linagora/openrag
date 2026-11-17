@@ -377,15 +377,22 @@ def _table_data() -> TableData:
 
 
 def _document_a_page_export_treats_specially() -> tuple[DoclingDocument, dict[str, str]]:
-    """Pages 1 to 4 and 6, page 4 blank; lists and a section that cross pages,
-    captions on another page than their picture or table, a chart, furniture,
-    and items without provenance."""
+    """Pages 1 to 4 and 6, no item on page 4; lists and a section that cross
+    pages, captions on another page than their picture or table, a caption in
+    the furniture layer, a chart, furniture, and items without provenance."""
     document = DoclingDocument(name="report")
     for page_no in (1, 2, 3, 4, 6):
         document.add_page(page_no=page_no, size=Size(width=100, height=100))
 
     document.add_title(text="Annual report", prov=_prov(1))
     document.add_text(label=DocItemLabel.PAGE_HEADER, text="Running header", prov=_prov(1))
+    logo_caption = document.add_text(
+        label=DocItemLabel.CAPTION,
+        text="Logo, captioned in the furniture",
+        prov=_prov(1),
+        content_layer=ContentLayer.FURNITURE,
+    )
+    _add_picture(document, 1, caption=logo_caption)
     steps = document.add_list_group()
     document.add_list_item(text="first step", enumerated=True, prov=_prov(1), parent=steps)
     second = document.add_list_item(text="second step", enumerated=True, prov=_prov(2), parent=steps)
@@ -438,8 +445,9 @@ def test_each_page_export_is_the_one_docling_core_makes_for_that_page():
 class _RandomDocument:
     """A document built at random through docling-core's API: pages with gaps,
     sections, nested lists and list items made of inline groups, pictures and
-    tables captioned on any page, charts, text inside pictures, furniture, items
-    without provenance, and the item types the fallback serializer prints."""
+    tables captioned on any page and in either layer, charts, text inside
+    pictures, furniture, items without provenance, and the item types the
+    fallback serializer prints."""
 
     def __init__(self, rng: random.Random, n_pages: int) -> None:
         self.rng = rng
@@ -479,7 +487,10 @@ class _RandomDocument:
         if self.rng.random() >= 0.6:
             return None
         return self.document.add_text(
-            label=DocItemLabel.CAPTION, text=f"{prefix}{next(self.counter)}", prov=self.prov()
+            label=DocItemLabel.CAPTION,
+            text=f"{prefix}{next(self.counter)}",
+            prov=self.prov(),
+            content_layer=self.layer(),
         )
 
     def list_group(self, parent: NodeItem | None, depth: int) -> None:

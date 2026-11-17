@@ -262,7 +262,9 @@ class _PageIndex:
         """The pages ``subtree`` can print anything on, or ``None`` for every page.
 
         More pages than it prints on only costs time. Captions print with their
-        picture or table whatever page it is on.
+        picture or table whatever page it is on. ``serialize_captions`` prints a
+        caption on each page whose excluded refs lack it, so a caption neither
+        lookup holds, such as one outside the body layer, prints on every page.
         """
         pages: set[int] = set()
         for node, _ in self.document.iterate_items(
@@ -280,8 +282,15 @@ class _PageIndex:
             if isinstance(node, FloatingItem):
                 for ref in node.captions:
                     caption = ref.resolve(self.document)
-                    if isinstance(caption, DocItem):
-                        pages.update(prov.page_no for prov in caption.prov)
+                    if not isinstance(caption, DocItem):
+                        continue
+                    if (
+                        isinstance(caption, TextItem)
+                        and caption.self_ref not in self._always_excluded
+                        and caption.self_ref not in self._page_of
+                    ):
+                        return None  # no page's excluded refs hold it
+                    pages.update(prov.page_no for prov in caption.prov)
         return pages
 
 
