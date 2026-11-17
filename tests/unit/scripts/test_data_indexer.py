@@ -110,6 +110,7 @@ def test_data_indexer_uploads_only_files_inside_the_given_directory(monkeypatch,
     (source / "alias.pdf").symlink_to(source / "report.pdf")
     (source / "private.txt").symlink_to(elsewhere / "private.txt")
     (source / "elsewhere").symlink_to(elsewhere, target_is_directory=True)
+    (source / "loop").symlink_to(source / "loop")
     uploads = []
 
     def post(_url, *, files, **_kwargs):
