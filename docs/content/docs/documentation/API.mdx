@@ -285,7 +285,8 @@ Replace an existing file in the partition. Deletes the current entry and creates
   - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
     expired before indexing started. Nothing was queued; retry the request.
   - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. Nothing was
-    queued; retry once the delete has returned. Earlier releases answered `500`.
+    queued. Once the delete has returned the file no longer exists, so a `PUT`
+    answers `404`: upload it again with `POST`. Earlier releases answered `500`.
 - `415 Unsupported Media Type` / `422 Unprocessable Entity`: same cases as the
   POST endpoint
 
