@@ -561,3 +561,35 @@ async def test_low_confidence_encoding_guess_uses_cp1252(monkeypatch):
 
     assert "Renée à Noël" in result.text_blocks[0].text
     assert result.text_blocks[0].metadata["csv_decode_replacements"] == 0
+
+
+@pytest.mark.parametrize("encoding", ["EUC-TW", "ISO-2022-CN", "no-such-codec"])
+@pytest.mark.parametrize("from_path", [False, True], ids=["bytes", "path"])
+async def test_detected_encoding_without_a_python_codec_uses_cp1252(tmp_path, monkeypatch, encoding, from_path):
+    """chardet can name a codec CPython does not ship (#1370)."""
+    import chardet
+
+    monkeypatch.setattr(chardet, "detect", lambda _: {"encoding": encoding, "confidence": 0.99})
+    raw = "id,note\n1,Renée à Noël\n".encode("cp1252")
+    if from_path:
+        path = tmp_path / "legacy.csv"
+        path.write_bytes(raw)
+        document = Document(source_path=str(path))
+    else:
+        document = Document(raw_bytes=raw)
+
+    result = await CsvParser().parse(document)
+
+    assert "Renée à Noël" in result.text_blocks[0].text
+    assert result.text_blocks[0].metadata["csv_decode_replacements"] == 0
+
+
+async def test_fuzz_input_detected_as_euc_tw_is_decoded():
+    """The twake-fuzz input from #1370, which chardet 5.2 reports as EUC-TW.
+
+    It is a single line, so after decoding it is a header with no data rows.
+    """
+    raw = b"6\0\0\0" + b"\xce" * 22 + b"\0\0\0\0\t_name,b,~\b~\n"
+
+    with pytest.raises(NoIndexableContentError):
+        await CsvParser().parse(Document(raw_bytes=raw))
