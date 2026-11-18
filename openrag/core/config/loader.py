@@ -158,6 +158,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     # Ray
     ("RAY_POOL_SIZE", "ray.indexer.pool_size", int),
     ("RAY_MAX_TASKS_PER_WORKER", "ray.indexer.max_tasks_per_worker", int),
+    ("RAY_MAX_ADMITTED_TASKS", "ray.indexer.max_admitted_tasks", int),
+    ("RAY_MAX_ADMITTED_BYTES", "ray.indexer.max_admitted_bytes", int),
     ("ENABLE_RAY_SERVE", "ray.serve.enable", bool),
     ("RAY_SERVE_NUM_REPLICAS", "ray.serve.num_replicas", int),
     ("RAY_SERVE_HOST", "ray.serve.host", str),

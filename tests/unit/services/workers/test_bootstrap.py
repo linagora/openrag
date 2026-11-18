@@ -70,6 +70,7 @@ def test_task_state_manager_restarts_without_retrying_mutations(monkeypatch):
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
         get_stage_progress_snapshots=SimpleNamespace(),
@@ -103,6 +104,7 @@ def test_legacy_task_state_manager_is_replaced_before_handle_is_returned(monkeyp
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
         get_stage_progress_snapshots=SimpleNamespace(),
@@ -128,6 +130,7 @@ def test_legacy_task_state_manager_is_reused_without_disrupting_active_workers(m
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         has_object_ref=SimpleNamespace(),
     )
@@ -175,6 +178,7 @@ def test_task_state_manager_without_renewable_fences_is_replaced(monkeypatch):
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
         get_stage_progress_snapshots=SimpleNamespace(),
@@ -206,6 +210,7 @@ def test_task_state_manager_without_bounded_retention_is_replaced(monkeypatch):
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         has_object_ref=SimpleNamespace(),
         renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
@@ -230,6 +235,7 @@ def test_task_state_manager_without_pending_outcome_retention_is_replaced(monkey
         supports_bounded_task_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
     )
     replacement = SimpleNamespace(
@@ -239,6 +245,7 @@ def test_task_state_manager_without_pending_outcome_retention_is_replaced(monkey
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
         get_stage_progress_snapshots=SimpleNamespace(),
@@ -270,6 +277,7 @@ def test_task_state_manager_without_atomic_degraded_completion_is_replaced(monke
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
         get_stage_progress_snapshots=SimpleNamespace(),
@@ -302,6 +310,7 @@ def test_task_state_manager_without_explicit_completion_outcomes_is_replaced(mon
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
         get_stage_progress_snapshots=SimpleNamespace(),
@@ -329,6 +338,7 @@ def test_task_state_manager_without_admission_fence_is_replaced(monkeypatch):
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
     )
     replacement = SimpleNamespace(
         supports_in_place_restart=SimpleNamespace(),
@@ -337,6 +347,7 @@ def test_task_state_manager_without_admission_fence_is_replaced(monkeypatch):
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         renew_worker_lease_with_stage_snapshot=SimpleNamespace(),
         get_stage_progress_snapshots=SimpleNamespace(),
@@ -364,6 +375,7 @@ def test_task_state_manager_without_has_object_ref_is_replaced(monkeypatch):
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
     )
     replacement = SimpleNamespace(**vars(legacy), has_object_ref=SimpleNamespace())
@@ -389,6 +401,7 @@ def test_task_state_manager_recreated_by_an_older_process_is_replaced_too(monkey
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         has_object_ref=SimpleNamespace(),
     )
@@ -420,6 +433,7 @@ def test_task_state_manager_recreated_before_the_lookup_is_replaced_too(monkeypa
         supports_job_outcome_retention=SimpleNamespace(),
         complete_with_degraded_stages=SimpleNamespace(),
         supports_explicit_completion_outcomes=SimpleNamespace(),
+        supports_bounded_ingestion_admission=SimpleNamespace(),
         set_queued_details_v2=SimpleNamespace(),
         has_object_ref=SimpleNamespace(),
     )

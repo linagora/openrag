@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import traceback
 import uuid
 from collections.abc import Mapping
@@ -24,7 +25,9 @@ from core.utils.error_summary import extract_task_error_reason, failure_reason_f
 from core.utils.exceptions import (
     ConflictError,
     DocumentNotFoundError,
+    IndexingAdmissionError,
     ServiceUnavailableError,
+    ValidationError,
     mark_indexing_worker_may_be_running,
 )
 from core.utils.logging import get_logger
@@ -41,8 +44,12 @@ from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 from services.workers.task_state import (
     QUEUE_REFUSED_CANCELLED,
+    QUEUE_REFUSED_FILE_DELETING,
     QUEUE_REFUSED_FILE_INDEXING,
+    QUEUE_REFUSED_INDEXING_ADMISSION,
     QUEUE_REFUSED_INDEXING_CAPACITY,
+    QUEUE_REFUSED_INDEXING_FILE_TOO_LARGE,
+    QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED,
     TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
     read_ref_when_settled,
 )
@@ -73,6 +80,8 @@ class WorkerDispatcher(IndexingDispatcher):
         collection: str,
         job_repo: Any = None,
         timeout: float = DEFAULT_TIMEOUT,
+        max_admitted_tasks: int | None = None,
+        max_admitted_bytes: int | None = None,
     ) -> None:
         self._pool = pool
         self._tsm = task_state_manager
@@ -83,6 +92,8 @@ class WorkerDispatcher(IndexingDispatcher):
         self._job_repo = job_repo
         self._collection = collection
         self._timeout = timeout
+        self._max_admitted_tasks = max_admitted_tasks
+        self._max_admitted_bytes = max_admitted_bytes
 
     async def _call(self, future: Any, task_description: str) -> Any:
         from services.workers.ray_utils import call_ray_actor_with_timeout
@@ -103,6 +114,75 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=task_description,
         )
 
+    async def reserve_upload_admission(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        admitted_bytes: int,
+        replace: bool = False,
+    ) -> str:
+        del replace  # Replacements share the same capacity budget as first-time uploads.
+        task_id = uuid.uuid4().hex
+        remote = _remote_actor_method(self._tsm, "reserve_upload_admission")
+        if remote is None:
+            raise ServiceUnavailableError(
+                "The indexing actor cannot reserve upload capacity before saving the file.",
+                code="INDEXING_ADMISSION_UNAVAILABLE",
+            )
+        admission_kwargs = {}
+        if self._max_admitted_tasks is not None and self._max_admitted_bytes is not None:
+            admission_kwargs = {
+                "max_admitted_tasks": self._max_admitted_tasks,
+                "max_admitted_bytes": self._max_admitted_bytes,
+            }
+        outcome = await retry_idempotent_ray_actor_method(
+            submit=lambda: remote(
+                task_id,
+                file_id=file_id,
+                partition=partition,
+                admitted_bytes=admitted_bytes,
+                **admission_kwargs,
+            ),
+            recovery_timeout=self._timeout,
+            task_description=f"reserve_upload_admission({task_id})",
+        )
+        if not isinstance(outcome, dict):
+            raise ServiceUnavailableError(
+                "The indexing actor returned an invalid upload admission result.",
+                code="INDEXING_ADMISSION_UNAVAILABLE",
+            )
+        _raise_admission_refusal(outcome, task_id=task_id, file_id=file_id, partition=partition)
+        return task_id
+
+    async def release_upload_admission(self, task_id: str) -> None:
+        remote = _remote_actor_method(self._tsm, "release_upload_admission")
+        if remote is None:
+            logger.warning("TaskStateManager cannot release an upload reservation", task_id=task_id)
+            return
+        try:
+            await retry_idempotent_ray_actor_method(
+                submit=lambda: remote(task_id),
+                recovery_timeout=self._timeout,
+                task_description=f"release_upload_admission({task_id})",
+            )
+        except Exception as exc:  # noqa: BLE001 - the reservation has a finite recovery TTL
+            logger.warning("Could not release upload admission reservation", task_id=task_id, error=str(exc))
+
+    async def renew_upload_admission(self, task_id: str) -> bool:
+        remote = _remote_actor_method(self._tsm, "renew_upload_admission")
+        if remote is None:
+            raise ServiceUnavailableError(
+                "The indexing actor cannot renew upload capacity reservations.",
+                code="INDEXING_ADMISSION_UNAVAILABLE",
+            )
+        renewed = await retry_idempotent_ray_actor_method(
+            submit=lambda: remote(task_id),
+            recovery_timeout=self._timeout,
+            task_description=f"renew_upload_admission({task_id})",
+        )
+        return renewed is True
+
     async def _set_queued_details(
         self,
         task_id: str,
@@ -112,6 +192,8 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata: dict[str, Any],
         user_id: int | None,
         reject_if_file_active: bool = False,
+        require_upload_reservation: bool = False,
+        admitted_bytes: int | None = None,
     ) -> dict[str, Any]:
         """Register the task as QUEUED and report whether the actor took it.
 
@@ -123,6 +205,24 @@ class WorkerDispatcher(IndexingDispatcher):
         """
         remote_v2 = _remote_actor_method(self._tsm, "set_queued_details_v2")
         if remote_v2 is not None:
+            if require_upload_reservation and _remote_actor_method(self._tsm, "renew_upload_admission") is None:
+                raise ServiceUnavailableError(
+                    "The indexing actor cannot verify upload capacity reservations.",
+                    code="INDEXING_ADMISSION_UNAVAILABLE",
+                )
+            admission_kwargs = {}
+            if (
+                admitted_bytes is not None
+                and self._max_admitted_tasks is not None
+                and self._max_admitted_bytes is not None
+            ):
+                admission_kwargs = {
+                    "admitted_bytes": admitted_bytes,
+                    "max_admitted_tasks": self._max_admitted_tasks,
+                    "max_admitted_bytes": self._max_admitted_bytes,
+                }
+            if require_upload_reservation:
+                admission_kwargs["require_upload_reservation"] = True
             outcome = await retry_idempotent_ray_actor_method(
                 submit=lambda: remote_v2(
                     task_id,
@@ -131,6 +231,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     metadata=metadata,
                     user_id=user_id,
                     reject_if_file_active=reject_if_file_active,
+                    **admission_kwargs,
                 ),
                 recovery_timeout=self._timeout,
                 task_description=f"set_queued_details_v2({task_id})",
@@ -139,6 +240,11 @@ class WorkerDispatcher(IndexingDispatcher):
                 return outcome
             return _queue_admitted(outcome is not False)
 
+        if require_upload_reservation:
+            raise ServiceUnavailableError(
+                "The indexing actor cannot verify upload capacity reservations.",
+                code="INDEXING_ADMISSION_UNAVAILABLE",
+            )
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
             if reject_if_file_active:
@@ -316,10 +422,23 @@ class WorkerDispatcher(IndexingDispatcher):
         embedder_name: str | None = None,
         callback_url: str | None = None,
         callback_token: str | None = None,
+        task_id: str | None = None,
+        require_upload_reservation: bool = False,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
     ) -> str:
-        task_id = uuid.uuid4().hex
+        task_id = task_id or uuid.uuid4().hex
+        try:
+            admitted_bytes = await asyncio.to_thread(os.path.getsize, path)
+        except FileNotFoundError:
+            # Preserve the existing worker failure path for a missing source;
+            # there are no source bytes to reserve in that case.
+            admitted_bytes = 0
+        except OSError as exc:
+            raise ServiceUnavailableError(
+                "Could not determine the uploaded file size for indexing admission.",
+                code="INDEXING_ADMISSION_SIZE_UNAVAILABLE",
+            ) from exc
         file_id = str(metadata.get("file_id") or "")
         content_sha256 = metadata.get("content_sha256")
         content_claim_token = f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}"
@@ -393,28 +512,19 @@ class WorkerDispatcher(IndexingDispatcher):
             # then fail on the catalog insert, after a full parse and embed. A
             # replace is not fenced — re-indexing a file that already exists is
             # what it is for.
-            admission = await self._set_queued_details(task_id, reject_if_file_active=not replace, **task_details)
+            admission = await self._set_queued_details(
+                task_id,
+                reject_if_file_active=not replace,
+                require_upload_reservation=require_upload_reservation,
+                admitted_bytes=admitted_bytes,
+                **task_details,
+            )
         except BaseException:
             await release_claim()
             raise
         if not admission["accepted"]:
             await release_claim()
-            busy_task_id = admission.get("existing_task_id")
-            reason = admission.get("reason")
-            if reason == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
-                raise _indexing_in_progress(file_id, partition, busy_task_id)
-            if reason == QUEUE_REFUSED_CANCELLED:
-                raise RuntimeError(f"Task {task_id} was cancelled before it queued")
-            if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
-                raise ServiceUnavailableError(
-                    "Indexing is temporarily paused because task capacity is full "
-                    "(queued or running work and unsaved job outcomes). Please retry shortly.",
-                    # Preserve this API code so existing clients keep retrying it.
-                    code="INDEXING_OUTCOME_BACKLOG",
-                )
-            raise RuntimeError(
-                f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
-            )
+            _raise_admission_refusal(admission, task_id=task_id, file_id=file_id, partition=partition)
 
         await self._record_job(
             task_id,
@@ -1046,7 +1156,13 @@ def from_ray_namespace(
     job_repo: Any = None,
 ) -> WorkerDispatcher:
     import ray
+    from core.config import load_config
     from services.workers.indexer_pool import build_indexer_pool
+
+    config = load_config()
+    max_admitted_tasks = config.ray.indexer.max_admitted_tasks or (
+        config.ray.indexer.pool_size * config.ray.indexer.max_tasks_per_worker
+    )
 
     return WorkerDispatcher(
         pool=build_indexer_pool(namespace=namespace),
@@ -1058,6 +1174,8 @@ def from_ray_namespace(
         collection=collection,
         job_repo=job_repo,
         timeout=timeout,
+        max_admitted_tasks=max_admitted_tasks,
+        max_admitted_bytes=config.ray.indexer.max_admitted_bytes,
     )
 
 
@@ -1088,6 +1206,47 @@ def _indexing_in_progress(file_id: str, partition: str, task_id: str) -> Conflic
         f"File '{file_id}' is already being indexed in partition '{partition}'.",
         code="DOCUMENT_INDEXING_IN_PROGRESS",
         existing_task_id=task_id,
+    )
+
+
+def _raise_admission_refusal(outcome: dict[str, Any], *, task_id: str, file_id: str, partition: str) -> None:
+    if outcome.get("accepted"):
+        return
+    reason = outcome.get("reason")
+    busy_task_id = outcome.get("existing_task_id")
+    if reason == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
+        raise _indexing_in_progress(file_id, partition, busy_task_id)
+    if reason == QUEUE_REFUSED_CANCELLED:
+        raise RuntimeError(f"Task {task_id} was cancelled before it queued")
+    if reason == QUEUE_REFUSED_FILE_DELETING:
+        raise ConflictError(
+            f"File '{file_id}' is being deleted in partition '{partition}'.",
+            code="DOCUMENT_DELETION_IN_PROGRESS",
+        )
+    if reason == QUEUE_REFUSED_INDEXING_ADMISSION:
+        raise IndexingAdmissionError(
+            "Indexing admission capacity is full. Retry shortly.",
+            retry_after_seconds=5,
+        )
+    if reason == QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED:
+        raise IndexingAdmissionError(
+            "The upload admission reservation expired before indexing could be queued. Please retry the upload.",
+            retry_after_seconds=5,
+        )
+    if reason == QUEUE_REFUSED_INDEXING_FILE_TOO_LARGE:
+        raise ValidationError(
+            "The uploaded file exceeds the configured aggregate indexing admission byte limit.",
+            status_code=413,
+            code="INDEXING_FILE_EXCEEDS_ADMISSION_LIMIT",
+        )
+    if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
+        raise ServiceUnavailableError(
+            "Indexing is temporarily paused because the task-state outcome capacity is full. Please retry shortly.",
+            code="INDEXING_OUTCOME_BACKLOG",
+        )
+    raise ServiceUnavailableError(
+        "The indexing service could not reserve upload capacity.",
+        code="INDEXING_ADMISSION_UNAVAILABLE",
     )
 
 

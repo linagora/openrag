@@ -31,6 +31,21 @@ if TYPE_CHECKING:
 class IndexingDispatcher(ABC):
     """Operations the indexing orchestrator needs from the worker layer."""
 
+    async def reserve_upload_admission(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        admitted_bytes: int,
+        replace: bool = False,
+    ) -> str:
+        """Reserve bounded admission before the API persists an uploaded file."""
+        raise NotImplementedError
+
+    async def release_upload_admission(self, task_id: str) -> None:
+        """Release a pre-save reservation that was not transferred to a queued task."""
+        return None
+
     @abstractmethod
     async def dispatch_indexing(
         self,
@@ -45,6 +60,7 @@ class IndexingDispatcher(ABC):
         embedder_name: str | None = None,
         callback_url: str | None = None,
         callback_token: str | None = None,
+        task_id: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
     ) -> str:

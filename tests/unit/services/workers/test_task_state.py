@@ -413,12 +413,13 @@ async def test_content_claim_owners_include_only_unsettled_workers(monkeypatch) 
         ("completed-task", "tenant-a"),
         ("other-partition-task", "tenant-b"),
     ):
-        await manager.set_queued_details(
+        await manager.set_queued_details_v2(
             task_id,
             file_id=f"{task_id}-file",
             partition=partition,
             metadata=metadata_by_task.get(task_id, {}),
             user_id=None,
+            admitted_bytes=1,
         )
 
     cancelled_ref = {"ref": _FakeWorkerRef()}
@@ -642,12 +643,13 @@ async def test_unaccepted_submission_fence_expires_after_handoff_grace(monkeypat
     monkeypatch.setattr(task_state_module.time, "time", lambda: now)
     manager = _task_state_manager()
     for task_id, file_id in (("claim-task", "file-1"), ("delete-task", "file-2")):
-        await manager.set_queued_details(
+        await manager.set_queued_details_v2(
             task_id,
             file_id=file_id,
             partition="tenant-a",
             metadata={"_openrag_job_created_at": datetime.now(UTC).isoformat()},
             user_id=None,
+            admitted_bytes=1,
         )
         assert await manager.begin_worker_submission(task_id) is True
     await manager.set_details(
@@ -742,20 +744,24 @@ async def test_file_delete_fence_only_blocks_same_partition_and_file() -> None:
 
     await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
 
-    assert await manager.set_queued_details(
+    other_file = await manager.set_queued_details_v2(
         "other-file",
         file_id="file-2",
         partition="tenant-a",
         metadata={},
         user_id=None,
+        admitted_bytes=1,
     )
-    assert await manager.set_queued_details(
+    other_partition = await manager.set_queued_details_v2(
         "other-partition",
         file_id="file-1",
         partition="tenant-b",
         metadata={},
         user_id=None,
+        admitted_bytes=1,
     )
+    assert other_file["accepted"]
+    assert other_partition["accepted"]
 
     assert await manager.get_state("other-file") == "QUEUED"
     assert await manager.get_state("other-partition") == "QUEUED"
@@ -1205,6 +1211,7 @@ async def test_queue_admission_reserves_capacity_for_active_tasks(monkeypatch) -
         partition="tenant-a",
         metadata={},
         user_id=42,
+        admitted_bytes=1,
     )
     refused = await manager.set_queued_details_v2(
         "task-2",
@@ -1212,6 +1219,7 @@ async def test_queue_admission_reserves_capacity_for_active_tasks(monkeypatch) -
         partition="tenant-a",
         metadata={},
         user_id=42,
+        admitted_bytes=1,
     )
 
     assert admitted["accepted"] is True
@@ -1233,7 +1241,14 @@ async def test_terminal_tasks_are_evicted_once_retention_expires(monkeypatch) ->
     manager = _task_state_manager()
 
     for task_id in ("done-task", "failed-task"):
-        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=7)
+        await manager.set_queued_details_v2(
+            task_id,
+            file_id=task_id,
+            partition="tenant-a",
+            metadata={},
+            user_id=7,
+            admitted_bytes=1,
+        )
     await manager.set_state("done-task", "COMPLETED")
     await manager.set_failed_if_not_cancelled("failed-task", "boom")
     await _mark_job_outcome_persisted(manager, "done-task")
@@ -1289,14 +1304,23 @@ async def test_eviction_keeps_active_tasks_and_unsettled_cancellations(monkeypat
     manager = _task_state_manager()
 
     for task_id in ("active-task", "cancelled-task", "completed-task"):
-        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
+        await manager.set_queued_details_v2(
+            task_id,
+            file_id=task_id,
+            partition="tenant-a",
+            metadata={},
+            user_id=None,
+            admitted_bytes=1,
+        )
     await manager.set_object_ref("cancelled-task", {"ref": _FakeWorkerRef()})
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_state("completed-task", "COMPLETED")
     await _mark_job_outcome_persisted(manager, "completed-task")
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
-    await manager.set_queued_details("new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=None)
+    await manager.set_queued_details_v2(
+        "new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=None, admitted_bytes=1
+    )
 
     assert set(manager.tasks) == {"active-task", "cancelled-task", "new-task"}
 
@@ -1312,7 +1336,14 @@ async def test_a_settling_burst_sheds_history_with_nothing_else_running(monkeypa
     manager = _task_state_manager()
     for index in range(4):
         task_id = f"task-{index}"
-        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
+        await manager.set_queued_details_v2(
+            task_id,
+            file_id=task_id,
+            partition="tenant-a",
+            metadata={},
+            user_id=None,
+            admitted_bytes=1,
+        )
     for index in range(4):
         await manager.set_state(f"task-{index}", "COMPLETED")
         await _mark_job_outcome_persisted(manager, f"task-{index}")
@@ -1320,7 +1351,9 @@ async def test_a_settling_burst_sheds_history_with_nothing_else_running(monkeypa
     assert set(manager.tasks) == {"task-2", "task-3"}
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
-    await manager.set_queued_details("late-task", file_id="late", partition="tenant-a", metadata={}, user_id=None)
+    await manager.set_queued_details_v2(
+        "late-task", file_id="late", partition="tenant-a", metadata={}, user_id=None, admitted_bytes=1
+    )
     await manager.set_failed_if_not_cancelled("late-task", "boom")
 
     assert set(manager.tasks) == {"late-task"}
@@ -1362,7 +1395,14 @@ async def test_an_expired_receipt_behind_a_fence_is_still_evicted(monkeypatch) -
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
     manager = _task_state_manager()
     for task_id in ("cancelled-task", "done-task"):
-        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=1)
+        await manager.set_queued_details_v2(
+            task_id,
+            file_id=task_id,
+            partition="tenant-a",
+            metadata={},
+            user_id=1,
+            admitted_bytes=1,
+        )
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_state("done-task", "COMPLETED")
     await _mark_job_outcome_persisted(manager, "cancelled-task")
@@ -1439,7 +1479,7 @@ async def test_recovered_terminal_tasks_are_subject_to_retention(monkeypatch) ->
                         "metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-07-20T08:00:00+00:00"},
                     },
                 ),
-                "queued-task": TaskInfo(state="QUEUED", details={"user_id": 3}),
+                "queued-task": TaskInfo(state="QUEUED", details={"user_id": 3}, admitted_bytes=1),
             },
             {},
         ),
@@ -1729,12 +1769,13 @@ async def test_admission_fence_refuses_a_second_task_for_a_file_already_indexing
 async def test_admission_fence_keeps_a_record_the_refused_call_did_not_create() -> None:
     """Only the record the refused registration made is dropped, never an earlier one."""
     manager = _task_state_manager()
-    await manager.set_queued_details(
+    await manager.set_queued_details_v2(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
         metadata={},
         user_id=42,
+        admitted_bytes=1,
     )
     await manager.set_details("task-2", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
 
@@ -1754,12 +1795,13 @@ async def test_admission_fence_keeps_a_record_the_refused_call_did_not_create() 
 @pytest.mark.asyncio
 async def test_admission_fence_is_scoped_to_the_same_file_and_partition() -> None:
     manager = _task_state_manager()
-    await manager.set_queued_details(
+    await manager.set_queued_details_v2(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
         metadata={},
         user_id=42,
+        admitted_bytes=1,
     )
 
     for task_id, file_id, partition in (
@@ -1773,6 +1815,7 @@ async def test_admission_fence_is_scoped_to_the_same_file_and_partition() -> Non
             metadata={},
             user_id=42,
             reject_if_file_active=True,
+            admitted_bytes=1,
         )
         assert admitted["accepted"] is True, task_id
         assert await manager.get_state(task_id) == "QUEUED"
@@ -1781,12 +1824,13 @@ async def test_admission_fence_is_scoped_to_the_same_file_and_partition() -> Non
 @pytest.mark.asyncio
 async def test_admission_fence_is_opt_in_so_a_replace_still_queues() -> None:
     manager = _task_state_manager()
-    await manager.set_queued_details(
+    await manager.set_queued_details_v2(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
         metadata={},
         user_id=42,
+        admitted_bytes=1,
     )
 
     admitted = await manager.set_queued_details_v2(
@@ -1795,6 +1839,7 @@ async def test_admission_fence_is_opt_in_so_a_replace_still_queues() -> None:
         partition="tenant-a",
         metadata={},
         user_id=42,
+        admitted_bytes=1,
     )
 
     assert admitted["accepted"] is True
@@ -1872,12 +1917,13 @@ async def test_admission_fence_keeps_a_cancelled_task_whose_worker_has_not_settl
 @pytest.mark.asyncio
 async def test_admission_fence_releases_the_file_once_a_cancelled_worker_settles(monkeypatch) -> None:
     manager = _task_state_manager()
-    await manager.set_queued_details(
+    await manager.set_queued_details_v2(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
         metadata={},
         user_id=42,
+        admitted_bytes=1,
     )
     worker_ref = _FakeWorkerRef()
     assert await manager.set_object_ref("task-1", {"ref": worker_ref}) is True
@@ -1891,6 +1937,7 @@ async def test_admission_fence_releases_the_file_once_a_cancelled_worker_settles
         metadata={},
         user_id=42,
         reject_if_file_active=True,
+        admitted_bytes=1,
     )
 
     assert admitted["accepted"] is True
@@ -2094,7 +2141,14 @@ async def test_live_stage_snapshot_cache_is_bounded(monkeypatch) -> None:
     monkeypatch.setattr(task_state_module, "_MAX_TASKS_PER_WORKER", 1)
     manager = _task_state_manager()
     for task_id in ("task-1", "task-2"):
-        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=42)
+        await manager.set_queued_details_v2(
+            task_id,
+            file_id=task_id,
+            partition="tenant-a",
+            metadata={},
+            user_id=42,
+            admitted_bytes=1,
+        )
         await manager.set_state(task_id, "SERIALIZING")
         tracker = StageTracker(task_id)
         tracker.start_stage("parse", 0)

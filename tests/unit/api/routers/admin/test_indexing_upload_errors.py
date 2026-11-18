@@ -22,6 +22,15 @@ from services.orchestrators.auth_service import AuthService
 
 
 class _FakeIndexingService:
+    async def reserve_upload_admission(self, **_kwargs):
+        return "upload-reservation"
+
+    async def release_upload_admission(self, _task_id: str) -> None:
+        return None
+
+    async def renew_upload_admission(self, _task_id: str) -> bool:
+        return True
+
     async def file_exists(self, file_id: str, partition: str) -> bool:
         return False
 
@@ -91,7 +100,7 @@ def _build_app(
     job_service=None,
 ) -> FastAPI:
     # Cap at ~8 bytes so a small upload trips the limit.
-    monkeypatch.setattr("api.dependencies.files._max_upload_size_bytes", lambda: 8)
+    monkeypatch.setattr("api.dependencies.files.max_upload_size_bytes", lambda: 8)
 
     app = FastAPI()
     register_error_handlers(app)
@@ -101,6 +110,7 @@ def _build_app(
         paths=SimpleNamespace(data_dir=str(tmp_path / "data")),
         loader=SimpleNamespace(content_deduplication_enabled=deduplication_enabled),
         server=SimpleNamespace(preferred_url_scheme="http"),
+        ray=SimpleNamespace(indexer=SimpleNamespace(max_admitted_bytes=1024)),
     )
 
     app.dependency_overrides[validate_file_id] = lambda: "f1"

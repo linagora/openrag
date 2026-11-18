@@ -43,11 +43,13 @@ TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 _TERMINAL_STATE_NAMES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
 # Reasons ``set_queued_details_v2`` can turn a submission away. Shared with
-# the dispatcher, which maps FILE_INDEXING to a 409 and indexing-capacity
-# backpressure to a retryable 503.
+# the dispatcher for duplicate, saturation, and outcome-backlog responses.
 QUEUE_REFUSED_CANCELLED = "cancelled"
 QUEUE_REFUSED_FILE_DELETING = "file_deleting"
 QUEUE_REFUSED_FILE_INDEXING = "file_indexing"
+QUEUE_REFUSED_INDEXING_ADMISSION = "admission_full"
+QUEUE_REFUSED_INDEXING_FILE_TOO_LARGE = "admission_file_too_large"
+QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED = "upload_reservation_expired"
 # Keep the Ray actor payload stable while detached actors roll forward.
 QUEUE_REFUSED_INDEXING_CAPACITY = "outcome_backlog"
 SUBMITTED_TASK_WITHOUT_REF = "__openrag_submitted_task_without_ref__"
@@ -100,6 +102,9 @@ _MAX_TERMINAL_TASKS = 2_000
 # outcome is durable. This bounds queued Ray work and the possible outcome
 # backlog if catalog persistence stops after tasks have been admitted.
 _MAX_RESERVED_JOB_OUTCOMES = 2_000
+_DEFAULT_MAX_ADMITTED_BYTES = 1_073_741_824
+_UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS = 30 * 60
+_UPLOAD_RESERVED_STATE = "UPLOAD_RESERVED"
 _MAX_TASK_ERROR_CHARS = 8_000
 STALE_REFLESS_TASK_ERROR = (
     "Indexing task never exposed a worker reference within the registration grace period; marking it failed as stale."
@@ -244,6 +249,8 @@ def _tombstone_deadline(info: TaskInfo, *, now: float | None = None) -> float | 
 
 def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
     timestamp = time.time() if now is None else now
+    if info.state == _UPLOAD_RESERVED_STATE:
+        return info, getattr(info, "admission_reservation_expires_at", timestamp)
     if _is_fenced_failure(info):
         return info, _tombstone_deadline(info, now=timestamp)
     if info.state != "CANCELLED":
@@ -261,6 +268,8 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         worker_finished=getattr(info, "worker_finished", False),
         worker_restarts_baseline=getattr(info, "worker_restarts_baseline", None),
         worker_abandoned=getattr(info, "worker_abandoned", False),
+        admitted_bytes=getattr(info, "admitted_bytes", 0),
+        admission_reservation_expires_at=getattr(info, "admission_reservation_expires_at", None),
     )
     return snapshot, _tombstone_deadline(snapshot, now=timestamp)
 
@@ -280,7 +289,12 @@ def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
     if not _task_state_storage_available():
         return
     key = _recoverable_task_key(task_id)
-    if info.state in RECOVERABLE_TASK_STATES or _is_fenced_failure(info) or _job_outcome_requires_persistence(info):
+    if (
+        info.state in RECOVERABLE_TASK_STATES
+        or info.state == _UPLOAD_RESERVED_STATE
+        or _is_fenced_failure(info)
+        or _job_outcome_requires_persistence(info)
+    ):
         snapshot, expires_at = _recovery_snapshot(info)
         _internal_kv_put(
             key,
@@ -319,6 +333,8 @@ try:
     _cfg = _load_config()
     _POOL_SIZE: int = _cfg.ray.indexer.pool_size
     _MAX_TASKS_PER_WORKER: int = _cfg.ray.indexer.max_tasks_per_worker
+    _MAX_ADMITTED_TASKS: int = _cfg.ray.indexer.max_admitted_tasks or (_POOL_SIZE * _MAX_TASKS_PER_WORKER)
+    _MAX_ADMITTED_BYTES: int = _cfg.ray.indexer.max_admitted_bytes
 except (ImportError, AttributeError) as _cfg_err:
     import logging as _logging
 
@@ -327,6 +343,8 @@ except (ImportError, AttributeError) as _cfg_err:
     )
     _POOL_SIZE = 1
     _MAX_TASKS_PER_WORKER = 1
+    _MAX_ADMITTED_TASKS = 1
+    _MAX_ADMITTED_BYTES = _DEFAULT_MAX_ADMITTED_BYTES
 
 
 @dataclass
@@ -359,6 +377,13 @@ class TaskInfo:
     # incarnation the task went to, so the task may still be picked up; this
     # makes its pickup refused instead of indexing a file already released.
     worker_abandoned: bool = False
+    # Exact raw upload bytes held by this active task. Older snapshots are
+    # conservatively charged the full admission budget during recovery.
+    admitted_bytes: int | None = None
+    # Upload reservations expire if the API process dies before queue transfer.
+    admission_reservation_expires_at: float | None = None
+    # A delete that starts after reservation must still prevent a late queue transfer.
+    admission_reservation_cancelled: bool = False
 
 
 def _job_outcome_pending(info: TaskInfo) -> bool:
@@ -374,6 +399,16 @@ def _job_outcome_requires_persistence(info: TaskInfo) -> bool:
     metadata = info.details.get("metadata") if isinstance(info.details, dict) else None
     return info.state in TERMINAL_TASK_STATES and not (
         isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata
+    )
+
+
+def _task_reserves_admission(info: TaskInfo) -> bool:
+    """Whether this task can still occupy a worker or touch its source file."""
+    return (
+        info.state == _UPLOAD_RESERVED_STATE
+        or info.state in CANCELLABLE_INDEXING_STATES
+        or (info.state == "CANCELLED" and _cancelled_task_has_worker_fence(info))
+        or _is_fenced_failure(info)
     )
 
 
@@ -625,12 +660,27 @@ class TaskStateManager:
         self._worker_lease_ttl_seconds = worker_lease_ttl_seconds
         self._live_stage_progress: OrderedDict[str, tuple[StageProgressWorkerSnapshot, float]] = OrderedDict()
         self._live_stage_progress_capacity = max(1, _POOL_SIZE * _MAX_TASKS_PER_WORKER)
+        self._admission_max_tasks = max(1, _MAX_ADMITTED_TASKS)
+        self._admission_max_bytes = max(1, _MAX_ADMITTED_BYTES)
         self.tasks, expiries = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
         # Terminal task ids in eviction order, mapped to the time they may go.
         self.terminal_tasks: OrderedDict[str, float] = OrderedDict()
         now = time.time()
         for task_id, info in self.tasks.items():
+            # Older snapshots do not carry source size. Charge them the full
+            # budget so a rollout cannot admit another large file beside work
+            # whose memory footprint is unknown.
+            if getattr(info, "admitted_bytes", None) is None:
+                info.admitted_bytes = self._admission_max_bytes if _task_reserves_admission(info) else 0
+                _save_recoverable_task(task_id, info)
+            if info.state == _UPLOAD_RESERVED_STATE:
+                if getattr(info, "admission_reservation_expires_at", None) is None:
+                    info.admission_reservation_expires_at = expiries.get(
+                        task_id, now + _UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS
+                    )
+                    _save_recoverable_task(task_id, info)
+                continue
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
             read_ref_when_settled(info.object_ref)
             info.worker_lease_expires_at = now + worker_lease_ttl_seconds
@@ -712,6 +762,15 @@ class TaskStateManager:
             if not owned:
                 self.user_index.pop(user_id, None)
         _delete_recoverable_task(task_id)
+
+    def _expire_upload_reservations_locked(self, *, now: float | None = None) -> None:
+        timestamp = time.time() if now is None else now
+        for task_id, info in list(self.tasks.items()):
+            if info.state != _UPLOAD_RESERVED_STATE:
+                continue
+            expires_at = getattr(info, "admission_reservation_expires_at", None)
+            if expires_at is None or expires_at <= timestamp:
+                self._forget_task_locked(task_id)
 
     def _evict_terminal_tasks_locked(self, *, now: float | None = None) -> None:
         """Drop settled tasks once they age out or the retention cap is exceeded.
@@ -883,6 +942,7 @@ class TaskStateManager:
     @ray.method(concurrency_group="set")
     async def begin_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
         with self.lock:
+            self._expire_upload_reservations_locked()
             self._prune_expired_file_delete_fences()
             key = (partition, file_id)
             updated = dict(self.file_delete_fences)
@@ -894,6 +954,15 @@ class TaskStateManager:
             updated[key] = holders
             _save_file_delete_fences(updated)
             self.file_delete_fences = updated
+            for task_id, info in self.tasks.items():
+                details = info.details or {}
+                if (
+                    info.state == _UPLOAD_RESERVED_STATE
+                    and details.get("partition") == partition
+                    and details.get("file_id") == file_id
+                ):
+                    info.admission_reservation_cancelled = True
+                    self._persist_task_locked(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def renew_file_delete(self, *, partition: str, file_id: str, fence_id: str) -> bool:
@@ -1118,6 +1187,116 @@ class TaskStateManager:
             return "completed"
 
     @ray.method(concurrency_group="set")
+    async def reserve_upload_admission(
+        self,
+        task_id: str,
+        *,
+        file_id: str,
+        partition: str,
+        admitted_bytes: int,
+        max_admitted_tasks: int | None = None,
+        max_admitted_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Reserve shared count and byte capacity before an upload is copied to disk."""
+        with self.lock:
+            self._expire_upload_reservations_locked()
+            existing = self.tasks.get(task_id)
+            if existing is not None:
+                details = existing.details or {}
+                if existing.state == _UPLOAD_RESERVED_STATE and getattr(
+                    existing, "admission_reservation_cancelled", False
+                ):
+                    return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
+                if (
+                    existing.state == _UPLOAD_RESERVED_STATE
+                    and not getattr(existing, "admission_reservation_cancelled", False)
+                    and details.get("file_id") == file_id
+                    and details.get("partition") == partition
+                    and getattr(existing, "admitted_bytes", None) == admitted_bytes
+                ):
+                    return {"accepted": True, "reason": None, "existing_task_id": None}
+                return _queue_refused(QUEUE_REFUSED_CANCELLED)
+            if self._file_delete_fenced(partition=partition, file_id=file_id):
+                return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
+
+            requested_max_tasks = max(
+                1,
+                int(self._admission_max_tasks if max_admitted_tasks is None else max_admitted_tasks),
+            )
+            requested_max_bytes = max(
+                1,
+                int(self._admission_max_bytes if max_admitted_bytes is None else max_admitted_bytes),
+            )
+            active_tasks = [info for info in self.tasks.values() if _task_reserves_admission(info)]
+            active_bytes = sum(max(0, int(getattr(info, "admitted_bytes", 0) or 0)) for info in active_tasks)
+            if active_tasks:
+                self._admission_max_tasks = min(self._admission_max_tasks, requested_max_tasks)
+                self._admission_max_bytes = min(self._admission_max_bytes, requested_max_bytes)
+            else:
+                self._admission_max_tasks = requested_max_tasks
+                self._admission_max_bytes = requested_max_bytes
+
+            admitted_bytes = max(0, int(admitted_bytes))
+            if admitted_bytes > self._admission_max_bytes:
+                return _queue_refused(QUEUE_REFUSED_INDEXING_FILE_TOO_LARGE)
+            if (
+                len(active_tasks) >= self._admission_max_tasks
+                or active_bytes + admitted_bytes > self._admission_max_bytes
+            ):
+                return _queue_refused(QUEUE_REFUSED_INDEXING_ADMISSION)
+
+            reserved_outcomes = sum(
+                1
+                for info in self.tasks.values()
+                if info.state == _UPLOAD_RESERVED_STATE
+                or info.state in CANCELLABLE_INDEXING_STATES
+                or _job_outcome_requires_persistence(info)
+            )
+            if reserved_outcomes >= _MAX_RESERVED_JOB_OUTCOMES:
+                return _queue_refused(QUEUE_REFUSED_INDEXING_CAPACITY)
+
+            info = TaskInfo(
+                state=_UPLOAD_RESERVED_STATE,
+                details={"file_id": file_id, "partition": partition},
+                admitted_bytes=admitted_bytes,
+                admission_reservation_expires_at=time.time() + _UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS,
+            )
+            self.tasks[task_id] = info
+            self._persist_task_locked(task_id, info)
+            return {"accepted": True, "reason": None, "existing_task_id": None}
+
+    @ray.method(concurrency_group="set")
+    async def release_upload_admission(self, task_id: str) -> bool:
+        """Release an upload reservation unless queue registration already took it over."""
+        with self.lock:
+            self._expire_upload_reservations_locked()
+            info = self.tasks.get(task_id)
+            if info is None or info.state != _UPLOAD_RESERVED_STATE:
+                return False
+            self._forget_task_locked(task_id)
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def renew_upload_admission(self, task_id: str) -> bool:
+        """Keep a live upload's admission reservation until queue transfer."""
+        with self.lock:
+            self._expire_upload_reservations_locked()
+            info = self.tasks.get(task_id)
+            if info is None:
+                return False
+            if info.state != _UPLOAD_RESERVED_STATE:
+                # Queue transfer won the race with this renewal. The request no
+                # longer owns a temporary reservation, but its task was admitted.
+                if info.state == DocumentStatus.CANCELLED:
+                    return info.admission_reservation_expires_at is None
+                return True
+            if getattr(info, "admission_reservation_cancelled", False):
+                return False
+            info.admission_reservation_expires_at = time.time() + _UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS
+            self._persist_task_locked(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
     async def set_queued_details(
         self,
         task_id: str,
@@ -1135,6 +1314,10 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
                 reject_if_file_active=False,
+                require_upload_reservation=False,
+                admitted_bytes=None,
+                max_admitted_tasks=None,
+                max_admitted_bytes=None,
             )["accepted"]
 
     @ray.method(concurrency_group="set")
@@ -1147,6 +1330,10 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
         reject_if_file_active: bool = False,
+        require_upload_reservation: bool = False,
+        admitted_bytes: int | None = None,
+        max_admitted_tasks: int | None = None,
+        max_admitted_bytes: int | None = None,
     ) -> dict[str, Any]:
         """Queue a task, optionally refusing one whose file is already indexing.
 
@@ -1171,6 +1358,10 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
                 reject_if_file_active=reject_if_file_active,
+                require_upload_reservation=require_upload_reservation,
+                admitted_bytes=admitted_bytes,
+                max_admitted_tasks=max_admitted_tasks,
+                max_admitted_bytes=max_admitted_bytes,
             )
 
     def _queue_task_locked(
@@ -1182,11 +1373,20 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
         reject_if_file_active: bool,
+        require_upload_reservation: bool,
+        admitted_bytes: int | None,
+        max_admitted_tasks: int | None,
+        max_admitted_bytes: int | None,
     ) -> dict[str, Any]:
+        self._expire_upload_reservations_locked()
         previous = self.tasks.get(task_id)
+        if require_upload_reservation and previous is None:
+            return _queue_refused(QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED)
         info = self._ensure_task(task_id)
         if info.state == DocumentStatus.CANCELLED:
             return _queue_refused(QUEUE_REFUSED_CANCELLED)
+        if info.state == _UPLOAD_RESERVED_STATE and getattr(info, "admission_reservation_cancelled", False):
+            return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
         if reject_if_file_active and file_id is not None:
             busy_task_id = self._active_indexing_task_for_file_locked(
                 partition=partition, file_id=file_id, excluding=task_id
@@ -1202,13 +1402,68 @@ class TaskStateManager:
                     self.tasks.pop(task_id, None)
                     self.terminal_tasks.pop(task_id, None)
                 return _queue_refused(QUEUE_REFUSED_FILE_INDEXING, existing_task_id=busy_task_id)
+
+        requested_max_tasks = max(
+            1,
+            int(self._admission_max_tasks if max_admitted_tasks is None else max_admitted_tasks),
+        )
+        requested_max_bytes = max(
+            1,
+            int(self._admission_max_bytes if max_admitted_bytes is None else max_admitted_bytes),
+        )
+        active_tasks = [existing for existing in self.tasks.values() if _task_reserves_admission(existing)]
+        previous_admitted = previous is not None and _task_reserves_admission(previous)
+        active_count = len(active_tasks) - int(previous_admitted)
+        active_bytes = sum(max(0, int(getattr(existing, "admitted_bytes", 0) or 0)) for existing in active_tasks)
+        if previous_admitted:
+            admitted_bytes = max(0, int(getattr(previous, "admitted_bytes", 0) or 0))
+            active_bytes -= admitted_bytes
+
+        # A changed deployment may lower its admission cap while work is live.
+        # Keep the tighter cap until this shared actor has drained, then adopt
+        # the next request's current settings.
+        if active_tasks:
+            self._admission_max_tasks = min(self._admission_max_tasks, requested_max_tasks)
+            self._admission_max_bytes = min(self._admission_max_bytes, requested_max_bytes)
+        else:
+            self._admission_max_tasks = requested_max_tasks
+            self._admission_max_bytes = requested_max_bytes
+
+        # Older API callers do not send a file size. Charging them the whole
+        # byte budget prevents that compatibility path from bypassing weighted
+        # admission; it runs alone until it settles.
+        if admitted_bytes is None:
+            admitted_bytes = self._admission_max_bytes
+        else:
+            admitted_bytes = max(0, int(admitted_bytes))
+
+        if not previous_admitted and admitted_bytes > self._admission_max_bytes:
+            if info is not previous:
+                self.tasks.pop(task_id, None)
+                self.terminal_tasks.pop(task_id, None)
+            return _queue_refused(QUEUE_REFUSED_INDEXING_FILE_TOO_LARGE)
+        if not previous_admitted and active_count >= self._admission_max_tasks:
+            if info is not previous:
+                self.tasks.pop(task_id, None)
+                self.terminal_tasks.pop(task_id, None)
+            return _queue_refused(QUEUE_REFUSED_INDEXING_ADMISSION)
+        if not previous_admitted and active_bytes + admitted_bytes > self._admission_max_bytes:
+            if info is not previous:
+                self.tasks.pop(task_id, None)
+                self.terminal_tasks.pop(task_id, None)
+            return _queue_refused(QUEUE_REFUSED_INDEXING_ADMISSION)
+
         already_reserved = previous is not None and (
-            previous.state in CANCELLABLE_INDEXING_STATES or _job_outcome_requires_persistence(previous)
+            previous.state == _UPLOAD_RESERVED_STATE
+            or previous.state in CANCELLABLE_INDEXING_STATES
+            or _job_outcome_requires_persistence(previous)
         )
         reserved_outcomes = sum(
             1
             for existing in self.tasks.values()
-            if existing.state in CANCELLABLE_INDEXING_STATES or _job_outcome_requires_persistence(existing)
+            if existing.state == _UPLOAD_RESERVED_STATE
+            or existing.state in CANCELLABLE_INDEXING_STATES
+            or _job_outcome_requires_persistence(existing)
         )
         if not already_reserved and reserved_outcomes >= _MAX_RESERVED_JOB_OUTCOMES:
             if info is not previous:
@@ -1223,6 +1478,8 @@ class TaskStateManager:
             metadata=metadata,
             user_id=user_id,
         )
+        info.admitted_bytes = admitted_bytes
+        info.admission_reservation_expires_at = None
         if self._file_delete_fenced(partition=partition, file_id=file_id):
             self._set_cancelled_locked(task_id, info)
             return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
@@ -1594,16 +1851,18 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def get_all_states(self) -> dict[str, str | None]:
         with self.lock:
+            self._expire_upload_reservations_locked()
             # A queue that only gets polled admits no task, so the listing reads
             # have to shed history or retention never runs. Sweep after the stale
             # pass: it settles tasks itself, and it cannot evict while iterating.
             self._expire_refless_tasks_if_stale_locked()
             self._evict_terminal_tasks_locked()
-            return {tid: info.state for tid, info in self.tasks.items()}
+            return {tid: info.state for tid, info in self.tasks.items() if info.state != _UPLOAD_RESERVED_STATE}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_info(self) -> dict[str, dict]:
         with self.lock:
+            self._expire_upload_reservations_locked()
             self._expire_refless_tasks_if_stale_locked()
             self._evict_terminal_tasks_locked()
             return {
@@ -1616,6 +1875,7 @@ class TaskStateManager:
                     "submission_started_at": getattr(info, "submission_started_at", None),
                 }
                 for task_id, info in self.tasks.items()
+                if info.state != _UPLOAD_RESERVED_STATE
             }
 
     @ray.method(concurrency_group="queue_info")
@@ -1662,6 +1922,11 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def supports_explicit_completion_outcomes(self) -> bool:
         """Identify actors that distinguish cancellation, loss, and conflicts."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_bounded_ingestion_admission(self) -> bool:
+        """Identify actors that atomically enforce the active task and byte caps."""
         return True
 
     @ray.method(concurrency_group="queue_info")

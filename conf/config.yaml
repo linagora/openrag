@@ -330,10 +330,16 @@ indexing_callback:
 # --- Ray ---
 ray:
   indexer:
-    # Env: RAY_POOL_SIZE, RAY_MAX_TASKS_PER_WORKER
+    # Env: RAY_POOL_SIZE, RAY_MAX_TASKS_PER_WORKER, RAY_MAX_ADMITTED_TASKS,
+    #      RAY_MAX_ADMITTED_BYTES
     # Indexing capacity = pool_size (worker actors) × max_tasks_per_worker (files per worker).
     pool_size: 1
     max_tasks_per_worker: 50
+    # Unset uses the worker execution capacity; raise only to allow a bounded queue.
+    max_admitted_tasks: null
+    # Keep this >= MAX_UPLOAD_SIZE_MB; reduce that limit and drain old API
+    # replicas before lowering this cap.
+    max_admitted_bytes: 1073741824
 
   serve:
     # Env: ENABLE_RAY_SERVE, RAY_SERVE_NUM_REPLICAS, RAY_SERVE_HOST,

@@ -1295,6 +1295,8 @@ env:
     # RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'
     RAY_POOL_SIZE: "1"
     RAY_MAX_TASKS_PER_WORKER: "50"
+    # Keep at least as large as MAX_UPLOAD_SIZE_MB × 1 MiB.
+    RAY_MAX_ADMITTED_BYTES: "1073741824"
     RAY_DASHBOARD_PORT: "8265"
     RAY_task_retry_delay_ms: "3000"
     RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
