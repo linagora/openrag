@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
@@ -335,7 +334,7 @@ async def test_the_sweep_keeps_live_and_recent_slots_and_releases_the_rest(postg
     released = await repo.release_stale_file_slots(
         live_ids=["live-old"],
         settled_ids=["settled-new"],
-        created_before=datetime.now(UTC) - timedelta(minutes=5),
+        older_than_seconds=300,
     )
 
     assert released == 2
@@ -355,7 +354,7 @@ async def test_the_sweep_decrements_each_user_by_their_own_slots(postgres_store)
     released = await repo.release_stale_file_slots(
         live_ids=[],
         settled_ids=[],
-        created_before=datetime.now(UTC) + timedelta(seconds=1),
+        older_than_seconds=-1,
     )
 
     assert released == 4
@@ -370,7 +369,7 @@ async def test_the_sweep_with_nothing_to_release_changes_nothing(postgres_store)
     released = await postgres_store.user_repo.release_stale_file_slots(
         live_ids=[],
         settled_ids=[],
-        created_before=datetime.now(UTC) - timedelta(minutes=5),
+        older_than_seconds=300,
     )
 
     assert released == 0

@@ -8,7 +8,6 @@ Partition memberships moved to
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
 from typing import Any
 
 from core.models.user import ApiKey, FileSlotGrant, User
@@ -93,13 +92,13 @@ class UserRepository(ABC):
         *,
         live_ids: list[str],
         settled_ids: list[str],
-        created_before: datetime,
+        older_than_seconds: float,
     ) -> int:
         """Release reservations no live task can still consume.
 
         Keeps every id in ``live_ids``. Releases the rest when they are in
-        ``settled_ids`` or older than ``created_before``. Returns how many
-        were released.
+        ``settled_ids`` or older than ``older_than_seconds``, measured on the
+        database clock that stamped them. Returns how many were released.
         """
 
     @abstractmethod

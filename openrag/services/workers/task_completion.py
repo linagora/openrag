@@ -515,7 +515,7 @@ class TaskCompletionTracker:
             released = await repo.release_stale_file_slots(
                 live_ids=live_ids,
                 settled_ids=settled_ids,
-                created_before=datetime.now(UTC) - timedelta(seconds=_ORPHAN_GRACE_SECONDS),
+                older_than_seconds=_ORPHAN_GRACE_SECONDS,
             )
             if released:
                 self._logger.info("Released file slots no live indexing task holds", released=released)

@@ -50,9 +50,9 @@ class _FakeUserRepo:
         self.released.append(reservation_id)
         return True
 
-    async def release_stale_file_slots(self, *, live_ids, settled_ids, created_before) -> int:
+    async def release_stale_file_slots(self, *, live_ids, settled_ids, older_than_seconds) -> int:
         self.sweeps.append(
-            {"live_ids": sorted(live_ids), "settled_ids": sorted(settled_ids), "created_before": created_before}
+            {"live_ids": sorted(live_ids), "settled_ids": sorted(settled_ids), "older_than_seconds": older_than_seconds}
         )
         return 0
 
@@ -1332,12 +1332,9 @@ async def test_a_failed_slot_release_does_not_stop_the_settlement(user_repo) -> 
 
 @pytest.mark.asyncio
 async def test_the_slot_sweep_keeps_live_tasks_and_releases_settled_ones(user_repo) -> None:
-    from datetime import UTC, datetime, timedelta
-
     from services.workers import task_completion
 
     tracker = task_completion.TaskCompletionTracker()
-    before = datetime.now(UTC)
 
     await tracker.reconcile_file_slots(
         {
@@ -1354,9 +1351,9 @@ async def test_the_slot_sweep_keeps_live_tasks_and_releases_settled_ones(user_re
     assert sweep["live_ids"] == ["queued", "registering", "running"]
     assert sweep["settled_ids"] == ["cancelled", "done", "failed"]
     # Slots the actor does not know are spared for the grace window: they may
-    # belong to an upload that has not been queued yet.
-    grace = timedelta(seconds=task_completion._ORPHAN_GRACE_SECONDS)
-    assert before - grace - timedelta(seconds=5) < sweep["created_before"] <= datetime.now(UTC) - grace
+    # belong to an upload that has not been queued yet. The cutoff is passed
+    # as an age so the repository measures it on the database clock.
+    assert sweep["older_than_seconds"] == task_completion._ORPHAN_GRACE_SECONDS
 
 
 @pytest.mark.asyncio

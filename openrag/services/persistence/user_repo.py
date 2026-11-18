@@ -33,8 +33,8 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -363,32 +363,32 @@ class PgUserRepository(UserRepository):
         *,
         live_ids: list[str],
         settled_ids: list[str],
-        created_before: datetime,
+        older_than_seconds: float,
     ) -> int:
-        return await self.pool.fetchval(
-            """
-            WITH released AS (
+        async with self.pool.acquire() as conn, conn.transaction():
+            # The cutoff is computed from the database's ``now()``, the clock
+            # that stamped ``created_at``, not the caller's.
+            rows = await conn.fetch(
+                """
                 DELETE FROM file_quota_reservations
                  WHERE id <> ALL($1::text[])
-                   AND (id = ANY($2::text[]) OR created_at < $3)
+                   AND (id = ANY($2::text[]) OR created_at < now() - make_interval(secs => $3))
                 RETURNING user_id
-            ),
-            per_user AS (
-                SELECT user_id, COUNT(*)::int AS n FROM released GROUP BY user_id
-            ),
-            decremented AS (
-                UPDATE users
-                   SET file_count = GREATEST(users.file_count - per_user.n, 0)
-                  FROM per_user
-                 WHERE users.id = per_user.user_id
-                RETURNING 1
+                """,
+                list(live_ids),
+                list(settled_ids),
+                float(older_than_seconds),
             )
-            SELECT COUNT(*)::int FROM released
-            """,
-            list(live_ids),
-            list(settled_ids),
-            created_before,
-        )
+            # Lock users rows in id order, as ``decrement_file_counts`` does,
+            # so a sweep and a concurrent delete cannot deadlock.
+            counts = Counter(row["user_id"] for row in rows)
+            for user_id in sorted(counts):
+                await conn.execute(
+                    "UPDATE users SET file_count = GREATEST(file_count - $1, 0) WHERE id = $2",
+                    counts[user_id],
+                    user_id,
+                )
+            return len(rows)
 
     async def count_indexed_files(self, user_id: int) -> int | None:
         return await self.pool.fetchval(
