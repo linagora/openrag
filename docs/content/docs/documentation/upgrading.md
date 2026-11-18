@@ -21,9 +21,13 @@ once, and a retrieval preset has no `type` any more. Partitions on the seeded
 them to `default` and delete the two presets if you like. The upgrade removes
 `type`, `llm`, `hyde_prompt_name` and `multi_query_prompt_name` from the stored
 retrieval presets, and a downgrade does not restore them; a request that still
-sends them has no effect. `RETRIEVER_TYPE` is no longer read: remove it. The `hyde` and `multi_query`
-prompts are no longer used; they can still be listed, edited and deleted, but not
-created. See [Pipeline Presets](/openrag/documentation/api/#-pipeline-presets).
+sends them has no effect. `RETRIEVER_TYPE` is no longer read: remove it. The
+retrieval configuration fingerprint, in a retrieval trace and in a partition
+snapshot, changes once, even for an unchanged preset: the removed fields no longer
+go into it.
+The `hyde` and `multi_query` prompts are no longer used; they can still be listed,
+edited and deleted, but not created. See
+[Pipeline Presets](/openrag/documentation/api/#-pipeline-presets).
 
 ## 2.3.0 or 2.3.1 to a later 2.3.x
 

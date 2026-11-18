@@ -7,8 +7,7 @@ keys they change out, so they run and are tested without LangGraph.
 ``ClassicWorkflow`` runs the compiled graph for ``ChatService``.
 
 Grading only happens in map-reduce (``summarize``), when the request sets
-``use_map_reduce``; without it, the graph runs exactly the pipeline
-``ChatService._prepare_chat`` ran before it.
+``use_map_reduce``.
 """
 
 from __future__ import annotations

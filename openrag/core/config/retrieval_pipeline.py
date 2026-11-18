@@ -29,7 +29,7 @@ class RetrievalPipelineConfig(BaseModel):
 
     # The library prompt that rewrites the user's query before retrieval
     # (None = the type's global default, then the disk seed), resolved in
-    # ChatService.generate_query. A query-side concern, so it lives on the
+    # QueryContextualizer.contextualize. A query-side concern, so it lives on the
     # retrieval preset rather than with the partition's generation prompts.
     query_contextualizer_prompt_name: str | None = None
 
