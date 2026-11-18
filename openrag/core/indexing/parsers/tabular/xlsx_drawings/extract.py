@@ -415,6 +415,11 @@ def _apply_policy(
         if on_hidden_sheet(reference.formula) and withhold:
             return replace(reference, values=(), withheld=True)
         cell_range = resolve(reference.formula)
+        if withhold and reference.formula and cell_range is None and reference.values:
+            # A union, whole-column or formula reference cannot be checked for
+            # hidden cells: its cache may hold them, so it is withheld, as an
+            # unresolved title, label or text link is.
+            return replace(reference, values=(), withheld=True)
         if not drop_hidden_cells or not reference.values:
             return reference
         if cell_range is not None:
@@ -457,7 +462,7 @@ def _apply_policy(
 
     def series_of(series: Series) -> Series:
         # A withheld name loses its reference too, so it is never read from the cell.
-        hidden_name = hidden_text(series.name_ref)
+        hidden_name = hidden_or_unknown_text(series.name_ref)
         positions = _series_hidden_points(series, resolve, hidden_cells) if drop_hidden_cells else frozenset()
         values = dimension(series.values, positions)
         return replace(
@@ -491,20 +496,35 @@ def _apply_policy(
         )
 
     def plot_of(plot):
-        hidden_header = hidden_text(plot.category_header_ref)
+        hidden_header = hidden_or_unknown_text(plot.category_header_ref)
+        hidden_category_title = hidden_or_unknown_text(plot.category_axis_title_ref)
+        hidden_value_title = hidden_or_unknown_text(plot.value_axis_title_ref)
         return replace(
             plot,
             series=tuple(series_of(series) for series in plot.series),
             category_header=None if hidden_header else plot.category_header,
             category_header_ref=None if hidden_header else plot.category_header_ref,
+            category_axis_title=None if hidden_category_title else plot.category_axis_title,
+            category_axis_title_ref=None if hidden_category_title else plot.category_axis_title_ref,
+            value_axis_title=None if hidden_value_title else plot.value_axis_title,
+            value_axis_title_ref=None if hidden_value_title else plot.value_axis_title_ref,
             total_points=totals_of(plot),
         )
 
     plots = tuple(plot_of(plot) for plot in chart.plots)
-    if hidden_text(chart.title_ref):
+    if hidden_or_unknown_text(chart.title_ref):
         chart = replace(chart, title=None, title_ref=None)
     annotations = tuple(shape for shape in chart.annotations if drawn(shape))
     return replace(chart, plots=plots, annotations=annotations), tuple(sources)
+
+
+def _withholds_data(chart: Chart) -> bool:
+    """Whether the policy withheld a series' data, even from no known hidden sheet."""
+    return any(
+        reference is not None and reference.withheld
+        for series in chart.series
+        for reference in (series.categories, series.values, series.sizes)
+    )
 
 
 def _qualified(link: str, sheet: str | None) -> str | None:
@@ -1073,7 +1093,7 @@ class WorkbookCharts:
             tables,
             covering,
             hidden_sources,
-            self._withhold and bool(hidden_sources),
+            self._withhold and (bool(hidden_sources) or _withholds_data(chart)),
         )
 
     @property

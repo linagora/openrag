@@ -244,15 +244,19 @@ def _groups(chart: Chart) -> list[tuple[tuple[str, ...], list[_Member]]]:
     nor do bubble series, whose rows carry sizes. Groups are found by hashing
     the categories, so many series cost one pass, not one comparison per pair.
     """
-    groups: dict[tuple[bool, bool, tuple[str, ...]], list[_Member]] = {}
+    groups: dict[tuple[bool, bool, int, tuple[str, ...]], list[_Member]] = {}
     for plot, number, series in _numbered(chart):
         if series.values is not None and series.values.withheld:
             continue
-        key = (plot.xy, plot.kind == "bubbleChart", _values(series.categories))
+        categories = _values(series.categories)
+        # Withheld categories say nothing about alignment: such a series
+        # gets its own table, with positional rows.
+        alone = number if series.categories is not None and series.categories.withheld else 0
+        key = (plot.xy, plot.kind == "bubbleChart", alone, categories)
         groups.setdefault(key, []).append((plot, number, series))
     return [
         (categories, members[start : start + _MAX_SERIES_PER_TABLE])
-        for (_, _, categories), members in groups.items()
+        for (_, _, _, categories), members in groups.items()
         for start in range(0, len(members), _MAX_SERIES_PER_TABLE)
     ]
 
@@ -470,6 +474,8 @@ def render_chart(
             lines.append(f"Source data: hidden worksheet{plural} {names}; its values are not indexed.")
         else:
             lines.append(f"Source data: hidden worksheet{plural} {names}.")
+    elif hidden_data_withheld:
+        lines.append("Source data: references that cannot be checked for hidden cells; their values are not indexed.")
     axes = []
     for plot in chart.plots:
         category_name = "x" if plot.xy else "categories"

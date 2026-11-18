@@ -120,6 +120,10 @@ class Plot:
     # charts point at the header cell: ``cx:nf``), and that cell's reference.
     category_header: str | None = None
     category_header_ref: str | None = None
+    # Cells an axis title is read from (Office 2016 charts), so the chart
+    # policy can withhold a title cached from a hidden or unknown cell.
+    category_axis_title_ref: str | None = None
+    value_axis_title_ref: str | None = None
 
     @property
     def xy(self) -> bool:

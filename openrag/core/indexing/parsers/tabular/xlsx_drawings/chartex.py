@@ -128,14 +128,21 @@ def _data_blocks(root: Element) -> dict[str, dict[str, tuple[DataRef, str | None
     return blocks
 
 
-def _axis_titles(plot_area: Element) -> tuple[str | None, str | None]:
-    category = value = None
+#: An axis title and the cell it is read from, if any.
+_AxisTitle = tuple[str | None, str | None]
+
+
+def _axis_titles(plot_area: Element) -> tuple[_AxisTitle, _AxisTitle]:
+    """The category and value axis titles, each with its cell reference."""
+    category: _AxisTitle = (None, None)
+    value: _AxisTitle = (None, None)
     for axis in plot_area.findall("{*}axis"):
-        title = _text(axis.find("{*}title"))
+        element = axis.find("{*}title")
+        title = (_text(element), _formula(axis.find("{*}title/{*}tx/{*}txData")))
         if axis.find("{*}catScaling") is not None:
-            category = category or title
+            category = category if category[0] else title
         elif axis.find("{*}valScaling") is not None:
-            value = value or title
+            value = value if value[0] else title
     return category, value
 
 
@@ -178,7 +185,9 @@ def parse_chartex(root: Element) -> Chart:
         raise ValueError("chartex part has no cx:chart element")
     blocks = _data_blocks(root)
     plot_area = chart.find("{*}plotArea")
-    category_title, value_title = _axis_titles(plot_area) if plot_area is not None else (None, None)
+    (category_title, category_title_ref), (value_title, value_title_ref) = (
+        _axis_titles(plot_area) if plot_area is not None else ((None, None), (None, None))
+    )
     by_layout: dict[str, list[Series]] = {}
     notes: list[str] = []
     totals: set[int] = set()
@@ -229,6 +238,8 @@ def parse_chartex(root: Element) -> Chart:
                 value_title,
                 total_points=tuple(sorted(totals)) if layout == "waterfall" else (),
                 category_header_ref=header_refs.get(layout),
+                category_axis_title_ref=category_title_ref,
+                value_axis_title_ref=value_title_ref,
             )
         )
     return Chart(

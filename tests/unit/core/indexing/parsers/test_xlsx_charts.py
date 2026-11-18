@@ -986,6 +986,79 @@ def test_without_hidden_data_mode_keeps_the_chart_but_not_its_hidden_values(cach
     assert all(series["point_count"] == 0 for series in chart.metadata["chart_series"])
 
 
+#: References a single range cannot describe, each over the hidden ``Data`` sheet.
+_UNRESOLVABLE_HIDDEN_REFERENCES = [
+    pytest.param("(Data!$B$2:$B$3,Data!$B$4)", id="union"),
+    pytest.param("Data!$B$2:$B$3,Data!$B$4:$B$4", id="libreoffice-multi-range"),
+    pytest.param("Data!$B:$B", id="whole-column"),
+    pytest.param("[0]!PayDyn", id="dynamic-name"),
+]
+
+
+def _cached_chart_over_unresolvable_reference(formula: str) -> bytes:
+    """A chart on a visible sheet whose cached values come from the hidden ``Data`` sheet."""
+    chart = _chart_xml(
+        [_plot("barChart", [_series(None, ("Report!$A$1:$A$3", ["a", "b", "c"]), (formula, [7301, 7302, 7303]))])]
+    )
+    raw = _replace_parts(_chart_over_hidden_sheet(), {"xl/charts/chart1.xml": chart})
+    return _with_defined_names(raw, '<definedName name="PayDyn">OFFSET(Data!$B$2,0,0,3,1)</definedName>')
+
+
+@pytest.mark.parametrize("formula", _UNRESOLVABLE_HIDDEN_REFERENCES)
+def test_without_hidden_data_mode_withholds_cached_values_it_cannot_resolve(formula):
+    raw = _cached_chart_over_unresolvable_reference(formula)
+    assert "7301" in _charts(raw)[0].text  # full mode uses the cache as stored
+
+    (chart,) = _charts(raw, mode="without_hidden_data")
+
+    for value in ("7301", "7302", "7303"):
+        assert value not in chart.text
+    assert [series["values_withheld"] for series in chart.metadata["chart_series"]] == [True]
+    assert chart.metadata["chart_series"][0]["point_count"] == 0
+    assert chart.metadata["chart_hidden_data_withheld"] is True
+    assert "Source data: references that cannot be checked for hidden cells; their values are not indexed." in (
+        chart.text
+    )
+
+
+def test_without_hidden_data_mode_withholds_an_unresolved_series_name_and_title():
+    title = (
+        '<c:title><c:tx><c:strRef><c:f>[0]!PayDyn</c:f><c:strCache><c:ptCount val="1"/>'
+        '<c:pt idx="0"><c:v>Payroll of Chloé</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title>'
+    )
+    series = _series("Chloé Dubois", ("Report!$A$1:$A$3", ["a", "b", "c"]), ("Report!$B$1:$B$3", [1, 2, 3]))
+    chart_xml = _chart_xml([_plot("barChart", [series.replace("Data!$B$1", "[0]!PayDyn")])])
+    raw = _cached_chart_over_unresolvable_reference("Data!$B$2:$B$4")
+    raw = _replace_parts(raw, {"xl/charts/chart1.xml": chart_xml.replace("<c:chart>", "<c:chart>" + title, 1)})
+    full_text = _charts(raw)[0].text
+    assert "Chloé Dubois" in full_text and "Payroll of Chloé" in full_text
+
+    (chart,) = _charts(raw, mode="without_hidden_data")
+
+    assert "Chloé" not in chart.text
+    assert "Chloé" not in str(chart.metadata)
+    assert "| a | 1 |" in chart.text  # the visible data stays
+
+
+def test_series_with_withheld_categories_are_never_merged_into_one_table():
+    def series(index, categories, value):
+        return _series(
+            f"S{index}", (categories, ["x", "y"]), (f"Report!$B${index + 1}:$C${index + 1}", [value, value + 1])
+        )
+
+    chart_xml = _chart_xml(
+        [_plot("barChart", [series(0, "(Data!$A$2,Data!$A$3)", 10), series(1, "Data!$A:$A", 20)])]
+    ).replace("Data!$B$1", "Report!$A$1")
+    raw = _replace_parts(_chart_over_hidden_sheet(), {"xl/charts/chart1.xml": chart_xml})
+
+    (chart,) = _charts(raw, mode="without_hidden_data")
+
+    assert "| x" not in chart.text
+    tables = [line for line in chart.text.splitlines() if line.startswith("| ") and "---" not in line]
+    headers = [line for line in tables if "S0" in line or "S1" in line]
+    assert len(headers) == 2, chart.text  # one table per series, not "S0 | S1" side by side
+
+
 def test_without_hidden_data_mode_never_reads_the_hidden_sheet(monkeypatch):
     from core.indexing.parsers.tabular.xlsx_drawings import extract
 
@@ -1344,6 +1417,30 @@ def test_waterfall_chart_is_indexed_with_its_data_and_totals(alternate_content):
     assert "Totals (bars showing the running total): Start, End." in chart.text
     assert chart.metadata["chart_format"] == "chartex"
     assert chart.metadata["chart_types"] == ["waterfall chart"]
+
+
+def test_without_hidden_data_mode_withholds_office_2016_axis_titles_from_hidden_or_unknown_cells():
+    def axis(axis_id, scaling, formula, title):
+        title_xml = (
+            f"<cx:title><cx:tx><cx:txData><cx:f>{formula}</cx:f><cx:v>{title}</cx:v></cx:txData></cx:tx></cx:title>"
+        )
+        return f'<cx:axis id="{axis_id}"><cx:{scaling}/>{title_xml}</cx:axis>'
+
+    xml = _cx_chart(
+        [_cx_data(0, categories=["Start", "Sales", "Costs", "Tax", "End"], values=[100, 50, -30, -5, 115])],
+        [_cx_series("waterfall")],
+        axes=axis(0, "catScaling", "[0]!PayDyn", "Step of Chloé")
+        + axis(1, "valScaling", "Secret!$A$1", "Pay of Chloé"),
+    )
+    raw = _workbook_with_chartex(xml, hidden_sheet=True)
+    raw = _with_defined_names(raw, '<definedName name="PayDyn">OFFSET(Secret!$A$1,0,0,1,1)</definedName>')
+    assert "Axes: Step of Chloé (categories); Pay of Chloé (values)" in _charts(raw)[0].text
+
+    (chart,) = _charts(raw, mode="without_hidden_data")
+
+    assert "Chloé" not in chart.text
+    assert "Chloé" not in str(chart.metadata)
+    assert "| Costs | -30 |" in chart.text  # the visible data stays
 
 
 def test_treemap_hierarchy_is_combined_outer_level_first_and_sized_by_its_values():
