@@ -329,6 +329,28 @@ async def test_an_update_with_nothing_to_change_still_checks_the_fence(store):
         )
 
 
+async def test_a_fenced_commit_during_a_partition_delete_waits_instead_of_deadlocking(store):
+    await _acquire(store, "task-a")
+    conn = await store.pool.acquire()
+    try:
+        transaction = conn.transaction()
+        await transaction.start()
+        # The order of a partition delete: its row first, then the cascade.
+        await conn.execute("SELECT partition FROM partitions WHERE partition = $1 FOR UPDATE", PARTITION)
+        commit = asyncio.ensure_future(
+            store.document_repo.add_file_to_partition(file_id=FILE_ID, partition=PARTITION, fence_holder_id="task-a")
+        )
+        await asyncio.sleep(0.3)
+        await conn.execute("DELETE FROM partitions WHERE partition = $1", PARTITION)
+        await transaction.commit()
+    finally:
+        await store.pool.release(conn)
+
+    with pytest.raises(FileFenceLostError):
+        await asyncio.wait_for(commit, timeout=5)
+    assert not await _file_row(store)
+
+
 async def test_a_take_over_waits_for_a_commit_in_flight(store):
     await _acquire(store, "task-a")
     conn = await store.pool.acquire()

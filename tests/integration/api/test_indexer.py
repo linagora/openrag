@@ -875,7 +875,13 @@ class TestPostgresFileFences:
             data={"metadata": "{}"},
         )
 
-        assert refused.status_code == 409
+        if refused.status_code != 409:
+            state = api_client.get(f"/indexer/task/{task_id}").json().get("task_state")
+            pytest.fail(
+                f"the second replace answered {refused.status_code}, not 409; the first replace ({task_id}) "
+                f"is now {state}. COMPLETED means it may have finished before the second one arrived, "
+                "so the test indexed too fast for the race; any other state means the fence did not hold."
+            )
         assert refused.json()["detail"].startswith("[DOCUMENT_INDEXING_IN_PROGRESS]")
         assert refused.json()["extra"]["existing_task_id"] == task_id
         wait_for_task(api_client, task_id)

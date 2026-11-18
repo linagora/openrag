@@ -67,7 +67,15 @@ async def _require_file_fence(conn: asyncpg.Connection, partition: str, file_id:
     ``FOR SHARE`` keeps the fence from being taken over or dropped until this
     transaction ends: a delete that takes the fence right after the write sees
     the committed row and removes it, never a row it could miss.
+
+    The partition's row is locked first. A partition delete locks it before its
+    cascade removes the partition's fences, and the write locks it anyway (the
+    embedder check, the foreign key of a new file row): taking the fence first
+    would hold the two in the opposite order, and the delete and the write could
+    deadlock. Locked first, the write waits for the delete, then finds its fence
+    gone.
     """
+    await conn.execute("SELECT 1 FROM partitions WHERE partition = $1 FOR KEY SHARE", partition)
     held = await conn.fetchval(
         """
         SELECT 1 FROM file_fences
