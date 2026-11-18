@@ -10,7 +10,9 @@ from conftest import TASK_TIMEOUT, wait_for_cancellation, wait_for_task
 # Check if image captioning is enabled (disabled in CI)
 IMAGE_CAPTIONING_ENABLED = os.environ.get("IMAGE_CAPTIONING", "").lower() not in ("false", "0", "")
 
-RESOURCES_DIR = Path(__file__).parent.parent / "resources"
+# tests/resources: the fixtures are part of the repository, so a missing one is
+# a broken test and fails, never a reason to skip.
+RESOURCES_DIR = Path(__file__).parents[2] / "resources"
 PDF_FILE = RESOURCES_DIR / "test_file.pdf"
 
 
@@ -26,8 +28,7 @@ def get_task_id(response_data: dict) -> str:
 @pytest.fixture
 def pdf_file_path():
     """Path to the test PDF file."""
-    if not PDF_FILE.exists():
-        pytest.skip(f"Test PDF not found: {PDF_FILE}")
+    assert PDF_FILE.exists(), f"Test PDF not found: {PDF_FILE}"
     return PDF_FILE
 
 
@@ -313,8 +314,7 @@ class TestSVGIndexing:
     def test_upload_svg_file(self, api_client, created_partition):
         """Test uploading and indexing an SVG file."""
         svg_file = RESOURCES_DIR / "test_file.svg"
-        if not svg_file.exists():
-            pytest.skip(f"Test SVG not found: {svg_file}")
+        assert svg_file.exists(), f"Test SVG not found: {svg_file}"
         file_id = "test-svg-001"
 
         with open(svg_file, "rb") as f:
