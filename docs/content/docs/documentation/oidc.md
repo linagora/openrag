@@ -409,6 +409,14 @@ successful login; until then, their open sessions and their API token keep the p
 take access away at once, remove the membership through the API, or regenerate the user's token
 (`POST /users/{user_id}/regenerate_token`), which also ends their OIDC sessions.
 
+Sync follows the IdP even when that takes a partition's **last owner** away (a role lowered, or the
+membership pruned), unlike the membership API, which refuses that with a 409. The partition keeps its
+documents, editors and viewers, but nobody can manage its members, change its presets or delete it
+until it has an owner again; a warning naming the partition is logged (`partition has no owner left`). To restore
+one, give a user the partition's owner group in the IdP: their next login makes them owner. A
+super-admin (`SUPER_ADMIN_MODE=true`) can also add an owner through the API meanwhile. When ownership
+moves from one user to another in the IdP, the partition is ownerless only until the new owner logs in.
+
 > **`is_admin` is never derived from groups.** Admin remains an explicit operator action
 > (`POST /users/` or `PATCH /users/{id}`), the same hard boundary as [Claim Mapping](#claim-mapping-optional).
 > The role vocabulary here is strictly the partition roles `viewer`/`editor`/`owner`.

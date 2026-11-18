@@ -893,6 +893,9 @@ class AuthService:
                 log.warning(
                     f"OIDC group sync: could not apply membership (partition may not exist or other error): {e}"
                 )
+            # Reached only on success: a failed change away from owner raised above.
+            if current.get(partition) == PartitionRole.OWNER.value:
+                await self._warn_if_left_without_owner(partition)
 
         # Prune memberships not present in the token (opt-in).
         #
@@ -929,6 +932,25 @@ class AuthService:
                 except Exception as e:
                     logger.bind(user_id=user.id, partition=partition).exception("OIDC group sync: prune failed")
                     raise OIDCFlowError(_GROUP_SYNC_FAILED, status_code=500) from e
+                if current[partition] == PartitionRole.OWNER.value:
+                    await self._warn_if_left_without_owner(partition)
+
+    async def _warn_if_left_without_owner(self, partition: str) -> None:
+        """Log when group sync has just taken a partition's last owner away.
+
+        Sync follows the IdP even then: a partition with no owner can still be
+        read and edited, but only a super-admin can manage its members until the
+        IdP gives someone its owner group and that user logs in. Checking is
+        best-effort; a failure here is logged and never blocks the login.
+        """
+        log = logger.bind(partition=partition)
+        try:
+            members = await self._membership_repo.list_partition_users(partition)
+        except Exception as e:
+            log.warning(f"OIDC group sync: could not check the partition's owners: {e}")
+            return
+        if not any(m.role == PartitionRole.OWNER for m in members):
+            log.warning("OIDC group sync: partition has no owner left; give a user its owner group in the IdP")
 
 
 __all__ = [

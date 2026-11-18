@@ -166,6 +166,13 @@ class FakeMembershipRepo:
             if uid == user_id
         ]
 
+    async def list_partition_users(self, partition: str):
+        return [
+            UserPartition(user_id=uid, partition=part, role=PartitionRole(role))
+            for (uid, part), role in self._rows.items()
+            if part == partition
+        ]
+
     async def assign_partition(self, assignment: UserPartition):
         if assignment.partition in self._fk_missing:
             raise RuntimeError("insert or update violates foreign key constraint")
@@ -830,6 +837,62 @@ async def test_membership_sync_skips_a_role_that_cannot_be_raised():
     # The user keeps less access than the token grants: the login goes on.
     await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner", "/openrag/beta/editor"]})
     assert repo.assigned == [(1, "beta", "editor")]
+
+
+@pytest.fixture
+def warnings_logged():
+    from loguru import logger
+
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="WARNING", format="{message} {extra}")
+    yield messages
+    logger.remove(sink_id)
+
+
+def _ownerless_warnings(messages):
+    return [m for m in messages if "no owner left" in m]
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_follows_the_idp_when_it_demotes_the_last_owner(warnings_logged):
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "owner"), (2, "alpha", "viewer")])
+    svc = _service(cfg=_group_cfg(), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/editor"]})
+    assert repo.updated == [(1, "alpha", "editor")]
+    [warning] = _ownerless_warnings(warnings_logged)
+    assert "alpha" in warning
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_follows_the_idp_when_it_prunes_the_last_owner(warnings_logged):
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "owner")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": []})
+    assert repo.removed == [(1, "alpha")]
+    [warning] = _ownerless_warnings(warnings_logged)
+    assert "alpha" in warning
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_says_nothing_when_another_owner_remains(warnings_logged):
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "owner"), (2, "alpha", "owner")])
+    svc = _service(cfg=_group_cfg(), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/viewer"]})
+    assert repo.updated == [(1, "alpha", "viewer")]
+    assert _ownerless_warnings(warnings_logged) == []
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_login_goes_on_when_the_owner_check_fails(warnings_logged):
+    class OwnersUnreadable(FakeMembershipRepo):
+        async def list_partition_users(self, partition):
+            raise RuntimeError("db down")
+
+    repo = OwnersUnreadable(seed=[(1, "alpha", "owner")])
+    svc = _service(cfg=_group_cfg(), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/viewer"]})
+    assert repo.updated == [(1, "alpha", "viewer")]
+    assert any("could not check the partition's owners" in m for m in warnings_logged)
 
 
 @pytest.mark.asyncio
