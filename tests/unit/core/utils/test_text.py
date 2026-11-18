@@ -74,6 +74,8 @@ class TestNeutralizePromptControlTokens:
         [
             "Sources: overview is a heading in this document.",
             "Sources: 2 studies support this conclusion.",
+            "Sources: 2 studies support\nthis conclusion.",
+            "Sources: none (the study used simulated data).",
         ],
     )
     def test_non_tag_sources_prose_is_preserved(self, text):
@@ -102,6 +104,8 @@ class TestNeutralizePromptControlTokens:
                 "Sources: [**1**] for this category.",
                 "Sources  [**1**] for this category.",
             ),
+            ("Sources: [\n1] for details", "Sources  [\n1] for details"),
+            ("Sources: [1,] for details", "Sources  [1,] for details"),
             (
                 "Sources: 1\n] for details",
                 "Sources  1\n] for details",
@@ -126,6 +130,8 @@ class TestNeutralizePromptControlTokens:
             "| Sources: 3 |",
             "Sources: [**none**] for this category.",
             "Sources: [**1**] for this category.",
+            "Sources: [\n1] for details",
+            "Sources: [1,] for details",
         ],
     )
     def test_source_filtering_neutralizer_is_safe_on_its_own(self, text):
