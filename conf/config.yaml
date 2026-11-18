@@ -368,7 +368,7 @@ chunker:
 retriever:
   type: single
   top_k: 50
-  similarity_threshold: 0.6
+  similarity_threshold: 0.2
   with_surrounding_chunks: false
   include_related: true
   include_ancestors: true
@@ -417,7 +417,7 @@ mcp:
   path: /mcp
   default_top_k: 5
   max_top_k: 50
-  similarity_threshold: 0.8
+  similarity_threshold: 0.2
   download_timeout: 30.0
   max_download_bytes: 104857600  # 100 MiB
 
