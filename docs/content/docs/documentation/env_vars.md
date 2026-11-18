@@ -466,7 +466,7 @@ The retriever fetches relevant documents from the vector database based on query
 |----------|------|---------|-------------|
 | `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
 | `RETRIEVER_TOP_K` | int | 50 | Number of documents to retrieve before reranking.|
-| `SIMILARITY_THRESHOLD` | float | 0.6 | Minimum similarity score (0.0-1.0) for document retrieval. Documents below this threshold are filtered out |
+| `SIMILARITY_THRESHOLD` | float | 0.2 | Minimum similarity score (0.0-1.0) applied to the dense (semantic) search only, before it is merged with the keyword (BM25) results. Its scale depends on the embedding model; with the default embedder relevant passages score about 0.2-0.7. Read only when no partition is loaded. Chat uses the `similarity_threshold` of the partition's retrieval preset, `GET /search` its own `similarity_threshold` parameter (default 0.2), and the MCP search tool `OPENRAG_MCP_SIMILARITY_THRESHOLD` |
 | `WITH_SURROUNDING_CHUNKS` | `bool` | false | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
 | `INCLUDE_RELATED` | `bool` | true | Expand results with chunks from files sharing the matched file's `relationship_id` (see [Linked files](/openrag/documentation/linked_files/)). |
 | `INCLUDE_ANCESTORS` | `bool` | true | Expand results with chunks from ancestor files in the parent/child file hierarchy (see [Linked files](/openrag/documentation/linked_files/)). |
@@ -820,7 +820,7 @@ OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol
 | `OPENRAG_MCP_PATH` | `str` | `/mcp` | HTTP path the MCP endpoint is served under. |
 | `OPENRAG_MCP_DEFAULT_TOP_K` | `int` | `5` | Number of chunks the search tool returns when the caller doesn't specify `top_k`. |
 | `OPENRAG_MCP_MAX_TOP_K` | `int` | `50` | Upper bound clamped on a caller-supplied `top_k`. |
-| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.8` | Minimum similarity score for a chunk to be returned by the search tool. |
+| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.2` | Minimum similarity score applied to the dense (semantic) side of the search only, before the merge with keyword (BM25) results. Its scale depends on the embedder. |
 | `OPENRAG_MCP_DOWNLOAD_TIMEOUT` | `float` | `30.0` | Timeout (seconds) for the server-side `index_url` fetch (SSRF/DoS hardening). |
 | `OPENRAG_MCP_MAX_DOWNLOAD_BYTES` | `int` | `104857600` | Maximum bytes downloaded by an `index_url` fetch. Default is 100 MiB. |
 
