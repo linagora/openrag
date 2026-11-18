@@ -665,7 +665,7 @@ class TestCrud:
         assert p.id
 
     async def test_query_contextualizer_accepts_calendar_anchors_placeholder(self):
-        """``{calendar_anchors}`` is rendered by QueryService.generate_query; a
+        """``{calendar_anchors}`` is rendered by ChatService.generate_query; a
         contextualizer prompt using it must pass write-time validation, and the
         bundled template does."""
         svc = _service()

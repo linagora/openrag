@@ -1,9 +1,9 @@
-"""OpenAI-compatible RAG endpoints — thin HTTP layer over QueryService.
+"""OpenAI-compatible RAG endpoints — thin HTTP layer over ChatService.
 
 Phase 8C.2: the RAG flow (query generation, retrieval, web search,
 map-reduce, context/prompt assembly, streaming, and the
 ``[Sources: N]`` citation filtering) moved to
-``services.orchestrators.query_service.QueryService``. This module keeps
+``services.orchestrators.chat_service.ChatService``. This module keeps
 HTTP transport only: model→partition resolution, token-limit validation,
 the OpenAI ``/models`` listing, request-bound source-link building
 (``__prepare_sources`` uses ``request.url_for`` so it stays here and is
@@ -38,7 +38,7 @@ from core.utils.exceptions import OpenRAGError, ServiceUnavailableError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text
 from core.utils.web_url import normalize_web_url
-from di.providers import get_config, get_partition_service, get_query_service
+from di.providers import get_chat_service, get_config, get_partition_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -321,7 +321,7 @@ def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None)
     """Effective LLM endpoint registry name for *partitions*.
 
     Delegates to ``resolve_partition_chat_llm`` — the same consensus rule
-    ``QueryService._resolve_llm`` uses to pick the LLM that actually answers
+    ``ChatService._resolve_llm`` uses to pick the LLM that actually answers
     the request — so the token preflight is checked against the budget of the
     model that will really be called, not always the global default. Falls
     back to the ``"default"`` alias (see ``ModelEndpointService``) when no
@@ -329,7 +329,7 @@ def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None)
 
     A partition's ``chat_llm`` can also go **stale** — the endpoint it names
     may have been deleted or renamed after assignment (nothing cascades the
-    reference). ``QueryService._resolve_llm`` handles that by catching the
+    reference). ``ChatService._resolve_llm`` handles that by catching the
     factory ``KeyError`` and answering with the catalog default; the preflight
     must converge on the same endpoint, otherwise it would check the request
     against the global budget while a differently-sized default endpoint
@@ -477,7 +477,7 @@ def _max_prompt_tokens(
     """Tokens the prompt may take on the endpoint answering this request.
 
     Its context window (``get_max_model_tokens``: admin-set, else probed, else
-    the global fallback) minus the output budget. ``QueryService`` caps the
+    the global fallback) minus the output budget. ``ChatService`` caps the
     retrieved context to what is left of it once the instructions and the
     conversation are in. ``None`` for a client-supplied endpoint, whose window
     is unknown here.
@@ -561,7 +561,7 @@ async def openai_chat_completion(
     request: OpenAIChatCompletionRequest = Body(...),
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    service=Depends(get_query_service),
+    service=Depends(get_chat_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
@@ -720,7 +720,7 @@ async def openai_completion(
     request: OpenAICompletionRequest,
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    service=Depends(get_query_service),
+    service=Depends(get_chat_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
 ):

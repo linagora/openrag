@@ -1,4 +1,4 @@
-"""Unit tests for :class:`QueryService` (Phase 8C.2).
+"""Unit tests for :class:`ChatService` (Phase 8C.2).
 
 The Ray-backed LLM semaphore and the model-file-backed language detector
 are monkeypatched (both are infra concerns exercised in integration, not
@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-import services.orchestrators.query_service as qs
+import services.orchestrators.chat_service as qs
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
@@ -25,9 +25,9 @@ from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
 from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder
 from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
-from services.orchestrators.query_service import QueryService
+from services.orchestrators.chat_service import ChatService
 
-# Real prompt-template config (dir + key->filename mapping) so QueryService
+# Real prompt-template config (dir + key->filename mapping) so ChatService
 # can load its system / contextualizer / spoken-style templates from disk.
 _PROMPT_CFG = load_config()
 
@@ -173,8 +173,8 @@ def _config(mode="SimpleRag"):
     )
 
 
-def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> QueryService:
-    return QueryService(
+def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> ChatService:
+    return ChatService(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
         config=_config(mode),
@@ -297,7 +297,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
     of what this depth is meant to limit."""
     config = _config()
     config.rag.chat_history_depth = global_depth
-    svc = QueryService(
+    svc = ChatService(
         retrieval_service=FakeRetrieval(),
         llm=FakeLLM(),
         config=config,
@@ -2785,7 +2785,7 @@ async def test_websearch_with_partition_forwards_retrieval_diagnostic_overrides(
 async def test_answer_system_prompt_comes_from_prompt_service():
     # Revert-proves the query seam: the payload's system message is built from
     # prompt_service.resolve_prompt("sys_prompt", ...), resolved request-time —
-    # not a startup snapshot. Reverting query_service to load_template_by_key at
+    # not a startup snapshot. Reverting chat_service to load_template_by_key at
     # __init__ makes the marker disappear.
     class MarkerPromptService:
         def __init__(self):
@@ -3632,7 +3632,7 @@ def test_sanitize_valid_alternating_unchanged():
         {"role": "assistant", "content": "hi"},
         {"role": "user", "content": "again"},
     ]
-    assert QueryService._sanitize_messages(msgs) == msgs
+    assert ChatService._sanitize_messages(msgs) == msgs
 
 
 def test_sanitize_empty_content_replaced_with_placeholder():
@@ -3642,7 +3642,7 @@ def test_sanitize_empty_content_replaced_with_placeholder():
         {"role": "assistant", "content": ""},
         {"role": "user", "content": "second"},
     ]
-    out = QueryService._sanitize_messages(msgs)
+    out = ChatService._sanitize_messages(msgs)
     assert len(out) == 3
     assert out[1]["role"] == "assistant"
     assert out[1]["content"] == "NO_CONTENT"
@@ -3654,7 +3654,7 @@ def test_sanitize_whitespace_only_replaced():
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": "   "},
     ]
-    out = QueryService._sanitize_messages(msgs)
+    out = ChatService._sanitize_messages(msgs)
     assert out[1]["content"] == "NO_CONTENT"
 
 
@@ -3664,7 +3664,7 @@ def test_sanitize_no_content_key_replaced():
         {"role": "user", "content": "q"},
         {"role": "assistant", "name": "bot"},
     ]
-    out = QueryService._sanitize_messages(msgs)
+    out = ChatService._sanitize_messages(msgs)
     assert out[1]["content"] == "NO_CONTENT"
     assert out[1]["name"] == "bot"
 
@@ -3675,7 +3675,7 @@ def test_sanitize_empty_list_content_replaced():
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": []},
     ]
-    out = QueryService._sanitize_messages(msgs)
+    out = ChatService._sanitize_messages(msgs)
     assert out[1]["content"] == "NO_CONTENT"
 
 
@@ -3685,7 +3685,7 @@ def test_sanitize_assistant_with_tool_calls_untouched():
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function"}]},
     ]
-    out = QueryService._sanitize_messages(msgs)
+    out = ChatService._sanitize_messages(msgs)
     assert out == msgs
 
 
@@ -3695,14 +3695,14 @@ def test_sanitize_assistant_with_function_call_untouched():
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": None, "function_call": {"name": "f"}},
     ]
-    out = QueryService._sanitize_messages(msgs)
+    out = ChatService._sanitize_messages(msgs)
     assert out == msgs
 
 
 def test_sanitize_empty_user_not_touched():
     """User message with empty content → kept as-is (only assistant is patched)."""
     msgs = [{"role": "user", "content": ""}]
-    assert QueryService._sanitize_messages(msgs) == msgs
+    assert ChatService._sanitize_messages(msgs) == msgs
 
 
 def test_sanitize_multiple_empty_assistants_all_replaced():
@@ -3714,7 +3714,7 @@ def test_sanitize_multiple_empty_assistants_all_replaced():
         {"role": "assistant", "content": ""},
         {"role": "user", "content": "u3"},
     ]
-    out = QueryService._sanitize_messages(msgs)
+    out = ChatService._sanitize_messages(msgs)
     assert len(out) == 5
     assert out[1]["content"] == "NO_CONTENT"
     assert out[3]["content"] == "NO_CONTENT"
@@ -3726,12 +3726,12 @@ def test_sanitize_multimodal_content_untouched():
         {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]},
         {"role": "assistant", "content": [{"type": "text", "text": "desc"}]},
     ]
-    assert QueryService._sanitize_messages(msgs) == msgs
+    assert ChatService._sanitize_messages(msgs) == msgs
 
 
 def test_sanitize_empty_list():
     """Empty input → empty output."""
-    assert QueryService._sanitize_messages([]) == []
+    assert ChatService._sanitize_messages([]) == []
 
 
 def test_sanitize_system_message_preserved():
@@ -3741,7 +3741,7 @@ def test_sanitize_system_message_preserved():
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    assert QueryService._sanitize_messages(msgs) == msgs
+    assert ChatService._sanitize_messages(msgs) == msgs
 
 
 @pytest.mark.asyncio

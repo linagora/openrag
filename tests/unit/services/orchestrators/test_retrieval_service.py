@@ -679,7 +679,7 @@ async def test_search_rerank_across_embedders_reranks_the_fused_candidates(trace
 
 
 # --------------------------------------------------------------------------- #
-# retrieve / retrieve_multi / fuse — powers QueryService (8C.2)
+# retrieve / retrieve_multi / fuse — powers ChatService (8C.2)
 # --------------------------------------------------------------------------- #
 
 
@@ -1146,7 +1146,7 @@ async def test_preset_fields_the_pipeline_does_not_read_do_not_split_partitions(
                     **no_rerank, type="hyde", llm="llm-1", hyde_prompt_name="h", multi_query_prompt_name="m"
                 ),
             ),
-            # QueryService reads the contextualizer prompt, the pipeline does not.
+            # ChatService reads the contextualizer prompt, the pipeline does not.
             _partition(name="p4", retrieval=RetrievalPipelineConfig(**no_rerank, query_contextualizer_prompt_name="c")),
         ],
         {"embed-a": "vector_embed_a"},

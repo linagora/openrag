@@ -296,7 +296,7 @@ def test_sanitize_messages_keeps_tool_calls_reaching_it():
     """_sanitize_messages leaves a content-free assistant turn alone when it
     carries tool_calls — reachable only now that the schema forwards the field
     """
-    from services.orchestrators.query_service import QueryService
+    from services.orchestrators.chat_service import ChatService
 
     request = OpenAIChatCompletionRequest.model_validate(
         {
@@ -309,7 +309,7 @@ def test_sanitize_messages_keeps_tool_calls_reaching_it():
             ]
         }
     )
-    sanitized = QueryService._sanitize_messages(request.model_dump(exclude_none=True)["messages"])
+    sanitized = ChatService._sanitize_messages(request.model_dump(exclude_none=True)["messages"])
 
     assert sanitized[0]["content"] == ""
 

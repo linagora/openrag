@@ -137,7 +137,7 @@ class RetrievalService:
         return partition in self._partition_configs()
 
     def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
-        """Mirror QueryService's partition LLM resolution for public metadata."""
+        """Mirror ChatService's partition LLM resolution for public metadata."""
         if self._llm_factory is None:
             return "default"
         name = resolve_partition_chat_llm(list(partitions), self._partition_configs())
@@ -439,7 +439,7 @@ class RetrievalService:
     ) -> tuple[Reranker | None, dict[str, object]]:
         """Effective reranker for one partition's retrieval pipeline.
 
-        Resolution order — mirrors ``QueryService._resolve_llm``:
+        Resolution order — mirrors ``ChatService._resolve_llm``:
 
         1. The partition's configured ``reranker`` endpoint, resolved fresh via
            the model-endpoint catalog factory so a rename/promotion of that
@@ -488,7 +488,7 @@ class RetrievalService:
     def _default_reranker_name(self) -> str:
         """Real endpoint name behind the catalog reranker ``"default"`` alias, for logging.
 
-        Same identity-lookup trick as ``QueryService._default_llm_name``: the
+        Same identity-lookup trick as ``ChatService._default_llm_name``: the
         ``"default"`` alias config object is the *same* object as its real-named
         entry, so the name is recovered by identity. Returns ``"default"`` when
         it can't be resolved (e.g. the alias isn't populated yet).
@@ -551,7 +551,7 @@ class RetrievalService:
         """The settings *partition_cfg*'s pipeline is built from, after the caller's overrides.
 
         Only what the pipeline reads: a preset field it ignores (the reranker
-        when reranking is off, the contextualizer prompt, which QueryService
+        when reranking is off, the contextualizer prompt, which ChatService
         reads, a value the caller overrides) cannot split partitions into
         separate retrievals.
         """
@@ -867,7 +867,7 @@ class RetrievalService:
 
         Without ``rerank`` this is a faithful port of ``indexer.asearch`` + the
         legacy ``_expand_with_related_chunks`` (no query generation / reranking —
-        those belong to QueryService). Partitions on different embedders are
+        those belong to ChatService). Partitions on different embedders are
         searched separately, each with its own model's query embedding; their
         hits are fused with RRF and cut to ``top_k`` before the surrounding
         chunks are added.
@@ -1081,7 +1081,7 @@ class RetrievalService:
         return hits + [c for c in surrounding if c.id not in seen]
 
     # ------------------------------------------------------------------
-    # Pipeline retrieval (powers QueryService — 8C.2)
+    # Pipeline retrieval (powers ChatService — 8C.2)
     # ------------------------------------------------------------------
 
     async def _gather_partition_groups(
@@ -1345,7 +1345,7 @@ class RetrievalService:
     ) -> list[list[Chunk]]:
         """Per-sub-query ranked lists (NOT fused).
 
-        QueryService's combined web-search path interleaves these with web
+        ChatService's combined web-search path interleaves these with web
         searches concurrently, then fuses; exposing the un-fused lists
         lets it run one ``asyncio.gather`` over both.
         """

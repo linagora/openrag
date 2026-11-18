@@ -1,4 +1,4 @@
-"""The chat routes hand ``QueryService`` what the answering model's window leaves
+"""The chat routes hand ``ChatService`` what the answering model's window leaves
 for the prompt: its context size minus the output budget (``max_prompt_tokens``),
 and report a prompt that doesn't fit in it as a 413.
 """
@@ -15,7 +15,7 @@ from api.routers.user import chat
 from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, ModelEndpointConfig
 from core.config.root import Settings
 from core.utils.exceptions import ContextWindowExceededError
-from di.providers import get_config, get_partition_service, get_query_service
+from di.providers import get_chat_service, get_config, get_partition_service
 from fastapi import FastAPI
 
 WINDOW = 16384
@@ -26,8 +26,8 @@ def _deterministic_token_counter(monkeypatch):
     monkeypatch.setattr(chat, "get_num_tokens", lambda: lambda text: len(text.split()))
 
 
-class RecordingQueryService:
-    """Records the keyword arguments each QueryService entry point is called with."""
+class RecordingChatService:
+    """Records the keyword arguments each ChatService entry point is called with."""
 
     def __init__(self) -> None:
         self.calls: dict[str, dict[str, Any]] = {}
@@ -48,7 +48,7 @@ class RecordingQueryService:
         return {"choices": [], "extra": {}}
 
 
-class OverWindowQueryService:
+class OverWindowChatService:
     """Answers every request as one whose instructions and conversation overflow the window."""
 
     async def refresh_partition_configs(self) -> None:
@@ -71,8 +71,8 @@ class FakePartitionService:
 
 
 @pytest.fixture
-def service() -> RecordingQueryService:
-    return RecordingQueryService()
+def service() -> RecordingChatService:
+    return RecordingChatService()
 
 
 @pytest.fixture
@@ -89,7 +89,7 @@ def make_client(async_client_factory, monkeypatch):
         app.include_router(chat.router, prefix="/v1")
         app.dependency_overrides[current_user] = lambda: {"id": 2, "is_admin": False}
         app.dependency_overrides[current_user_or_admin_partitions_list] = lambda: ["p"]
-        app.dependency_overrides[get_query_service] = lambda: service
+        app.dependency_overrides[get_chat_service] = lambda: service
         app.dependency_overrides[get_partition_service] = FakePartitionService
         app.dependency_overrides[get_config] = lambda: settings
         return async_client_factory(app)
@@ -139,7 +139,7 @@ async def test_completions_pass_the_window_minus_the_output_budget(client, servi
     ],
 )
 async def test_a_prompt_over_the_window_is_a_413(make_client, path, body):
-    async with make_client(OverWindowQueryService()) as client:
+    async with make_client(OverWindowChatService()) as client:
         response = await client.post(path, json=body)
 
     assert response.status_code == 413
@@ -150,7 +150,7 @@ async def test_a_prompt_over_the_window_is_a_413(make_client, path, body):
 async def test_a_streamed_prompt_over_the_window_is_an_error_event(make_client):
     """The stream's headers are sent before the prompt is built, so the 413 comes as an error event."""
     body = {"model": "openrag-p", "messages": [{"role": "user", "content": "hello"}], "stream": True}
-    async with make_client(OverWindowQueryService()) as client:
+    async with make_client(OverWindowChatService()) as client:
         response = await client.post("/v1/chat/completions", json=body)
 
     events = [line[len("data: ") :] for line in response.text.splitlines() if line.startswith("data: ")]

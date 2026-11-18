@@ -7,7 +7,7 @@ from api.dependencies.auth import require_partition_viewer
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
 from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
-from di.providers import get_config, get_query_service
+from di.providers import get_chat_service, get_config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -37,7 +37,7 @@ def _config(max_context_tokens=4096):
 
 
 def _client(*, max_context_tokens=4096, user=None):
-    class _QueryService:
+    class _ChatService:
         def __init__(self):
             self.calls = []
             self.events = []
@@ -58,7 +58,7 @@ def _client(*, max_context_tokens=4096, user=None):
                 "errors": [],
             }
 
-    service = _QueryService()
+    service = _ChatService()
     app = FastAPI()
     register_error_handlers(app)
     app.include_router(search_router, prefix="/search")
@@ -66,7 +66,7 @@ def _client(*, max_context_tokens=4096, user=None):
     app.dependency_overrides[require_partition_viewer] = lambda: viewer
     if viewer["is_admin"]:
         app.dependency_overrides[get_retrieval_diagnostics_guard] = lambda: _AllowDiagnostics()
-    app.dependency_overrides[get_query_service] = lambda: service
+    app.dependency_overrides[get_chat_service] = lambda: service
     app.dependency_overrides[get_config] = lambda: _config(max_context_tokens)
     return TestClient(app), service
 

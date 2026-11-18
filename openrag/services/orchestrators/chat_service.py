@@ -1,28 +1,21 @@
-"""QueryService — RAG orchestration (Phase 8C.2).
+"""ChatService — orchestrates the chat and completions endpoints (was ``QueryService``).
 
-Rebuilt from ``components/pipeline.py:RagPipeline`` + ``map_reduce.py``.
-The hardest single extraction in Phase 8: query generation, retrieval,
-web search, map-reduce, context formatting, system-prompt assembly, and
-streaming all lived tangled in ``RagPipeline``.
+The router is pure transport: it maps the partition, builds request-bound
+source links (the ``prepare_sources`` callable keeps ``request.url_for`` in
+transport), and wraps ``StreamingResponse`` / ``JSONResponse``.
 
-Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
+This module does the rest: it rewrites the history into search queries,
+retrieves the documents and web results, runs map-reduce when asked, fits the
+sources into the prompt, calls the model, and returns the answer with the
+citation-filtered ``extra`` sources. ``chat_stream`` drives
+``core.utils.source_filtering.stream_with_source_filtering``, which holds back
+a lookahead so the ``[Sources: N]`` tag never reaches the client and emits
+only settled text.
 
-* **Structured output** — the legacy used a LangChain structured-output
-  chain for ``SearchQueries`` (query generation) and ``SummarizedChunk``
-  (map-reduce). 8H bans LangChain in orchestrators, so QueryService uses
-  the injected core ``LLM`` with a
-  JSON-instructed prompt + ``response_format=json_object`` and
-  ``json.loads`` into the Pydantic model, keeping the legacy fallbacks
-  (retry → raw user query; relevancy=False on parse failure).
-* **Streaming + citations live here; the router is pure transport.**
-  ``chat_stream`` drives the proven
-  ``core.utils.source_filtering.stream_with_source_filtering`` (it holds back a lookahead that
-  keeps the ``[Sources: N]`` tag from reaching the client, and emits only settled text);
-  ``chat`` / ``complete`` return the finalized OpenAI dict with the
-  citation-filtered ``extra`` sources. The router only maps the
-  partition, builds request-bound source links (``prepare_sources``
-  callable — keeps ``request.url_for`` in transport), and wraps
-  ``StreamingResponse`` / ``JSONResponse``.
+Query generation and map-reduce call the injected core ``LLM`` with a
+JSON-instructed prompt and ``response_format=json_object``, parsed into
+Pydantic models: a rewrite that can't be read falls back to the user's
+message, a map-reduce verdict that can't be read counts as not relevant.
 
 No LangChain symbol is imported into this module. ``Chunk`` is converted to a
 LangChain ``Document`` via ``Chunk.to_langchain()`` at the boundary so the
@@ -238,7 +231,7 @@ class RAGMODE(Enum):
     CHATBOTRAG = "ChatBotRag"
 
 
-class QueryService:
+class ChatService:
     """End-to-end RAG: query-gen → retrieve (+web) → map-reduce → answer."""
 
     #: Used when the global ``rag.chat_history_depth`` config is < 1 — see
@@ -1990,4 +1983,4 @@ def _build_extra_payload(
     return payload
 
 
-__all__ = ["QueryService", "RAGMODE"]
+__all__ = ["ChatService", "RAGMODE"]

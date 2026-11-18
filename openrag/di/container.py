@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from core.ports.workspace_repo import WorkspaceRepository
     from core.vector_stores import VectorStore
     from services.orchestrators.auth_service import AuthService
+    from services.orchestrators.chat_service import ChatService
     from services.orchestrators.conversion_service import ConversionService
     from services.orchestrators.embedder_swap_service import EmbedderSwapService
     from services.orchestrators.indexing_service import IndexingService
@@ -70,7 +71,6 @@ if TYPE_CHECKING:
     from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.preset_service import PresetService
     from services.orchestrators.prompt_service import PromptService
-    from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
     from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
     from services.orchestrators.user_service import UserService
@@ -133,7 +133,7 @@ class ServiceContainer:
         self._workspace_service: WorkspaceService | None = None
         self._retrieval_service: RetrievalService | None = None
         self._retrieval_snapshot_service: RetrievalSnapshotService | None = None
-        self._query_service: QueryService | None = None
+        self._chat_service: ChatService | None = None
         self._indexing_service: IndexingService | None = None
         self._job_service: JobService | None = None
         self._conversion_service: ConversionService | None = None
@@ -657,8 +657,8 @@ class ServiceContainer:
         return self._retrieval_snapshot_service
 
     @property
-    def query_service(self) -> QueryService:
-        """QueryService — lazily built, cached for the container's lifetime.
+    def chat_service(self) -> ChatService:
+        """ChatService — lazily built, cached for the container's lifetime.
 
         Shares the same core LLM construction as ``retrieval_service``
         (built from ``settings.llm``); the named ``llm_factory`` lets the
@@ -668,8 +668,8 @@ class ServiceContainer:
         ``WebSearchFactory`` (provider is ``None`` when
         ``WEBSEARCH_API_TOKEN`` is unset — web search silently disabled).
         """
-        if self._query_service is None:
-            from services.orchestrators.query_service import QueryService
+        if self._chat_service is None:
+            from services.orchestrators.chat_service import ChatService
             from services.websearch import WebSearchFactory
 
             settings = self._require_settings()
@@ -684,7 +684,7 @@ class ServiceContainer:
                 ),
                 DEFAULT_PROVIDER,
             )
-            self._query_service = QueryService(
+            self._chat_service = ChatService(
                 retrieval_service=self.retrieval_service,
                 llm=llm,
                 config=settings,
@@ -693,7 +693,7 @@ class ServiceContainer:
                 prompt_service=self.prompt_service,
                 llm_factory=self.llm_factory,
             )
-        return self._query_service
+        return self._chat_service
 
     @property
     def indexing_service(self) -> IndexingService:
