@@ -1,25 +1,19 @@
-"""RetrievalService — retrieval orchestration (Phase 8C.1).
+"""RetrievalService — retrieval orchestration.
 
-Wraps the clean ``core.retrieval`` pipeline (strategy + optional reranker
-+ related/ancestor expansion + RRF fusion). The legacy
-``components/retriever.py`` and ``RetrieverPipeline`` were Phase-5 shims
-over this same core; this service is the real composition seam.
+Builds one ``core.retrieval`` pipeline (retriever, optional reranker,
+related/ancestor expansion) per group of partitions that share an embedder
+and retrieval settings, from the partition configs cached in
+``Settings.partitions``, and fuses the groups' results with RRF. It also
+serves the raw ``/search`` endpoint and describes the retrieval settings for
+the trace and its fingerprints.
 
-Searcher backing (logged decision, Phase 8C): the core retriever talks
-to a ``RetrievalSearcher`` port. The only implementation today is
-``MilvusRayShim`` (Ray ``Vectordb`` actor — embeds + hybrid-searches
-internally). Per the dev-workflow doc, Ray cleanup is Phase 9, and
-orchestrators may call Ray actors *behind a port* during the Phase-8
-shim. So the searcher is injected (Ray stays behind the port); this
-file has no Ray remote-call and no Ray import (8H stays satisfied). A
-clean ``VectorStore``-backed searcher replaces it in Phase 9.
-
-Constructor deviates from the plan's prescribed
-``(vector_store, embedder_factory, reranker_factory, llm_factory,
-document_repo, config)`` for the same reason: with the Ray-shim searcher,
-the vector store / embedder / document repo are unused (the shim does
-embedding + related/ancestor itself). The container injects the already
-built ``searcher`` / ``reranker`` / ``llm`` plus ``config``.
+The core retriever talks to the ``RetrievalSearcher`` port, implemented by
+``services.storage.vector_store_searcher.VectorStoreSearcher`` (query
+embedding in-process, then the ``VectorStore``). The container injects the
+default searcher, rerankers and LLM, and factories that resolve a partition's
+own embedder, reranker and LLM by name. A partition missing from the config
+cache is a ``PartitionNotFoundError``: there is no fallback pipeline built
+from the static ``settings.retriever`` config.
 """
 
 from __future__ import annotations
@@ -133,74 +127,12 @@ class RetrievalService:
         # the on-disk seed via load_template_by_key, preserving prior behaviour.
         self._prompt_service = prompt_service
         self._preset_service = preset_service
-        self._pipeline = self._build_legacy_pipeline(reranker=reranker, llm=llm)
 
         logger.debug(
             "RetrievalService ready",
             retriever=config.retriever.type,
             reranker_enabled=config.reranker.enabled and reranker is not None,
             partition_configs=len(getattr(config, "partitions", {}) or {}),
-        )
-
-    def _build_legacy_pipeline(
-        self,
-        *,
-        reranker: Reranker | None,
-        llm: LLM | None,
-        top_k: int | None = None,
-        similarity_threshold: float | None = None,
-        disable_reranker: bool = False,
-        disable_expansion: bool = False,
-    ) -> RetrieverPipeline:
-        """Pipeline built from the static ``settings.retriever``/``settings.reranker`` config.
-
-        Used when the partition cache (``Settings.partitions``) is empty, or
-        when an empty partition list is requested. A running service never
-        gets there: startup seeds the ``default`` partition and loads the
-        cache, and that partition cannot be deleted. An empty scope never
-        reaches this service either: the search and chat routes answer 403,
-        and the MCP search tool raises ``PermissionError("No accessible
-        partitions")``, which the client sees as a tool error. Only unit tests
-        that build the service without partitions, or a partition table
-        emptied by hand in the database, still reach it.
-        """
-        config = self._config
-        rcfg = config.retriever
-        common = {
-            "searcher": self._searcher,
-            "top_k": top_k if top_k is not None else rcfg.top_k,
-            "similarity_threshold": (
-                similarity_threshold if similarity_threshold is not None else rcfg.similarity_threshold
-            ),
-            "with_surrounding_chunks": rcfg.with_surrounding_chunks,
-            "include_related": False if disable_expansion else rcfg.include_related,
-            "include_ancestors": False if disable_expansion else rcfg.include_ancestors,
-            "related_limit": rcfg.related_limit,
-            "max_ancestor_depth": rcfg.max_ancestor_depth,
-        }
-        rtype = rcfg.type
-        if rtype == "multiQuery":
-            retriever = MultiQueryRetriever(
-                llm=llm,
-                multi_query_template=load_template_by_key(config.paths.prompts_dir, config.prompts, "multi_query"),
-                k_queries=rcfg.k_queries,
-                **common,
-            )
-        elif rtype == "hyde":
-            retriever = HyDeRetriever(
-                llm=llm,
-                hyde_template=load_template_by_key(config.paths.prompts_dir, config.prompts, "hyde"),
-                combine=rcfg.combine,
-                **common,
-            )
-        else:
-            retriever = SingleRetriever(**common)
-
-        return RetrieverPipeline(
-            retriever=retriever,
-            reranker=reranker if config.reranker.enabled and not disable_reranker else None,
-            reranker_top_k=config.reranker.top_k,
-            allow_filterless_fallback=rcfg.allow_filterless_fallback,
         )
 
     def _build_retriever(
@@ -298,7 +230,7 @@ class RetrievalService:
         }
 
     def _legacy_reranker_identity(self) -> dict[str, object]:
-        """Describe the startup reranker used by the legacy retrieval pipeline."""
+        """Describe the static reranker built at startup from ``settings.reranker``."""
         if self._legacy_reranker is None:
             return {"name": None, "model": None}
         return {
@@ -786,24 +718,6 @@ class RetrievalService:
             rrf_k=cfg.rrf_k,
         )
 
-    @staticmethod
-    def _legacy_query_expansion_prompt_identity(pipeline: RetrieverPipeline) -> dict[str, str | None] | None:
-        retriever = pipeline.retriever
-        if isinstance(retriever, MultiQueryRetriever):
-            prompt_type = "multi_query"
-            content = retriever.multi_query_template
-        elif isinstance(retriever, HyDeRetriever):
-            prompt_type = "hyde"
-            content = retriever.hyde_template
-        else:
-            return None
-        return {
-            "type": prompt_type,
-            "name": None,
-            "source": "disk-seed",
-            "content_hash": hashlib.sha256(content.encode()).hexdigest(),
-        }
-
     async def _pipeline_for_partition(
         self,
         partition: str,
@@ -813,10 +727,6 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
     ) -> tuple[RetrieverPipeline, int | None]:
-        # Callers only ever pass a concrete partition name. With no per-partition
-        # configs at all, fall back to the legacy pipeline.
-        if not self._partition_configs():
-            return self._pipeline, None
         partition_cfg = self._require_partition_config(partition)
         settings = self._pipeline_settings(
             partition_cfg,
@@ -846,7 +756,7 @@ class RetrievalService:
         await self.refresh_partition_configs()
         requested = list(partitions)
         configs = self._partition_configs()
-        selected = list(configs) if "all" in requested and configs else list(dict.fromkeys(requested))
+        selected = list(configs) if "all" in requested else list(dict.fromkeys(requested))
         prompt_identities: dict[str, dict[str, str | None] | None] = {}
         reranker_identities: dict[str, dict[str, object]] = {}
         groups: list[ResolvedRetrievalGroup] = []
@@ -855,10 +765,8 @@ class RetrievalService:
             for partition_name in selected:
                 partition = configs.get(partition_name)
                 retrieval = partition.retrieval if partition is not None else self._config.retriever
-                prompt_identities[partition_name] = (
-                    await self._query_expansion_prompt_identity(retrieval, strict=strict_prompt_resolution)
-                    if configs
-                    else self._legacy_query_expansion_prompt_identity(self._pipeline)
+                prompt_identities[partition_name] = await self._query_expansion_prompt_identity(
+                    retrieval, strict=strict_prompt_resolution
                 )
                 reranker_enabled = getattr(
                     retrieval,
@@ -871,23 +779,7 @@ class RetrievalService:
                         partition_name,
                     )
                     reranker_identities[partition_name] = identity
-        elif not selected or not configs:
-            pipeline = self._pipeline
-            if any((top_k is not None, similarity_threshold is not None, disable_reranker, disable_expansion)):
-                pipeline = self._build_legacy_pipeline(
-                    reranker=self._legacy_reranker,
-                    llm=self._legacy_llm,
-                    top_k=top_k,
-                    similarity_threshold=similarity_threshold,
-                    disable_reranker=disable_reranker,
-                    disable_expansion=disable_expansion,
-                )
-            group_partitions = tuple(["all"] if "all" in requested else selected)
-            groups.append(ResolvedRetrievalGroup(group_partitions, pipeline, None))
-            legacy_identity = self._legacy_query_expansion_prompt_identity(pipeline)
-            for partition_name in selected:
-                prompt_identities[partition_name] = legacy_identity
-        else:
+        elif selected:
             partition_groups = self._partitions_by_pipeline(
                 selected,
                 top_k=top_k,
@@ -965,23 +857,13 @@ class RetrievalService:
         """
         await self.refresh_partition_configs()
         configs = self._partition_configs()
-        if not partitions or not configs:
-            # Nothing to expand (no partitions exist yet) — keep the single
-            # legacy pipeline; there is no per-partition config to honour.
-            pipeline = self._pipeline
-            if any((top_k is not None, similarity_threshold is not None, disable_reranker, disable_expansion)):
-                pipeline = self._build_legacy_pipeline(
-                    reranker=self._legacy_reranker,
-                    llm=self._legacy_llm,
-                    top_k=top_k,
-                    similarity_threshold=similarity_threshold,
-                    disable_reranker=disable_reranker,
-                    disable_expansion=disable_expansion,
-                )
-            return [(["all"] if "all" in partitions else partitions, pipeline, None)]
+        scope = list(configs) if "all" in partitions else partitions
+        if not scope:
+            # No partition to retrieve from: nothing to search.
+            return []
         groups: list[tuple[list[str], RetrieverPipeline, int | None]] = []
         partition_groups = self._partitions_by_pipeline(
-            list(configs) if "all" in partitions else partitions,
+            scope,
             top_k=top_k,
             similarity_threshold=similarity_threshold,
             disable_reranker=disable_reranker,

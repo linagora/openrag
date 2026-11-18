@@ -76,6 +76,13 @@ def _partition(name: str, embedder: str) -> PartitionConfig:
     )
 
 
+def _tenant_config() -> SimpleNamespace:
+    """A config whose partition cache holds ``tenant-a``, on the default embedder."""
+    config = _config()
+    config.partitions = {"tenant-a": _partition("tenant-a", "default")}
+    return config
+
+
 def _service(searcher=None, *, config=None, searcher_factory=None) -> RetrievalService:
     return RetrievalService(
         searcher=searcher or _Searcher(),
@@ -91,7 +98,7 @@ async def test_retrieve_threads_trace_and_records_final_stage():
     searcher = _Searcher()
     trace = RetrievalTraceBuilder("request-1", "hello")
 
-    chunks = await _service(searcher).retrieve(
+    chunks = await _service(searcher, config=_tenant_config()).retrieve(
         partitions=["tenant-a"],
         query=Query(query="hello"),
         trace=trace,
@@ -259,7 +266,7 @@ async def test_retrieve_per_query_traces_each_query_in_order():
     searcher = _Searcher([_chunk("hit")])
     trace = RetrievalTraceBuilder("request-1", "original question")
 
-    results = await _service(searcher).retrieve_per_query(
+    results = await _service(searcher, config=_tenant_config()).retrieve_per_query(
         partitions=["tenant-a"],
         queries=[Query(query="rewrite one"), Query(query="rewrite two")],
         trace=trace,

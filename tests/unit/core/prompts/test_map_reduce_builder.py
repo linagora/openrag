@@ -19,6 +19,11 @@ def test_build_map_messages_returns_system_then_user_with_substitution():
     assert "some doc body" in user_text
 
 
+def test_system_prompt_asks_for_the_json_the_chat_service_parses():
+    """The chat service reads ``relevancy`` and ``summary`` from the reply as JSON."""
+    assert '{"relevancy": <true|false>, "summary":' in SYSTEM_PROMPT_MAP
+
+
 def test_user_prompt_template_uses_named_placeholders():
     """Lock the template's named placeholders so accidental positional refactors
     don't silently change the wire format."""
