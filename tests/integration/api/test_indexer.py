@@ -846,6 +846,14 @@ class TestPostgresFileFences:
 
     def test_a_replace_while_the_file_is_indexing_is_refused(self, api_client, created_partition, tmp_path):
         file_id = "fenced-replace-001"
+        first = api_client.post(
+            f"/indexer/partition/{created_partition}/file/{file_id}",
+            files={"file": ("first.txt", b"The first version of the file.", "text/plain")},
+            data={"metadata": "{}"},
+        )
+        assert first.status_code in [200, 201, 202]
+        wait_for_task(api_client, get_task_id(first.json()))
+
         # Large enough to take seconds to chunk and embed, and needs no fixture
         # file: the PDF the other tests use isn't present in CI.
         large = tmp_path / "large.txt"
@@ -853,21 +861,21 @@ class TestPostgresFileFences:
             "\n\n".join(f"Paragraph {i}: the fence holds this file while it is indexed." for i in range(20000))
         )
         with open(large, "rb") as f:
-            first = api_client.post(
+            running = api_client.put(
                 f"/indexer/partition/{created_partition}/file/{file_id}",
                 files={"file": ("large.txt", f, "text/plain")},
                 data={"metadata": "{}"},
             )
-        assert first.status_code in [200, 201, 202]
-        task_id = get_task_id(first.json())
+        assert running.status_code in [200, 201, 202]
+        task_id = get_task_id(running.json())
 
-        replace = api_client.put(
+        refused = api_client.put(
             f"/indexer/partition/{created_partition}/file/{file_id}",
             files={"file": ("replacement.txt", b"A different, short replacement.", "text/plain")},
             data={"metadata": "{}"},
         )
 
-        assert replace.status_code == 409
-        assert replace.json()["detail"].startswith("[DOCUMENT_INDEXING_IN_PROGRESS]")
-        assert replace.json()["extra"]["existing_task_id"] == task_id
+        assert refused.status_code == 409
+        assert refused.json()["detail"].startswith("[DOCUMENT_INDEXING_IN_PROGRESS]")
+        assert refused.json()["extra"]["existing_task_id"] == task_id
         wait_for_task(api_client, task_id)

@@ -921,7 +921,11 @@ class PgDocumentRepository(DocumentRepository):
             params.append(chunk_count)
             sets.append(f"chunk_count = ${len(params)}")
         if not sets:
-            # Match legacy: report whether the row exists at all.
+            # Match legacy: report whether the row exists at all. A holder that
+            # lost the fence is refused here too, as it would be with fields.
+            if fence_holder_id is not None:
+                async with self.pool.acquire() as conn:
+                    await _require_file_fence(conn, partition, file_id, fence_holder_id)
             return await self.file_exists_in_partition(file_id, partition)
         params.extend([file_id, partition])
         sql = f"""
