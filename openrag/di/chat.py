@@ -1,7 +1,9 @@
-"""Builds the ``ChatService`` and the steps it finds a request's sources with.
+"""Builds the ``ChatService``: its capabilities, the ``classic`` graph's steps and the compiled graph.
 
-The capabilities are built once, when the container first builds the service,
-and shared by chat and completions.
+The graph is compiled here, once, when the container first builds the service,
+and runs for every chat request. The capabilities are built once too and
+shared: the graph's steps and the completions endpoint read the same
+contextualizer, retriever and prompt settings.
 """
 
 from __future__ import annotations
@@ -15,6 +17,9 @@ from services.capabilities.retrieve import SourceRetriever
 from services.capabilities.scope import ScopeResolver
 from services.capabilities.summarize import Summarizer
 from services.capabilities.web_search import WebSearch
+from services.chat.classic import ClassicSteps
+from services.chat.graphs.classic import build_classic_graph
+from services.chat.prompt_settings import PartitionPromptSettings
 from services.inference.runtime import detect_language, get_llm_semaphore
 from services.orchestrators.answer_service import AnswerService
 from services.orchestrators.chat_service import ChatService
@@ -37,7 +42,7 @@ def create_chat_service(
     prompt_service: PromptService,
     llm_factory: Callable[[str], LLM] | None = None,
 ) -> ChatService:
-    """A ``ChatService`` over these services.
+    """A ``ChatService`` running the ``classic`` graph over these services.
 
     *llm* is the static LLM built from ``settings.llm``: the last resort when
     no catalog endpoint answers, and the one map-reduce runs on. *llm_factory*
@@ -45,24 +50,39 @@ def create_chat_service(
     ``"default"`` alias); ``None`` in unit tests. *web_search_service* is
     ``None`` when no provider is configured.
     """
+    contextualizer = QueryContextualizer(
+        config=config,
+        prompt_service=prompt_service,
+        llm=llm,
+        detect_language=detect_language,
+        clock=lambda: datetime.now(UTC),
+    )
     web_search = WebSearch(web_search_service)
+    retriever = SourceRetriever(retrieval_service=retrieval_service, web_search=web_search)
+    prompt_settings = PartitionPromptSettings(config)
+    steps = ClassicSteps(
+        config=config,
+        retrieval_service=retrieval_service,
+        prompt_service=prompt_service,
+        contextualizer=contextualizer,
+        retriever=retriever,
+        web_search=web_search,
+        summarizer=Summarizer(llm=llm, config=config, semaphore=get_llm_semaphore),
+        prompt_settings=prompt_settings,
+        clock=datetime.now,
+        detect_language=detect_language,
+    )
     return ChatService(
         config=config,
         llm=llm,
         llm_factory=llm_factory,
         retrieval_service=retrieval_service,
         prompt_service=prompt_service,
-        contextualizer=QueryContextualizer(
-            config=config,
-            prompt_service=prompt_service,
-            llm=llm,
-            detect_language=detect_language,
-            clock=lambda: datetime.now(UTC),
-        ),
+        contextualizer=contextualizer,
         scope_resolver=ScopeResolver(workspace_service),
-        web_search=web_search,
-        retriever=SourceRetriever(retrieval_service=retrieval_service, web_search=web_search),
-        summarizer=Summarizer(llm=llm, config=config, semaphore=get_llm_semaphore),
+        retriever=retriever,
+        prompt_settings=prompt_settings,
+        classic=build_classic_graph(steps),
         answer_service=AnswerService(detect_language=detect_language),
     )
 

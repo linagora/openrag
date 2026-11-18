@@ -14,8 +14,10 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import core.utils.text as text_utils
 import di.chat as chat_factory
 import pytest
+import services.chat.classic as classic_steps
 import services.orchestrators.chat_service as qs
 from core.chat import smalltalk
 from core.config import load_config
@@ -57,8 +59,7 @@ def _patch_infra(monkeypatch):
         yield
 
     monkeypatch.setattr(chat_factory, "get_llm_semaphore", _noop_sem)
-    for module in (qs, chat_factory):
-        monkeypatch.setattr(module, "detect_language", lambda _t, **_kwargs: "en")
+    monkeypatch.setattr(chat_factory, "detect_language", lambda _t, **_kwargs: "en")
 
 
 class FakeLLM:
@@ -170,14 +171,16 @@ def _config(mode="SimpleRag"):
     )
 
 
-def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> ChatService:
+def _svc(
+    *, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None, prompt_service=None
+) -> ChatService:
     return create_chat_service(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
         config=_config(mode),
         web_search_service=web or FakeWeb(),
         workspace_service=workspace or FakeWorkspace(),
-        prompt_service=_disk_prompt_service(),
+        prompt_service=prompt_service or _disk_prompt_service(),
         llm_factory=llm_factory,
     )
 
@@ -202,7 +205,7 @@ def test_resolve_chat_history_depth_zero_inherits_global_default():
 
 
 # --------------------------------------------------------------------------- #
-# sources: the retrieval preset's top_n, within the model window
+# a partition's config, as the chat path reads it
 # --------------------------------------------------------------------------- #
 
 
@@ -212,34 +215,8 @@ def _partition_cfg(top_n: int | None = None, **fields) -> SimpleNamespace:
     return SimpleNamespace(retrieval=RetrievalPipelineConfig(top_n=top_n), **{**defaults, **fields})
 
 
-def test_top_n_follows_the_partition_preset():
-    svc = _svc()  # reranker.top_k = 5
-    svc._config.partitions = {"p": _partition_cfg(top_n=15)}
-    assert svc._resolve_top_n(["p"]) == 15
-
-
-def test_unset_top_n_follows_reranker_top_k():
-    svc = _svc()
-    svc._config.partitions = {"p": _partition_cfg(top_n=None)}
-    assert svc._resolve_top_n(["p"]) == 5
-
-
-def test_top_n_takes_the_largest_across_partitions():
-    svc = _svc()
-    svc._config.partitions = {"small": _partition_cfg(top_n=15), "unset": _partition_cfg(top_n=None)}
-    assert svc._resolve_top_n(["small", "unset"]) == 15
-    assert svc._resolve_top_n(["all"]) == 15
-
-
-def test_top_n_falls_back_to_reranker_top_k():
-    svc = _svc()
-    svc._config.partitions = {"p": _partition_cfg(top_n=15)}
-    assert svc._resolve_top_n(None) == 5
-    assert svc._resolve_top_n(["unknown"]) == 5
-
-
 def test_acknowledgement_prompt_does_not_assume_the_user_expressed_gratitude():
-    prompt = qs.build_casual_response_prompt("acknowledgement", "en")
+    prompt = classic_steps.build_casual_response_prompt("acknowledgement", "en")
 
     assert "Acknowledge the user's response briefly" in prompt
     assert "current topic" in prompt
@@ -743,7 +720,7 @@ async def _presented(svc, *, max_prompt_tokens, metadata=None, **request):
 async def test_chat_caps_sources_at_what_the_model_window_leaves(monkeypatch):
     """With the window known, the sources get what is left of it after the
     instructions and the conversation, even below the partition's top_n."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
     first_only = 100 + qs.get_num_tokens()("[Source 1]\nshort")
 
@@ -755,7 +732,7 @@ async def test_chat_caps_sources_at_what_the_model_window_leaves(monkeypatch):
 async def test_chat_takes_top_n_chunks_however_long(monkeypatch):
     """The count is top_n, not a token budget sized from the chunk size: a chunk
     longer than the chunk size, or one carrying a long header, still makes it."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     chunks = [Chunk(id="c1", text="word " * 2000, metadata={"_id": "c1"})]
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer"]))
     svc._config.partitions = {"p": _partition_cfg(top_n=1)}
@@ -766,7 +743,7 @@ async def test_chat_takes_top_n_chunks_however_long(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_skips_a_source_the_window_cannot_fit_and_keeps_going(monkeypatch):
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     chunks = [
         Chunk(id="long", text="word " * 2000, metadata={"_id": "long"}),
         Chunk(id="short", text="short", metadata={"_id": "short"}),
@@ -779,7 +756,7 @@ async def test_chat_skips_a_source_the_window_cannot_fit_and_keeps_going(monkeyp
 
 @pytest.mark.asyncio
 async def test_chat_without_a_known_window_takes_top_n(monkeypatch):
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
 
     assert await _presented(svc, max_prompt_tokens=None) == ["c1", "c2"]
@@ -795,10 +772,10 @@ def _long_tool_definition():
 async def test_chat_sources_leave_room_for_the_tool_definitions(monkeypatch):
     """The client's tool definitions reach the provider with the prompt, so
     the sources get what is left of the window after them too."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
     tools = [_long_tool_definition()]
-    tools_tokens = qs.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
+    tools_tokens = classic_steps.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
     first_only = 100 + tools_tokens + qs.get_num_tokens()("[Source 1]\nshort")
 
     assert await _presented(svc, max_prompt_tokens=first_only, tools=tools) == ["c1"]
@@ -815,7 +792,7 @@ async def test_chat_with_tools_never_sends_more_than_the_window_leaves(monkeypat
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
     svc._config.partitions = {"p": _partition_cfg(top_n=5)}
     tools = [_long_tool_definition()]
-    tools_tokens = qs.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
+    tools_tokens = classic_steps.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
 
     async def sent(max_prompt_tokens):
         await svc.chat(
@@ -827,7 +804,7 @@ async def test_chat_with_tools_never_sends_more_than_the_window_leaves(monkeypat
         )
         messages, kwargs = llm.chat_calls[-1]
         assert kwargs["tools"] == tools
-        return qs._messages_tokens(messages) + tools_tokens
+        return classic_steps.messages_tokens(messages) + tools_tokens
 
     everything = await sent(None)
     for window in range(everything - 600, everything + 1):
@@ -841,10 +818,10 @@ def _long_web_result():
 @pytest.mark.asyncio
 async def test_window_cap_counts_the_web_results(monkeypatch):
     """Under a known window the web results take their share of it."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     web = _long_web_result()
     svc = _two_chunk_svc(web=FakeWeb(results=[web]))
-    _, _, web_tokens = qs.format_web_context([web], length_function=qs.get_num_tokens(), max_tokens=2000)
+    _, _, web_tokens = classic_steps.format_web_context([web], length_function=qs.get_num_tokens(), max_tokens=2000)
     first_only = 100 + web_tokens + qs.get_num_tokens()("[Source 1]\nshort")
 
     presented = await _presented(svc, max_prompt_tokens=first_only, metadata={"websearch": True})
@@ -855,7 +832,7 @@ async def test_window_cap_counts_the_web_results(monkeypatch):
 @pytest.mark.asyncio
 async def test_web_results_take_no_more_than_the_window_leaves(monkeypatch):
     """A web context larger than the room left is cut to it, not sent over the window."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc(web=FakeWeb(results=[_long_web_result()]))
 
     # 50 tokens left: the 600-word web result doesn't fit, both chunks do.
@@ -868,7 +845,7 @@ async def test_web_results_take_no_more_than_the_window_leaves(monkeypatch):
 async def test_chat_never_sends_more_than_the_window_leaves(monkeypatch):
     """Whatever the window, the answer messages fit it: the separator between the
     documents and the web results counts too, though the sizing leaves it out."""
-    monkeypatch.setattr(qs, "get_num_tokens", lambda: len)
+    monkeypatch.setattr(text_utils, "_cached_length_function", len)
     chunks = [Chunk(id=f"c{i}", text="word " * (5 * i), metadata={"_id": f"c{i}"}) for i in range(1, 6)]
     web = [
         SimpleNamespace(url=f"https://example.test/{i}", title="Web", content="word " * 8, snippet="") for i in range(3)
@@ -887,9 +864,9 @@ async def test_chat_never_sends_more_than_the_window_leaves(monkeypatch):
         )
         return llm.chat_calls[-1][0]
 
-    everything = qs._messages_tokens(await sent(None))
+    everything = classic_steps.messages_tokens(await sent(None))
     for window in range(everything - 400, everything + 1):
-        assert qs._messages_tokens(await sent(window)) <= window
+        assert classic_steps.messages_tokens(await sent(window)) <= window
 
 
 @pytest.mark.asyncio
@@ -900,7 +877,7 @@ async def test_complete_never_sends_more_than_the_window_leaves(monkeypatch):
         # The assembled prompt costs more than its parts: 5 per source in it.
         return len(text) + (5 * text.count("[Source") if "# User request" in text else 0)
 
-    monkeypatch.setattr(qs, "get_num_tokens", lambda: num_tokens)
+    monkeypatch.setattr(text_utils, "_cached_length_function", num_tokens)
     chunks = [Chunk(id=f"c{i}", text="word " * (5 * i), metadata={"_id": f"c{i}"}) for i in range(1, 6)]
     llm = FakeLLM(gen_text="answer")
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
@@ -945,7 +922,7 @@ async def test_chat_without_documents_never_sends_more_than_the_window_leaves():
         )
         messages = llm.chat_calls[-1][0]
         assert EMPTY_CONTEXT_MESSAGE in messages[0]["content"]
-        return qs._messages_tokens(messages)
+        return classic_steps.messages_tokens(messages)
 
     everything = await sent(None)
     for window in range(everything - 50, everything + 1):
@@ -993,7 +970,7 @@ async def test_casual_answer_never_sends_more_than_the_window_leaves():
             model_name="m",
             max_prompt_tokens=max_prompt_tokens,
         )
-        return qs._messages_tokens(llm.chat_calls[-1][0])
+        return classic_steps.messages_tokens(llm.chat_calls[-1][0])
 
     everything = await sent(None)
     assert await sent(everything) == everything
@@ -1025,7 +1002,7 @@ async def test_window_counts_an_empty_assistant_turn_as_sent(question):
         )
         messages = llm.chat_calls[-1][0]
         assert messages[2]["content"] == "NO_CONTENT"
-        return qs._messages_tokens(messages)
+        return classic_steps.messages_tokens(messages)
 
     everything = await sent(None)
     assert await sent(everything) == everything
@@ -1035,7 +1012,7 @@ async def test_window_counts_an_empty_assistant_turn_as_sent(question):
 
 @pytest.mark.asyncio
 async def test_chat_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
 
     with pytest.raises(ContextWindowExceededError) as exc:
@@ -1048,7 +1025,7 @@ async def test_chat_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_stream_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
 
     with pytest.raises(ContextWindowExceededError):
@@ -1065,7 +1042,7 @@ async def test_chat_stream_rejects_a_conversation_the_window_cannot_hold(monkeyp
 @pytest.mark.asyncio
 async def test_web_results_leave_the_top_n_whole_when_the_window_has_room(monkeypatch):
     """Web results come out of the window, not out of the top_n chunks."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc(web=FakeWeb(results=[_long_web_result()]))
 
     for window in (None, 100_000):
@@ -1082,7 +1059,7 @@ async def test_complete_caps_sources_at_what_the_model_window_leaves(monkeypatch
         # The rendered instructions always end with the user request; count them as one block.
         return instructions if "# User request" in text else len(text.split())
 
-    monkeypatch.setattr(qs, "get_num_tokens", lambda: num_tokens)
+    monkeypatch.setattr(text_utils, "_cached_length_function", num_tokens)
     chunks = [Chunk(id="c1", text="short", metadata={"_id": "c1"})]
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
     svc._config.partitions = {"p": _partition_cfg(top_n=10)}
@@ -1241,7 +1218,7 @@ async def test_chat_casual_response_preserves_the_safely_wrapped_client_system_p
     ],
 )
 def test_casual_response_prompt_is_intent_specific(intent, required_text):
-    prompt = qs.build_casual_response_prompt(intent, "en")
+    prompt = classic_steps.build_casual_response_prompt(intent, "en")
 
     assert "Respond in English" in prompt
     assert f"intent is {intent}" in prompt
@@ -1252,14 +1229,14 @@ def test_casual_response_prompt_is_intent_specific(intent, required_text):
 
 @pytest.mark.parametrize("intent", ["gratitude", "farewell", "empty"])
 def test_casual_response_prompt_addresses_assistant_directly(intent):
-    prompt = qs.build_casual_response_prompt(intent, "en")
+    prompt = classic_steps.build_casual_response_prompt(intent, "en")
 
     assert "list your capabilities" in prompt
     assert "list its capabilities" not in prompt
 
 
 def test_casual_response_prompt_uses_configured_assistant_name_without_vendor_attribution():
-    prompt = qs.build_casual_response_prompt("greeting", "en", assistant_name="Marianne")
+    prompt = classic_steps.build_casual_response_prompt("greeting", "en", assistant_name="Marianne")
 
     assert "You are Marianne, a helpful assistant" in prompt
     assert "introduce yourself as Marianne" in prompt
@@ -1674,7 +1651,7 @@ async def test_original_query_comparison_never_changes_actual_documents():
     ]
     comparison = out["extra"]["retrieval_trace"]["comparisons"]["original_query"]
     assert comparison["status"] == "complete"
-    expected_fingerprint = qs.canonical_fingerprint(
+    expected_fingerprint = classic_steps.canonical_fingerprint(
         {
             "stored_configuration_fingerprint": "fake-fingerprint",
             "effective_request_overrides": {
@@ -1834,8 +1811,7 @@ async def test_empty_contextualized_casual_answer_retries_in_the_same_language(o
             return "en"
         return None
 
-    for module in (qs, chat_factory):
-        monkeypatch.setattr(module, "detect_language", detect_test_language)
+    monkeypatch.setattr(chat_factory, "detect_language", detect_test_language)
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
     kwargs = {
         "partitions": ["p"],
@@ -2440,7 +2416,7 @@ async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
 
     assert len(retrieval.retrieve_multi_calls) == 1
     assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == "Merci!"
-    assert retrieval.retrieve_multi_calls[0]["top_k"] == svc._summarizer.max_total_documents
+    assert retrieval.retrieve_multi_calls[0]["top_k"] == svc._config.map_reduce.max_total_documents
     assert retrieval.retrieve_multi_calls[0]["retrieval_top_k"] is None
 
 
@@ -2501,9 +2477,8 @@ async def test_answer_system_prompt_comes_from_prompt_service():
             self.seen.append(prompt_type)
             return "MARKER-SYS::{context}"
 
-    svc = _svc(retrieval=FakeRetrieval())  # SimpleRag → no contextualizer call
     marker = MarkerPromptService()
-    svc._prompt_service = marker
+    svc = _svc(retrieval=FakeRetrieval(), prompt_service=marker)  # SimpleRag → no contextualizer call
 
     result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     payload = result.payload
@@ -2526,9 +2501,8 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
             self.calls.append((prompt_type, tuple(names or ())))
             return "SYS::{context}"
 
-    svc = _svc(retrieval=FakeRetrieval())
     rec = RecordingPromptService()
-    svc._prompt_service = rec
+    svc = _svc(retrieval=FakeRetrieval(), prompt_service=rec)
     svc._config.partitions = {
         "p": _partition_cfg(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
     }
@@ -2557,9 +2531,8 @@ async def test_spoken_style_metadata_swaps_the_answer_prompt():
             self.calls.append((prompt_type, tuple(names or ())))
             return "SPOKEN::{context}"
 
-    svc = _svc(retrieval=FakeRetrieval())
     rec = RecordingPromptService()
-    svc._prompt_service = rec
+    svc = _svc(retrieval=FakeRetrieval(), prompt_service=rec)
     svc._config.partitions = {
         "p": _partition_cfg(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
     }
@@ -3594,13 +3567,11 @@ def _service_with_orders(orders):
     svc = _svc(retrieval=FakeRetrieval(chunks=_BY_RELEVANCE))
     svc._config.partitions = {"p": _partition_cfg(top_n=2)}
 
-    class FixedQueries:
-        rewrites_queries = False
+    async def contextualize(*_args, **_kwargs):
+        return SearchQueries(query_list=[Query(query=f"q{i}", date_order=order) for i, order in enumerate(orders)])
 
-        async def contextualize(self, *_args, **_kwargs):
-            return SearchQueries(query_list=[Query(query=f"q{i}", date_order=order) for i, order in enumerate(orders)])
-
-    svc._contextualizer = FixedQueries()
+    # One contextualizer: chat reads it in the graph's steps, completions in the service.
+    svc._contextualizer.contextualize = contextualize
     return svc
 
 

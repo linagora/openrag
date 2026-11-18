@@ -4,17 +4,17 @@ The router is pure transport: it maps the partition, builds request-bound
 source links (the ``prepare_sources`` callable keeps ``request.url_for`` in
 transport), and wraps ``StreamingResponse`` / ``JSONResponse``.
 
-This module finds the sources and renders them into the prompt. Finding them
-is a sequence of steps in ``services.capabilities``: the scope, the
-contextualized queries, the documents and web results, the map-reduce
-summaries; this module decides which of them run, and fits the sources into
-the window. ``AnswerService`` (``answer_service.py``) then calls the model,
-strips the ``[Sources: N]`` tag, retries an empty answer and builds ``extra``,
-the same way for ``chat``, ``chat_stream`` and ``complete``.
-``di.chat.create_chat_service`` builds the steps and this service.
-
-The rules with no I/O live in ``core``: small talk (``core.chat.smalltalk``),
-the history window (``core.chat.history``), fitting the sources into the window
+This module finds the sources and renders them into the prompt;
+``AnswerService`` (``answer_service.py``) then calls the model, strips the
+``[Sources: N]`` tag, retries an empty answer and builds ``extra``, the same
+way for ``chat``, ``chat_stream`` and ``complete``. A chat request's sources
+are found by the ``classic`` graph (``services.chat``), whose steps call the
+capabilities in ``services.capabilities``: the scope, the contextualized
+queries, the documents and web results, the map-reduce summaries. This module
+settles the history, the route and the scope, runs the graph, and prepares
+completions itself; ``di.chat`` builds it and compiles the graph. The rules
+with no I/O live in ``core``: small talk (``core.chat.smalltalk``), the history window
+(``core.chat.history``), fitting the sources into the window
 (``core.chat.budget``), the route (``core.chat.routing``), shaping the answer
 (``core.chat.answer``), the request's metadata flags
 (``core.models.chat.ChatOptions``) and the contextualizer's messages
@@ -39,50 +39,32 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
 
-from core.chat.budget import fit_prompt, fit_sources
-from core.chat.history import history_window, latest_user_query, sanitize_messages, split_leading_system_prompt
+from core.chat.budget import fit_prompt
+from core.chat.history import history_window, latest_user_query, split_leading_system_prompt
 from core.chat.routing import Route, resolve_route
 from core.chat.scope import Scope
-from core.chat.smalltalk import (
-    CasualMessagePolicy,
-    acknowledgement_language,
-    classify_latest_message,
-)
 from core.models.chat import ChatOptions
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
-from core.models.retrieval_trace import ContextualizationTrace, PromptTrace
-from core.prompts import (
-    SOURCE_SEPARATOR,
-    build_casual_response_prompt,
-    documents_context,
-    format_web_context,
-    message_tokens,
-    prepend_system_prompt,
-    tool_definition_tokens,
-)
+from core.prompts import documents_context
 from core.retrieval.date_order import order_chunks_by_date
-from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder, canonical_fingerprint
+from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder
 from core.utils.exceptions import ContextWindowExceededError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens
-from services.capabilities.contextualize import (
-    QueryContextualizer,
-    mark_fallback,
-    record_bypass,
-    record_contextualization,
-    record_not_run,
-)
-from services.capabilities.retrieve import SourceRetriever
-from services.capabilities.scope import ScopeResolver
-from services.capabilities.summarize import Summarizer
-from services.capabilities.web_search import WebSearch
-from services.inference.runtime import detect_language
-from services.orchestrators.answer_service import AnswerService, PreparedAnswer
+from services.capabilities.contextualize import record_contextualization, record_not_run
+from services.chat.classic import ChatContext
+from services.orchestrators.answer_service import PreparedAnswer
 
 if TYPE_CHECKING:
     from core.config.root import Settings
     from core.llm.llm import LLM
+    from services.capabilities.contextualize import QueryContextualizer
+    from services.capabilities.retrieve import SourceRetriever
+    from services.capabilities.scope import ScopeResolver
+    from services.chat.classic import ClassicGraph
+    from services.chat.prompt_settings import PartitionPromptSettings
+    from services.orchestrators.answer_service import AnswerService
     from services.orchestrators.prompt_service import PromptService
     from services.orchestrators.retrieval_service import RetrievalService
 
@@ -121,13 +103,17 @@ class ChatService:
         prompt_service: PromptService,
         contextualizer: QueryContextualizer,
         scope_resolver: ScopeResolver,
-        web_search: WebSearch,
         retriever: SourceRetriever,
-        summarizer: Summarizer,
+        prompt_settings: PartitionPromptSettings,
+        classic: ClassicGraph,
         answer_service: AnswerService,
         llm_factory: Callable[[str], LLM] | None = None,
     ) -> None:
-        """Built by ``di.chat.create_chat_service``, which builds the steps it runs."""
+        """Built by ``di.chat.create_chat_service``, which compiles the *classic* graph.
+
+        The graph's steps share *contextualizer*, *retriever* and
+        *prompt_settings* with the completions endpoint, which runs outside it.
+        """
         self._retrieval = retrieval_service
         self._answer = answer_service
         self._llm = llm
@@ -137,9 +123,9 @@ class ChatService:
         self._prompt_service = prompt_service
         self._contextualizer = contextualizer
         self._scope = scope_resolver
-        self._web = web_search
         self._retriever = retriever
-        self._summarizer = summarizer
+        self._prompt_settings = prompt_settings
+        self._classic = classic
 
         # Keep a live reference so per-partition config (resolved into
         # ``config.partitions`` and refreshed on every preset change) can be
@@ -187,44 +173,6 @@ class ChatService:
             if explicit:
                 return max(explicit)
         return self._default_chat_history_depth
-
-    def _resolve_top_n(self, partition: list[str] | None) -> int:
-        """How many sources this request's prompt takes: the retrieval preset's ``top_n``.
-
-        ``reranker.top_k`` when the preset leaves it unset. Retrieval already
-        cuts each group of partitions it retrieves together (one embedder, the
-        same retrieval settings) to the group's ``top_n``; this matters for a
-        request whose partitions, or ``"all"``, span several groups, whose fused
-        results can hold up to the *sum* of them. It takes the largest ``top_n``
-        among the partitions, so about one group's worth (in RRF order) reaches
-        the prompt.
-        """
-        default = self._config.reranker.top_k
-        configs = self._config.partitions
-        if partition and configs:
-            names = list(configs) if "all" in partition else partition
-            top_ns = [
-                cfg.retrieval.effective_top_n(default) for name in names if (cfg := configs.get(name)) is not None
-            ]
-            if top_ns:
-                return max(top_ns)
-        return default
-
-    def _fit_sources(self, docs: list, partition: list[str] | None, headroom: int | None) -> list[int]:
-        """Positions of up to ``top_n`` of *docs*, within the *headroom* the answering model's window leaves.
-
-        See ``core.chat.budget.fit_sources``. The window comes from the LLM
-        endpoint's context size (admin-set, else probed from vLLM, else
-        ``MAX_LLM_CONTEXT_SIZE``), so a too-small value there shows up here as
-        fewer sources than ``top_n``: logged, because nothing else surfaces it.
-        """
-        top_n = self._resolve_top_n(partition)
-        included = fit_sources(docs, top_n=top_n, headroom=headroom, length_function=get_num_tokens())
-        if len(included) < min(len(docs), top_n):
-            logger.bind(partition=partition, top_n=top_n, presented=len(included), headroom=headroom).info(
-                "Sources left out: they don't fit in the answering model's context window"
-            )
-        return included
 
     def _resolve_llm(self, partition: list[str] | None) -> LLM:
         """Effective LLM for this request — query generation and answering.
@@ -340,22 +288,6 @@ class ChatService:
                     return name
         return "default"
 
-    def _generation_prompt_name(self, prompt_type: str, partition: list[str] | None) -> str | None:
-        """The library prompt this request's partition names for a generation type.
-
-        Honoured only for a single owning partition (same rule as chat_llm /
-        chat_history_depth); multi-partition and the ``"all"`` sentinel resolve
-        the global default. Returned as the sole candidate name for
-        ``PromptService.resolve_prompt`` — a future per-user tier prepends ahead
-        of it.
-        """
-        if not partition or "all" in partition or len(partition) != 1:
-            return None
-        cfg = self._config.partitions.get(partition[0])
-        if cfg is None:
-            return None
-        return getattr(cfg, "generation_prompt_names", {}).get(prompt_type)
-
     # ------------------------------------------------------------------
     # Preparation (was RagPipeline._prepare_for_chat_completion)
     # ------------------------------------------------------------------
@@ -368,6 +300,13 @@ class ChatService:
         trace: RetrievalTraceBuilder | None = None,
         max_prompt_tokens: int | None = None,
     ):
+        """Find a chat request's sources and render its prompt, through the ``classic`` graph.
+
+        The history check, the route and the scope are settled first: a request
+        with no non-system message is a 422 and an unknown workspace a 404
+        before any step runs. *payload*'s messages are replaced by the prompt
+        the graph built, unless a web-only search found nothing.
+        """
         messages = history_window(payload["messages"], self._resolve_chat_history_depth(partition))
         custom_prompt, messages = split_leading_system_prompt(payload["messages"], messages)
         if not messages:
@@ -376,237 +315,38 @@ class ChatService:
         options = ChatOptions.from_metadata(payload.get("metadata"))
         # Taken before a workspace narrows the partitions: narrowing never empties them.
         route = resolve_route(partition, options)
-
-        effective_retrieval_options = options.retrieval.as_options()
-        retrieval_top_k = effective_retrieval_options.get("top_k")
-        top_k = self._summarizer.max_total_documents if options.use_map_reduce else None
-        retrieval_overrides = {key: value for key, value in effective_retrieval_options.items() if key != "top_k"}
-
         scope = await self._scope.resolve(
             partition, workspace=options.workspace, attachment_ids=list(options.attachment_ids)
         )
-        partition = scope.partitions
-        indexed_attachment_ids = scope.attachment_ids
-
-        last_user_message = latest_user_query(messages)
-        casual_policy, acknowledgement_candidate = classify_latest_message(
-            messages, last_user_message, query_rewrite=self._contextualizer.rewrites_queries
-        )
-        retrieval_forced = (
-            options.require_retrieval or options.websearch or options.use_map_reduce or bool(indexed_attachment_ids)
-        )
-        queries: SearchQueries | None = None
-        configuration_fingerprint = "unavailable"
-        resolved_retrieval_plan = None
-
-        if options.bypass_query_contextualization:
-            queries = SearchQueries(query_list=[Query(query=last_user_message)])
-            record_bypass(trace, original_query=last_user_message)
-        elif casual_policy is None or retrieval_forced:
-            queries = await self._contextualizer.contextualize(messages, llm=llm, partitions=partition, trace=trace)
-            usable_queries = [query for query in queries.query_list if query.query.strip()]
-            if (
-                acknowledgement_candidate
-                and not retrieval_forced
-                and queries.intent == "gratitude"
-                and not queries.requires_retrieval
-                and not usable_queries
-            ):
-                casual_policy = CasualMessagePolicy(
-                    "acknowledgement", acknowledgement_language(messages, last_user_message, detect_language)
-                )
-            elif not usable_queries:
-                queries = SearchQueries(query_list=[Query(query=last_user_message)])
-                mark_fallback(trace, queries)
-            elif len(usable_queries) != len(queries.query_list):
-                queries = queries.model_copy(update={"query_list": usable_queries})
-
-        if trace is not None:
-            contextualizer_prompt = trace.contextualization.prompt if trace.contextualization is not None else None
-            resolve_plan = getattr(self._retrieval, "resolve_retrieval_plan", None)
-            if partition is not None and resolve_plan is not None:
-                try:
-                    resolved_retrieval_plan = await resolve_plan(
-                        partition,
-                        top_k=retrieval_top_k,
-                        contextualizer_prompt=contextualizer_prompt,
-                        **retrieval_overrides,
-                    )
-                except Exception as error:  # noqa: BLE001 - legacy resolution below keeps telemetry optional
-                    trace.record_error("configuration_resolution", error)
-            configuration_fingerprint = await self._configuration_fingerprint(
-                partition,
-                effective_options=effective_retrieval_options,
-                contextualizer_prompt=contextualizer_prompt,
-                resolved_plan=resolved_retrieval_plan,
-            )
-
-        # The history as the model gets it, so the window is checked against what is sent.
-        messages = sanitize_messages(messages)
-
-        if casual_policy is not None and not retrieval_forced:
-            if trace is not None and trace.contextualization is None:
-                trace.contextualization = ContextualizationTrace(
-                    original_query=last_user_message,
-                    subqueries=[],
-                    intent=casual_policy.intent,
-                    requires_retrieval=False,
-                )
-                trace.record_stage("original_query", status="complete", candidates=[])
-                trace.record_stage("contextualized_query", status="not_run", candidates=[])
-            casual_prompt = build_casual_response_prompt(
-                casual_policy.intent, casual_policy.language, assistant_name=self._config.server.assistant_name
-            )
-            payload["messages"] = prepend_system_prompt(
-                messages,
-                casual_prompt,
-                context="",
-                current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
-                custom_prompt=custom_prompt,
-            )
-            if max_prompt_tokens is not None:
-                sent = _messages_tokens(payload["messages"]) + tool_definition_tokens(payload, get_num_tokens())
-                if sent > max_prompt_tokens:
-                    raise ContextWindowExceededError(sent, max_prompt_tokens)
-            return _PrepareChatResult(
-                payload,
-                [],
-                [],
-                [],
-                [],
-                True,
-                indexed_attachment_ids,
-                configuration_fingerprint,
-                True,
-            )
-
-        if queries is None:  # pragma: no cover - guarded by the casual return above
-            queries = SearchQueries(query_list=[Query(query=last_user_message)])
-
-        chunks, web_results = await self._retriever.retrieve(
-            queries,
+        context = ChatContext(
+            options=options,
             route=route,
             scope=scope,
-            top_k=top_k,
-            retrieval_top_k=retrieval_top_k,
-            overrides=retrieval_overrides,
+            llm=llm,
+            payload=payload,
             trace=trace,
-            resolved_plan=resolved_retrieval_plan,
+            max_prompt_tokens=max_prompt_tokens,
         )
-
-        if trace is not None and route.has_documents and options.compare_original_query:
-            await self._retriever.compare_original_query(
-                trace,
-                original_query=last_user_message,
-                scope=scope,
-                top_k=top_k,
-                retrieval_top_k=retrieval_top_k,
-                overrides=retrieval_overrides,
-                configuration_fingerprint=configuration_fingerprint,
-                resolved_plan=resolved_retrieval_plan,
-            )
-
-        if not chunks and not web_results and not route.has_documents:
-            return _PrepareChatResult(
-                payload,
-                [],
-                [],
-                [],
-                [],
-                False,
-                indexed_attachment_ids,
-                configuration_fingerprint,
-            )
-
-        docs = [c.to_langchain() for c in chunks]
-
-        # Full retrieval set, captured right after retrieval — before map-reduce
-        # replaces `docs` with LLM-generated summaries, and before the
-        # token-budget selection below drops anything that didn't fit in the
-        # prompt. Kept separately for `all_retrieved_sources` (debugging/eval),
-        # while `docs`/`web_results` stay map-reduced and budget-truncated to
-        # match what the LLM actually saw and the citation indices it cites
-        # (#847 review — the map-reduce gap was called out in a follow-up pass).
-        retrieved_docs = docs
-        retrieved_web_results = web_results
-
-        prompt_type = "spoken_style_answer" if options.spoken_style_answer else "sys_prompt"
-        tmpl = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+        state = await self._classic.ainvoke(
+            {
+                "messages": messages,
+                "custom_prompt": custom_prompt,
+                "last_user_message": latest_user_query(messages),
+            },
+            context=context,
         )
-        current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
-        # What the window leaves for sources once the instructions, the
-        # conversation and the client's tool definitions are in. A conversation
-        # it can't hold fails here, before map-reduce, rather than at the provider.
-        room = None
-        tools_tokens = tool_definition_tokens(payload, get_num_tokens())
-        if max_prompt_tokens is not None:
-            without_sources = prepend_system_prompt(
-                messages, tmpl, context="", current_date=current_date, custom_prompt=custom_prompt
-            )
-            room = max_prompt_tokens - _messages_tokens(without_sources) - tools_tokens
-            if room < 0:
-                raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
-
-        if options.use_map_reduce and docs:
-            docs = await self._summarizer.summarize(" ".join(q.query for q in queries.query_list), docs)
-
-        # Web results come out of the same room, so they can't take more than it either.
-        web_max_tokens = self._web.max_tokens if room is None else min(self._web.max_tokens, room)
-        web_formatted, web_source_numbers, web_tokens = "", [], 0
-        web_start_index = 1
-        if web_results:
-            web_formatted, web_source_numbers, web_tokens = format_web_context(
-                web_results,
-                length_function=get_num_tokens(),
-                start_index=web_start_index,
-                max_tokens=web_max_tokens,
-            )
-        headroom = None if room is None else room - web_tokens
-        candidates = docs
-        docs = [docs[i] for i in self._fit_sources(docs, partition, headroom)]
-
-        def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
-            """The answer messages with *docs*, then the *web_candidates* that fit after them."""
-            context = documents_context(
-                order_chunks_by_date(docs, queries.date_order),
-                any_retrieved=bool(candidates),
-                length_function=get_num_tokens(),
-            )
-            web_shown: list = []
-            if web_candidates:
-                start = len(docs) + 1
-                web_formatted, numbers, _ = format_web_context(
-                    web_candidates, length_function=get_num_tokens(), start_index=start, max_tokens=web_max_tokens
-                )
-                web_shown = [web_candidates[n - start] for n in numbers]
-                context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if docs else web_formatted
-            answer_messages = prepend_system_prompt(
-                messages, tmpl, context=context, current_date=current_date, custom_prompt=custom_prompt
-            )
-            return answer_messages, web_shown
-
-        # The sources were sized part by part, without the separators between
-        # documents and web results or the web results' final numbering: measure
-        # what is sent, and drop sources (documents first) until it fits.
-        new_messages, docs, web_results = fit_prompt(
-            assemble,
-            docs,
-            web_results,
-            measure=lambda answer_messages: _messages_tokens(answer_messages) + tools_tokens,
-            max_tokens=max_prompt_tokens,
-        )
-        payload["messages"] = new_messages
+        if "answer_messages" in state:
+            payload["messages"] = state["answer_messages"]
         return _PrepareChatResult(
             payload,
-            # The order they were rendered in: citation numbers index into it.
-            order_chunks_by_date(docs, queries.date_order),
-            web_results,
-            retrieved_docs,
-            retrieved_web_results,
-            True,
-            indexed_attachment_ids,
-            configuration_fingerprint,
+            state.get("docs", []),
+            state.get("web_results", []),
+            state.get("retrieved_docs", []),
+            state.get("retrieved_web_results", []),
+            state.get("citation_protocol_active", False),
+            scope.attachment_ids,
+            state.get("configuration_fingerprint", "unavailable"),
+            state.get("retry_empty_response", True),
         )
 
     @staticmethod
@@ -616,43 +356,6 @@ class ChatService:
             compare_original_query=options.compare_original_query,
             effective_options=options.retrieval.as_options(),
         )
-
-    async def _configuration_fingerprint(
-        self,
-        partitions: list[str] | None,
-        *,
-        effective_options: dict[str, object] | None = None,
-        contextualizer_prompt: PromptTrace | None = None,
-        resolved_plan=None,
-    ) -> str:
-        if not partitions:
-            return "unavailable"
-        if resolved_plan is not None:
-            return str(resolved_plan.configuration_fingerprint)
-        resolved_fingerprint = getattr(self._retrieval, "resolved_configuration_fingerprint", None)
-        fingerprint = getattr(self._retrieval, "configuration_fingerprint", None)
-        if resolved_fingerprint is None and fingerprint is None:
-            return "unavailable"
-        try:
-            if resolved_fingerprint is not None:
-                stored_fingerprint = str(
-                    await resolved_fingerprint(
-                        partitions,
-                        contextualizer_prompt=contextualizer_prompt,
-                    )
-                )
-            else:
-                stored_fingerprint = str(fingerprint(partitions))
-            if not effective_options:
-                return stored_fingerprint
-            return canonical_fingerprint(
-                {
-                    "stored_configuration_fingerprint": stored_fingerprint,
-                    "effective_request_overrides": effective_options,
-                }
-            )
-        except Exception:  # noqa: BLE001 - telemetry must never fail a request
-            return "unavailable"
 
     async def _prepare_completions(
         self,
@@ -670,7 +373,7 @@ class ChatService:
         )
         prompt_type = "spoken_style_answer" if options.spoken_style_answer else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+            prompt_type, names=[self._prompt_settings.generation_prompt_name(prompt_type, partition)]
         )
         current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
 
@@ -707,7 +410,7 @@ class ChatService:
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
-            docs = [docs[i] for i in self._fit_sources(docs, partition, room)]
+            docs = [docs[i] for i in self._prompt_settings.fit_sources(docs, partition, room)]
 
             def assemble(docs: list, _web: list) -> tuple[str, list]:
                 context = documents_context(
@@ -938,17 +641,6 @@ class ChatService:
             citation_protocol_active=partitions is not None,
         )
         return await self._answer.complete(prepared, llm=llm)
-
-
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-
-
-def _messages_tokens(messages: list[dict]) -> int:
-    """Tokens a chat message list takes, counted as the router's preflight does."""
-    length_function = get_num_tokens()
-    return sum(message_tokens(message, length_function) for message in messages)
 
 
 __all__ = ["ChatService"]
