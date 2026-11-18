@@ -3455,7 +3455,10 @@ def test_very_hidden_sheet_is_excluded_and_false_zero_rows_keep_exact_citations(
     assert all("must not be indexed" not in block.text for block in blocks)
 
 
-def test_hidden_rows_and_columns_are_not_indexed():
+@pytest.mark.parametrize("flag", ["1", " 1 ", "true", " TRUE "])
+def test_hidden_rows_and_columns_are_not_indexed(flag):
+    import zipfile
+
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["id", "internal_note", "public_value"])
@@ -3466,8 +3469,17 @@ def test_hidden_rows_and_columns_are_not_indexed():
     output = BytesIO()
     workbook.save(output)
     workbook.close()
+    # A padded XML boolean (" 1 ") hides like "1": OpenPyXL reads it so.
+    patched = BytesIO()
+    with zipfile.ZipFile(output) as source, zipfile.ZipFile(patched, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                assert data.count(b'hidden="1"') == 2
+                data = data.replace(b'hidden="1"', f'hidden="{flag}"'.encode())
+            target.writestr(item, data)
 
-    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=output.getvalue())))
+    [block] = list(XlsxParser().iter_batches(Document(raw_bytes=patched.getvalue())))
 
     assert block.metadata["table_columns"] == ["id", "public_value"]
     assert block.metadata["table_row_numbers"] == [3]
