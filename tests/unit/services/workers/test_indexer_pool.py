@@ -1852,6 +1852,9 @@ class _RecordingWorker:
         self.calls = 0
         self.last_kwargs = None
         self.released: list[dict] = []
+        self.renewals: list[dict] = []
+        self.renewal_stopped = False
+        self.holds_fence = True
 
     async def process_file(self, **kwargs) -> dict:
         self.calls += 1
@@ -1862,6 +1865,16 @@ class _RecordingWorker:
 
     async def release_file_fence(self, **kwargs) -> None:
         self.released.append(kwargs)
+
+    async def keep_file_fence_alive(self, **kwargs) -> None:
+        self.renewals.append(kwargs)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.renewal_stopped = True
+
+    async def holds_file_fence(self, **_kwargs) -> bool:
+        return self.holds_fence
 
 
 def _AsyncReturn(value):
@@ -1969,6 +1982,116 @@ async def test_actor_logs_a_workspace_attachment_failure_after_indexing(tmp_path
     error.assert_called_once()
     assert error.call_args.args == ("Workspace attachment failed after indexing.",)
     assert error.call_args.kwargs["error_reason"].startswith("RuntimeError: Cannot protect indexed file 'f'")
+
+
+@pytest.mark.asyncio
+async def test_actor_releases_the_fence_after_the_workspace_attachment(tmp_path) -> None:
+    """The attachment is the file's last write, so the worker doesn't release first (#1430)."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    events: list[str] = []
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(
+        side_effect=lambda *_: events.append("attached") or []
+    )
+    worker.release_file_fence = AsyncMock(side_effect=lambda **_: events.append("released"))
+
+    await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=["ws1"],
+        fence_holder_id="t",
+    )
+
+    assert worker.last_kwargs["release_fence_on_success"] is False
+    assert events == ["attached", "released"]
+    worker.release_file_fence.assert_awaited_once_with(partition="p", file_id="f", holder_id="t")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_ids", [None, ["ws1"]])
+async def test_actor_leaves_the_release_to_the_worker_without_an_attachment(tmp_path, workspace_ids) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=workspace_ids,
+        replace=workspace_ids is not None,
+        fence_holder_id="t",
+    )
+
+    assert worker.last_kwargs["release_fence_on_success"] is True
+    assert worker.released == []
+
+
+@pytest.mark.asyncio
+async def test_actor_does_not_fail_a_file_a_delete_took_during_its_attachment(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    worker.holds_fence = False
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(return_value=["f"])
+    actor._catalog_store.document_repo.mark_file_independently_indexed = AsyncMock(return_value=False)
+
+    result = await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=["ws1"],
+        fence_holder_id="t",
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    actor._logger.bind.return_value.info.assert_called_once_with("File deleted during its workspace attachment.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_actor_renews_the_fence_while_it_works_and_stops_after(tmp_path, fails) -> None:
+    """The pool renews too, but only while the pool actor lives (#1430)."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+
+    class _YieldingWorker(_RecordingWorker):
+        async def process_file(self, **kwargs) -> dict:
+            await asyncio.sleep(0)  # lets the renewal start, as real work does
+            return await super().process_file(**kwargs)
+
+    worker = _YieldingWorker(error=RuntimeError("boom") if fails else None)
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    try:
+        await actor.process_file(
+            task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", fence_holder_id="t"
+        )
+    except RuntimeError:
+        assert fails
+
+    assert worker.renewals == [{"partition": "p", "file_id": "f", "holder_id": "t"}]
+    assert worker.renewal_stopped
+
+
+@pytest.mark.asyncio
+async def test_actor_renews_nothing_without_a_fence(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert worker.renewals == []
 
 
 @pytest.mark.asyncio
@@ -3388,7 +3511,7 @@ async def test_pool_renews_the_file_fence_until_the_task_settles_then_releases_i
     renewed = asyncio.Event()
     store.file_fence_repo.renew_all.side_effect = lambda *_args, **_kwargs: renewed.set() or 1
     pool._claim_store = store
-    monkeypatch.setattr(module, "_FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.001)
 
     await pool.submit(
         task_id="task-1",

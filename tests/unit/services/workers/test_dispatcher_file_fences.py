@@ -425,6 +425,20 @@ async def test_a_delete_that_fails_before_starting_leaves_the_upload_its_fence()
 
 
 @pytest.mark.asyncio
+async def test_a_delete_that_fails_after_taking_the_fence_over_still_costs_the_upload_its_fence() -> None:
+    """The upload's commit is then refused; the client retries the delete."""
+    fences = InMemoryFileFences()
+    fences.hold(FileFenceKind.INDEX, "task-running")
+    repo = _document_repo()
+    repo.remove_file_from_partition.side_effect = RuntimeError("catalog down")
+
+    with pytest.raises(RuntimeError, match="catalog down"):
+        await _dispatcher(fences, document_repo=repo).delete_file(FILE_ID, PARTITION)
+
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
 async def test_a_delete_survives_a_failed_fence_renewal(monkeypatch: pytest.MonkeyPatch) -> None:
     import services.workers.dispatcher as module
 

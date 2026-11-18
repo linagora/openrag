@@ -11,7 +11,11 @@ from typing import Any
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS, DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.config.root import Settings
-from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY, FILE_FENCE_TTL_SECONDS
+from core.models.catalog import (
+    CONTENT_CLAIM_TOKEN_METADATA_KEY,
+    FILE_FENCE_RENEW_INTERVAL_SECONDS,
+    FILE_FENCE_TTL_SECONDS,
+)
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
@@ -33,9 +37,6 @@ from services.workers.worker_lease import (
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
-# The pool renews every file fence it holds in one statement. Four renewals per
-# lease, so one slow round never lets a fence lapse.
-_FILE_FENCE_RENEW_INTERVAL_SECONDS = 30.0
 _WORKER_REF_REGISTRATION_TIMEOUT_SECONDS = 60.0
 _WORKER_REF_REGISTRATION_POLL_SECONDS = 0.05
 _REJECTED_SUBMISSION_ERROR = "Indexer worker submission was rejected before the worker started."
@@ -536,6 +537,11 @@ class IndexerWorkerActor:
         # task state this task left the actor's queue. Until the finally below,
         # a renewal answered False cancels this task.
         working = True
+        fence_file_id = str(metadata.get("file_id") or "")
+        # The workspace attachment below is the file's last write: the fence is
+        # released after it, not by the worker when it reports the outcome.
+        attachment_follows = bool(workspace_ids) and not replace and bool(fence_file_id)
+        fence_renewal: asyncio.Task | None = None
         lease_started = asyncio.Event()
         worker_lease = asyncio.create_task(
             keep_worker_lease(
@@ -569,6 +575,14 @@ class IndexerWorkerActor:
                 await wait_for_worker_lease_start(lease_started, worker_lease)
                 await self._await_worker_ref_registration(task_id)
                 await self._ensure_catalog()
+                if fence_holder_id:
+                    # The pool renews the fence too, but only while the pool
+                    # actor lives; this renewal lives as long as the work.
+                    fence_renewal = asyncio.create_task(
+                        self._worker.keep_file_fence_alive(
+                            partition=partition, file_id=fence_file_id, holder_id=fence_holder_id
+                        )
+                    )
                 from services.workers.parsers.parser_dispatcher import routes_to_openai_audio_loader
 
                 await self._ensure_registry_fresh(
@@ -623,12 +637,13 @@ class IndexerWorkerActor:
                     resolved_prompts=resolved_prompts,
                     on_failure_report=stop_lease_interrupting,
                     fence_holder_id=fence_holder_id,
+                    release_fence_on_success=not attachment_follows,
                 )
             finally:
                 self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
             try:
-                if workspace_ids and not replace and file_id:
+                if attachment_follows:
                     results = await asyncio.gather(
                         *(
                             self._catalog_store.workspace_repo.add_files_to_workspace(
@@ -650,6 +665,15 @@ class IndexerWorkerActor:
                         protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
                             file_id, partition
                         )
+                        if not protected and not await self._worker.holds_file_fence(
+                            partition=partition, file_id=file_id, holder_id=fence_holder_id
+                        ):
+                            # A delete took the file over once it was indexed:
+                            # there is nothing left to attach or protect.
+                            self._logger.bind(file_id=file_id, partition=partition, task_id=task_id).info(
+                                "File deleted during its workspace attachment."
+                            )
+                            return result
                         if not protected:
                             raise RuntimeError(
                                 f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
@@ -682,6 +706,11 @@ class IndexerWorkerActor:
                     "Workspace attachment failed after indexing.", error_reason=failure_reason_from_exception(exc)
                 )
                 raise
+            finally:
+                if attachment_follows:
+                    await self._worker.release_file_fence(
+                        partition=partition, file_id=fence_file_id, holder_id=fence_holder_id
+                    )
             return result
         except asyncio.CancelledError:
             # The lease stopped this worker because the task state stopped
@@ -708,6 +737,8 @@ class IndexerWorkerActor:
             # earlier was delivered to the work above, and none can land in
             # the claim release or the lease teardown below.
             working = False
+            if fence_renewal is not None:
+                fence_renewal.cancel()
             content_sha256 = metadata.get("content_sha256")
             file_id = metadata.get("file_id")
             if content_sha256 and file_id and content_claim_token:
@@ -730,7 +761,9 @@ class IndexerWorkerActor:
                     await delete_uploaded_file(path, self._logger)
             finally:
                 worker_lease.cancel()
-                await asyncio.gather(worker_lease, return_exceptions=True)
+                await asyncio.gather(
+                    worker_lease, *([fence_renewal] if fence_renewal is not None else []), return_exceptions=True
+                )
                 await end_worker_lease(self._task_state_manager, task_id, logger=self._logger)
                 await self._remove_stage_progress_snapshot(task_id)
 
@@ -1143,7 +1176,7 @@ class IndexerPool:
         again. A fence a delete took over is simply no longer renewed.
         """
         while self._held_fences:
-            await asyncio.sleep(_FILE_FENCE_RENEW_INTERVAL_SECONDS)
+            await asyncio.sleep(FILE_FENCE_RENEW_INTERVAL_SECONDS)
             fences = list(self._held_fences.values())
             if not fences:
                 return

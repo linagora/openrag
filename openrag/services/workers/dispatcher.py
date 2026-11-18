@@ -777,6 +777,8 @@ class WorkerDispatcher(IndexingDispatcher):
         try:
             # Taken over only once the TaskStateManager fence is held: a delete
             # that fails before that must not cost a running upload its fence.
+            # One that fails after it still has: the upload's commit is refused,
+            # and the client retries the delete.
             await self._acquire_delete_fence(partition=partition, file_id=file_id, fence_id=fence_id)
             try:
                 await self._delete_with_renewable_fence(file_id=file_id, partition=partition, fence_id=fence_id)

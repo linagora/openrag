@@ -137,13 +137,21 @@ class PgFileFenceRepository(FileFenceRepository):
         partitions, file_ids, holder_ids = (list(column) for column in zip(*fences, strict=True))
         renewed = await self.pool.fetchval(
             """
-            WITH renewed AS (
+            WITH lockable AS (
+                SELECT f.partition_name, f.file_id
+                  FROM file_fences f
+                  JOIN unnest($1::text[], $2::text[], $3::text[]) AS held(partition_name, file_id, holder_id)
+                    ON f.partition_name = held.partition_name
+                   AND f.file_id = held.file_id
+                   AND f.holder_id = held.holder_id
+                   FOR NO KEY UPDATE OF f SKIP LOCKED
+            ),
+            renewed AS (
                 UPDATE file_fences
                    SET expires_at = now() + make_interval(secs => $4)
-                  FROM unnest($1::text[], $2::text[], $3::text[]) AS held(partition_name, file_id, holder_id)
-                 WHERE file_fences.partition_name = held.partition_name
-                   AND file_fences.file_id = held.file_id
-                   AND file_fences.holder_id = held.holder_id
+                  FROM lockable
+                 WHERE file_fences.partition_name = lockable.partition_name
+                   AND file_fences.file_id = lockable.file_id
                 RETURNING 1
             )
             SELECT count(*) FROM renewed

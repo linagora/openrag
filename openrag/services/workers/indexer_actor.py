@@ -7,7 +7,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
+from core.models.catalog import (
+    FILE_FENCE_RENEW_INTERVAL_SECONDS,
+    FILE_FENCE_TTL_SECONDS,
+    DocumentStatus,
+    IndexationJob,
+    normalize_degraded_stages,
+)
 from core.models.document import Document, DocumentType
 from core.models.stage_progress import StageProgressWorkerSnapshot, StageTaskPhase
 from core.observability.ray_metrics import initialize_stage_writer_counters
@@ -88,10 +94,12 @@ class IndexerWorker:
         )
 
     async def release_file_fence(self, *, partition: str, file_id: str, holder_id: str | None) -> None:
-        """Free the file before the outcome is reported (#1430).
+        """Free the file after its last write (#1430).
 
-        A client that sees the task settle may replace the file at once; the
-        pool's own release comes later, after the workspace attachment.
+        On success that is before the outcome is reported, so a client that sees
+        the task settle may replace the file at once; when a workspace
+        attachment follows, the worker actor releases after it instead. The
+        pool's own release, when the task settles, is a backstop.
         """
         if self._file_fence_repo is None or not holder_id or not file_id:
             return
@@ -101,6 +109,36 @@ class IndexerWorker:
             logger.bind(file_id=file_id, partition=partition).warning(
                 "Failed to release the file fence", error=str(exc)
             )
+
+    async def keep_file_fence_alive(self, *, partition: str, file_id: str, holder_id: str | None) -> None:
+        """Renew this task's fence while the worker runs it (#1430).
+
+        The pool renews it too, but only while the pool actor lives; this
+        renewal runs where the work runs. It stops once the fence is no longer
+        this task's: the catalog write refuses the task then anyway.
+        """
+        if self._file_fence_repo is None or not holder_id or not file_id:
+            return
+        while True:
+            await asyncio.sleep(FILE_FENCE_RENEW_INTERVAL_SECONDS)
+            try:
+                renewed = await self._file_fence_repo.renew(
+                    partition=partition, file_id=file_id, holder_id=holder_id, ttl_seconds=FILE_FENCE_TTL_SECONDS
+                )
+            except Exception as exc:  # noqa: BLE001 - the next round retries, and the lease outlasts three misses
+                logger.bind(file_id=file_id, partition=partition).warning(
+                    "Failed to renew the file fence; retrying.", error=str(exc)
+                )
+                continue
+            if not renewed:
+                return
+
+    async def holds_file_fence(self, *, partition: str, file_id: str, holder_id: str | None) -> bool:
+        """Whether this task still holds the file's fence; always True without fences."""
+        if self._file_fence_repo is None or not holder_id or not file_id:
+            return True
+        fence = await self._file_fence_repo.get(partition=partition, file_id=file_id)
+        return fence is not None and fence.holder_id == holder_id
 
     async def close_stage_writer(self) -> None:
         if self._stage_writer is not None:
@@ -189,6 +227,7 @@ class IndexerWorker:
         resolved_prompts: dict[str, str] | None = None,
         on_failure_report: Callable[[], None] | None = None,
         fence_holder_id: str | None = None,
+        release_fence_on_success: bool = True,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -205,7 +244,9 @@ class IndexerWorker:
 
         With *fence_holder_id*, the catalog write is refused unless this task
         still holds the file's fence (#1430); the failure path then removes the
-        vectors it stored.
+        vectors it stored. With *release_fence_on_success* False, a successful
+        run keeps the fence for the caller's own last writes (the workspace
+        attachment); a failed run always releases it.
         """
         file_id = metadata.get("file_id", "")
         log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
@@ -307,7 +348,8 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            await self.release_file_fence(partition=partition, file_id=file_id, holder_id=fence_holder_id)
+            if release_fence_on_success:
+                await self.release_file_fence(partition=partition, file_id=file_id, holder_id=fence_holder_id)
             finish_stage_tracker_once()
             completion_outcome = await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),

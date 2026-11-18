@@ -832,3 +832,40 @@ class TestTaskCancellation:
         """Cancelling a task that does not exist must return 404."""
         response = api_client.delete("/indexer/task/nonexistent-cancel-task-99999")
         assert response.status_code == 404
+
+
+@pytest.mark.skipif(
+    os.environ.get("FILE_FENCES", "ray") != "postgres",
+    reason="Postgres file fences only (#1430)",
+)
+class TestPostgresFileFences:
+    """Run by the api-tests-postgres-fences job, where it fails if FILE_FENCES never reached the API.
+
+    On the Ray path a replace of a file being indexed is accepted.
+    """
+
+    def test_a_replace_while_the_file_is_indexing_is_refused(
+        self, api_client, created_partition, pdf_file_path, sample_text_file
+    ):
+        file_id = "fenced-replace-001"
+        with open(pdf_file_path, "rb") as f:
+            first = api_client.post(
+                f"/indexer/partition/{created_partition}/file/{file_id}",
+                files={"file": (pdf_file_path.name, f, "application/pdf")},
+                data={"metadata": "{}"},
+            )
+        assert first.status_code in [200, 201, 202]
+        task_id = get_task_id(first.json())
+
+        # Sent right away, as the cancellation tests do: the PDF is still indexing.
+        with open(sample_text_file, "rb") as f:
+            replace = api_client.put(
+                f"/indexer/partition/{created_partition}/file/{file_id}",
+                files={"file": ("replacement.txt", f, "text/plain")},
+                data={"metadata": "{}"},
+            )
+
+        assert replace.status_code == 409
+        assert replace.json()["detail"].startswith("[DOCUMENT_INDEXING_IN_PROGRESS]")
+        assert replace.json()["extra"]["existing_task_id"] == task_id
+        wait_for_task(api_client, task_id)

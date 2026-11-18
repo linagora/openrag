@@ -368,6 +368,29 @@ async def test_renew_all_extends_only_the_fences_still_held(store):
     assert (await repo.get(partition=PARTITION, file_id="doc-2")).holder_id == "delete-1"
 
 
+async def test_renew_all_skips_a_fence_a_commit_is_holding(store):
+    await _acquire(store, "task-a")
+    await _acquire(store, "task-b", file_id="doc-2")
+    conn = await store.pool.acquire()
+    try:
+        transaction = conn.transaction()
+        await transaction.start()
+        await _require_file_fence(conn, PARTITION, FILE_ID, "task-a")
+
+        renewed = await asyncio.wait_for(
+            store.file_fence_repo.renew_all(
+                [(PARTITION, FILE_ID, "task-a"), (PARTITION, "doc-2", "task-b")], ttl_seconds=HOUR
+            ),
+            timeout=5,
+        )
+
+        await transaction.commit()
+    finally:
+        await store.pool.release(conn)
+
+    assert renewed == 1
+
+
 async def test_renew_all_of_nothing_renews_nothing(store):
     assert await store.file_fence_repo.renew_all([], ttl_seconds=HOUR) == 0
 

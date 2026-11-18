@@ -2155,3 +2155,80 @@ async def test_process_file_frees_the_file_before_reporting_the_outcome(tmp_path
 
     assert events[:2] == ["released", "reported"]
     fences.release.assert_awaited_with(partition="p", file_id="f1", holder_id="t")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_process_file_keeps_the_fence_for_a_later_write_only_on_success(tmp_path: Path, fails: bool) -> None:
+    """The worker actor releases after the workspace attachment; a failure still releases here (#1430)."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    fences = SimpleNamespace(release=AsyncMock(return_value=True))
+    repo = FakeDocumentRepo()
+    if fails:
+        repo.add_file_to_partition = AsyncMock(side_effect=RuntimeError("pg down"))
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+        file_fence_repo=fences,
+    )
+
+    try:
+        await worker.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+            fence_holder_id="t",
+            release_fence_on_success=False,
+        )
+    except RuntimeError:
+        assert fails
+
+    assert fences.release.await_count == (1 if fails else 0)
+
+
+@pytest.mark.asyncio
+async def test_keep_file_fence_alive_renews_until_the_fence_is_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.indexer_actor as module
+
+    monkeypatch.setattr(module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0)
+    fences = SimpleNamespace(renew=AsyncMock(side_effect=[True, RuntimeError("pg down"), True, False]))
+    worker = IndexerWorker(pipeline=MagicMock(), task_state_manager=_fake_tsm(), file_fence_repo=fences)
+
+    await asyncio.wait_for(worker.keep_file_fence_alive(partition="p", file_id="f1", holder_id="t"), timeout=5)
+
+    assert fences.renew.await_count == 4
+    fences.renew.assert_awaited_with(
+        partition="p", file_id="f1", holder_id="t", ttl_seconds=module.FILE_FENCE_TTL_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_keep_file_fence_alive_is_a_no_op_without_a_fence() -> None:
+    fences = SimpleNamespace(renew=AsyncMock())
+    worker = IndexerWorker(pipeline=MagicMock(), task_state_manager=_fake_tsm(), file_fence_repo=fences)
+
+    await asyncio.wait_for(worker.keep_file_fence_alive(partition="p", file_id="f1", holder_id=None), timeout=1)
+
+    fences.renew.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("holder", "expected"), [("t", True), ("delete-1", False), (None, False)])
+async def test_holds_file_fence_compares_the_current_holder(holder, expected) -> None:
+    current = None if holder is None else SimpleNamespace(holder_id=holder)
+    fences = SimpleNamespace(get=AsyncMock(return_value=current))
+    worker = IndexerWorker(pipeline=MagicMock(), task_state_manager=_fake_tsm(), file_fence_repo=fences)
+
+    assert await worker.holds_file_fence(partition="p", file_id="f1", holder_id="t") is expected
+
+
+@pytest.mark.asyncio
+async def test_holds_file_fence_without_fences_is_always_true() -> None:
+    worker = IndexerWorker(pipeline=MagicMock(), task_state_manager=_fake_tsm())
+
+    assert await worker.holds_file_fence(partition="p", file_id="f1", holder_id=None) is True
