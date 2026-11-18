@@ -11,6 +11,7 @@ from urllib.parse import quote, urlparse
 
 import chainlit as cl
 import httpx
+from chainlit.input_widget import Select
 from chainlit.config import config as cl_config
 from chainlit.context import get_context
 from core.auth.chainlit import (
@@ -45,6 +46,14 @@ OPENRAG_API_KEY_SESSION_KEY = "openrag_api_key"
 OPENRAG_AUTH_HANDLE_METADATA_KEY = "openrag_auth_handle"
 OPENRAG_CHAT_PROFILES_METADATA_KEY = "openrag_chat_profiles"
 OPENRAG_SESSION_COOKIE_NAME = "openrag_session"
+WORKSPACE_SETTING_ID = "Workspace"
+WORKSPACE_NONE_VALUE = "__openrag_no_workspace__"
+WORKSPACE_SCOPE_SESSION_KEY = "openrag_workspace_scope"
+WORKSPACE_SCOPE_VALUE_SESSION_KEY = "openrag_workspace_scope_value"
+WORKSPACE_ITEMS_SESSION_KEY = "openrag_workspace_items"
+WORKSPACE_VALUES_SESSION_KEY = "openrag_workspace_values"
+WORKSPACE_LOCKED_SESSION_KEY = "openrag_workspace_locked"
+WORKSPACE_INVALID_SESSION_KEY = "openrag_workspace_invalid"
 _OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
 _MARKDOWN_ESCAPE_TABLE = str.maketrans({char: f"\\{char}" for char in string.punctuation})
 _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
@@ -190,6 +199,112 @@ def get_headers(api_key):
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+def _workspace_scope_from_value(value: object) -> tuple[str, str] | None:
+    """Decode a Chainlit option value into its partition/workspace pair."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        scope = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    if (
+        isinstance(scope, list)
+        and len(scope) == 2
+        and all(isinstance(part, str) and part for part in scope)
+    ):
+        return scope[0], scope[1]
+    return None
+
+
+def _workspace_option_label(display_name: object, partition: str, workspace_id: str) -> str:
+    """Keep user-controlled labels on one line and make same-named choices distinct."""
+    raw_label = display_name if isinstance(display_name, str) else ""
+    label = " ".join(raw_label.split())
+    label = "".join(char if not unicodedata.category(char).startswith("C") else " " for char in label)
+    label = " ".join(label.split())[:80] or workspace_id
+    return f"{label} — {partition}/{workspace_id}"
+
+
+async def _load_workspace_setting_items(
+    client: httpx.AsyncClient,
+    api_key: str,
+    chat_profile: str | None,
+) -> dict[str, str]:
+    """Load workspace options visible through the selected partition profile."""
+    if not isinstance(chat_profile, str) or not chat_profile.startswith(PARTITION_PREFIX):
+        return {}
+
+    profile_partition = chat_profile.removeprefix(PARTITION_PREFIX)
+    model_ids = await _load_openrag_model_ids(client, api_key)
+    available_partitions = sorted(
+        {
+            model_id.removeprefix(PARTITION_PREFIX)
+            for model_id in model_ids
+            if model_id.startswith(PARTITION_PREFIX) and model_id != f"{PARTITION_PREFIX}all"
+        },
+        key=str.casefold,
+    )
+
+    if profile_partition == "all":
+        partitions = available_partitions
+    elif chat_profile in model_ids:
+        partitions = [profile_partition]
+    else:
+        return {}
+
+    items = {t("workspace_scope_none"): WORKSPACE_NONE_VALUE}
+    for partition in partitions:
+        response = await client.get(
+            url=f"{INTERNAL_BASE_URL}/partition/{quote(partition, safe='')}/workspaces",
+            headers=get_headers(api_key),
+        )
+        response.raise_for_status()
+        workspaces = response.json().get("workspaces", [])
+        if not isinstance(workspaces, list):
+            continue
+        for workspace in sorted(
+            (item for item in workspaces if isinstance(item, dict)),
+            key=lambda item: str(item.get("workspace_id", "")).casefold(),
+        ):
+            workspace_id = workspace.get("workspace_id")
+            if not isinstance(workspace_id, str) or not workspace_id:
+                continue
+            label = _workspace_option_label(workspace.get("display_name"), partition, workspace_id)
+            value = json.dumps([partition, workspace_id], separators=(",", ":"))
+            items[label] = value
+    return items
+
+
+def _set_workspace_scope_value(value: str) -> None:
+    cl.user_session.set(WORKSPACE_SCOPE_VALUE_SESSION_KEY, value)
+    cl.user_session.set(WORKSPACE_SCOPE_SESSION_KEY, _workspace_scope_from_value(value))
+
+
+async def _send_workspace_settings(
+    value: str = WORKSPACE_NONE_VALUE,
+    *,
+    disabled: bool = False,
+) -> dict | None:
+    items = cl.user_session.get(WORKSPACE_ITEMS_SESSION_KEY, {})
+    if not isinstance(items, dict) or not items:
+        return None
+    allowed_values = set(items.values())
+    initial_value = value if value in allowed_values else WORKSPACE_NONE_VALUE
+    settings = await cl.ChatSettings(
+        [
+            Select(
+                id=WORKSPACE_SETTING_ID,
+                label=t("workspace_scope_label"),
+                items=items,
+                initial_value=initial_value,
+                description=t("workspace_scope_description"),
+                disabled=disabled,
+            )
+        ]
+    ).send()
+    return settings
 
 
 def _extract_cookie(cookie_header: str, name: str) -> str | None:
@@ -468,7 +583,64 @@ if PERSISTENCY:
 
     @cl.on_chat_resume
     async def on_chat_resume(thread):
-        pass
+        # Chainlit restores the committed ChatSettings from the persisted
+        # thread's metadata. Keep the workspace scope for resumed turns, and
+        # keep it fixed so the same conversation never mixes retrieval scopes.
+        cl.user_session.set("messages", [])
+        cl.user_session.set(WORKSPACE_LOCKED_SESSION_KEY, True)
+        saved_settings = cl.user_session.get("chat_settings", {}) or {}
+        if not isinstance(saved_settings, dict):
+            saved_settings = {}
+        raw_value = saved_settings.get(WORKSPACE_SETTING_ID, WORKSPACE_NONE_VALUE)
+        if raw_value is None or raw_value == "":
+            raw_value = WORKSPACE_NONE_VALUE
+            invalid_scope = False
+        elif not isinstance(raw_value, str):
+            raw_value = WORKSPACE_NONE_VALUE
+            invalid_scope = True
+        else:
+            invalid_scope = False
+        scope = _workspace_scope_from_value(raw_value)
+        invalid_scope = invalid_scope or bool(raw_value != WORKSPACE_NONE_VALUE and scope is None)
+        items = {t("workspace_scope_none"): WORKSPACE_NONE_VALUE}
+        if scope:
+            partition, workspace_id = scope
+            try:
+                api_key = _current_openrag_api_key()
+                async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                    response = await client.get(
+                        url=(
+                            f"{INTERNAL_BASE_URL}/partition/{quote(partition, safe='')}"
+                            f"/workspaces/{quote(workspace_id, safe='')}"
+                        ),
+                        headers=get_headers(api_key),
+                    )
+                    response.raise_for_status()
+                workspace = response.json()
+                label = _workspace_option_label(
+                    workspace.get("display_name") if isinstance(workspace, dict) else None,
+                    partition,
+                    workspace_id,
+                )
+                items[label] = raw_value
+            except httpx.HTTPStatusError as e:
+                logger.warning(
+                    "Workspace scope is no longer available when resuming chat",
+                    partition=partition,
+                    status_code=e.response.status_code,
+                )
+                invalid_scope = True
+            except Exception as e:
+                logger.warning("Could not verify workspace scope when resuming chat", error=str(e))
+                invalid_scope = True
+        cl.user_session.set(WORKSPACE_ITEMS_SESSION_KEY, items)
+        cl.user_session.set(WORKSPACE_VALUES_SESSION_KEY, set(items.values()))
+        _set_workspace_scope_value(raw_value if scope and not invalid_scope else WORKSPACE_NONE_VALUE)
+        cl.user_session.set(WORKSPACE_INVALID_SESSION_KEY, invalid_scope)
+        if invalid_scope:
+            await cl.Message(content=t("workspace_scope_resume_error")).send()
+            return
+        await _send_workspace_settings(raw_value, disabled=True)
 
 
 if AUTH_TOKEN and AUTH_MODE != "oidc":
@@ -552,6 +724,12 @@ async def chat_profile(current_user: cl.User):
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("messages", [])
+    cl.user_session.set(WORKSPACE_SCOPE_SESSION_KEY, None)
+    cl.user_session.set(WORKSPACE_SCOPE_VALUE_SESSION_KEY, WORKSPACE_NONE_VALUE)
+    cl.user_session.set(WORKSPACE_ITEMS_SESSION_KEY, {})
+    cl.user_session.set(WORKSPACE_VALUES_SESSION_KEY, {WORKSPACE_NONE_VALUE})
+    cl.user_session.set(WORKSPACE_LOCKED_SESSION_KEY, False)
+    cl.user_session.set(WORKSPACE_INVALID_SESSION_KEY, False)
     logger.debug("New Chat Started", internal_base_url=INTERNAL_BASE_URL)
     try:
         api_key = _current_openrag_api_key()
@@ -563,11 +741,49 @@ async def on_chat_start():
             print(response.text)
         commands = t("commands")
         await cl.context.emitter.set_commands(commands if isinstance(commands, list) else [])
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                items = await _load_workspace_setting_items(
+                    client,
+                    api_key,
+                    cl.user_session.get("chat_profile"),
+                )
+            cl.user_session.set(WORKSPACE_ITEMS_SESSION_KEY, items)
+            allowed_values = set(items.values())
+            cl.user_session.set(WORKSPACE_VALUES_SESSION_KEY, allowed_values or {WORKSPACE_NONE_VALUE})
+            if items:
+                settings = await _send_workspace_settings()
+                value = settings.get(WORKSPACE_SETTING_ID, WORKSPACE_NONE_VALUE) if settings else WORKSPACE_NONE_VALUE
+                if value not in allowed_values:
+                    value = WORKSPACE_NONE_VALUE
+                _set_workspace_scope_value(value)
+        except Exception as e:
+            logger.warning("Could not load workspace choices for Chainlit", error=str(e))
+            await cl.Message(content=t("workspace_scope_load_error")).send()
     except MissingOpenRAGCredentialError as e:
         await _handle_missing_openrag_credential(e)
     except Exception as e:
         logger.exception("An error occured while checking the API health", error=str(e))
         await cl.Message(content=t("error_health").format(e)).send()
+
+
+@cl.on_settings_update
+async def on_chat_settings_update(settings: dict):
+    value = settings.get(WORKSPACE_SETTING_ID, WORKSPACE_NONE_VALUE)
+    allowed_values = cl.user_session.get(WORKSPACE_VALUES_SESSION_KEY, {WORKSPACE_NONE_VALUE})
+    if not isinstance(value, str) or value not in allowed_values:
+        cl.user_session.set(WORKSPACE_INVALID_SESSION_KEY, True)
+        await cl.Message(content=t("workspace_scope_invalid")).send()
+        return
+
+    current_value = cl.user_session.get(WORKSPACE_SCOPE_VALUE_SESSION_KEY, WORKSPACE_NONE_VALUE)
+    if cl.user_session.get(WORKSPACE_LOCKED_SESSION_KEY, False) and value != current_value:
+        await _send_workspace_settings(current_value, disabled=True)
+        await cl.Message(content=t("workspace_scope_locked")).send()
+        return
+
+    cl.user_session.set(WORKSPACE_INVALID_SESSION_KEY, False)
+    _set_workspace_scope_value(value)
 
 
 async def __fetch_page_content(chunk_url, headers=None):
@@ -704,18 +920,45 @@ async def on_message(message: cl.Message):
     messages: list = cl.user_session.get("messages", [])
     model: str = cl.user_session.get("chat_profile")
 
+    workspace_value = cl.user_session.get(WORKSPACE_SCOPE_VALUE_SESSION_KEY, WORKSPACE_NONE_VALUE)
+    allowed_values = cl.user_session.get(WORKSPACE_VALUES_SESSION_KEY, {WORKSPACE_NONE_VALUE})
+    workspace_scope = cl.user_session.get(WORKSPACE_SCOPE_SESSION_KEY)
+    if (
+        cl.user_session.get(WORKSPACE_INVALID_SESSION_KEY, False)
+        or not isinstance(workspace_value, str)
+        or workspace_value not in allowed_values
+        or (workspace_value != WORKSPACE_NONE_VALUE and workspace_scope is None)
+    ):
+        cl.user_session.set(WORKSPACE_INVALID_SESSION_KEY, True)
+        await cl.Message(content=t("workspace_scope_invalid")).send()
+        return
+
+    if workspace_scope:
+        partition, workspace_id = workspace_scope
+        # The API's `workspace` metadata contains only a workspace ID. Pair it
+        # with its partition-specific model so duplicate IDs in All Partitions
+        # are resolved unambiguously and retrieval remains inside that partition.
+        model = f"{PARTITION_PREFIX}{partition}"
+
+    if not cl.user_session.get(WORKSPACE_LOCKED_SESSION_KEY, False):
+        cl.user_session.set(WORKSPACE_LOCKED_SESSION_KEY, True)
+        await _send_workspace_settings(workspace_value, disabled=True)
+
     messages.append({"role": "user", "content": message.content})
+    metadata = {
+        "use_map_reduce": message.command == "DeepSearch",
+        "spoken_style_answer": message.command == "SpokenStyleAnswer",
+        "websearch": message.command == "WebSearch",
+    }
+    if workspace_scope:
+        metadata["workspace"] = workspace_id
     data = {
         "model": model,
         "messages": messages,
         "temperature": 0.2,
         "stream": True,
         "frequency_penalty": 0.4,
-        "metadata": {
-            "use_map_reduce": message.command == "DeepSearch",
-            "spoken_style_answer": message.command == "SpokenStyleAnswer",
-            "websearch": message.command == "WebSearch",
-        },
+        "metadata": metadata,
     }
 
     async with cl.Step(name=t("searching")):
