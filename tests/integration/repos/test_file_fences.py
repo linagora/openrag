@@ -319,6 +319,16 @@ async def test_an_update_whose_fence_was_lost_changes_nothing(store):
     assert await store.pool.fetchval("SELECT chunk_count FROM files WHERE file_id = $1", FILE_ID) == 3
 
 
+async def test_an_update_with_nothing_to_change_still_checks_the_fence(store):
+    await store.document_repo.add_file_to_partition(file_id=FILE_ID, partition=PARTITION)
+    await _acquire(store, "task-b")
+
+    with pytest.raises(FileFenceLostError):
+        await store.document_repo.update_file_in_partition(
+            file_id=FILE_ID, partition=PARTITION, fence_holder_id="task-a"
+        )
+
+
 async def test_a_take_over_waits_for_a_commit_in_flight(store):
     await _acquire(store, "task-a")
     conn = await store.pool.acquire()
