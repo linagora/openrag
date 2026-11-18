@@ -265,6 +265,8 @@ class _PageIndex:
         picture or table whatever page it is on. ``serialize_captions`` prints a
         caption on each page whose excluded refs lack it, so a caption neither
         lookup holds, such as one outside the body layer, prints on every page.
+        A picture or table outside the exported layers is never serialized, so
+        its captions print nowhere through it.
         """
         pages: set[int] = set()
         for node, _ in self.document.iterate_items(
@@ -279,7 +281,7 @@ class _PageIndex:
             ):
                 return None  # a chart's table prints on every page
             pages.update(prov.page_no for prov in node.prov)
-            if isinstance(node, FloatingItem):
+            if isinstance(node, FloatingItem) and node.content_layer in self.params.layers:
                 for ref in node.captions:
                     caption = ref.resolve(self.document)
                     if not isinstance(caption, DocItem):
@@ -550,6 +552,8 @@ class DoclingLoader(BasePooledParser):
                 # Built after the first check, so a parse cancelled before the
                 # export starts never reads the whole document.
                 index = _PageIndex(result.document)
+                if cancelled is not None and cancelled.is_set():
+                    break  # cancelled while the index was built
             text = _page_markdown(result.document, page_no, refs, index)
             left_out = [ref for ref in page_refs.get(page_no, ()) if ref not in text]
             text = "\n\n".join([text, *left_out]).strip()

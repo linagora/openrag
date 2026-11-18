@@ -205,6 +205,31 @@ def test_a_parse_cancelled_before_the_page_export_does_not_index_the_document(mo
     assert docling_workers.DoclingLoader._build_text_blocks(result, cancelled=cancelled) == []
 
 
+def test_a_parse_cancelled_while_the_index_is_built_exports_no_page(monkeypatch):
+    """Cancelled while the page index is built, a parse exports no page and
+    reports no page of progress."""
+    cancelled = threading.Event()
+    page_index = docling_workers._PageIndex
+
+    def _index_then_cancel(document):
+        index = page_index(document)
+        cancelled.set()
+        return index
+
+    def _no_export(*_args, **_kwargs):
+        raise AssertionError("a page was exported for a cancelled parse")
+
+    progress = []
+    monkeypatch.setattr(docling_workers, "_PageIndex", _index_then_cancel)
+    monkeypatch.setattr(docling_workers, "_page_markdown", _no_export)
+    monkeypatch.setattr(
+        docling_workers, "report_parser_substage", lambda *_args, **kwargs: progress.append(kwargs.get("progress"))
+    )
+    result = SimpleNamespace(document=_docling_document(3))
+    assert docling_workers.DoclingLoader._build_text_blocks(result, cancelled=cancelled) == []
+    assert progress == [0]
+
+
 # ----------------------------------------------------------------------------------
 # #1313: the caption stage substitutes a caption for the picture's ``markdown_ref``
 # wherever it occurs in the page text. ``export_to_markdown`` printed
@@ -612,6 +637,29 @@ def test_exporting_every_page_reads_each_item_a_bounded_number_of_times(monkeypa
     # visits and pages × items serializations.
     assert visits <= 10 * n_items
     assert serializations <= 2 * n_items
+
+
+def test_a_picture_outside_the_exported_layers_is_not_exported_on_every_page():
+    """A furniture picture captioned in the furniture prints nothing through
+    the body export, so it is scheduled on no page but its own."""
+    n_pages = 4
+    document = _docling_document(n_pages)
+    for page_no in range(1, n_pages + 1):
+        _add_text(document, page_no, f"body text on page {page_no}")
+        caption = document.add_text(
+            label=DocItemLabel.CAPTION,
+            text=f"Logo on page {page_no}",
+            prov=_prov(page_no),
+            content_layer=ContentLayer.FURNITURE,
+        )
+        _add_picture(document, page_no, caption=caption, content_layer=ContentLayer.FURNITURE)
+
+    index = docling_workers._PageIndex(document)
+    assert index._subtrees_on_every_page == []
+    for page_no in range(1, n_pages + 1):
+        assert docling_workers._page_markdown(document, page_no, {}, index) == _docling_core_page_export(
+            document, page_no, {}
+        )
 
 
 class _WidthVLM:
