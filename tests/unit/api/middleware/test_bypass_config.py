@@ -343,7 +343,7 @@ async def test_oidc_chainlit_reload_after_chat_logout_goes_to_the_idp_logout(mon
             path="/chainlit/",
             headers={
                 "accept": "text/html",
-                "cookie": f"{CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=1; openrag_session=revoked-session",
+                "cookie": f"{CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=session-token",
             },
         ),
         call_next,
@@ -351,8 +351,36 @@ async def test_oidc_chainlit_reload_after_chat_logout_goes_to_the_idp_logout(mon
 
     assert response.status_code == 302
     assert response.headers["location"] == "/auth/logout"
-    set_cookie = response.headers["set-cookie"]
-    assert set_cookie.startswith(f"{CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=") and "Max-Age=0" in set_cookie
+    # Kept until /auth/logout succeeds, so a failed attempt is retried.
+    assert "set-cookie" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_oidc_redirected_chat_logout_reaches_the_logout_route(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    reached = []
+
+    async def call_next(req):
+        reached.append(req.url.path)
+        return Response("logout")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    response = await middleware.dispatch(
+        _request(
+            path="/auth/logout",
+            headers={"accept": "text/html", "cookie": f"{CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=revoked-session"},
+        ),
+        call_next,
+    )
+
+    assert response.status_code == 200
+    assert reached == ["/auth/logout"]
 
 
 @pytest.mark.asyncio

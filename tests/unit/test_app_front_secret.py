@@ -339,11 +339,15 @@ async def test_chainlit_oidc_logout_ends_the_session_and_asks_for_the_idp_logout
 
     assert returned == {"success": True}
     assert auth_service.ended == ["oidc-session-token"]
-    idp_logout = next(c for c in _set_cookies(response) if c.startswith(f"{module.CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=1"))
+    # The session cookie is gone; its value moves to the cookie /auth/logout reads.
+    assert module.OPENRAG_SESSION_COOKIE_NAME in _cleared_cookies(response)
+    idp_logout = next(
+        c
+        for c in _set_cookies(response)
+        if c.startswith(f"{module.CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=oidc-session-token")
+    )
     assert "HttpOnly" in idp_logout
     assert f"Max-Age={module.CHAINLIT_IDP_LOGOUT_MAX_AGE_SECONDS}" in idp_logout
-    # /auth/logout reads the IdP hint through the session cookie, and clears it.
-    assert module.OPENRAG_SESSION_COOKIE_NAME not in _cleared_cookies(response)
     assert any(c.startswith(f"{module.CHAINLIT_LOGOUT_COOKIE_NAME}=1") for c in _set_cookies(response))
 
 
@@ -372,10 +376,11 @@ async def test_chainlit_logout_completes_when_the_session_cannot_be_ended(monkey
 
     returned = await module.on_logout(request, response)
 
-    # The IdP logout on the next page load revokes the session again.
+    # The browser keeps no session cookie; the IdP logout on the next page load
+    # revokes the session again.
     assert returned == {"success": True}
-    assert any(c.startswith(f"{module.CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=1") for c in _set_cookies(response))
-    assert module.CHAINLIT_TOKEN_COOKIE_NAME in _cleared_cookies(response)
+    assert module.OPENRAG_SESSION_COOKIE_NAME in _cleared_cookies(response)
+    assert any(c.startswith(f"{module.CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=") for c in _set_cookies(response))
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,10 @@ faked. Each test asserts behaviour the legacy router used to own.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
+from core.auth.chainlit import CHAINLIT_IDP_LOGOUT_MAX_AGE_SECONDS
 from core.config.auth import OIDCConfig
 from core.models.user import PartitionRole, User, UserPartition
 from core.utils.exceptions import OpenRAGError
@@ -77,6 +80,7 @@ class FakeSessionRepo:
         self.revoked_ids: list[int] = []
         self.revoked_sids: list[str] = []
         self.revoked_users: list[int] = []
+        self.revoked_lookup_windows: list = []
         self._by_hash = {}
 
     async def create_session(self, session):
@@ -89,6 +93,7 @@ class FakeSessionRepo:
         return None if session is None or session.id in self.revoked_ids else session
 
     async def get_recently_revoked_by_token_hash(self, token_hash: str, within):
+        self.revoked_lookup_windows.append(within)
         session = self._by_hash.get(token_hash)
         return session if session is not None and session.id in self.revoked_ids else None
 
@@ -600,6 +605,23 @@ async def test_chat_logout_ends_the_session_and_the_idp_logout_still_gets_its_hi
 
     target = await svc.logout(cb.session_cookie_value)
     assert "id_token_hint=idtok" in target
+    # The window outlasts the Chat logout cookie, which starts after the revoke.
+    assert srepo.revoked_lookup_windows == [timedelta(seconds=2 * CHAINLIT_IDP_LOGOUT_MAX_AGE_SECONDS)]
+
+
+@pytest.mark.asyncio
+async def test_logout_goes_on_without_the_hint_when_the_session_cannot_be_read():
+    class Unreachable(FakeSessionRepo):
+        async def get_by_token_hash(self, token_hash):
+            raise RuntimeError("db down")
+
+    client = FakeOIDCClient(meta={"end_session_endpoint": "https://idp.example/logout"})
+    svc = _service(session_repo=Unreachable(), client=client)
+
+    target = await svc.logout("some-cookie")
+
+    assert target.startswith("https://idp.example/logout?")
+    assert "id_token_hint" not in target
 
 
 @pytest.mark.asyncio

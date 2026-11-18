@@ -108,13 +108,12 @@ def _login_redirect(request: Request, path: str) -> RedirectResponse:
 def _idp_logout_redirect() -> RedirectResponse:
     """Finish a Chat logout at the IdP, as the admin UI's logout does.
 
-    Chat logout revokes the OpenRAG session and sets the cookie this consumes;
-    the page reload that follows lands here. ``/auth/logout`` revokes the
-    session again if Chat logout couldn't, then redirects to the IdP.
+    Chat logout revokes the OpenRAG session and sets the cookie that leads
+    here on the page reload that follows. ``/auth/logout`` revokes the session
+    again if Chat logout couldn't, redirects to the IdP, and clears that
+    cookie: until it has, every Chat page load comes back here.
     """
-    response = RedirectResponse(url="/auth/logout", status_code=302)
-    response.delete_cookie(key=CHAINLIT_IDP_LOGOUT_COOKIE_NAME, path="/")
-    return response
+    return RedirectResponse(url="/auth/logout", status_code=302)
 
 
 def _allow_no_auth() -> bool:
