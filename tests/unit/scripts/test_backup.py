@@ -145,3 +145,16 @@ def test_the_backup_never_reopens_its_file_by_name(backup, monkeypatch, tmp_path
 
     assert victim.read_text() == "victim"
     assert path.is_symlink()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_the_mode_does_not_depend_on_the_umask(backup, tmp_path):
+    path = tmp_path / "backup.openrag"
+    previous = os.umask(0o777)
+    try:
+        with backup.open_output_file(str(path)) as out:
+            out.write("backup data\n")
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600

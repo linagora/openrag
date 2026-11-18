@@ -87,3 +87,25 @@ def test_a_symlink_at_the_output_path_is_refused(run, output, tmp_path, target):
     assert result.returncode == 1
     assert output.is_symlink()
     assert victim.read_text() == "victim"
+
+
+def test_an_existing_fifo_is_refused_without_blocking(run, output):
+    os.mkfifo(output)
+
+    result = run()
+
+    assert result.returncode == 1
+    assert "already exists" in result.stderr
+    assert stat.S_ISFIFO(output.lstat().st_mode)
+
+
+@pytest.mark.skipif(shutil.which("setfacl") is None, reason="needs setfacl")
+def test_a_default_acl_on_the_folder_does_not_open_the_backup_to_its_group(run, output, backup_dir):
+    acl = subprocess.run(["setfacl", "-d", "-m", "g::r", str(backup_dir)], capture_output=True)
+    if acl.returncode != 0:
+        pytest.skip("the file system has no ACL support")
+
+    result = run()
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600

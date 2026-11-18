@@ -205,6 +205,9 @@ def open_output_file(file_name: str) -> Iterator[IO[str]]:
     created = os.fstat(fd)
     try:
         with os.fdopen(fd, "wb") as raw:
+            # The umask, or a default ACL on the folder, filters the mode
+            # given to os.open: set it explicitly.
+            os.fchmod(raw.fileno(), 0o600)
             _give_to_folder_owner(raw.fileno(), file_name)
             if file_name.endswith(".xz"):
                 import lzma
