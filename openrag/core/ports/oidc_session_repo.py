@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import timedelta
 
 from core.models.user import OIDCSession
 
@@ -15,6 +16,11 @@ class OIDCSessionRepository(ABC):
 
     @abstractmethod
     async def get_by_token_hash(self, token_hash: str) -> OIDCSession | None: ...
+
+    @abstractmethod
+    async def get_recently_revoked_by_token_hash(self, token_hash: str, within: timedelta) -> OIDCSession | None:
+        """A session revoked less than ``within`` ago and not expired, for its IdP logout hint only."""
+        ...
 
     @abstractmethod
     async def get_by_id(self, session_id: int) -> OIDCSession | None: ...

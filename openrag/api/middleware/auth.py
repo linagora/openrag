@@ -35,7 +35,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
-from core.auth.chainlit import CHAINLIT_TOKEN_COOKIE_NAME
+from core.auth.chainlit import CHAINLIT_IDP_LOGOUT_COOKIE_NAME, CHAINLIT_TOKEN_COOKIE_NAME
 from core.config.auth import AuthBypassConfig
 from core.utils.consts import DEFAULT_ADMIN_USER_ID
 from core.utils.logging import get_logger
@@ -103,6 +103,18 @@ def _login_redirect(request: Request, path: str) -> RedirectResponse:
     query = request.scope.get("query_string", b"").decode()
     next_path = f"{path}?{query}" if query else path
     return RedirectResponse(url=f"/auth/login?next={quote(next_path, safe='')}", status_code=302)
+
+
+def _idp_logout_redirect() -> RedirectResponse:
+    """Finish a Chat logout at the IdP, as the admin UI's logout does.
+
+    Chat logout revokes the OpenRAG session and sets the cookie this consumes;
+    the page reload that follows lands here. ``/auth/logout`` revokes the
+    session again if Chat logout couldn't, then redirects to the IdP.
+    """
+    response = RedirectResponse(url="/auth/logout", status_code=302)
+    response.delete_cookie(key=CHAINLIT_IDP_LOGOUT_COOKIE_NAME, path="/")
+    return response
 
 
 def _allow_no_auth() -> bool:
@@ -292,6 +304,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 and "text/html" in request.headers.get("accept", "").lower()
                 and not request.headers.get("authorization", "").lower().startswith("bearer ")
             ):
+                if request.cookies.get(CHAINLIT_IDP_LOGOUT_COOKIE_NAME):
+                    return _idp_logout_redirect()
                 cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
                 session_valid = False
                 if cookie_token:

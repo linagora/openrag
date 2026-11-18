@@ -89,7 +89,9 @@ Browser              OpenRag           IdP (Keycloak)
 - `/auth/login` — Start Authorization Code + PKCE flow
 - `/auth/callback` — Handle IdP redirect, create session
 - `/auth/backchannel-logout` — IdP-driven revocation (OIDC spec)
-- `/auth/logout` — RP-initiated logout (local + IdP)
+- `/auth/logout` — RP-initiated logout (local + IdP). The admin UI's logout goes here, and so does
+  Chat's: logging out of Chat revokes the OpenRAG session at once, and the page reload that follows
+  is sent to `/auth/logout` to end the IdP session.
 - `/auth/me` — Debug endpoint (returns current user + session expiry)
 
 **Database:**

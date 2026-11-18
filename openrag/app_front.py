@@ -15,6 +15,8 @@ from chainlit.config import config as cl_config
 from chainlit.context import get_context
 from core.auth.chainlit import (
     CHAINLIT_AUTH_COOKIE_NAME,
+    CHAINLIT_IDP_LOGOUT_COOKIE_NAME,
+    CHAINLIT_IDP_LOGOUT_MAX_AGE_SECONDS,
     CHAINLIT_LOGOUT_COOKIE_MAX_AGE_SECONDS,
     CHAINLIT_LOGOUT_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_NAME,
@@ -23,6 +25,7 @@ from core.auth.chainlit import (
 from core.utils.consts import PARTITION_PREFIX
 from core.utils.logging import get_logger, mask_email
 from core.utils.web_url import normalize_web_url
+from di.providers import get_auth_service
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -223,10 +226,13 @@ def _is_request_secure(request) -> bool:
     return getattr(url, "scheme", "") == "https"
 
 
-def _clear_chat_logout_cookies(request, response) -> None:
+def _clear_chat_logout_cookies(request, response, *, keep_openrag_session: bool = False) -> None:
     _delete_cookie_and_chunks(request, response, CHAINLIT_AUTH_COOKIE_NAME, paths=("/", CHAINLIT_TOKEN_COOKIE_PATH))
     _delete_cookie_and_chunks(request, response, CHAINLIT_TOKEN_COOKIE_NAME, paths=(CHAINLIT_TOKEN_COOKIE_PATH,))
-    response.delete_cookie(key=OPENRAG_SESSION_COOKIE_NAME, path="/")
+    # An OIDC session cookie stays until /auth/logout clears it: that logout
+    # reads the IdP hint through it, after Chat logout has revoked the session.
+    if not keep_openrag_session:
+        response.delete_cookie(key=OPENRAG_SESSION_COOKIE_NAME, path="/")
     secure_logout_signal = _is_request_secure(request)
     response.set_cookie(
         key=CHAINLIT_LOGOUT_COOKIE_NAME,
@@ -515,31 +521,45 @@ elif AUTH_MODE == "oidc":
 
 
 async def _end_openrag_session(session_token: str) -> None:
-    """End the OpenRAG session on the server: deleting the cookie alone leaves it valid.
+    """Revoke the OpenRAG session on the server: deleting the cookie alone leaves it valid.
 
-    ``/auth/logout`` answers with a redirect to the IdP, which is not followed:
-    only the OpenRAG session ends here. A failure is logged, never raised, so the
-    logout itself always completes.
+    Revoked in-process, so it doesn't depend on the API being reachable over
+    HTTP. A failure is logged and the logout goes on: the IdP logout that
+    follows (see ``on_logout``) revokes the session again.
     """
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            response = await client.get(
-                f"{INTERNAL_BASE_URL}/auth/logout",
-                headers={"Cookie": f"{OPENRAG_SESSION_COOKIE_NAME}={session_token}"},
-            )
-    except httpx.HTTPError as e:
+        await get_auth_service().end_oidc_session(session_token)
+    except Exception as e:
         logger.warning("Could not end the OpenRAG session on Chat logout", error=str(e))
-        return
-    if response.is_error:
-        logger.warning("Could not end the OpenRAG session on Chat logout", status=response.status_code)
+
+
+def _request_idp_logout(request, response) -> None:
+    """Have the page reload that follows Chat logout end the IdP session too.
+
+    Chainlit's logout is a request followed by a page reload. On that reload
+    the auth middleware sees this cookie and sends the browser to
+    ``/auth/logout``, which ends the IdP session as the admin UI's logout does.
+    """
+    response.set_cookie(
+        key=CHAINLIT_IDP_LOGOUT_COOKIE_NAME,
+        value="1",
+        max_age=CHAINLIT_IDP_LOGOUT_MAX_AGE_SECONDS,
+        path="/",
+        secure=_is_request_secure(request),
+        httponly=True,
+        samesite="lax",
+    )
 
 
 @cl.on_logout
 async def on_logout(request, response):
     session_token = request.cookies.get(OPENRAG_SESSION_COOKIE_NAME)
-    if AUTH_MODE == "oidc" and session_token:
+    oidc_session = AUTH_MODE == "oidc" and bool(session_token)
+    # Browser cookies first, so a failure below can't skip them.
+    _clear_chat_logout_cookies(request, response, keep_openrag_session=oidc_session)
+    if oidc_session:
+        _request_idp_logout(request, response)
         await _end_openrag_session(session_token)
-    _clear_chat_logout_cookies(request, response)
     return {"success": True}
 
 

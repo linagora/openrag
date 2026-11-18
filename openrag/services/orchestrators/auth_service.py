@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
+from core.auth.chainlit import CHAINLIT_IDP_LOGOUT_MAX_AGE_SECONDS
 from core.models.user import OIDCSession, PartitionRole, User, UserPartition
 from core.utils.consts import is_reserved_partition_name
 from core.utils.exceptions import AuthError, OpenRAGError
@@ -308,6 +309,18 @@ class AuthService:
         """
         return await self._oidc_session_repo.revoke_by_user(user_id)
 
+    async def end_oidc_session(self, session_cookie_value: str) -> bool:
+        """Revoke the session behind a browser cookie, without the IdP logout.
+
+        Chat logout calls this, then reloads the page into ``/auth/logout``
+        for the IdP side (see :meth:`logout`). Returns whether a live session
+        was revoked; a storage failure is raised to the caller.
+        """
+        session = await self._oidc_session_repo.get_by_token_hash(hash_session_token(session_cookie_value))
+        if session is None:
+            return False
+        return await self._oidc_session_repo.revoke_session(session.id)
+
     async def logout(self, session_cookie_value: str | None) -> str | None:
         """Revoke the local session and build the IdP end-session redirect.
 
@@ -319,22 +332,28 @@ class AuthService:
 
         id_token_hint: str | None = None
         if session_cookie_value:
-            session = await self._oidc_session_repo.get_by_token_hash(
-                hash_session_token(session_cookie_value),
-            )
+            token_hash = hash_session_token(session_cookie_value)
+            session = await self._oidc_session_repo.get_by_token_hash(token_hash)
             if session:
-                if session.id_token_encrypted:
-                    try:
-                        id_token_hint = decrypt_token(
-                            session.id_token_encrypted,
-                            key=self._config.token_encryption_key,
-                        )
-                    except ValueError as e:
-                        logger.warning(f"Failed to decrypt id_token for logout: {e}")
                 try:
                     await self._oidc_session_repo.revoke_session(session.id)
                 except Exception as e:
                     logger.warning(f"Failed to revoke oidc_session during logout: {e}")
+            else:
+                # Chat logout revokes its session itself and then reloads into
+                # this logout: the session it just revoked still gives the hint.
+                session = await self._oidc_session_repo.get_recently_revoked_by_token_hash(
+                    token_hash,
+                    within=timedelta(seconds=CHAINLIT_IDP_LOGOUT_MAX_AGE_SECONDS),
+                )
+            if session and session.id_token_encrypted:
+                try:
+                    id_token_hint = decrypt_token(
+                        session.id_token_encrypted,
+                        key=self._config.token_encryption_key,
+                    )
+                except ValueError as e:
+                    logger.warning(f"Failed to decrypt id_token for logout: {e}")
 
         local_target = self._config.post_logout_redirect_uri or None
         redirect_target: str | None = local_target

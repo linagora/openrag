@@ -85,7 +85,12 @@ class FakeSessionRepo:
         return session
 
     async def get_by_token_hash(self, token_hash: str):
-        return self._by_hash.get(token_hash)
+        session = self._by_hash.get(token_hash)
+        return None if session is None or session.id in self.revoked_ids else session
+
+    async def get_recently_revoked_by_token_hash(self, token_hash: str, within):
+        session = self._by_hash.get(token_hash)
+        return session if session is not None and session.id in self.revoked_ids else None
 
     async def revoke_session(self, session_id: int) -> bool:
         self.revoked_ids.append(session_id)
@@ -576,6 +581,34 @@ async def test_logout_revokes_and_builds_end_session_url():
     assert "client_id=openrag" in target
     assert "id_token_hint=idtok" in target
     assert srepo.revoked_ids == [srepo.created[0].id]
+
+
+@pytest.mark.asyncio
+async def test_chat_logout_ends_the_session_and_the_idp_logout_still_gets_its_hint():
+    user = User(id=5, external_user_id="kc-d")
+    srepo = FakeSessionRepo()
+    client = FakeOIDCClient(
+        bundle=_bundle(claims={"sub": "kc-d", "sid": "z"}),
+        meta={"end_session_endpoint": "https://idp.example/logout"},
+    )
+    svc = _service(user_repo=FakeUserRepo({"kc-d": user}), session_repo=srepo, client=client)
+    state, cookie = await _login_and_get_state(svc)
+    cb = await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert await svc.end_oidc_session(cb.session_cookie_value) is True
+    assert await svc.get_oidc_session_by_token_for_request(cb.session_cookie_value) is None
+
+    target = await svc.logout(cb.session_cookie_value)
+    assert "id_token_hint=idtok" in target
+
+
+@pytest.mark.asyncio
+async def test_end_oidc_session_without_a_live_session_revokes_nothing():
+    srepo = FakeSessionRepo()
+    svc = _service(session_repo=srepo)
+
+    assert await svc.end_oidc_session("unknown-cookie") is False
+    assert srepo.revoked_ids == []
 
 
 @pytest.mark.asyncio
