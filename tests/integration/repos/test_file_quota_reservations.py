@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncpg
 import pytest
@@ -209,6 +210,36 @@ async def test_release_gives_the_slot_back_exactly_once(postgres_store):
 
     assert await _file_count(postgres_store, user_id) == 0
     assert await repo.try_reserve_file_slot(user_id, "r-2", default_quota=-1) is FileSlotGrant.RESERVED
+
+
+async def test_a_failed_parse_gives_its_slot_back_through_the_tracker(postgres_store):
+    """A capped user's upload that fails to parse frees its slot for the next one (#664).
+
+    The worker never reaches the catalog insert, so the slot is only given
+    back when the completion tracker sees the worker ref settle.
+    """
+    from services.workers.task_completion import TaskCompletionTracker
+
+    user_id = await _create_user(postgres_store, file_quota=1)
+    repo = postgres_store.user_repo
+    assert await repo.try_reserve_file_slot(user_id, "task-1", default_quota=-1) is FileSlotGrant.RESERVED
+    assert await repo.try_reserve_file_slot(user_id, "task-2", default_quota=-1) is FileSlotGrant.DENIED
+
+    tsm = MagicMock()
+    tsm.finish_cancellation.remote = AsyncMock()
+    ref = asyncio.get_running_loop().create_future()
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = TaskCompletionTracker()
+        tracker._user_repo = AsyncMock(return_value=repo)
+        tracker._record_finished_at = AsyncMock()
+        watch = asyncio.create_task(tracker.track("task-1", {"ref": ref}))
+        await asyncio.sleep(0)
+        ref.set_exception(RuntimeError("parser failed"))
+        await watch
+
+    assert await _reservations(postgres_store, user_id) == 0
+    assert await repo.try_reserve_file_slot(user_id, "task-2", default_quota=-1) is FileSlotGrant.RESERVED
+    await _assert_counter_matches(postgres_store, user_id)
 
 
 async def test_concurrent_releases_of_one_slot_give_back_one(postgres_store, wide_user_repo):
