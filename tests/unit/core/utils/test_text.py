@@ -46,6 +46,8 @@ class TestNeutralizePromptControlTokens:
             "Sources: 4, 5 (internal memo)",
             "See Sources: 1, 2] for details",
             "| Sources: 3 |",
+            "Sources: [,] for details",
+            "Sources: ] for details",
             "Sources: [**none**] for this category.",
             "Sources: [**1**] for this category.",
         ],
@@ -106,6 +108,8 @@ class TestNeutralizePromptControlTokens:
             ),
             ("Sources: [\n1] for details", "Sources  [\n1] for details"),
             ("Sources: [1,] for details", "Sources  [1,] for details"),
+            ("Sources: [,] for details", "Sources  [,] for details"),
+            ("Sources: ] for details", "Sources  ] for details"),
             (
                 "Sources: 1\n] for details",
                 "Sources  1\n] for details",
@@ -132,6 +136,8 @@ class TestNeutralizePromptControlTokens:
             "Sources: [**1**] for this category.",
             "Sources: [\n1] for details",
             "Sources: [1,] for details",
+            "Sources: [,] for details",
+            "Sources: ] for details",
         ],
     )
     def test_source_filtering_neutralizer_is_safe_on_its_own(self, text):

@@ -62,7 +62,9 @@ _SOURCES_TAG_PREFIX_COLON_RE = re.compile(
     + r"|[*_`]*+none\b[*_`]*+(?:"
     + _SOURCES_TAG_CLOSE
     + r"|[ \t]*+\|)"
-    + r"|\]))",
+    + r"|"
+    + _SOURCES_TAG_CLOSE
+    + r"))",
     re.IGNORECASE,
 )
 # Any whitespace but a newline may end the line, as the final rstrip() removes
