@@ -21,18 +21,24 @@ settings so the service stays Ray/config-free (8H).
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+import uuid
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, TypeVar
 
+from core.indexing.file_fences import DEFAULT_WAIT_TIMEOUT_SECONDS, FileFences
 from core.models.workspace import WorkspaceScope
 from core.utils.exceptions import AmbiguousWorkspaceError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.ports.document_repo import DocumentRepository
+    from core.ports.file_fence_repo import FileFenceRepository
     from core.ports.workspace_repo import WorkspaceRepository
     from core.vector_stores import VectorStore
 
 logger = get_logger()
+
+T = TypeVar("T")
 
 
 class WorkspaceService:
@@ -45,11 +51,15 @@ class WorkspaceService:
         document_repo: DocumentRepository,
         vector_store: VectorStore,
         collection: str,
+        file_fence_repo: FileFenceRepository | None = None,
+        fence_wait_timeout: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
     ) -> None:
         self._workspace_repo = workspace_repo
         self._document_repo = document_repo
         self._vector_store = vector_store
         self._collection = collection
+        # A repository only with ``FILE_FENCES=postgres`` (#1430).
+        self._file_fences = FileFences(file_fence_repo, wait_timeout=fence_wait_timeout)
 
     # ------------------------------------------------------------------
     # CRUD / lookups (thin repo delegations)
@@ -190,10 +200,28 @@ class WorkspaceService:
         }
 
     async def _delete_file(self, file_id: str, partition: str) -> None:
+        await self._with_delete_fence(file_id, partition, lambda: self._delete_claimed_file(file_id, partition))
+
+    async def _delete_claimed_file(self, file_id: str, partition: str) -> None:
         async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
             if owned is None:
                 raise RuntimeError(f"Workspace cleanup already running for {file_id}")
             await self._delete_owned_file(file_id, partition, owned)
+
+    async def _with_delete_fence(self, file_id: str, partition: str, work: Callable[[], Awaitable[T]]) -> T:
+        """Run a file delete under the file's delete fence, as a file delete does (#1430).
+
+        It takes an indexing task's fence over without cancelling the task: the
+        task's catalog commit is refused then, and it removes its own vectors.
+        """
+        holder_id = uuid.uuid4().hex
+        await self._file_fences.acquire_for_delete(partition=partition, file_id=file_id, holder_id=holder_id)
+        try:
+            return await self._file_fences.run_holding(
+                partition=partition, file_id=file_id, holder_id=holder_id, work=work
+            )
+        finally:
+            await self._file_fences.release(partition=partition, file_id=file_id, holder_id=holder_id)
 
     async def _delete_owned_file(
         self, file_id: str, partition: str, owned: WorkspaceRepository, *, cleanup_started: bool = False
@@ -245,6 +273,11 @@ class WorkspaceService:
 
     async def retry_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
         """Retry a failed or abandoned cleanup while keeping attachment fenced."""
+        return await self._with_delete_fence(
+            file_id, partition, lambda: self._retry_claimed_file_cleanup(file_id, partition)
+        )
+
+    async def _retry_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
         async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
             if owned is None or not await owned.claim_failed_file_cleanup(file_id, partition):
                 return False

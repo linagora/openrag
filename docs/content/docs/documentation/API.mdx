@@ -279,7 +279,8 @@ Replace an existing file in the partition. Deletes the current entry and creates
   - `DOCUMENT_CONTENT_EXISTS`: content deduplication finds the same bytes held by
     another file, or by a task still indexing this one (`extra.existing_file_id`).
     A replace is not refused for a task already indexing the file, so it never
-    returns `DOCUMENT_INDEXING_IN_PROGRESS`.
+    returns `DOCUMENT_INDEXING_IN_PROGRESS`, except with `FILE_FENCES=postgres`:
+    see [Concurrent operations on one file](#concurrent-operations-on-one-file).
   - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
     expired before indexing started. Nothing was queued; retry the request.
 - `415 Unsupported Media Type` / `422 Unprocessable Entity`: same cases as the
@@ -309,6 +310,26 @@ Remove a file from the specified partition.
 **Responses:**
 - `204 No Content`: Successfully deleted
 - `404 Not Found`: File not found in partition
+
+#### Concurrent operations on one file
+
+With [`FILE_FENCES=postgres`](/openrag/documentation/env_vars/) (not yet the default), one operation
+changes a file at a time: an upload, a replace, a delete, a metadata update, or a copy into it.
+Another one arriving meanwhile is answered:
+
+| Arriving | While the file is indexed | While it is deleted | While its metadata is updated |
+|---|---|---|---|
+| Upload (`POST`) or replace (`PUT`) | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
+| Delete | Stops the indexing and deletes the file | Waits for it, then `409 DOCUMENT_DELETE_IN_PROGRESS` after 60 s | Waits for it, then `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` after 60 s |
+| Metadata update (`PATCH`) | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
+| Copy, of this file | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
+| Copy, into this `file_id` | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
+
+The code is the `[CODE]` prefix of `detail`. `DOCUMENT_INDEXING_IN_PROGRESS` carries
+`extra.existing_task_id`. Every `409` here is temporary: retry once the other operation has ended.
+Copies of one file can run side by side; a copy whose source changed while it was read answers
+`409 DOCUMENT_CHANGED_DURING_COPY`. Deleting a workspace deletes the files it orphaned the same way
+as a file delete.
 
 #### Check Indexing Status
 ```http
