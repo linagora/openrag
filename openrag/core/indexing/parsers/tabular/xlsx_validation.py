@@ -56,6 +56,23 @@ class XlsxLimits:
     # Part of max_spool_bytes kept in memory before the temporary file is used.
     # Typical side-by-side sheets fit, so they never depend on a usable TMPDIR.
     max_spool_memory_bytes: int = 32 * 1024 * 1024
+    # Charts read across the workbook; later ones are skipped, never rejected.
+    max_charts: int = 256
+    # Size of one drawing or chart part, read whole when the workbook is parsed.
+    # Cached values make charts large: 10 series x 5,000 points is about 4 MB.
+    max_chart_part_bytes: int = 16 * 1024 * 1024
+    # Chart parts read across the workbook (about 2-3 s of parsing at most);
+    # later charts are skipped, never rejected.
+    max_chart_bytes: int = 64 * 1024 * 1024
+    # Data points rendered per chart; the chunk says when points were left out.
+    max_chart_points: int = 5_000
+    # A chart over data already indexed as worksheet tables repeats at most
+    # this many points; past it, it keeps a summary and points to the tables.
+    max_chart_points_from_tables: int = 200
+    # Worksheet rows the chart cell reads may parse across the workbook. Each
+    # read parses its sheet from the first row (about 14 us a row), so this
+    # bounds their time: about 30 s at most, two full passes of a 1M-row sheet.
+    max_chart_scan_rows: int = 2_000_000
 
     def __post_init__(self):
         for field in fields(self):
@@ -299,6 +316,16 @@ def _merged_header_depth(
         depth += 1
     leaf_row = region.start_row + depth
     return depth if leaf_row in populated_rows and leaf_row not in hidden_rows else 0
+
+
+def xml_true(value: str | None) -> bool:
+    """An XML Schema boolean attribute: ``1`` or ``true``, surrounding whitespace allowed.
+
+    ``hidden=" 1 "`` is as hidden as ``hidden="1"`` (OpenPyXL reads it so):
+    comparing the raw text let padded flags show hidden rows, columns,
+    charts and text boxes.
+    """
+    return value is not None and value.strip().lower() in {"1", "true"}
 
 
 def invalid(message: str):
@@ -944,7 +971,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 advance_explicit_tables(current_row)
                                 row_content_columns = set()
                                 row_typed_columns = set()
-                                if element.get("hidden", "0").lower() in {"1", "true"}:
+                                if xml_true(element.get("hidden")):
                                     if sheet_filter_active:
                                         filter_candidate_rows.add(current_row)
                                     else:
@@ -979,7 +1006,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 cell_has_formula = True
                             elif tag == "t" and element.text:
                                 cell_has_inline_text = True
-                        if tag == "col" and element.get("hidden", "0").lower() in {"1", "true"}:
+                        if tag == "col" and xml_true(element.get("hidden")):
                             start_column = int(element.get("min", "0"))
                             end_column = int(element.get("max", "0"))
                             if start_column < 1 or end_column < start_column or end_column > 16_384:
@@ -1081,7 +1108,7 @@ def validate_ooxml(source, limits: XlsxLimits, *, allow_macros: bool = False) ->
                                 if start_row == end_row and end_column > start_column:
                                     merged_columns_by_row.setdefault(start_row, []).append((start_column, end_column))
                         if tag == "sheetPr" and len(stack) == 2:
-                            sheet_filter_active = element.get("filterMode", "0").lower() in {"1", "true"}
+                            sheet_filter_active = xml_true(element.get("filterMode"))
                         if tag == "autoFilter" and len(stack) == 2:
                             # Only the worksheet's own filter; custom sheet views
                             # nest theirs and are not what the file shows.

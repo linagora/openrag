@@ -283,6 +283,54 @@ async def test_xlsx_cells_outside_tables_are_chunked_as_text(setup_pipeline, chu
     assert chunk.metadata["cell_ranges"] == ["'Sheet'!A1", "'Sheet'!A3:B3"]
 
 
+@pytest.mark.parametrize("chunker_name", ["structured_section", "recursive_splitter"])
+async def test_xlsx_charts_go_through_the_pipeline_as_their_own_chunks(setup_pipeline, chunker_name):
+    from core.chunking.recursive import RecursiveSplitter
+    from core.indexing.parsers.tabular.xlsx_parser import XlsxParser
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, Reference
+
+    pipeline, row, _ = setup_pipeline
+    if chunker_name == "recursive_splitter":
+        pipeline = replace(
+            pipeline,
+            chunker=RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=lambda t: len(t.split())),
+        )
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sales"
+    for values in (["Month", "2025", "2026"], ["Jan", 100, 200], ["Feb", 110, 210]):
+        sheet.append(values)
+    chart = BarChart()
+    chart.title = "Monthly revenue"
+    chart.add_data(Reference(sheet, min_col=2, min_row=1, max_col=3, max_row=3), titles_from_data=True)
+    chart.set_categories(Reference(sheet, min_col=1, min_row=2, max_row=3))
+    sheet.add_chart(chart, "E2")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    row["document"] = Document(
+        id="charts-file",
+        filename="sales.xlsx",
+        content_type=DocumentType.XLSX,
+        partition="customers",
+        raw_bytes=output.getvalue(),
+    )
+
+    result = await replace(pipeline, parser=XlsxParser()).run(row)
+
+    assert result["stage"] == "stored"
+    chunks = [chunk for group, _ in pipeline.vector_store.calls for chunk in group]
+    charts = [chunk for chunk in chunks if chunk.metadata.get("xlsx_content_kind") == "chart"]
+    assert len(charts) == 1
+    assert "Chart: Monthly revenue" in charts[0].text
+    assert "| Jan | 100 | 200 |" in charts[0].text
+    assert charts[0].metadata["chart_id"] == "sheet:0:chart:1"
+    assert charts[0].metadata["chart_source_table_ids"] == ["sheet:0:table:0"]
+    assert charts[0].metadata["sheet_name"] == "Sales"
+    assert any(chunk.metadata.get("xlsx_content_kind") == "table" for chunk in chunks)
+
+
 async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
     pipeline, row, _ = setup_pipeline
     resolved = []

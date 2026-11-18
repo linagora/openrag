@@ -35,13 +35,37 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 #
 # The label up to its colon, with marks allowed before and after each bracket
 # and around "Sources".
-_SOURCES_LABEL = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+:\s*+[*_`]*+\[?[ \t]*+"
+_SOURCES_LABEL_PREFIX = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+"
+_SOURCES_LABEL_VALUE_PREFIX = r"\s*+[*_`]*+\[?[ \t]*+"
+_SOURCES_LABEL = _SOURCES_LABEL_PREFIX + r":" + _SOURCES_LABEL_VALUE_PREFIX
+# The parser accepts separators (including line breaks and emphasis) before
+# each number. Keep the fragment check in step with that number grammar.
+_SOURCES_NUMBER_SEPARATOR = r"[,\s*_`]*+"
+# A closing bracket may follow commas, whitespace or emphasis, and may be on
+# the next line. The prefix check shares this parser rule.
+_SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
+# Break the label as soon as its value starts with parser-recognized citation
+# syntax. A model can copy just that prefix from a longer prose line, so the
+# trailing text cannot be used to decide whether the colon is safe. In
+# particular, don't add a word boundary after "none": the parser accepts the
+# copied "Sources: none" prefix even when the source line continues a word.
+_SOURCES_TAG_PREFIX_COLON_RE = re.compile(
+    _SOURCES_LABEL_PREFIX
+    + r":(?="
+    + _SOURCES_LABEL_VALUE_PREFIX
+    + r"(?:"
+    + _SOURCES_NUMBER_SEPARATOR
+    + r"\d"
+    + r"|[*_`]*+none"
+    + r"|"
+    + _SOURCES_TAG_CLOSE
+    + r"))",
+    re.IGNORECASE,
+)
 # Any whitespace but a newline may end the line, as the final rstrip() removes
 # all of it: a no-break space after a tag must not hide the tag from the strip.
 _SOURCES_TAG_TAIL = r"(?:[.*_`]|[^\S\n])*+(?=\n|$)"
-# The closing bracket may sit on the next line ([Sources: 1, 3,\n]); without
-# one, the tag ends on its own line.
-_SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
+# A bracketed tag ends at its closing bracket; an unbracketed tag ends at line end.
 _SOURCES_TAG_END = r"(?:" + _SOURCES_TAG_CLOSE + r"|[,*_` \t]*+)" + _SOURCES_TAG_TAIL
 _SOURCES_NONE_RE = re.compile(
     _SOURCES_LABEL + r"[*_`]*+none" + _SOURCES_TAG_END,
@@ -53,7 +77,7 @@ _SOURCES_NONE_RE = re.compile(
 # ("Sources: 1\n2. Next item"), it gives numbers back one at a time, which
 # costs one short scan each since every separator run stops at the next digit.
 _SOURCES_NUMS_RE = re.compile(
-    _SOURCES_LABEL + r"((?:[,\s*_`]*+\d++)+)" + _SOURCES_TAG_END,
+    _SOURCES_LABEL + r"((?:" + _SOURCES_NUMBER_SEPARATOR + r"\d++)+)" + _SOURCES_TAG_END,
     re.IGNORECASE,
 )
 # An empty tag ([Sources: ]) cites nothing but is still stripped. It needs its
@@ -75,6 +99,19 @@ _UNCLOSED_SOURCE_NUMS_RE = re.compile(
     re.IGNORECASE,
 )
 _DANGLING_SOURCE_RE = re.compile(r"(?<![ \t])[ \t]*+\[\s*Sources?\s*(?=\n|$)", re.IGNORECASE)
+_UNTRUSTED_SOURCE_BLOCK_RE = re.compile(r"\[\s*(sources?)\b(?![ \t]*\])(\s*:)?", re.IGNORECASE)
+
+
+def neutralize_sources_tags(text: str) -> str:
+    """Break citation labels and bracketed source markers recognized by the parser."""
+
+    text = _UNTRUSTED_SOURCE_BLOCK_RE.sub(
+        lambda match: "(" + match.group(1) + (" " if match.group(2) else ""),
+        text,
+    )
+
+    text = _SOURCES_TAG_PREFIX_COLON_RE.sub(lambda match: match.group(0)[:-1] + " ", text)
+    return text
 
 
 def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
