@@ -38,11 +38,15 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 _SOURCES_LABEL_PREFIX = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+"
 _SOURCES_LABEL = _SOURCES_LABEL_PREFIX + r":\s*+[*_`]*+\[?[ \t]*+"
 _SOURCES_LABEL_COLON_RE = re.compile(_SOURCES_LABEL_PREFIX + r":", re.IGNORECASE)
-# A source label followed by a citation-shaped prefix remains dangerous even
-# when prose after the tag keeps the full parser pattern from matching. Break
-# the colon as soon as its value begins like one the parser accepts.
+# The full parser patterns below cover tags ending at the line boundary. This
+# also catches clearly delimited citation fragments followed by prose, without
+# changing ordinary sentences such as "Sources: 2 studies support this".
 _SOURCES_TAG_PREFIX_COLON_RE = re.compile(
-    _SOURCES_LABEL_PREFIX + r":(?=\s*+[*_`]*+\[?[ \t]*+(?:\d|none\b|\]))",
+    _SOURCES_LABEL_PREFIX
+    + r":(?=\s*+[*_`]*+\[?[ \t*_`]*+(?:"
+    + r"\d++(?:[,_`*\s]*+\d++)*+[*_`]*+(?:\s*+\]|[ \t]*+(?:\(|\|))"
+    + r"|none\b[*_`]*+(?:\s*+\]|[ \t]*+(?:\(|\|))"
+    + r"|\]))",
     re.IGNORECASE,
 )
 # Any whitespace but a newline may end the line, as the final rstrip() removes

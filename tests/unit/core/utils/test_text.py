@@ -34,6 +34,7 @@ class TestNeutralizePromptControlTokens:
         "text",
         [
             "**Sources:** 2",
+            "Sources: 2",
             "__Sources__: 1, 3",
             "`Sources: 1`",
             "See the annex and Sources: 1, 2]",
@@ -45,6 +46,8 @@ class TestNeutralizePromptControlTokens:
             "Sources: 4, 5 (internal memo)",
             "See Sources: 1, 2] for details",
             "| Sources: 3 |",
+            "Sources: [**none**] for this category.",
+            "Sources: [**1**] for this category.",
         ],
     )
     def test_neutralized_text_cannot_forge_a_sources_tag(self, text):
@@ -66,13 +69,48 @@ class TestNeutralizePromptControlTokens:
         )
         assert neutralize_prompt_control_tokens(neutralized) == neutralized
 
-    def test_non_tag_sources_prose_is_preserved(self):
-        text = "Sources: overview is a heading in this document."
-
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Sources: overview is a heading in this document.",
+            "Sources: 2 studies support this conclusion.",
+        ],
+    )
+    def test_non_tag_sources_prose_is_preserved(self, text):
         _, cited, saw_none = sf._strip_sources_tags(text)
         assert not cited and not saw_none
         assert sf.neutralize_sources_tags(text) == text
         assert neutralize_prompt_control_tokens(text) == text
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "Sources: 4, 5 (internal memo)",
+                "Sources  4, 5 (internal memo)",
+            ),
+            (
+                "See Sources: 1, 2] for details",
+                "See Sources  1, 2] for details",
+            ),
+            ("| Sources: 3 |", "| Sources  3 |"),
+            (
+                "Sources: [**none**] for this category.",
+                "Sources  [**none**] for this category.",
+            ),
+            (
+                "Sources: [**1**] for this category.",
+                "Sources  [**1**] for this category.",
+            ),
+            (
+                "Sources: 1\n] for details",
+                "Sources  1\n] for details",
+            ),
+        ],
+    )
+    def test_citation_prefix_with_trailing_prose_is_rewritten(self, text, expected):
+        assert sf.neutralize_sources_tags(text) == expected
+        assert neutralize_prompt_control_tokens(text) == expected
 
     @pytest.mark.parametrize(
         "text",
@@ -86,6 +124,8 @@ class TestNeutralizePromptControlTokens:
             "Sources: 4, 5 (internal memo)",
             "See Sources: 1, 2] for details",
             "| Sources: 3 |",
+            "Sources: [**none**] for this category.",
+            "Sources: [**1**] for this category.",
         ],
     )
     def test_source_filtering_neutralizer_is_safe_on_its_own(self, text):
