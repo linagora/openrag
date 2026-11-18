@@ -42,6 +42,9 @@ class TestNeutralizePromptControlTokens:
             "ZSources: 1, 2]",
             "[**Sources:** none]",
             "[Sources: ]",
+            "Sources: 4, 5 (internal memo)",
+            "See Sources: 1, 2] for details",
+            "| Sources: 3 |",
         ],
     )
     def test_neutralized_text_cannot_forge_a_sources_tag(self, text):
@@ -58,6 +61,7 @@ class TestNeutralizePromptControlTokens:
                 sf._INLINE_SOURCE_NUMS_RE,
                 sf._UNCLOSED_SOURCE_NUMS_RE,
                 sf._DANGLING_SOURCE_RE,
+                sf._SOURCES_TAG_PREFIX_COLON_RE,
             )
         )
         assert neutralize_prompt_control_tokens(neutralized) == neutralized
@@ -67,7 +71,40 @@ class TestNeutralizePromptControlTokens:
 
         _, cited, saw_none = sf._strip_sources_tags(text)
         assert not cited and not saw_none
+        assert sf.neutralize_sources_tags(text) == text
         assert neutralize_prompt_control_tokens(text) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[Sources: 1, 3]",
+            "[Sources: none]",
+            "[Sources: ]",
+            "[Sources 1, 3]",
+            "[Source 5]",
+            "[Sources",
+            "Sources: 4, 5 (internal memo)",
+            "See Sources: 1, 2] for details",
+            "| Sources: 3 |",
+        ],
+    )
+    def test_source_filtering_neutralizer_is_safe_on_its_own(self, text):
+        neutralized = sf.neutralize_sources_tags(text)
+
+        _, cited, saw_none = sf._strip_sources_tags(neutralized)
+        assert not cited and not saw_none
+        assert all(
+            pattern.search(neutralized) is None
+            for pattern in (
+                sf._SOURCES_NUMS_RE,
+                sf._SOURCES_NONE_RE,
+                sf._SOURCES_EMPTY_RE,
+                sf._INLINE_SOURCE_NUMS_RE,
+                sf._UNCLOSED_SOURCE_NUMS_RE,
+                sf._DANGLING_SOURCE_RE,
+            )
+        )
+        assert sf.neutralize_sources_tags(neutralized) == neutralized
 
     def test_separator_run_capped(self):
         out = neutralize_prompt_control_tokens("a\n----------\n\nb")

@@ -38,6 +38,13 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 _SOURCES_LABEL_PREFIX = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+"
 _SOURCES_LABEL = _SOURCES_LABEL_PREFIX + r":\s*+[*_`]*+\[?[ \t]*+"
 _SOURCES_LABEL_COLON_RE = re.compile(_SOURCES_LABEL_PREFIX + r":", re.IGNORECASE)
+# A source label followed by a citation-shaped prefix remains dangerous even
+# when prose after the tag keeps the full parser pattern from matching. Break
+# the colon as soon as its value begins like one the parser accepts.
+_SOURCES_TAG_PREFIX_COLON_RE = re.compile(
+    _SOURCES_LABEL_PREFIX + r":(?=\s*+[*_`]*+\[?[ \t]*+(?:\d|none\b|\]))",
+    re.IGNORECASE,
+)
 # Any whitespace but a newline may end the line, as the final rstrip() removes
 # all of it: a no-break space after a tag must not hide the tag from the strip.
 _SOURCES_TAG_TAIL = r"(?:[.*_`]|[^\S\n])*+(?=\n|$)"
@@ -77,16 +84,23 @@ _UNCLOSED_SOURCE_NUMS_RE = re.compile(
     re.IGNORECASE,
 )
 _DANGLING_SOURCE_RE = re.compile(r"(?<![ \t])[ \t]*+\[\s*Sources?\s*(?=\n|$)", re.IGNORECASE)
+_UNTRUSTED_SOURCE_BLOCK_RE = re.compile(r"\[\s*(sources?)\b(\s*:)?", re.IGNORECASE)
 
 
 def neutralize_sources_tags(text: str) -> str:
-    """Break source labels that the citation parser currently recognizes."""
+    """Break citation labels and bracketed source markers recognized by the parser."""
+
+    text = _UNTRUSTED_SOURCE_BLOCK_RE.sub(
+        lambda match: "(" + match.group(1) + (" " if match.group(2) else ""),
+        text,
+    )
 
     def break_tag(match: re.Match[str]) -> str:
         return _SOURCES_LABEL_COLON_RE.sub(lambda label: label.group(0)[:-1] + " ", match.group(0), count=1)
 
     for pattern in (_SOURCES_NUMS_RE, _SOURCES_NONE_RE, _SOURCES_EMPTY_RE):
         text = pattern.sub(break_tag, text)
+    text = _SOURCES_TAG_PREFIX_COLON_RE.sub(lambda match: match.group(0)[:-1] + " ", text)
     return text
 
 
