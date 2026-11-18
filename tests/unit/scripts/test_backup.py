@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import logging
 import lzma
 import os
 import stat
@@ -34,7 +33,7 @@ def open_umask():
 def test_the_backup_file_is_readable_by_its_owner_only(backup, open_umask, tmp_path, name):
     path = tmp_path / name
 
-    with backup.open_output_file(str(path), logging.getLogger("test")) as out:
+    with backup.open_output_file(str(path)) as out:
         out.write('{"partition": "docs"}\n')
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -53,7 +52,8 @@ def test_run_as_root_the_file_goes_to_the_owner_of_its_folder(backup, monkeypatc
     monkeypatch.setattr(backup.os, "geteuid", lambda: 0)
     monkeypatch.setattr(backup.os, "fchown", lambda fd, uid, gid: owners.append((uid, gid)))
 
-    backup.open_output_file(str(folder / "backup.openrag"), logging.getLogger("test")).close()
+    with backup.open_output_file(str(folder / "backup.openrag")):
+        pass
 
     assert owners == [(folder.stat().st_uid, folder.stat().st_gid)]
 
@@ -67,8 +67,8 @@ def test_when_the_owner_cannot_be_set_no_file_is_left_behind(backup, monkeypatch
     monkeypatch.setattr(backup.os, "fchown", refuse)
     path = tmp_path / "backup.openrag"
 
-    with pytest.raises(PermissionError):
-        backup.open_output_file(str(path), logging.getLogger("test"))
+    with pytest.raises(PermissionError), backup.open_output_file(str(path)):
+        pass
 
     assert not path.exists()
 
@@ -78,14 +78,27 @@ def test_run_as_another_user_the_ownership_is_left_alone(backup, monkeypatch, tm
     monkeypatch.setattr(backup.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(backup.os, "fchown", lambda *args: pytest.fail("fchown must not run"))
 
-    backup.open_output_file(str(tmp_path / "backup.openrag"), logging.getLogger("test")).close()
+    with backup.open_output_file(str(tmp_path / "backup.openrag")):
+        pass
 
 
 def test_an_existing_file_is_not_overwritten(backup, tmp_path):
     path = tmp_path / "backup.openrag"
     path.write_text("previous backup")
 
-    with pytest.raises(Exception, match="already exists"):
-        backup.open_output_file(str(path), logging.getLogger("test"))
+    with pytest.raises(Exception, match="already exists"), backup.open_output_file(str(path)):
+        pass
 
     assert path.read_text() == "previous backup"
+
+
+@pytest.mark.parametrize("name", ["backup.openrag", "backup.openrag.xz"])
+def test_a_failed_backup_leaves_no_file_behind(backup, tmp_path, name):
+    # A partial file would make the retry stop at "already exists".
+    path = tmp_path / name
+
+    with pytest.raises(RuntimeError, match="milvus went away"), backup.open_output_file(str(path)) as out:
+        out.write('{"partition": "docs"}\n')
+        raise RuntimeError("milvus went away")
+
+    assert not path.exists()

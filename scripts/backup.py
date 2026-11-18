@@ -4,6 +4,8 @@
 import json
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import IO, Any
 
 from _bootstrap import ensure_openrag_source_path
@@ -182,33 +184,33 @@ def _create_owner_only(file_name: str) -> None:
         os.close(fd)
 
 
-def open_output_file(file_name: str, logger: Any) -> IO[str]:
-    """
-    Opens output file for writing
+@contextmanager
+def open_output_file(file_name: str) -> Iterator[IO[str]]:
+    """Open the backup output for writing, '-' meaning STDOUT.
 
-    Parameters:
-        file_name:  Path to the output file or '-' for STDOUT
-        logger:     Logger for status and error reporting.
-
-    Returns:
-        file object:  Opened file handle in text mode.
+    The file is created by this call and removed again if the backup fails,
+    so a failed run leaves nothing a retry would refuse to overwrite. A file
+    that already exists is never touched.
     """
     if file_name in ["-"]:
-        return sys.stdout
+        yield sys.stdout
+        return
 
     if os.path.isfile(file_name):
         raise Exception(f"File '{file_name}' already exists.")
 
+    _create_owner_only(file_name)
     try:
-        _create_owner_only(file_name)
         if file_name.endswith(".xz"):
             import lzma
 
-            return lzma.open(file_name, "wt", encoding="utf-8", preset=9 | lzma.PRESET_EXTREME)
+            out_fh = lzma.open(file_name, "wt", encoding="utf-8", preset=9 | lzma.PRESET_EXTREME)
         else:
-            return open(file_name, "w", encoding="utf-8")
-    except Exception as e:
-        logger.error(f"Failed while opening file '{file_name}' for writing:\n" + str(e))
+            out_fh = open(file_name, "w", encoding="utf-8")
+        with out_fh:
+            yield out_fh
+    except BaseException:
+        os.unlink(file_name)
         raise
 
 
@@ -317,7 +319,7 @@ def main():
         raise
 
     try:
-        with open_output_file(args.output, logger) as out_fh:
+        with open_output_file(args.output) as out_fh:
             with create_engine(database_url).connect() as conn:
                 # Dump data from RDB (one line per document)
                 dump_rdb_part(out_fh, conn, partitions, logger, args.verbose)

@@ -16,4 +16,7 @@ if [ "$(id -u)" -eq 0 ] && ! chown --reference=/backup "${OUTPUT_FILE}"; then
     exit 1
 fi
 
-uv run /app/scripts/backup.py --include-only=${PARTITION_NAME} --output - | xz -9ec -T 0 --memlimit=20% > ${OUTPUT_FILE}
+if ! uv run /app/scripts/backup.py --include-only=${PARTITION_NAME} --output - | xz -9ec -T 0 --memlimit=20% > "${OUTPUT_FILE}"; then
+    rm -f "${OUTPUT_FILE}"
+    exit 1
+fi
