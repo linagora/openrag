@@ -29,6 +29,9 @@ and deleted the ``components/auth/middleware.py`` shim.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import os
 import time
 from collections.abc import Callable
@@ -121,7 +124,7 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 class AuthFailureRateLimiter:
-    """Limit failed authentication attempts by client IP."""
+    """Track failed authentication attempts and pre-check their client IP bucket."""
 
     def __init__(self) -> None:
         self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
@@ -141,14 +144,15 @@ class AuthFailureRateLimiter:
     def _safe_log_value(value: str, *, max_len: int = 200) -> str:
         return value.replace("\r", "\\r").replace("\n", "\\n").replace("\x00", "\\0")[:max_len]
 
-    async def response_if_limited(self, request: Request) -> JSONResponse | None:
+    async def is_limited(self, request: Request) -> bool:
         if not self.enabled or self._limit is None:
-            return None
+            return False
         identity = self._identity(request)
         tier = "auth-failure"
-        allowed = await self._limiter.test(self._limit, tier, identity)
-        if allowed:
-            return None
+        return not await self._limiter.test(self._limit, tier, identity)
+
+    async def limited_response(self, request: Request) -> JSONResponse:
+        identity = self._identity(request)
         return await self._limited_response(request, identity)
 
     async def record_failure(self, request: Request) -> JSONResponse | None:
@@ -197,12 +201,62 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self._get_auth_service = get_auth_service
         self._bypass_config = bypass_config or AuthBypassConfig()
         self._auth_failure_limiter = AuthFailureRateLimiter()
+        self._rejected_admin_token_digest: bytes | None = None
+        self._admin_token_lookup_lock = asyncio.Lock()
 
     async def _auth_failure(self, request: Request, *, status_code: int, detail: str) -> JSONResponse:
         limited = await self._auth_failure_limiter.record_failure(request)
         if limited is not None:
             return limited
         return JSONResponse(status_code=status_code, content={"detail": detail})
+
+    @staticmethod
+    def _request_token(request: Request, path: str) -> str | None:
+        if path.startswith("/static"):
+            return getattr(request.state, "original_token", None)
+        auth = request.headers.get("authorization", "")
+        if auth and auth.lower().startswith("bearer "):
+            return auth.split(" ", 1)[1]
+        return None
+
+    @staticmethod
+    def _matches_configured_admin_token(token: str | None, auth_token: str | None) -> bool:
+        if not token or not auth_token:
+            return False
+        return hmac.compare_digest(token.encode("utf-8"), auth_token.encode("utf-8"))
+
+    @staticmethod
+    def _admin_token_fingerprint(auth_token: str) -> bytes:
+        return hashlib.sha256(auth_token.encode("utf-8")).digest()
+
+    def _admin_token_was_rejected(self, auth_token: str | None) -> bool:
+        if auth_token is None or self._rejected_admin_token_digest is None:
+            return False
+        return hmac.compare_digest(
+            self._rejected_admin_token_digest,
+            self._admin_token_fingerprint(auth_token),
+        )
+
+    def _is_configured_admin_token(self, token: str | None, auth_token: str | None) -> bool:
+        return self._matches_configured_admin_token(token, auth_token) and not self._admin_token_was_rejected(
+            auth_token
+        )
+
+    async def _get_configured_admin_user(self, auth_service: Any, token: str, auth_token: str) -> Any:
+        fingerprint = self._admin_token_fingerprint(auth_token)
+        async with self._admin_token_lookup_lock:
+            if self._rejected_admin_token_digest is not None and hmac.compare_digest(
+                self._rejected_admin_token_digest,
+                fingerprint,
+            ):
+                return None
+
+            user = await auth_service.get_user_by_token_for_request(token)
+            if user is None:
+                # A stale AUTH_TOKEN must not keep bypassing the IP pre-check
+                # and trigger an unbounded DB lookup stream after rotation.
+                self._rejected_admin_token_digest = fingerprint
+            return user
 
     def _resolve_auth_service(self, request: Request) -> tuple[Any, JSONResponse | None]:
         """Resolve the auth service, or the response to send when it is unavailable.
@@ -324,9 +378,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return _login_redirect(request, path)
             return await call_next(request)
 
-        limited = await self._auth_failure_limiter.response_if_limited(request)
-        if limited is not None:
-            return limited
+        token = self._request_token(request, path)
+        limited = await self._auth_failure_limiter.is_limited(request)
+        configured_admin_token = (
+            auth_mode == "token" and self._is_configured_admin_token(token, auth_token)
+        )
+        admin_token_bypass = limited and configured_admin_token
+        # The configured AUTH_TOKEN is the shared admin credential used by the
+        # token-mode UI. Let it reach normal auth validation after unrelated
+        # failures exhaust a shared proxy bucket; retain the pre-check for other
+        # credentials to protect token lookups from repeated failed attempts.
+        if limited and not admin_token_bypass:
+            return await self._auth_failure_limiter.limited_response(request)
 
         user = None
         session = None
@@ -361,14 +424,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         #        callers like Chainlit's header_auth_callback which forwards
         #        the browser cookie value in the Authorization header).
         if user is None:
-            token = None
-            if path.startswith("/static"):
-                token = getattr(request.state, "original_token", None)
-            else:
-                auth = request.headers.get("authorization", "")
-                if auth and auth.lower().startswith("bearer "):
-                    token = auth.split(" ", 1)[1]
-
             if token is not None:
                 # In oidc mode, a Bearer may carry an OIDC session token (not
                 # a ``users.token`` hash). Try the session lookup first with
@@ -394,7 +449,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     # Either token mode, or oidc mode with no matching session
                     # — fall back to the long-lived ``users.token`` used by
                     # programmatic clients (CI, scripts, service agents).
-                    user = await auth_service.get_user_by_token_for_request(token)
+                    if auth_mode == "token" and self._matches_configured_admin_token(token, auth_token):
+                        if self._admin_token_was_rejected(auth_token):
+                            user = None
+                        elif admin_token_bypass:
+                            user = await self._get_configured_admin_user(auth_service, token, auth_token)
+                        else:
+                            user = await auth_service.get_user_by_token_for_request(token)
+                            if user is None:
+                                self._rejected_admin_token_digest = self._admin_token_fingerprint(auth_token)
+                    else:
+                        user = await auth_service.get_user_by_token_for_request(token)
                     if not user and auth_mode == "token":
                         # Legacy test contract: robot suite asserts 403 + "Invalid token".
                         return await self._auth_failure(request, status_code=403, detail="Invalid token")
