@@ -34,7 +34,6 @@ def _indexation_config(chunk_size: int) -> dict:
 
 def _retrieval_config() -> dict:
     return {
-        "type": "single",
         "top_k": 5,
         "top_n": 3,
         "similarity_threshold": 0.0,

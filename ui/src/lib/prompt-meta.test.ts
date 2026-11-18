@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  CREATABLE_PROMPT_TYPES,
+  isRetiredPromptType,
   PROMPT_GROUPS,
   PROMPT_DEFAULT_OPTION,
+  PROMPT_TYPES,
   promptOptionToName,
   promptOptionValue,
   promptSelectValue,
@@ -81,6 +84,23 @@ describe("validatePlaceholders", () => {
     const v = validatePlaceholders("Keep <speaker> labels and {literal braces}.", "asr_transcription");
     expect(v.unknown).toEqual([]);
     expect(v.malformed).toBe(false);
+  });
+});
+
+describe("retired prompt types", () => {
+  it("lists the HyDE and multi-query prompts but never offers them for a new prompt", () => {
+    const listed = PROMPT_TYPES.map((t) => t.value);
+    const creatable = CREATABLE_PROMPT_TYPES.map((t) => t.value);
+    expect(listed).toEqual(expect.arrayContaining(["hyde", "multi_query"]));
+    expect(creatable).not.toContain("hyde");
+    expect(creatable).not.toContain("multi_query");
+    expect(creatable).toContain("query_contextualizer");
+  });
+
+  it("tells the retired types apart", () => {
+    expect(isRetiredPromptType("hyde")).toBe(true);
+    expect(isRetiredPromptType("multi_query")).toBe(true);
+    expect(isRetiredPromptType("query_contextualizer")).toBe(false);
   });
 });
 

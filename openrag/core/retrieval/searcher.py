@@ -5,7 +5,6 @@ Retrievers need higher-level operations, which this port groups:
 
   * search by query string (the query is embedded, plus BM25 when the
     collection is hybrid)
-  * multi-query search (one round per query, deduplicated)
   * surrounding, CSV-row, related (``relationship_id``) and ancestor
     (``file_id``, depth-bounded) chunk lookups
 
@@ -60,21 +59,6 @@ class RetrievalSearcher(ABC):
         trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Single-query similarity search."""
-        ...
-
-    @abstractmethod
-    async def multi_query_search(
-        self,
-        queries: list[str],
-        partition: list[str],
-        top_k_per_query: int,
-        filter: str | None = None,
-        filter_params: dict | None = None,
-        similarity_threshold: float = 0.0,
-        with_surrounding_chunks: bool = True,
-        trace: RetrievalTraceBuilder | None = None,
-    ) -> list[Chunk]:
-        """Run one similarity search per query, return the merged result."""
         ...
 
     @abstractmethod

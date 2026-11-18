@@ -33,7 +33,7 @@ def _preset_row(**overrides: Any) -> dict[str, Any]:
     row = {
         "name": "default",
         "preset_type": "retrieval",
-        "config": {"type": "single", "top_k": 50},
+        "config": {"top_k": 50},
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
     }
@@ -999,7 +999,8 @@ async def test_preset_options_return_registered_choices(async_client_factory):
     assert response.status_code == 200
     body = response.json()
     assert body["chunking_strategies"] == ["recursive_splitter", "structured_section"]
-    assert set(body["retrieval_types"]) == {"single", "multiQuery", "hyde"}
+    # One retriever remains: there is no retrieval type to choose.
+    assert "retrieval_types" not in body
     assert body["reranker_providers"] == ["infinity", "openai", "tei"]
     # An unset retrieval top_n follows RERANKER_TOP_K; the UI shows it as the placeholder.
     assert body["default_top_n"] == 12
@@ -1014,13 +1015,11 @@ async def test_create_preset_forwards_schema_payload(async_client_factory):
     async with async_client_factory(app) as client:
         response = await client.post(
             "/presets/",
-            json={"name": " default ", "preset_type": "retrieval", "config": {"type": "single"}},
+            json={"name": " default ", "preset_type": "retrieval", "config": {}},
         )
 
     assert response.status_code == 201
-    assert preset_service.calls == [
-        ("create", {"name": "default", "preset_type": "retrieval", "config": {"type": "single"}})
-    ]
+    assert preset_service.calls == [("create", {"name": "default", "preset_type": "retrieval", "config": {}})]
 
 
 @pytest.mark.asyncio

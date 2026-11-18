@@ -16,7 +16,7 @@ from core.embeddings import Embedder
 from core.models.chunk import Chunk, _coerce_chunk_type
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
-from core.retrieval.trace import RetrievalTraceBuilder, merge_query_traces
+from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
 from core.utils.logging import get_logger
 from core.vector_stores import VectorStore
@@ -131,69 +131,6 @@ class VectorStoreSearcher(RetrievalSearcher):
             surrounding = await self._fetch_surrounding(chunks, allowed_file_ids=file_id_restriction(filter_params))
             seen = {c.id for c in chunks}
             chunks.extend(c for c in surrounding if c.id not in seen)
-        return chunks
-
-    async def multi_query_search(
-        self,
-        queries: list[str],
-        partition: list[str],
-        top_k_per_query: int,
-        filter: str | None = None,
-        filter_params: dict | None = None,
-        similarity_threshold: float = 0.0,
-        with_surrounding_chunks: bool = True,
-        trace: RetrievalTraceBuilder | None = None,
-    ) -> list[Chunk]:
-        embedding_started = perf_counter() if trace is not None else None
-        embeddings = await self._embedder.embed(queries)
-        if trace is not None and embedding_started is not None:
-            trace.timings["embedding"] = perf_counter() - embedding_started
-        field = self._field()
-        filters: dict[str, Any] = {"partition": partition}
-        if filter:
-            filters["expr"] = filter
-        if filter_params:
-            filters.update(filter_params)
-        query_traces = (
-            [
-                RetrievalTraceBuilder(
-                    request_id=f"{trace.request_id}:subquery:{index}",
-                    original_query=query,
-                    diagnostics=trace.diagnostics,
-                )
-                for index, query in enumerate(queries)
-            ]
-            if trace is not None
-            else []
-        )
-        per_query = await asyncio.gather(
-            *[
-                self._store.search(
-                    embedding=emb,
-                    query_text=q,
-                    collection=self._collection,
-                    filters=filters,
-                    top_k=top_k_per_query,
-                    similarity_threshold=similarity_threshold or None,
-                    vector_field=field,
-                    **({"trace": query_traces[index]} if trace is not None else {}),
-                )
-                for index, (emb, q) in enumerate(zip(embeddings, queries, strict=True))
-            ]
-        )
-        if trace is not None:
-            merge_query_traces(trace, query_traces)
-        seen_ids: set[str] = set()
-        chunks: list[Chunk] = []
-        for results in per_query:
-            for r in results:
-                c = _dict_to_chunk(r)
-                if c.id not in seen_ids:
-                    seen_ids.add(c.id)
-                    chunks.append(c)
-        if with_surrounding_chunks and chunks:
-            surrounding = await self._fetch_surrounding(chunks, allowed_file_ids=file_id_restriction(filter_params))
-            chunks.extend(c for c in surrounding if c.id not in seen_ids)
         return chunks
 
     async def get_surrounding_chunks(

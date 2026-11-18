@@ -13,6 +13,18 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## 2.3.x to 2.4.0
+
+The `multiQuery` and `hyde` retrievers are removed: retrieval searches each query
+once, and a retrieval preset has no `type` any more. Partitions on the seeded
+`multiquery` or `hyde` preset keep it, and it now retrieves like `default`; move
+them to `default` and delete the two presets if you like. The upgrade removes
+`type`, `llm`, `hyde_prompt_name` and `multi_query_prompt_name` from the stored
+retrieval presets, and a downgrade does not restore them; a request that still
+sends them has no effect. `RETRIEVER_TYPE` is no longer read: remove it. The `hyde` and `multi_query`
+prompts are no longer used; they can still be listed, edited and deleted, but not
+created. See [Pipeline Presets](/openrag/documentation/api/#-pipeline-presets).
+
 ## 2.3.0 or 2.3.1 to a later 2.3.x
 
 The fence that holds a file while an orphaned indexing worker may still write to

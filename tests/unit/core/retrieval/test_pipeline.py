@@ -603,21 +603,6 @@ async def test_rerank_chunks_short_circuits_on_empty_input():
     assert rer.calls == []
 
 
-def test_pipeline_expansion_enabled_false_for_non_base_retriever():
-    """Retrievers without an expansion_enabled attr (e.g. custom impls) are
-    treated as non-expanding via getattr default."""
-
-    class MinimalRetriever(Retriever):
-        async def retrieve(self, partition, query, filter=None, filter_params=None):
-            return []
-
-        async def expand_search_results(self, results):
-            return results
-
-    p = RetrieverPipeline(retriever=MinimalRetriever())
-    assert p.expansion_enabled is False
-
-
 @pytest.mark.asyncio
 async def test_retrieve_docs_caps_to_top_k():
     r = FakeRetriever()

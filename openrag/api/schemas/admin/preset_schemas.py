@@ -88,7 +88,6 @@ class PresetOptionsResponse(BaseModel):
 
     chunking_strategies: list[str]
     parsing_strategies: list[str]
-    retrieval_types: list[str]
     reranker_providers: list[str]
     # What a retrieval preset's unset ``top_n`` resolves to: the global
     # ``reranker.top_k`` (RERANKER_TOP_K).

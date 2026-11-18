@@ -83,17 +83,8 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
     # (RERANKER_TOP_K) at query time rather than freezing it at seed time.
     "retrieval": {
         "default": {
-            "type": "single",
             "top_k": 50,
             "similarity_threshold": 0.2,
-        },
-        "multiquery": {
-            "type": "multiQuery",
-            "top_k": 50,
-        },
-        "hyde": {
-            "type": "hyde",
-            "top_k": 50,
         },
     },
 }

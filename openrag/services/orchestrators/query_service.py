@@ -503,7 +503,7 @@ class QueryService:
 
     def _retrieval_prompt_name(self, field: str, partition: list[str] | None) -> str | None:
         """The library prompt this request's partition names on its retrieval
-        preset (query-side prompts: query_contextualizer / hyde / multi_query).
+        preset (the query-side prompt: query_contextualizer).
 
         Same single-owning-partition rule as generation prompts; multi-partition
         and ``"all"`` resolve the global default.

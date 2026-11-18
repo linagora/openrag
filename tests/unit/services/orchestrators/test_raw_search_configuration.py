@@ -29,8 +29,6 @@ def _config() -> SimpleNamespace:
             related_limit=10,
             max_ancestor_depth=None,
             allow_filterless_fallback=True,
-            k_queries=3,
-            combine=False,
             max_partition_concurrency=16,
         ),
         reranker=SimpleNamespace(enabled=False, top_k=5),
@@ -54,7 +52,7 @@ def _partition(*, chat_llm=None, retrieval=None) -> PartitionConfig:
 @pytest.mark.asyncio
 async def test_search_forwards_request_local_trace():
     searcher = _Searcher()
-    service = RetrievalService(searcher=searcher, reranker=None, llm=None, config=_config())
+    service = RetrievalService(searcher=searcher, reranker=None, config=_config())
     trace = RetrievalTraceBuilder("request-1", "hello")
 
     await service.search(
@@ -71,13 +69,12 @@ async def test_search_forwards_request_local_trace():
 def test_raw_search_fingerprint_ignores_chat_pipeline_settings():
     config = _config()
     config.models.embedder = {"default": SimpleNamespace(model_name="embed-model", vector_field="vector")}
-    retrieval = RetrievalPipelineConfig(type="single", rrf_k=42)
+    retrieval = RetrievalPipelineConfig(rrf_k=42)
     config.partitions = {"tenant-a": _partition(chat_llm="chat-a", retrieval=retrieval)}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config)
     request_options = {"top_k": 25, "similarity_threshold": 0.4}
 
     first = service.search_configuration_fingerprint(["tenant-a"], request_options)
-    retrieval.type = "multiQuery"
     retrieval.rrf_k = 99
     retrieval.query_contextualizer_prompt_name = "different-prompt"
     config.partitions["tenant-a"].chat_llm = "chat-b"
@@ -88,7 +85,7 @@ def test_raw_search_fingerprint_ignores_chat_pipeline_settings():
 def test_raw_search_fingerprint_tracks_effective_request_options():
     config = _config()
     config.models.embedder = {"default": SimpleNamespace(model_name="embed-model", vector_field="vector")}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config)
 
     first = service.search_configuration_fingerprint(
         ["tenant-a"],
@@ -106,7 +103,7 @@ def test_raw_search_fingerprint_tracks_embedder_vector_field_and_hybrid_mode():
     config = _config()
     endpoint = SimpleNamespace(model_name="embed-model", vector_field="vector-a")
     config.models.embedder = {"default": endpoint}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+    service = RetrievalService(searcher=_Searcher(), reranker=None, config=config)
     options = {"top_k": 25, "similarity_threshold": 0.4}
 
     baseline = service.search_configuration_fingerprint(["tenant-a"], options)
@@ -128,7 +125,6 @@ def test_raw_search_configuration_uses_factory_embedder_per_partition():
     service = RetrievalService(
         searcher=_Searcher(),
         reranker=None,
-        llm=None,
         config=config,
         searcher_factory=lambda _name: _Searcher(),
     )
@@ -165,7 +161,7 @@ def test_raw_search_fingerprint_tracks_the_effective_rerank():
     retrieval = RetrievalPipelineConfig(top_k=20)
     config.partitions = {"tenant-a": _partition(retrieval=retrieval)}
     service = RetrievalService(
-        searcher=_Searcher(), reranker=None, llm=None, config=config, reranker_factory=lambda _name: object()
+        searcher=_Searcher(), reranker=None, config=config, reranker_factory=lambda _name: object()
     )
     # rerank_candidates omitted: the count used comes from the preset's top_k.
     options = {"top_k": 5, "similarity_threshold": 0.4, "rerank": True, "rerank_candidates": None}

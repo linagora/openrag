@@ -502,8 +502,8 @@ class TestPhase8OrchestratorWiring:
         container.retrieval_service
         container.query_service
 
-        assert len(built) == 4
-        assert [getattr(client, PROVIDER_NAME_ATTR, None) for client in built] == ["default"] * 4
+        assert len(built) == 3
+        assert [getattr(client, PROVIDER_NAME_ATTR, None) for client in built] == ["default"] * 3
 
     @pytest.mark.parametrize("prop,_provider", _ORCHESTRATORS)
     def test_property_is_lazy_and_cache_slot_starts_none(self, prop, _provider):

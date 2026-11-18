@@ -22,6 +22,8 @@ import {
 } from "@/lib/api/prompts";
 import type { PromptResponse, PromptType } from "@/lib/api/prompts";
 import {
+  CREATABLE_PROMPT_TYPES,
+  isRetiredPromptType,
   PROMPT_GROUPS,
   PROMPT_TYPES,
   promptTypeLabel,
@@ -266,7 +268,7 @@ function PromptCard({
         </p>
         <div className="text-[0.7rem] text-muted-foreground">Updated {formatDate(prompt.updated_at)}</div>
         <div className="flex flex-wrap gap-2 pt-3">
-          {!prompt.is_default && (
+          {!prompt.is_default && !isRetiredPromptType(prompt.prompt_type) && (
             <Button size="sm" variant="outline" onClick={onSetDefault}>
               <Star className="mr-1 h-3 w-3" /> Set Default
             </Button>
@@ -274,7 +276,7 @@ function PromptCard({
           <Button size="sm" variant="outline" onClick={onEdit}>
             <Pencil className="mr-1 h-3 w-3" /> Edit
           </Button>
-          {prompt.is_default ? (
+          {prompt.is_default && !isRetiredPromptType(prompt.prompt_type) ? (
             <Button
               size="sm"
               variant="outline"
@@ -448,7 +450,7 @@ function PromptEditorSheet({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {PROMPT_TYPES.map((t) => (
+                    {CREATABLE_PROMPT_TYPES.map((t) => (
                       <SelectItem key={t.value} value={t.value}>
                         {t.label}
                       </SelectItem>

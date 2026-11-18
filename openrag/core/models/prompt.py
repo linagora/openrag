@@ -21,6 +21,12 @@ class PromptType(str, Enum):
     ASR_TRANSCRIPTION = "asr_transcription"
 
 
+#: Types of features that were removed: the ``hyde`` and ``multiQuery``
+#: retrievers. Their stored prompts stay valid so an admin can read and delete
+#: them, but they are no longer seeded and no new one can be created.
+RETIRED_PROMPT_TYPES = frozenset({PromptType.HYDE.value, PromptType.MULTI_QUERY.value})
+
+
 class Prompt(BaseModel):
     """A prompt template stored in the library."""
 

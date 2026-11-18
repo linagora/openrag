@@ -27,18 +27,6 @@ from services.storage.vector_store_searcher import VectorStoreSearcher
             },
         ),
         (
-            "multi_query_search",
-            {
-                "queries": ["q"],
-                "partition": ["a", "b"],
-                "top_k_per_query": 4,
-                "filter": "page > 2",
-                "filter_params": {"file_id": ["f"]},
-                "similarity_threshold": 0.3,
-                "with_surrounding_chunks": False,
-            },
-        ),
-        (
             "get_related_chunks",
             {"partition": "a", "relationship_id": "r", "limit": 4, "allowed_file_ids": ["f"], "filter": None},
         ),
@@ -134,8 +122,7 @@ async def test_search_marks_catalog_orphans_in_recorded_stages_without_changing_
     assert candidates["live"].removal_reason is None
 
 
-@pytest.mark.parametrize("multi", [False, True])
-async def test_surrounding_orphan_is_removed_after_real_search_expansion(multi):
+async def test_surrounding_orphan_is_removed_after_real_search_expansion():
     vectors = AsyncMock()
     # Neighbours come from the hit's own file: the orphan here is the neighbour
     # of a hit whose file was deleted, which expansion adds after the search.
@@ -149,10 +136,7 @@ async def test_surrounding_orphan_is_removed_after_real_search_expansion(multi):
     repo = AsyncMock()
     repo.get_indexed_documents.return_value = {("a", "live"): datetime.now(UTC)}
     searcher = CatalogSearcher(VectorStoreSearcher(vectors, embedder, repo, "collection"), repo)
-    if multi:
-        chunks = await searcher.multi_query_search(["q"], ["a"], 5)
-    else:
-        chunks = await searcher.search("q", ["a"], 5)
+    chunks = await searcher.search("q", ["a"], 5)
     assert [c.id for c in chunks] == ["1"]
     assert set(repo.get_indexed_documents.call_args.args[0]) == {("a", "live"), ("a", "deleted")}
 

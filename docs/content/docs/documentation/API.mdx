@@ -557,7 +557,7 @@ PATCH /partition/{partition}
 curl -X PATCH http://localhost:8080/partition/my_partition \
   -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"indexation_preset": "legal", "retrieval_preset": "hyde"}'
+  -d '{"indexation_preset": "legal", "retrieval_preset": "default"}'
 ```
 
 :::tip
@@ -749,7 +749,7 @@ Returns only the direct ancestor path, not sibling branches.
 
 ### 🧩 Pipeline Presets
 
-Named, reusable **indexation** and **retrieval** pipeline configurations. Partitions reference a preset by name (see [`PATCH /partition/{partition}`](#partition-pipeline-config)) instead of carrying an inline config, so a change to a preset propagates to every partition using it. Six defaults are seeded on first boot (`default`, `legal`, `finance` for indexation; `default`, `multiquery`, `hyde` for retrieval); the `default` preset of each type cannot be deleted or renamed.
+Named, reusable **indexation** and **retrieval** pipeline configurations. Partitions reference a preset by name (see [`PATCH /partition/{partition}`](#partition-pipeline-config)) instead of carrying an inline config, so a change to a preset propagates to every partition using it. Four defaults are seeded on first boot (`default`, `legal`, `finance` for indexation; `default` for retrieval; a deployment seeded earlier keeps its `multiquery` and `hyde` presets, which now retrieve like `default`); the `default` preset of each type cannot be deleted or renamed.
 
 All routes are prefixed with **`/presets`** and require the **admin** role. `preset_type` is one of `indexation` | `retrieval`.
 
@@ -757,7 +757,7 @@ All routes are prefixed with **`/presets`** and require the **admin** role. `pre
 ```http
 GET /presets/options
 ```
-Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), `retrieval_types`, and `reranker_providers`, plus `default_top_n`: what a retrieval preset's `top_n` resolves to when it is left out (the deployment's `RERANKER_TOP_K`).
+Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), and `reranker_providers`, plus `default_top_n`: what a retrieval preset's `top_n` resolves to when it is left out (the deployment's `RERANKER_TOP_K`).
 
 #### Create a preset
 ```http
@@ -770,11 +770,13 @@ curl -X POST http://localhost:8080/presets/ \
   -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "hyde-large",
+    "name": "precise",
     "preset_type": "retrieval",
-    "config": {"type": "hyde", "top_k": 50, "top_n": 10}
+    "config": {"top_k": 50, "top_n": 10, "similarity_threshold": 0.7}
   }'
 ```
+
+A retrieval `config` no longer has a `type`: the `multiQuery` and `hyde` retrievers were removed, and retrieval searches each query once. The upgrade removed `type`, `llm`, `hyde_prompt_name` and `multi_query_prompt_name` from the stored presets; a request that still sends them is accepted, and they have no effect.
 
 An indexation `config` instead accepts keys such as `chunking` (`{name, chunk_size, chunk_overlap_rate}`), `parsing_strategy`, `stt` (a named STT endpoint), `asr_transcription_prompt_name`, `enable_image_captioning`, `enable_contextualization`, and `contextualization_mode`. Omitting `stt` or `asr_transcription_prompt_name` uses the corresponding global default. The STT and ASR prompt selections apply only to audio or video files routed to `OpenAIAudioLoader`; `LocalWhisperLoader` does not use them.
 
@@ -800,7 +802,7 @@ Every prompt the pipeline sends to a model is a stored, editable row rather than
 
 On startup, an unchanged default seeded from an older bundled template is refreshed in place. Edited or renamed defaults and named prompts are preserved. For staged rollouts, set `PROMPTS_REFRESH_DEFAULTS=false` until older application instances have stopped, then enable refresh again.
 
-All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `hyde` | `multi_query` | `topic_tagger` | `asr_transcription`.
+All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `topic_tagger` | `asr_transcription`, plus the retired `hyde` and `multi_query`: their stored prompts can still be listed, edited and deleted (a retired type's default included), but they are no longer seeded or used, and creating one returns `422` (`PROMPT_TYPE_RETIRED`).
 
 **Resolution order** for a given type: the name selected for the request → the type's global default → the bundled template. A selection naming a prompt that no longer exists falls back to the default rather than failing.
 
@@ -809,7 +811,7 @@ All routes are prefixed with **`/prompts`** and require the **admin** role. `pro
 | Prompt type | Selected on |
 |---|---|
 | `sys_prompt`, `spoken_style_answer` | partition — `generation_prompt_names` |
-| `query_contextualizer`, `hyde`, `multi_query` | retrieval preset — `*_prompt_name` |
+| `query_contextualizer` | retrieval preset — `query_contextualizer_prompt_name` |
 | `chunk_contextualizer`, `image_captioning`, `topic_tagger` | indexation preset — `*_prompt_name` |
 | `asr_transcription` | indexation preset — `asr_transcription_prompt_name` for audio or video files routed to `OpenAIAudioLoader` |
 
@@ -819,7 +821,7 @@ POST /prompts/
 ```
 **Body:** `prompt_type`, `name`, `content`, `is_default` (default `false`). Returns `201 Created`, or `409` if that `(prompt_type, name)` already exists.
 
-Types rendered as templates (`sys_prompt`, `spoken_style_answer`, `query_contextualizer`, `hyde`, `multi_query`) accept only their own **plain** `{placeholders}` — no conversion (`!r`), format spec (`:>10`) or attribute access — and a violation returns `422` at write time rather than failing later at render. Escape a literal brace as `{{` / `}}`. The remaining types are sent to the model verbatim. `asr_transcription` may be empty, which keeps the transcription model's native prompt.
+Types rendered as templates (`sys_prompt`, `spoken_style_answer`, `query_contextualizer`) accept only their own **plain** `{placeholders}` — no conversion (`!r`), format spec (`:>10`) or attribute access — and a violation returns `422` at write time rather than failing later at render. Escape a literal brace as `{{` / `}}`. The remaining types are sent to the model verbatim. `asr_transcription` may be empty, which keeps the transcription model's native prompt.
 
 ```bash frame="none"
 curl -X POST http://localhost:8080/prompts/ \

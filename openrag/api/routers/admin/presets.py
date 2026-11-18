@@ -11,7 +11,6 @@ from api.schemas.admin.preset_schemas import (
 from core.chunking import chunking_registry
 from core.config.indexation_pipeline import PARSING_STRATEGIES
 from core.rerankers.registry import reranker_registry
-from core.retrieval import retriever_registry
 from di.providers import get_config, get_preset_service
 from fastapi import APIRouter, Depends, Response, status
 
@@ -37,7 +36,6 @@ async def get_preset_options(config=Depends(get_config)):
     return PresetOptionsResponse(
         chunking_strategies=chunking_registry.list_registered(),
         parsing_strategies=_PARSING_STRATEGIES,
-        retrieval_types=retriever_registry.list_registered(),
         reranker_providers=_registered_or_default(
             reranker_registry.list_registered(),
             _DEFAULT_RERANKER_PROVIDERS,

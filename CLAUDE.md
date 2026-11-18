@@ -198,7 +198,8 @@ Four caveats:
 - Its scale is provider-dependent: Infinity/vLLM return a `relevance_score`, TEI a
   `score` with `raw_scores: false` (0–1). Compare within one response, never across
   deployments, and don't threshold on an absolute value.
-- On the multi-query path it does **not** explain the ordering. `get_relevant_docs`
+- When the contextualizer splits the question into several sub-queries it does **not**
+  explain the ordering. `get_relevant_docs`
   reranks each sub-query's list separately and then fuses them with RRF, so the final
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
