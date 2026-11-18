@@ -93,7 +93,8 @@ class EmbedderConfig(ConfigMixin):
     # timeout straight into httpx).
     timeout: float = Field(default=120.0, gt=0)
     # Big documents are embedded in slices of `batch_size`, at most
-    # `embed_concurrency` requests in flight, to stay within the timeout above.
+    # `embed_concurrency` requests in flight per document (not per process),
+    # to stay within the timeout above.
     batch_size: int = Field(default=32, gt=0)
     embed_concurrency: int = Field(default=4, gt=0)
 
@@ -110,6 +111,17 @@ class SemaphoreConfig(ConfigMixin):
 
     llm_semaphore: int = 10
     vlm_semaphore: int = 10
+
+
+class LanguageDetectionConfig(ConfigMixin):
+    """fast-langdetect model used to detect the language of queries and documents.
+
+    ``lite`` ships inside the package and needs no network access. ``full``
+    and ``auto`` download the larger model on first use; it is more accurate
+    than ``lite`` on very short text.
+    """
+
+    model: Literal["lite", "full", "auto"] = "lite"
 
 
 class LLMContextConfig(ConfigMixin):

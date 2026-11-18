@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
+from core.chunking.factory import create_chunker
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.presets import PresetsConfig
 from core.config.retrieval import InfinityRerankerConfig, OpenAIRerankerConfig, TEIRerankerConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
+from core.models.document import ProcessedDocument, TextBlock
 from pydantic import ValidationError
 
 
@@ -120,3 +124,16 @@ def test_default_chunker_is_structured_section():
     # A default that is not registered would fail every partition at chunker
     # build time (create_chunker) rather than at config load.
     assert ChunkerConfig().name in chunking_registry
+
+
+def test_a_stored_preset_still_setting_prepend_heading_path_loads_and_keeps_its_header():
+    """Presets live in the database, so one saved with this removed option must not break indexing."""
+    config = IndexationPipelineConfig.model_validate(
+        {"chunking": {"name": "structured_section", "chunk_size": 60, "prepend_heading_path": False}}
+    )
+    chunker = create_chunker(SimpleNamespace(chunker=config.chunking))
+    document = ProcessedDocument(
+        document_id="d", text_blocks=[TextBlock(text="Some body text here.")], metadata={"filename": "report.pdf"}
+    )
+
+    assert chunker.chunk(document, partition="p")[0].text.startswith("[Source: report.pdf")

@@ -18,32 +18,24 @@ export interface Release {
  * dialog content are derived from it.
  */
 export const releaseNotes: Release = {
-  version: "2.3.0",
-  date: "2026-10-01",
+  version: "2.3.5",
+  date: "2026-11-13",
   summary:
-    "OpenRAG 2.3.0 makes deployments observable and more robust: durable job history, dependency-aware readiness, metrics, alerts and dashboards, and one vector field per embedder so partitions can use different embedding models.",
+    'OpenRAG 2.3.5 shows each file\'s indexing progress, indexes Excel workbooks (.xlsx), sorts sources by date for "the latest" questions, and upgrades Milvus to 3.0.5.',
 
   newFeatures: [
-    "Indexing job status and history are stored in PostgreSQL and survive restarts.",
-    "Degraded indexing outcomes and failure reasons are shown in the Jobs view.",
-    "Each embedder has its own vector field: partitions can use different embedding models, and each partition is searched with its own.",
-    "A partition's embedder is validated when the partition is created or updated, and editing the URL or model of an embedder that already has indexed files requires explicit acknowledgement.",
-    "New deployments chunk documents with the structure-aware structured_section strategy by default; existing presets keep their chunker.",
-    "Uploaded files are checked against their declared extension, and a second upload of a file that is still indexing is refused.",
-    "Documents that produce no chunks now fail with a clear reason instead of being reported as indexed.",
-    "Workspace deletion can keep the workspace's files, and workspace IDs only need to be unique within a partition.",
-    "Chat sources report the reranker score of each document when a reranker ran.",
-    "A new /ready endpoint reports PostgreSQL, Milvus, Ray and the model endpoints in use.",
-    "Prometheus metrics, alert rules with runbooks and Grafana dashboards ship with the Helm chart and Docker Compose.",
-    "Logs can be written as JSON, with the request ID on every line logged while serving a request, and shipped to Loki.",
+    "The Jobs page shows each file's current indexing stage, its elapsed time and its stage history.",
+    "Excel workbooks (.xlsx) can now be indexed, sheet by sheet.",
+    "Questions about the latest documents get sources sorted by date, with their dates shown, for documents that carry a creation date (created_at metadata).",
+    "Figure and table captions stay attached to the block they label.",
+    "Admin console usability improvements, and failed data loads shown as errors instead of empty lists.",
   ],
-
   breakingChange: {
-    title: "Milvus collection migration and configuration changes required",
+    title: "Remote images in Markdown files are no longer captioned",
     description:
-      "OpenRAG 2.3.0 migrates its Milvus collection to schema version 3, which moves each embedder's vectors into its own field. Milvus itself moves to v3.0.2, which is required for that migration. Until the migration runs, every search fails. Chat responses now return extra as a JSON object with chunk metadata nested under chunk, JSON requests need a Content-Type: application/json header, GET /metrics needs METRICS_TOKEN, and example credentials are refused at startup.",
+      "An image a Markdown file links to by URL (![alt](https://...)) is no longer fetched or captioned; its link stays in the text. Images embedded in the file are still captioned. The IMAGE_CAPTIONING_URL setting is removed, and a configuration that still sets it keeps loading and ignores it.",
     action:
-      "Plan a maintenance window and follow the Upgrading OpenRAG guide for 2.2.x to 2.3.0, including backups, secrets, the Milvus migration and the API client changes, before starting OpenRAG 2.3.0.",
+      "If you relied on captions of linked images, embed those images in the Markdown file, or convert the document to a format whose images are embedded, such as PDF or DOCX, and index it again.",
   },
 };
 

@@ -98,6 +98,11 @@ number:
 | `infra/charts/openrag-stack/values.yaml` | the `tag: "vX.Y.Z"` of each OpenRag image |
 | `infra/compose/docker-compose.yaml` | the `linagoraai/openrag*:vX.Y.Z` images |
 
+The install command in the Kubernetes guide (`docs/content/docs/documentation/kubernetes.md`) names the
+chart instead: set its `--version` to the chart `version` this release publishes, in the same commit. A
+pin left on an older chart installs a chart without this release's changes; one ahead of the registry
+fails with a 404.
+
 Before opening the release PR, check the bump from both sides. First, nothing under `infra/` should
 still name the version you are replacing — this is what finds a file the table doesn't list:
 

@@ -51,8 +51,9 @@ _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
 # Chainlit inserts source names into Markdown link labels. Strip only characters
 # that can break or restyle that label so ordinary filenames stay recognizable.
 _MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]*`\\<>", " "))
-_MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"^(?:(?:#{1,6}|[-+]|\d{1,9}[.)])\s+)+")
+_MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"^(?:(?:#{1,6}|[-+]|\d{1,9}[.)])(?:\s+|$))+")
 _MARKDOWN_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:-\s*){3,}|(?:_\s*){3,}|(?:\*\s*){3,})$")
+_MARKDOWN_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)$")
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
@@ -121,11 +122,18 @@ def _safe_source_name(value: str, existing: dict) -> str:
     """Build a Markdown-inert name that Chainlit can match to its element."""
     value = _neutralize_source_name_delimiters(value)
     value = value.lstrip()
-    if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value):
-        value = ""
-    else:
-        value = _MARKDOWN_BLOCK_PREFIX_RE.sub("", value)
-    base = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split()) or "source"
+    while True:
+        value = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split())
+        if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value) or _MARKDOWN_SETEXT_UNDERLINE_RE.fullmatch(value):
+            value = ""
+            break
+
+        stripped = _MARKDOWN_BLOCK_PREFIX_RE.sub("", value)
+        if stripped == value:
+            break
+        value = stripped
+
+    base = value or "source"
     candidate = base
     suffix = 2
     while candidate in existing:
@@ -587,6 +595,7 @@ def _chunk_field(source: dict, key: str):
 
 
 async def _format_sources(metadata_sources, only_txt=False, api_key=None):
+    """Format retrieved web and file sources as Chainlit elements."""
     if not isinstance(metadata_sources, list) or not metadata_sources:
         return [], []
 
@@ -608,6 +617,7 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
             markdown_url = quote(url, safe=_MARKDOWN_URL_SAFE_CHARS)
 
             source_label = title or url
+            source_label = " ".join(source_label.split())
             source_name = _safe_source_name(source_label, d)
             content = f"**[{_escape_markdown_text(source_label)}]({markdown_url})**"
             if snippet:

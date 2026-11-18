@@ -30,7 +30,8 @@ from typing import TYPE_CHECKING, Any
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import ContentClaimLease, DocumentRepository, IndexedCorpusState
-from core.utils.exceptions import ConflictError
+from core.utils.consts import is_reserved_partition_name
+from core.utils.exceptions import ConflictError, ValidationError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -657,6 +658,12 @@ class PgDocumentRepository(DocumentRepository):
                     if not partition_exists:
                         return False
                 else:
+                    if is_reserved_partition_name(partition):
+                        raise ValidationError(
+                            f"Partition name '{partition}' is reserved.",
+                            status_code=400,
+                            code="RESERVED_PARTITION_NAME",
+                        )
                     # Auto-create partition + first-owner membership when missing —
                     # legacy side-effect documented in the phase-7 spec.
                     created = await conn.fetchval(

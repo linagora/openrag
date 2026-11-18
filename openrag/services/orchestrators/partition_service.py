@@ -37,7 +37,12 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.preset import PartitionConfig
-from core.utils.consts import DEFAULT_ADMIN_USER_ID, DEFAULT_PARTITION_NAME, is_internal_metadata_key
+from core.utils.consts import (
+    DEFAULT_ADMIN_USER_ID,
+    DEFAULT_PARTITION_NAME,
+    is_internal_metadata_key,
+    is_reserved_partition_name,
+)
 from core.utils.exceptions import (
     ConfigError,
     ConflictError,
@@ -61,11 +66,6 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-# Names reserved as cross-partition sentinels (e.g. ``openrag-all`` /
-# ``?partitions=all``). A real partition named ``all`` collides with the sentinel
-# and the admin partition-list route would expand it to *every* partition — see
-# ``list_existant_partitions``. Matched case-insensitively.
-_RESERVED_PARTITION_NAMES = frozenset({"all"})
 _MAX_MEMBER_CANDIDATE_PAGE_SIZE = 100
 _MAX_POSTGRES_INTEGER = 2_147_483_647
 _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH = 3
@@ -107,9 +107,12 @@ class PartitionService:
         task_state_manager_factory: Callable[[], Any] | None = None,
         task_cancel_timeout: float = 60.0,
         prompt_repo: Any = None,
+        topic_tag_repo: Any = None,
     ) -> None:
+        """Wire the repositories and optional collaborators used by every method."""
         self._partition_repo = partition_repo
         self._prompt_repo = prompt_repo
+        self._topic_tag_repo = topic_tag_repo
         self._membership_repo = membership_repo
         self._document_repo = document_repo
         self._vector_store = vector_store
@@ -404,7 +407,7 @@ class PartitionService:
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
         # error rather than the generic identifier-allowlist rejection.
-        if partition.strip().lower() in _RESERVED_PARTITION_NAMES:
+        if is_reserved_partition_name(partition):
             raise ValidationError(
                 f"Partition name '{partition}' is reserved.",
                 status_code=400,
@@ -948,6 +951,20 @@ class PartitionService:
             )
         return metadata
 
+    async def get_file_topic_tags(self, partition: str, file_id: str) -> list[str]:
+        """Return the document-level topic tags stored for one file.
+
+        Reads through the existing topic-tag repository (populated at indexing
+        by ``indexer_actor._replace_topic_tags_if_needed``). An empty list
+        means the file has no tags — tagging disabled, not yet run, or the
+        tagger returned nothing. Repository errors propagate like any other
+        catalog read failure; they are never masked as "no tags".
+        """
+        if self._topic_tag_repo is None:
+            return []
+        rows = await self._topic_tag_repo.get_by_document(file_id, partition)
+        return [row["tag"] for row in rows if row.get("tag")]
+
     async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list[dict]:
         """Return chunk IDs and page numbers for one file.
 
@@ -1109,14 +1126,28 @@ class PartitionService:
         logger.info(f"User_id {user_id} added to partition '{partition}'.")
 
     async def remove_member(self, partition: str, user_id: int) -> None:
+        """Remove a member; the partition's last owner is refused with a 409."""
         await self._ensure_membership(partition, user_id)
-        await self._membership_repo.remove_partition_member(partition, user_id)
+        status = await self._membership_repo.remove_partition_member(partition, user_id)
+        self._raise_if_last_owner(status, partition, user_id)
         logger.info(f"User_id {user_id} removed from partition '{partition}'.")
 
     async def update_role(self, partition: str, user_id: int, new_role: str) -> None:
+        """Change a member's role; demoting the last owner is refused with a 409."""
         await self._ensure_membership(partition, user_id)
-        await self._membership_repo.update_partition_member_role(partition, user_id, new_role)
+        status = await self._membership_repo.update_partition_member_role(partition, user_id, new_role)
+        self._raise_if_last_owner(status, partition, user_id)
         logger.info(f"User_id {user_id} role updated to '{new_role}' in partition '{partition}'.")
+
+    @staticmethod
+    def _raise_if_last_owner(status: str, partition: str, user_id: int) -> None:
+        # A partition without an owner has nobody left to manage its members
+        # (only admins under SUPER_ADMIN_MODE bypass the owner check).
+        if status == "last_owner":
+            raise ConflictError(
+                f"User {user_id} is the last owner of partition '{partition}'. Make another member owner first.",
+                code="LAST_PARTITION_OWNER",
+            )
 
     # ------------------------------------------------------------------
     # Document relationships

@@ -38,13 +38,13 @@ To upgrade a running release to 2.3.0, follow [Upgrading OpenRAG — 2.2.x to 2.
    helm upgrade\
       --install openrag oci://ghcr.io/linagora/openrag-stack\
       -f ./values.yaml\
-      --version 0.6.0
+      --version 0.7.15
    ```
 
    - `openrag` is the Helm release name.
    - `oci://ghcr.io/linagora/openrag-stack` is the remote chart location.
    - `-f ./values.yaml` specifies your custom configuration.
-   - `--version 0.6.0` ensures you deploy a specific chart version — check `Chart.yaml` for the current version before installing.
+   - `--version 0.7.15` deploys the chart published with OpenRAG 2.3.5. To deploy another release, use the chart version published with it.
 
 ---
 
@@ -203,7 +203,10 @@ PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
 It stops the old generation from accepting work, waits for the files it accepted
 to settle, then removes its actors. If the timeout expires, it leaves them running
 and accepting work again: do not start the new release then. Find out what is
-still indexing, and run the command again. See
+still indexing, and run the command again. After jobs settle, a separate
+stage-history writer timeout is best-effort; the idle generation is still
+removed if a writer does not respond, and its remaining history may be
+incomplete. See
 [Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
 
 ### Upgrades that keep the generation
@@ -221,6 +224,69 @@ true`, delete every Ray pod, head included, as in step 4 of the
 [upgrade guide](/openrag/documentation/upgrading/#4-upgrade-the-release). Restart
 an external Ray cluster yourself. With `ray.enabled: false` (the default) Ray runs
 inside the OpenRAG pod, so the pod restart of the upgrade recreates the actors.
+
+## Sizing indexing
+
+With `ray.enabled: false`, no `RAY_ADDRESS` and `ray.externalCluster: false` (the
+default), the `openrag` pod starts its own Ray: chat, the indexer workers, the document parsers and the task
+tracker share that pod's CPU, memory and GPU. Indexing then scales **vertically
+only**, by giving that pod more resources.
+
+### What sizes indexing
+
+| Setting | What it limits | What it costs |
+|---|---|---|
+| `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER` | Files indexed at once | Each file in flight holds its parsed content and chunks in memory while it waits for the limits below |
+| `PYMUPDF_POOL_SIZE` | PDFs one worker parses at once with PyMuPDF | Above 1, or with `PYMUPDF_PARSE_MEMORY_LIMIT_MB` set, one child process per slot ([figures](/openrag/documentation/env_vars/#pymupdf-loader-configuration)) |
+| `MARKER_POOL_SIZE` × `MARKER_MAX_PROCESSES` | Marker parses at once | One Python and torch process per slot; each Marker worker reserves `MARKER_NUM_GPUS` of the pod's GPUs |
+| `DOCLING_POOL_SIZE` × `DOCLING_MAX_TASKS_PER_WORKER` | PDFs Docling converts at once | Each Docling worker reserves `DOCLING_NUM_GPUS` of the pod's GPUs, and holds the documents it converts in memory |
+| `WHISPER_N_WORKERS` × `WHISPER_CONCURRENCY_PER_WORKER` | Audio and video files the local Whisper transcribes at once | Each Whisper worker reserves `WHISPER_NUM_GPUS` of the pod's GPUs and loads its own copy of the model |
+| `LLM_SEMAPHORE` | Contextualization calls at once, across workers (and the map-reduce calls of chat) | Load on the LLM endpoint |
+| `VLM_SEMAPHORE` | Image-captioning calls at once | Load on the VLM endpoint |
+| `EMBEDDER_CONCURRENCY` | Embedding requests at once **within one call**: a file sends up to this many, so N files embedding at once send up to N times this many | Load on the embedder |
+
+### Scaling up
+
+1. Give the `openrag` pod more CPU and memory under `openrag.resources`, and a GPU if Marker or Docling parse your PDFs.
+2. Raise the parser pools within that budget. With the embedded Ray, the GPU reservations of the Marker, Docling and Whisper workers must fit the pod's GPUs, card by card, since Ray keeps a fraction of a GPU on a single card. From OpenRAG 2.3.5, the chart refuses to render otherwise, but only from the values it can read: `env.config`, and `env.secrets` when the chart renders the Secret itself. It does not see `MARKER_*`, `DOCLING_*` or `WHISPER_*` set in `env.existingSecret` or in a secret from an external secrets operator, and that Secret overrides `env.config` at runtime. Keep these settings in `env.config` only, removed from that Secret, or check the fit yourself.
+3. Set `openrag.shmSize` when Marker runs or PyMuPDF parses in child processes (`PYMUPDF_POOL_SIZE` above 1, or `PYMUPDF_PARSE_MEMORY_LIMIT_MB` set). Their child processes use `/dev/shm`, which container runtimes limit to 64Mi by default; the value counts against the pod's memory limit.
+4. Raise `LLM_SEMAPHORE`, `VLM_SEMAPHORE` and `RAY_MAX_TASKS_PER_WORKER` only as far as the endpoints behind them can follow. More files in flight than the endpoints and parsers can serve only wait, in memory.
+
+### What not to do
+
+From OpenRAG 2.3.5, the chart refuses both of these with the embedded Ray.
+
+- **`openrag.replicas` above 1 with the embedded Ray.** Each pod would have its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. The chart refuses it, and for the same reason replaces the pod on upgrade (`Recreate`) instead of rolling it, so two pods never run at once.
+- **GPU workers that don't fit the pod's GPUs.** Marker, Docling and Whisper workers each reserve part of a GPU, and Ray keeps a fraction on a single card: three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and the files sent to them fail after the parser's timeout. The chart refuses it too, as long as it can read these settings (see [Scaling up](#scaling-up)).
+
+### Large batches
+
+Files waiting for a worker live in the pod's Ray. If the pod restarts, they are
+lost and their jobs end as failed with "Indexing task was interrupted by a restart
+and no longer has a live worker." For very large batches, send the files in waves,
+watch the pod, and send the failed files again.
+
+What to watch:
+
+- `openrag_ingest_tasks` by `state` (queue depth) and `openrag_ingest_stage_duration_seconds` by `stage` (where indexing time goes), described in the [metrics reference](/openrag/documentation/metrics_reference/);
+- restarts of the `openrag` pod, and an `OOMKilled` reason in `kubectl describe pod`.
+
+### More than one replica
+
+Several `openrag` replicas need one Ray cluster shared by all of them: with
+`ray.enabled: true` together with `env.config.RAY_ADDRESS` or
+`env.config.ENABLE_RAY_SERVE=true` (see [Notes](#notes)), or with an external
+cluster through `env.config.RAY_ADDRESS`. Set `ray.externalCluster: true` when
+`RAY_ADDRESS` comes from a Secret the chart cannot read. The pods then use the
+same task state. By default the chart's `RayCluster` runs a fixed number of
+worker pods: `ray.workers.count` groups of `ray.workers.replicas` each. With
+`ray.enableInTreeAutoscaling: true`, each group scales between
+`ray.workers.minReplicas` and `ray.workers.maxReplicas`, which are both 1 by
+default, so raise `ray.workers.maxReplicas` for any scaling. The autoscaler also
+needs the Ray head's service account token, which the chart does not mount by
+default, so set `ray.automountServiceAccountToken: true` too. Upgrades follow
+[Upgrades that change the indexer generation](#upgrades-that-change-the-indexer-generation).
+See [Deploy a Ray cluster](/openrag/documentation/deploy_ray_cluster/).
 
 ## Notes
 

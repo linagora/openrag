@@ -138,6 +138,23 @@ async def test_unsafe_callback_url_is_skipped_not_sent(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hostname", ["127。0。0。1", "127．0．0．1", "127｡0｡0｡1", "127。1", "localhost."])
+async def test_noncanonical_loopback_callback_is_not_sent(monkeypatch: pytest.MonkeyPatch, hostname: str) -> None:
+    sent_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent_requests
+        sent_requests += 1
+        return httpx.Response(200)
+
+    _patch_async_client(monkeypatch, handler)
+
+    await send_indexing_callback(f"http://{hostname}/callback", "p", "f1", "success")
+
+    assert sent_requests == 0
+
+
+@pytest.mark.asyncio
 async def test_callback_url_credentials_are_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must never be called
         raise AssertionError("no HTTP call should be made to an unsafe callback_url")
@@ -348,6 +365,23 @@ async def test_callback_token_is_redacted_from_logged_errors(monkeypatch: pytest
         mock_logger.warning.assert_called_once()
         assert "s3cret-token" not in mock_logger.warning.call_args[1]["error"]
         assert "REDACTED" in mock_logger.warning.call_args[1]["error"]
+        assert "ConnectError" in mock_logger.warning.call_args[1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_callback_error_with_empty_message_logs_the_exception_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """httpx.ReadTimeout("") has an empty str(); the log must still say what failed (#1300)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("")
+
+    _patch_async_client(monkeypatch, handler)
+
+    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
+        await send_indexing_callback("https://cozy.example.com/ai/index/status", "p", "f1", "success", {})
+
+        mock_logger.warning.assert_called_once()
+        assert "ReadTimeout" in mock_logger.warning.call_args[1]["error"]
 
 
 @pytest.mark.asyncio

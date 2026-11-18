@@ -5,6 +5,7 @@ message contained "unsupported plot type"; any other ValueError fell through
 and the function returned None implicitly, causing TypeError in the caller.
 """
 
+import pytest
 from core.indexing.parsers.pptx_parser import PptxParser
 
 
@@ -133,7 +134,9 @@ class TestPptxParserConvertPath:
         slide3.has_notes_slide = False
 
         mock_prs = MagicMock()
-        mock_prs.slides = [slide1, slide2, slide3]
+        # _convert resolves each slide-list entry itself (#1394).
+        mock_prs._element.sldIdLst.sldId_lst = [MagicMock(rId=f"rId{n}") for n in (1, 2, 3)]
+        mock_prs.part.related_slide = {"rId1": slide1, "rId2": slide2, "rId3": slide3}.__getitem__
 
         import pptx as _pptx_module
 
@@ -147,3 +150,248 @@ class TestPptxParserConvertPath:
         texts = [text for _, text in slides]
         assert any("Slide one text" in t for t in texts)
         assert any("Slide three text" in t for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# Picture decoding is limited to the upload image formats
+# ---------------------------------------------------------------------------
+
+
+def _deck_with_pictures(tmp_path, pictures: list[bytes], replace: dict[bytes, bytes]):
+    """Build a real .pptx with one picture per slide, then swap media bytes in the zip."""
+    import zipfile
+    from io import BytesIO
+
+    import pptx
+    from pptx.util import Inches
+
+    presentation = pptx.Presentation()
+    for picture in pictures:
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        slide.shapes.add_picture(BytesIO(picture), Inches(1), Inches(1))
+    built = tmp_path / "built.pptx"
+    presentation.save(built)
+
+    deck = tmp_path / "deck.pptx"
+    with zipfile.ZipFile(built) as source, zipfile.ZipFile(deck, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename.startswith("ppt/media/"):
+                data = replace.get(data, data)
+            target.writestr(item, data)
+    return deck
+
+
+def test_a_picture_in_another_format_is_skipped(tmp_path, psd_bytes, encoded_image):
+    first, second = encoded_image("PNG"), encoded_image("JPEG")
+    deck = _deck_with_pictures(tmp_path, [first, second], replace={first: psd_bytes})
+
+    _, _, images = PptxParser()._convert(str(deck))
+
+    assert [image.page_number for image in images] == [2]
+
+
+# ---------------------------------------------------------------------------
+# An unreadable chart or graphic frame does not fail the deck (#1374)
+# ---------------------------------------------------------------------------
+
+_R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+
+def _deck_with_broken_frame(tmp_path, kind, break_frame):
+    """Build a real .pptx with text, a chart or table frame, more text and a
+    second slide, then break the frame."""
+    import pptx
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.util import Inches
+
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = "Quarterly revenue"
+    if kind == "chart":
+        data = CategoryChartData()
+        data.categories = ["Q1", "Q2"]
+        data.add_series("Revenue", (1.0, 2.0))
+        frame = slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(2), Inches(4), Inches(3), data)
+    else:
+        frame = slide.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(4), Inches(1))
+    slide.shapes.add_textbox(Inches(1), Inches(6), Inches(4), Inches(1)).text = "Source: finance"
+    second = presentation.slides.add_slide(presentation.slide_layouts[6])
+    second.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = "Next slide"
+    break_frame(frame)
+    deck = tmp_path / "deck.pptx"
+    presentation.save(deck)
+    return deck
+
+
+def _point_chart_at_layout(frame):
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    layout = next(rid for rid, rel in frame.part.rels.items() if rel.reltype == RT.SLIDE_LAYOUT)
+    frame._element.chart.set(_R_ID, layout)
+
+
+def _point_chart_at_hyperlink(frame):
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    frame._element.chart.set(_R_ID, frame.part.relate_to("https://example.com", RT.HYPERLINK, is_external=True))
+
+
+@pytest.mark.parametrize(
+    "break_chart",
+    [
+        pytest.param(lambda frame: frame._element.chart.attrib.pop(_R_ID), id="missing-r-id"),
+        pytest.param(lambda frame: frame._element.chart.set(_R_ID, "rId99"), id="dangling-r-id"),
+        # The relationship exists but its target is not a chart.
+        pytest.param(_point_chart_at_layout, id="r-id-to-the-slide-layout"),
+        pytest.param(_point_chart_at_hyperlink, id="r-id-to-an-external-hyperlink"),
+    ],
+)
+def test_a_chart_that_cannot_be_read_becomes_a_placeholder(tmp_path, break_chart):
+    deck = _deck_with_broken_frame(tmp_path, "chart", break_chart)
+
+    _, slides, _ = PptxParser()._convert(str(deck))
+
+    assert slides == [
+        (1, "Quarterly revenue\n\n\n[unsupported chart]\n\nSource: finance"),
+        (2, "Next slide"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "break_frame"),
+    [
+        # has_chart itself raises on a graphicData without its uri.
+        pytest.param(
+            "chart", lambda frame: frame._element.graphic.graphicData.attrib.pop("uri"), id="chart-without-uri"
+        ),
+        pytest.param(
+            "table", lambda frame: frame._element.graphic.graphicData.attrib.pop("uri"), id="table-without-uri"
+        ),
+        pytest.param(
+            "table",
+            lambda frame: frame._element.graphic.graphicData.remove(frame._element.graphic.graphicData.tbl),
+            id="table-without-its-grid",
+        ),
+    ],
+)
+def test_a_graphic_frame_that_cannot_be_read_is_skipped(tmp_path, kind, break_frame):
+    deck = _deck_with_broken_frame(tmp_path, kind, break_frame)
+
+    _, slides, _ = PptxParser()._convert(str(deck))
+
+    assert slides == [(1, "Quarterly revenue\nSource: finance"), (2, "Next slide")]
+
+
+# python-pptx builds a shape before any guard sees it, and a placeholder of a
+# type it does not know cannot be built: the slide keeps what was read before
+# it, its notes and the next slides are kept.
+def _deck_with_unknown_placeholder(tmp_path, where):
+    import pptx
+
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = "Slide title"
+    slide.placeholders[1].text = "Body text"
+    slide.notes_slide.notes_text_frame.text = "Speaker note"
+    second = presentation.slides.add_slide(presentation.slide_layouts[1])
+    second.shapes.title.text = "Next slide"
+    placeholder = {
+        "title": slide.shapes.title,
+        "body": slide.placeholders[1],
+        "notes": slide.notes_slide.notes_placeholder,
+    }[where]
+    placeholder._element.ph.set("type", "bogus")
+    deck = tmp_path / "deck.pptx"
+    presentation.save(deck)
+    return deck
+
+
+@pytest.mark.parametrize(
+    ("where", "first_slide"),
+    [
+        ("title", "### Notes:\nSpeaker note"),
+        ("body", "# Slide title\n\n### Notes:\nSpeaker note"),
+        ("notes", "# Slide title\nBody text"),
+    ],
+)
+def test_a_placeholder_of_an_unknown_type_does_not_fail_the_deck(tmp_path, where, first_slide):
+    deck = _deck_with_unknown_placeholder(tmp_path, where)
+
+    _, slides, _ = PptxParser()._convert(str(deck))
+
+    assert slides == [(1, first_slide), (2, "# Next slide")]
+
+
+# ---------------------------------------------------------------------------
+# A slide that cannot be resolved does not fail the deck (#1394)
+# ---------------------------------------------------------------------------
+
+
+def _deck_with_three_slides(tmp_path, *, edit_deck=None, edit_zip=None):
+    """Build a real .pptx with three text slides, then break the second one,
+    either in the saved package (``edit_zip``) or before saving (``edit_deck``)."""
+    import zipfile
+
+    import pptx
+    from pptx.util import Inches
+
+    presentation = pptx.Presentation()
+    for text in ("Slide one", "Slide two", "Slide three"):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = text
+    if edit_deck is not None:
+        edit_deck(presentation)
+    built = tmp_path / "built.pptx"
+    presentation.save(built)
+
+    deck = tmp_path / "deck.pptx"
+    with zipfile.ZipFile(built) as source, zipfile.ZipFile(deck, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if edit_zip is not None:
+                data = edit_zip(item.filename, data)
+            if data is not None:
+                target.writestr(item, data)
+    return deck
+
+
+def _drop_second_slide_relationship(filename, data):
+    import re
+
+    if filename == "ppt/_rels/presentation.xml.rels":
+        return re.sub(rb'<Relationship [^>]*Target="slides/slide2.xml"/>', b"", data)
+    return data
+
+
+def _drop_second_slide_part(filename, data):
+    # python-pptx drops a relationship whose target part is missing when it
+    # opens the package, which leaves the slide's r:id dangling.
+    if filename in ("ppt/slides/slide2.xml", "ppt/slides/_rels/slide2.xml.rels"):
+        return None
+    return data
+
+
+def _point_second_slide_at_the_master(presentation):
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    master = next(rid for rid, rel in presentation.part.rels.items() if rel.reltype == RT.SLIDE_MASTER)
+    presentation._element.sldIdLst.sldId_lst[1].rId = master
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        pytest.param({"edit_zip": _drop_second_slide_relationship}, id="relationship-removed"),
+        pytest.param({"edit_zip": _drop_second_slide_part}, id="slide-part-missing"),
+        pytest.param({"edit_deck": _point_second_slide_at_the_master}, id="r-id-to-the-slide-master"),
+    ],
+)
+def test_a_slide_that_cannot_be_resolved_does_not_fail_the_deck(tmp_path, broken):
+    deck = _deck_with_three_slides(tmp_path, **broken)
+
+    slide_count, slides, _ = PptxParser()._convert(str(deck))
+
+    assert slide_count == 3
+    assert slides == [(1, "Slide one"), (3, "Slide three")]

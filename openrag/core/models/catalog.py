@@ -121,6 +121,7 @@ class IndexationJob(BaseModel):
     error: str | None = None
     error_reason: str | None = None
     degraded_stages: list[str] = Field(default_factory=list)
+    stage_tracking_version: int | None = Field(default=None, ge=0, le=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
     started_at: datetime | None = None

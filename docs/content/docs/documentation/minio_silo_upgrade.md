@@ -2,95 +2,175 @@
 title: Object storage upgrade (MinIO to SILO)
 ---
 
-Milvus keeps its segments in an S3-compatible object store. OpenRAG used to ship MinIO `RELEASE.2024-12-18T13-15-44Z` for it. MinIO no longer publishes images or security fixes, and that build is affected by CVE-2026-40344 and CVE-2026-41145: anyone who knows an access key can write objects without signing the request.
+OpenRAG 2.3.2 replaces MinIO `RELEASE.2024-12-18T13-15-44Z`, which gets no more security fixes and is affected by CVE-2026-40344 and CVE-2026-41145, with [SILO](https://silo.pgsty.com/), the maintained MinIO fork: `pgsty/silo:RELEASE.2026-09-16T00-00-00Z`. SILO opens an existing MinIO volume in place. If that image becomes unavailable, `linagoraai/silo` is a copy with the same digest.
 
-From OpenRAG 2.3.2, the stack ships [SILO](https://silo.pgsty.com/), the maintained MinIO fork by PGSTY, as `pgsty/silo:RELEASE.2026-09-16T00-00-00Z`, pinned by digest, for amd64 and arm64. SILO fixes both CVEs, speaks the same S3 API, and opens an existing MinIO volume in place. If that image ever becomes unavailable, `linagoraai/silo` holds a copy with the same digest: only the repository name changes.
+A fresh Kubernetes install only needs the [credentials](#credentials). An external S3 store only needs [External S3 store](#external-s3-store).
 
-Fresh installs need nothing beyond the credentials below. Existing deployments must read the next section before upgrading.
+## The switch is one-way: back up first
 
-## Before you upgrade: the switch is one-way
+SILO writes objects the old MinIO cannot read. After the upgrade, going back to the previous release makes Milvus fail (`decodeXLHeaders: Unknown xl meta version 3`) until you restore a backup taken before it. Switching forward again recovers everything.
 
-SILO writes new objects in a metadata format the old MinIO build cannot read. Once SILO has written anything, going back to the old image makes Milvus fail on those segments (`decodeXLHeaders: Unknown xl meta version 3`) and OpenRAG searches return errors. Switching forward again recovers everything, but the only way back to the old image is a backup.
-
-Stop writes and back up the MinIO, etcd and Milvus data together, as described in [Backup and restore](/openrag/documentation/backup_restore/) and [storage layout](/openrag/documentation/openshift_deployment/). To roll back, restore that backup with the previous release.
+The backup includes PostgreSQL, because 2.3.2 also migrates the database.
 
 ## Docker Compose
 
-The Compose stack pulls the new image; nothing else changes, and your `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` stay as they are.
+Run the commands from `infra/compose`, with these set to your `.env` values if it overrides them:
 
 ```bash
-cd infra/compose
-docker compose pull minio
-docker compose up -d minio
-docker compose restart milvus
+DB_DIR=../../db             # DB_VOLUME
+MILVUS_DIR=milvus/volumes   # MILVUS_VOLUME_DIRECTORY, prefixed with milvus/ when relative
+DATA_DIR=../../data         # DATA_VOLUME
 ```
 
-Recreating only `minio` is enough: Milvus reconnects on its own, and the restart makes it reload every segment through SILO, which is the quickest way to confirm the upgrade.
+Named volumes, as set by `.env.named-volumes.example`, aren't directories: back up and restore those volumes instead.
 
-## Helm
+Add your `-f` overlays, and `--profile cpu` on a CPU host, to every `docker compose` command.
 
-Two things change for the bundled MinIO, and both need **every MinIO pod stopped before any new one starts**:
+1. Stop the stack and back it up:
 
-1. **The image.** A distributed MinIO refuses peers running a different binary, so a normal rolling update leaves the cluster unable to read or write until the last pod has switched.
-2. **The credentials are now required.** The Milvus chart defaults them to `minioadmin` / `minioadmin`, which is public. The chart now fails to install or upgrade until `minioCredentials.accessKey` and `minioCredentials.secretKey` are set: no published value, an access key of at least 3 characters (SILO refuses a shorter one at startup), and a secret key of at least 12 characters. An existing release that ran on the default must pick new ones; MinIO accepts new root credentials on existing data. A release that already set `milvus.minio.accessKey` / `secretKey` moves the same values to `minioCredentials` and removes the old keys, which now fail the install: MinIO then keeps its current credentials. If they don't meet the rules above, pick new ones instead.
+   ```bash
+   docker compose down
+   mkdir ~/openrag_backup &&   # stops if an earlier backup is there: move it aside first
+     sudo cp -a "$DB_DIR"     ~/openrag_backup/db &&      # PostgreSQL
+     sudo cp -a "$MILVUS_DIR" ~/openrag_backup/milvus &&  # etcd, MinIO and Milvus
+     sudo cp -a "$DATA_DIR"   ~/openrag_backup/data       # uploaded files
+   ```
 
-The chart stores them in the Secret `openrag-minio-credentials`, which MinIO and every Milvus component read when they start, and keeps them out of the Milvus ConfigMap. Generate them once into a values file kept out of version control and readable only by whoever deploys, and pass that file on every upgrade. Don't pass them with `--set`: that puts them on the command line, where the process list and shell tracing in CI logs can show them.
+2. Start the new release. `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY` don't change.
 
-To manage that Secret yourself instead, for example with External Secrets or Vault, create it with the keys `accesskey` and `secretkey` and set `minioCredentials.create: false`. The chart then renders no Secret and can't check the values.
+   ```bash
+   git fetch --tags
+   git checkout v2.3.2   # or a later release
+   docker compose pull
+   docker compose up -d
+   ```
+
+### Rolling back
+
+Remove each directory before copying its backup back: copying over an existing directory merges the two and corrupts PostgreSQL and etcd.
 
 ```bash
-# Once: generate the credentials into a private values file
+docker compose down
+sudo rm -rf "${DB_DIR:?}" "${MILVUS_DIR:?}" "${DATA_DIR:?}" &&
+  sudo cp -a ~/openrag_backup/db     "$DB_DIR" &&
+  sudo cp -a ~/openrag_backup/milvus "$MILVUS_DIR" &&
+  sudo cp -a ~/openrag_backup/data   "$DATA_DIR" &&
+  git checkout v2.3.1 &&   # the release you ran before
+  docker compose pull &&
+  docker compose up -d
+```
+
+## Kubernetes (Helm)
+
+### Credentials
+
+The chart refuses to install until `minioCredentials.accessKey` and `minioCredentials.secretKey` replace the public `minioadmin` default: an access key of at least 3 characters, a secret key of at least 12, and no published value. MinIO accepts new credentials on existing data. If your values set `milvus.minio.accessKey` / `secretKey`, move them to `minioCredentials`: the old keys now fail the install.
+
+Generate them once and pass the file on every upgrade:
+
+```bash
 touch minio-credentials.yaml && chmod 600 minio-credentials.yaml
 cat > minio-credentials.yaml <<EOF
 minioCredentials:
   accessKey: "$(openssl rand -hex 8)"
   secretKey: "$(openssl rand -hex 20)"
 EOF
-
-# Every install or upgrade: pass it after your other values
-helm upgrade --install <release> oci://ghcr.io/linagora/openrag-stack \
-  -n <namespace> \
-  -f ./values.yaml \
-  -f ./minio-credentials.yaml
 ```
 
-To upgrade an existing release:
+To manage the Secret yourself, for example with External Secrets or Vault, create `openrag-minio-credentials` with the keys `accesskey` and `secretkey` and set `minioCredentials.create: false`.
 
-1. Stop writes and back up the MinIO and etcd volumes (see above).
-2. Stop every MinIO pod and wait until none is left, before upgrading. Upgrading first and deleting the pods afterwards leaves old and new pods running side by side: the rolling update starts as soon as the chart is applied, and the StatefulSet recreates each deleted pod as soon as it is gone.
+### Upgrade
+
+Every MinIO pod must be stopped before SILO starts: a distributed MinIO refuses peers running a different binary.
+
+```bash
+NS=openrag                 # the release namespace
+RELEASE=openrag            # the Helm release name
+CHART_VERSION=0.7.8        # the chart of the release you upgrade to; 0.7.8 is OpenRAG 2.3.2
+PG_POD=openrag-postgresql-0   # the bundled PostgreSQL pod: <postgresql.fullnameOverride>-0
+PG_USER=root               # postgresql.auth.username
+DB=partitions_for_collection_vdb_test   # POSTGRES_DATABASE; when unset, partitions_for_collection_<VDB_COLLECTION_NAME>
+```
+
+1. Stop traffic and wait until no indexing task is active (`GET /queue/tasks?task_status=active` returns `{"tasks": []}`). Then stop OpenRAG, Milvus, etcd and MinIO:
 
    ```bash
-   kubectl scale statefulset -n <namespace> <release>-minio --replicas=0
-   kubectl wait pod -n <namespace> -l app=minio,release=<release> --for=delete --timeout=5m
+   kubectl scale deployment -n "$NS" -l app.kubernetes.io/name=openrag --replicas=0
+   kubectl scale deployment -n "$NS" -l app.kubernetes.io/name=milvus,app.kubernetes.io/instance="$RELEASE" --replicas=0
+   kubectl scale statefulset -n "$NS" -l app.kubernetes.io/name=etcd,app.kubernetes.io/instance="$RELEASE" --replicas=0
+   kubectl scale deployment,statefulset -n "$NS" -l app=minio,release="$RELEASE" --replicas=0
+   kubectl wait pod -n "$NS" -l app.kubernetes.io/name=openrag --for=delete --timeout=5m
+   kubectl wait pod -n "$NS" -l app.kubernetes.io/name=etcd,app.kubernetes.io/instance="$RELEASE" --for=delete --timeout=5m
+   kubectl wait pod -n "$NS" -l app=minio,release="$RELEASE" --for=delete --timeout=5m
    ```
 
-3. Run `helm upgrade` with the new chart and your credentials file. It scales MinIO back to its configured replica count, with every pod on SILO. Pass your values files again rather than `--reuse-values`. That flag keeps the previous chart's defaults instead of this chart's: the old MinIO image, the `minioadmin` credentials, and no name for the credentials Secret. The chart refuses it with "milvus.minio.existingSecret must name the Secret holding MinIO's credentials…". On Helm 3.14 or later, `--reset-then-reuse-values` with the credentials file works too.
-4. Wait for MinIO, then Milvus, to become ready. Milvus restarts on its own because its configuration changed.
+2. Snapshot the etcd, MinIO and `<fullnameOverride>-data` volumes, and dump PostgreSQL:
 
    ```bash
-   kubectl get pods -n <namespace> -l app=minio,release=<release> \
-     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
-   # Expected image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
-   kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus
+   touch openrag.dump && chmod 600 openrag.dump
+   kubectl exec -n "$NS" "$PG_POD" -- env PGUSER="$PG_USER" PGDATABASE="$DB" \
+     sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" pg_dump -Fc' > openrag.dump
+   kubectl exec -i -n "$NS" "$PG_POD" -- pg_restore -l < openrag.dump > /dev/null && echo "dump OK"
    ```
 
-Plan a maintenance window: search and indexing are unavailable while MinIO and Milvus restart.
+3. Upgrade. Helm starts Milvus, etcd and MinIO again, MinIO on SILO.
 
-Deployments that use an external S3 store (`milvus.externalS3.enabled: true`, `milvus.minio.enabled: false`) skip these steps and don't set `minioCredentials`. The chart writes `milvus.externalS3.accessKey` / `secretKey` to `openrag-minio-credentials`, since Milvus reads that Secret whichever store it uses. If a Secret of that name already exists outside the release, for example one External Secrets or Vault created for the bundled MinIO, the install fails rather than let it override the external keys: delete it, or set `minioCredentials.create: false` and have it hold the external store's keys.
+   ```bash
+   helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack --version "$CHART_VERSION" -n "$NS" \
+     -f ./values.yaml -f ./minio-credentials.yaml
+   ```
+
+   Don't use `--reuse-values`: it keeps the old chart's defaults, and the chart refuses it with "milvus.minio.existingSecret must name the Secret holding MinIO's credentials…". On Helm 3.14 or later, `--reset-then-reuse-values` works.
+
+   With `milvus.minio.mode: standalone`, Helm doesn't start MinIO again:
+
+   ```bash
+   kubectl scale deployment -n "$NS" -l app=minio,release="$RELEASE" --replicas=1
+   ```
+
+4. Once Milvus is ready, restart OpenRAG, which otherwise keeps answering 503:
+
+   ```bash
+   kubectl rollout restart deployment -n "$NS" -l app.kubernetes.io/name=openrag
+   ```
+
+### Rolling back
+
+1. Stop OpenRAG, Milvus, etcd and MinIO as in upgrade step 1. With `ray.enabled: true`, also run `kubectl delete raycluster -n "$NS" <fullnameOverride>-raycluster`. The rollback recreates it.
+2. Restore the etcd, MinIO and `<fullnameOverride>-data` volumes from their snapshots.
+3. Restore PostgreSQL, where `<password>` is the database password:
+
+   ```bash
+   echo "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT USAGE ON SCHEMA public TO PUBLIC;" | kubectl exec -i -n "$NS" "$PG_POD" -- \
+     env PGPASSWORD='<password>' psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$DB"
+   kubectl exec -i -n "$NS" "$PG_POD" -- \
+     env PGPASSWORD='<password>' pg_restore --no-owner --exit-on-error -U "$PG_USER" -d "$DB" < openrag.dump
+   ```
+
+4. Roll back to the revision before the upgrade:
+
+   ```bash
+   helm rollback "$RELEASE" <revision> -n "$NS"
+   ```
+
+5. Start a standalone MinIO and restart OpenRAG, as in upgrade steps 3 and 4.
 
 ### Later SILO updates
 
-The same applies whenever a later OpenRAG release changes the SILO image: SILO doesn't support pods of two releases in one cluster either. Stop MinIO before `helm upgrade`, as in step 2, and plan the same maintenance window. To tell whether a release changes the image, compare `milvus.minio.image.tag` in its chart with the one you run.
-
-The Compose stack runs a single MinIO container, so there `docker compose up -d minio` is enough.
+A later release that changes the SILO image needs the same order: stop MinIO (the `app=minio` lines of upgrade step 1) before `helm upgrade`, then start a standalone MinIO again, as in upgrade step 3.
 
 ### Changing the credentials later
 
-Changing the Secret restarts nothing: MinIO and Milvus keep the credentials they started with. Every MinIO node must run with the same credentials, so stop MinIO first, as for the upgrade, then restart Milvus once MinIO is back:
+MinIO and Milvus only read the credentials when they start. Stop MinIO, upgrade, then restart Milvus, with `CHART_VERSION` set to the chart the release runs now (the CHART column of `helm list -n "$NS"`):
 
 ```bash
-kubectl scale statefulset -n <namespace> <release>-minio --replicas=0
-kubectl wait pod -n <namespace> -l app=minio,release=<release> --for=delete --timeout=5m
-helm upgrade <release> oci://ghcr.io/linagora/openrag-stack -n <namespace> -f ./values.yaml -f ./minio-credentials.yaml --wait
-kubectl rollout restart deployment -n <namespace> -l app.kubernetes.io/name=milvus,app.kubernetes.io/instance=<release>
+kubectl scale deployment,statefulset -n "$NS" -l app=minio,release="$RELEASE" --replicas=0
+kubectl wait pod -n "$NS" -l app=minio,release="$RELEASE" --for=delete --timeout=5m
+helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack --version "$CHART_VERSION" -n "$NS" -f ./values.yaml -f ./minio-credentials.yaml --wait
+kubectl scale deployment -n "$NS" -l app=minio,release="$RELEASE" --replicas=1   # standalone MinIO only
+kubectl rollout restart deployment -n "$NS" -l app.kubernetes.io/name=milvus,app.kubernetes.io/instance="$RELEASE"
 ```
+
+### External S3 store
+
+With an external S3 store (`milvus.externalS3.enabled: true`, `milvus.minio.enabled: false`), skip all of the above and leave `minioCredentials` unset. The chart writes `milvus.externalS3.accessKey` / `secretKey` to the Secret `openrag-minio-credentials`. If a Secret of that name already exists outside the release, the install fails: delete it, or set `minioCredentials.create: false` and put the external store's keys in it.

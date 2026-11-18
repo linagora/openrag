@@ -60,14 +60,16 @@ def test_month_and_year_anchors():
 
 
 def test_recent_anchor_is_the_past_90_days_up_to_tomorrow():
-    """The prompt promises "recent / latest → past 90 days" but had no concrete
-    range for it, so the model rolled its own (three calendar months, ending
-    today). The anchor names both words and closes on tomorrow so a document
-    created today is included."""
+    """The prompt promises "recent → past 90 days" but had no concrete range
+    for it, so the model rolled its own (three calendar months, ending today).
+    The anchor closes on tomorrow so a document created today is included.
+    "latest" is deliberately not listed here: "the latest X" is a
+    ``date_order`` request (one item, newest first), not a period."""
     out = calendar_anchors(THURSDAY)
     assert RECENT_DAYS == 90
-    assert _line(out, "- recent / latest (past 90 days)")
-    assert _range(out, "- recent / latest") == ("2026-06-12", "2026-09-11")
+    assert _line(out, "- recent / lately (past 90 days)")
+    assert _range(out, "- recent / lately") == ("2026-06-12", "2026-09-11")
+    assert "latest" not in out
 
 
 def test_past_n_formula_names_every_unit_the_prompt_accepts():

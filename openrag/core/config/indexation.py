@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator
 
@@ -87,6 +87,8 @@ class FileLoadersConfig(ConfigMixin):
     eml: str = "EmlLoader"
     docx: str = "DocxLoader"
     pptx: str = "PPTXLoader"
+    xlsx: str = "XlsxParser"
+    xlsm: str = "XlsxParser"
     doc: str = "DocLoader"
     png: str = "ImageLoader"
     jpeg: str = "ImageLoader"
@@ -115,6 +117,7 @@ class MimetypesConfig(ConfigMixin):
     """
 
     text_plain: str = Field(default=".txt", alias="text/plain")
+    text_csv: str = Field(default=".csv", alias="text/csv")
     text_markdown: str = Field(default=".md", alias="text/markdown")
     application_pdf: str = Field(default=".pdf", alias="application/pdf")
     message_rfc822: str = Field(default=".eml", alias="message/rfc822")
@@ -125,6 +128,14 @@ class MimetypesConfig(ConfigMixin):
     application_pptx: str = Field(
         default=".pptx",
         alias="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    application_xlsx: str = Field(
+        default=".xlsx",
+        alias="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    application_xlsm: str = Field(
+        default=".xlsm",
+        alias="application/vnd.ms-excel.sheet.macroEnabled.12",
     )
     application_msword: str = Field(default=".doc", alias="application/msword")
     image_png: str = Field(default=".png", alias="image/png")
@@ -157,8 +168,24 @@ class MimetypesConfig(ConfigMixin):
 
 
 class LoaderConfig(ConfigMixin):
+    csv_batch_size: int = Field(default=10_000, gt=0, strict=True)
+    csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
+    xlsx_batch_size: int = Field(default=10_000, gt=0, strict=True)
+    xlsx_limits: dict[str, Annotated[int, Field(gt=0, strict=True)]] = Field(default_factory=dict)
+
+    @field_validator("xlsx_limits")
+    @classmethod
+    def _validate_xlsx_limits(cls, value: dict[str, int]) -> dict[str, int]:
+        from dataclasses import fields
+
+        from core.indexing.parsers.tabular.xlsx_validation import XlsxLimits
+
+        unknown = set(value) - {field.name for field in fields(XlsxLimits)}
+        if unknown:
+            raise ValueError(f"Unknown xlsx_limits keys: {sorted(unknown)}")
+        return value
+
     image_captioning: bool = True
-    image_captioning_url: bool = True
     save_markdown: bool = False
     # Keep the raw uploaded file in ``paths.data_dir`` after indexation. Default
     # ``True`` — the source-download route (``/static/{extract_id}``) serves these
@@ -213,6 +240,14 @@ class LoaderConfig(ConfigMixin):
     docling_timeout: int = 3600
     docling_max_task_retry: int = 3
     docling_retry_base_delay: float = 2.0
+
+    @field_validator("csv_delimiter")
+    @classmethod
+    def _validate_csv_delimiter(cls, value: str | None) -> str | None:
+        if value in {"\r", "\n"}:
+            raise ValueError("csv_delimiter must not be a newline")
+        return value
+
     # Outer wall-clock bound (seconds) for a single file's parse stage. Unlike
     # marker/docling — which self-limit at marker_timeout/docling_timeout — the
     # pymupdf backend has no internal timeout, so without this a wedged pymupdf

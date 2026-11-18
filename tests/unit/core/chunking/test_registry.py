@@ -41,3 +41,15 @@ def test_every_chunker_stores_each_chunk_token_count(name):
 
     assert chunks
     assert [c.token_count for c in chunks] == [_words(c.text) for c in chunks]
+
+
+@pytest.mark.parametrize("name", chunking_registry.list_registered())
+def test_every_chunker_puts_the_filename_in_each_chunk(name):
+    """Search and the answering model only read ``text``, so a filename left in
+    metadata can't be found by a question naming the file."""
+    chunker = chunking_registry.create(name, chunk_size=60, chunk_overlap_rate=0.0, length_function=_words)
+
+    chunks = chunker.chunk(_DOCUMENT, partition="p")
+
+    assert chunks
+    assert all("doc.md" in c.text for c in chunks)

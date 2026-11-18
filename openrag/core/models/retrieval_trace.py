@@ -153,10 +153,11 @@ class TemporalFilterTrace(_TraceModel):
 
 
 class ContextualizedSubqueryTrace(_TraceModel):
-    """One generated query and its public temporal predicates."""
+    """One generated query, its public temporal predicates and its date ordering."""
 
     query: str
     temporal_filters: list[TemporalFilterTrace] = Field(default_factory=list)
+    date_order: Literal["newest", "oldest"] | None = None
 
 
 class PromptTrace(_TraceModel):

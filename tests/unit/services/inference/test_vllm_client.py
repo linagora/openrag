@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import gc
 import json
 from unittest.mock import AsyncMock
 
@@ -24,6 +26,7 @@ from services.inference.vllm_client import (
     VLLMVision,
     _find_suspect_escapes,
     _log_safe_error_detail,
+    downscale_image,
 )
 
 
@@ -33,6 +36,29 @@ def _clean_breakers():
     for breaker in _breakers.values():
         breaker.close()
     _breakers.clear()
+
+
+async def _unretrieved_task_errors(coro) -> list[str]:
+    """Await *coro*, then return the "Task exception was never retrieved"
+    contexts asyncio reports once the leftover tasks are garbage collected."""
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    recorded: list[str] = []
+
+    def handler(_loop, ctx):
+        if "never retrieved" in ctx["message"]:
+            recorded.append(f"{ctx['message']}: {ctx.get('future')!r}")
+
+    loop.set_exception_handler(handler)
+    try:
+        await coro
+        for _ in range(3):
+            await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    return recorded
 
 
 def _make_transport(handler):
@@ -913,6 +939,32 @@ class TestVLLMEmbedder:
         assert sorted(cancelled) == ["slow1", "slow2"]  # both slow batches were cancelled
 
     @pytest.mark.asyncio
+    async def test_embed_leaves_no_unretrieved_task_exception_when_several_batches_fail(self):
+        """#1299: tqdm.gather re-raises the first failed batch and abandons the
+        other wrapper tasks, so a second failed batch logs "Task exception was
+        never retrieved". Both fail before embed() gets to cancel anything."""
+        embedder = VLLMEmbedder(endpoint="http://x", model_name="m", batch_size=1, embed_concurrency=5)
+
+        async def fake_embed_batch(texts: list[str], *, offset: int = 0) -> list[list[float]]:
+            raise EmbeddingAPIError("boom", model_name="m", base_url="http://x", error="boom")
+
+        embedder._embed_batch = fake_embed_batch  # type: ignore[method-assign]
+        # Record only the type: an ExceptionInfo's traceback would keep the
+        # abandoned tasks alive past the gc.collect() in the helper.
+        raised: list[type[BaseException]] = []
+
+        async def run():
+            try:
+                await embedder.embed(["a", "b", "c"])
+            except EmbeddingAPIError as exc:
+                raised.append(type(exc))
+
+        recorded = await _unretrieved_task_errors(run())
+
+        assert raised == [EmbeddingAPIError]
+        assert recorded == []
+
+    @pytest.mark.asyncio
     async def test_embed_empty_returns_empty(self):
         def handler(req: httpx.Request) -> httpx.Response:  # pragma: no cover - must not be called
             raise AssertionError("no request should be sent for empty input")
@@ -1164,6 +1216,107 @@ class TestVLLMVision:
 
         result = await self._make_vision(handler).caption_image(b"\x89PNG\r\n\x1a\n", prompt="What is this?")
         assert result == "A red car"
+
+    @staticmethod
+    def _png(width: int, height: int) -> bytes:
+        from io import BytesIO
+
+        from PIL import Image
+
+        out = BytesIO()
+        Image.new("RGB", (width, height), "white").save(out, format="PNG")
+        return out.getvalue()
+
+    @staticmethod
+    def _sent_size(request: httpx.Request) -> tuple[int, int]:
+        from io import BytesIO
+
+        from PIL import Image
+
+        url = json.loads(request.content)["messages"][0]["content"][0]["image_url"]["url"]
+        with Image.open(BytesIO(base64.b64decode(url.split(",", 1)[1]))) as image:
+            return image.size
+
+    @pytest.mark.asyncio
+    async def test_caption_image_downscales_to_max_image_side(self):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["size"] = self._sent_size(request)
+            assert "max_image_side" not in json.loads(request.content)
+            return _chat_response("ok")
+
+        await self._make_vision(handler, max_image_side=1024).caption_image(self._png(2000, 1000))
+        assert seen["size"] == (1024, 512)
+
+    @pytest.mark.asyncio
+    async def test_caption_image_keeps_the_image_without_max_image_side(self):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["size"] = self._sent_size(request)
+            return _chat_response("ok")
+
+        await self._make_vision(handler).caption_image(self._png(2000, 1000))
+        assert seen["size"] == (2000, 1000)
+
+    def test_downscale_leaves_small_and_unreadable_images_unchanged(self):
+        small = self._png(800, 600)
+        assert downscale_image(small, 1024) is small
+        assert downscale_image(b"not an image", 1024) == b"not an image"
+
+    def test_downscale_converts_modes_png_cannot_store(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        cmyk = BytesIO()
+        Image.new("CMYK", (2000, 1000)).save(cmyk, format="JPEG")
+        with Image.open(BytesIO(downscale_image(cmyk.getvalue(), 1024))) as image:
+            assert (image.format, image.mode, image.size) == ("PNG", "RGB", (1024, 512))
+
+    def test_downscale_never_uses_the_scaled_jpeg_decode(self, monkeypatch):
+        from io import BytesIO
+
+        from PIL import Image, JpegImagePlugin
+
+        def fail_draft(self, mode, size):
+            pytest.fail("draft() must not run: its scaled decode is GHSA-8g5g-8vmr-9782")
+
+        monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", fail_draft)
+        jpeg = BytesIO()
+        Image.new("L", (2400, 2200)).save(jpeg, format="JPEG")
+        with Image.open(BytesIO(downscale_image(jpeg.getvalue(), 1024))) as image:
+            assert image.size == (1024, 939)
+
+    def test_downscale_applies_the_exif_orientation(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        exif = Image.Exif()
+        exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to display
+        jpeg = BytesIO()
+        Image.new("RGB", (2000, 1000)).save(jpeg, format="JPEG", exif=exif)
+        with Image.open(BytesIO(downscale_image(jpeg.getvalue(), 1024))) as image:
+            assert image.size == (512, 1024)
+
+    def test_downscale_leaves_formats_the_parsers_refuse_undecoded(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        tiff = BytesIO()
+        Image.new("RGB", (2000, 1000)).save(tiff, format="TIFF")
+        assert downscale_image(tiff.getvalue(), 1024) == tiff.getvalue()
+
+    def test_max_image_side_is_coerced_to_int(self):
+        assert self._make_vision(lambda request: None, max_image_side="1024")._max_image_side == 1024
+
+    @pytest.mark.parametrize("value", [0, -5, "abc", True, 1024.5, "1024.5"])
+    def test_max_image_side_rejects_invalid_values(self, value):
+        with pytest.raises(ValueError):
+            self._make_vision(lambda request: None, max_image_side=value)
 
     @pytest.mark.asyncio
     async def test_caption_image_default_prompt(self):

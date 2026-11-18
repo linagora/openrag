@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import weakref
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,7 +21,11 @@ def _stub_periodic_reconcile(request, monkeypatch):
 
     Skipped for the test that exercises the real loop directly.
     """
-    if request.node.name == "test_periodic_reconcile_keeps_sweeping_until_cancelled":
+    if request.node.name in {
+        "test_periodic_reconcile_keeps_sweeping_until_cancelled",
+        "test_periodic_reconcile_retries_unrecorded_terminal_outcomes",
+        "test_periodic_reconcile_retries_cancelled_worker_fence_cleanup",
+    }:
         return
     from services.workers import task_completion
 
@@ -46,6 +51,7 @@ def _task_state_manager(
     tsm.finish_cancellation = _remote_mock()
     tsm.expire_refless_task_if_stale = _remote_mock(False)
     tsm.has_unsettled_cancelled_worker = _remote_mock(False)
+    tsm.has_worker_settled = _remote_mock(True)
     return tsm
 
 
@@ -59,6 +65,12 @@ def test_tracker_reports_error_reason_history_capability() -> None:
     from services.workers.task_completion import TaskCompletionTracker
 
     assert TaskCompletionTracker().supports_error_reason_history() is True
+
+
+def test_tracker_reports_interrupted_stage_history_capability() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    assert TaskCompletionTracker().supports_interrupted_stage_history() is True
 
 
 @pytest.mark.asyncio
@@ -228,9 +240,9 @@ async def test_tracker_records_recovered_refless_task_when_it_reaches_terminal_s
     }
     tsm = _task_state_manager(object_ref=None)
     tsm.get_details.remote.return_value = details
-    # Three reads: two by the poll loop, one by the history write that now has to
-    # succeed before the actor is stamped.
-    tsm.get_state.remote.side_effect = ["SERIALIZING", "COMPLETED", "COMPLETED"]
+    # Four reads: two by the poll loop, one to confirm the recovered outcome,
+    # and one by the history write that must succeed before the actor is stamped.
+    tsm.get_state.remote.side_effect = ["SERIALIZING", "COMPLETED", "COMPLETED", "COMPLETED"]
 
     with (
         patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
@@ -401,7 +413,8 @@ async def test_tracker_bounds_cancellation_finalization_actor_call() -> None:
 
 @pytest.mark.asyncio
 async def test_tracker_backfills_terminal_task_missed_during_api_restart() -> None:
-    from services.workers.task_completion import TaskCompletionTracker
+    async def call_actor_method(submit, **_kwargs):
+        return await submit()
 
     details = {
         "file_id": "file-1",
@@ -415,12 +428,62 @@ async def test_tracker_backfills_terminal_task_missed_during_api_restart() -> No
     with (
         patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
         patch("services.workers.task_completion._utc_now_iso", return_value="2026-07-20T08:01:05+00:00"),
+        patch("services.workers.task_completion.call_ray_actor_method_with_timeout", side_effect=call_actor_method),
     ):
-        tracker = TaskCompletionTracker()
+        tracker = _tracker_with_repo(_FakeJobRepo())
         await tracker.recover()
+        await asyncio.gather(*list(tracker._background_tasks))
 
     tsm.get_object_ref.remote.assert_not_called()
     tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recover_continues_tracking_while_terminal_worker_settlement_is_pending() -> None:
+    async def call_actor_method(submit, **_kwargs):
+        return await submit()
+
+    terminal_details = {"partition": "tenant-a", "metadata": {}}
+    active_details = {"partition": "tenant-a", "metadata": {}}
+    tsm = _task_state_manager(
+        all_info={
+            "terminal-first": {"state": "FAILED", "details": terminal_details},
+            "active-second": {"state": "QUEUED", "details": active_details},
+        },
+        object_ref={"ref": object()},
+    )
+    settlement_started = asyncio.Event()
+
+    async def unsettled(_task_id):
+        settlement_started.set()
+        return False
+
+    async def details(task_id):
+        return terminal_details if task_id == "terminal-first" else active_details
+
+    tsm.has_worker_settled.remote = AsyncMock(side_effect=unsettled)
+    tsm.get_details.remote = AsyncMock(side_effect=details)
+
+    with (
+        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
+        patch("services.workers.task_completion.call_ray_actor_method_with_timeout", side_effect=call_actor_method),
+    ):
+        tracker = _tracker_with_repo(_FakeJobRepo())
+        await tracker.recover()
+        await asyncio.wait_for(settlement_started.wait(), timeout=1)
+
+    tsm.get_object_ref.remote.assert_awaited_once_with("active-second")
+    tsm.track.remote.assert_called_once_with(
+        "active-second",
+        {"ref": tsm.get_object_ref.remote.return_value["ref"]},
+    )
+    assert "terminal-first" in tracker._tracked_task_ids
+    assert len(tracker._background_tasks) == 1
+
+    background_tasks = list(tracker._background_tasks)
+    for task in background_tasks:
+        task.cancel()
+    await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -446,12 +509,17 @@ async def test_tracker_does_not_replace_existing_completion_time() -> None:
 class _FakeJobRepo:
     def __init__(self) -> None:
         self.saved: list[Any] = []
+        self.interrupted_calls: list[str] = []
         self.failed_calls: list[dict] = []
         self.purged_before: list[Any] = []
 
     async def upsert_job(self, job):
         self.saved.append(job)
         return job
+
+    async def mark_stage_progress_interrupted(self, task_id: str) -> bool:
+        self.interrupted_calls.append(task_id)
+        return True
 
     async def fail_orphaned_jobs(self, *, active_ids, error, before):
         self.failed_calls.append({"active_ids": list(active_ids), "error": error, "before": before})
@@ -500,6 +568,69 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
     assert job.completed_at is not None
     assert job.degraded_stages == ["caption"]
     assert job.filename == "report.pdf"
+    assert repo.interrupted_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recovered_completed_task_does_not_require_worker_settlement_probe() -> None:
+    from core.models.catalog import DocumentStatus
+
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="COMPLETED")
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {"filename": "recovered.pdf"},
+        "user_id": 42,
+    }
+    settlement_probe = tsm.has_worker_settled.remote
+    del tsm.has_worker_settled
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+    assert [job.status for job in repo.saved] == [DocumentStatus.COMPLETED]
+    assert repo.interrupted_calls == []
+    settlement_probe.assert_not_awaited()
+    tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_job_waits_for_settlement_before_interruption_marker_and_stamp() -> None:
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="FAILED")
+    tsm.get_details.remote.return_value = {"partition": "tenant-a", "metadata": {}}
+    tsm.has_worker_settled.remote.side_effect = [False, True]
+
+    with (
+        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
+        patch("services.workers.task_completion.asyncio.sleep", new=AsyncMock()),
+    ):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+    assert tsm.has_worker_settled.remote.await_count == 2
+    assert repo.interrupted_calls == ["task-1"]
+    tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tracker_leaves_task_unstamped_when_settlement_cannot_be_confirmed() -> None:
+    repo = _FakeJobRepo()
+    tsm = SimpleNamespace(
+        get_details=_remote_mock({"partition": "tenant-a", "metadata": {}}),
+        get_state=_remote_mock("FAILED"),
+        set_details=_remote_mock(),
+    )
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+    assert repo.saved == []
+    assert repo.interrupted_calls == []
+    tsm.set_details.remote.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -516,6 +647,7 @@ async def test_failed_task_reason_is_written_to_job_history() -> None:
 
     assert repo.saved[0].error == "traceback"
     assert repo.saved[0].error_reason == "RuntimeError: parser failed"
+    assert repo.interrupted_calls == ["task-1"]
 
 
 @pytest.mark.asyncio
@@ -610,6 +742,22 @@ async def test_a_failed_history_write_leaves_the_task_unstamped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failed_interruption_marker_leaves_the_task_unstamped_for_retry() -> None:
+    repo = _FakeJobRepo()
+    repo.mark_stage_progress_interrupted = AsyncMock(side_effect=RuntimeError("postgres is unavailable"))
+    tsm = _task_state_manager(state="FAILED")
+    tsm.get_details.remote.return_value = {"partition": "tenant-a", "metadata": {}}
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1", worker_settled=True)
+
+    tsm.set_details.remote.assert_not_awaited()
+    assert list(tracker._pending_settlements) == ["task-1"]
+    tracker._settlement_retry.cancel()
+
+
+@pytest.mark.asyncio
 async def test_active_task_is_not_written_as_settled() -> None:
     repo = _FakeJobRepo()
     tsm = _task_state_manager(state="SERIALIZING")
@@ -665,13 +813,39 @@ async def test_a_held_settlement_is_retried_until_postgres_takes_it() -> None:
 
 
 @pytest.mark.asyncio
+async def test_held_cancelled_settlement_retries_worker_fence_cleanup() -> None:
+    repo = _FakeJobRepo()
+    repo.upsert_job = AsyncMock(side_effect=[RuntimeError("postgres is unavailable"), None])
+    tsm = _task_state_manager(state="CANCELLED")
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 42,
+    }
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+        assert list(tracker._pending_settlements) == ["task-1"]
+
+        tracker._settlement_retry.cancel()
+        await tracker._retry_pending_settlements(delay=0)
+
+    assert tracker._pending_settlements == {}
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
 async def test_a_held_settlement_is_not_reconciled_as_an_orphan() -> None:
     from core.models.catalog import DocumentStatus, IndexationJob
 
     repo = _FakeJobRepo()
     tracker = _tracker_with_repo(repo)
-    tracker._pending_settlements["task-1"] = IndexationJob(
-        id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a"
+    tracker._pending_settlements["task-1"] = (
+        IndexationJob(id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a"),
+        True,
     )
 
     await tracker.reconcile_jobs([])
@@ -744,6 +918,77 @@ async def test_periodic_reconcile_keeps_sweeping_until_cancelled() -> None:
 
     assert len(calls) == 2
     assert calls[0] == ["task-live"]
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconcile_retries_unrecorded_terminal_outcomes() -> None:
+    repo = _FakeJobRepo()
+    tracker = _tracker_with_repo(repo)
+    tracker._task_state_manager = MagicMock()
+    tracker._call_task_state = AsyncMock(
+        return_value={
+            "task-pending": {"state": "COMPLETED", "details": {"metadata": {}}},
+            "task-recorded": {
+                "state": "COMPLETED",
+                "details": {"metadata": {"_openrag_job_finished_at": "2026-11-09T12:00:00+00:00"}},
+            },
+            "task-queued": {"state": "COMPLETED", "details": {"metadata": {}}},
+        }
+    )
+    tracker._pending_settlements["task-queued"] = (MagicMock(), True)
+    scheduled = []
+
+    def schedule(task_id):
+        scheduled.append(task_id)
+        raise asyncio.CancelledError()
+
+    tracker._schedule_terminal_settlement = schedule
+
+    with pytest.raises(asyncio.CancelledError):
+        await tracker._periodic_reconcile(interval=0)
+
+    assert scheduled == ["task-pending"]
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconcile_retries_cancelled_worker_fence_cleanup() -> None:
+    tracker = _tracker_with_repo(_FakeJobRepo())
+    tracker._task_state_manager = MagicMock()
+    tracker._call_task_state = AsyncMock(
+        return_value={
+            "task-cancel-cleanup": {
+                "state": "CANCELLED",
+                "details": {"metadata": {"_openrag_job_finished_at": "2026-11-09T12:00:00+00:00"}},
+                "worker_submitted": True,
+            }
+        }
+    )
+    scheduled = []
+
+    def schedule(task_id):
+        scheduled.append(task_id)
+        raise asyncio.CancelledError()
+
+    tracker._schedule_terminal_settlement = schedule
+
+    with pytest.raises(asyncio.CancelledError):
+        await tracker._periodic_reconcile(interval=0)
+
+    assert scheduled == ["task-cancel-cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_recovered_terminal_settlement_retries_cancellation_cleanup() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    tracker = TaskCompletionTracker()
+    tracker._record_finished_at = AsyncMock(return_value=True)
+    tracker._finish_cancellation = AsyncMock()
+
+    await tracker._recover_terminal_settlement("task-1")
+
+    tracker._record_finished_at.assert_awaited_once_with("task-1")
+    tracker._finish_cancellation.assert_awaited_once_with("task-1")
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,7 @@ without touching a parse running in another slot.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import ctypes
 import gc
 import os
@@ -57,6 +58,7 @@ from core.utils.process_limits import apply_parse_memory_limit
 
 from ....models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from ..document_parser import DocumentParser
+from ..progress import report_parser_substage
 from ..registry import parser_registry
 
 ParseMode = Literal["markdown", "text"]
@@ -529,7 +531,16 @@ class _ParsePool:
         try:
             executor = self._executor(slot)
             try:
-                parse = asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+                loop = asyncio.get_running_loop()
+                if self.uses_processes:
+                    # Process workers cannot share the loop-bound progress reporter.
+                    # The dispatcher still reports that this backend is running.
+                    parse = loop.run_in_executor(executor, fn, *args)
+                else:
+                    # The default dedicated thread can report page checkpoints back
+                    # to the actor loop without calling the tracker from this thread.
+                    context = contextvars.copy_context()
+                    parse = loop.run_in_executor(executor, context.run, fn, *args)
             except Exception:
                 # ``submit()`` queues the parse before it starts the child, so a
                 # child that cannot start (no process slots or memory left) leaves
@@ -626,7 +637,14 @@ def _open_pdf(source: bytes | str) -> pymupdf.Document:
 def _extract_text(source: bytes | str, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return one stripped plain-text string per page; no images."""
     with _open_pdf(source) as doc:
-        return [page.get_text().strip() for page in doc], []
+        total = len(doc)
+        if total:
+            report_parser_substage("parse.text", "Extracting page text", progress=0, total=total)
+        pages = []
+        for index, page in enumerate(doc, start=1):
+            pages.append(page.get_text().strip())
+            report_parser_substage("parse.text", "Extracting page text", progress=index, total=total)
+        return pages, []
 
 
 def _to_markdown(doc: pymupdf.Document) -> list[dict]:
@@ -651,22 +669,26 @@ def _pages_with_fallback(doc: pymupdf.Document, chunks: list[dict], filename: st
     page and log a warning so the silent data-loss is visible in logs.
     """
     pages: list[str] = []
-    for i, (chunk, page) in enumerate(zip(chunks, doc)):
+    fallen_back_pages = []
+    total = min(len(chunks), len(doc))
+    if total:
+        report_parser_substage("parse.text", "Extracting page text", progress=0, total=total)
+    for i, (chunk, page) in enumerate(zip(chunks, doc), start=1):
         md_text = (chunk.get("text") or "").strip()
         plain_text = page.get_text().strip()
         plain_len = len(plain_text)
         if plain_len > 0 and len(md_text) < plain_len * _MARKDOWN_TEXT_RATIO_THRESHOLD:
-            logger.bind(
-                filename=filename,
-                page=i + 1,
-                md_chars=len(md_text),
-                plain_chars=plain_len,
-            ).warning(
-                "pymupdf4llm returned much less text than the text layer; falling back to page.get_text() for this page"
-            )
+            fallen_back_pages.append(i)
             pages.append(plain_text)
         else:
             pages.append(md_text)
+        report_parser_substage("parse.text", "Extracting page text", progress=i, total=total)
+    if len(fallen_back_pages) > 0:
+        logger.bind(
+            filename=filename, fallen_back_pages=fallen_back_pages, fallen_back_pages_count=len(fallen_back_pages)
+        ).warning(
+            f"pymupdf4llm returned much less text than the text layer on {len(fallen_back_pages)} page{'s' if len(fallen_back_pages) > 1 else ''}: {fallen_back_pages}; using page.get_text() for them"
+        )
     return pages
 
 
@@ -683,6 +705,7 @@ def _extract_markdown(source: bytes | str, filename: str) -> tuple[list[str], li
     """
     with _open_pdf(source) as doc:
         try:
+            report_parser_substage("parse.convert", "Converting PDF with PyMuPDF")
             chunks = _to_markdown(doc)
             pages = _pages_with_fallback(doc, chunks, filename)
             return pages, []
@@ -707,6 +730,7 @@ def _extract_markdown(source: bytes | str, filename: str) -> tuple[list[str], li
     # than held alongside the second. The source itself belongs to the caller's
     # Document and stays live either way (#846).
     with pymupdf.open(stream=cleaned, filetype="pdf") as clean_doc:
+        report_parser_substage("parse.convert", "Retrying conversion with a cleaned PDF")
         chunks = _to_markdown(clean_doc)
         pages = _pages_with_fallback(clean_doc, chunks, filename)
     return pages, []

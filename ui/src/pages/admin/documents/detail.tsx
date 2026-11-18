@@ -1,24 +1,18 @@
 import { useRef, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Trash2, Copy, RefreshCw, FileText, BookOpen, Hash, ChevronRight } from "lucide-react";
+import { ArrowLeft, Trash2, Copy, RefreshCw, FileText, BookOpen, Hash, ChevronRight, Tag } from "lucide-react";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { PartitionCombobox } from "@/components/shared/partition-combobox";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { formatDate, cn } from "@/lib/utils";
 import { getFileDetail, listFileChunks, type PartitionChunk } from "@/lib/api/documents";
 import {
@@ -129,6 +123,7 @@ function DetailsCard({ metadata }: { metadata: Record<string, unknown> }) {
   );
 }
 
+/** Admin file-detail page: authoritative catalog metadata, chunk links and topic tags. */
 export default function DocumentDetailPage() {
   const { partition, fileId } = useParams<{ partition: string; fileId: string }>();
   const navigate = useNavigate();
@@ -210,6 +205,8 @@ export default function DocumentDetailPage() {
   }
 
   const chunks = chunksQuery.data ?? [];
+  // Older backends omit the field; default to [] so the view stays compatible.
+  const topicTags = detailQuery.data?.topic_tags ?? [];
   const metadata = {
     ...(chunks[0]?.metadata ?? {}),
     ...(detailQuery.data?.metadata ?? {}),
@@ -224,6 +221,9 @@ export default function DocumentDetailPage() {
   const role = allPartitions.find((p) => p.partition === partition)?.role;
   const writable = canWrite(role);
   const copyTargets = allPartitions.filter((p) => p.partition !== partition && canWrite(p.role));
+  // A refetch can drop the chosen target (partition deleted, role revoked): the picker then shows
+  // its placeholder, so Copy must not stay enabled on the stale value.
+  const copyTargetAvailable = copyTargets.some((p) => p.partition === copyTarget);
 
   return (
     <div className="space-y-6">
@@ -262,6 +262,23 @@ export default function DocumentDetailPage() {
               {deleteMutation.isPending ? "Deleting..." : "Delete File"}
             </Button>
           </ConfirmDialog>
+        )}
+      </div>
+
+      <div
+        className="flex flex-wrap items-center gap-2"
+        role="group"
+        aria-label="Topic tags"
+      >
+        <Tag className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        {topicTags.length > 0 ? (
+          topicTags.map((tag) => (
+            <Badge key={tag} variant="secondary">
+              {tag}
+            </Badge>
+          ))
+        ) : (
+          <span className="text-sm text-muted-foreground">No topic tags</span>
         )}
       </div>
 
@@ -339,22 +356,17 @@ export default function DocumentDetailPage() {
                 <div className="space-y-3">
                   <p className="text-sm font-medium">Copy to partition</p>
                   <div className="flex gap-2">
-                    <Select value={copyTarget} onValueChange={setCopyTarget}>
-                      <SelectTrigger className="flex-1">
-                        <SelectValue placeholder="Select partition" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {copyTargets.map((p) => (
-                          <SelectItem key={p.partition} value={p.partition}>
-                            {p.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <PartitionCombobox
+                      partitions={copyTargets}
+                      value={copyTarget}
+                      onValueChange={setCopyTarget}
+                      className="flex-1 min-w-0"
+                      aria-label="Copy to partition"
+                    />
                     <Button
                       variant="outline"
                       onClick={() => copyMutation.mutate()}
-                      disabled={!copyTarget || copyMutation.isPending}
+                      disabled={!copyTargetAvailable || copyMutation.isPending}
                     >
                       <Copy className="h-4 w-4" />
                       {copyMutation.isPending ? "Copying..." : "Copy"}
