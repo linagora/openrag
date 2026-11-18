@@ -289,7 +289,7 @@ def test_get_num_tokens_does_not_pass_enable_thinking_to_chatopenai(monkeypatch)
 def test_literal_special_token_text_is_counted_and_budgeted(monkeypatch, fallback, expected_tokens, request_type):
     import core.utils.text as text_utils
     import langchain_openai
-    from api.routers.user.chat import validate_tokens_limit
+    from api.dependencies.token_budget import validate_tokens_limit
     from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 
     monkeypatch.setattr(text_utils, "_cached_length_function", None)

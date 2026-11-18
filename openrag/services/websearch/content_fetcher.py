@@ -7,8 +7,8 @@ import httpx
 import lxml.html
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_blocked_address, is_safe_url
+from core.websearch import WebResult
 from html_to_markdown import convert
-from services.websearch.base import WebResult
 
 logger = get_logger()
 

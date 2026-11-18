@@ -12,7 +12,7 @@ _IDX_CONFIG = {
     "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2},
     "parsing_strategy": "marker",
 }
-_RET_CONFIG = {"type": "single", "top_k": 50, "top_n": 10}
+_RET_CONFIG = {"top_k": 50, "top_n": 10}
 
 
 def _full_row(partition: str, **overrides) -> dict:

@@ -1,35 +1,18 @@
-"""Retriever strategies: Single, MultiQuery, HyDe.
+"""The retriever: one similarity search per query, then related/ancestor expansion.
 
-Rewritten from ``components/retriever.py``. Differences from the legacy:
-
-  * ``RetrievalSearcher`` (clean ABC) replaces ``get_vectordb()`` / Ray actor
-    direct access. The retriever has no Ray imports.
-  * ``LLM`` (clean ABC) replaces ``ChatOpenAI`` + LangChain chain assembly.
-  * Prompt templates are passed in as strings. The DI layer loads them
-    from disk via ``core/prompts/template_loader``.
-  * Returns are domain ``Chunk`` objects, not LangChain ``Document``.
-
-A ``retriever_registry`` is exposed so the composition root can pick a
-strategy by name (``single`` / ``multiQuery`` / ``hyde``) per the
-strategy doc's "every factory becomes a Registry" rule.
+It talks to the ``RetrievalSearcher`` port and returns domain ``Chunk``
+objects. Searching several phrasings of a question is done by the callers:
+the chat path searches each rewritten sub-query and fuses the results.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from core.llm.llm import LLM, chat_content
 from core.models.chunk import Chunk
-from core.prompts.query_rewriter import (
-    build_hyde_prompt,
-    build_multi_query_prompt,
-    split_multi_query_response,
-)
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
-from core.utils.registry import Registry
 
 logger = logging.getLogger(__name__)
 
@@ -40,41 +23,8 @@ if TYPE_CHECKING:
     from core.retrieval.trace import RetrievalTraceBuilder
 
 
-class Retriever(ABC):
-    """Common surface for all retrieval strategies."""
-
-    @abstractmethod
-    async def retrieve(
-        self,
-        partition: list[str],
-        query: str,
-        filter: str | None = None,
-        filter_params: dict | None = None,
-        trace: RetrievalTraceBuilder | None = None,
-    ) -> list[Chunk]:
-        """Run the strategy and return scored chunks."""
-        ...
-
-    @abstractmethod
-    async def expand_search_results(
-        self,
-        results: list[Chunk],
-        filter_params: dict | None = None,
-        filter: str | None = None,
-    ) -> list[Chunk]:
-        """Optionally enrich a result set with related/ancestor chunks.
-
-        ``filter_params`` carries the same restriction (e.g. a workspace's
-        ``file_id`` allowlist) the initial search was scoped by — expansion
-        must never surface a chunk that restriction would have excluded.
-        ``filter`` is the expression that search used, so a temporal or caller
-        filter is not dropped when related chunks are added (#953).
-        """
-        ...
-
-
-class BaseRetriever(Retriever):
-    """Single-query retriever — the building block for the others."""
+class Retriever:
+    """One similarity search per query, then the related and ancestor chunks when asked."""
 
     def __init__(
         self,
@@ -86,7 +36,6 @@ class BaseRetriever(Retriever):
         include_ancestors: bool = False,
         related_limit: int = 10,
         max_ancestor_depth: int | None = None,
-        **_: Any,
     ) -> None:
         self.searcher = searcher
         self.top_k = top_k
@@ -106,6 +55,7 @@ class BaseRetriever(Retriever):
         filter_params: dict | None = None,
         trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        """Search and return scored chunks."""
         kwargs = {}
         if trace is not None:
             kwargs["trace"] = trace
@@ -123,6 +73,14 @@ class BaseRetriever(Retriever):
     async def expand_search_results(
         self, results: list[Chunk], filter_params: dict | None = None, filter: str | None = None
     ) -> list[Chunk]:
+        """Add the related and ancestor chunks of *results*, when this retriever includes them.
+
+        ``filter_params`` carries the same restriction (e.g. a workspace's
+        ``file_id`` allowlist) the initial search was scoped by — expansion
+        must never surface a chunk that restriction would have excluded.
+        ``filter`` is the expression that search used, so a temporal or caller
+        filter is not dropped when related chunks are added (#953).
+        """
         return await _expand_with_related_chunks(
             searcher=self.searcher,
             results=results,
@@ -132,115 +90,6 @@ class BaseRetriever(Retriever):
             max_ancestor_depth=self.max_ancestor_depth,
             filter_params=filter_params,
             filter=filter,
-        )
-
-
-class SingleRetriever(BaseRetriever):
-    """Default strategy — issues exactly one similarity search per query."""
-
-
-class MultiQueryRetriever(BaseRetriever):
-    """Generates K query variants via the LLM and unions their results."""
-
-    def __init__(
-        self,
-        searcher: RetrievalSearcher,
-        llm: LLM,
-        multi_query_template: str,
-        k_queries: int = 3,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(searcher=searcher, **kwargs)
-        if llm is None:
-            raise ValueError("llm must be provided for MultiQueryRetriever")
-        self.llm = llm
-        self.multi_query_template = multi_query_template
-        self.k_queries = k_queries
-
-    async def _generate_queries(self, query: str) -> list[str]:
-        prompt = build_multi_query_prompt(self.multi_query_template, query, self.k_queries)
-        response = await self.llm.chat([{"role": "user", "content": prompt}])
-        # Cap to k_queries — a non-compliant LLM response can otherwise fan
-        # out far more searches than configured.
-        queries = split_multi_query_response(chat_content(response))[: self.k_queries]
-        return queries or [query]
-
-    async def retrieve(
-        self,
-        partition: list[str],
-        query: str,
-        filter: str | None = None,
-        filter_params: dict | None = None,
-        trace: RetrievalTraceBuilder | None = None,
-    ) -> list[Chunk]:
-        queries = await self._generate_queries(query)
-        kwargs = {}
-        if trace is not None:
-            kwargs["trace"] = trace
-        return await self.searcher.multi_query_search(
-            queries=queries,
-            partition=partition,
-            top_k_per_query=self.top_k,
-            filter=filter,
-            filter_params=filter_params,
-            similarity_threshold=self.similarity_threshold,
-            with_surrounding_chunks=self.with_surrounding_chunks,
-            **kwargs,
-        )
-
-
-class HyDeRetriever(BaseRetriever):
-    """Generates a hypothetical answer document and searches with it.
-
-    If ``combine`` is set, the original query is also issued and results
-    are unioned via the searcher's multi-query path.
-    """
-
-    def __init__(
-        self,
-        searcher: RetrievalSearcher,
-        llm: LLM,
-        hyde_template: str,
-        combine: bool = False,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(searcher=searcher, **kwargs)
-        if llm is None:
-            raise ValueError("llm must be provided for HyDeRetriever")
-        self.llm = llm
-        self.hyde_template = hyde_template
-        self.combine = combine
-
-    async def get_hyde(self, query: str) -> str:
-        prompt = build_hyde_prompt(self.hyde_template, query)
-        response = await self.llm.chat([{"role": "user", "content": prompt}])
-        return chat_content(response)
-
-    async def retrieve(
-        self,
-        partition: list[str],
-        query: str,
-        filter: str | None = None,
-        filter_params: dict | None = None,
-        trace: RetrievalTraceBuilder | None = None,
-    ) -> list[Chunk]:
-        hyde = (await self.get_hyde(query)).strip()
-        if not hyde:
-            queries = [query]
-        else:
-            queries = [hyde, query] if self.combine else [hyde]
-        kwargs = {}
-        if trace is not None:
-            kwargs["trace"] = trace
-        return await self.searcher.multi_query_search(
-            queries=queries,
-            partition=partition,
-            top_k_per_query=self.top_k,
-            filter=filter,
-            filter_params=filter_params,
-            similarity_threshold=self.similarity_threshold,
-            with_surrounding_chunks=self.with_surrounding_chunks,
-            **kwargs,
         )
 
 
@@ -492,12 +341,3 @@ def _csv_sibling_sort_key(chunk: Chunk) -> tuple[int, int, str]:
 def order_csv_continuations(chunks: list[Chunk]) -> list[Chunk]:
     """Backward-compatible name for ordering all CSV row siblings."""
     return order_csv_row_siblings(chunks)
-
-
-# ---------------------------------------------------------------------------
-# Registry — config-driven factory replacement
-# ---------------------------------------------------------------------------
-retriever_registry: Registry[Retriever] = Registry("retriever")
-retriever_registry.register("single")(SingleRetriever)
-retriever_registry.register("multiQuery")(MultiQueryRetriever)
-retriever_registry.register("hyde")(HyDeRetriever)

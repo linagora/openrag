@@ -9,7 +9,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from core.models.retrieval_trace import TraceCandidate
 from core.retrieval.trace import RetrievalTraceBuilder
 from services.storage.vector_store_searcher import VectorStoreSearcher, _dict_to_chunk
 
@@ -212,25 +211,6 @@ async def test_search_combines_filter_and_filter_params():
 
 
 @pytest.mark.asyncio
-async def test_multi_query_search_merges_filter_params():
-    embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
-    store = MagicMock()
-    store.search = AsyncMock(return_value=[])
-    store.query_chunks_by_filter = AsyncMock(return_value=[])
-    searcher = VectorStoreSearcher(vector_store=store, embedder=embedder, document_repo=MagicMock(), collection="col")
-    await searcher.multi_query_search(
-        queries=["q1", "q2"],
-        partition=["p1"],
-        top_k_per_query=3,
-        filter_params={"file_id": ["a"]},
-        with_surrounding_chunks=False,
-    )
-    for call in store.search.call_args_list:
-        assert call.kwargs["filters"]["file_id"] == ["a"]
-
-
-@pytest.mark.asyncio
 async def test_search_scopes_surrounding_chunks_to_allowed_file_ids():
     """#706: surrounding-chunk hydration must not leak a neighbouring file
     outside the workspace/file-id restriction the main search was scoped by."""
@@ -279,161 +259,6 @@ async def test_search_skips_surrounding_when_no_results():
     searcher, store, _, _ = _make_searcher(search_results=[])
     await searcher.search(query="q", partition=["p1"], top_k=5, with_surrounding_chunks=True)
     store.query_chunks_by_filter.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# multi_query_search()
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_multi_query_search_embeds_all_queries():
-    embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
-
-    store = MagicMock()
-    store.search = AsyncMock(return_value=[])
-    store.query_chunks_by_filter = AsyncMock(return_value=[])
-
-    searcher = VectorStoreSearcher(
-        vector_store=store,
-        embedder=embedder,
-        document_repo=MagicMock(),
-        collection="col",
-    )
-    await searcher.multi_query_search(
-        queries=["q1", "q2"], partition=["p1"], top_k_per_query=3, with_surrounding_chunks=False
-    )
-    embedder.embed.assert_awaited_once_with(["q1", "q2"])
-
-
-@pytest.mark.asyncio
-async def test_multi_query_search_deduplicates_across_queries():
-    embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
-
-    # Both queries return the same chunk "1" plus a unique one each
-    store = MagicMock()
-    store.search = AsyncMock(
-        side_effect=[
-            [_make_row("1"), _make_row("2")],
-            [_make_row("1"), _make_row("3")],
-        ]
-    )
-    store.query_chunks_by_filter = AsyncMock(return_value=[])
-
-    searcher = VectorStoreSearcher(
-        vector_store=store,
-        embedder=embedder,
-        document_repo=MagicMock(),
-        collection="col",
-    )
-    chunks = await searcher.multi_query_search(
-        queries=["q1", "q2"], partition=["p1"], top_k_per_query=5, with_surrounding_chunks=False
-    )
-    ids = [c.id for c in chunks]
-    assert ids.count("1") == 1
-    assert sorted(ids) == ["1", "2", "3"]
-
-
-@pytest.mark.asyncio
-async def test_multi_query_search_uses_independent_traces_and_merges_in_query_order():
-    embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
-    child_traces = []
-
-    async def search(*, query_text, trace, **_kwargs):
-        child_traces.append(trace)
-        candidate_id = "first" if query_text == "q1" else "second"
-        trace.record_stage(
-            "dense_after_threshold",
-            status="complete",
-            candidates=[TraceCandidate(id=candidate_id, rank=1)],
-        )
-        trace.record_stage("sparse", status="unavailable", candidates=[])
-        trace.record_stage("hybrid_fused", status="unavailable", candidates=[])
-        return [_make_row(candidate_id)]
-
-    store = MagicMock()
-    store.search = AsyncMock(side_effect=search)
-    store.query_chunks_by_filter = AsyncMock(return_value=[])
-    parent = RetrievalTraceBuilder("request", "question")
-    searcher = VectorStoreSearcher(store, embedder, MagicMock(), "col")
-
-    await searcher.multi_query_search(
-        queries=["q1", "q2"],
-        partition=["p1"],
-        top_k_per_query=3,
-        with_surrounding_chunks=False,
-        trace=parent,
-    )
-
-    assert len({id(trace) for trace in child_traces}) == 2
-    assert all(trace is not parent for trace in child_traces)
-    finished = parent.finish(configuration_fingerprint="fingerprint")
-    assert [query_trace["query"] for query_trace in finished["query_traces"]] == ["q1", "q2"]
-    assert [
-        next(stage for stage in query_trace["stages"] if stage["name"] == "dense_after_threshold")["candidates"][0][
-            "id"
-        ]
-        for query_trace in finished["query_traces"]
-    ] == [
-        "first",
-        "second",
-    ]
-    assert parent.stages["dense_after_threshold"].status == "unavailable"
-    assert parent.stages["dense_after_threshold"].candidates == []
-    assert parent.stages["hybrid_fused"].status == "unavailable"
-
-
-@pytest.mark.asyncio
-async def test_multi_query_search_uses_parallel_wall_clock_latency():
-    embedder = MagicMock()
-    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
-
-    async def search(*, query_text, trace, **_kwargs):
-        duration = 0.2 if query_text == "q1" else 0.7
-        trace.timings["dense_search"] = duration
-        trace.record_stage(
-            "dense_after_threshold",
-            status="complete",
-            candidates=[],
-            duration_seconds=duration,
-        )
-        return []
-
-    store = MagicMock()
-    store.search = AsyncMock(side_effect=search)
-    store.query_chunks_by_filter = AsyncMock(return_value=[])
-    parent = RetrievalTraceBuilder("request", "question")
-    searcher = VectorStoreSearcher(store, embedder, MagicMock(), "col")
-
-    await searcher.multi_query_search(
-        queries=["q1", "q2"],
-        partition=["p1"],
-        top_k_per_query=3,
-        with_surrounding_chunks=False,
-        trace=parent,
-    )
-
-    assert parent.stages["dense_after_threshold"].status == "unavailable"
-    assert parent.stages["dense_after_threshold"].duration_seconds == 0.7
-    assert parent.timings["dense_search"] == 0.7
-
-
-@pytest.mark.asyncio
-async def test_multi_query_search_does_not_create_traces_when_disabled():
-    searcher, store, embedder, _ = _make_searcher()
-    embedder.embed.return_value = [_EMBED_VEC, _EMBED_VEC]
-
-    await searcher.multi_query_search(
-        queries=["q1", "q2"],
-        partition=["p1"],
-        top_k_per_query=3,
-        with_surrounding_chunks=False,
-    )
-
-    assert all("trace" not in call.kwargs for call in store.search.await_args_list)
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ from typing import get_args
 import pytest
 from api.schemas.admin.prompt_schemas import PromptTypeName
 from core.config.infrastructure import PathsConfig, PromptsConfig
-from core.models.prompt import Prompt, PromptType
+from core.models.prompt import RETIRED_PROMPT_TYPES, Prompt, PromptType
 from core.utils.exceptions import ConfigError, NotFoundError, ServiceUnavailableError, ValidationError
 from loguru import logger
 from services.orchestrators import prompt_seed_hashes as seed_hash_module
@@ -149,7 +149,7 @@ class _RefreshRecorder:
 class TestSeeding:
     async def test_shared_template_metadata_covers_every_prompt_type(self):
         metadata = seed_hash_module._PROMPT_TEMPLATE_METADATA
-        assert set(metadata) == {prompt_type.value for prompt_type in PromptType}
+        assert set(metadata) == {prompt_type.value for prompt_type in PromptType} - RETIRED_PROMPT_TYPES
         assert set(seed_hash_module._PROMPT_SEED_HASH_HISTORY) == set(metadata)
         assert {prompt_type: config_key for prompt_type, (config_key, _) in metadata.items()} == (
             prompt_module._TYPE_TO_CONFIG_KEY
@@ -206,7 +206,8 @@ class TestSeeding:
         await _service(repo).seed_defaults()
         seeded_types = {p.prompt_type for p in repo.prompts.values()}
         assert seeded_types == set(PROMPT_TYPE_KEYS)
-        assert len(PROMPT_TYPE_KEYS) == 9
+        assert len(PROMPT_TYPE_KEYS) == 7
+        assert seeded_types.isdisjoint(RETIRED_PROMPT_TYPES)
         for p in repo.prompts.values():
             assert p.is_default is True
             if p.prompt_type != PromptType.ASR_TRANSCRIPTION.value:
@@ -224,7 +225,7 @@ class TestSeeding:
         sysp.content = "OPERATOR EDIT"
         await svc.seed_defaults()
         assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
-        assert len(repo.prompts) == 9
+        assert len(repo.prompts) == 7
 
     async def test_seed_defaults_propagates_repository_read_failure(self):
         class FailingRepo(FakePromptRepo):
@@ -448,7 +449,7 @@ class TestSeeding:
         assert (await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)).content == ""
 
     async def test_type_set_matches_enum(self):
-        assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType}
+        assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType} - RETIRED_PROMPT_TYPES
 
     async def test_api_prompt_type_names_match_enum(self):
         assert set(get_args(PromptTypeName)) == {t.value for t in PromptType}
@@ -604,7 +605,7 @@ class TestCrud:
         with pytest.raises(ValidationError):
             await svc.create_prompt(prompt_type="sys_prompt", name="formal", content="b")
         # Same name under a different type is fine.
-        await svc.create_prompt(prompt_type="hyde", name="formal", content="c")
+        await svc.create_prompt(prompt_type="query_contextualizer", name="formal", content="c")
 
     async def test_rename_collision_is_rejected(self):
         repo = FakePromptRepo()
@@ -664,7 +665,7 @@ class TestCrud:
         assert p.id
 
     async def test_query_contextualizer_accepts_calendar_anchors_placeholder(self):
-        """``{calendar_anchors}`` is rendered by QueryService.generate_query; a
+        """``{calendar_anchors}`` is rendered by QueryContextualizer.contextualize; a
         contextualizer prompt using it must pass write-time validation, and the
         bundled template does."""
         svc = _service()
@@ -730,7 +731,7 @@ class TestCrud:
     async def test_update_rejects_bad_template(self):
         repo = FakePromptRepo()
         svc = _service(repo)
-        p = await svc.create_prompt(prompt_type="hyde", name="h", content="Hypothetical doc for {question}")
+        p = await svc.create_prompt(prompt_type="query_contextualizer", name="q", content="Answer in {query_language}")
         with pytest.raises(ValidationError):
             await svc.update_prompt(p.id, content="now with {unknown_var}")
 
@@ -886,7 +887,9 @@ class TestErrorPathsAreExercised:
     async def test_malformed_braces_raise_at_write_time(self):
         svc = _service()
         with pytest.raises(ValidationError) as exc:
-            await svc.create_prompt(prompt_type="hyde", name="bad", content="unbalanced {question")
+            await svc.create_prompt(
+                prompt_type="query_contextualizer", name="bad", content="unbalanced {query_language"
+            )
         assert exc.value.status_code == 422
         assert "brace" in str(exc.value).lower()
 
@@ -906,9 +909,32 @@ class TestErrorPathsAreExercised:
     async def test_deleting_a_types_default_is_refused(self):
         repo = FakePromptRepo()
         svc = _service(repo)
-        p = await svc.create_prompt(prompt_type="hyde", name="d", content="{question}", is_default=True)
+        p = await svc.create_prompt(
+            prompt_type="query_contextualizer", name="d", content="{query_language}", is_default=True
+        )
         with pytest.raises(ValidationError):
             await svc.delete_prompt(p.id)
+
+    @pytest.mark.parametrize("prompt_type", sorted(RETIRED_PROMPT_TYPES))
+    async def test_creating_a_prompt_of_a_retired_type_is_refused(self, prompt_type):
+        with pytest.raises(ValidationError) as exc:
+            await _service().create_prompt(prompt_type=prompt_type, name="new", content="c")
+        assert exc.value.status_code == 422
+        assert exc.value.code == "PROMPT_TYPE_RETIRED"
+
+    @pytest.mark.parametrize("prompt_type", sorted(RETIRED_PROMPT_TYPES))
+    async def test_a_retired_types_default_can_be_deleted(self, prompt_type):
+        """Nothing resolves it any more, and it is no longer seeded back."""
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        p = await repo.create(
+            Prompt(prompt_type=prompt_type, name=f"default_{prompt_type}", content="c", is_default=True)
+        )
+
+        await svc.delete_prompt(p.id)
+        await svc.seed_defaults()
+
+        assert await repo.get_default(prompt_type) is None
 
     async def test_seeding_keeps_the_native_asr_default_when_custom_templates_are_missing(self, tmp_path):
         repo = FakePromptRepo()

@@ -1,13 +1,6 @@
 from api.dependencies.auth import SUPER_ADMIN_MODE
 from core.utils import consts
 from fastapi import HTTPException, status
-from openai import AsyncOpenAI
-
-
-async def get_openai_models(base_url: str, api_key: str, timeout: float = 30):
-    async with AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout) as client:
-        models_response = await client.models.list()
-        return models_response.data
 
 
 async def get_partition_name(

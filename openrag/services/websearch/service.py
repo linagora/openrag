@@ -1,5 +1,5 @@
 from core.utils.logging import get_logger
-from services.websearch.base import BaseWebSearchProvider, WebResult
+from core.websearch import WebResult, WebSearcher
 from services.websearch.content_fetcher import ContentFetcher
 
 logger = get_logger()
@@ -8,7 +8,7 @@ logger = get_logger()
 class WebSearchService:
     def __init__(
         self,
-        provider: BaseWebSearchProvider | None,
+        provider: WebSearcher | None,
         content_fetcher: ContentFetcher | None = None,
         max_tokens: int = 2000,
     ):

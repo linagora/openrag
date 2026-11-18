@@ -123,34 +123,6 @@ class CatalogSearcher(RetrievalSearcher):
             trace=trace,
         )
 
-    async def multi_query_search(
-        self,
-        queries: list[str],
-        partition: list[str],
-        top_k_per_query: int,
-        filter: str | None = None,
-        filter_params: dict | None = None,
-        similarity_threshold: float = 0.0,
-        with_surrounding_chunks: bool = True,
-        trace: RetrievalTraceBuilder | None = None,
-    ) -> list[Chunk]:
-        kwargs = {}
-        if trace is not None:
-            kwargs["trace"] = trace
-        return await self._filter(
-            await self._searcher.multi_query_search(
-                queries=queries,
-                partition=partition,
-                top_k_per_query=top_k_per_query,
-                filter=filter,
-                filter_params=filter_params,
-                similarity_threshold=similarity_threshold,
-                with_surrounding_chunks=with_surrounding_chunks,
-                **kwargs,
-            ),
-            trace=trace,
-        )
-
     async def get_surrounding_chunks(
         self,
         chunks: list[Chunk],

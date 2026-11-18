@@ -1,4 +1,5 @@
-"""Unit tests for token validation logic in :mod:`api.routers.user.chat`.
+"""Unit tests for the token budget (:mod:`api.dependencies.token_budget`) and the
+answering endpoint's window (:mod:`api.dependencies.model_limits`).
 
 The test file lives at openrag/ (not under api/routers/user/) because a
 file named ``routers/test_*.py`` would shadow the third-party
@@ -16,7 +17,7 @@ import ray  # noqa: E402
 if not ray.is_initialized():
     ray.init(runtime_env={"working_dir": None}, ignore_reinit_error=True)
 
-from api.routers.user.chat import validate_tokens_limit  # noqa: E402
+from api.dependencies.token_budget import validate_tokens_limit  # noqa: E402
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest  # noqa: E402
 from core.utils.exceptions import ServiceUnavailableError  # noqa: E402
 
@@ -28,16 +29,16 @@ def fake_length_function(text: str) -> int:
 
 @pytest.fixture(autouse=True)
 def _mock_get_num_tokens():
-    with patch("api.routers.user.chat.get_num_tokens", return_value=fake_length_function):
+    with patch("api.dependencies.token_budget.get_num_tokens", return_value=fake_length_function):
         yield
 
 
 @pytest.fixture(autouse=True)
 def _restore_probe_pending(monkeypatch):
     """Invalidation flips a module-level flag; keep it from leaking into other tests."""
-    import api.routers.user.chat as chat
+    import api.dependencies.model_limits as model_limits
 
-    monkeypatch.setattr(chat, "_max_model_tokens_pending", False)
+    monkeypatch.setattr(model_limits, "_max_model_tokens_pending", False)
 
 
 # ---------------------------------------------------------------------------
@@ -177,16 +178,16 @@ class TestValidateTokensLimit:
     @pytest.mark.parametrize("request_factory", [_chat_request, _completion_request])
     @pytest.mark.parametrize("failure_stage", ["initialization", "invocation"])
     def test_counter_failure_stops_validation(self, request_factory, failure_stage):
-        from api.routers.user.chat import logger
+        from api.dependencies.token_budget import logger
 
         failure = RuntimeError("private request content and credentials")
-        counter = patch("api.routers.user.chat.get_num_tokens", side_effect=failure)
+        counter = patch("api.dependencies.token_budget.get_num_tokens", side_effect=failure)
         if failure_stage == "invocation":
 
             def fail_counting(_text):
                 raise failure
 
-            counter = patch("api.routers.user.chat.get_num_tokens", return_value=fail_counting)
+            counter = patch("api.dependencies.token_budget.get_num_tokens", return_value=fail_counting)
 
         records = []
         sink = logger.add(lambda message: records.append(message.record))
@@ -206,10 +207,13 @@ class TestValidateTokensLimit:
         assert diagnostic["extra"]["traceback"]
         assert "private" not in repr(diagnostic)
 
-    @pytest.mark.parametrize("function", ["_runtime_config", "_effective_max_output_tokens", "message_tokens"])
+    @pytest.mark.parametrize("function", ["_runtime_config", "effective_max_output_tokens", "message_tokens"])
     def test_unrelated_failure_is_not_reported_as_counter_unavailability(self, function):
         failure = RuntimeError("unrelated programming or configuration error")
-        with patch(f"api.routers.user.chat.{function}", side_effect=failure), pytest.raises(RuntimeError) as error:
+        with (
+            patch(f"api.dependencies.token_budget.{function}", side_effect=failure),
+            pytest.raises(RuntimeError) as error,
+        ):
             validate_tokens_limit(_chat_request("hello"), max_tokens_allowed=2000)
         assert error.value is failure
 
@@ -262,29 +266,35 @@ class TestGetMaxModelTokens:
     """get_max_model_tokens precedence: endpoint config > startup-primed > global."""
 
     def test_endpoint_config_wins_over_primed(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
+        import api.dependencies.token_budget as token_budget
         from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY
 
         s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 32768})
-        monkeypatch.setattr(chat, "load_config", lambda: s)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000})  # auto-probed value present
-        assert chat.get_max_model_tokens() == 32768
+        monkeypatch.setattr(model_limits, "load_config", lambda: s)
+        monkeypatch.setattr(token_budget, "load_config", lambda: s)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 8000})  # auto-probed value present
+        assert model_limits.get_max_model_tokens() == 32768
 
     def test_primed_used_when_no_endpoint_config(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
+        import api.dependencies.token_budget as token_budget
 
         s = _settings_with_default_llm()  # no override
-        monkeypatch.setattr(chat, "load_config", lambda: s)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000})
-        assert chat.get_max_model_tokens() == 8000
+        monkeypatch.setattr(model_limits, "load_config", lambda: s)
+        monkeypatch.setattr(token_budget, "load_config", lambda: s)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 8000})
+        assert model_limits.get_max_model_tokens() == 8000
 
     def test_global_fallback_when_nothing_configured(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
+        import api.dependencies.token_budget as token_budget
 
         s = _settings_with_default_llm()  # no override
-        monkeypatch.setattr(chat, "load_config", lambda: s)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
-        assert chat.get_max_model_tokens() == int(s.llm_context.max_llm_context_size)
+        monkeypatch.setattr(model_limits, "load_config", lambda: s)
+        monkeypatch.setattr(token_budget, "load_config", lambda: s)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
+        assert model_limits.get_max_model_tokens() == int(s.llm_context.max_llm_context_size)
 
 
 class _FakeOpenAIModel:
@@ -309,7 +319,7 @@ async def test_fetch_max_model_tokens_reads_vendor_extra_from_real_sdk_model(mon
     a key in the dump, so that branch was unreachable. This pins the live path
     against the shape the SDK actually produces.
     """
-    import api.routers.user.chat as chat
+    import api.dependencies.model_limits as model_limits
     from openai.types import Model
 
     sdk_model = Model.construct(id="model-a", created=0, object="model", owned_by="vllm", max_model_len=8192)
@@ -318,9 +328,9 @@ async def test_fetch_max_model_tokens_reads_vendor_extra_from_real_sdk_model(mon
     async def fake_get_openai_models(*, base_url, api_key):
         return [sdk_model]
 
-    monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+    monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
 
-    got = await chat._fetch_max_model_tokens(base_url="http://default:8000/v1", model_id="model-a", api_key="k")
+    got = await model_limits._fetch_max_model_tokens(base_url="http://default:8000/v1", model_id="model-a", api_key="k")
     assert got == 8192
 
 
@@ -331,7 +341,7 @@ class TestPrimeMaxModelTokens:
     budget (the '639' fix)."""
 
     async def test_probes_each_distinct_endpoint_and_caches_by_name(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -347,19 +357,19 @@ class TestPrimeMaxModelTokens:
                 "http://mistral:8000/v1": [_FakeOpenAIModel("model-b", 32768)],
             }[base_url]
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        await chat.prime_max_model_tokens(s)
+        await model_limits.prime_max_model_tokens(s)
 
-        assert chat._max_model_tokens_by_name == {"default": 8192, "mistral": 32768}
+        assert model_limits._max_model_tokens_by_name == {"default": 8192, "mistral": 32768}
         assert sorted(calls) == ["http://default:8000/v1", "http://mistral:8000/v1"]
 
     async def test_dedupes_aliased_default_endpoint(self, monkeypatch):
         """The "default" name always aliases whichever endpoint is is_default
         (same ModelEndpointConfig object) — it must be probed once, and the
         result cached under both names."""
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -373,16 +383,16 @@ class TestPrimeMaxModelTokens:
             calls.append(base_url)
             return [_FakeOpenAIModel("model-a", 8192)]
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        await chat.prime_max_model_tokens(s)
+        await model_limits.prime_max_model_tokens(s)
 
-        assert chat._max_model_tokens_by_name == {"default": 8192, "model-a": 8192}
+        assert model_limits._max_model_tokens_by_name == {"default": 8192, "model-a": 8192}
         assert calls == ["http://default:8000/v1"]
 
     async def test_endpoint_without_model_name_is_skipped(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -392,15 +402,15 @@ class TestPrimeMaxModelTokens:
         async def fake_get_openai_models(base_url, api_key, timeout=30):
             pytest.fail("must not probe an endpoint with no model_name")
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        await chat.prime_max_model_tokens(s)
+        await model_limits.prime_max_model_tokens(s)
 
-        assert chat._max_model_tokens_by_name == {}
+        assert model_limits._max_model_tokens_by_name == {}
 
     async def test_one_endpoint_probe_failure_does_not_affect_others(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -413,12 +423,12 @@ class TestPrimeMaxModelTokens:
                 raise RuntimeError("connection refused")
             return [_FakeOpenAIModel("model-a", 8192)]
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        await chat.prime_max_model_tokens(s)
+        await model_limits.prime_max_model_tokens(s)
 
-        assert chat._max_model_tokens_by_name == {"default": 8192}
+        assert model_limits._max_model_tokens_by_name == {"default": 8192}
 
     async def test_concurrent_refreshes_are_serialized(self, monkeypatch):
         """Overlapping refreshes (e.g. several endpoint writes in quick
@@ -426,7 +436,7 @@ class TestPrimeMaxModelTokens:
         can't finish last and overwrite a newer refresh's cache."""
         import asyncio
 
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -444,13 +454,13 @@ class TestPrimeMaxModelTokens:
             in_flight -= 1
             return [_FakeOpenAIModel("model-a", 8192)]
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        await asyncio.gather(chat.prime_max_model_tokens(s), chat.prime_max_model_tokens(s))
+        await asyncio.gather(model_limits.prime_max_model_tokens(s), model_limits.prime_max_model_tokens(s))
 
         assert max_in_flight == 1  # the lock prevents overlapping probes
-        assert chat._max_model_tokens_by_name == {"default": 8192}
+        assert model_limits._max_model_tokens_by_name == {"default": 8192}
 
     async def test_probe_uses_the_endpoints_configured_timeout(self, monkeypatch):
         """Each probe is bounded by that endpoint's own timeout.
@@ -459,7 +469,7 @@ class TestPrimeMaxModelTokens:
         helper's generic default would hold every later refresh for longer than
         the admin asked for — widening the window in which the cache is empty.
         """
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -473,10 +483,10 @@ class TestPrimeMaxModelTokens:
             seen.append(timeout)
             return [_FakeOpenAIModel("model-a", 8192)]
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        await chat.prime_max_model_tokens(s)
+        await model_limits.prime_max_model_tokens(s)
 
         assert seen == [7.5]
 
@@ -488,18 +498,18 @@ class TestInvalidateMaxModelTokens:
     endpoint's probed limit."""
 
     def test_clears_the_probed_cache(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
 
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8192})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 8192})
 
-        chat.invalidate_max_model_tokens()
+        model_limits.invalidate_max_model_tokens()
 
-        assert chat._max_model_tokens_by_name == {}
+        assert model_limits._max_model_tokens_by_name == {}
 
     def test_cleared_cache_falls_back_to_the_global_default(self, monkeypatch):
         """The window degrades to the conservative global value, not to another
         endpoint's probed limit."""
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -507,13 +517,13 @@ class TestInvalidateMaxModelTokens:
         s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
         # Probed value deliberately unlike the global fallback, so the assertion
         # below can only pass by actually falling through to the global tier.
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 128000})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 128000})
 
-        assert chat.get_max_model_tokens(settings=s) == 128000  # probed value while fresh
+        assert model_limits.get_max_model_tokens(settings=s) == 128000  # probed value while fresh
 
-        chat.invalidate_max_model_tokens()
+        model_limits.invalidate_max_model_tokens()
 
-        assert chat.get_max_model_tokens(settings=s) == int(s.llm_context.max_llm_context_size)
+        assert model_limits.get_max_model_tokens(settings=s) == int(s.llm_context.max_llm_context_size)
 
     async def test_refresh_invalidated_mid_probe_discards_its_results(self, monkeypatch):
         """An in-flight probe must not republish over a later invalidation.
@@ -523,7 +533,7 @@ class TestInvalidateMaxModelTokens:
         Publishing them would silently re-open the stale window the write's own
         invalidation just closed.
         """
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -532,21 +542,21 @@ class TestInvalidateMaxModelTokens:
 
         async def fake_get_openai_models(base_url, api_key, timeout=30):
             # A model-endpoint write lands while this probe is in flight.
-            chat.invalidate_max_model_tokens()
+            model_limits.invalidate_max_model_tokens()
             return [_FakeOpenAIModel("model-a", 8192)]
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        await chat.prime_max_model_tokens(s)
+        await model_limits.prime_max_model_tokens(s)
 
-        assert chat._max_model_tokens_by_name == {}  # discarded, not published
+        assert model_limits._max_model_tokens_by_name == {}  # discarded, not published
         # The write's own refresh is still to come, so the detection stays pending.
-        assert chat.max_model_tokens_probe_pending() is True
+        assert model_limits.max_model_tokens_probe_pending() is True
 
     async def test_uninvalidated_refresh_still_publishes(self, monkeypatch):
         """The generation guard must not block the normal path."""
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -556,12 +566,12 @@ class TestInvalidateMaxModelTokens:
         async def fake_get_openai_models(base_url, api_key, timeout=30):
             return [_FakeOpenAIModel("model-a", 8192)]
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        await chat.prime_max_model_tokens(s)
+        await model_limits.prime_max_model_tokens(s)
 
-        assert chat._max_model_tokens_by_name == {"default": 8192}
+        assert model_limits._max_model_tokens_by_name == {"default": 8192}
 
 
 class TestProbePending:
@@ -570,12 +580,12 @@ class TestProbePending:
     "not probed yet", not "the endpoint reports no max_model_len"."""
 
     def test_not_pending_before_any_write(self):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
 
-        assert chat.max_model_tokens_probe_pending() is False
+        assert model_limits.max_model_tokens_probe_pending() is False
 
     async def test_pending_from_invalidation_until_the_refresh_publishes(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -585,21 +595,21 @@ class TestProbePending:
         async def fake_get_openai_models(base_url, api_key, timeout=30):
             return [_FakeOpenAIModel("model-a", 131072)]
 
-        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 131072})
+        monkeypatch.setattr(model_limits, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 131072})
 
-        chat.invalidate_max_model_tokens()
-        assert chat.max_model_tokens_probe_pending() is True
-        assert chat.probed_max_model_tokens("default") is None
+        model_limits.invalidate_max_model_tokens()
+        assert model_limits.max_model_tokens_probe_pending() is True
+        assert model_limits.probed_max_model_tokens("default") is None
 
-        await chat.prime_max_model_tokens(s)
-        assert chat.max_model_tokens_probe_pending() is False
-        assert chat.probed_max_model_tokens("default") == 131072
+        await model_limits.prime_max_model_tokens(s)
+        assert model_limits.max_model_tokens_probe_pending() is False
+        assert model_limits.probed_max_model_tokens("default") == 131072
 
     async def test_a_failed_refresh_stops_the_detection(self, monkeypatch):
         """Requests fall back to the global window after a failed refresh, so
         the admin UI must show that rather than poll "detecting" forever."""
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
         from core.config.root import Settings
 
@@ -609,51 +619,54 @@ class TestProbePending:
         async def broken_fetch(**kwargs):
             raise RuntimeError("probe blew up")
 
-        monkeypatch.setattr(chat, "_fetch_max_model_tokens", broken_fetch)
-        chat.invalidate_max_model_tokens()
+        monkeypatch.setattr(model_limits, "_fetch_max_model_tokens", broken_fetch)
+        model_limits.invalidate_max_model_tokens()
 
         with pytest.raises(RuntimeError):
-            await chat.prime_max_model_tokens(s)
+            await model_limits.prime_max_model_tokens(s)
 
-        assert chat.max_model_tokens_probe_pending() is False
-        assert chat.probed_max_model_tokens("default") is None
+        assert model_limits.max_model_tokens_probe_pending() is False
+        assert model_limits.probed_max_model_tokens("default") is None
 
 
 class TestMaxPromptTokens:
-    """What the router hands QueryService to cap the retrieved sources: the
+    """What the router hands ChatService to cap the retrieved sources: the
     answering endpoint's window minus the output budget."""
 
     def test_window_minus_output_budget(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
+        import api.dependencies.token_budget as token_budget
         from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY
 
         s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 16384})
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
         req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}], max_tokens=2048)
-        assert chat._max_prompt_tokens(req, s, None) == 16384 - 2048
+        assert token_budget.max_prompt_tokens_for(req, s, None) == 16384 - 2048
 
     def test_probed_window_when_the_endpoint_sets_none(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
+        import api.dependencies.token_budget as token_budget
 
         s = _settings_with_default_llm()
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 131072})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 131072})
         req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
-        chat._apply_default_max_tokens(req, s, None)
-        assert chat._max_prompt_tokens(req, s, None) == 131072 - s.llm_context.max_output_tokens
+        token_budget.apply_default_max_tokens(req, s, None)
+        assert token_budget.max_prompt_tokens_for(req, s, None) == 131072 - s.llm_context.max_output_tokens
 
     def test_global_fallback_window_when_nothing_is_known(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
+        import api.dependencies.token_budget as token_budget
 
         s = _settings_with_default_llm()
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
         req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
-        chat._apply_default_max_tokens(req, s, None)
-        assert chat._max_prompt_tokens(req, s, None) == (
+        token_budget.apply_default_max_tokens(req, s, None)
+        assert token_budget.max_prompt_tokens_for(req, s, None) == (
             s.llm_context.max_llm_context_size - s.llm_context.max_output_tokens
         )
 
     def test_client_supplied_endpoint_has_no_known_window(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.token_budget as token_budget
         from core.config.endpoints import LLM_OVERRIDE_ENDPOINT_ENV
 
         monkeypatch.setenv(LLM_OVERRIDE_ENDPOINT_ENV, "true")
@@ -662,7 +675,7 @@ class TestMaxPromptTokens:
             messages=[{"role": "user", "content": "hello"}],
             metadata={"llm_override": {"base_url": "https://api.example.com/v1", "model": "m"}},
         )
-        assert chat._max_prompt_tokens(req, s, None) is None
+        assert token_budget.max_prompt_tokens_for(req, s, None) is None
 
 
 def _partition_config(chat_llm=None):
@@ -685,7 +698,7 @@ class TestPartitionResolvedMaxModelTokens:
     always the global default."""
 
     def test_partition_preset_endpoint_budget_wins_over_default(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY, ModelEndpointConfig
 
         s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 8192})
@@ -694,45 +707,47 @@ class TestPartitionResolvedMaxModelTokens:
             extra={LLM_CONTEXT_SIZE_KEY: 32768, LLM_OUTPUT_TOKENS_KEY: 4096},
         )
         s.partitions["p"] = _partition_config(chat_llm="mistral")
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000, "mistral": 16000})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 8000, "mistral": 16000})
 
-        assert chat.get_max_model_tokens(partitions=["p"], settings=s) == 32768
+        assert model_limits.get_max_model_tokens(partitions=["p"], settings=s) == 32768
         # No partition (direct-LLM) still resolves the default endpoint.
-        assert chat.get_max_model_tokens(partitions=None, settings=s) == 8192
+        assert model_limits.get_max_model_tokens(partitions=None, settings=s) == 8192
 
     def test_partition_preset_uses_its_own_probed_value(self, monkeypatch):
         """Each endpoint's auto-probed max_model_len is cached under its own
         name (prime_max_model_tokens probes every registered LLM endpoint,
         not just the default) — a partition preset with no admin override
         gets its own probed budget, not the default endpoint's."""
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
 
         s = _settings_with_default_llm()  # no explicit context size configured
         s.models.llm["mistral"] = ModelEndpointConfig(endpoint="http://mistral:8000/v1")
         s.partitions["p"] = _partition_config(chat_llm="mistral")
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000, "mistral": 32768})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 8000, "mistral": 32768})
 
-        assert chat.get_max_model_tokens(partitions=["p"], settings=s) == 32768
-        assert chat.get_max_model_tokens(partitions=None, settings=s) == 8000
+        assert model_limits.get_max_model_tokens(partitions=["p"], settings=s) == 32768
+        assert model_limits.get_max_model_tokens(partitions=None, settings=s) == 8000
 
     def test_unprobed_preset_falls_back_to_global_not_default_probed_value(self, monkeypatch):
         """A resolved endpoint with neither an admin override nor a
         successful probe of its own must not silently borrow the default
         endpoint's cached probe — it falls straight to the global default."""
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import ModelEndpointConfig
 
         s = _settings_with_default_llm()  # no explicit context size configured
         s.models.llm["mistral"] = ModelEndpointConfig(endpoint="http://mistral:8000/v1")
         s.partitions["p"] = _partition_config(chat_llm="mistral")
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000})  # "mistral" never probed
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {"default": 8000})  # "mistral" never probed
 
-        assert chat.get_max_model_tokens(partitions=["p"], settings=s) == int(s.llm_context.max_llm_context_size)
-        assert chat.get_max_model_tokens(partitions=None, settings=s) == 8000
+        assert model_limits.get_max_model_tokens(partitions=["p"], settings=s) == int(
+            s.llm_context.max_llm_context_size
+        )
+        assert model_limits.get_max_model_tokens(partitions=None, settings=s) == 8000
 
     def test_conflicting_partition_presets_fall_back_to_default(self, monkeypatch):
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, ModelEndpointConfig
 
         s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 8192})
@@ -742,30 +757,30 @@ class TestPartitionResolvedMaxModelTokens:
         s.models.llm["llama"] = ModelEndpointConfig(endpoint="http://llama:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: 4096})
         s.partitions["a"] = _partition_config(chat_llm="mistral")
         s.partitions["b"] = _partition_config(chat_llm="llama")
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
-        assert chat.get_max_model_tokens(partitions=["a", "b"], settings=s) == 8192
+        assert model_limits.get_max_model_tokens(partitions=["a", "b"], settings=s) == 8192
 
     def test_stale_partition_preset_falls_back_to_default_endpoint_budget(self, monkeypatch):
         """A partition ``chat_llm`` naming an endpoint that was later deleted or
         renamed (nothing cascades the preset) must resolve the preflight to the
-        catalog default — mirroring ``QueryService._resolve_llm``'s KeyError
+        catalog default — mirroring ``ChatService._resolve_llm``'s KeyError
         fallback — so the budget matches the endpoint that actually answers.
 
         Otherwise the preflight would fall to the *global* budget while the
         default endpoint (potentially smaller) answers, letting an oversized
         request clear the 413 guard and then exceed the real window."""
-        import api.routers.user.chat as chat
+        import api.dependencies.model_limits as model_limits
         from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY
 
         # Default endpoint configured smaller (4096) than the global fallback (8192).
         s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 4096})
         s.partitions["p"] = _partition_config(chat_llm="ghost")  # "ghost" is not in the catalog
-        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
 
         assert s.llm_context.max_llm_context_size == 8192  # global is larger — the bug returned this
         # Resolves to the default endpoint's 4096 (what answers), not the global 8192.
-        assert chat.get_max_model_tokens(partitions=["p"], settings=s) == 4096
+        assert model_limits.get_max_model_tokens(partitions=["p"], settings=s) == 4096
 
 
 class TestApplyDefaultMaxTokens:
@@ -781,7 +796,7 @@ class TestApplyDefaultMaxTokens:
         assert req.max_tokens is None
 
     def test_partition_preset_output_budget_wins_over_default(self):
-        import api.routers.user.chat as chat
+        import api.dependencies.token_budget as token_budget
         from core.config.model_endpoints import LLM_OUTPUT_TOKENS_KEY, ModelEndpointConfig
 
         s = _settings_with_default_llm(**{LLM_OUTPUT_TOKENS_KEY: 1024})
@@ -791,42 +806,42 @@ class TestApplyDefaultMaxTokens:
         s.partitions["p"] = _partition_config(chat_llm="mistral")
 
         req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
-        chat._apply_default_max_tokens(req, s, ["p"])
+        token_budget.apply_default_max_tokens(req, s, ["p"])
         # The answering endpoint allows 4096 — not the default endpoint's 1024.
         assert req.max_tokens == 4096
 
     def test_no_partition_uses_default_endpoint_budget(self):
-        import api.routers.user.chat as chat
+        import api.dependencies.token_budget as token_budget
         from core.config.model_endpoints import LLM_OUTPUT_TOKENS_KEY
 
         s = _settings_with_default_llm(**{LLM_OUTPUT_TOKENS_KEY: 1024})
         req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
-        chat._apply_default_max_tokens(req, s, None)
+        token_budget.apply_default_max_tokens(req, s, None)
         assert req.max_tokens == 1024
 
     def test_global_fallback_when_endpoint_has_no_override(self):
-        import api.routers.user.chat as chat
+        import api.dependencies.token_budget as token_budget
 
         s = _settings_with_default_llm()  # no per-endpoint override
         req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
-        chat._apply_default_max_tokens(req, s, None)
+        token_budget.apply_default_max_tokens(req, s, None)
         assert req.max_tokens == s.llm_context.max_output_tokens
 
     def test_explicit_client_value_is_honoured(self):
         """A caller-supplied max_tokens is never overwritten."""
-        import api.routers.user.chat as chat
+        import api.dependencies.token_budget as token_budget
         from core.config.model_endpoints import LLM_OUTPUT_TOKENS_KEY
 
         s = _settings_with_default_llm(**{LLM_OUTPUT_TOKENS_KEY: 4096})
         req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}], max_tokens=7)
-        chat._apply_default_max_tokens(req, s, None)
+        token_budget.apply_default_max_tokens(req, s, None)
         assert req.max_tokens == 7
 
     @pytest.mark.parametrize("llm_override", ["gpt-5.1", ["gpt-5.1"], 7])
     def test_non_mapping_llm_override_falls_back_to_the_server_default(self, llm_override):
         """``metadata`` is validated only as ``dict[str, Any]``, so this reaches the
         read; ``.get`` on it would raise ``AttributeError`` — a 500."""
-        import api.routers.user.chat as chat
+        import api.dependencies.token_budget as token_budget
         from core.config.model_endpoints import LLM_OUTPUT_TOKENS_KEY
 
         s = _settings_with_default_llm(**{LLM_OUTPUT_TOKENS_KEY: 1024})
@@ -834,5 +849,5 @@ class TestApplyDefaultMaxTokens:
             messages=[{"role": "user", "content": "hello"}],
             metadata={"llm_override": llm_override},
         )
-        chat._apply_default_max_tokens(req, s, None)
+        token_budget.apply_default_max_tokens(req, s, None)
         assert req.max_tokens == 1024

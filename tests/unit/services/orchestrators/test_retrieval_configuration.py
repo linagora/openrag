@@ -9,14 +9,11 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
 from core.retrieval.trace import canonical_fingerprint
-from services.orchestrators.retrieval_service import RetrievalService
+from di.retrieval import create_retrieval_service
 
 
 class _Searcher:
     async def search(self, **_kwargs):
-        return []
-
-    async def multi_query_search(self, **_kwargs):
         return []
 
     async def get_related_chunks(self, **_kwargs):
@@ -38,8 +35,6 @@ def _config() -> SimpleNamespace:
             related_limit=10,
             max_ancestor_depth=None,
             allow_filterless_fallback=True,
-            k_queries=3,
-            combine=False,
             max_partition_concurrency=16,
         ),
         reranker=SimpleNamespace(enabled=False, top_k=5),
@@ -65,22 +60,19 @@ def _partition(
     )
 
 
-def test_public_configuration_uses_effective_contextualizer_and_expansion_llms():
+def test_public_configuration_uses_effective_contextualizer_llm():
     config = _config()
-    config.models.llm = {
-        "chat-model": SimpleNamespace(model_name="contextualizer-model"),
-        "query-model": SimpleNamespace(model_name="query-expansion-model"),
-    }
+    config.models.llm = {"chat-model": SimpleNamespace(model_name="contextualizer-model")}
+    # A preset stored for the removed multiQuery retriever: its type and LLM are ignored.
     config.partitions = {
         "tenant-a": _partition(
             chat_llm="chat-model",
             retrieval=RetrievalPipelineConfig(type="multiQuery", llm="query-model"),
         )
     }
-    service = RetrievalService(
+    service = create_retrieval_service(
         searcher=_Searcher(),
         reranker=None,
-        llm=None,
         config=config,
         llm_factory=lambda _name: object(),
     )
@@ -91,7 +83,7 @@ def test_public_configuration_uses_effective_contextualizer_and_expansion_llms()
     assert partition["contextualizer"]["model"] == "contextualizer-model"
     assert partition["contextualizer"]["mode"] == "ChatBotRag"
     assert partition["contextualizer"]["max_contextualized_query_len"] == 512
-    assert partition["retrieval"]["query_expansion_llm"]["model"] == "query-expansion-model"
+    assert {"type", "query_expansion_llm", "query_expansion_prompt"}.isdisjoint(partition["retrieval"])
 
 
 @pytest.mark.parametrize(
@@ -101,7 +93,7 @@ def test_public_configuration_uses_effective_contextualizer_and_expansion_llms()
 def test_configuration_fingerprint_tracks_rag_query_path_settings(setting, changed):
     config = _config()
     config.partitions = {"tenant-a": _partition()}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     first = service.configuration_fingerprint(["tenant-a"])
     setattr(config.rag, setting, changed)
@@ -110,18 +102,14 @@ def test_configuration_fingerprint_tracks_rag_query_path_settings(setting, chang
 
 
 @pytest.mark.parametrize(
-    ("retrieval_type", "setting", "initial", "changed"),
-    [
-        ("single", "rrf_k", 42, 99),
-        ("hyde", "hyde_prompt_name", "hyde-a", "hyde-b"),
-        ("multiQuery", "multi_query_prompt_name", "multi-a", "multi-b"),
-    ],
+    ("setting", "initial", "changed"),
+    [("rrf_k", 42, 99), ("top_k", 20, 40), ("similarity_threshold", 0.5, 0.7)],
 )
-def test_configuration_fingerprint_tracks_pipeline_settings(retrieval_type, setting, initial, changed):
+def test_configuration_fingerprint_tracks_pipeline_settings(setting, initial, changed):
     config = _config()
-    retrieval = RetrievalPipelineConfig(type=retrieval_type, **{setting: initial})
+    retrieval = RetrievalPipelineConfig(**{setting: initial})
     config.partitions = {"tenant-a": _partition(retrieval=retrieval)}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     first = service.configuration_fingerprint(["tenant-a"])
     setattr(retrieval, setting, changed)
@@ -135,7 +123,7 @@ def test_public_configuration_reports_the_top_n_that_applies():
         "tenant-a": _partition(name="tenant-a"),
         "tenant-b": _partition(name="tenant-b", retrieval=RetrievalPipelineConfig(top_n=12)),
     }
-    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     public = service.public_retrieval_configuration(["all"])
 
@@ -145,7 +133,7 @@ def test_public_configuration_reports_the_top_n_that_applies():
 def test_configuration_fingerprint_tracks_global_top_n_when_preset_leaves_it_unset():
     config = _config()
     config.partitions = {"tenant-a": _partition()}
-    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     first = service.configuration_fingerprint(["tenant-a"])
     config.reranker.top_k = 15
@@ -161,7 +149,7 @@ def test_configuration_fingerprint_expands_all_partitions():
         "tenant-b": _partition(name="tenant-b", retrieval=tenant_b),
         "tenant-a": _partition(name="tenant-a", retrieval=tenant_a),
     }
-    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config)
 
     public = service.public_retrieval_configuration(["all"])
     first = service.configuration_fingerprint(["all"])
@@ -172,50 +160,26 @@ def test_configuration_fingerprint_expands_all_partitions():
 
 
 @pytest.mark.asyncio
-async def test_resolved_plan_reuses_the_prompt_used_for_execution_and_fingerprint():
+async def test_resolved_plan_is_executed_without_resolving_a_prompt():
+    """Given the contextualizer prompt, neither the plan nor its execution resolves one."""
+
     class _Prompts:
         def __init__(self):
             self.calls = 0
 
         async def resolve_prompt_with_identity(self, _prompt_type, names, *, strict_errors=False):
             self.calls += 1
-            content = f"private prompt version {self.calls}"
-            return SimpleNamespace(
-                content=content,
-                content_hash=hashlib.sha256(content.encode()).hexdigest(),
-                name=names[0],
-                source="named",
-            )
-
-    class _LLM:
-        async def chat(self, _messages):
-            return {"choices": [{"message": {"content": "generated query"}}]}
+            raise AssertionError("no prompt should be resolved")
 
     config = _config()
-    config.partitions = {
-        "tenant-a": _partition(
-            retrieval=RetrievalPipelineConfig(type="multiQuery", multi_query_prompt_name="legal-query")
-        )
-    }
+    config.partitions = {"tenant-a": _partition()}
     prompts = _Prompts()
-    service = RetrievalService(
-        searcher=_Searcher(),
-        reranker=None,
-        llm=None,
-        config=config,
-        llm_factory=lambda _name: _LLM(),
-        prompt_service=prompts,
-    )
+    service = create_retrieval_service(searcher=_Searcher(), reranker=None, config=config, prompt_service=prompts)
 
     plan = await service.resolve_retrieval_plan(
         ["tenant-a"],
         contextualizer_prompt=SimpleNamespace(content_hash="context-hash", name=None, source="default"),
     )
-    prompt = plan.public_configuration["partitions"][0]["retrieval"]["query_expansion_prompt"]
-
-    assert prompts.calls == 1
-    assert plan.groups[0].pipeline.retriever.multi_query_template == "private prompt version 1"
-    assert prompt["content_hash"] == hashlib.sha256(b"private prompt version 1").hexdigest()
     assert plan.configuration_fingerprint == canonical_fingerprint(plan.public_configuration)
 
     await service.retrieve_multi(
@@ -223,11 +187,11 @@ async def test_resolved_plan_reuses_the_prompt_used_for_execution_and_fingerprin
         search_queries=SearchQueries(query_list=[Query(query="question")]),
         resolved_plan=plan,
     )
-    assert prompts.calls == 1
+    assert prompts.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_snapshot_plan_uses_strict_prompt_resolution_for_both_prompt_identities():
+async def test_snapshot_plan_uses_strict_prompt_resolution_for_the_contextualizer_prompt():
     class _Prompts:
         def __init__(self):
             self.strict_values = []
@@ -243,16 +207,11 @@ async def test_snapshot_plan_uses_strict_prompt_resolution_for_both_prompt_ident
             )
 
     config = _config()
-    config.partitions = {
-        "tenant-a": _partition(
-            retrieval=RetrievalPipelineConfig(type="multiQuery", multi_query_prompt_name="legal-query")
-        )
-    }
+    config.partitions = {"tenant-a": _partition()}
     prompts = _Prompts()
-    service = RetrievalService(
+    service = create_retrieval_service(
         searcher=_Searcher(),
         reranker=None,
-        llm=None,
         config=config,
         prompt_service=prompts,
     )
@@ -263,7 +222,7 @@ async def test_snapshot_plan_uses_strict_prompt_resolution_for_both_prompt_ident
         strict_prompt_resolution=True,
     )
 
-    assert prompts.strict_values == [("multi_query", True), ("query_contextualizer", True)]
+    assert prompts.strict_values == [("query_contextualizer", True)]
 
 
 @pytest.mark.asyncio
@@ -280,7 +239,7 @@ async def test_resolved_plan_records_effective_request_overrides():
             )
         )
     }
-    service = RetrievalService(searcher=_Searcher(), reranker=object(), llm=None, config=config)
+    service = create_retrieval_service(searcher=_Searcher(), reranker=object(), config=config)
 
     plan = await service.resolve_retrieval_plan(
         ["tenant-a"],
@@ -322,10 +281,9 @@ async def test_resolved_snapshot_uses_global_reranker_for_legacy_preset():
             return object()
         raise KeyError(name)
 
-    service = RetrievalService(
+    service = create_retrieval_service(
         searcher=_Searcher(),
         reranker=object(),
-        llm=None,
         config=config,
         reranker_factory=reranker_factory,
     )
@@ -352,10 +310,9 @@ async def test_static_reranker_model_changes_resolved_fingerprint(has_factory):
     def missing_catalog_endpoint(name):
         raise KeyError(name)
 
-    service = RetrievalService(
+    service = create_retrieval_service(
         searcher=_Searcher(),
         reranker=object(),
-        llm=None,
         config=config,
         reranker_factory=missing_catalog_endpoint if has_factory else None,
     )
@@ -386,8 +343,8 @@ async def test_resolved_plan_reloads_an_embedder_switched_by_another_process():
                 )
             }
 
-    service = RetrievalService(
-        searcher=_Searcher(), reranker=None, llm=None, config=config, preset_service=SwappedElsewhere()
+    service = create_retrieval_service(
+        searcher=_Searcher(), reranker=None, config=config, preset_service=SwappedElsewhere()
     )
     prompt = SimpleNamespace(content_hash="context-hash", name=None, source="default")
     plan = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)

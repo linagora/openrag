@@ -18,13 +18,13 @@ from fastapi import HTTPException, Request, status
 if TYPE_CHECKING:
     from di.container import ServiceContainer
     from services.orchestrators.auth_service import AuthService
+    from services.orchestrators.chat_service import ChatService
     from services.orchestrators.conversion_service import ConversionService
     from services.orchestrators.embedder_swap_service import EmbedderSwapService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.mcp_service import MCPService
     from services.orchestrators.partition_service import PartitionService
-    from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
     from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
     from services.orchestrators.user_service import UserService
@@ -115,9 +115,9 @@ def get_retrieval_snapshot_service(request: Request = None) -> RetrievalSnapshot
     return _require_initialized(request).retrieval_snapshot_service
 
 
-def get_query_service(request: Request = None) -> QueryService:
+def get_chat_service(request: Request = None) -> ChatService:
     """Resolve the query orchestrator from the active container."""
-    return _require_initialized(request).query_service
+    return _require_initialized(request).chat_service
 
 
 def get_indexing_service(request: Request = None) -> IndexingService:
@@ -183,7 +183,7 @@ __all__ = [
     "get_partition_service",
     "get_preset_service",
     "get_prompt_service",
-    "get_query_service",
+    "get_chat_service",
     "get_retrieval_service",
     "get_retrieval_snapshot_service",
     "get_user_service",

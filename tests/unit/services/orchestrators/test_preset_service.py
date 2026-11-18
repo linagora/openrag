@@ -15,7 +15,6 @@ _VALID_IDX_CONFIG = {
 }
 
 _VALID_RET_CONFIG = {
-    "type": "single",
     "top_k": 50,
     "top_n": 10,
     "enable_reranker": True,
@@ -160,13 +159,23 @@ async def test_list_presets_defaults_to_zero_when_unused():
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_inserts_six_presets_when_empty():
+async def test_seed_defaults_inserts_four_presets_when_empty():
     repo = _FakePresetRepo()
     svc = _make_service(repo)
     await svc.seed_defaults()
 
     upserts = [c for c in repo.calls if c[0] == "upsert"]
-    assert len(upserts) == 6  # 3 indexation + 3 retrieval
+    assert len(upserts) == 4  # 3 indexation + 1 retrieval
+
+
+@pytest.mark.asyncio
+async def test_seeded_retrieval_preset_has_no_retriever_type():
+    repo = _FakePresetRepo()
+    await _make_service(repo).seed_defaults()
+
+    retrieval = {name: row["config"] for (name, kind), row in repo._store.items() if kind == "retrieval"}
+    assert list(retrieval) == ["default"]
+    assert "type" not in retrieval["default"]
 
 
 @pytest.mark.asyncio

@@ -69,9 +69,9 @@ class ScoredChunk(Chunk):
         Accepts an already-scored chunk — the expansion path reranks a chunk a
         second time — and replaces just the named scores rather than nesting a
         second wrapper or resetting the ones it isn't given. Always returns a
-        new object: the same ``Chunk`` is reranked once per sub-query on the
-        multi-query path, so mutating in place would let one sub-query's score
-        bleed into another's list.
+        new object: the same ``Chunk`` is reranked once per sub-query when the
+        question is split into several, so mutating in place would let one
+        sub-query's score bleed into another's list.
         """
         if isinstance(chunk, cls):
             return chunk.model_copy(update=scores)

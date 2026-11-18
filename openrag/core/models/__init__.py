@@ -2,7 +2,6 @@
 
 from .catalog import TERMINAL_TASK_STATES, DocumentRecord, DocumentStatus, IndexationJob
 from .chunk import Chunk, ChunkType
-from .contextualization import ContextualizedQuery
 from .conversation import Conversation, Message
 from .document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from .prompt import Prompt, PromptType
@@ -17,7 +16,6 @@ __all__ = [
     "ApiKey",
     "Chunk",
     "ChunkType",
-    "ContextualizedQuery",
     "Conversation",
     "Document",
     "DocumentRecord",

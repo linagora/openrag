@@ -59,8 +59,6 @@ _PRESET_FIELD_TO_TYPE = {
     "asr_transcription_prompt_name": "asr_transcription",
     "image_captioning_prompt_name": "image_captioning",
     "topic_tagging_prompt_name": "topic_tagger",
-    "hyde_prompt_name": "hyde",
-    "multi_query_prompt_name": "multi_query",
     "query_contextualizer_prompt_name": "query_contextualizer",
 }
 

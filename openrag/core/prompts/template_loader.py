@@ -41,13 +41,13 @@ def load_template_by_key(
     """Read a prompt by logical key, looking up the filename on a mapping object.
 
     The mapping object is typically the ``PromptsConfig`` Pydantic model with
-    attributes like ``sys_prompt``, ``hyde``, ``multi_query`` whose values are
+    attributes like ``sys_prompt``, ``query_contextualizer`` whose values are
     template filenames.
 
     Args:
         prompts_dir: Directory containing prompt template files.
         prompt_mapping: Object exposing prompt keys as attributes.
-        prompt_key: Attribute name on ``prompt_mapping`` (e.g. ``"hyde"``).
+        prompt_key: Attribute name on ``prompt_mapping`` (e.g. ``"sys_prompt"``).
 
     Returns:
         The template contents as a string.

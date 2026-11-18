@@ -165,6 +165,22 @@ def format_context(
     return SOURCE_SEPARATOR.join(reduced), included
 
 
+def documents_context(docs: list, *, any_retrieved: bool, length_function: Callable[[str], int]) -> str:
+    """*docs* (LangChain-style, with ``page_content`` and ``metadata``) as numbered ``[Source N]`` blocks.
+
+    Empty when retrieval found documents but none fit the prompt, and the
+    no-document message when it found none.
+    """
+    if not docs and any_retrieved:
+        return ""
+    return format_context(
+        [doc.page_content for doc in docs],
+        max_context_tokens=None,
+        length_function=length_function,
+        headers=[describe_source(doc.metadata) for doc in docs],
+    )[0]
+
+
 def format_web_context(
     web_results: list[WebSourceLike],
     length_function: Callable[[str], int],

@@ -34,7 +34,6 @@ from .retrieval import (
     RAGConfig,
     RerankerConfig,
     RetrieverConfig,
-    SingleRetrieverConfig,
     StaanWebSearchConfig,
     WebSearchConfig,
     _default_reranker_config,
@@ -66,7 +65,7 @@ class Settings(ConfigMixin):
     indexing_callback: IndexingCallbackConfig = Field(default_factory=IndexingCallbackConfig)
     ray: RayConfig = Field(default_factory=RayConfig)
     chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)
-    retriever: RetrieverConfig = Field(default_factory=SingleRetrieverConfig)
+    retriever: RetrieverConfig = Field(default_factory=RetrieverConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
     websearch: WebSearchConfig = Field(default_factory=StaanWebSearchConfig)
     mcp: MCPServerConfig = Field(default_factory=MCPServerConfig)

@@ -86,7 +86,7 @@ def _partition(chat_llm: str | None = None) -> PartitionConfig:
 
 
 class TestResolvePartitionChatLlm:
-    """resolve_partition_chat_llm — shared by QueryService._resolve_llm (which LLM
+    """resolve_partition_chat_llm — shared by ChatService._resolve_llm (which LLM
     answers) and the chat-completions token preflight (what budget it's checked
     against), so both must agree on the same consensus rule."""
 

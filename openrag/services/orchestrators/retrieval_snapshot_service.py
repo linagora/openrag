@@ -93,35 +93,11 @@ class RetrievalSnapshotService:
         )
         retrieval = self._keys(
             partition_config.get("retrieval"),
-            "type",
             "top_k",
             "similarity_threshold",
             "rrf_k",
-            "k_queries",
-            "combine",
             "with_surrounding_chunks",
             "allow_filterless_fallback",
-            "hyde_prompt_name",
-            "multi_query_prompt_name",
-            "query_expansion_llm",
-        )
-        retrieval["query_expansion_llm"] = (
-            self._keys(
-                retrieval.get("query_expansion_llm"),
-                "name",
-                "model",
-            )
-            if isinstance(retrieval.get("query_expansion_llm"), dict)
-            else None
-        )
-        retrieval_source = partition_config.get("retrieval")
-        query_expansion_prompt = (
-            retrieval_source.get("query_expansion_prompt") if isinstance(retrieval_source, dict) else None
-        )
-        retrieval["query_expansion_prompt"] = (
-            self._keys(query_expansion_prompt, "type", "name", "source", "content_hash")
-            if isinstance(query_expansion_prompt, dict)
-            else None
         )
         configuration = {
             "openrag": {"version": self._version, "commit": self._commit},

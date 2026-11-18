@@ -32,7 +32,6 @@ def _indexation_config(chunk_size: int) -> dict:
 
 def _retrieval_config(top_n: int = 3) -> dict:
     return {
-        "type": "single",
         "top_k": 5,
         "top_n": top_n,
         "similarity_threshold": 0.0,
@@ -60,7 +59,7 @@ def test_preset_options_crud_and_rename(api_client):
         _assert_success(options, context="preset options")
         option_data = options.json()
         assert "recursive_splitter" in option_data["chunking_strategies"]
-        assert "single" in option_data["retrieval_types"]
+        assert "retrieval_types" not in option_data
         # Parsing strategies are derived from IndexationPipelineConfig's Literal.
         assert set(option_data["parsing_strategies"]) == {"pymupdf", "marker", "docling"}
 

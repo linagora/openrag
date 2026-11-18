@@ -293,10 +293,10 @@ def test_chat_message_passes_through_extra_openai_fields():
 
 
 def test_sanitize_messages_keeps_tool_calls_reaching_it():
-    """_sanitize_messages leaves a content-free assistant turn alone when it
+    """sanitize_messages leaves a content-free assistant turn alone when it
     carries tool_calls — reachable only now that the schema forwards the field
     """
-    from services.orchestrators.query_service import QueryService
+    from core.chat.history import sanitize_messages
 
     request = OpenAIChatCompletionRequest.model_validate(
         {
@@ -309,7 +309,7 @@ def test_sanitize_messages_keeps_tool_calls_reaching_it():
             ]
         }
     )
-    sanitized = QueryService._sanitize_messages(request.model_dump(exclude_none=True)["messages"])
+    sanitized = sanitize_messages(request.model_dump(exclude_none=True)["messages"])
 
     assert sanitized[0]["content"] == ""
 
@@ -396,7 +396,7 @@ def test_chat_message_accepts_tool_role_with_tool_call_id():
 
 def test_chat_message_accepts_null_content_with_tool_calls():
     """The assistant turn that *carries* tool_calls has `content: null` in the
-    OpenAI API — the exact shape `_sanitize_messages` documents as legitimately
+    OpenAI API — the exact shape `sanitize_messages` documents as legitimately
     content-free. A required `content: str` rejected it before it got there
     """
     message = OpenAIMessage.model_validate(
