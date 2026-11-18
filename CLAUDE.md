@@ -217,9 +217,9 @@ answer stays usable). `Query.to_milvus_filter()` (`core/models/query.py`) render
 `order_chunks_by_date` (`core/retrieval/date_order.py`) orders the sources the answering LLM
 reads, stable within a document and with undated (or future-dated) chunks last. The date never
 decides *which* sources the model gets: retrieval, the `top_k` cut, the context-budget fit
-(`_fit_sources`) and the drop-until-it-fits loop all stay relevance-ranked, exactly as without a
-date order, and only the chunks that made it in are re-sorted, in `_prepare_chat` and
-`_prepare_completions` right before rendering. Selecting by date instead let recent, loosely
+(`fit_sources`) and the drop-until-it-fits loop (`fit_prompt`, both in `core/chat/budget.py`) all
+stay relevance-ranked, exactly as without a date order, and only the chunks that made it in are
+re-sorted, in `_prepare_chat` and `_prepare_completions` right before rendering. Selecting by date instead let recent, loosely
 matching documents (invitations, agendas) crowd the asked-for report out of the context (review
 on PR #1317); with the dates shown, the model picks the newest relevant source itself. The
 returned `docs` (hence `extra.sources` and the citation numbers) follow the rendered order.
@@ -234,9 +234,9 @@ ahead of the real one under the trusted marker.
 
 `created_at` is the only temporal field and is client-supplied at upload (`TEMPORAL_FIELDS` in
 `indexing_service.py`, a TIMESTAMPTZ column in Milvus); cozy-stack sends the Cozy file creation
-date. A chunk without it is neither filtered in nor sorted first. `_QUERY_JSON_HINT`
-(`chat_service.py`) must keep `temporal_filters` / `date_order` open ("per the rules above"): a
-literal `null` there is copied verbatim by the model.
+date. A chunk without it is neither filtered in nor sorted first. `QUERY_JSON_HINT`
+(`core/prompts/query_contextualizer.py`) must keep `temporal_filters` / `date_order` open ("per the
+rules above"): a literal `null` there is copied verbatim by the model.
 
 Known limits: `retriever.allow_filterless_fallback` (default `true`) retries without the filter
 when a period matches nothing, and the model is not told — it then summarizes out-of-period

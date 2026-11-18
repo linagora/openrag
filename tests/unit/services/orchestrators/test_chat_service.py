@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import services.orchestrators.chat_service as qs
+from core.chat import smalltalk
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
@@ -3597,10 +3598,6 @@ async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
 # --------------------------------------------------------------------------- #
 
 
-def test_json_slice_extracts_object():
-    assert qs._json_slice('noise {"a": 1} trailing') == '{"a": 1}'
-
-
 def test_dedupe_web_preserves_first_seen():
     a = SimpleNamespace(url="https://example.test/one")
     b = SimpleNamespace(url="https://example.test/one")
@@ -3620,132 +3617,8 @@ def test_sampling_strips_transport_keys():
     assert out == {"temperature": 0.5}
 
 
-# --------------------------------------------------------------------------- #
-# _sanitize_messages
-# --------------------------------------------------------------------------- #
-
-
-def test_sanitize_valid_alternating_unchanged():
-    """Valid alternating history → identical output."""
-    msgs = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi"},
-        {"role": "user", "content": "again"},
-    ]
-    assert ChatService._sanitize_messages(msgs) == msgs
-
-
-def test_sanitize_empty_content_replaced_with_placeholder():
-    """Empty assistant content → replaced with NO_CONTENT, alternation preserved."""
-    msgs = [
-        {"role": "user", "content": "first"},
-        {"role": "assistant", "content": ""},
-        {"role": "user", "content": "second"},
-    ]
-    out = ChatService._sanitize_messages(msgs)
-    assert len(out) == 3
-    assert out[1]["role"] == "assistant"
-    assert out[1]["content"] == "NO_CONTENT"
-
-
-def test_sanitize_whitespace_only_replaced():
-    """Whitespace-only assistant content → replaced with NO_CONTENT."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": "   "},
-    ]
-    out = ChatService._sanitize_messages(msgs)
-    assert out[1]["content"] == "NO_CONTENT"
-
-
-def test_sanitize_no_content_key_replaced():
-    """Assistant with no 'content' key → replaced with NO_CONTENT, other keys kept."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "name": "bot"},
-    ]
-    out = ChatService._sanitize_messages(msgs)
-    assert out[1]["content"] == "NO_CONTENT"
-    assert out[1]["name"] == "bot"
-
-
-def test_sanitize_empty_list_content_replaced():
-    """Empty multimodal content list → treated as empty, replaced with NO_CONTENT."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": []},
-    ]
-    out = ChatService._sanitize_messages(msgs)
-    assert out[1]["content"] == "NO_CONTENT"
-
-
-def test_sanitize_assistant_with_tool_calls_untouched():
-    """Empty assistant content is legitimate when carrying tool_calls → untouched."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function"}]},
-    ]
-    out = ChatService._sanitize_messages(msgs)
-    assert out == msgs
-
-
-def test_sanitize_assistant_with_function_call_untouched():
-    """Empty assistant content is legitimate when carrying function_call → untouched."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": None, "function_call": {"name": "f"}},
-    ]
-    out = ChatService._sanitize_messages(msgs)
-    assert out == msgs
-
-
-def test_sanitize_empty_user_not_touched():
-    """User message with empty content → kept as-is (only assistant is patched)."""
-    msgs = [{"role": "user", "content": ""}]
-    assert ChatService._sanitize_messages(msgs) == msgs
-
-
-def test_sanitize_multiple_empty_assistants_all_replaced():
-    """Multiple empty assistants → all replaced, alternation intact."""
-    msgs = [
-        {"role": "user", "content": "u1"},
-        {"role": "assistant", "content": ""},
-        {"role": "user", "content": "u2"},
-        {"role": "assistant", "content": ""},
-        {"role": "user", "content": "u3"},
-    ]
-    out = ChatService._sanitize_messages(msgs)
-    assert len(out) == 5
-    assert out[1]["content"] == "NO_CONTENT"
-    assert out[3]["content"] == "NO_CONTENT"
-
-
-def test_sanitize_multimodal_content_untouched():
-    """Non-empty multimodal content list → never replaced."""
-    msgs = [
-        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]},
-        {"role": "assistant", "content": [{"type": "text", "text": "desc"}]},
-    ]
-    assert ChatService._sanitize_messages(msgs) == msgs
-
-
-def test_sanitize_empty_list():
-    """Empty input → empty output."""
-    assert ChatService._sanitize_messages([]) == []
-
-
-def test_sanitize_system_message_preserved():
-    """System message in head → preserved untouched."""
-    msgs = [
-        {"role": "system", "content": "You are an assistant."},
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi"},
-    ]
-    assert ChatService._sanitize_messages(msgs) == msgs
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("message", [*sorted(qs.CASUAL_MESSAGES), "   ?! 👋   "])
+@pytest.mark.parametrize("message", [*sorted(smalltalk.CASUAL_MESSAGES), "   ?! 👋   "])
 async def test_allowlisted_or_normalized_empty_chat_bypasses_contextualization_and_retrieval(message):
     llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": True, "query_list": [{"query": "wrong"}]})])
     retrieval = FakeRetrieval()
@@ -3753,109 +3626,15 @@ async def test_allowlisted_or_normalized_empty_chat_bypasses_contextualization_a
 
     result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": message}], "metadata": {}})
 
-    policy = qs.casual_message_policy(message)
+    policy = smalltalk.casual_message_policy(message)
     assert policy is not None
-    if not qs.normalize_casual_message(message):
-        assert policy == qs.CasualMessagePolicy("empty", "en")
+    if not smalltalk.normalize_casual_message(message):
+        assert policy == smalltalk.CasualMessagePolicy("empty", "en")
     assert llm.chat_calls == []
     assert retrieval.retrieve_multi_calls == []
     assert result.docs == []
     assert result.web_results == []
     assert result.payload["messages"][0]["role"] == "system"
-
-
-def test_split_leading_system_prompt_tolerates_content_free_system_turn():
-    """``OpenAIMessage`` allows a null content and the router dumps with
-    ``exclude_none=True``, so a leading system message can reach here with no
-    ``content`` key at all. Reading it unguarded raised KeyError — a 500 on a
-    request the schema had just accepted.
-    """
-    raw = [
-        {"role": "system"},
-        {"role": "system", "content": "be terse"},
-        {"role": "user", "content": "hi"},
-    ]
-
-    pinned, rest = qs._split_leading_system_prompt(raw, raw)
-
-    # The content-free turn is still consumed by the leading run (stripped from
-    # the history) — it just contributes nothing to the pinned prompt.
-    assert pinned == "be terse"
-    assert rest == [{"role": "user", "content": "hi"}]
-
-
-def test_split_leading_system_prompt_returns_none_when_every_system_turn_is_empty():
-    """A leading run made only of content-free system messages pins nothing,
-    rather than joining empty strings into a blank custom prompt.
-    """
-    raw = [{"role": "system"}, {"role": "system", "content": ""}, {"role": "user", "content": "hi"}]
-
-    pinned, rest = qs._split_leading_system_prompt(raw, raw)
-
-    assert pinned is None
-    assert rest == [{"role": "user", "content": "hi"}]
-
-
-@pytest.mark.parametrize(
-    ("message", "normalized"),
-    [
-        ("Bonjour ! 👋", "bonjour"),
-        ("BONJOUR", "bonjour"),
-        ("Hey, how are you?", "hey how are you"),
-        ("Merci.", "merci"),
-        ("THANK YOU!", "thank you"),
-        ("   ?! 👋   ", ""),
-        ("Bonjour, qu’est-ce qu’OpenRAG ?", "bonjour qu est ce qu openrag"),
-        ("  ÉTÉ\t東京  １２３  ", "été 東京 123"),
-        ("👩‍💻 ❤️ 1️⃣", "1"),
-    ],
-)
-def test_normalize_casual_message_preserves_words_while_removing_symbols_and_punctuation(message, normalized):
-    assert qs.normalize_casual_message(message) == normalized
-
-
-@pytest.mark.parametrize(
-    ("message", "intent", "language"),
-    [
-        ("bonjour", "greeting", "fr"),
-        ("salut", "greeting", "fr"),
-        ("hello", "greeting", "en"),
-        ("hey", "greeting", "en"),
-        ("comment allez vous", "greeting", "fr"),
-        ("how are you", "greeting", "en"),
-        ("hey how are you", "greeting", "en"),
-        ("comment pouvez-vous m'aider ?", "capability", "fr"),
-        ("how can you help me", "capability", "en"),
-        ("what can you do", "capability", "en"),
-        ("merci", "gratitude", "fr"),
-        ("thank you", "gratitude", "en"),
-        ("au revoir", "farewell", "fr"),
-        ("bye", "farewell", "en"),
-    ],
-)
-def test_casual_message_policy_classifies_every_allowlisted_expression(message, intent, language):
-    policy = qs.casual_message_policy(message)
-
-    assert policy is not None
-    assert policy.intent == intent
-    assert policy.language == language
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Bonjour, qu’est-ce qu’OpenRAG ?",
-        "Hello, summarize the uploaded document.",
-        "Merci, mais que dit le rapport sur ce problème ?",
-        "Albendazole is used to treat lymphatic filariasis.",
-        "OpenRAG utilise Milvus.",
-        "say hello",
-        "How can you help me with Product A revenue?",
-        "What can you do with the uploaded report?",
-    ],
-)
-def test_casual_message_policy_requires_an_exact_complete_message_match(message):
-    assert qs.casual_message_policy(message) is None
 
 
 @pytest.mark.asyncio
@@ -4124,19 +3903,6 @@ _TOOL_TURN = [
 ]
 
 
-def test_history_window_keeps_the_latest_message_of_the_user():
-    messages = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "ok"}, *_TOOL_TURN]
-    assert qs._history_window(messages, 2) == _TOOL_TURN, "widened to the request the results serve"
-    assert qs._history_window(messages, 10) == messages
-    assert qs._history_window(messages, 3) == _TOOL_TURN
-
-
-def test_history_window_never_opens_on_a_tool_result():
-    messages = [*_TOOL_TURN, {"role": "assistant", "content": "Claire wrote..."}, {"role": "user", "content": "thanks"}]
-    assert qs._history_window(messages, 3) == messages[3:], "the result cut from its call is dropped"
-    assert qs._history_window([{"role": "tool", "content": "x"}], 4) == []
-
-
 @pytest.mark.asyncio
 async def test_generate_query_searches_the_request_of_the_user_not_the_tool_result():
     svc = _svc(mode="SimpleRag")
@@ -4218,13 +3984,6 @@ async def test_generate_query_keeps_the_contextualizers_date_order():
     out = await svc.generate_query([{"role": "user", "content": "résume le dernier meeting que j'ai eu"}])
     assert out.query_list[0].date_order == "newest"
     assert out.date_order == "newest"
-
-
-def test_query_json_hint_leaves_the_temporal_fields_open():
-    """The hint is the last thing the model reads; a literal ``null`` there was
-    copied verbatim and the date rules never fired."""
-    assert '"temporal_filters": null' not in qs._QUERY_JSON_HINT
-    assert '"date_order"' in qs._QUERY_JSON_HINT
 
 
 def _dated(cid: str, created_at: str) -> Chunk:

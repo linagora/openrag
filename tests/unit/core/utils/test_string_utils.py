@@ -1,5 +1,5 @@
 import pytest
-from core.utils.string_utils import str_to_bool
+from core.utils.string_utils import json_object_slice, str_to_bool
 
 
 def test_str_to_bool_true_values():
@@ -94,3 +94,12 @@ def test_str_to_bool_similar_but_wrong_word_raises():
         str_to_bool("nah")
     with pytest.raises(ValueError):
         str_to_bool("truee")
+
+
+def test_json_object_slice_extracts_object():
+    assert json_object_slice('noise {"a": 1} trailing') == '{"a": 1}'
+
+
+def test_json_object_slice_returns_text_without_an_object():
+    assert json_object_slice("no json here") == "no json here"
+    assert json_object_slice("} reversed {") == "} reversed {"
