@@ -88,7 +88,12 @@ async def test_without_a_repository_every_rule_is_a_no_op() -> None:
     await fences.acquire_for_delete(partition=PARTITION, file_id=FILE_ID, holder_id="d")
     await fences.acquire_for_metadata(partition=PARTITION, file_id=FILE_ID, holder_id="m")
     await fences.check_free(partition=PARTITION, file_id=FILE_ID)
-    assert await fences.run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=_returns(7)) == 7
+    assert (
+        await fences.run_holding(
+            partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=_returns(7)
+        )
+        == 7
+    )
     assert not fences.enabled
 
 
@@ -209,7 +214,10 @@ async def test_run_holding_renews_while_the_work_runs(monkeypatch: pytest.Monkey
         return "done"
 
     result = await asyncio.wait_for(
-        FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work), timeout=5
+        FileFences(repo).run_holding(
+            partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+        ),
+        timeout=5,
     )
 
     assert result == "done"
@@ -230,7 +238,10 @@ async def test_run_holding_stops_the_work_once_the_fence_is_lost(monkeypatch: py
 
     with pytest.raises(FileFenceLostError):
         await asyncio.wait_for(
-            FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work), timeout=5
+            FileFences(repo).run_holding(
+                partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+            ),
+            timeout=5,
         )
 
     assert stopped.is_set()
@@ -242,7 +253,9 @@ async def test_run_holding_passes_the_works_failure_through() -> None:
         raise ValueError("milvus down")
 
     with pytest.raises(ValueError, match="milvus down"):
-        await FileFences(_Fences()).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work)
+        await FileFences(_Fences()).run_holding(
+            partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+        )
 
 
 # ── Delete ───────────────────────────────────────────────────────────
@@ -257,3 +270,48 @@ async def test_a_delete_still_waiting_at_the_timeout_names_the_holder() -> None:
         await FileFences(repo, wait_timeout=0).acquire_for_delete(partition=PARTITION, file_id=FILE_ID, holder_id="d")
 
     assert caught.value.code == "DOCUMENT_METADATA_UPDATE_IN_PROGRESS"
+
+
+# ── Metrics ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_is_counted_by_operation_and_holder(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict] = []
+    monkeypatch.setattr(module, "record_file_fence_conflict", lambda **labels: recorded.append(labels))
+    repo = _Fences()
+    repo.hold(FileFenceKind.DELETE, "d")
+    fences = FileFences(repo)
+
+    with pytest.raises(ConflictError):
+        await fences.acquire_for_indexing(partition=PARTITION, file_id=FILE_ID, holder_id="copy:1", operation="copy")
+    with pytest.raises(ConflictError):
+        await fences.acquire_for_metadata(partition=PARTITION, file_id=FILE_ID, holder_id="m")
+
+    assert recorded == [
+        {"file_operation": "copy", "holder_kind": "delete"},
+        {"file_operation": "metadata", "holder_kind": "delete"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_renewal_is_counted_by_holder_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0)
+    recorded: list[dict] = []
+    monkeypatch.setattr(module, "record_file_fence_renewal_failure", lambda **labels: recorded.append(labels))
+    repo = _Fences()
+    repo.renew_results = [RuntimeError("pg down"), False]
+
+    with pytest.raises(FileFenceLostError):
+        await asyncio.wait_for(
+            FileFences(repo).run_holding(
+                partition=PARTITION,
+                file_id=FILE_ID,
+                holder_id="d",
+                holder_kind=FileFenceKind.DELETE,
+                work=lambda: asyncio.Event().wait(),
+            ),
+            timeout=5,
+        )
+
+    assert recorded == [{"holder_kind": "delete"}]

@@ -30,6 +30,10 @@ from core.models.catalog import (
     FileFence,
     FileFenceKind,
 )
+from core.observability.file_fence_metrics import (
+    record_file_fence_conflict,
+    record_file_fence_renewal_failure,
+)
 from core.ports.file_fence_repo import FileFenceRepository
 from core.utils.exceptions import ConflictError, FileFenceLostError
 from core.utils.logging import get_logger
@@ -90,7 +94,9 @@ class FileFences:
     def enabled(self) -> bool:
         return self._repo is not None
 
-    async def acquire_for_indexing(self, *, partition: str, file_id: str, holder_id: str) -> bool:
+    async def acquire_for_indexing(
+        self, *, partition: str, file_id: str, holder_id: str, operation: str = "index"
+    ) -> bool:
         """Take the fence for an upload or a replace, or refuse with 409.
 
         Returns whether a fence was taken: ``False`` without fences or without
@@ -106,7 +112,7 @@ class FileFences:
             ttl_seconds=FILE_FENCE_TTL_SECONDS,
         )
         if fence.holder_id != holder_id:
-            raise busy(fence)
+            raise self._refused(fence, operation)
         return True
 
     async def acquire_for_delete(self, *, partition: str, file_id: str, holder_id: str) -> None:
@@ -137,7 +143,7 @@ class FileFences:
                 # The holder changed in between: look again.
                 continue
             if monotonic() >= deadline:
-                raise busy(fence)
+                raise self._refused(fence, "delete")
             await asyncio.sleep(_WAIT_INTERVAL_SECONDS)
 
     async def acquire_for_metadata(self, *, partition: str, file_id: str, holder_id: str) -> None:
@@ -152,7 +158,7 @@ class FileFences:
             ttl_seconds=FILE_FENCE_TTL_SECONDS,
         )
         if fence.holder_id != holder_id:
-            raise busy(fence)
+            raise self._refused(fence, "metadata")
 
     async def check_free(self, *, partition: str, file_id: str, own_holder_id: str | None = None) -> None:
         """Refuse with 409 if an operation other than *own_holder_id* holds the file."""
@@ -160,7 +166,7 @@ class FileFences:
             return
         fence = await self._repo.get(partition=partition, file_id=file_id)
         if fence is not None and fence.holder_id != own_holder_id:
-            raise busy(fence)
+            raise self._refused(fence, "copy")
 
     async def check_unchanged(
         self,
@@ -184,7 +190,15 @@ class FileFences:
         if await read_again() != before:
             raise changed_during_copy(file_id, partition)
 
-    async def run_holding(self, *, partition: str, file_id: str, holder_id: str, work: Callable[[], Awaitable[T]]) -> T:
+    async def run_holding(
+        self,
+        *,
+        partition: str,
+        file_id: str,
+        holder_id: str,
+        holder_kind: FileFenceKind,
+        work: Callable[[], Awaitable[T]],
+    ) -> T:
         """Run *work* while renewing the fence; stop it with ``FileFenceLostError`` if the fence is lost.
 
         A database error during a renewal is retried at the next round; the
@@ -193,7 +207,9 @@ class FileFences:
         if self._repo is None:
             return await work()
         work_task = asyncio.ensure_future(work())
-        renewal = asyncio.ensure_future(self._keep_alive(partition=partition, file_id=file_id, holder_id=holder_id))
+        renewal = asyncio.ensure_future(
+            self._keep_alive(partition=partition, file_id=file_id, holder_id=holder_id, holder_kind=holder_kind)
+        )
         try:
             done, _ = await asyncio.wait({work_task, renewal}, return_when=asyncio.FIRST_COMPLETED)
             if renewal in done:
@@ -205,18 +221,24 @@ class FileFences:
                     task.cancel()
             await asyncio.gather(work_task, renewal, return_exceptions=True)
 
-    async def _keep_alive(self, *, partition: str, file_id: str, holder_id: str) -> None:
+    async def _keep_alive(self, *, partition: str, file_id: str, holder_id: str, holder_kind: FileFenceKind) -> None:
         while True:
             await asyncio.sleep(FILE_FENCE_RENEW_INTERVAL_SECONDS)
             try:
                 held = await self.renew(partition=partition, file_id=file_id, holder_id=holder_id)
             except Exception as exc:  # noqa: BLE001 - retried at the next round
+                record_file_fence_renewal_failure(holder_kind=holder_kind.value)
                 logger.bind(partition=partition, file_id=file_id).warning(
                     "Failed to renew the file fence; retrying", error=str(exc)
                 )
                 continue
             if not held:
                 raise FileFenceLostError(file_id, partition)
+
+    @staticmethod
+    def _refused(fence: FileFence, operation: str) -> ConflictError:
+        record_file_fence_conflict(file_operation=operation, holder_kind=fence.kind.value)
+        return busy(fence)
 
     async def renew(self, *, partition: str, file_id: str, holder_id: str) -> bool:
         """Extend the fence; ``False`` once ``holder_id`` no longer holds it, ``True`` without fences.

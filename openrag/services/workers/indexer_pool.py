@@ -15,7 +15,9 @@ from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
     FILE_FENCE_RENEW_INTERVAL_SECONDS,
     FILE_FENCE_TTL_SECONDS,
+    FileFenceKind,
 )
+from core.observability.file_fence_metrics import record_file_fence_renewal_failure
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
@@ -1186,6 +1188,7 @@ class IndexerPool:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - renewal retries until the tasks settle
+                record_file_fence_renewal_failure(holder_kind=FileFenceKind.INDEX.value)
                 from core.utils.logging import get_logger
 
                 get_logger().warning("Failed to renew file fences; retrying.", fences=len(fences), error=str(exc))

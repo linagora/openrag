@@ -26,6 +26,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, TypeVar
 
 from core.indexing.file_fences import DEFAULT_WAIT_TIMEOUT_SECONDS, FileFences
+from core.models.catalog import FileFenceKind
 from core.models.workspace import WorkspaceScope
 from core.utils.exceptions import AmbiguousWorkspaceError
 from core.utils.logging import get_logger
@@ -218,7 +219,7 @@ class WorkspaceService:
         await self._file_fences.acquire_for_delete(partition=partition, file_id=file_id, holder_id=holder_id)
         try:
             return await self._file_fences.run_holding(
-                partition=partition, file_id=file_id, holder_id=holder_id, work=work
+                partition=partition, file_id=file_id, holder_id=holder_id, holder_kind=FileFenceKind.DELETE, work=work
             )
         finally:
             await self._file_fences.release(partition=partition, file_id=file_id, holder_id=holder_id)

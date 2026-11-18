@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     import asyncpg
+from core.observability.file_fence_metrics import record_file_fence_commit_refused
 
 # Note on JSON: ``ConnectionManager.initialize`` registers a json/jsonb codec
 # on every connection, so reading a JSON column yields a Python dict and
@@ -78,6 +79,7 @@ async def _require_file_fence(conn: asyncpg.Connection, partition: str, file_id:
         holder_id,
     )
     if not held:
+        record_file_fence_commit_refused()
         raise FileFenceLostError(file_id, partition)
 
 

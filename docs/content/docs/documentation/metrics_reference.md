@@ -103,6 +103,9 @@ Supporting metrics:
 | `openrag_ingest_stage_history_pending` | gauge | — | Ray | Task histories waiting for a durable acknowledgement |
 | `openrag_ingest_stage_history_incomplete` | gauge | — | Ray | Surviving histories known to have lost or conflicting stage observations |
 | `openrag_circuit_breaker_state` | gauge | `name` | both | 0 closed, 1 open, 2 half-open, -1 unknown |
+| `openrag_file_fence_conflicts_total` | counter | `file_operation`, `holder_kind` | both | Operations refused because another operation held the file (`FILE_FENCES=postgres` only) |
+| `openrag_file_fence_commits_refused_total` | counter | — | both | Catalog writes refused because their operation lost the file's fence, most often an indexing task whose file was deleted meanwhile |
+| `openrag_file_fence_renewal_failures_total` | counter | `holder_kind` | both | Fence renewals that failed and are retried; a sustained rate means fences are about to lapse |
 
 `both` means each process exports its own calls, under the same name once the
 Ray series are renamed. Neither side is limited to one kind of call: the API
@@ -130,6 +133,8 @@ Label values:
 - `kind` — `prompt`, `completion`
 - `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client` for PDF and audio; any other format is labelled by its document type (`text`, `docx`, `eml`, `image`, ...)
 - `name` — `llm`, `embedder`, `vlm`, `reranker`
+- `file_operation` — `index` (an upload or a replace), `delete`, `metadata`, `copy` (into the file, or of it)
+- `holder_kind` — `index`, `delete`, `metadata`
 
 ## No metric carries `partition`
 

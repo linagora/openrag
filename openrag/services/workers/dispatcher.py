@@ -17,9 +17,11 @@ from core.models.catalog import (
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     DocumentStatus,
+    FileFenceKind,
     IndexationJob,
     reconcile_task_state,
 )
+from core.observability.file_fence_metrics import record_file_fence_renewal_failure
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
 from core.utils.exceptions import (
@@ -295,6 +297,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 try:
                     still_held = await self._file_fences.renew(partition=partition, file_id=file_id, holder_id=fence_id)
                 except Exception as exc:  # noqa: BLE001 - the lease outlasts several missed rounds
+                    record_file_fence_renewal_failure(holder_kind=FileFenceKind.DELETE.value)
                     logger.bind(partition=partition, file_id=file_id).warning(
                         "Failed to renew the file fence; retrying", error=str(exc)
                     )
@@ -769,6 +772,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 partition=partition,
                 file_id=file_id,
                 holder_id=holder_id,
+                holder_kind=FileFenceKind.METADATA,
                 work=lambda: self._update_file_metadata(file_id, metadata, partition, catalog_metadata),
             )
         finally:
@@ -822,7 +826,7 @@ class WorkerDispatcher(IndexingDispatcher):
         # writing the target, as an upload would be.
         claim_token = f"{COPY_CONTENT_CLAIM_TOKEN_PREFIX}{uuid.uuid4().hex}"
         fenced = await self._file_fences.acquire_for_indexing(
-            partition=target_partition, file_id=target_file_id, holder_id=claim_token
+            partition=target_partition, file_id=target_file_id, holder_id=claim_token, operation="copy"
         )
         try:
             await self._copy_file(
