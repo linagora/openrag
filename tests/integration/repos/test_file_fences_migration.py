@@ -16,7 +16,7 @@ from .test_users_managed_by_config_migration import _alembic_config
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
 
 REVISION = "934e9f4e871f"
-PREVIOUS = "f3a4b5c6d7e8"
+PREVIOUS = "4d7e2b9c1f35"
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -31,13 +31,16 @@ async def previous_db():
     finally:
         await admin.close()
 
-    cfg = _alembic_config(name)
-    await asyncio.to_thread(command.upgrade, cfg, PREVIOUS)
-    conn = await asyncpg.connect(_admin_dsn().rsplit("/", 1)[0] + f"/{name}")
+    conn = None
     try:
+        cfg = _alembic_config(name)
+        await asyncio.to_thread(command.upgrade, cfg, PREVIOUS)
+        conn = await asyncpg.connect(_admin_dsn().rsplit("/", 1)[0] + f"/{name}")
         yield conn, cfg
     finally:
-        await conn.close()
+        # Also when the migration or the connection failed: the database exists.
+        if conn is not None:
+            await conn.close()
         admin = await _connect_admin()
         if admin is not None:
             try:
