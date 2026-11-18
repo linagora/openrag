@@ -37,7 +37,7 @@ export function ConfirmDialog({
       <AlertDialogContent>
         <AlertDialogHeader className="min-w-0">
           <AlertDialogTitle className="min-w-0 [overflow-wrap:anywhere]">{title}</AlertDialogTitle>
-          <AlertDialogDescription className="min-w-0 [overflow-wrap:anywhere]">
+          <AlertDialogDescription className="min-w-0 max-h-[50vh] overflow-y-auto [overflow-wrap:anywhere]">
             {description}
           </AlertDialogDescription>
         </AlertDialogHeader>

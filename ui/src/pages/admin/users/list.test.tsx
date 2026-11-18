@@ -107,10 +107,10 @@ describe("UserListPage", () => {
     const dialog = await screen.findByRole("alertdialog");
     expect(
       await within(dialog).findByText(
-        /This also deletes the 2 partitions they own, with all their documents: research, archive\./,
+        /Right now that is: research, archive\./,
       ),
     ).toBeTruthy();
-    expect(dialog.textContent).toContain("The default partition is kept");
+    expect(dialog.textContent).toContain("the default admin becomes its owner");
     expect(dialog.textContent).not.toContain("shared");
     expect(getUserMock).toHaveBeenCalledWith(2);
   });
@@ -123,7 +123,7 @@ describe("UserListPage", () => {
 
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog.textContent).toContain("Every partition they own is deleted too");
-    expect(dialog.textContent).not.toContain("They own no partitions");
+    expect(dialog.textContent).not.toContain("Right now");
     expect(getUserMock).toHaveBeenCalledWith(2);
   });
 
@@ -137,7 +137,7 @@ describe("UserListPage", () => {
 
     const dialog = await screen.findByRole("alertdialog");
     expect(
-      await within(dialog).findByText(/This also deletes the partition they own, with all its documents: research\./),
+      await within(dialog).findByText(/Right now that is: research\./),
     ).toBeTruthy();
   });
 
@@ -151,7 +151,7 @@ describe("UserListPage", () => {
     await waitFor(() => expect(getUserMock).toHaveBeenCalled());
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(dialog.textContent).toContain("Every partition they own is deleted too");
-    expect(dialog.textContent).not.toContain("They own no partitions");
+    expect(dialog.textContent).not.toContain("Right now");
   });
 
   it("forgets a deleted user's cached details", async () => {

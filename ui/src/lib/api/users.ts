@@ -112,27 +112,25 @@ const DEFAULT_PARTITION = "default";
  *  its documents. Pass `memberships` to name those partitions; without them the
  *  text stays generic. */
 export function deleteUserDescription(label: string, memberships?: UserMembership[]): string {
-  const intro = `Permanently delete "${label}"?`;
-  const outro = "They lose access to every other partition, and their token stops working.";
-  if (!memberships) {
-    return `${intro} Every partition they own is deleted too, with all its documents (the default partition is kept). ${outro}`;
-  }
-  const owned = memberships.filter((m) => m.role === "owner").map((m) => m.partition);
-  const deleted = owned.filter((p) => p !== DEFAULT_PARTITION);
-  const parts = [intro];
-  if (deleted.length === 0) {
-    parts.push("They own no partitions that would be deleted.");
-  } else if (deleted.length === 1) {
-    parts.push(`This also deletes the partition they own, with all its documents: ${deleted[0]}.`);
-  } else {
+  // The cascade sentence is always shown: the names below are a snapshot from
+  // when the dialog opened, and DELETE removes whatever they own at that time.
+  const parts = [
+    `Permanently delete "${label}"?`,
+    "Every partition they own is deleted too, with all its documents, even if it has other owners (the default partition is kept).",
+  ];
+  if (memberships) {
+    const owned = memberships.filter((m) => m.role === "owner").map((m) => m.partition);
+    const deleted = owned.filter((p) => p !== DEFAULT_PARTITION);
     parts.push(
-      `This also deletes the ${deleted.length} partitions they own, with all their documents: ${deleted.join(", ")}.`,
+      deleted.length === 0
+        ? "Right now they own no such partition."
+        : `Right now that is: ${deleted.join(", ")}.`,
     );
+    if (owned.includes(DEFAULT_PARTITION)) {
+      parts.push("They own the default partition, so the default admin becomes its owner.");
+    }
   }
-  if (owned.includes(DEFAULT_PARTITION)) {
-    parts.push("The default partition is kept, and the default admin becomes its owner.");
-  }
-  parts.push(outro);
+  parts.push("They lose access to every other partition, and their token stops working.");
   return parts.join(" ");
 }
 

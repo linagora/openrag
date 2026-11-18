@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getUser, deleteUserDescription } from "@/lib/api/users";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 
@@ -19,6 +19,7 @@ export function DeleteUserAction({
   onConfirm: () => void;
   children: ReactNode;
 }) {
+  const queryClient = useQueryClient();
   const [openedAt, setOpenedAt] = useState(0);
   const { data, dataUpdatedAt, isError, refetch } = useQuery({
     queryKey: ["user", String(userId)],
@@ -35,7 +36,11 @@ export function DeleteUserAction({
       onOpenChange={(open) => {
         if (open) {
           setOpenedAt(Date.now());
-          void refetch();
+          // With no data yet, refetch() joins a request still running from an
+          // earlier opening; cancel it so the answer comes from this one.
+          void queryClient
+            .cancelQueries({ queryKey: ["user", String(userId)] })
+            .then(() => refetch());
         }
       }}
     >
