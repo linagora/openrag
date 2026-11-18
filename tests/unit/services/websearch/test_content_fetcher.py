@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from services.websearch.base import WebResult
+from core.websearch import WebResult
 from services.websearch.content_fetcher import ContentFetcher
 
 

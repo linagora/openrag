@@ -1,11 +1,11 @@
 import httpx
 from core.utils.logging import get_logger
-from services.websearch.base import BaseWebSearchProvider, WebResult
+from core.websearch import WebResult, WebSearcher
 
 logger = get_logger()
 
 
-class StaanProvider(BaseWebSearchProvider):
+class StaanProvider(WebSearcher):
     def __init__(self, api_token: str, base_url: str, top_k: int = 5, lang: str = "fr-FR"):
         self.api_token = api_token
         self.base_url = base_url
