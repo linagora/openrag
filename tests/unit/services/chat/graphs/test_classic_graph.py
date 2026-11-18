@@ -37,6 +37,17 @@ class RecordingSteps(ClassicSteps):
             raise update
         return update
 
+    async def direct(self, state, ctx):
+        return await self._record("direct")
+
+    async def scope(self, state, ctx):
+        return await self._record("scope") or {
+            "messages": state["request_messages"],
+            "custom_prompt": None,
+            "last_user_message": "q",
+            "scope": Scope(partitions=ctx.partitions),
+        }
+
     async def route(self, state, ctx):
         return await self._record("route")
 
@@ -66,7 +77,7 @@ def _context(*, route: Route = Route.DOCUMENTS, **metadata) -> ChatContext:
     return ChatContext(
         options=ChatOptions.from_metadata(metadata),
         route=route,
-        scope=Scope(partitions=None if route is Route.WEB else ["p"]),
+        partitions=None if route in (Route.WEB, Route.DIRECT) else ["p"],
         llm=object(),
         payload={"messages": []},
     )
@@ -74,7 +85,7 @@ def _context(*, route: Route = Route.DOCUMENTS, **metadata) -> ChatContext:
 
 async def _run(steps: RecordingSteps, ctx: ChatContext) -> list[str]:
     await build_classic_graph(steps).ainvoke(
-        {"messages": [{"role": "user", "content": "q"}], "custom_prompt": None, "last_user_message": "q"},
+        {"request_messages": [{"role": "user", "content": "q"}]},
         context=ctx,
     )
     return steps.ran
@@ -85,10 +96,26 @@ _FOUND = {"queries": _QUERIES, "chunks": ["chunk"], "web_results": []}
 
 
 @pytest.mark.asyncio
+async def test_a_request_with_nothing_to_search_goes_to_the_model_as_it_is():
+    # No partition and no web search: no history window, no scope, no small talk.
+    steps = RecordingSteps()
+
+    assert await _run(steps, _context(route=Route.DIRECT)) == ["direct"]
+
+
+@pytest.mark.asyncio
 async def test_a_question_is_contextualized_retrieved_and_fitted():
     steps = RecordingSteps(route=_NOT_CASUAL, contextualize={"queries": _QUERIES}, retrieve=_FOUND)
 
-    assert await _run(steps, _context()) == ["route", "contextualize", "trace_config", "retrieve", "budget", "prompt"]
+    assert await _run(steps, _context()) == [
+        "scope",
+        "route",
+        "contextualize",
+        "trace_config",
+        "retrieve",
+        "budget",
+        "prompt",
+    ]
 
 
 @pytest.mark.asyncio
@@ -99,6 +126,7 @@ async def test_each_step_is_logged_as_it_starts_with_the_number_of_queries_searc
     await _run(steps, _context())
 
     assert logged_steps == [
+        ("classic:scope", {}),
         ("classic:route", {}),
         ("classic:contextualize", {}),
         ("classic:trace_config", {}),
@@ -112,7 +140,7 @@ async def test_each_step_is_logged_as_it_starts_with_the_number_of_queries_searc
 async def test_small_talk_skips_the_contextualizer_and_the_search():
     steps = RecordingSteps(route={"casual": _HELLO, "acknowledgement_candidate": False, "retrieval_forced": False})
 
-    assert await _run(steps, _context()) == ["route", "trace_config", "small_talk"]
+    assert await _run(steps, _context()) == ["scope", "route", "trace_config", "small_talk"]
 
 
 @pytest.mark.asyncio
@@ -122,7 +150,7 @@ async def test_an_acknowledgement_the_contextualizer_confirms_is_answered_as_sma
         contextualize={"queries": SearchQueries(query_list=[]), "casual": CasualMessagePolicy("acknowledgement", "en")},
     )
 
-    assert await _run(steps, _context()) == ["route", "contextualize", "trace_config", "small_talk"]
+    assert await _run(steps, _context()) == ["scope", "route", "contextualize", "trace_config", "small_talk"]
 
 
 @pytest.mark.asyncio
@@ -135,7 +163,7 @@ async def test_forced_retrieval_searches_even_for_small_talk():
 
     ran = await _run(steps, _context(require_retrieval=True))
 
-    assert ran == ["route", "contextualize", "trace_config", "retrieve", "budget", "prompt"]
+    assert ran == ["scope", "route", "contextualize", "trace_config", "retrieve", "budget", "prompt"]
 
 
 @pytest.mark.asyncio
@@ -145,7 +173,7 @@ async def test_bypass_reaches_the_contextualize_step_even_for_small_talk():
 
     ran = await _run(steps, _context(bypass_query_contextualization=True))
 
-    assert ran == ["route", "contextualize", "trace_config", "small_talk"]
+    assert ran == ["scope", "route", "contextualize", "trace_config", "small_talk"]
 
 
 @pytest.mark.asyncio
@@ -156,7 +184,13 @@ async def test_a_web_only_search_that_finds_nothing_ends_without_a_prompt():
         retrieve={"queries": _QUERIES, "chunks": [], "web_results": []},
     )
 
-    assert await _run(steps, _context(route=Route.WEB)) == ["route", "contextualize", "trace_config", "retrieve"]
+    assert await _run(steps, _context(route=Route.WEB)) == [
+        "scope",
+        "route",
+        "contextualize",
+        "trace_config",
+        "retrieve",
+    ]
 
 
 @pytest.mark.asyncio
@@ -170,7 +204,7 @@ async def test_documents_found_nothing_still_build_the_prompt():
 
     ran = await _run(steps, _context())
 
-    assert ran == ["route", "contextualize", "trace_config", "retrieve", "budget", "prompt"]
+    assert ran == ["scope", "route", "contextualize", "trace_config", "retrieve", "budget", "prompt"]
 
 
 @pytest.mark.asyncio

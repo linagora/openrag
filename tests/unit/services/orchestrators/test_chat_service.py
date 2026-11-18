@@ -22,12 +22,14 @@ import services.orchestrators.chat_service as qs
 from core.chat import smalltalk
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
+from core.models.chat import ChatOptions
 from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
 from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
 from di.chat import create_chat_service
+from services.chat.workflow import ChatRequest
 from services.orchestrators.chat_service import ChatService
 
 # Real prompt-template config (dir + key->filename mapping) so ChatService
@@ -185,6 +187,20 @@ def _svc(
     )
 
 
+async def _prepare_chat(svc, partitions, payload, llm=None, trace=None, max_prompt_tokens=None):
+    """Run the ``classic`` workflow's graph for a request, as a chat request does before its answer."""
+    request = ChatRequest(
+        partitions=partitions,
+        payload=payload,
+        options=ChatOptions.from_metadata(payload.get("metadata")),
+        llm=llm,
+        prepare_sources=lambda _docs, _web: [],
+        started=0.0,
+        max_prompt_tokens=max_prompt_tokens,
+    )
+    return await svc._classic.run(request, trace)
+
+
 # --------------------------------------------------------------------------- #
 # chat history depth resolution (per-partition override of the global default)
 # --------------------------------------------------------------------------- #
@@ -193,7 +209,7 @@ def _svc(
 def test_resolve_chat_history_depth_uses_partition_value():
     svc = _svc()  # global default = 4
     svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=10)}
-    assert svc._resolve_chat_history_depth(["p"]) == 10
+    assert svc._prompt_settings.chat_history_depth(["p"]) == 10
 
 
 def test_resolve_chat_history_depth_zero_inherits_global_default():
@@ -201,7 +217,7 @@ def test_resolve_chat_history_depth_zero_inherits_global_default():
     # would select the entire history).
     svc = _svc()
     svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=0)}
-    assert svc._resolve_chat_history_depth(["p"]) == 4
+    assert svc._prompt_settings.chat_history_depth(["p"]) == 4
 
 
 # --------------------------------------------------------------------------- #
@@ -226,8 +242,8 @@ def test_acknowledgement_prompt_does_not_assume_the_user_expressed_gratitude():
 def test_resolve_chat_history_depth_none_and_unknown_use_default():
     svc = _svc()
     svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=9)}
-    assert svc._resolve_chat_history_depth(None) == 4
-    assert svc._resolve_chat_history_depth(["missing"]) == 4
+    assert svc._prompt_settings.chat_history_depth(None) == 4
+    assert svc._prompt_settings.chat_history_depth(["missing"]) == 4
 
 
 def test_resolve_chat_history_depth_all_sentinel_uses_default():
@@ -236,7 +252,7 @@ def test_resolve_chat_history_depth_all_sentinel_uses_default():
     # per-partition value.
     svc = _svc()  # global default = 4
     svc._config.partitions = {"a": SimpleNamespace(chat_history_depth=10)}
-    assert svc._resolve_chat_history_depth(["all"]) == 4
+    assert svc._prompt_settings.chat_history_depth(["all"]) == 4
 
 
 def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
@@ -246,7 +262,7 @@ def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
         "b": SimpleNamespace(chat_history_depth=2),
         "c": SimpleNamespace(chat_history_depth=0),  # inherits → ignored
     }
-    assert svc._resolve_chat_history_depth(["a", "b", "c"]) == 6
+    assert svc._prompt_settings.chat_history_depth(["a", "b", "c"]) == 6
 
 
 @pytest.mark.parametrize("global_depth", [0, -1])
@@ -265,8 +281,8 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
         workspace_service=FakeWorkspace(),
         prompt_service=_disk_prompt_service(),
     )
-    assert svc._default_chat_history_depth == 4
-    assert svc._resolve_chat_history_depth(None) == 4
+    assert svc._prompt_settings._default_chat_history_depth == 4
+    assert svc._prompt_settings.chat_history_depth(None) == 4
 
 
 # --------------------------------------------------------------------------- #
@@ -1191,7 +1207,8 @@ async def test_chat_casual_response_prompt_takes_priority_over_spoken_style():
 async def test_chat_casual_response_preserves_the_safely_wrapped_client_system_prompt():
     svc = _svc(mode="ChatBotRag")
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -1249,7 +1266,8 @@ async def test_chat_casual_greeting_uses_assistant_name_from_runtime_configurati
     svc = _svc(mode="ChatBotRag")
     svc._config.server.assistant_name = "Marianne"
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": "Bonjour"}], "metadata": {}},
     )
@@ -1265,7 +1283,8 @@ async def test_chat_casual_greeting_preserves_literal_braces_in_assistant_name(a
     svc = _svc(mode="ChatBotRag")
     svc._config.server.assistant_name = assistant_name
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -1680,7 +1699,8 @@ async def test_non_allowlisted_social_messages_retrieve_despite_contextualizer_c
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=[query_json]), retrieval=retrieval)
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": message}], "metadata": {}},
     )
@@ -1696,7 +1716,8 @@ async def test_ok_after_social_history_uses_contextualizer_gratitude_decision():
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -1721,7 +1742,8 @@ async def test_explicit_retrieval_metadata_still_forces_retrieval_for_acknowledg
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -1754,7 +1776,8 @@ async def test_ack_after_factual_offer_still_retrieves_the_accepted_request(ackn
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -1779,7 +1802,8 @@ async def test_thumb_reaction_keeps_simple_rag_casual_behavior(reaction):
     retrieval = FakeRetrieval()
     svc = _svc(mode="SimpleRag", retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": reaction}], "metadata": {}},
     )
@@ -2178,7 +2202,8 @@ async def test_chat_fails_closed_to_retrieval_for_incomplete_or_inconsistent_cas
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": message}], "metadata": {}},
     )
@@ -2387,7 +2412,8 @@ async def test_explicit_websearch_forces_retrieval_for_allowlisted_casual_messag
     web = FakeWeb()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval, web=web)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [{"role": "user", "content": "Hello!"}],
@@ -2406,7 +2432,8 @@ async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
     retrieval = FakeRetrieval(chunks=[])
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [{"role": "user", "content": "Merci!"}],
@@ -2427,8 +2454,8 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     retrieval = FakeRetrieval()
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
-    result = await svc._prepare_chat(
-        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
+    result = await _prepare_chat(
+        svc, ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
     )
     web = result.web_results
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
@@ -2441,7 +2468,8 @@ async def test_websearch_with_partition_forwards_retrieval_diagnostic_overrides(
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [{"role": "user", "content": "q"}],
@@ -2480,7 +2508,7 @@ async def test_answer_system_prompt_comes_from_prompt_service():
     marker = MarkerPromptService()
     svc = _svc(retrieval=FakeRetrieval(), prompt_service=marker)  # SimpleRag → no contextualizer call
 
-    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    result = await _prepare_chat(svc, ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     payload = result.payload
 
     assert payload["messages"][0]["role"] == "system"
@@ -2507,11 +2535,11 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
         "p": _partition_cfg(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
     }
 
-    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    await _prepare_chat(svc, ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     assert ("sys_prompt", ("legal",)) in rec.calls
 
     rec.calls.clear()
-    await svc._prepare_chat(["p", "q"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    await _prepare_chat(svc, ["p", "q"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     assert ("sys_prompt", (None,)) in rec.calls  # no single owning partition
 
 
@@ -2537,7 +2565,8 @@ async def test_spoken_style_metadata_swaps_the_answer_prompt():
         "p": _partition_cfg(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
     }
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": "q"}], "metadata": {"spoken_style_answer": True}},
     )
@@ -2547,7 +2576,7 @@ async def test_spoken_style_metadata_swaps_the_answer_prompt():
 
     # Without the flag the ordinary answer prompt is used.
     rec.calls.clear()
-    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    await _prepare_chat(svc, ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     assert any(call[0] == "sys_prompt" for call in rec.calls)
     assert not any(call[0] == "spoken_style_answer" for call in rec.calls)
 
@@ -2599,7 +2628,7 @@ async def test_chat_trace_labels_workspace_scope_for_diagnostics():
 
 @pytest.mark.asyncio
 async def test_chat_workspace_restricts_openrag_all_to_owning_partition():
-    # "openrag-all" reaches _prepare_chat as partitions=["all"] — a workspace
+    # "openrag-all" reaches the workflow as partitions=["all"] — a workspace
     # must narrow retrieval to its single owning partition, never search
     # every accessible partition with just a file_id filter (#706).
     scope = WorkspaceScope(workspace_id="w1", partition="only-this-one", file_ids=["fa"])
@@ -3242,7 +3271,7 @@ async def test_allowlisted_or_normalized_empty_chat_bypasses_contextualization_a
     retrieval = FakeRetrieval()
     svc = _svc(llm=llm, retrieval=retrieval, mode="ChatBotRag")
 
-    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": message}], "metadata": {}})
+    result = await _prepare_chat(svc, ["p"], {"messages": [{"role": "user", "content": message}], "metadata": {}})
 
     policy = smalltalk.casual_message_policy(message)
     assert policy is not None
@@ -3365,7 +3394,8 @@ async def test_only_explicit_json_true_forces_retrieval_for_casual_or_normalized
     if require_retrieval is not None:
         metadata["require_retrieval"] = require_retrieval
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": message}], "metadata": metadata},
     )
@@ -3388,7 +3418,8 @@ async def test_require_retrieval_preserves_workspace_scope():
         llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
         workspace=FakeWorkspace(scope=WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["allowed-file"])),
     )
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p1", "p2"],
         {
             "messages": [{"role": "user", "content": "Verify this claim."}],
@@ -3410,7 +3441,8 @@ async def test_require_retrieval_does_not_bypass_missing_workspace():
         llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
     )
     with pytest.raises(WorkspaceNotFoundError):
-        await svc._prepare_chat(
+        await _prepare_chat(
+            svc,
             ["p"],
             {
                 "messages": [{"role": "user", "content": "Verify this claim."}],
@@ -3444,7 +3476,8 @@ async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(h
             ]
         ),
     )
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [{"role": "user", "content": "Find papers from 2020."}],
@@ -3586,8 +3619,8 @@ def _in_reading_order(text: str, ids: list[str]) -> bool:
 )
 @pytest.mark.asyncio
 async def test_prepare_chat_selects_sources_by_relevance_and_shows_them_by_date(orders, shown):
-    out = await _service_with_orders(orders)._prepare_chat(
-        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
+    out = await _prepare_chat(
+        _service_with_orders(orders), ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
     )
     assert [doc.metadata["_id"] for doc in out.docs] == shown, "the citation numbers index into this order"
     system = out.payload["messages"][0]["content"]

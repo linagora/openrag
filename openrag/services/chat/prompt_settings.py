@@ -1,4 +1,4 @@
-"""What a request's partitions set for its prompt: how many sources it takes, and which answer template.
+"""What a request's partitions set for its prompt: how much history, how many sources, which answer template.
 
 Read by the ``classic`` graph's steps and by the completions endpoint, so both
 fit and render their sources the same way.
@@ -21,9 +21,52 @@ logger = get_logger()
 class PartitionPromptSettings:
     """The partition-dependent settings of a request's prompt, read from the live config."""
 
+    #: Used when the global ``rag.chat_history_depth`` config is < 1 — see
+    #: PartitionService._CHAT_HISTORY_DEPTH_DEFAULT for the matching partition-side clamp.
+    _CHAT_HISTORY_DEPTH_DEFAULT = 4
+
     def __init__(self, config: Settings) -> None:
         # Live reference: the partition configs are refreshed on every preset change.
         self._config = config
+        # RAGConfig.chat_history_depth carries no lower bound, so a deployment may
+        # configure it to 0 (or negative). Left unclamped, messages[-0:] would keep
+        # the *entire* history instead of none — the opposite of what this depth
+        # is meant to limit. Clamp here rather than reject at config-load time so a
+        # misconfigured global default degrades safely instead of crashing startup.
+        self._default_chat_history_depth = (
+            config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
+        )
+
+    def chat_history_depth(self, partition: list[str] | None) -> int:
+        """Effective chat-history depth for this request.
+
+        Honors a partition's configured ``chat_history_depth`` (set via the
+        admin API) over the global default. The admin API now requires an
+        explicit ``chat_history_depth >= 1`` on create/update (``ge=1`` in
+        ``CreatePartitionRequest``/``UpdatePartitionRequest``), and
+        ``PartitionService.resolve_partition_row`` normalizes any pre-existing
+        row still holding the legacy ``0`` sentinel to the global default
+        value before it reaches ``Settings.partitions``. So in practice
+        ``cfg.chat_history_depth`` is always >= 1 here; the ``> 0`` filter
+        below is kept only as a defensive backstop — it must never reach the
+        ``messages[-depth:]`` slice, where ``0`` would select the *entire*
+        history rather than none.
+
+        The ``"all"`` sentinel (``openrag-all``) reaches this layer un-expanded
+        (retrieval resolves it to concrete partitions downstream) and is a
+        cross-partition query with no single owning partition, so it uses the
+        global default. A request scoped to one or more named partitions takes
+        the largest explicit (>0) value among them.
+        """
+        if partition and "all" not in partition:
+            explicit = [
+                cfg.chat_history_depth
+                for name in partition
+                if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_history_depth > 0
+            ]
+            if explicit:
+                return max(explicit)
+        return self._default_chat_history_depth
 
     def top_n(self, partition: list[str] | None) -> int:
         """How many sources this request's prompt takes: the retrieval preset's ``top_n``.

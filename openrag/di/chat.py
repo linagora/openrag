@@ -17,7 +17,7 @@ from services.capabilities.retrieve import SourceRetriever
 from services.capabilities.scope import ScopeResolver
 from services.capabilities.summarize import Summarizer
 from services.capabilities.web_search import WebSearch
-from services.chat.classic import ClassicSteps
+from services.chat.classic import ClassicSteps, ClassicWorkflow
 from services.chat.graphs.classic import build_classic_graph
 from services.chat.prompt_settings import PartitionPromptSettings
 from services.inference.runtime import detect_language, get_llm_semaphore
@@ -65,6 +65,7 @@ def create_chat_service(
         retrieval_service=retrieval_service,
         prompt_service=prompt_service,
         contextualizer=contextualizer,
+        scope_resolver=ScopeResolver(workspace_service),
         retriever=retriever,
         web_search=web_search,
         summarizer=Summarizer(llm=llm, config=config, semaphore=get_llm_semaphore),
@@ -79,10 +80,9 @@ def create_chat_service(
         retrieval_service=retrieval_service,
         prompt_service=prompt_service,
         contextualizer=contextualizer,
-        scope_resolver=ScopeResolver(workspace_service),
         retriever=retriever,
         prompt_settings=prompt_settings,
-        classic=build_classic_graph(steps),
+        classic=ClassicWorkflow(build_classic_graph(steps)),
         answer_service=AnswerService(detect_language=detect_language),
     )
 

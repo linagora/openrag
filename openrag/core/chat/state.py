@@ -2,7 +2,7 @@
 
 Each key is written by one node and read by the ones after it; a node returns
 only the keys it changes. Per-request data that no node writes (the options,
-the scope, the LLM, the trace) is not here: it travels in the graph's context
+the route, the LLM, the trace) is not here: it travels in the graph's context
 (``services.chat.classic.ChatContext``).
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 # Imported at run time, not only for type checkers: LangGraph reads the hints.
+from core.chat.scope import Scope
 from core.chat.smalltalk import CasualMessagePolicy
 from core.models.chunk import Chunk
 from core.models.query import SearchQueries
@@ -20,11 +21,16 @@ from core.websearch import WebResult
 class ClassicState(TypedDict, total=False):
     """What the ``classic`` graph knows about a request at each step."""
 
-    # Input: the history window without its leading system prompt, which is
-    # the client's own (``custom_prompt``), and the user's last message.
+    # Input: the messages as the client sent them.
+    request_messages: list[dict]
+
+    # scope: the history window without its leading system prompt, which is
+    # the client's own (``custom_prompt``), the user's last message, and the
+    # partitions searched, narrowed by a workspace or attachments.
     messages: list[dict]
     custom_prompt: str | None
     last_user_message: str
+    scope: Scope
 
     # route, then contextualize, which can recognise an acknowledgement.
     casual: CasualMessagePolicy | None

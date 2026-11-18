@@ -7,13 +7,16 @@ transport), and wraps ``StreamingResponse`` / ``JSONResponse``.
 This module finds the sources and renders them into the prompt;
 ``AnswerService`` (``answer_service.py``) then calls the model, strips the
 ``[Sources: N]`` tag, retries an empty answer and builds ``extra``, the same
-way for ``chat``, ``chat_stream`` and ``complete``. A chat request's sources
-are found by the ``classic`` graph (``services.chat``), whose steps call the
-capabilities in ``services.capabilities``: the scope, the contextualized
-queries, the documents and web results, the map-reduce summaries. This module
-settles the history, the route and the scope, runs the graph, and prepares
-completions itself; ``di.chat`` builds it and compiles the graph. The rules
-with no I/O live in ``core``: small talk (``core.chat.smalltalk``), the history window
+way for ``chat``, ``chat_stream`` and ``complete``. Every chat request runs a
+workflow (``services.chat.workflow``): today the ``classic`` graph
+(``services.chat.classic.ClassicWorkflow``), whose steps settle the history
+window and the scope, then call the capabilities in ``services.capabilities``:
+the contextualized queries, the documents and web results, the map-reduce
+summaries. A request with no partition and no web search goes through it too,
+and reaches the model as it was sent. This module resolves the answering LLM,
+picks the workflow, and prepares completions itself; ``di.chat`` builds it and
+compiles the graph. The rules with no I/O live in ``core``: small talk
+(``core.chat.smalltalk``), the history window
 (``core.chat.history``), fitting the sources into the window
 (``core.chat.budget``), the route (``core.chat.routing``), shaping the answer
 (``core.chat.answer``), the request's metadata flags
@@ -34,26 +37,22 @@ LangChain ``Document`` via ``Chunk.to_langchain()`` at the boundary so the
 from __future__ import annotations
 
 import time
-import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 from core.chat.budget import fit_prompt
-from core.chat.history import history_window, latest_user_query, split_leading_system_prompt
-from core.chat.routing import Route, resolve_route
+from core.chat.routing import Route
 from core.chat.scope import Scope
 from core.models.chat import ChatOptions
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import documents_context
 from core.retrieval.date_order import order_chunks_by_date
-from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder
-from core.utils.exceptions import ContextWindowExceededError, ValidationError
+from core.utils.exceptions import ContextWindowExceededError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens
-from services.capabilities.contextualize import record_contextualization, record_not_run
-from services.chat.classic import ChatContext
+from services.chat.workflow import ChatRequest, ChatWorkflow, PrepareSources
 from services.orchestrators.answer_service import PreparedAnswer
 
 if TYPE_CHECKING:
@@ -61,8 +60,7 @@ if TYPE_CHECKING:
     from core.llm.llm import LLM
     from services.capabilities.contextualize import QueryContextualizer
     from services.capabilities.retrieve import SourceRetriever
-    from services.capabilities.scope import ScopeResolver
-    from services.chat.classic import ClassicGraph
+    from services.chat.classic import ClassicWorkflow
     from services.chat.prompt_settings import PartitionPromptSettings
     from services.orchestrators.answer_service import AnswerService
     from services.orchestrators.prompt_service import PromptService
@@ -70,29 +68,9 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-PrepareSources = Callable[[list, list], list]
-
-
-class _PrepareChatResult(NamedTuple):
-    """Prepared chat data passed from orchestration to the response methods."""
-
-    payload: dict
-    docs: list
-    web_results: list
-    retrieved_docs: list
-    retrieved_web_results: list
-    citation_protocol_active: bool
-    indexed_attachment_ids: list[str]
-    configuration_fingerprint: str
-    retry_empty_response: bool = True
-
 
 class ChatService:
     """End-to-end RAG: query-gen → retrieve (+web) → map-reduce → answer."""
-
-    #: Used when the global ``rag.chat_history_depth`` config is < 1 — see
-    #: PartitionService._CHAT_HISTORY_DEPTH_DEFAULT for the matching partition-side clamp.
-    _CHAT_HISTORY_DEPTH_DEFAULT = 4
 
     def __init__(
         self,
@@ -102,17 +80,17 @@ class ChatService:
         retrieval_service: RetrievalService,
         prompt_service: PromptService,
         contextualizer: QueryContextualizer,
-        scope_resolver: ScopeResolver,
         retriever: SourceRetriever,
         prompt_settings: PartitionPromptSettings,
-        classic: ClassicGraph,
+        classic: ClassicWorkflow,
         answer_service: AnswerService,
         llm_factory: Callable[[str], LLM] | None = None,
     ) -> None:
         """Built by ``di.chat.create_chat_service``, which compiles the *classic* graph.
 
-        The graph's steps share *contextualizer*, *retriever* and
-        *prompt_settings* with the completions endpoint, which runs outside it.
+        Every chat request runs the *classic* workflow. Its steps share
+        *contextualizer*, *retriever* and *prompt_settings* with the
+        completions endpoint, which runs outside it.
         """
         self._retrieval = retrieval_service
         self._answer = answer_service
@@ -122,7 +100,6 @@ class ChatService:
         # admin's edit takes effect on the next chat without a restart.
         self._prompt_service = prompt_service
         self._contextualizer = contextualizer
-        self._scope = scope_resolver
         self._retriever = retriever
         self._prompt_settings = prompt_settings
         self._classic = classic
@@ -131,48 +108,9 @@ class ChatService:
         # ``config.partitions`` and refreshed on every preset change) can be
         # read at request time, not snapshotted once at startup.
         self._config = config
-        # RAGConfig.chat_history_depth carries no lower bound, so a deployment may
-        # configure it to 0 (or negative). Left unclamped, messages[-0:] would keep
-        # the *entire* history instead of none — the opposite of what this depth
-        # is meant to limit. Clamp here rather than reject at config-load time so a
-        # misconfigured global default degrades safely instead of crashing startup.
-        self._default_chat_history_depth = (
-            config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
-        )
 
     async def refresh_partition_configs(self) -> None:
         await self._retrieval.refresh_partition_configs()
-
-    def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
-        """Effective chat-history depth for this request.
-
-        Honors a partition's configured ``chat_history_depth`` (set via the
-        admin API) over the global default. The admin API now requires an
-        explicit ``chat_history_depth >= 1`` on create/update (``ge=1`` in
-        ``CreatePartitionRequest``/``UpdatePartitionRequest``), and
-        ``PartitionService.resolve_partition_row`` normalizes any pre-existing
-        row still holding the legacy ``0`` sentinel to the global default
-        value before it reaches ``Settings.partitions``. So in practice
-        ``cfg.chat_history_depth`` is always >= 1 here; the ``> 0`` filter
-        below is kept only as a defensive backstop — it must never reach the
-        ``messages[-depth:]`` slice, where ``0`` would select the *entire*
-        history rather than none.
-
-        The ``"all"`` sentinel (``openrag-all``) reaches this layer un-expanded
-        (retrieval resolves it to concrete partitions downstream) and is a
-        cross-partition query with no single owning partition, so it uses the
-        global default. A request scoped to one or more named partitions takes
-        the largest explicit (>0) value among them.
-        """
-        if partition and "all" not in partition:
-            explicit = [
-                cfg.chat_history_depth
-                for name in partition
-                if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_history_depth > 0
-            ]
-            if explicit:
-                return max(explicit)
-        return self._default_chat_history_depth
 
     def _resolve_llm(self, partition: list[str] | None) -> LLM:
         """Effective LLM for this request — query generation and answering.
@@ -289,73 +227,12 @@ class ChatService:
         return "default"
 
     # ------------------------------------------------------------------
-    # Preparation (was RagPipeline._prepare_for_chat_completion)
+    # Preparation
     # ------------------------------------------------------------------
 
-    async def _prepare_chat(
-        self,
-        partition: list[str] | None,
-        payload: dict,
-        llm: LLM | None = None,
-        trace: RetrievalTraceBuilder | None = None,
-        max_prompt_tokens: int | None = None,
-    ):
-        """Find a chat request's sources and render its prompt, through the ``classic`` graph.
-
-        The history check, the route and the scope are settled first: a request
-        with no non-system message is a 422 and an unknown workspace a 404
-        before any step runs. *payload*'s messages are replaced by the prompt
-        the graph built, unless a web-only search found nothing.
-        """
-        messages = history_window(payload["messages"], self._resolve_chat_history_depth(partition))
-        custom_prompt, messages = split_leading_system_prompt(payload["messages"], messages)
-        if not messages:
-            raise ValidationError("Request must contain at least one non-system message")
-
-        options = ChatOptions.from_metadata(payload.get("metadata"))
-        # Taken before a workspace narrows the partitions: narrowing never empties them.
-        route = resolve_route(partition, options)
-        scope = await self._scope.resolve(
-            partition, workspace=options.workspace, attachment_ids=list(options.attachment_ids)
-        )
-        context = ChatContext(
-            options=options,
-            route=route,
-            scope=scope,
-            llm=llm,
-            payload=payload,
-            trace=trace,
-            max_prompt_tokens=max_prompt_tokens,
-        )
-        state = await self._classic.ainvoke(
-            {
-                "messages": messages,
-                "custom_prompt": custom_prompt,
-                "last_user_message": latest_user_query(messages),
-            },
-            context=context,
-        )
-        if "answer_messages" in state:
-            payload["messages"] = state["answer_messages"]
-        return _PrepareChatResult(
-            payload,
-            state.get("docs", []),
-            state.get("web_results", []),
-            state.get("retrieved_docs", []),
-            state.get("retrieved_web_results", []),
-            state.get("citation_protocol_active", False),
-            scope.attachment_ids,
-            state.get("configuration_fingerprint", "unavailable"),
-            state.get("retry_empty_response", True),
-        )
-
-    @staticmethod
-    def _retrieval_diagnostics_context(options: ChatOptions) -> RetrievalDiagnosticsContext:
-        return RetrievalDiagnosticsContext(
-            query_mode=options.query_mode,
-            compare_original_query=options.compare_original_query,
-            effective_options=options.retrieval.as_options(),
-        )
+    def _workflow(self, options: ChatOptions) -> ChatWorkflow:
+        """The workflow that finds a chat request's sources: ``classic``, the one there is."""
+        return self._classic
 
     async def _prepare_completions(
         self,
@@ -463,21 +340,20 @@ class ChatService:
         if disable_expansion:
             metadata["retrieval_disable_expansion"] = True
 
-        original_query = latest_user_query(messages)
-        trace = RetrievalTraceBuilder(
-            request_id=request_id or str(uuid.uuid4()),
-            original_query=original_query,
-            diagnostics=self._retrieval_diagnostics_context(ChatOptions.from_metadata(metadata)),
-        )
         started = time.perf_counter()
-        result = await self._prepare_chat(
-            partitions,
-            {"messages": messages, "metadata": metadata},
-            self._resolve_llm(partitions),
-            trace=trace,
+        request = ChatRequest(
+            partitions=partitions,
+            payload={"messages": messages, "metadata": metadata},
+            options=ChatOptions.from_metadata(metadata),
+            llm=self._resolve_llm(partitions),
+            prepare_sources=lambda _docs, _web: [],
+            started=started,
+            request_id=request_id,
         )
+        trace = self._classic.new_trace(request)
+        run = await self._classic.run(request, trace)
         trace.timings["total"] = time.perf_counter() - started
-        return trace.finish(configuration_fingerprint=result.configuration_fingerprint)
+        return trace.finish(configuration_fingerprint=run.configuration_fingerprint)
 
     async def _prepare_answer(
         self,
@@ -490,73 +366,22 @@ class ChatService:
         max_prompt_tokens: int | None,
         request_started: float,
     ) -> PreparedAnswer:
-        """Find the sources of a chat request and render them into its prompt.
+        """Find the sources of a chat request and render them into its prompt, with its workflow.
 
-        A request with no partition and no web search goes to the model as it
-        is. *max_prompt_tokens*: see ``chat``.
+        *max_prompt_tokens*: see ``chat``.
         """
         options = ChatOptions.from_metadata(payload.get("metadata"))
-        original_query = latest_user_query(payload.get("messages", []))
-        trace = (
-            RetrievalTraceBuilder(
-                request_id=request_id or str(uuid.uuid4()),
-                original_query=original_query,
-                diagnostics=self._retrieval_diagnostics_context(options),
-            )
-            if options.include_retrieval_trace
-            else None
-        )
-        configuration_fingerprint = "unavailable"
-        citation_protocol_active = False
-        retry_empty_response = True
-        if not resolve_route(partitions, options).searches:
-            docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
-            attachments: list[str] = []
-            record_not_run(trace, original_query=original_query)
-        else:
-            result = await self._prepare_chat(
-                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens
-            )
-            payload = result.payload
-            docs = result.docs
-            web_results = result.web_results
-            retrieved_docs = result.retrieved_docs
-            retrieved_web_results = result.retrieved_web_results
-            citation_protocol_active = result.citation_protocol_active
-            attachments = result.indexed_attachment_ids
-            configuration_fingerprint = result.configuration_fingerprint
-            retry_empty_response = result.retry_empty_response
-        sources = prepare_sources(docs, web_results)
-        # `all_retrieved_sources` is debug/eval telemetry, not needed by most
-        # callers — skip building it (and calling prepare_sources on the full,
-        # uncapped retrieval set) unless the caller opted in (#847 review).
-        include_all_retrieved = options.include_all_retrieved_sources
-        all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
-
-        finish_trace = None
-        if trace is not None:
-            if trace.contextualization is None:
-                record_contextualization(
-                    trace,
-                    SearchQueries(query_list=[Query(query=original_query)]),
-                    original_query=original_query,
-                )
-
-            def finish_trace() -> dict:
-                trace.timings["total"] = time.perf_counter() - request_started
-                return {"retrieval_trace": trace.finish(configuration_fingerprint=configuration_fingerprint)}
-
-        return PreparedAnswer(
+        request = ChatRequest(
+            partitions=partitions,
             payload=payload,
-            sources=sources,
-            all_sources=all_sources,
-            include_all_retrieved=include_all_retrieved,
-            citation_protocol_active=citation_protocol_active,
-            retry_empty_response=retry_empty_response,
-            # Which attachments were actually searched to generate the answer.
-            extra_fields={"attachments": attachments} if options.attachments_sent else {},
-            finish_trace=finish_trace,
+            options=options,
+            llm=llm,
+            prepare_sources=prepare_sources,
+            started=request_started,
+            request_id=request_id,
+            max_prompt_tokens=max_prompt_tokens,
         )
+        return await self._workflow(options).prepare(request)
 
     async def chat(
         self,

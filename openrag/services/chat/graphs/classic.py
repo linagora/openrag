@@ -2,23 +2,25 @@
 
 The only code that sees LangGraph. Each node unpacks the request's context and
 calls its step in ``services.chat.classic``; the edges decide which step comes
-next. Every path ends with the answer's prompt ready (or, for a web-only
-request whose search found nothing, the request left as it was), and
-``ChatService`` then asks ``AnswerService`` for the answer, outside the graph.
+next. Every path ends with the answer's prompt ready (or, for a request with
+nothing to search, or a web-only one whose search found nothing, the request
+left as it was), and ``ChatService`` then asks ``AnswerService`` for the
+answer, outside the graph.
 
-    START → route ─┬─ small talk ───────────────┐
-                   └─ contextualize ────────────┤
-                                                ▼
-                                          trace_config
-                                    ┌───────────┴──────────┐
-                               small_talk → END         retrieve
-                                                 web only, nothing found → END
-                                                           ▼
-                                                        budget ─ map-reduce ─→ summarize
-                                                           ▼                      ▼
-                                                        prompt  ◀─────────────────┘
-                                                           ▼
-                                                          END
+    START ─┬─ no partition, no web search → direct → END
+           └─ scope → route ─┬─ small talk ───────────────┐
+                             └─ contextualize ────────────┤
+                                                          ▼
+                                                    trace_config
+                                              ┌───────────┴──────────┐
+                                         small_talk → END         retrieve
+                                                           web only, nothing found → END
+                                                                     ▼
+                                                                  budget ─ map-reduce ─→ summarize
+                                                                     ▼                      ▼
+                                                                  prompt  ◀─────────────────┘
+                                                                     ▼
+                                                                    END
 """
 
 from __future__ import annotations
@@ -49,6 +51,14 @@ if TYPE_CHECKING:
 
 def build_classic_graph(steps: ClassicSteps) -> CompiledStateGraph:
     """Compile the ``classic`` graph over *steps*; compiled once, run for every chat request."""
+
+    async def direct(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "direct")
+        return await steps.direct(state, runtime.context)
+
+    async def scope(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
+        log_step("classic", "scope")
+        return await steps.scope(state, runtime.context)
 
     async def route(state: ClassicState, runtime: Runtime[ChatContext]) -> dict:
         log_step("classic", "route")
@@ -83,6 +93,9 @@ def build_classic_graph(steps: ClassicSteps) -> CompiledStateGraph:
         log_step("classic", "prompt")
         return await steps.prompt(state, runtime.context)
 
+    def after_start(state: ClassicState, runtime: Runtime[ChatContext]) -> str:
+        return "direct" if steps.is_direct(runtime.context) else "scope"
+
     def after_route(state: ClassicState, runtime: Runtime[ChatContext]) -> str:
         return "contextualize" if steps.needs_queries(state, runtime.context) else "trace_config"
 
@@ -96,10 +109,12 @@ def build_classic_graph(steps: ClassicSteps) -> CompiledStateGraph:
         return "summarize" if steps.map_reduce_requested(state, runtime.context) else "prompt"
 
     graph = StateGraph(ClassicState, context_schema=ChatContext)
-    for node in (route, contextualize, trace_config, small_talk, retrieve, budget, summarize, prompt):
+    for node in (direct, scope, route, contextualize, trace_config, small_talk, retrieve, budget, summarize, prompt):
         graph.add_node(node.__name__, node)
 
-    graph.add_edge(START, "route")
+    graph.add_conditional_edges(START, after_start, ["direct", "scope"])
+    graph.add_edge("direct", END)
+    graph.add_edge("scope", "route")
     graph.add_conditional_edges("route", after_route, ["contextualize", "trace_config"])
     graph.add_edge("contextualize", "trace_config")
     graph.add_conditional_edges("trace_config", after_trace_config, ["small_talk", "retrieve"])

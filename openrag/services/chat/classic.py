@@ -4,6 +4,7 @@ The graph itself (its edges and the compile step) is
 ``services.chat.graphs.classic``, the only module that imports LangGraph. The
 steps here are plain async methods: the request's state and context in, the
 keys they change out, so they run and are tested without LangGraph.
+``ClassicWorkflow`` runs the compiled graph for ``ChatService``.
 
 Grading only happens in map-reduce (``summarize``), when the request sets
 ``use_map_reduce``; without it, the graph runs exactly the pipeline
@@ -12,13 +13,16 @@ Grading only happens in map-reduce (``summarize``), when the request sets
 
 from __future__ import annotations
 
+import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 from core.chat.budget import fit_prompt
-from core.chat.history import sanitize_messages
+from core.chat.history import history_window, latest_user_query, sanitize_messages, split_leading_system_prompt
+from core.chat.routing import resolve_route
 from core.chat.smalltalk import CasualMessagePolicy, acknowledgement_language, classify_latest_message
 from core.models.query import Query, SearchQueries
 from core.models.retrieval_trace import ContextualizationTrace
@@ -32,24 +36,25 @@ from core.prompts import (
     tool_definition_tokens,
 )
 from core.retrieval.date_order import order_chunks_by_date
-from core.retrieval.trace import canonical_fingerprint
-from core.utils.exceptions import ContextWindowExceededError
+from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder, canonical_fingerprint
+from core.utils.exceptions import ContextWindowExceededError, ValidationError
 from core.utils.text import get_num_tokens
-from services.capabilities.contextualize import mark_fallback, record_bypass
+from services.capabilities.contextualize import mark_fallback, record_bypass, record_contextualization, record_not_run
+from services.orchestrators.answer_service import PreparedAnswer
 
 if TYPE_CHECKING:
     from core.chat.routing import Route
-    from core.chat.scope import Scope
     from core.chat.state import ClassicState
     from core.config.root import Settings
     from core.llm.llm import LLM
     from core.models.chat import ChatOptions
-    from core.retrieval.trace import RetrievalTraceBuilder
     from services.capabilities.contextualize import QueryContextualizer
     from services.capabilities.retrieve import SourceRetriever
+    from services.capabilities.scope import ScopeResolver
     from services.capabilities.summarize import Summarizer
     from services.capabilities.web_search import WebSearch
     from services.chat.prompt_settings import PartitionPromptSettings
+    from services.chat.workflow import ChatRequest
     from services.orchestrators.prompt_service import PromptService
     from services.orchestrators.retrieval_service import RetrievalService
 
@@ -60,14 +65,16 @@ _DATE_FORMAT = "%A, %B %d, %Y, %H:%M:%S"
 class ChatContext:
     """What a chat request runs with besides its state, settled before the graph starts.
 
-    *payload* is the request as the client sent it; the steps only read its
-    tool definitions. *max_prompt_tokens* is what the answering model's window
-    leaves for the prompt, ``None`` when the window is unknown.
+    *partitions* is the request's scope as the router resolved it, before a
+    workspace or attachments narrow it (``scope``). *payload* is the request
+    as the client sent it; the steps only read its tool definitions.
+    *max_prompt_tokens* is what the answering model's window leaves for the
+    prompt, ``None`` when the window is unknown.
     """
 
     options: ChatOptions
     route: Route
-    scope: Scope
+    partitions: list[str] | None
     llm: LLM
     payload: dict
     trace: RetrievalTraceBuilder | None = None
@@ -75,7 +82,7 @@ class ChatContext:
 
 
 class ClassicGraph(Protocol):
-    """The compiled ``classic`` graph (``services.chat.graphs.classic``), as ``ChatService`` runs it."""
+    """The compiled ``classic`` graph (``services.chat.graphs.classic``), as ``ClassicWorkflow`` runs it."""
 
     async def ainvoke(self, input: ClassicState, *, context: ChatContext) -> ClassicState: ...
 
@@ -101,6 +108,7 @@ class ClassicSteps:
         retrieval_service: RetrievalService,
         prompt_service: PromptService,
         contextualizer: QueryContextualizer,
+        scope_resolver: ScopeResolver,
         retriever: SourceRetriever,
         web_search: WebSearch,
         summarizer: Summarizer,
@@ -113,6 +121,7 @@ class ClassicSteps:
         self._retrieval = retrieval_service
         self._prompt_service = prompt_service
         self._contextualizer = contextualizer
+        self._scope = scope_resolver
         self._retriever = retriever
         self._web = web_search
         self._summarizer = summarizer
@@ -128,6 +137,41 @@ class ClassicSteps:
         return effective, effective.get("top_k"), top_k, overrides
 
     # ------------------------------------------------------------------
+    # direct, or scope
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def is_direct(ctx: ChatContext) -> bool:
+        """A request with no partition and no web search: the model gets it as it is."""
+        return not ctx.route.searches
+
+    async def direct(self, state: ClassicState, ctx: ChatContext) -> dict[str, Any]:
+        """Nothing to search: the trace says so, and the request's messages are left as they are."""
+        record_not_run(ctx.trace, original_query=latest_user_query(state["request_messages"]))
+        return {}
+
+    async def scope(self, state: ClassicState, ctx: ChatContext) -> dict[str, Any]:
+        """The history window and the partitions searched.
+
+        A request with no non-system message is a 422, and an unknown
+        workspace a 404, before any search runs.
+        """
+        request_messages = state["request_messages"]
+        messages = history_window(request_messages, self._prompt_settings.chat_history_depth(ctx.partitions))
+        custom_prompt, messages = split_leading_system_prompt(request_messages, messages)
+        if not messages:
+            raise ValidationError("Request must contain at least one non-system message")
+        scope = await self._scope.resolve(
+            ctx.partitions, workspace=ctx.options.workspace, attachment_ids=list(ctx.options.attachment_ids)
+        )
+        return {
+            "messages": messages,
+            "custom_prompt": custom_prompt,
+            "last_user_message": latest_user_query(messages),
+            "scope": scope,
+        }
+
+    # ------------------------------------------------------------------
     # route → contextualize → trace_config
     # ------------------------------------------------------------------
 
@@ -138,7 +182,10 @@ class ClassicSteps:
         )
         options = ctx.options
         retrieval_forced = (
-            options.require_retrieval or options.websearch or options.use_map_reduce or bool(ctx.scope.attachment_ids)
+            options.require_retrieval
+            or options.websearch
+            or options.use_map_reduce
+            or bool(state["scope"].attachment_ids)
         )
         return {
             "casual": casual,
@@ -169,7 +216,7 @@ class ClassicSteps:
 
         messages = state["messages"]
         queries = await self._contextualizer.contextualize(
-            messages, llm=ctx.llm, partitions=ctx.scope.partitions, trace=trace
+            messages, llm=ctx.llm, partitions=state["scope"].partitions, trace=trace
         )
         casual = state.get("casual")
         usable_queries = [query for query in queries.query_list if query.query.strip()]
@@ -195,7 +242,7 @@ class ClassicSteps:
         trace = ctx.trace
         if trace is None:
             return {"resolved_plan": None, "configuration_fingerprint": "unavailable"}
-        partitions = ctx.scope.partitions
+        partitions = state["scope"].partitions
         effective, retrieval_top_k, _top_k, overrides = self._retrieval_settings(ctx.options)
         contextualizer_prompt = trace.contextualization.prompt if trace.contextualization is not None else None
         resolved_plan = None
@@ -310,7 +357,7 @@ class ClassicSteps:
         chunks, web_results = await self._retriever.retrieve(
             queries,
             route=ctx.route,
-            scope=ctx.scope,
+            scope=state["scope"],
             top_k=top_k,
             retrieval_top_k=retrieval_top_k,
             overrides=overrides,
@@ -321,7 +368,7 @@ class ClassicSteps:
             await self._retriever.compare_original_query(
                 trace,
                 original_query=state["last_user_message"],
-                scope=ctx.scope,
+                scope=state["scope"],
                 top_k=top_k,
                 retrieval_top_k=retrieval_top_k,
                 overrides=overrides,
@@ -342,7 +389,7 @@ class ClassicSteps:
         spends any LLM call, rather than at the provider.
         """
         messages = sanitize_messages(state["messages"])
-        partitions = ctx.scope.partitions
+        partitions = state["scope"].partitions
         docs = [chunk.to_langchain() for chunk in state["chunks"]]
         prompt_type = "spoken_style_answer" if ctx.options.spoken_style_answer else "sys_prompt"
         template = await self._prompt_service.resolve_prompt(
@@ -411,7 +458,7 @@ class ClassicSteps:
             )
         headroom = None if room is None else room - web_tokens
         candidates = docs
-        docs = [docs[i] for i in self._prompt_settings.fit_sources(docs, ctx.scope.partitions, headroom)]
+        docs = [docs[i] for i in self._prompt_settings.fit_sources(docs, state["scope"].partitions, headroom)]
 
         def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
             """The answer messages with *docs*, then the *web_candidates* that fit after them."""
@@ -452,4 +499,117 @@ class ClassicSteps:
         }
 
 
-__all__ = ["ChatContext", "ClassicSteps", "messages_tokens"]
+class ClassicRun(NamedTuple):
+    """What a run of the ``classic`` graph found and rendered for a request."""
+
+    payload: dict
+    docs: list
+    web_results: list
+    retrieved_docs: list
+    retrieved_web_results: list
+    citation_protocol_active: bool
+    indexed_attachment_ids: list[str]
+    configuration_fingerprint: str
+    retry_empty_response: bool = True
+
+
+class ClassicWorkflow:
+    """The ``classic`` workflow: the compiled graph finds a chat request's sources and renders its prompt.
+
+    Every chat request runs it, one with no partition and no web search too:
+    the graph's ``direct`` step leaves that request as the client sent it.
+    """
+
+    def __init__(self, graph: ClassicGraph) -> None:
+        self._graph = graph
+
+    @staticmethod
+    def new_trace(request: ChatRequest) -> RetrievalTraceBuilder:
+        """An empty retrieval trace for *request*, which its run fills in."""
+        options = request.options
+        return RetrievalTraceBuilder(
+            request_id=request.request_id or str(uuid.uuid4()),
+            original_query=latest_user_query(request.payload.get("messages", [])),
+            diagnostics=RetrievalDiagnosticsContext(
+                query_mode=options.query_mode,
+                compare_original_query=options.compare_original_query,
+                effective_options=options.retrieval.as_options(),
+            ),
+        )
+
+    async def run(self, request: ChatRequest, trace: RetrievalTraceBuilder | None = None) -> ClassicRun:
+        """Run the graph for *request*; its payload's messages become the prompt the graph built.
+
+        They stay as they were for a request the graph sends to the model as
+        it is: no partition and no web search, or a web-only search that found
+        nothing.
+        """
+        payload = request.payload
+        context = ChatContext(
+            options=request.options,
+            route=resolve_route(request.partitions, request.options),
+            partitions=request.partitions,
+            llm=request.llm,
+            payload=payload,
+            trace=trace,
+            max_prompt_tokens=request.max_prompt_tokens,
+        )
+        state = await self._graph.ainvoke({"request_messages": payload["messages"]}, context=context)
+        if "answer_messages" in state:
+            payload["messages"] = state["answer_messages"]
+        scope = state.get("scope")
+        return ClassicRun(
+            payload,
+            state.get("docs", []),
+            state.get("web_results", []),
+            state.get("retrieved_docs", []),
+            state.get("retrieved_web_results", []),
+            state.get("citation_protocol_active", False),
+            scope.attachment_ids if scope is not None else [],
+            state.get("configuration_fingerprint", "unavailable"),
+            state.get("retry_empty_response", True),
+        )
+
+    async def prepare(self, request: ChatRequest) -> PreparedAnswer:
+        """Find the sources of a chat request and render them into its prompt."""
+        options = request.options
+        # Read before the run, which replaces the payload's messages with the prompt.
+        original_query = latest_user_query(request.payload.get("messages", []))
+        trace = self.new_trace(request) if options.include_retrieval_trace else None
+        run = await self.run(request, trace)
+        sources = request.prepare_sources(run.docs, run.web_results)
+        # `all_retrieved_sources` is debug/eval telemetry, not needed by most
+        # callers — skip building it (and calling prepare_sources on the full,
+        # uncapped retrieval set) unless the caller opted in (#847 review).
+        include_all_retrieved = options.include_all_retrieved_sources
+        all_sources = (
+            request.prepare_sources(run.retrieved_docs, run.retrieved_web_results) if include_all_retrieved else None
+        )
+
+        finish_trace = None
+        if trace is not None:
+            if trace.contextualization is None:
+                record_contextualization(
+                    trace,
+                    SearchQueries(query_list=[Query(query=original_query)]),
+                    original_query=original_query,
+                )
+
+            def finish_trace() -> dict:
+                trace.timings["total"] = time.perf_counter() - request.started
+                return {"retrieval_trace": trace.finish(configuration_fingerprint=run.configuration_fingerprint)}
+
+        return PreparedAnswer(
+            payload=run.payload,
+            sources=sources,
+            all_sources=all_sources,
+            include_all_retrieved=include_all_retrieved,
+            citation_protocol_active=run.citation_protocol_active,
+            retry_empty_response=run.retry_empty_response,
+            # Which attachments were actually searched to generate the answer.
+            extra_fields={"attachments": run.indexed_attachment_ids} if options.attachments_sent else {},
+            finish_trace=finish_trace,
+        )
+
+
+__all__ = ["ChatContext", "ClassicRun", "ClassicSteps", "ClassicWorkflow", "messages_tokens"]

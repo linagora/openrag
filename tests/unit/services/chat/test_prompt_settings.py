@@ -9,8 +9,12 @@ from services.chat.prompt_settings import PartitionPromptSettings
 
 
 def _settings(**partitions) -> PartitionPromptSettings:
-    """Settings over these partition configs, with ``reranker.top_k`` = 5."""
-    return PartitionPromptSettings(SimpleNamespace(reranker=SimpleNamespace(top_k=5), partitions=partitions))
+    """Settings over these partition configs, with ``reranker.top_k`` = 5 and a history depth of 4."""
+    return PartitionPromptSettings(
+        SimpleNamespace(
+            reranker=SimpleNamespace(top_k=5), rag=SimpleNamespace(chat_history_depth=4), partitions=partitions
+        )
+    )
 
 
 def _partition(top_n: int | None = None, **generation_prompt_names) -> SimpleNamespace:
