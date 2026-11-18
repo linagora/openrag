@@ -298,13 +298,19 @@ def test_logout_redirects_to_idp_and_clears_session(oidc_env, client, stub):
     assert r.status_code == 302
     assert r.headers["location"] == stub.logout_target
     assert stub.calls == [("logout", "sess")]
-    assert any(SESSION_COOKIE_NAME in c and ("Max-Age=0" in c or "expires=" in c.lower()) for c in _set_cookies(r))
+    assert _cleared(r, SESSION_COOKIE_NAME)
 
 
 def _cleared(response, name) -> bool:
-    return any(
-        c.startswith(f"{name}=") and ("Max-Age=0" in c or "expires=" in c.lower()) for c in _set_cookies(response)
-    )
+    """Whether the response deletes the root-scoped cookie ``name``."""
+    for cookie in _set_cookies(response):
+        pair, *attributes = (part.strip() for part in cookie.split(";"))
+        if pair.split("=", 1)[0] != name:
+            continue
+        parsed = {key.lower(): value for key, _, value in (attribute.partition("=") for attribute in attributes)}
+        if parsed.get("max-age") == "0" and parsed.get("path") == "/":
+            return True
+    return False
 
 
 def test_logout_after_chat_logout_reads_the_handoff_cookie_and_clears_it(oidc_env, client, stub):

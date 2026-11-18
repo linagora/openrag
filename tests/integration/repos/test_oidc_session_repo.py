@@ -104,6 +104,16 @@ class TestRecentlyRevoked:
         assert found is not None
         assert found.id_token_encrypted == b"id-token-bytes"
 
+    async def test_a_session_that_expired_after_its_revocation_is_found(self, postgres_store: PostgresStore):
+        repo = postgres_store.oidc_session_repo
+        user = await _seed_user(postgres_store)
+        created = await repo.create_session(
+            _session(user.id, token_hash="hash-expired-logout", expires_in=timedelta(seconds=-1))
+        )
+        await repo.revoke_session(created.id)
+
+        assert await repo.get_recently_revoked_by_token_hash("hash-expired-logout", within=timedelta(seconds=60))
+
     async def test_a_live_session_is_not_found(self, postgres_store: PostgresStore):
         repo = postgres_store.oidc_session_repo
         user = await _seed_user(postgres_store)

@@ -19,7 +19,7 @@ class OIDCSessionRepository(ABC):
 
     @abstractmethod
     async def get_recently_revoked_by_token_hash(self, token_hash: str, within: timedelta) -> OIDCSession | None:
-        """A session revoked less than ``within`` ago and not expired, for its IdP logout hint only."""
+        """A session revoked less than ``within`` ago, expired or not, for its IdP logout hint only."""
         ...
 
     @abstractmethod
