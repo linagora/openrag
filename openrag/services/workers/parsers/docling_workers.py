@@ -173,6 +173,11 @@ class _PageIndex:
     only the top-level subtrees that can print something on the page, in
     document order, with the same visits as the whole-document export; a subtree
     left out would print nothing on that page.
+
+    A list or inline group is one subtree, serialized whole on every page it
+    prints on, so a list spanning k pages costs k times its items. Splitting it
+    per page would mean reimplementing docling-core's list serializer, which
+    numbers the items across the whole list.
     """
 
     def __init__(self, document: DoclingDocument) -> None:
