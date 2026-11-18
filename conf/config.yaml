@@ -176,13 +176,16 @@ prompts:
 loader:
   # Env: IMAGE_CAPTIONING, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
   #      CONTENT_DEDUPLICATION_ENABLED, FILE_FENCES, CSV_BATCH_SIZE,
-  #      CSV_DELIMITER, XLSX_BATCH_SIZE
+  #      CSV_DELIMITER, XLSX_BATCH_SIZE, XLSX_CHARTS
   csv_batch_size: 10000
   # Null enables delimiter sniffing. Set one character to force a delimiter.
   csv_delimiter: null
   xlsx_batch_size: 10000
   # Optional overrides of the OOXML and batch resource limits.
   xlsx_limits: {}
+  # Charts: full (with their data, hidden sources included),
+  # without_hidden_data (data from hidden sheets, rows or columns left out), off.
+  xlsx_charts: full
   image_captioning: true
   save_markdown: false
   # Keep the raw upload on disk after indexation (needed for source viewing in
@@ -367,7 +370,7 @@ chunker:
 retriever:
   type: single
   top_k: 50
-  similarity_threshold: 0.6
+  similarity_threshold: 0.2
   with_surrounding_chunks: false
   include_related: true
   include_ancestors: true
@@ -416,7 +419,7 @@ mcp:
   path: /mcp
   default_top_k: 5
   max_top_k: 50
-  similarity_threshold: 0.8
+  similarity_threshold: 0.2
   download_timeout: 30.0
   max_download_bytes: 104857600  # 100 MiB
 

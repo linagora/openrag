@@ -87,9 +87,10 @@ FILE_FENCE_TTL_SECONDS = 120.0
 class FileFenceKind(str, Enum):
     """What holds a file's fence (#1430).
 
-    ``INDEX`` covers indexing a new file, replacing it and copying into it: the
-    holder is the indexing task. ``DELETE`` and ``METADATA`` are held by one
-    request for as long as it runs.
+    ``INDEX`` covers indexing a new file and replacing it: the holder is the
+    indexing task. ``DELETE`` is held by one delete request for as long as it
+    runs. ``METADATA`` is meant for metadata updates and copies, which don't
+    take a fence yet.
     """
 
     INDEX = "index"

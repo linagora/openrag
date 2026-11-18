@@ -11,10 +11,11 @@ from core.ports.file_fence_repo import FileFenceRepository
 
 _TERMINAL_JOB_STATUSES = sorted(state.value for state in TERMINAL_TASK_STATES)
 
-# The statement that takes a free fence also reports who holds a busy one. The
-# second branch reads the snapshot the statement started with, so when the
-# conflicting row was committed by another transaction after that, neither
-# branch returns a row; ``acquire`` then runs it again.
+# Takes a free fence, renews our own, or takes one whose holder is gone; returns
+# nothing when another holder keeps it. Who that holder is comes from a second
+# statement: a fallback branch in this one would read the snapshot the statement
+# started with, so after waiting on a concurrent take-over it would name the
+# holder that was just replaced.
 _ACQUIRE_SQL = """
 WITH taken AS (
     INSERT INTO file_fences (partition_name, file_id, holder_kind, holder_id, expires_at)
@@ -40,14 +41,15 @@ WITH taken AS (
     RETURNING partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
 )
 SELECT partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at FROM taken
-UNION ALL
+"""
+
+_HOLDER_SQL = """
 SELECT partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
   FROM file_fences
  WHERE partition_name = $1 AND file_id = $2
-   AND NOT EXISTS (SELECT 1 FROM taken)
 """
 
-# Each retry means another transaction took or dropped the fence in between;
+# Each retry means the holder released the fence between the two statements;
 # a handful bounds a pathological loop without ever being reached in practice.
 _ACQUIRE_ATTEMPTS = 5
 
@@ -79,6 +81,8 @@ class PgFileFenceRepository(FileFenceRepository):
                 float(ttl_seconds),
                 _TERMINAL_JOB_STATUSES,
             )
+            if row is None:
+                row = await self.pool.fetchrow(_HOLDER_SQL, partition, file_id)
             if row is not None:
                 return _row_to_fence(row)
         raise RuntimeError(f"Could not read the fence of file {file_id!r} in partition {partition!r}")

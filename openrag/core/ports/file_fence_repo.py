@@ -1,9 +1,9 @@
 """File fence repository interface (#1430).
 
 One fence per ``(partition, file_id)``, held by at most one operation at a
-time: indexing (a new file, a replace, the target of a copy), a delete or a
-metadata update. The fence lives in the catalog database, so it holds for
-every process that shares it, whatever runs the operation.
+time: indexing (a new file or a replace) or a delete. Metadata updates and
+copies don't take one yet. The fence lives in the catalog database, so it holds
+for every process that shares it, whatever runs the operation.
 
 The holder id is the fencing token. An indexing fence is held by its task id
 and released by whichever process settles the task, so it is a row with an

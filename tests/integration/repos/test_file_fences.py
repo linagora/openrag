@@ -156,6 +156,31 @@ async def test_two_processes_racing_for_a_fence_get_one_holder(store, test_rdb_c
     assert winners <= set(holders)
 
 
+async def test_a_refusal_names_the_holder_that_won_a_concurrent_take_over(store):
+    await _acquire(store, "task-a")
+    conn = await store.pool.acquire()
+    try:
+        transaction = conn.transaction()
+        await transaction.start()
+        await conn.execute(
+            "UPDATE file_fences SET holder_kind = 'delete', holder_id = 'delete-1'"
+            " WHERE partition_name = $1 AND file_id = $2",
+            PARTITION,
+            FILE_ID,
+        )
+        refused = asyncio.ensure_future(_acquire(store, "task-b"))
+        await asyncio.sleep(0.3)
+        assert not refused.done()
+        await transaction.commit()
+    finally:
+        await store.pool.release(conn)
+
+    fence = await asyncio.wait_for(refused, timeout=5)
+
+    assert fence.holder_id == "delete-1"
+    assert fence.kind is FileFenceKind.DELETE
+
+
 # ── Take over, renew, release ────────────────────────────────────────
 
 
