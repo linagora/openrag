@@ -37,7 +37,12 @@ export function ConfirmDialog({
       <AlertDialogContent>
         <AlertDialogHeader className="min-w-0">
           <AlertDialogTitle className="min-w-0 [overflow-wrap:anywhere]">{title}</AlertDialogTitle>
-          <AlertDialogDescription className="min-w-0 max-h-[50vh] overflow-y-auto [overflow-wrap:anywhere]">
+          <AlertDialogDescription
+            // Focusable so a long description can be scrolled from the keyboard
+            // (Safari does not focus scroll containers on Tab).
+            tabIndex={0}
+            className="min-w-0 max-h-[50vh] overflow-y-auto rounded-sm [overflow-wrap:anywhere] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
             {description}
           </AlertDialogDescription>
         </AlertDialogHeader>
