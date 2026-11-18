@@ -257,6 +257,121 @@ async def test_list_jobs_filters_by_status_and_user():
 
 
 @pytest.mark.asyncio
+async def test_list_jobs_by_stage_order_returns_a_bounded_filtered_page():
+    pool = _FakePool(fetch=[_row(status="SERIALIZING")])
+    repo = _repo(pool)
+
+    jobs = await repo.list_jobs_by_stage_order(
+        statuses=["SERIALIZING"],
+        user_id=7,
+        exclude_task_ids=["actor-task"],
+        offset=24,
+        limit=12,
+    )
+
+    query, params = pool.calls[0]
+    assert "LEFT JOIN job_stage_state" in query
+    assert "stage_progress.position_score" in query
+    assert "FROM unnest($3::text[]) AS excluded_task_ids(task_id)" in query
+    assert "OFFSET $4 LIMIT $5" in query
+    assert params[:5] == (["SERIALIZING"], 7, ["actor-task"], 24, 12)
+    assert params[5] == ["parse", "caption", "chunk", "contextualize", "topic_tag", "embed", "store"]
+    assert params[6] == ["between_stages", "finalizing"]
+    assert "jobs.status = ANY($8::text[])" in query
+    assert "THEN -EXTRACT(EPOCH FROM jobs.created_at)" in query
+    assert "ELSE EXTRACT(EPOCH FROM jobs.created_at)" in query
+    assert params[7] == ["CANCELLED", "COMPLETED", "FAILED"]
+    assert [job.id for job in jobs] == ["task-1"]
+
+
+@pytest.mark.asyncio
+async def test_list_task_page_by_stage_order_merges_actor_rows_with_a_bounded_window():
+    import json
+
+    pool = _FakePool(
+        fetch=[
+            {"task_id": "actor-only", "job_json": None},
+            {"task_id": "durable-task", "job_json": json.dumps(_row(id="durable-task"), default=str)},
+        ]
+    )
+    repo = _repo(pool)
+    created_at = _NOW - timedelta(hours=1)
+
+    page = await repo.list_task_page_by_stage_order(
+        statuses=None,
+        user_id=7,
+        actor_overlays=[("actor-only", "QUEUED", created_at)],
+        offset=12,
+        limit=8,
+    )
+
+    query, params = pool.calls[0]
+    assert "WITH actor_overlays AS" in query
+    assert "UNION ALL" in query
+    assert "OFFSET $6 LIMIT $7" in query
+    assert params[:7] == (None, 7, ["actor-only"], ["QUEUED"], [created_at], 12, 8)
+    assert page[0] == ("actor-only", None)
+    assert page[1][0] == "durable-task"
+    assert page[1][1].id == "durable-task"
+
+
+@pytest.mark.asyncio
+async def test_get_job_list_metadata_counts_matching_jobs_by_partition():
+    pool = _FakePool(
+        fetch=[
+            {"partition": "tenant-a", "count": 3},
+            {"partition": "tenant-b", "count": 2},
+        ]
+    )
+    repo = _repo(pool)
+
+    metadata = await repo.get_job_list_metadata(statuses=["FAILED"], user_id=7)
+
+    query, params = pool.calls[0]
+    assert "GROUP BY partition" in query
+    assert params == (["FAILED"], 7)
+    assert metadata == (5, {"tenant-a": 3, "tenant-b": 2})
+
+
+@pytest.mark.asyncio
+async def test_get_job_list_metadata_reads_actor_states_in_the_same_snapshot():
+    pool = _FakePool(
+        fetch=[
+            {"row_type": "partition", "partition": "tenant-a", "count": 3, "id": None, "status": None},
+            {"row_type": "actor", "partition": "tenant-b", "count": 0, "id": "actor-task", "status": "FAILED"},
+        ]
+    )
+    repo = _repo(pool)
+
+    metadata = await repo.get_job_list_metadata_with_actor_rows(
+        statuses=["SERIALIZING", "QUEUED"],
+        user_id=7,
+        actor_task_ids=["actor-task"],
+    )
+
+    query, params = pool.calls[0]
+    assert "WITH matching_partitions AS" in query
+    assert "FROM matching_partitions" in query
+    assert "id = ANY($3::text[])" in query
+    assert params == (7, ["SERIALIZING", "QUEUED"], ["actor-task"])
+    assert metadata == (3, {"tenant-a": 3}, {"actor-task": ("FAILED", "tenant-b")})
+
+
+@pytest.mark.asyncio
+async def test_get_latest_stage_ids_reads_the_newest_attempt_event_per_task():
+    pool = _FakePool(fetch=[{"task_id": "task-1", "stage_id": "embed"}])
+    repo = _repo(pool)
+
+    stages = await repo.get_latest_stage_ids(["task-1"])
+
+    query, params = pool.calls[0]
+    assert "DISTINCT ON (task_id)" in query
+    assert "ORDER BY task_id, attempt DESC, sequence DESC" in query
+    assert params == (["task-1"],)
+    assert stages == {"task-1": "embed"}
+
+
+@pytest.mark.asyncio
 async def test_get_jobs_returns_rows_for_known_task_ids():
     pool = _FakePool(fetch=[_row(), _row(id="task-2")])
     repo = _repo(pool)

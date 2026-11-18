@@ -33,6 +33,7 @@ import email
 import io
 import logging
 from collections.abc import Mapping
+from contextlib import closing
 from email import policy
 from email.utils import parsedate_to_datetime
 
@@ -52,6 +53,16 @@ _IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"}
 # nested .eml-in-.eml recursion is bounded separately at parser-tree build time
 # via _MAX_EML_ATTACHMENT_DEPTH in the parser_dispatcher.)
 _MAX_EML_ATTACHMENTS = 50
+# Total text from tabular attachments in one email, truncation marker included.
+_MAX_EML_ATTACHMENT_TEXT_BYTES = 8 * 1024 * 1024
+_ATTACHMENT_TRUNCATED_MARKER = "[attachment content truncated at the safe text limit]"
+
+
+class _AttachmentTextBudget:
+    """Bytes of tabular attachment text one email may still emit."""
+
+    def __init__(self, remaining: int) -> None:
+        self.remaining = remaining
 
 
 @parser_registry.register("eml")
@@ -218,17 +229,22 @@ class EmlParser(DocumentParser):
 
         rendered: list[str] = ["\n\n--- ATTACHMENTS ---\n"]
         images: list[ImageBlock] = []
+        # One budget for the whole email, not one per attachment: 50 large
+        # spreadsheets must not add up to 50 times the limit in one block.
+        text_budget = _AttachmentTextBudget(_MAX_EML_ATTACHMENT_TEXT_BYTES)
         for att in attachments:
             ext = self._extension(att["filename"])
             header = (
                 f"\nAttachment: {att['filename']}\nContent-Type: {att['content_type']}\nSize: {att['size']} bytes\n"
             )
-            content, att_images = await self._render_one(att, ext)
+            content, att_images = await self._render_one(att, ext, text_budget)
             rendered.append(header + content + "---\n")
             images.extend(att_images)
         return "".join(rendered), images
 
-    async def _render_one(self, attachment: dict, ext: str) -> tuple[str, list[ImageBlock]]:
+    async def _render_one(
+        self, attachment: dict, ext: str, text_budget: _AttachmentTextBudget | None = None
+    ) -> tuple[str, list[ImageBlock]]:
         """Dispatch one attachment. Returns ``(text_to_inline, image_blocks)``."""
         # An attachment's name decides how it is handled — which parser it
         # reaches, or whether it is emitted as an image for captioning — but
@@ -252,10 +268,15 @@ class EmlParser(DocumentParser):
                     content_type=Document.detect_content_type(attachment["filename"]),
                     metadata={"source": f"attachment:{attachment['filename']}"},
                 )
-                processed = await parser.parse(doc)
-                content = "\n\n".join(b.text for b in processed.text_blocks if b.text)
+                if hasattr(parser, "iter_batches"):
+                    content = await asyncio.to_thread(self._render_tabular_attachment, parser, doc, text_budget)
+                    images = []
+                else:
+                    processed = await parser.parse(doc)
+                    content = "\n\n".join(b.text for b in processed.text_blocks if b.text)
+                    images = list(processed.images)
                 inline = f"Content:\n{content}\n" if content else ""
-                return inline, list(processed.images)
+                return inline, images
             except Exception as exc:
                 logger.warning("Attachment parser failed for %s: %s", attachment["filename"], exc)
 
@@ -273,6 +294,45 @@ class EmlParser(DocumentParser):
             ]
 
         return "", []
+
+    @staticmethod
+    def _render_tabular_attachment(parser, document: Document, budget: _AttachmentTextBudget | None = None) -> str:
+        """Render a tabular attachment incrementally within the email's text budget.
+
+        The returned text, truncation marker included, never exceeds what the
+        budget had left; the budget is then reduced by what was emitted.
+        """
+        budget = budget if budget is not None else _AttachmentTextBudget(_MAX_EML_ATTACHMENT_TEXT_BYTES)
+        limit = budget.remaining
+        rendered: list[str] = []
+        used = 0
+        truncated = False
+        with closing(parser.iter_batches(document)) as batches:
+            for batch in batches:
+                if not batch.text:
+                    continue
+                encoded = batch.text.encode("utf-8")
+                separator_bytes = len(b"\n\n") if rendered else 0
+                available = limit - used - separator_bytes
+                if len(encoded) > available:
+                    if available > 0:
+                        rendered.append(encoded[:available].decode("utf-8", errors="ignore"))
+                    truncated = True
+                    break
+                rendered.append(batch.text)
+                used += separator_bytes + len(encoded)
+        text = "\n\n".join(rendered)
+        if truncated:
+            marker_bytes = len(_ATTACHMENT_TRUNCATED_MARKER.encode("utf-8"))
+            # Make room for the marker (and its separator) inside the budget.
+            room = limit - marker_bytes - len(b"\n\n")
+            kept = text.encode("utf-8")[: max(room, 0)].decode("utf-8", errors="ignore").rstrip()
+            if kept:
+                text = f"{kept}\n\n{_ATTACHMENT_TRUNCATED_MARKER}"
+            else:
+                text = _ATTACHMENT_TRUNCATED_MARKER if marker_bytes <= limit else ""
+        budget.remaining = max(limit - len(text.encode("utf-8")), 0)
+        return text
 
     @staticmethod
     def _extension(filename: str) -> str:

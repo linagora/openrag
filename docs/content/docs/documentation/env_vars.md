@@ -80,6 +80,17 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 `PyMuPDFLoader` (the default) is a lightweight PDF loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images. Set `PDFLOADER=MarkerLoader` when you need those.
 :::
 
+#### Excel workbook ingestion
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `XLSX_BATCH_SIZE` | `int` | `10000` | Positive number of data rows per parser batch for `.xlsx` and `.xlsm` workbooks. The rendered batch byte limit can flush a batch earlier. This is independent of the chunk token budget. |
+| `XLSX_CHARTS` | `str` | `full` | Charts in workbooks: `full` indexes every chart with its data, including data plotted from hidden worksheets; `without_hidden_data` indexes every chart but leaves out values, labels, names, titles and text boxes read from hidden worksheets, rows or columns; `off` reads no chart (worksheet text boxes are still indexed). |
+
+Set archive, worksheet, cell, and batch byte limits through `loader.xlsx_limits` in YAML; there are no individual environment-variable overrides for these limits. Unknown limit names, non-integer values, and non-positive values are rejected. Rows waiting for their table's turn in the single worksheet pass use memory first, then a temporary file in the standard `TMPDIR`; a read-only or full `TMPDIR` only makes large worksheets fall back to slower per-table reads, never changes what is indexed. Header selection is automatic per table; the former `XLSX_HEADER_ROW` and per-sheet header settings are no longer supported.
+
+See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, charts, formula handling, hidden content, and default safety limits.
+
 #### PDF Loader
 ##### PyMuPDF Loader Configuration
 These settings apply wherever PyMuPDF parses a PDF during indexing — the default `PyMuPDFLoader`, and a preset whose parsing strategy is `pymupdf` whatever `PDFLOADER` says — and during indexing only: the API's direct-extract path always parses on a single thread. With nothing set, parsing runs one PDF at a time on a single thread per indexer worker, as before.
@@ -251,7 +262,7 @@ After files are converted to Markdown, only the **text content** is chunked.
 **Chunker strategies:**
 
 * **`structured_section`** *(default)*: Cuts on the document's own structure instead of on character separators. It detects headings (Markdown `#`, plus keyword headings such as `Titre` / `Chapitre` / `Section`) and leaf units (e.g. `Article L110-1`) by matching line content, keeps each leaf atomic, greedily packs consecutive short leaves up to `CHUNK_SIZE`, and prepends the heading path so every chunk is self-describing at retrieval time. A numbered figure or table caption (`Table 2. …`, `Figure 1.1: …`) sitting directly above or below a table or image description is moved to the head of that block, and repeated on every piece of a split table. Overlap is always 0 — leaves are atomic, so replaying a tail would only duplicate whole sections, and `CHUNK_OVERLAP_RATE` is therefore ignored by this strategy. Best for structured documents (legal codes, standards, reports, technical manuals).
-* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while keeping chunks within `CHUNK_SIZE`, and replays `CHUNK_OVERLAP_RATE` of each chunk into the next. A single table row or image caption is never split, so it can go over. Every chunk of a named file contains a `[Source: <filename>]` line, counted in `CHUNK_SIZE` (a name is shortened to take at most half of it), so a question that names a file can find it; files indexed before this was added can get it from [a script](/openrag/documentation/milvus_migration/#add-the-filename-to-chunks-already-indexed), without re-indexing. Set `CHUNKER=recursive_splitter` for unstructured prose.
+* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while keeping chunks within `CHUNK_SIZE`, and replays `CHUNK_OVERLAP_RATE` of each chunk into the next. A single table row or image caption is never split, so it can go over. Standalone tables and oversized image descriptions are emitted in the document's reading order, as their own chunks, without welding the prose around them. Every chunk of a named file contains a `[Source: <filename>]` line, counted in `CHUNK_SIZE` (a name is shortened to take at most half of it), so a question that names a file can find it; files indexed before this was added can get it from [a script](/openrag/documentation/milvus_migration/#add-the-filename-to-chunks-already-indexed), without re-indexing. Set `CHUNKER=recursive_splitter` for unstructured prose.
 
 ### Embedding
 Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured with the following variables:
@@ -266,7 +277,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
 | `EMBEDDER_TIMEOUT` | `float` | 120.0 | Per-request HTTP timeout (in seconds) for embedding calls. Raise it for slow remote endpoints. |
 | `EMBEDDER_BATCH_SIZE` | `int` | 32 | Number of chunks sent per embedding request; large documents are split into batches of this size. |
-| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests in flight at once. |
+| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests one `embed()` call keeps in flight, when its texts span several batches of `EMBEDDER_BATCH_SIZE`. It is not a limit for the whole process: N files embedding at once send up to N times this many requests. |
 
 If you prefer to use an **external embedding service**, simply comment out the embedder service in the [docker-compose.yaml](https://github.com/linagora/openrag/blob/dev/docker-compose.yaml#L117-L153) and provide the variables above in your environment.
 
@@ -439,7 +450,7 @@ Enable only where every API caller is already trusted with both.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory, not when the download fails. Without that access, every detection retries the download, which can block for about two minutes when the host doesn't answer, and then falls back to English. |
+| `LANGDETECT_MODEL` | str | `lite` | Language detection model for queries and indexed documents. `lite` ships with fast-langdetect and needs no network access, but is slightly less accurate than `full` on very short text, such as a query of a few words. `full` downloads the larger model to `/app/model_weights` on first use and needs access to `dl.fbaipublicfiles.com`. `auto` does the same and falls back to `lite` only when loading the model runs out of memory. When the model cannot be loaded (for example the download fails), a warning is logged once and the process uses `lite` from then on. |
 
 ### RAG Pipeline Mode
 
@@ -455,7 +466,7 @@ The retriever fetches relevant documents from the vector database based on query
 |----------|------|---------|-------------|
 | `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
 | `RETRIEVER_TOP_K` | int | 50 | Number of documents to retrieve before reranking.|
-| `SIMILARITY_THRESHOLD` | float | 0.6 | Minimum similarity score (0.0-1.0) for document retrieval. Documents below this threshold are filtered out |
+| `SIMILARITY_THRESHOLD` | float | 0.2 | Minimum similarity score (0.0-1.0) applied to the dense (semantic) search only, before it is merged with the keyword (BM25) results. Its scale depends on the embedding model; with the default embedder relevant passages score about 0.2-0.7. Read only when no partition is loaded. Chat uses the `similarity_threshold` of the partition's retrieval preset, `GET /search` its own `similarity_threshold` parameter (default 0.2), and the MCP search tool `OPENRAG_MCP_SIMILARITY_THRESHOLD` |
 | `WITH_SURROUNDING_CHUNKS` | `bool` | false | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
 | `INCLUDE_RELATED` | `bool` | true | Expand results with chunks from files sharing the matched file's `relationship_id` (see [Linked files](/openrag/documentation/linked_files/)). |
 | `INCLUDE_ANCESTORS` | `bool` | true | Expand results with chunks from ancestor files in the parent/child file hierarchy (see [Linked files](/openrag/documentation/linked_files/)). |
@@ -542,6 +553,8 @@ there too.
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
 | `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and `openai` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
+| `LOG_PERSONAL_DATA` | `bool` | `false` | Personal data in logs. Off, uvicorn's request lines (`uvicorn.access`, and WebSocket handshakes on `uvicorn.error`) keep only the client's network — `/24` for IPv4, `/48` for IPv6, no port. `true` keeps full client addresses, for troubleshooting or security investigations. Query strings are replaced with `?[REDACTED]` either way, since they can carry a user's search text or an OIDC authorization code. This covers the API's own logs; the admin-ui proxy (nginx) keeps its own access log. |
+| `TQDM_DISABLE` | `str` | (unset) | Turns off tqdm progress bars, Marker's included. Any non-empty value disables them, `0` too. The logging overlay sets it to `1`, and the Helm chart does whenever `LOG_FORMAT=json` and `env.config.TQDM_DISABLE` is not set: in JSON mode every bar refresh becomes a non-JSON log line. Marker's bars are off with `LOG_FORMAT=json` whatever this is set to. |
 
 #### Text format
 ```bash title="Logging message in the terminal..."
@@ -807,7 +820,7 @@ OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol
 | `OPENRAG_MCP_PATH` | `str` | `/mcp` | HTTP path the MCP endpoint is served under. |
 | `OPENRAG_MCP_DEFAULT_TOP_K` | `int` | `5` | Number of chunks the search tool returns when the caller doesn't specify `top_k`. |
 | `OPENRAG_MCP_MAX_TOP_K` | `int` | `50` | Upper bound clamped on a caller-supplied `top_k`. |
-| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.8` | Minimum similarity score for a chunk to be returned by the search tool. |
+| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.2` | Minimum similarity score applied to the dense (semantic) side of the search only, before the merge with keyword (BM25) results. Its scale depends on the embedder. |
 | `OPENRAG_MCP_DOWNLOAD_TIMEOUT` | `float` | `30.0` | Timeout (seconds) for the server-side `index_url` fetch (SSRF/DoS hardening). |
 | `OPENRAG_MCP_MAX_DOWNLOAD_BYTES` | `int` | `104857600` | Maximum bytes downloaded by an `index_url` fetch. Default is 100 MiB. |
 

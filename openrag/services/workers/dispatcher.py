@@ -21,7 +21,12 @@ from core.models.catalog import (
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
-from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
+from core.utils.exceptions import (
+    ConflictError,
+    DocumentNotFoundError,
+    ServiceUnavailableError,
+    mark_indexing_worker_may_be_running,
+)
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
@@ -34,7 +39,13 @@ from services.workers.ray_utils import (
 )
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
-from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING
+from services.workers.task_state import (
+    QUEUE_REFUSED_CANCELLED,
+    QUEUE_REFUSED_FILE_INDEXING,
+    QUEUE_REFUSED_INDEXING_CAPACITY,
+    TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
+    read_ref_when_settled,
+)
 
 logger = get_logger()
 
@@ -350,7 +361,14 @@ class WorkerDispatcher(IndexingDispatcher):
         user_metadata = {
             key: value
             for key, value in metadata.items()
-            if key not in {"file_id", "source", TASK_CREATED_AT_METADATA_KEY, TASK_FINISHED_AT_METADATA_KEY}
+            if key
+            not in {
+                "file_id",
+                "source",
+                TASK_CREATED_AT_METADATA_KEY,
+                TASK_FINISHED_AT_METADATA_KEY,
+                TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
+            }
         }
         user_metadata[TASK_CREATED_AT_METADATA_KEY] = _utc_now_iso()
         task_details = {
@@ -387,6 +405,13 @@ class WorkerDispatcher(IndexingDispatcher):
                 raise _indexing_in_progress(file_id, partition, busy_task_id)
             if reason == QUEUE_REFUSED_CANCELLED:
                 raise RuntimeError(f"Task {task_id} was cancelled before it queued")
+            if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
+                raise ServiceUnavailableError(
+                    "Indexing is temporarily paused because task capacity is full "
+                    "(queued or running work and unsaved job outcomes). Please retry shortly.",
+                    # Preserve this API code so existing clients keep retrying it.
+                    code="INDEXING_OUTCOME_BACKLOG",
+                )
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
@@ -551,6 +576,9 @@ class WorkerDispatcher(IndexingDispatcher):
             self._pool.submit.remote(**submit_kwargs),
             task_description=f"submit({task_id})",
         )
+        # Deserializing the ref made this process borrow it, and it is dropped
+        # once handed to the completion tracker.
+        read_ref_when_settled(submitted[0])
         return submitted[0]
 
     async def _mark_submit_failed(self, task_id: str, tb: str, error_reason: str) -> None:
@@ -706,7 +734,7 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
-            return
+            raise DocumentNotFoundError(f"File '{file_id}' not found in partition '{partition}'.")
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
@@ -734,7 +762,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 output_fields=["*"],
             )
             if not rows:
-                return
+                raise DocumentNotFoundError(f"No indexed chunks found for file '{file_id}' in partition '{partition}'.")
 
             public_metadata = strip_internal_metadata(metadata)
             indexed_at = datetime.now(UTC)
@@ -979,6 +1007,9 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         if obj_ref is None:
             return False
+        # Fetching the ref made this process borrow it, and a task already
+        # settled returns below without reading it.
+        read_ref_when_settled(obj_ref)
 
         # Atomically claim the cancellation first: if ray.cancel() ran before
         # this and the RPC then failed, a killed worker could never report

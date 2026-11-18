@@ -85,6 +85,32 @@ def test_cancellation_closes_only_an_invocation_that_was_started() -> None:
     assert deliveries[-1][1].has_open_invocation is False
 
 
+def test_parser_substage_updates_snapshot_without_an_event_and_is_cleared_on_parse_end() -> None:
+    deliveries, deliver = _event_deliveries()
+    tracker = StageTracker("task-1", deliver=deliver)
+    tracker.start_stage("parse", 0)
+    started = tracker.summary()
+
+    tracker.set_substage("parse.text", "Extracting page text", progress=12, total=578)
+
+    current = tracker.summary()
+    assert current.latest_sequence == started.latest_sequence == 1
+    assert current.snapshot_revision > started.snapshot_revision
+    assert current.current_substage_id == "parse.text"
+    assert current.current_substage_label == "Extracting page text"
+    assert current.current_substage_progress == 12
+    assert current.current_substage_total == 578
+    assert [event.status for event, _, _ in deliveries if event is not None] == [StageEventStatus.STARTED]
+
+    tracker.finish_stage()
+
+    finished = tracker.summary()
+    assert finished.current_substage_id is None
+    assert finished.current_substage_label is None
+    assert finished.current_substage_progress is None
+    assert finished.current_substage_total is None
+
+
 def test_tracking_delivery_failure_is_captured_without_raising() -> None:
     calls = 0
 

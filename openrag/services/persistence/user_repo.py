@@ -41,6 +41,7 @@ from core.config.auth import ADMIN_TOKEN_ENV_VAR, SeedUserConfig
 from core.config.secrets_guard import ALLOW_INSECURE_SECRETS_ENV_VAR, MIN_SECRET_LENGTH, is_known_default
 from core.models.user import ApiKey, PartitionRole, User, UserPartition
 from core.ports.user_repo import UserRepository
+from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -55,6 +56,21 @@ def _hash_token(token: str) -> str:
     without instantiating the repo.
     """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _as_user_conflict(exc: asyncpg.UniqueViolationError) -> ConflictError:
+    """A 409 naming the field another user already holds, never its value.
+
+    asyncpg's message quotes the duplicate (``DETAIL: Key (email)=(…)``), and the
+    API error handler and the OIDC callers log the message they get. The caller
+    raises this ``from None`` so the database error is not chained into a
+    logged traceback either.
+    """
+    constraint = exc.constraint_name or ""
+    for column, label in (("external_user_id", "external user ID"), ("email", "email address")):
+        if column in constraint:
+            return ConflictError(f"Another user already has this {label}.", code="USER_CONFLICT")
+    return ConflictError("This user conflicts with an existing one.", code="USER_CONFLICT")
 
 
 #: Serialises :meth:`PgUserRepository.ensure_seed_users` across API replicas
@@ -154,21 +170,24 @@ class PgUserRepository(UserRepository):
         external id, instead of raising a UniqueViolation on the second
         insert.
         """
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO users (display_name, external_user_id, email,
-                               is_admin, file_quota, file_count, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()))
-            RETURNING *
-            """,
-            user.display_name,
-            (user.external_user_id.strip() or None) if user.external_user_id else None,
-            (user.email.strip().lower() if user.email else None),
-            user.is_admin,
-            user.file_quota,
-            user.file_count,
-            user.created_at,
-        )
+        try:
+            row = await self.pool.fetchrow(
+                """
+                INSERT INTO users (display_name, external_user_id, email,
+                                   is_admin, file_quota, file_count, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()))
+                RETURNING *
+                """,
+                user.display_name,
+                (user.external_user_id.strip() or None) if user.external_user_id else None,
+                (user.email.strip().lower() if user.email else None),
+                user.is_admin,
+                user.file_quota,
+                user.file_count,
+                user.created_at,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise _as_user_conflict(exc) from None
         return self._row_to_user(row)
 
     async def get_user(self, user_id: int) -> User | None:
@@ -258,10 +277,13 @@ class PgUserRepository(UserRepository):
         if not sets:
             return await self.get_user(user_id)
         params.append(user_id)
-        row = await self.pool.fetchrow(
-            f"UPDATE users SET {', '.join(sets)} WHERE id = ${len(params)} RETURNING *",
-            *params,
-        )
+        try:
+            row = await self.pool.fetchrow(
+                f"UPDATE users SET {', '.join(sets)} WHERE id = ${len(params)} RETURNING *",
+                *params,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise _as_user_conflict(exc) from None
         if row is None:
             return None
         memberships = await self._fetch_memberships(user_id)
@@ -313,20 +335,23 @@ class PgUserRepository(UserRepository):
         """
         plaintext = f"or-{secrets.token_hex(16)}"
         token_hash = _hash_token(plaintext)
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO users (display_name, external_user_id, email,
-                               token, is_admin, file_quota, file_count, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, 0, NOW())
-            RETURNING *
-            """,
-            display_name,
-            (external_user_id.strip() or None) if external_user_id else None,
-            (email.strip().lower() if email else None),
-            token_hash,
-            is_admin,
-            file_quota,
-        )
+        try:
+            row = await self.pool.fetchrow(
+                """
+                INSERT INTO users (display_name, external_user_id, email,
+                                   token, is_admin, file_quota, file_count, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, 0, NOW())
+                RETURNING *
+                """,
+                display_name,
+                (external_user_id.strip() or None) if external_user_id else None,
+                (email.strip().lower() if email else None),
+                token_hash,
+                is_admin,
+                file_quota,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise _as_user_conflict(exc) from None
         return {
             "id": row["id"],
             "display_name": row["display_name"],
@@ -457,10 +482,13 @@ class PgUserRepository(UserRepository):
             params.append(value)
             sets.append(f"{key} = ${len(params)}")
         params.append(user_id)
-        result = await self.pool.execute(
-            f"UPDATE users SET {', '.join(sets)} WHERE id = ${len(params)}",
-            *params,
-        )
+        try:
+            result = await self.pool.execute(
+                f"UPDATE users SET {', '.join(sets)} WHERE id = ${len(params)}",
+                *params,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise _as_user_conflict(exc) from None
         if not result.endswith(" 1"):
             raise ValueError(f"User {user_id} not found")
 

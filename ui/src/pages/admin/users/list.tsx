@@ -3,20 +3,20 @@ import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Trash2, Eye, Plus, Copy, Search, X, AlertCircle, RefreshCw } from "lucide-react";
+import { Trash2, Eye, Plus, Copy, Search, X } from "lucide-react";
 import { listUsers, deleteUser, createUser, effectiveQuota } from "@/lib/api/users";
 import type { UserResponse, UserWithToken } from "@/lib/api/users";
 import { getConfig } from "@/lib/api/system";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { copyToClipboard } from "@/lib/utils";
 import {
   Dialog,
@@ -28,38 +28,6 @@ import {
 } from "@/components/ui/dialog";
 
 const EMPTY_USERS: UserResponse[] = [];
-
-function UserDirectoryError({
-  title,
-  message,
-  isRetrying,
-  onRetry,
-}: {
-  title: string;
-  message: string;
-  isRetrying: boolean;
-  onRetry: () => void;
-}) {
-  return (
-    <Alert variant="destructive">
-      <AlertCircle aria-hidden="true" />
-      <AlertTitle>{title}</AlertTitle>
-      <AlertDescription>
-        <p>{message}</p>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={onRetry}
-          disabled={isRetrying}
-        >
-          <RefreshCw className={isRetrying ? "animate-spin" : ""} aria-hidden="true" />
-          Try again
-        </Button>
-      </AlertDescription>
-    </Alert>
-  );
-}
 
 // "indexed / effective-quota", e.g. "11 / 200". ∞ for unlimited; `over` flags
 // users at or past their cap (shown in red) so admins spot blocked uploaders.
@@ -231,10 +199,11 @@ export default function UserListPage() {
       {usersQuery.isLoading ? (
         <Skeleton className="h-64" />
       ) : usersQuery.isLoadingError ? (
-        <UserDirectoryError
+        <QueryErrorNotice
           title="Users could not be loaded"
           message={usersErrorMessage}
           isRetrying={usersQuery.isFetching}
+          retryLabel="Try again"
           onRetry={() => {
             usersQuery.refetch();
           }}
@@ -242,13 +211,15 @@ export default function UserListPage() {
       ) : (
         <div className="space-y-4">
           {usersQuery.isRefetchError && (
-            <UserDirectoryError
+            <QueryErrorNotice
               title="Users could not be refreshed"
               message={`Showing previously loaded users. ${usersErrorMessage}`}
               isRetrying={usersQuery.isFetching}
+              retryLabel="Try again"
               onRetry={() => {
                 usersQuery.refetch();
               }}
+              stale
             />
           )}
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

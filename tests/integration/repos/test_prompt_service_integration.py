@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from core.config.infrastructure import PathsConfig, PromptsConfig
-from core.models.prompt import Prompt
+from core.models.prompt import Prompt, PromptType
 from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
 from services.storage.postgres_store import PostgresStore
 
@@ -29,7 +29,12 @@ class TestSeedAndResolve:
         assert await postgres_store.prompt_repo.count() == len(PROMPT_TYPE_KEYS)
         for prompt_type in PROMPT_TYPE_KEYS:
             default = await postgres_store.prompt_repo.get_default(prompt_type)
-            assert default is not None and default.content.strip()
+            assert default is not None
+            if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
+                # Blank on purpose: it selects the model's own prompt.
+                assert default.content == ""
+            else:
+                assert default.content.strip()
 
     async def test_seed_is_idempotent(self, postgres_store: PostgresStore):
         svc = _service(postgres_store)

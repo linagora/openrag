@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
 from core.models.user import OIDCSession, PartitionRole, User, UserPartition
+from core.utils.consts import is_reserved_partition_name
 from core.utils.exceptions import AuthError, OpenRAGError
 from core.utils.logging import get_logger, mask_email
 from services.auth import (
@@ -366,6 +367,7 @@ class AuthService:
 
     async def list_user_partitions_for_request(self, user_id: int) -> list[dict[str, Any]]:
         memberships = await self._membership_repo.list_user_partitions(user_id)
+        # Reserved names are never memberships.
         return [
             {
                 "partition": membership.partition,
@@ -373,6 +375,7 @@ class AuthService:
                 "created_at": membership.added_at.isoformat() if membership.added_at else None,
             }
             for membership in memberships
+            if not is_reserved_partition_name(membership.partition)
         ]
 
     async def get_oidc_session_by_token_for_request(self, token: str) -> dict[str, Any] | None:

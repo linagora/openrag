@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
+from typing import Protocol
 
 from core.models.catalog import IndexationJob
 from core.models.stage_progress import (
@@ -15,6 +17,28 @@ from core.models.stage_progress import (
     StageProgressSummary,
     StageProgressWriteResult,
 )
+
+
+class JobListSnapshot(Protocol):
+    """Consistent durable reads used to build one paginated task-list response."""
+
+    async def get_job_list_metadata_with_actor_rows(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+        actor_task_ids: list[str],
+    ) -> tuple[int, dict[str, int], dict[str, tuple[str, str | None]]]: ...
+
+    async def list_task_page_by_stage_order(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+        actor_overlays: list[tuple[str, str | None, datetime | None]],
+        offset: int = 0,
+        limit: int = 50,
+    ) -> list[tuple[str, IndexationJob | None]]: ...
 
 
 class JobRepository(ABC):
@@ -40,6 +64,53 @@ class JobRepository(ABC):
         offset: int = 0,
         limit: int | None = 50,
     ) -> list[IndexationJob]: ...
+
+    @abstractmethod
+    async def list_jobs_by_stage_order(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+        exclude_task_ids: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> list[IndexationJob]:
+        """Return one globally stage-ordered task page without loading history."""
+
+    @abstractmethod
+    async def list_task_page_by_stage_order(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+        actor_overlays: list[tuple[str, str | None, datetime | None]],
+        offset: int = 0,
+        limit: int = 50,
+    ) -> list[tuple[str, IndexationJob | None]]:
+        """Return a globally ordered page, merging actor-only/newer states in SQL."""
+
+    @abstractmethod
+    async def get_job_list_metadata(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+    ) -> tuple[int, dict[str, int]]:
+        """Return the matching durable count and per-partition counts."""
+
+    @abstractmethod
+    async def get_job_list_metadata_with_actor_rows(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        user_id: int | None = None,
+        actor_task_ids: list[str],
+    ) -> tuple[int, dict[str, int], dict[str, tuple[str, str | None]]]:
+        """Read list counts and matching actor task states in one snapshot."""
+
+    @abstractmethod
+    def task_list_snapshot(self) -> AbstractAsyncContextManager[JobListSnapshot]:
+        """Open one repeatable-read snapshot for task-list metadata and page reads."""
 
     @abstractmethod
     async def count_jobs(self) -> dict[str, int]:
@@ -70,6 +141,14 @@ class JobRepository(ABC):
     @abstractmethod
     async def get_stage_progress_summaries(self, task_ids: list[str]) -> dict[str, DurableStageProgress]:
         """Bulk-read compact stage summaries without loading event histories."""
+
+    @abstractmethod
+    async def mark_stage_progress_interrupted(self, task_id: str) -> bool:
+        """Record confirmed settlement and mark an open stage now or when its snapshot arrives."""
+
+    @abstractmethod
+    async def get_latest_stage_ids(self, task_ids: list[str]) -> dict[str, str]:
+        """Return the stage ID from the newest persisted event for each task."""
 
     @abstractmethod
     async def get_stage_progress_events(

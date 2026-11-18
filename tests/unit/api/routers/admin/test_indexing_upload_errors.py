@@ -70,7 +70,7 @@ class _FakeJobService:
         self._owner_id = owner_id
         self._error = error
 
-    async def get_task_details(self, task_id: str) -> dict | None:
+    async def get_task_details(self, task_id: str, *, require_owner_identity: bool = False) -> dict | None:
         if self._error is not None:
             raise self._error
         return {"task_id": task_id, "user_id": self._owner_id}

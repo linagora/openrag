@@ -168,6 +168,8 @@ async def test_create_user_rejects_bad_email():
     with pytest.raises(ValidationError) as ei:
         await svc.create_user(UserCreate(display_name="Bob", email="not-an-email"))
     assert ei.value.status_code == 400
+    # The error is logged, so it must not quote what the caller sent.
+    assert "not-an-email" not in str(ei.value)
 
 
 @pytest.mark.asyncio

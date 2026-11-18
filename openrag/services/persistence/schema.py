@@ -345,6 +345,10 @@ jobs = Table(
         nullable=False,
     ),
     Column("stage_tracking_version", Integer, nullable=True),
+    # Orphan reconciliation can fail a job without proving its worker stopped.
+    # This records the attempt whose settlement was confirmed before marking
+    # an open stage as interrupted.
+    Column("stage_interruption_confirmed_attempt", Integer, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     # Queue wait is ``started_at - created_at`` and service time is
@@ -441,6 +445,10 @@ job_stage_state = Table(
     Column("phase", String(24), nullable=False, server_default="preparing"),
     Column("current_stage_id", String(64), nullable=True),
     Column("current_stage_rank", Integer, nullable=True),
+    Column("current_substage_id", String(64), nullable=True),
+    Column("current_substage_label", String(160), nullable=True),
+    Column("current_substage_progress", BigInteger, nullable=True),
+    Column("current_substage_total", BigInteger, nullable=True),
     Column("position_score", Integer, nullable=False, server_default="0"),
     Column("stage_started_at", DateTime(timezone=True), nullable=True),
     Column("current_invocation_id", UUID(as_uuid=True), nullable=True),

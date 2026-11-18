@@ -30,8 +30,9 @@ from unittest.mock import AsyncMock
 import pytest
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk, ChunkType
+from core.utils.exceptions import VDBSchemaMigrationRequiredError
 from pymilvus import DataType
-from services.storage.milvus_store import MilvusVectorStore, analyzer_params
+from services.storage.milvus_store import SCHEMA_VERSION_PROPERTY_KEY, MilvusVectorStore, analyzer_params
 
 pytestmark = pytest.mark.integration
 
@@ -262,6 +263,25 @@ class TestEndToEnd:
         # Second call must not raise and must not re-create.
         await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         assert hybrid_store._loaded is True
+
+    @pytest.mark.asyncio
+    async def test_health_check_reads_the_schema_version_stamped_on_the_collection(
+        self, hybrid_store: MilvusVectorStore, hybrid_config: VectorDBConfig
+    ) -> None:
+        """Readiness reads the version where this Milvus and client store it (#1064)."""
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await hybrid_store.check_health()
+
+        name = hybrid_config.collection_name
+        hybrid_store._client.alter_collection_properties(name, properties={SCHEMA_VERSION_PROPERTY_KEY: "0"})
+        awaiting_migration = MilvusVectorStore(hybrid_config)
+        with pytest.raises(VDBSchemaMigrationRequiredError):
+            await awaiting_migration.check_health()
+
+        hybrid_store._client.alter_collection_properties(
+            name, properties={SCHEMA_VERSION_PROPERTY_KEY: str(hybrid_config.schema_version)}
+        )
+        await awaiting_migration.check_health()
 
     @pytest.mark.asyncio
     async def test_full_upsert_preserves_existing_auto_id(self, dense_only_store: MilvusVectorStore) -> None:

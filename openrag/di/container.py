@@ -746,9 +746,13 @@ class ServiceContainer:
         """
         if self._job_service is None:
             from services.orchestrators.job_service import JobService
-            from services.workers.bootstrap import get_task_state_manager
+            from services.workers.bootstrap import get_stage_progress_manager, get_task_state_manager
 
-            self._job_service = JobService(task_state_manager=get_task_state_manager(), job_repo=self.job_repo)
+            self._job_service = JobService(
+                task_state_manager=get_task_state_manager(),
+                job_repo=self.job_repo,
+                stage_progress_manager=get_stage_progress_manager(),
+            )
         return self._job_service
 
     @property

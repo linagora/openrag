@@ -80,6 +80,10 @@ class StageProgressSummary(BaseModel):
     phase: StageTaskPhase = StageTaskPhase.PREPARING
     current_stage_id: str | None = Field(default=None, max_length=64)
     current_stage_rank: int | None = Field(default=None, ge=0, le=_MAX_POSTGRES_INTEGER)
+    current_substage_id: str | None = Field(default=None, max_length=64)
+    current_substage_label: str | None = Field(default=None, max_length=160)
+    current_substage_progress: int | None = Field(default=None, ge=0, le=_MAX_POSTGRES_BIGINT)
+    current_substage_total: int | None = Field(default=None, ge=1, le=_MAX_POSTGRES_BIGINT)
     position_score: int = Field(default=0, ge=_MIN_POSTGRES_INTEGER, le=_MAX_POSTGRES_INTEGER)
     stage_started_at: datetime | None = None
     current_invocation_id: UUID | None = None
@@ -110,6 +114,24 @@ class StageProgressSummary(BaseModel):
             not self.has_open_invocation or self.interrupted_invocation_id != self.current_invocation_id
         ):
             raise ValueError("an interrupted invocation must identify the open stage invocation")
+        if self.current_substage_id is None and (
+            self.current_substage_label is not None
+            or self.current_substage_progress is not None
+            or self.current_substage_total is not None
+        ):
+            raise ValueError("substage details require a substage id")
+        if self.current_substage_id is not None and (
+            self.current_stage_id != "parse" or self.current_substage_label is None
+        ):
+            raise ValueError("parser substages require an active or last-observed parse stage and a label")
+        if (self.current_substage_progress is None) != (self.current_substage_total is None):
+            raise ValueError("substage progress and total must either both be set or both be null")
+        if (
+            self.current_substage_progress is not None
+            and self.current_substage_total is not None
+            and self.current_substage_progress > self.current_substage_total
+        ):
+            raise ValueError("substage progress cannot exceed its total")
         return self
 
 

@@ -85,7 +85,7 @@ export function replaceFile(
   });
 }
 
-/** Update file metadata in place (no re-upload). A `partition` key MOVES the file. */
+/** Update file metadata in place (no re-upload). A `partition` key other than the file's own is refused (400). */
 export function updateFileMetadata(
   partition: string,
   fileId: string,

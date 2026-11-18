@@ -37,7 +37,12 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.preset import PartitionConfig
-from core.utils.consts import DEFAULT_ADMIN_USER_ID, DEFAULT_PARTITION_NAME, is_internal_metadata_key
+from core.utils.consts import (
+    DEFAULT_ADMIN_USER_ID,
+    DEFAULT_PARTITION_NAME,
+    is_internal_metadata_key,
+    is_reserved_partition_name,
+)
 from core.utils.exceptions import (
     ConfigError,
     ConflictError,
@@ -61,11 +66,6 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-# Names reserved as cross-partition sentinels (e.g. ``openrag-all`` /
-# ``?partitions=all``). A real partition named ``all`` collides with the sentinel
-# and the admin partition-list route would expand it to *every* partition — see
-# ``list_existant_partitions``. Matched case-insensitively.
-_RESERVED_PARTITION_NAMES = frozenset({"all"})
 _MAX_MEMBER_CANDIDATE_PAGE_SIZE = 100
 _MAX_POSTGRES_INTEGER = 2_147_483_647
 _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH = 3
@@ -407,7 +407,7 @@ class PartitionService:
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
         # error rather than the generic identifier-allowlist rejection.
-        if partition.strip().lower() in _RESERVED_PARTITION_NAMES:
+        if is_reserved_partition_name(partition):
             raise ValidationError(
                 f"Partition name '{partition}' is reserved.",
                 status_code=400,

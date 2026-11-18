@@ -91,7 +91,13 @@ class TestDelete:
         document_repo = postgres_store.document_repo
         user_repo = postgres_store.user_repo
 
-        uploader = await user_repo.create_legacy_user(display_name="Uploader")
+        uploader = await user_repo.create_legacy_user(
+            display_name="Uploader",
+            external_user_id=None,
+            email=None,
+            is_admin=False,
+            file_quota=None,
+        )
         uploader_id = uploader["id"]
 
         await partition_repo.create_partition("cascade-me")

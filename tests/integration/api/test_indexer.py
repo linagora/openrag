@@ -131,6 +131,26 @@ class TestFileIndexing:
         assert duplicate_response.json()["extra"]["existing_file_id"] == first_file_id
 
 
+class TestCopyReservedPartition:
+    """The store reads `all` as every partition, so a copy may neither read from it nor write into it."""
+
+    @pytest.mark.parametrize(
+        ("source", "target"),
+        [("all", None), ("ALL", None), (None, "all")],
+        ids=["from-all", "from-ALL", "into-all"],
+    )
+    def test_copy_with_a_reserved_partition_is_refused(self, api_client, created_partition, source, target):
+        response = api_client.post(
+            f"/indexer/partition/{target or created_partition}/file/copy-target/copy",
+            data={"source_partition": source or created_partition, "source_file_id": "copy-source"},
+        )
+        # 400 RESERVED_PARTITION_NAME from the service under SUPER_ADMIN_MODE
+        # (CI); 403 from the role check otherwise. Never a 201.
+        assert response.status_code in (400, 403), response.text
+        if response.status_code == 400:
+            assert response.json()["detail"].startswith("[RESERVED_PARTITION_NAME]")
+
+
 class TestIndexedDocuments:
     """Test document retrieval after indexing."""
 

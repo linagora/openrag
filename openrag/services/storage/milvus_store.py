@@ -175,6 +175,20 @@ RRF_K = 100
 #: ``__init__`` and raises :class:`VDBConnectionError` before the probe runs.
 _SCHEMA_PROBE_TIMEOUT = 5.0
 
+
+def _stored_schema_version(desc: dict[str, Any]) -> int:
+    """The schema version in a ``describe_collection`` result.
+
+    Missing or unparseable values read as ``0`` so existing pre-versioning
+    collections always look out of date rather than silently passing.
+    """
+    raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
+    try:
+        return int(raw) if raw is not None else 0
+    except (ValueError, TypeError):
+        return 0
+
+
 # Avoid serial five-second version probes when a Milvus server's management
 # endpoint is temporarily unavailable. Retry after this short cooldown.
 _SERVER_VERSION_PROBE_FAILURE_TTL_SECONDS = 30.0
@@ -629,6 +643,7 @@ class MilvusVectorStore(VectorStore):
         self._loaded = False
         self._load_lock = asyncio.Lock()
         self._search_schema_checked = False
+        self._health_schema_confirmed = False
         self._server_version_checked = False
         self._server_version: str | None = None
         self._server_version_probe_failed_at: float | None = None
@@ -988,8 +1003,6 @@ class MilvusVectorStore(VectorStore):
     def _read_schema_version(self, *, timeout: float | None = None) -> int:
         """The schema version stamped on the live collection.
 
-        Missing or unparseable values read as ``0`` so existing pre-versioning
-        collections always look out of date rather than silently passing.
         ``timeout`` overrides the client default for callers that must not
         block, such as the construction-time probe.
         """
@@ -1001,11 +1014,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
                 operation="describe_collection",
             ) from e
-        raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
-        try:
-            return int(raw) if raw is not None else 0
-        except (ValueError, TypeError):
-            return 0
+        return _stored_schema_version(desc)
 
     def _schema_mismatch_warning(self, stored_version: int, expected_version: int) -> str:
         """Operator-facing description of a schema-version mismatch."""
@@ -2805,7 +2814,25 @@ class MilvusVectorStore(VectorStore):
     async def check_health(self) -> None:
         # A missing collection is normal before the first upload. A failed RPC
         # is not. Use the async data-plane client so cancellation stops the RPC.
-        await self._async_client.has_collection(self._collection_name, timeout=2.0)
+        if not await self._async_client.has_collection(self._collection_name, timeout=2.0):
+            return
+        if self._health_schema_confirmed:
+            return
+        # Searches and uploads refuse a collection at another schema version, so
+        # neither is this replica ready (#1064). Only a match is remembered: the
+        # migration runs while the pod is up, and readiness recovers once it ends.
+        desc = await self._async_client.describe_collection(self._collection_name, timeout=2.0)
+        stored_version = _stored_schema_version(desc)
+        expected_version = self._config.schema_version
+        if stored_version != expected_version:
+            raise VDBSchemaMigrationRequiredError(
+                f"Collection `{self._collection_name}` is at schema version {stored_version}, "
+                f"but this build expects {expected_version}.",
+                collection_name=self._collection_name,
+                stored_version=stored_version,
+                expected_version=expected_version,
+            )
+        self._health_schema_confirmed = True
 
     async def vector_dimension(self, vector_field: str | None = None) -> int | None:
         """Dimension of ``vector_field`` on the live schema, or ``None`` if it is not there.

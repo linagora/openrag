@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getFileDetail, listFileChunks } from "@/lib/api/documents";
+import { listPartitions } from "@/lib/api/partitions";
 import DocumentDetailPage from "./detail";
 
 vi.mock("sonner", () => ({
@@ -12,7 +13,7 @@ vi.mock("sonner", () => ({
 }));
 
 vi.mock("@/lib/permissions", () => ({
-  usePermissions: () => ({ canWrite: () => false }),
+  usePermissions: () => ({ canWrite: (role?: string) => role === "editor" }),
 }));
 
 vi.mock("@/lib/api/partitions", () => ({
@@ -35,13 +36,24 @@ vi.mock("@/lib/api/indexing", () => ({
 
 const getFileDetailMock = vi.mocked(getFileDetail);
 const listFileChunksMock = vi.mocked(listFileChunks);
+const listPartitionsMock = vi.mocked(listPartitions);
+
+beforeAll(() => {
+  // cmdk (the copy-target picker) measures and scrolls its list; jsdom implements neither.
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  Element.prototype.scrollIntoView ??= () => {};
+});
 
 function renderDocumentDetail() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
 
-  return render(
+  render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={["/documents/docs/file-1"]}>
         <Routes>
@@ -50,6 +62,7 @@ function renderDocumentDetail() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return queryClient;
 }
 
 describe("DocumentDetailPage", () => {
@@ -105,5 +118,31 @@ describe("DocumentDetailPage", () => {
     await screen.findByRole("group", { name: "Topic tags" });
     expect(screen.getByText("finance")).not.toBeNull();
     expect(screen.getByText("risk")).not.toBeNull();
+  });
+
+  it("disables Copy when the chosen target drops out of the refreshed partition list", async () => {
+    listPartitionsMock.mockResolvedValue({
+      partitions: [
+        { partition: "docs", name: "docs", role: "viewer" },
+        { partition: "target", name: "target", role: "editor" },
+      ],
+    } as Awaited<ReturnType<typeof listPartitions>>);
+    const queryClient = renderDocumentDetail();
+
+    await userEvent.click(await screen.findByRole("tab", { name: "Details" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Copy to partition" }));
+    await userEvent.click(screen.getByRole("option", { name: "target" }));
+    const copy = screen.getByRole("button", { name: "Copy" });
+    expect(copy.hasAttribute("disabled")).toBe(false);
+
+    listPartitionsMock.mockResolvedValue({
+      partitions: [
+        { partition: "docs", name: "docs", role: "viewer" },
+        { partition: "other", name: "other", role: "editor" },
+      ],
+    } as Awaited<ReturnType<typeof listPartitions>>);
+    await queryClient.refetchQueries({ queryKey: ["partitions"] });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy" }).hasAttribute("disabled")).toBe(true));
   });
 });

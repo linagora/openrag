@@ -27,6 +27,10 @@ def test_stage_history_schema_has_bounded_task_scoped_storage() -> None:
         "interrupted_invocation_id",
         "persisted_through_sequence",
         "expected_final_sequence",
+        "current_substage_id",
+        "current_substage_label",
+        "current_substage_progress",
+        "current_substage_total",
     } <= set(state.c.keys())
     assert "has_summary" in state.c
     assert "stage_tracking_version" in metadata.tables["jobs"].c
@@ -62,6 +66,40 @@ async def test_stage_writer_rejects_oversized_batches_before_acquiring_storage()
 
     with pytest.raises(ValueError, match="at most 32 stage events"):
         await repo.write_stage_progress(events=[event] * 33, summaries=[])
+
+
+@pytest.mark.asyncio
+async def test_summary_upsert_includes_parser_substage_columns_and_values() -> None:
+    from services.persistence.job_repo import _upsert_stage_summary
+
+    calls = []
+
+    class _Connection:
+        async def execute(self, query: str, *args: object):
+            calls.append((query, args))
+
+    summary = StageProgressSummary(
+        task_id="task-parse-progress",
+        attempt=1,
+        latest_sequence=1,
+        snapshot_revision=2,
+        phase=StageTaskPhase.STAGE,
+        current_stage_id="parse",
+        current_stage_rank=0,
+        current_substage_id="parse.text",
+        current_substage_label="Extracting page text",
+        current_substage_progress=42,
+        current_substage_total=578,
+        current_invocation_id=uuid4(),
+        has_open_invocation=True,
+    )
+
+    await _upsert_stage_summary(_Connection(), summary, persisted_through_sequence=1)
+
+    query, args = calls[0]
+    assert "current_substage_id, current_substage_label" in query
+    assert "current_substage_progress, current_substage_total" in query
+    assert args[17:] == ("parse.text", "Extracting page text", 42, 578)
 
 
 @pytest.mark.asyncio
