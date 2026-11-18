@@ -266,7 +266,7 @@ class _PageIndex:
         caption on each page whose excluded refs lack it, so a caption neither
         lookup holds, such as one outside the body layer, prints on every page.
         A picture or table outside the exported layers is never serialized, so
-        its captions print nowhere through it.
+        its captions and a chart's table print nowhere through it.
         """
         pages: set[int] = set()
         for node, _ in self.document.iterate_items(
@@ -276,8 +276,10 @@ class _PageIndex:
                 continue
             if not isinstance(node, (TextItem, TableItem, PictureItem, KeyValueItem, FormItem)):
                 return None  # the fallback serializer prints these on every page
-            if isinstance(node, PictureItem) and any(
-                isinstance(annotation, PictureTabularChartData) for annotation in node.annotations
+            if (
+                isinstance(node, PictureItem)
+                and node.content_layer in self.params.layers
+                and any(isinstance(annotation, PictureTabularChartData) for annotation in node.annotations)
             ):
                 return None  # a chart's table prints on every page
             pages.update(prov.page_no for prov in node.prov)

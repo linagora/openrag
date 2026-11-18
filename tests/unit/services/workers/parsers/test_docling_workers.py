@@ -639,6 +639,39 @@ def test_exporting_every_page_reads_each_item_a_bounded_number_of_times(monkeypa
     assert serializations <= 2 * n_items
 
 
+def test_a_chart_outside_the_exported_layers_is_not_exported_on_every_page():
+    """A furniture chart prints no table through the body export, so it is
+    scheduled on no page but its own, while a body chart still prints on every page."""
+    n_pages = 4
+    document = _docling_document(n_pages)
+    for page_no in range(1, n_pages + 1):
+        _add_text(document, page_no, f"body text on page {page_no}")
+        _add_picture(
+            document,
+            page_no,
+            content_layer=ContentLayer.FURNITURE,
+            annotations=[PictureTabularChartData(title=f"furniture chart {page_no}", chart_data=_table_data())],
+        )
+
+    index = docling_workers._PageIndex(document)
+    assert index._subtrees_on_every_page == []
+    for page_no in range(1, n_pages + 1):
+        assert docling_workers._page_markdown(document, page_no, {}, index) == _docling_core_page_export(
+            document, page_no, {}
+        )
+
+    body_chart = _add_picture(
+        document, 2, annotations=[PictureTabularChartData(title="body chart", chart_data=_table_data())]
+    )
+    index = docling_workers._PageIndex(document)
+    assert len(index._subtrees_on_every_page) == 1
+    refs = {body_chart.self_ref: "![](docling_img_0)"}
+    for page_no in range(1, n_pages + 1):
+        assert docling_workers._page_markdown(document, page_no, refs, index) == _docling_core_page_export(
+            document, page_no, refs
+        )
+
+
 def test_a_picture_outside_the_exported_layers_is_not_exported_on_every_page():
     """A furniture picture captioned in the furniture prints nothing through
     the body export, so it is scheduled on no page but its own."""
