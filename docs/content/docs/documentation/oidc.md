@@ -404,6 +404,11 @@ user's current memberships — must succeed: if it fails, the login is refused w
 (`OIDC group sync failed`, cause in the server log) rather than opening a session with rights the IdP
 has withdrawn. The user can retry once the database is reachable.
 
+Memberships are synced at login only. A group removed in the IdP takes effect at the user's next
+successful login; until then, their open sessions and their API token keep the previous access. To
+take access away at once, remove the membership through the API, or regenerate the user's token
+(`POST /users/{user_id}/regenerate_token`), which also ends their OIDC sessions.
+
 Sync follows the IdP even when that takes a partition's **last owner** away (a role lowered, or the
 membership pruned), unlike the membership API, which refuses that with a 409. The partition keeps its
 documents, editors and viewers, but nobody can manage its members, change its presets or delete it
