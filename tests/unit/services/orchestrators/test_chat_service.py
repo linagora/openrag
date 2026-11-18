@@ -104,15 +104,10 @@ class FakeRetrieval:
     def __init__(self, chunks=None):
         self._chunks = chunks if chunks is not None else [Chunk(id="c1", text="ctx", metadata={"_id": "c1"})]
         self.retrieve_multi_calls: list[dict] = []
-        self.retrieve_per_query_calls: list[dict] = []
 
     async def retrieve_multi(self, **kwargs):
         self.retrieve_multi_calls.append(kwargs)
         return list(self._chunks)
-
-    async def retrieve_per_query(self, *, queries, **kwargs):
-        self.retrieve_per_query_calls.append({"queries": queries, **kwargs})
-        return [list(self._chunks) for _ in queries]
 
     @staticmethod
     def configuration_fingerprint(_partitions):
@@ -2451,10 +2446,8 @@ async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
 
 @pytest.mark.asyncio
 async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
-    # #707/#740: with a partition AND websearch enabled, the document branch must
-    # fuse through retrieve_multi (which honors the partition's rrf_k), NOT the
-    # legacy retrieve_per_query + fuse()@60. Revert-proves _gather_rag_and_web:
-    # reverting it to retrieve_per_query + fuse flips these call records and fails.
+    # With a partition and websearch, the documents are fused by retrieve_multi,
+    # which honors the partition's rrf_k, not by fuse() at the fixed 60.
     retrieval = FakeRetrieval()
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
@@ -2463,7 +2456,6 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     )
     web = result.web_results
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
-    assert retrieval.retrieve_per_query_calls == []  # legacy per-query + fuse()@60 path NOT used
     assert web and web[0].url == "https://ex.com"  # websearch branch actually taken
 
 

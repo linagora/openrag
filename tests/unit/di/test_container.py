@@ -476,7 +476,7 @@ class TestPhase8OrchestratorWiring:
         monkeypatch.setattr(container.document_repo, "get_indexed_documents", AsyncMock(return_value={}))
 
         service = container.retrieval_service
-        for searcher in (service._searcher, service._searcher_factory("named")):
+        for searcher in (service._pipelines._searcher, service._pipelines._searcher_factory("named")):
             assert await searcher.search("q", ["a"], 5, with_surrounding_chunks=False) == []
 
     def test_clients_built_from_static_settings_are_labelled_default(self, monkeypatch):
