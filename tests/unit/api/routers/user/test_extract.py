@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from api.dependencies.auth import current_user_or_admin_partitions_list
 from api.routers.user.extract import router as extract_router
 from di.providers import get_conversion_service
@@ -25,9 +26,11 @@ def _get(chunk, partitions):
     return TestClient(app).get("/extract/123")
 
 
-def test_extract_returns_a_chunk_of_a_readable_partition():
+@pytest.mark.parametrize("partitions", [["p1"], ["all"]])
+def test_extract_returns_a_chunk_of_a_readable_partition(partitions):
+    # ["all"] is what a super admin (SUPER_ADMIN_MODE) gets.
     chunk = {"page_content": "text", "metadata": {"partition": "p1"}}
-    r = _get(chunk, ["p1"])
+    r = _get(chunk, partitions)
     assert r.status_code == 200
     assert r.json() == chunk
 

@@ -27,8 +27,8 @@ router = APIRouter()
 
 **Permissions:**
 - Requires access to the partition containing the chunk (404 otherwise)
-- Regular users: Only chunks from assigned partitions
-- Admins: Any chunk
+- Users, admins included: only chunks from their own partitions
+- Admins with `SUPER_ADMIN_MODE=true`: any chunk
 
 **Response:**
 Returns chunk details including:

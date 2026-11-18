@@ -5,7 +5,9 @@ Covers the partition-membership check and DATA_DIR confinement.
 
 from __future__ import annotations
 
+import pytest
 from api.dependencies.auth import current_user_or_admin_partitions_list
+from api.routers.user import download
 from api.routers.user.download import router as download_router
 from di.providers import get_conversion_service
 from fastapi import FastAPI
@@ -38,6 +40,20 @@ def _client_with_service(chunk, partitions):
     app.dependency_overrides[current_user_or_admin_partitions_list] = lambda: partitions
     app.dependency_overrides[get_conversion_service] = lambda: service
     return TestClient(app), service
+
+
+@pytest.mark.parametrize("partitions", [["p1"], ["all"]])
+def test_download_serves_the_file_of_a_readable_partition(monkeypatch, tmp_path, partitions):
+    # ["all"] is what a super admin (SUPER_ADMIN_MODE) gets.
+    source = tmp_path / "report.pdf"
+    source.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(download, "_DATA_DIR", tmp_path.resolve())
+    chunk = {"metadata": {"partition": "p1", "source": str(source), "filename": "report.pdf"}}
+
+    response = _client(chunk, partitions).get("/static/123")
+
+    assert response.status_code == 200
+    assert response.content == b"%PDF-1.4"
 
 
 def test_download_404_when_chunk_missing():

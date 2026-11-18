@@ -501,9 +501,12 @@ async def test_get_chunk_by_id_in_another_partition_is_reported_as_missing():
 
 
 @pytest.mark.asyncio
-async def test_get_chunk_by_id_allows_in_scope():
+@pytest.mark.parametrize("allowed", [["a"], ["all"]])
+async def test_get_chunk_by_id_allows_in_scope(allowed):
     chunk = {"page_content": "x", "metadata": {"partition": "a"}}
-    out = await _service(conversion=FakeConversion(chunk=chunk)).get_chunk_by_id(chunk_id="9", allowed_partitions=["a"])
+    out = await _service(conversion=FakeConversion(chunk=chunk)).get_chunk_by_id(
+        chunk_id="9", allowed_partitions=allowed
+    )
     assert out["page_content"] == "x"
 
 
