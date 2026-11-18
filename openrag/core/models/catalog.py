@@ -80,6 +80,30 @@ INDEXING_CONTENT_CLAIM_TOKEN_PREFIX = "task:"
 COPY_CONTENT_CLAIM_TOKEN_PREFIX = "copy:"
 
 
+class FileFenceKind(str, Enum):
+    """What holds a file's fence (#1430).
+
+    ``INDEX`` covers indexing a new file, replacing it and copying into it: the
+    holder is the indexing task. ``DELETE`` and ``METADATA`` are held by one
+    request for as long as it runs.
+    """
+
+    INDEX = "index"
+    DELETE = "delete"
+    METADATA = "metadata"
+
+
+class FileFence(BaseModel):
+    """The one operation allowed to change ``(partition, file_id)`` right now."""
+
+    partition: str
+    file_id: str
+    kind: FileFenceKind
+    holder_id: str
+    acquired_at: datetime
+    expires_at: datetime
+
+
 class DocumentRecord(BaseModel):
     """A document entry in the catalog (PostgreSQL)."""
 

@@ -31,7 +31,7 @@ from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerp
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import ContentClaimLease, DocumentRepository, IndexedCorpusState
 from core.utils.consts import is_reserved_partition_name
-from core.utils.exceptions import ConflictError, ValidationError
+from core.utils.exceptions import ConflictError, FileFenceLostError, ValidationError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -58,6 +58,27 @@ _LOCK_EMBEDDER_ENDPOINT_SQL = """
     WHERE model_type = 'embedder' AND (name = $1 OR ($1 = $2 AND is_default))
     FOR SHARE
     """
+
+
+async def _require_file_fence(conn: asyncpg.Connection, partition: str, file_id: str, holder_id: str) -> None:
+    """Refuse a catalog write by an operation that no longer holds the file's fence (#1430).
+
+    ``FOR SHARE`` keeps the fence from being taken over or dropped until this
+    transaction ends: a delete that takes the fence right after the write sees
+    the committed row and removes it, never a row it could miss.
+    """
+    held = await conn.fetchval(
+        """
+        SELECT 1 FROM file_fences
+         WHERE partition_name = $1 AND file_id = $2 AND holder_id = $3
+           FOR SHARE
+        """,
+        partition,
+        file_id,
+        holder_id,
+    )
+    if not held:
+        raise FileFenceLostError(file_id, partition)
 
 
 async def _refuse_if_embedder_changed(
@@ -626,6 +647,7 @@ class PgDocumentRepository(DocumentRepository):
         independently_indexed: bool = True,
         chunk_count: int | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        fence_holder_id: str | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -638,9 +660,16 @@ class PgDocumentRepository(DocumentRepository):
         ``embedder_fingerprint`` is the config the file's vectors were built
         with; the file is refused if the partition's embedder no longer matches
         it (see ``_refuse_if_embedder_changed``).
+
+        ``fence_holder_id`` is the holder of the file's fence (#1430), for an
+        operation that took one. The insert then refuses with
+        :class:`FileFenceLostError` unless that holder still holds it, checked
+        in the same transaction. ``None`` writes without the check.
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                if fence_holder_id is not None:
+                    await _require_file_fence(conn, partition, file_id, fence_holder_id)
                 existing = await conn.fetchval(
                     "SELECT 1 FROM files WHERE file_id = $1 AND partition_name = $2",
                     file_id,
@@ -853,6 +882,7 @@ class PgDocumentRepository(DocumentRepository):
         content_sha256: object = _UNSET,
         chunk_count: object = _UNSET,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        fence_holder_id: str | None = None,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
@@ -864,7 +894,8 @@ class PgDocumentRepository(DocumentRepository):
         matches the freshly re-upserted Milvus chunks; ``None`` leaves it.
 
         ``embedder_fingerprint`` refuses the update the way it refuses
-        ``add_file_to_partition``'s insert.
+        ``add_file_to_partition``'s insert, and ``fence_holder_id`` checks the
+        file's fence the same way.
         """
         sets: list[str] = []
         params: list[Any] = []
@@ -897,12 +928,15 @@ class PgDocumentRepository(DocumentRepository):
             UPDATE files SET {", ".join(sets)}
             WHERE file_id = ${len(params) - 1} AND partition_name = ${len(params)}
             """
-        if embedder_fingerprint is None:
+        if embedder_fingerprint is None and fence_holder_id is None:
             result = await self.pool.execute(sql, *params)
         else:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    await _refuse_if_embedder_changed(conn, partition, embedder_fingerprint)
+                    if fence_holder_id is not None:
+                        await _require_file_fence(conn, partition, file_id, fence_holder_id)
+                    if embedder_fingerprint is not None:
+                        await _refuse_if_embedder_changed(conn, partition, embedder_fingerprint)
                     result = await conn.execute(sql, *params)
         return result.endswith(" 1")
 
