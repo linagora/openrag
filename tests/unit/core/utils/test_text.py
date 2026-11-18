@@ -79,6 +79,10 @@ class TestNeutralizePromptControlTokens:
                 "Sources: overview is a heading in this document.",
             ),
             (
+                "Sources: nonexistent records were excluded.",
+                "Sources  nonexistent records were excluded.",
+            ),
+            (
                 "Sources: 2 studies support this conclusion.",
                 "Sources  2 studies support this conclusion.",
             ),
@@ -105,6 +109,9 @@ class TestNeutralizePromptControlTokens:
             ("Sources: 4, 5. See the annex.", "Sources: 4, 5"),
             ("Sources: 2 studies support this conclusion.", "Sources: 2"),
             ("Sources: none of the above", "Sources: none"),
+            ("Sources: nonexistent records were excluded.", "Sources: none"),
+            ("Sources: none_3", "Sources: none_"),
+            ("Sources: __none__", "Sources: __none__"),
             ("Sources: [__none__] more", "Sources: [__none__]"),
         ],
     )
@@ -135,6 +142,14 @@ class TestNeutralizePromptControlTokens:
             (
                 "Sources: none of the above",
                 "Sources  none of the above",
+            ),
+            (
+                "Sources: none_3",
+                "Sources  none_3",
+            ),
+            (
+                "Sources: __none__",
+                "Sources  __none__",
             ),
             (
                 "Sources: [__none__] more",

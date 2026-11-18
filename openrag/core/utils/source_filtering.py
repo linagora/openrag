@@ -46,7 +46,9 @@ _SOURCES_NUMBER_SEPARATOR = r"[,\s*_`]*+"
 _SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
 # Break the label as soon as its value starts with parser-recognized citation
 # syntax. A model can copy just that prefix from a longer prose line, so the
-# trailing text cannot be used to decide whether the colon is safe.
+# trailing text cannot be used to decide whether the colon is safe. In
+# particular, don't add a word boundary after "none": the parser accepts the
+# copied "Sources: none" prefix even when the source line continues a word.
 _SOURCES_TAG_PREFIX_COLON_RE = re.compile(
     _SOURCES_LABEL_PREFIX
     + r":(?="
