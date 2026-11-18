@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-import api.routers.user.chat as chat_router
+import api.dependencies.token_budget as token_budget
 import api.routers.user.search as search_module
 import pytest
 from api.dependencies.auth import require_partition_viewer
@@ -19,7 +19,7 @@ class _AllowDiagnostics:
 
 @pytest.fixture(autouse=True)
 def _deterministic_token_counter(monkeypatch):
-    monkeypatch.setattr(chat_router, "get_num_tokens", lambda: lambda text: len(text.split()))
+    monkeypatch.setattr(token_budget, "get_num_tokens", lambda: lambda text: len(text.split()))
 
 
 def _config(max_context_tokens=4096):
@@ -157,7 +157,7 @@ def test_endpoint_rejects_unavailable_token_counting(monkeypatch, failure_stage)
         raise RuntimeError("secret tokenizer details")
 
     monkeypatch.setattr(
-        chat_router, "get_num_tokens", fail_counting if failure_stage == "initialization" else lambda: fail_counting
+        token_budget, "get_num_tokens", fail_counting if failure_stage == "initialization" else lambda: fail_counting
     )
     client, service = _client()
 

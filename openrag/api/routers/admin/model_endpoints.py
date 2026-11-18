@@ -8,7 +8,7 @@ delegated to the service resolved from the DI container.
 from datetime import UTC, datetime
 
 from api.dependencies.auth import require_admin
-from api.routers.user.chat import (
+from api.dependencies.model_limits import (
     invalidate_max_model_tokens,
     max_model_tokens_probe_pending,
     prime_max_model_tokens,
@@ -49,7 +49,7 @@ async def _reprime_llm_token_cache(model_type: str) -> None:
 
     ``config.models.llm`` itself is already refreshed synchronously inside
     the service call (``ModelEndpointService.load_all()``), but the
-    ``/v1/models`` auto-probe cache (``chat._max_model_tokens_by_name``) is
+    ``/v1/models`` auto-probe cache (``model_limits._max_model_tokens_by_name``) is
     a separate cache that ``prime_max_model_tokens`` otherwise only
     populates once at process startup — without this, a newly added or
     edited LLM endpoint keeps falling back to the global context-size
