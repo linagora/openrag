@@ -153,9 +153,7 @@ class AuthService:
     ) -> None:
         self._user_repo = user_repo
         self._oidc_session_repo = oidc_session_repo
-        # Retained for the role/membership helpers that later phases will
-        # route through this service (8B onward); the OIDC flow itself
-        # does not touch it.
+        # Read to authorize requests, and written by the OIDC group sync at login.
         self._membership_repo = membership_repo
         self._oidc_client = oidc_client
         self._config = config

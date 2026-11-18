@@ -261,6 +261,14 @@ def test_callback_flow_error_returns_json_and_clears_state(oidc_env, client, stu
     assert any(STATE_COOKIE_NAME in c for c in _set_cookies(r))
 
 
+def test_callback_refused_by_group_sync_sets_no_session_cookie(oidc_env, client, stub):
+    stub.raise_on["callback"] = OIDCFlowError("OIDC group sync failed", status_code=500)
+    r = client.get("/auth/callback?code=c&state=s", follow_redirects=False)
+    assert r.status_code == 500
+    assert r.json()["detail"] == "OIDC group sync failed"
+    assert not any(SESSION_COOKIE_NAME in c for c in _set_cookies(r))
+
+
 # ---------------------------------------------------------------------------
 # POST /auth/backchannel-logout
 # ---------------------------------------------------------------------------

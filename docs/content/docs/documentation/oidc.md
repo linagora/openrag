@@ -404,6 +404,11 @@ user's current memberships — must succeed: if it fails, the login is refused w
 (`OIDC group sync failed`, cause in the server log) rather than opening a session with rights the IdP
 has withdrawn. The user can retry once the database is reachable.
 
+Memberships are synced at login only. A group removed in the IdP takes effect at the user's next
+successful login; until then, their open sessions and their API token keep the previous access. To
+take access away at once, remove the membership through the API, or regenerate the user's token
+(`POST /users/{user_id}/regenerate_token`), which also ends their OIDC sessions.
+
 > **`is_admin` is never derived from groups.** Admin remains an explicit operator action
 > (`POST /users/` or `PATCH /users/{id}`), the same hard boundary as [Claim Mapping](#claim-mapping-optional).
 > The role vocabulary here is strictly the partition roles `viewer`/`editor`/`owner`.

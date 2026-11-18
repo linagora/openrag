@@ -813,6 +813,17 @@ async def test_membership_sync_fails_the_login_when_a_stale_membership_cannot_be
 
 
 @pytest.mark.asyncio
+async def test_membership_sync_keeps_what_it_granted_when_a_later_removal_fails():
+    repo = _FailingWritesRepo(seed=[(1, "stale", "editor")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    with pytest.raises(OIDCFlowError):
+        await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/beta/editor"]})
+    # Each write moves toward what the IdP asserts: the grant stays, the stale
+    # membership the sync could not remove is the only access left over.
+    assert repo.assigned == [(1, "beta", "editor")]
+
+
+@pytest.mark.asyncio
 async def test_membership_sync_skips_a_role_that_cannot_be_raised():
     repo = _FailingWritesRepo(seed=[(1, "alpha", "viewer")])
     svc = _service(cfg=_group_cfg(), membership_repo=repo)
