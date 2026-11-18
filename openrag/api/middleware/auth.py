@@ -380,9 +380,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         token = self._request_token(request, path)
         limited = await self._auth_failure_limiter.is_limited(request)
-        configured_admin_token = (
-            auth_mode == "token" and self._is_configured_admin_token(token, auth_token)
-        )
+        configured_admin_token = auth_mode == "token" and self._is_configured_admin_token(token, auth_token)
         admin_token_bypass = limited and configured_admin_token
         # The configured AUTH_TOKEN is the shared admin credential used by the
         # token-mode UI. Let it reach normal auth validation after unrelated
