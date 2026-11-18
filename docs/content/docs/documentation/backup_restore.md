@@ -6,9 +6,18 @@ title: How to backup or restore OpenRag partition/data ?
 
 > Storage layout (host paths vs. named volumes) and migrating data between storage modes are documented in [Deploying OpenRAG on OpenShift](/openrag/documentation/openshift_deployment/).
 
-A backup file holds the documents of every partition it exports. It is created readable and
-writable only by the owner of the folder it is written to (`/my-backup-dir` or `~/backup`
-below).
+A backup file holds the documents of every partition it exports, so it is created readable and
+writable by its owner only:
+
+- The commands below run as root in the container, and give the file to the owner of the backup
+  folder (`/my-backup-dir` or `~/backup`). **Create that folder yourself before the first
+  backup:** if it doesn't exist, Docker creates it owned by root, and only root can read the
+  backups in it.
+- If the owner can't be changed (for example on an NFS share with root squashing), the backup
+  stops and leaves no file.
+- Run as another user, the file belongs to that user.
+- With `--output -`, the backup goes to standard output, and the permissions are those of the file
+  you redirect it to.
 
 ## Backup one partition
 

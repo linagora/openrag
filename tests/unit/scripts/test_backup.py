@@ -48,14 +48,19 @@ def test_run_as_root_the_file_goes_to_the_owner_of_its_folder(backup, monkeypatc
     # mounted host folder: the folder's owner must still be able to read the file.
     folder = tmp_path / "backup"
     folder.mkdir()
+    owner = (folder.stat().st_uid, folder.stat().st_gid)
     owners = []
+    stated = []
+    real_stat = os.stat
     monkeypatch.setattr(backup.os, "geteuid", lambda: 0)
     monkeypatch.setattr(backup.os, "fchown", lambda fd, uid, gid: owners.append((uid, gid)))
+    monkeypatch.setattr(backup.os, "stat", lambda path, *args, **kwargs: stated.append(path) or real_stat(path))
 
     with backup.open_output_file(str(folder / "backup.openrag")):
         pass
 
-    assert owners == [(folder.stat().st_uid, folder.stat().st_gid)]
+    assert stated == [str(folder)]
+    assert owners == [owner]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file ownership")
@@ -102,3 +107,41 @@ def test_a_failed_backup_leaves_no_file_behind(backup, tmp_path, name):
         raise RuntimeError("milvus went away")
 
     assert not path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+@pytest.mark.parametrize("target", ["missing", "victim"])
+def test_a_symlink_at_the_output_path_is_refused(backup, tmp_path, target):
+    victim = tmp_path / "victim"
+    victim.write_text("victim")
+    path = tmp_path / "backup.openrag"
+    path.symlink_to(tmp_path / target)
+
+    with pytest.raises(Exception, match="already exists"), backup.open_output_file(str(path)):
+        pass
+
+    assert path.is_symlink()
+    assert victim.read_text() == "victim"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+@pytest.mark.parametrize("name", ["backup.openrag", "backup.openrag.xz"])
+def test_the_backup_never_reopens_its_file_by_name(backup, monkeypatch, tmp_path, name):
+    # Someone who can write in the folder swaps the new file for a symlink right
+    # after it is created: the backup must neither follow it nor remove it.
+    victim = tmp_path / "victim"
+    victim.write_text("victim")
+    path = tmp_path / name
+
+    def swap(fd, file_name):
+        os.unlink(file_name)
+        os.symlink(victim, file_name)
+
+    monkeypatch.setattr(backup, "_give_to_folder_owner", swap)
+
+    with pytest.raises(RuntimeError, match="milvus went away"), backup.open_output_file(str(path)) as out:
+        out.write('{"partition": "docs"}\n')
+        raise RuntimeError("milvus went away")
+
+    assert victim.read_text() == "victim"
+    assert path.is_symlink()

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # ruff: noqa: E402
 
+import io
 import json
 import os
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import IO, Any
 
 from _bootstrap import ensure_openrag_source_path
@@ -164,53 +165,57 @@ def dump_vdb_part(
         logger.info(f"{cnt} chunks written")
 
 
-def _create_owner_only(file_name: str) -> None:
-    """Create ``file_name`` empty, readable and writable by its owner only.
+def _give_to_folder_owner(fd: int, file_name: str) -> None:
+    """Run as root, give the file to the owner of the folder it is written to.
 
-    A backup holds every exported partition's documents. The documented
-    commands run this script as root in a container, writing to a mounted host
-    folder; the file is then given to that folder's owner, so the operator who
-    owns the folder can still read and copy it.
+    The documented commands run this script as root in a container, writing to
+    a mounted host folder: the operator who owns the folder must still be able
+    to read and copy the backup.
     """
-    fd = os.open(file_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            folder = os.stat(os.path.dirname(file_name) or ".")
-            os.fchown(fd, folder.st_uid, folder.st_gid)
-    except OSError:
-        os.unlink(file_name)
-        raise
-    finally:
-        os.close(fd)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        folder = os.stat(os.path.dirname(file_name) or ".")
+        os.fchown(fd, folder.st_uid, folder.st_gid)
+
+
+def _remove_if_created(file_name: str, created: os.stat_result) -> None:
+    """Remove ``file_name`` only while it is still the file this run created."""
+    with suppress(FileNotFoundError):
+        if os.path.samestat(os.lstat(file_name), created):
+            os.unlink(file_name)
 
 
 @contextmanager
 def open_output_file(file_name: str) -> Iterator[IO[str]]:
     """Open the backup output for writing, '-' meaning STDOUT.
 
-    The file is created by this call and removed again if the backup fails,
-    so a failed run leaves nothing a retry would refuse to overwrite. A file
-    that already exists is never touched.
+    A backup holds every exported partition's documents, so the file is
+    created readable and writable by its owner only, and written through the
+    descriptor that created it: the name is never opened again. It is removed
+    if the backup fails, so a retry is not refused. A name that already exists,
+    symlinks included, is refused and never touched.
     """
     if file_name in ["-"]:
         yield sys.stdout
         return
 
-    if os.path.isfile(file_name):
+    if os.path.lexists(file_name):
         raise Exception(f"File '{file_name}' already exists.")
 
-    _create_owner_only(file_name)
+    fd = os.open(file_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    created = os.fstat(fd)
     try:
-        if file_name.endswith(".xz"):
-            import lzma
+        with os.fdopen(fd, "wb") as raw:
+            _give_to_folder_owner(raw.fileno(), file_name)
+            if file_name.endswith(".xz"):
+                import lzma
 
-            out_fh = lzma.open(file_name, "wt", encoding="utf-8", preset=9 | lzma.PRESET_EXTREME)
-        else:
-            out_fh = open(file_name, "w", encoding="utf-8")
-        with out_fh:
-            yield out_fh
+                with lzma.open(raw, "wt", encoding="utf-8", preset=9 | lzma.PRESET_EXTREME) as out_fh:
+                    yield out_fh
+            else:
+                with io.TextIOWrapper(raw, encoding="utf-8") as out_fh:
+                    yield out_fh
     except BaseException:
-        os.unlink(file_name)
+        _remove_if_created(file_name, created)
         raise
 
 
