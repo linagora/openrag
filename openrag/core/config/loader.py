@@ -112,6 +112,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("SAVE_MARKDOWN", "loader.save_markdown", bool),
     ("SAVE_UPLOADED_FILES", "loader.save_uploaded_files", bool),
     ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
+    ("FILE_FENCES", "loader.file_fences", str),
     ("CSV_BATCH_SIZE", "loader.csv_batch_size", int),
     ("CSV_DELIMITER", "loader.csv_delimiter", str),
     ("XLSX_BATCH_SIZE", "loader.xlsx_batch_size", int),

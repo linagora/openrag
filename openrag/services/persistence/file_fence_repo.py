@@ -127,6 +127,30 @@ class PgFileFenceRepository(FileFenceRepository):
         )
         return bool(renewed)
 
+    async def renew_all(self, fences: list[tuple[str, str, str]], *, ttl_seconds: float) -> int:
+        if not fences:
+            return 0
+        partitions, file_ids, holder_ids = (list(column) for column in zip(*fences, strict=True))
+        renewed = await self.pool.fetchval(
+            """
+            WITH renewed AS (
+                UPDATE file_fences
+                   SET expires_at = now() + make_interval(secs => $4)
+                  FROM unnest($1::text[], $2::text[], $3::text[]) AS held(partition_name, file_id, holder_id)
+                 WHERE file_fences.partition_name = held.partition_name
+                   AND file_fences.file_id = held.file_id
+                   AND file_fences.holder_id = held.holder_id
+                RETURNING 1
+            )
+            SELECT count(*) FROM renewed
+            """,
+            partitions,
+            file_ids,
+            holder_ids,
+            float(ttl_seconds),
+        )
+        return int(renewed)
+
     async def release(self, *, partition: str, file_id: str, holder_id: str) -> bool:
         released = await self.pool.fetchval(
             """

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2035,3 +2036,122 @@ async def test_a_failed_job_write_does_not_fail_indexing(tmp_path: Path) -> None
     )
 
     assert result["stored_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace", [False, True])
+async def test_process_file_hands_the_catalog_write_its_fence_holder(tmp_path: Path, replace: bool) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    repo = FakeDocumentRepo()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+    )
+
+    await worker.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        replace=replace,
+        fence_holder_id="t",
+    )
+
+    calls = repo.update_calls if replace else repo.add_calls
+    assert calls[0]["fence_holder_id"] == "t"
+
+
+@pytest.mark.asyncio
+async def test_process_file_without_a_fence_holder_writes_unchecked(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    repo = FakeDocumentRepo()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+    )
+
+    await worker.process_file(task_id="t", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert "fence_holder_id" not in repo.add_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_process_file_whose_fence_was_taken_removes_its_vectors(tmp_path: Path) -> None:
+    from core.utils.exceptions import FileFenceLostError
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class StoredPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    class FenceTakenRepo:
+        async def add_file_to_partition(self, **kwargs: Any) -> bool:
+            raise FileFenceLostError(kwargs["file_id"], kwargs["partition"])
+
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=StoredPipeline(),
+        task_state_manager=_fake_tsm(),
+        document_repo=FenceTakenRepo(),
+        vector_store=vector_store,
+        collection="vdb",
+    )
+
+    with pytest.raises(FileFenceLostError):
+        await worker.process_file(
+            task_id="t-fenced",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+            fence_holder_id="t-fenced",
+        )
+
+    assert vector_store.deleted_filters == [
+        {"partition": "p", "file_id": "f1", "_openrag_indexing_task_id": "t-fenced"}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_process_file_frees_the_file_before_reporting_the_outcome(tmp_path: Path, fails: bool) -> None:
+    """A client that sees the task settle may replace the file at once (#1430)."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    events: list[str] = []
+    fences = SimpleNamespace(release=AsyncMock(side_effect=lambda **_: events.append("released") or True))
+    tsm = _fake_tsm()
+    tsm.complete_with_degraded_stages.remote.side_effect = lambda *_: events.append("reported") or "completed"
+    tsm.set_failed_if_not_cancelled.remote.side_effect = lambda *_args, **_kwargs: events.append("reported") or True
+    repo = FakeDocumentRepo()
+    if fails:
+        repo.add_file_to_partition = AsyncMock(side_effect=RuntimeError("pg down"))
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=tsm,
+        document_repo=repo,
+        file_fence_repo=fences,
+    )
+
+    try:
+        await worker.process_file(
+            task_id="t", path=str(path), metadata={"file_id": "f1"}, partition="p", fence_holder_id="t"
+        )
+    except RuntimeError:
+        assert fails
+
+    assert events[:2] == ["released", "reported"]
+    fences.release.assert_awaited_with(partition="p", file_id="f1", holder_id="t")

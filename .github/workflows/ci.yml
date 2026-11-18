@@ -240,7 +240,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    steps:
+    steps: &api-tests-steps
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -334,6 +334,18 @@ jobs:
         working-directory: tests/integration/api/api_run
         run: |
           docker compose down -v
+
+  # The same suite with the per-file fences in Postgres (#1430). A separate job,
+  # not a matrix on api-tests: a matrix would rename that required check. Not
+  # required itself until FILE_FENCES=postgres becomes the default.
+  api-tests-postgres-fences:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FILE_FENCES: postgres
+    steps: *api-tests-steps
 
   # The PostgreSQL repository tests and the Ray metrics export test, in one job:
   # each is about a minute, most of it setup.

@@ -175,8 +175,8 @@ prompts:
 # --- Document loader ---
 loader:
   # Env: IMAGE_CAPTIONING, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
-  #      CONTENT_DEDUPLICATION_ENABLED, CSV_BATCH_SIZE, CSV_DELIMITER,
-  #      XLSX_BATCH_SIZE
+  #      CONTENT_DEDUPLICATION_ENABLED, FILE_FENCES, CSV_BATCH_SIZE,
+  #      CSV_DELIMITER, XLSX_BATCH_SIZE
   csv_batch_size: 10000
   # Null enables delimiter sniffing. Set one character to force a delimiter.
   csv_delimiter: null
@@ -190,6 +190,8 @@ loader:
   save_uploaded_files: true
   # Reject identical content inside the same partition before indexing.
   content_deduplication_enabled: true
+  # ray | postgres. Where the per-file fences live; see FILE_FENCES.
+  file_fences: ray
 
   mimetypes:
     text/plain: .txt

@@ -11,7 +11,7 @@ from typing import Any
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS, DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.config.root import Settings
-from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
+from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY, FILE_FENCE_TTL_SECONDS
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
@@ -33,6 +33,9 @@ from services.workers.worker_lease import (
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
+# The pool renews every file fence it holds in one statement. Four renewals per
+# lease, so one slow round never lets a fence lapse.
+_FILE_FENCE_RENEW_INTERVAL_SECONDS = 30.0
 _WORKER_REF_REGISTRATION_TIMEOUT_SECONDS = 60.0
 _WORKER_REF_REGISTRATION_POLL_SECONDS = 0.05
 _REJECTED_SUBMISSION_ERROR = "Indexer worker submission was rejected before the worker started."
@@ -81,7 +84,9 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # v19 combines two independent v18 contracts: preserving unsettled terminal
 # outcomes and using has_object_ref for worker-ref ownership. Neither v18 actor
 # generation can safely be reused with the combined worker and task-state API.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v19"
+# v20: submit and process_file take fence_holder_id (#1430); a v19 worker
+# rejects it, and a v19 pool would never renew the fence.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v20"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -261,6 +266,7 @@ class IndexerWorkerActor:
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
             job_repo=self._catalog_store.job_repo,
+            file_fence_repo=self._catalog_store.file_fence_repo,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
             stage_writer_max_active_tasks=cfg.ray.indexer.max_tasks_per_worker,
@@ -521,6 +527,7 @@ class IndexerWorkerActor:
         callback_url: str | None = None,
         callback_token: str | None = None,
         require_existing_partition: bool = False,
+        fence_holder_id: str | None = None,
     ) -> dict[str, Any]:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
@@ -585,6 +592,9 @@ class IndexerWorkerActor:
                 # Not BaseException: a cancellation here must not notify or be
                 # reported as failed (same rule as set_failed_if_not_cancelled).
                 stop_lease_interrupting()
+                await self._worker.release_file_fence(
+                    partition=partition, file_id=str(metadata.get("file_id") or ""), holder_id=fence_holder_id
+                )
                 await self._report_task_failure(
                     task_id,
                     exc,
@@ -612,6 +622,7 @@ class IndexerWorkerActor:
                     require_existing_partition=require_existing_partition,
                     resolved_prompts=resolved_prompts,
                     on_failure_report=stop_lease_interrupting,
+                    fence_holder_id=fence_holder_id,
                 )
             finally:
                 self._active_indexation_config.reset(token)
@@ -679,6 +690,9 @@ class IndexerWorkerActor:
             if lost is None:
                 raise
             asyncio.current_task().uncancel()
+            await self._worker.release_file_fence(
+                partition=partition, file_id=str(metadata.get("file_id") or ""), holder_id=fence_holder_id
+            )
             await self._report_task_failure(
                 task_id,
                 lost,
@@ -877,6 +891,10 @@ class IndexerPool:
         self._release_tasks: set[asyncio.Task[Any]] = set()
         self._claim_store: Any = None
         self._claim_store_lock = asyncio.Lock()
+        # task id -> (partition, file_id, holder id) of each file fence held
+        # by a task submitted here and not settled yet.
+        self._held_fences: dict[str, tuple[str, str, str]] = {}
+        self._fence_renewal: asyncio.Task[Any] | None = None
         self._namespace = namespace
         self._task_state_manager: Any = None
 
@@ -934,8 +952,12 @@ class IndexerPool:
                 "content_sha256": str(content_sha256),
                 "claim_token": str(claim_token),
             }
+        fence_holder_id = kwargs.get("fence_holder_id")
+        fence = None
+        if fence_holder_id and file_id:
+            fence = (str(kwargs.get("partition") or ""), str(file_id), str(fence_holder_id))
         if not self._accepting_tasks:
-            await self._guard_prelaunch_rejection(task_id, claim)
+            await self._guard_prelaunch_rejection(task_id, claim, fence)
             raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
         idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
         # Reserve the slot before the await below, so a concurrent submit picks
@@ -953,9 +975,12 @@ class IndexerPool:
             # unserializable args or a dead actor); roll back so load balancing
             # stays accurate.
             self._inflight[idx] -= 1
-            await self._guard_prelaunch_rejection(task_id, claim)
+            await self._guard_prelaunch_rejection(task_id, claim, fence)
             raise
-        task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim))
+        if fence is not None:
+            self._held_fences[task_id] = fence
+            self._start_fence_renewal()
+        task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim, task_id=task_id))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
@@ -975,16 +1000,27 @@ class IndexerPool:
         settlement.add_done_callback(self._release_tasks.discard)
         await asyncio.shield(settlement)
 
-    async def _guard_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
-        cleanup = asyncio.create_task(self._finish_prelaunch_rejection(task_id, claim))
+    async def _guard_prelaunch_rejection(
+        self,
+        task_id: str,
+        claim: dict[str, str] | None,
+        fence: tuple[str, str, str] | None = None,
+    ) -> None:
+        cleanup = asyncio.create_task(self._finish_prelaunch_rejection(task_id, claim, fence))
         self._release_tasks.add(cleanup)
         cleanup.add_done_callback(self._release_tasks.discard)
         await asyncio.shield(cleanup)
 
-    async def _finish_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+    async def _finish_prelaunch_rejection(
+        self,
+        task_id: str,
+        claim: dict[str, str] | None,
+        fence: tuple[str, str, str] | None = None,
+    ) -> None:
         try:
             await self._finish_rejected_submission(task_id)
         finally:
+            await self._release_file_fence(fence)
             await self._release_content_claim(claim)
 
     async def _cancel_worker_and_wait(self, task_id: str, ref: Any) -> None:
@@ -1044,7 +1080,14 @@ class IndexerPool:
             self._task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
         return self._task_state_manager
 
-    async def _release(self, idx: int, ref: Any, *, claim: dict[str, str] | None = None) -> None:
+    async def _release(
+        self,
+        idx: int,
+        ref: Any,
+        *,
+        claim: dict[str, str] | None = None,
+        task_id: str | None = None,
+    ) -> None:
         renewal_task = None
         if claim is not None:
             renewal_task = asyncio.create_task(self._keep_content_claim_alive(**claim))
@@ -1055,6 +1098,7 @@ class IndexerPool:
             if renewal_task is not None:
                 renewal_task.cancel()
                 await asyncio.gather(renewal_task, return_exceptions=True)
+            await self._release_file_fence(self._held_fences.pop(task_id, None) if task_id else None)
             if claim is not None:
                 await self._release_content_claim(claim)
             self._inflight[idx] -= 1
@@ -1073,7 +1117,50 @@ class IndexerPool:
                 error=str(exc),
             )
 
+    async def _release_file_fence(self, fence: tuple[str, str, str] | None) -> None:
+        if fence is None:
+            return
+        partition, file_id, holder_id = fence
+        try:
+            store = await self._catalog_claim_store()
+            await store.file_fence_repo.release(partition=partition, file_id=file_id, holder_id=holder_id)
+        except Exception as exc:  # noqa: BLE001 - the lease expires on its own
+            from core.utils.logging import get_logger
+
+            get_logger().bind(file_id=file_id, partition=partition).warning(
+                "Failed to release the settled task's file fence; it expires on its own.",
+                error=str(exc),
+            )
+
+    def _start_fence_renewal(self) -> None:
+        if self._fence_renewal is None or self._fence_renewal.done():
+            self._fence_renewal = asyncio.create_task(self._keep_file_fences_alive())
+
+    async def _keep_file_fences_alive(self) -> None:
+        """Renew every fence of an unsettled task, in one statement per round.
+
+        Stops once no task holds a fence; the next fenced submission starts it
+        again. A fence a delete took over is simply no longer renewed.
+        """
+        while self._held_fences:
+            await asyncio.sleep(_FILE_FENCE_RENEW_INTERVAL_SECONDS)
+            fences = list(self._held_fences.values())
+            if not fences:
+                return
+            try:
+                store = await self._catalog_claim_store()
+                await store.file_fence_repo.renew_all(fences, ttl_seconds=FILE_FENCE_TTL_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - renewal retries until the tasks settle
+                from core.utils.logging import get_logger
+
+                get_logger().warning("Failed to renew file fences; retrying.", fences=len(fences), error=str(exc))
+
     async def _claim_document_repo(self) -> Any:
+        return (await self._catalog_claim_store()).document_repo
+
+    async def _catalog_claim_store(self) -> Any:
         if self._claim_store is None:
             async with self._claim_store_lock:
                 if self._claim_store is None:
@@ -1084,7 +1171,7 @@ class IndexerPool:
                     store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
                     await store.initialize()
                     self._claim_store = store
-        return self._claim_store.document_repo
+        return self._claim_store
 
     async def _keep_content_claim_alive(
         self,
