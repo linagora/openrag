@@ -754,6 +754,14 @@ async def test_chainlit_keeps_source_names_unique_after_sanitizing(monkeypatch):
         ("rapport_annuel_2026.pdf", "rapport_annuel_2026.pdf"),
         ("report.pdf (page: 3)", "report.pdf (page: 3)"),
         ("C++_style_guide.pdf", "C++_style_guide.pdf"),
+        ("report=final.pdf", "report=final.pdf"),
+        ("PROGRA~1.pdf", "PROGRA~1.pdf"),
+        ("cost ~5 or ~10", "cost ~5 or ~10"),
+        ("~*draft~", "~ draft~"),
+        ("v1~~~v2.pdf", "v1~~~v2.pdf"),
+        ("12:30 meeting.pdf", "12:30 meeting.pdf"),
+        ("std::vector.pdf", "std::vector.pdf"),
+        ("https://example.test/a", "https://example.test/a"),
     ],
 )
 def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_name, expected):
@@ -770,6 +778,12 @@ def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_nam
         ("__trusted__", "trusted"),
         ("foo _trusted_ bar", "foo trusted bar"),
         ("~~irrelevant~~", "irrelevant"),
+        ("~draft~ notes.pdf", "draft notes.pdf"),
+        ("a~b~c.pdf", "a b c.pdf"),
+        ("~a ~~b~ c~~", "a b c"),
+        ("a﻿~~!draft~~.pdf", "a﻿ !draft .pdf"),
+        ("AWS re:Invent 2025 recap", "AWS re: Invent 2025 recap"),
+        (":draft notes.pdf", ": draft notes.pdf"),
         ("# Trusted source", "Trusted source"),
         ("1. Official result", "Official result"),
         ("- Search result", "Search result"),
@@ -782,6 +796,21 @@ def test_chainlit_neutralizes_active_source_name_markdown(monkeypatch, source_na
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_markdown_test")
 
     assert module._safe_source_name(source_name, {}) == expected
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    ["1)", "12.", "-", "+", "#", "- ___", r"\___", "=", "==", "  ===  ", "--"],
+)
+def test_chainlit_source_names_stay_plain_text_in_sources_block(monkeypatch, source_name):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_block_marker_source_name_test")
+    safe_name = module._safe_source_name(source_name, {})
+
+    for markdown in (safe_name, f"Sources: \n{safe_name}"):
+        tokens = MarkdownIt("commonmark").parse(markdown)
+
+        assert [token.type for token in tokens] == ["paragraph_open", "inline", "paragraph_close"]
+        assert tokens[1].content == markdown
 
 
 @pytest.mark.parametrize("source_name", ["#report.pdf", "1.report.pdf"])
