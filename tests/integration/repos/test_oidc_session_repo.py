@@ -107,10 +107,11 @@ class TestRecentlyRevoked:
     async def test_a_session_that_expired_after_its_revocation_is_found(self, postgres_store: PostgresStore):
         repo = postgres_store.oidc_session_repo
         user = await _seed_user(postgres_store)
-        created = await repo.create_session(
-            _session(user.id, token_hash="hash-expired-logout", expires_in=timedelta(seconds=-1))
-        )
+        created = await repo.create_session(_session(user.id, token_hash="hash-expired-logout"))
         await repo.revoke_session(created.id)
+        await repo.update_session(
+            created.id, session_expires_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=1)
+        )
 
         assert await repo.get_recently_revoked_by_token_hash("hash-expired-logout", within=timedelta(seconds=60))
 
