@@ -72,19 +72,50 @@ class TestNeutralizePromptControlTokens:
         assert neutralize_prompt_control_tokens(neutralized) == neutralized
 
     @pytest.mark.parametrize(
-        "text",
+        ("text", "expected"),
         [
-            "Sources: overview is a heading in this document.",
-            "Sources: 2 studies support this conclusion.",
-            "Sources: 2 studies support\nthis conclusion.",
-            "Sources: none (the study used simulated data).",
+            (
+                "Sources: overview is a heading in this document.",
+                "Sources: overview is a heading in this document.",
+            ),
+            (
+                "Sources: 2 studies support this conclusion.",
+                "Sources  2 studies support this conclusion.",
+            ),
+            (
+                "Sources: 2 studies support\nthis conclusion.",
+                "Sources  2 studies support\nthis conclusion.",
+            ),
+            (
+                "Sources: none (the study used simulated data).",
+                "Sources  none (the study used simulated data).",
+            ),
         ],
     )
-    def test_non_tag_sources_prose_is_preserved(self, text):
+    def test_source_prose_keeps_wording_without_a_parseable_tag_prefix(self, text, expected):
         _, cited, saw_none = sf._strip_sources_tags(text)
         assert not cited and not saw_none
-        assert sf.neutralize_sources_tags(text) == text
-        assert neutralize_prompt_control_tokens(text) == text
+        assert sf.neutralize_sources_tags(text) == expected
+        assert neutralize_prompt_control_tokens(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "echo"),
+        [
+            ("Sources: 4, 5 - internal memo", "Sources: 4, 5"),
+            ("Sources: 4, 5. See the annex.", "Sources: 4, 5"),
+            ("Sources: 2 studies support this conclusion.", "Sources: 2"),
+            ("Sources: none of the above", "Sources: none"),
+            ("Sources: [__none__] more", "Sources: [__none__]"),
+        ],
+    )
+    def test_echoed_prefix_of_source_prose_cannot_become_a_tag(self, text, echo):
+        _, original_citations, original_none = sf._strip_sources_tags(echo)
+        assert original_citations or original_none
+
+        neutralized = neutralize_prompt_control_tokens(text)
+        safe_echo = neutralized[: len(echo)]
+        _, citations, saw_none = sf._strip_sources_tags(safe_echo)
+        assert not citations and not saw_none
 
     @pytest.mark.parametrize(
         ("text", "expected"),
@@ -92,6 +123,22 @@ class TestNeutralizePromptControlTokens:
             (
                 "Sources: 4, 5 (internal memo)",
                 "Sources  4, 5 (internal memo)",
+            ),
+            (
+                "Sources: 4, 5 - internal memo",
+                "Sources  4, 5 - internal memo",
+            ),
+            (
+                "Sources: 4, 5. See the annex.",
+                "Sources  4, 5. See the annex.",
+            ),
+            (
+                "Sources: none of the above",
+                "Sources  none of the above",
+            ),
+            (
+                "Sources: [__none__] more",
+                "Sources  [__none__] more",
             ),
             (
                 "See Sources: 1, 2] for details",
@@ -123,11 +170,15 @@ class TestNeutralizePromptControlTokens:
     @pytest.mark.parametrize(
         "text",
         [
+            "The glossary links to [Source].",
+            "[Source]",
+            "[Sources]",
             "[Sources: 1, 3]",
             "[Sources: none]",
             "[Sources: ]",
             "[Sources 1, 3]",
             "[Source 5]",
+            "[Source",
             "[Sources",
             "Sources: 4, 5 (internal memo)",
             "See Sources: 1, 2] for details",
@@ -157,6 +208,20 @@ class TestNeutralizePromptControlTokens:
             )
         )
         assert sf.neutralize_sources_tags(neutralized) == neutralized
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("The glossary links to [Source].", "The glossary links to [Source]."),
+            ("[Source]", "[Source]"),
+            ("[Sources]", "[Sources]"),
+            ("[Source 5]", "(Source 5]"),
+            ("[Source", "(Source"),
+        ],
+    )
+    def test_bare_source_reference_is_preserved_but_citations_are_defanged(self, text, expected):
+        assert sf.neutralize_sources_tags(text) == expected
+        assert neutralize_prompt_control_tokens(text) == expected
 
     def test_separator_run_capped(self):
         out = neutralize_prompt_control_tokens("a\n----------\n\nb")

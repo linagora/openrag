@@ -38,30 +38,23 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 _SOURCES_LABEL_PREFIX = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+"
 _SOURCES_LABEL_VALUE_PREFIX = r"\s*+[*_`]*+\[?[ \t]*+"
 _SOURCES_LABEL = _SOURCES_LABEL_PREFIX + r":" + _SOURCES_LABEL_VALUE_PREFIX
-_SOURCES_LABEL_COLON_RE = re.compile(_SOURCES_LABEL_PREFIX + r":", re.IGNORECASE)
 # The parser accepts separators (including line breaks and emphasis) before
 # each number. Keep the fragment check in step with that number grammar.
 _SOURCES_NUMBER_SEPARATOR = r"[,\s*_`]*+"
 # A closing bracket may follow commas, whitespace or emphasis, and may be on
 # the next line. The prefix check shares this parser rule.
 _SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
-# The full parser patterns below cover tags ending at the line boundary. This
-# also catches clearly delimited citation fragments followed by prose, without
-# changing ordinary sentences such as "Sources: 2 studies support this".
+# Break the label as soon as its value starts with parser-recognized citation
+# syntax. A model can copy just that prefix from a longer prose line, so the
+# trailing text cannot be used to decide whether the colon is safe.
 _SOURCES_TAG_PREFIX_COLON_RE = re.compile(
     _SOURCES_LABEL_PREFIX
     + r":(?="
     + _SOURCES_LABEL_VALUE_PREFIX
     + r"(?:"
     + _SOURCES_NUMBER_SEPARATOR
-    + r"\d++(?:"
-    + _SOURCES_NUMBER_SEPARATOR
-    + r"\d++)*+[*_`]*+(?:"
-    + _SOURCES_TAG_CLOSE
-    + r"|[ \t]*+(?:\(|\|))"
-    + r"|[*_`]*+none\b[*_`]*+(?:"
-    + _SOURCES_TAG_CLOSE
-    + r"|[ \t]*+\|)"
+    + r"\d"
+    + r"|[*_`]*+none"
     + r"|"
     + _SOURCES_TAG_CLOSE
     + r"))",
@@ -104,7 +97,7 @@ _UNCLOSED_SOURCE_NUMS_RE = re.compile(
     re.IGNORECASE,
 )
 _DANGLING_SOURCE_RE = re.compile(r"(?<![ \t])[ \t]*+\[\s*Sources?\s*(?=\n|$)", re.IGNORECASE)
-_UNTRUSTED_SOURCE_BLOCK_RE = re.compile(r"\[\s*(sources?)\b(\s*:)?", re.IGNORECASE)
+_UNTRUSTED_SOURCE_BLOCK_RE = re.compile(r"\[\s*(sources?)\b(?![ \t]*\])(\s*:)?", re.IGNORECASE)
 
 
 def neutralize_sources_tags(text: str) -> str:
@@ -115,11 +108,6 @@ def neutralize_sources_tags(text: str) -> str:
         text,
     )
 
-    def break_tag(match: re.Match[str]) -> str:
-        return _SOURCES_LABEL_COLON_RE.sub(lambda label: label.group(0)[:-1] + " ", match.group(0), count=1)
-
-    for pattern in (_SOURCES_NUMS_RE, _SOURCES_NONE_RE, _SOURCES_EMPTY_RE):
-        text = pattern.sub(break_tag, text)
     text = _SOURCES_TAG_PREFIX_COLON_RE.sub(lambda match: match.group(0)[:-1] + " ", text)
     return text
 
