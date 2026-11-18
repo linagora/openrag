@@ -4,7 +4,7 @@ One row per file an operation is changing right now: indexing it, replacing
 it, deleting it or updating its metadata (#1430). Nothing writes it yet.
 
 Revision ID: 934e9f4e871f
-Revises: f3a4b5c6d7e8
+Revises: 4d7e2b9c1f35
 Create Date: 2026-11-17
 """
 
@@ -15,7 +15,7 @@ from alembic import op
 from schema_helpers import table_exists
 
 revision: str = "934e9f4e871f"
-down_revision: str | Sequence[str] | None = "f3a4b5c6d7e8"
+down_revision: str | Sequence[str] | None = "4d7e2b9c1f35"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
