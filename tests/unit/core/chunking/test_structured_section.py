@@ -329,6 +329,24 @@ def test_greedy_split_cascades_consecutive_headings_to_nonempty_receiver():
     assert all(_words(piece) <= 4 for piece in bounded_pieces), bounded_pieces
 
 
+def test_greedy_split_rehomes_headings_packed_together_when_combined_piece_fits():
+    text = "intro\n\n### A\n\n### B\n\nbody"
+
+    pieces = _greedy_split(text, 5, 8, _words)
+
+    assert pieces == ["intro", "### A\n\n### B\n\nbody"]
+    assert all(_words(piece) <= 8 for piece in pieces), pieces
+
+
+def test_greedy_split_keeps_rehomed_heading_run_within_max_tokens():
+    text = "intro\n\n### A\n\n### B\n\nbody extra"
+
+    pieces = _greedy_split(text, 5, 5, _words)
+
+    assert pieces == ["intro\n\n### A", "### B\n\nbody extra"]
+    assert all(_words(piece) <= 5 for piece in pieces), pieces
+
+
 def test_greedy_split_distinguishes_fragment_from_duplicate_source_heading():
     text = "#### **Article L700-2 w1 details\n\n#### **Article\n\nalpha beta"
     pieces = _greedy_split(text, 2, 4, _words)

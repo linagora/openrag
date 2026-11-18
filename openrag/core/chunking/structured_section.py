@@ -1295,31 +1295,58 @@ def _rehome_trailing_headings(
     piece on one — stranding the heading away from the content it introduces
     (worst case: a piece that is an ``<image_description>`` opener plus a bare
     heading). A word-wrapped fragment that only looks like a heading does not
-    count; only complete source lines are eligible. If the combined piece does
-    not fit, leave the heading in place to preserve the hard ceiling.
+    count; only complete source lines are eligible. If moving a heading would
+    exceed the ceiling, leave it and any earlier headings in place.
     """
     out = list(pieces)
     # Walk backwards so a run of consecutive headings cascades forward in one
-    # pass when the combined piece fits. Only complete source lines are moved;
-    # pieces containing only moved headings then empty out and are filtered
-    # below. A heading stays in place when moving it would exceed the ceiling.
+    # pass. Blank lines between eligible headings are part of that run. Move
+    # each heading only while the complete candidate still fits the ceiling;
+    # pieces containing only moved headings are filtered below.
     for i in range(len(out) - 2, -1, -1):
         lines = out[i].rstrip().splitlines()
         cut = len(lines)
-        while cut > 0 and _CAPTION_HEADING_RE.match(lines[cut - 1]) and (i, cut - 1) in source_heading_positions:
-            cut -= 1
-        if cut == len(lines):
+        heading_indices: list[int] = []
+
+        def is_source_heading(line_index: int) -> bool:
+            position = (i, line_index)
+            return _CAPTION_HEADING_RE.match(lines[line_index]) is not None and position in source_heading_positions
+
+        while cut > 0:
+            line_index = cut - 1
+            if is_source_heading(line_index):
+                heading_indices.append(line_index)
+                cut -= 1
+                continue
+            if not lines[line_index].strip():
+                preceding_heading = line_index - 1
+                while preceding_heading >= 0 and not lines[preceding_heading].strip():
+                    preceding_heading -= 1
+                if preceding_heading >= 0 and is_source_heading(preceding_heading):
+                    cut = preceding_heading + 1
+                    continue
+            break
+
+        if not heading_indices:
             continue
-        moved = "\n\n".join(line.strip() for line in lines[cut:])
         receiver_index = i + 1
         while receiver_index < len(out) and not out[receiver_index].strip():
             receiver_index += 1
         if receiver_index == len(out):
             continue
-        receiver = f"{moved}\n\n{out[receiver_index].lstrip()}"
-        if length_function(receiver) > max_tokens:
+
+        receiver = out[receiver_index].lstrip()
+        move_cut = None
+        for heading_index in heading_indices:
+            candidate = f"{lines[heading_index].strip()}\n\n{receiver}"
+            if length_function(candidate) > max_tokens:
+                break
+            receiver = candidate
+            move_cut = heading_index
+        if move_cut is None:
             continue
-        out[i] = "\n".join(lines[:cut]).rstrip()
+
+        out[i] = "\n".join(lines[:move_cut]).rstrip()
         out[receiver_index] = receiver
     return [piece for piece in out if piece.strip()]
 
