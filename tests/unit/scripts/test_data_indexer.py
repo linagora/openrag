@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import runpy
 import sys
 import time
@@ -100,17 +101,19 @@ def test_data_indexer_does_not_retry_unrelated_service_unavailable(monkeypatch, 
     assert uploads == ["report.pdf"]
 
 
-def test_data_indexer_uploads_only_files_inside_the_given_directory(monkeypatch, tmp_path: Path) -> None:
+def test_data_indexer_uploads_only_regular_files_inside_the_given_directory(monkeypatch, tmp_path: Path) -> None:
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (elsewhere / "private.txt").write_bytes(b"not for indexing")
     source = tmp_path / "documents"
-    source.mkdir()
+    (source / "sub").mkdir(parents=True)
     (source / "report.pdf").write_bytes(b"pdf contents")
+    (source / "sub" / "notes.txt").write_bytes(b"notes")
     (source / "alias.pdf").symlink_to(source / "report.pdf")
     (source / "private.txt").symlink_to(elsewhere / "private.txt")
     (source / "elsewhere").symlink_to(elsewhere, target_is_directory=True)
     (source / "loop").symlink_to(source / "loop")
+    os.mkfifo(source / "pipe")
     uploads = []
 
     def post(_url, *, files, **_kwargs):
@@ -122,4 +125,37 @@ def test_data_indexer_uploads_only_files_inside_the_given_directory(monkeypatch,
 
     runpy.run_path(str(_SCRIPT), run_name="__main__")
 
-    assert sorted(uploads) == [("alias.pdf", b"pdf contents"), ("report.pdf", b"pdf contents")]
+    assert sorted(uploads) == [("notes.txt", b"notes"), ("report.pdf", b"pdf contents")]
+
+
+def test_data_indexer_uploads_the_file_it_opened_even_if_the_name_is_swapped(monkeypatch, tmp_path: Path) -> None:
+    # Someone who can write in the directory replaces the file with a symlink
+    # while the script asks the API whether it exists: the upload must still be
+    # the file that was opened, not the symlink's target.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "private.txt").write_bytes(b"not for indexing")
+    source = tmp_path / "documents"
+    source.mkdir()
+    report = source / "report.pdf"
+    report.write_bytes(b"pdf contents")
+    uploads = []
+
+    def post(_url, *, files, **_kwargs):
+        filename, stream, _content_type = files["file"]
+        uploads.append((filename, stream.read()))
+        return _Response(201, {"task_id": "task-1"})
+
+    _prepare_script(monkeypatch, source, post)
+
+    def get(url: str, **_kwargs):
+        if not url.endswith("/health_check"):
+            report.unlink()
+            report.symlink_to(elsewhere / "private.txt")
+        return _Response(200 if url.endswith("/health_check") else 404, {})
+
+    monkeypatch.setattr(httpx, "get", get)
+
+    runpy.run_path(str(_SCRIPT), run_name="__main__")
+
+    assert uploads == [("report.pdf", b"pdf contents")]

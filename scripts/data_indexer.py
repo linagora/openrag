@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
+import stat
 import time
 from pathlib import Path
 
@@ -105,34 +107,55 @@ def __upload_with_indexing_capacity_retry(url, filename, file_ext, file_handle, 
     return None
 
 
+def __open_regular_file(name, dir_fd):
+    """Open a regular file of the walked directory, or return None.
+
+    Symlinks are never followed (``O_NOFOLLOW``, relative to the directory's
+    descriptor): one could point outside the directory, or be swapped in after
+    the walk listed the name. FIFOs and devices are skipped too; ``O_NONBLOCK``
+    keeps a FIFO from blocking the open.
+    """
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError:
+        return None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
+    return os.fdopen(fd, "rb")
+
+
 __check_api(args.url)
 
 print(dir_path.is_dir())
 
-for file_path in dir_path.glob("**/*"):
-    logger.info(f"file: {file_path}")
-    if file_path.is_file():
-        if not file_path.resolve().is_relative_to(dir_path):
-            logger.warning(f'"{file_path}" links outside {dir_path}, skipped')
+# os.fwalk does not descend into symlinked directories, and opens each file
+# relative to its directory's descriptor, so nothing outside dir_path is read.
+for root, _dirs, filenames, root_fd in os.fwalk(dir_path):
+    for filename in filenames:
+        file_path = Path(root) / filename
+        logger.info(f"file: {file_path}")
+        file_handle = __open_regular_file(filename, root_fd)
+        if file_handle is None:
+            logger.warning(f'"{file_path}" is not a regular file that can be read, skipped')
             continue
-        file_ext = file_path.suffix[1:]  # Get the file extension without the dot
-        filename = file_path.name  # Get the filename without the directory path
 
-        file_id = filename  # or generate a unique ID if necessary
+        with file_handle:
+            file_ext = file_path.suffix[1:]  # Get the file extension without the dot
+            file_id = filename  # or generate a unique ID if necessary
 
-        if __check_file_exists(args.url, args.partition, filename, headers):
-            logger.info(f'"{filename}" exists')
-            continue
-        else:
-            logger.info(f'"{filename}" doesn\'t exist')
+            if __check_file_exists(args.url, args.partition, filename, headers):
+                logger.info(f'"{filename}" exists')
+                continue
+            else:
+                logger.info(f'"{filename}" doesn\'t exist')
 
-        # file_id = str(uuid.uuid4())
+            # file_id = str(uuid.uuid4())
 
-        url_template = f"{args.url}/indexer/partition/{args.partition}/file/{file_id}"
-        url = url_template.format(partition_name=args.partition, file_id=file_id)
+            url_template = f"{args.url}/indexer/partition/{args.partition}/file/{file_id}"
+            url = url_template.format(partition_name=args.partition, file_id=file_id)
 
-        with open(file_path, "rb") as f:
-            __upload_with_indexing_capacity_retry(url, filename, file_ext, f, headers)
+            __upload_with_indexing_capacity_retry(url, filename, file_ext, file_handle, headers)
 
 
 # How to run this code:
