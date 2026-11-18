@@ -844,26 +844,28 @@ class TestPostgresFileFences:
     On the Ray path a replace of a file being indexed is accepted.
     """
 
-    def test_a_replace_while_the_file_is_indexing_is_refused(
-        self, api_client, created_partition, pdf_file_path, sample_text_file
-    ):
+    def test_a_replace_while_the_file_is_indexing_is_refused(self, api_client, created_partition, tmp_path):
         file_id = "fenced-replace-001"
-        with open(pdf_file_path, "rb") as f:
+        # Large enough to take seconds to chunk and embed, and needs no fixture
+        # file: the PDF the other tests use isn't present in CI.
+        large = tmp_path / "large.txt"
+        large.write_text(
+            "\n\n".join(f"Paragraph {i}: the fence holds this file while it is indexed." for i in range(20000))
+        )
+        with open(large, "rb") as f:
             first = api_client.post(
                 f"/indexer/partition/{created_partition}/file/{file_id}",
-                files={"file": (pdf_file_path.name, f, "application/pdf")},
+                files={"file": ("large.txt", f, "text/plain")},
                 data={"metadata": "{}"},
             )
         assert first.status_code in [200, 201, 202]
         task_id = get_task_id(first.json())
 
-        # Sent right away, as the cancellation tests do: the PDF is still indexing.
-        with open(sample_text_file, "rb") as f:
-            replace = api_client.put(
-                f"/indexer/partition/{created_partition}/file/{file_id}",
-                files={"file": ("replacement.txt", f, "text/plain")},
-                data={"metadata": "{}"},
-            )
+        replace = api_client.put(
+            f"/indexer/partition/{created_partition}/file/{file_id}",
+            files={"file": ("replacement.txt", b"A different, short replacement.", "text/plain")},
+            data={"metadata": "{}"},
+        )
 
         assert replace.status_code == 409
         assert replace.json()["detail"].startswith("[DOCUMENT_INDEXING_IN_PROGRESS]")
