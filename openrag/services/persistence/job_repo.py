@@ -34,7 +34,8 @@ from core.ports.job_repo import JobListSnapshot, JobRepository
 
 _COLUMNS = (
     "id, partition, file_id, filename, user_id, status, error, error_reason, degraded_stages, stage_tracking_version, "
-    "created_at, updated_at, started_at, completed_at"
+    "created_at, updated_at, started_at, completed_at, lane, payload, object_key, attempt, max_attempts, "
+    "lease_owner, lease_expires_at, heartbeat_at, cancel_requested, available_at, priority, superseded_by"
 )
 _TERMINAL_STATUSES = sorted(state.value for state in TERMINAL_TASK_STATES)
 _MAX_ERROR_CHARS = 8_000
@@ -117,13 +118,20 @@ class PgJobRepository(JobRepository):
             f"""
             INSERT INTO jobs (
                 id, partition, file_id, user_id, status, error, error_reason,
-                started_at, completed_at, degraded_stages, filename, stage_tracking_version
+                started_at, completed_at, degraded_stages, filename, stage_tracking_version,
+                lane, payload, object_key, attempt, max_attempts, lease_owner, lease_expires_at,
+                heartbeat_at, cancel_requested, available_at, priority, superseded_by
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16, $17, $18, $19, $20, $21, COALESCE($22::timestamptz, now()), $23, $24
+            )
             ON CONFLICT (id) DO UPDATE SET
+                -- History writes preserve the queue-specific fields.
+                -- Queue transitions will update their own fields atomically.
                 -- A settled job never reopens, mirroring TaskStateManager.
                 status = CASE
-                    WHEN jobs.status = ANY($13::text[]) THEN jobs.status
+                    WHEN jobs.status = ANY($25::text[]) THEN jobs.status
                     ELSE EXCLUDED.status
                 END,
                 -- The outcome is decided by whichever write settled the row, and
@@ -131,19 +139,19 @@ class PgJobRepository(JobRepository):
                 -- status alone lets a FAILED write that lost the cancel race
                 -- staple its traceback onto a row reading CANCELLED.
                 error = CASE
-                    WHEN jobs.status = ANY($13::text[]) THEN jobs.error
+                    WHEN jobs.status = ANY($25::text[]) THEN jobs.error
                     ELSE COALESCE(EXCLUDED.error, jobs.error)
                 END,
                 error_reason = CASE
-                    WHEN jobs.status = ANY($13::text[]) THEN jobs.error_reason
+                    WHEN jobs.status = ANY($25::text[]) THEN jobs.error_reason
                     ELSE COALESCE(EXCLUDED.error_reason, jobs.error_reason)
                 END,
                 completed_at = CASE
-                    WHEN jobs.status = ANY($13::text[]) THEN jobs.completed_at
+                    WHEN jobs.status = ANY($25::text[]) THEN jobs.completed_at
                     ELSE COALESCE(jobs.completed_at, EXCLUDED.completed_at)
                 END,
                 degraded_stages = CASE
-                    WHEN jobs.status = ANY($13::text[]) THEN jobs.degraded_stages
+                    WHEN jobs.status = ANY($25::text[]) THEN jobs.degraded_stages
                     ELSE EXCLUDED.degraded_stages
                 END,
                 -- Instrumentation evidence is monotonic: a positive v1
@@ -180,6 +188,18 @@ class PgJobRepository(JobRepository):
             job.degraded_stages,
             job.filename,
             job.stage_tracking_version,
+            job.lane,
+            job.payload,
+            job.object_key,
+            job.attempt,
+            job.max_attempts,
+            job.lease_owner,
+            job.lease_expires_at,
+            job.heartbeat_at,
+            job.cancel_requested,
+            job.available_at,
+            job.priority,
+            job.superseded_by,
             _TERMINAL_STATUSES,
         )
         return self._row_to_job(row)
@@ -751,7 +771,8 @@ class PgJobRepository(JobRepository):
             WITH failed AS (
                 UPDATE jobs
                 SET status = 'FAILED', error = $1, error_reason = $1, completed_at = now(), updated_at = now()
-                WHERE status <> ALL($2::text[])
+                WHERE lane IS NULL
+                  AND status <> ALL($2::text[])
                   AND id <> ALL($3::text[])
                   AND updated_at < $4
                 RETURNING 1

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -122,6 +122,19 @@ class IndexationJob(BaseModel):
     error_reason: str | None = None
     degraded_stages: list[str] = Field(default_factory=list)
     stage_tracking_version: int | None = Field(default=None, ge=0, le=1)
+    # Ray jobs have no lane and continue to use the same status model.
+    lane: Literal["cpu", "gpu", "remote"] | None = None
+    payload: dict[str, Any] | None = None
+    object_key: str | None = None
+    attempt: int = 0
+    max_attempts: int = 3
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    cancel_requested: bool = False
+    available_at: datetime | None = None
+    priority: int = 0
+    superseded_by: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
     started_at: datetime | None = None
