@@ -84,7 +84,7 @@ COPY_CONTENT_CLAIM_TOKEN_PREFIX = "copy:"
 FILE_FENCE_TTL_SECONDS = 120.0
 # Four renewals per lease. An indexing worker survives three missed rounds in a
 # row (its catalog commit is checked); a delete, a metadata update or a copy
-# stops at the third, one round before the lease ends (FileFences.renew_before_expiry).
+# stops at the third, one round before the lease ends (FileFences.run_holding).
 FILE_FENCE_RENEW_INTERVAL_SECONDS = FILE_FENCE_TTL_SECONDS / 4
 
 

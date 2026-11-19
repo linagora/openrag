@@ -31,7 +31,7 @@ from core.models.catalog import (
     FileFenceKind,
 )
 from core.ports.file_fence_repo import FileFenceRepository
-from core.utils.exceptions import ConflictError, FileFenceLostError
+from core.utils.exceptions import ConflictError, FileFenceLostError, FileFenceUnavailableError
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -191,7 +191,8 @@ class FileFences:
 
         Call it right after taking the fence: the lease is counted from here. A
         database error during a renewal is retried at the next round, until less
-        than one round of the confirmed lease is left (see ``renew_before_expiry``).
+        than one round of the confirmed lease is left; the work then stops with
+        ``FileFenceUnavailableError`` (see ``_renew_before_expiry``).
         """
         if self._repo is None:
             return await work()
@@ -211,28 +212,29 @@ class FileFences:
     async def _keep_alive(self, *, partition: str, file_id: str, holder_id: str) -> None:
         confirmed_until = monotonic() + FILE_FENCE_TTL_SECONDS
         while True:
-            await asyncio.sleep(self.next_renewal_in(confirmed_until))
-            confirmed_until = await self.renew_before_expiry(
+            await asyncio.sleep(self._next_renewal_in(confirmed_until))
+            confirmed_until = await self._renew_before_expiry(
                 partition=partition, file_id=file_id, holder_id=holder_id, confirmed_until=confirmed_until
             )
 
     @staticmethod
-    def next_renewal_in(confirmed_until: float) -> float:
+    def _next_renewal_in(confirmed_until: float) -> float:
         """Seconds to wait before the next renewal: one round, or less when the deadline comes first."""
         deadline = confirmed_until - FILE_FENCE_RENEW_INTERVAL_SECONDS
         return max(min(FILE_FENCE_RENEW_INTERVAL_SECONDS, deadline - monotonic()), 0)
 
-    async def renew_before_expiry(
+    async def _renew_before_expiry(
         self, *, partition: str, file_id: str, holder_id: str, confirmed_until: float
     ) -> float:
         """Renew the fence of work that must stop before it can be taken; return the new confirmed expiry.
 
         *confirmed_until* is the ``monotonic()`` time the lease is known to last
         until. A database error is retried at the next round until one round
-        before that time; there, and once the fence is lost, this raises
-        ``FileFenceLostError``. With the defaults that is after three failed
-        rounds, 30 s before another operation could take the expired fence: the
-        time a write the work had already sent has to complete.
+        before that time; there this raises ``FileFenceUnavailableError`` (a
+        503: nothing else touched the file). With the defaults that is after
+        three failed rounds, 30 s before another operation could take the
+        expired fence: the time a write the work had already sent has to
+        complete. A fence another operation took raises ``FileFenceLostError``.
         """
         attempted_at = monotonic()
         deadline = confirmed_until - FILE_FENCE_RENEW_INTERVAL_SECONDS
@@ -246,7 +248,7 @@ class FileFences:
             log = logger.bind(partition=partition, file_id=file_id)
             if monotonic() >= deadline:
                 log.warning("Failed to renew the file fence before its lease ends; stopping", error=str(exc))
-                raise FileFenceLostError(file_id, partition) from exc
+                raise FileFenceUnavailableError(file_id, partition) from exc
             log.warning("Failed to renew the file fence; retrying", error=str(exc))
             return confirmed_until
         if not held:

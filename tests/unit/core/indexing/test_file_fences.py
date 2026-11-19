@@ -10,7 +10,7 @@ from core.indexing import file_fences as module
 from core.indexing.file_fences import FileFences
 from core.models.catalog import FileFence, FileFenceKind
 from core.ports.file_fence_repo import FileFenceRepository
-from core.utils.exceptions import ConflictError, FileFenceLostError
+from core.utils.exceptions import ConflictError, FileFenceLostError, FileFenceUnavailableError
 
 PARTITION = "tenant-a"
 FILE_ID = "file-1"
@@ -257,10 +257,12 @@ async def _run_until_stopped(repo: _Fences) -> tuple[float, asyncio.Event]:
             stopped.set()
 
     started = asyncio.get_running_loop().time()
-    with pytest.raises(FileFenceLostError):
+    # A 503, not a lost fence: nothing else touched the file.
+    with pytest.raises(FileFenceUnavailableError) as caught:
         await asyncio.wait_for(
             FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work), timeout=5
         )
+    assert caught.value.status_code == 503
     return asyncio.get_running_loop().time() - started, stopped
 
 

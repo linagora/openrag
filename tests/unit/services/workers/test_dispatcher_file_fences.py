@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.models.catalog import COPY_CONTENT_CLAIM_TOKEN_PREFIX, DocumentStatus, FileFence, FileFenceKind
 from core.ports.file_fence_repo import FileFenceRepository
-from core.utils.exceptions import ConflictError, FileFenceLostError, ServiceUnavailableError
+from core.utils.exceptions import (
+    ConflictError,
+    FileFenceLostError,
+    FileFenceUnavailableError,
+    ServiceUnavailableError,
+)
 from services.workers.dispatcher import WorkerDispatcher
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
@@ -472,9 +477,9 @@ async def test_a_delete_that_fails_after_taking_the_fence_over_still_costs_the_u
 
 @pytest.mark.asyncio
 async def test_a_delete_survives_a_failed_fence_renewal(monkeypatch: pytest.MonkeyPatch) -> None:
-    import services.workers.dispatcher as module
+    import core.indexing.file_fences as fences_module
 
-    monkeypatch.setattr(module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
     fences = InMemoryFileFences()
     renewals = 0
 
@@ -501,9 +506,9 @@ async def test_a_delete_survives_a_failed_fence_renewal(monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_a_delete_whose_fence_was_lost_stops(monkeypatch: pytest.MonkeyPatch) -> None:
-    import services.workers.dispatcher as module
+    import core.indexing.file_fences as fences_module
 
-    monkeypatch.setattr(module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
     fences = InMemoryFileFences()
     fences.renew = AsyncMock(return_value=False)
     repo = _document_repo()
@@ -513,20 +518,21 @@ async def test_a_delete_whose_fence_was_lost_stops(monkeypatch: pytest.MonkeyPat
 
     repo.remove_file_from_partition.side_effect = slow_remove
 
-    with pytest.raises(RuntimeError, match="lease was lost"):
+    with pytest.raises(FileFenceLostError):
         await _dispatcher(fences, document_repo=repo).delete_file(FILE_ID, PARTITION)
+
+
+def _short_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 0.4 s Postgres lease renewed every 0.1 s: without a renewal the delete must stop by 0.3 s."""
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "FILE_FENCE_TTL_SECONDS", 0.4)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
 
 
 @pytest.mark.asyncio
 async def test_a_delete_that_cannot_renew_stops_before_its_lease_ends(monkeypatch: pytest.MonkeyPatch) -> None:
-    import core.indexing.file_fences as fences_module
-    import services.workers.dispatcher as module
-
-    # A 0.4 s lease renewed every 0.1 s: without a renewal the delete must stop by 0.3 s.
-    monkeypatch.setattr(module, "FILE_FENCE_TTL_SECONDS", 0.4)
-    monkeypatch.setattr(fences_module, "FILE_FENCE_TTL_SECONDS", 0.4)
-    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
-    monkeypatch.setattr(module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
+    _short_lease(monkeypatch)
     fences = InMemoryFileFences()
     fences.renew = AsyncMock(side_effect=ConnectionError("postgres unreachable"))
     repo = _document_repo()
@@ -537,11 +543,51 @@ async def test_a_delete_that_cannot_renew_stops_before_its_lease_ends(monkeypatc
     repo.remove_file_from_partition.side_effect = slow_remove
     started = asyncio.get_running_loop().time()
 
-    with pytest.raises(RuntimeError, match="lease was lost"):
+    # A 503: the database didn't answer, nothing else took the file.
+    with pytest.raises(FileFenceUnavailableError):
         await _dispatcher(fences, document_repo=repo).delete_file(FILE_ID, PARTITION)
 
     assert asyncio.get_running_loop().time() - started < 0.4
     assert fences.renew.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_a_slow_task_state_renewal_does_not_hold_up_the_postgres_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.dispatcher as module
+
+    _short_lease(monkeypatch)
+    monkeypatch.setattr(module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    fences = InMemoryFileFences()
+    renewals = 0
+
+    async def renew_once_failing(**kwargs) -> bool:
+        nonlocal renewals
+        renewals += 1
+        if renewals == 1:
+            raise ConnectionError("postgres blip")
+        return await InMemoryFileFences.renew(fences, **kwargs)
+
+    fences.renew = renew_once_failing
+    tsm = _task_state_manager()
+
+    async def slow_task_state_renewal(**_kwargs) -> bool:
+        await asyncio.sleep(1)
+        return True
+
+    tsm.renew_file_delete.remote = slow_task_state_renewal
+    repo = _document_repo()
+
+    async def slow_remove(**_kwargs) -> None:
+        await asyncio.sleep(1.5)
+
+    repo.remove_file_from_partition.side_effect = slow_remove
+
+    # The delete outlives the 0.4 s lease, and the task state renewal takes 1 s:
+    # only Postgres renewals that run on their own keep the fence.
+    await _dispatcher(fences, tsm=tsm, document_repo=repo).delete_file(FILE_ID, PARTITION)
+
+    assert renewals >= 3
+    repo.remove_file_from_partition.assert_awaited_once()
 
 
 # ── Metadata update ──────────────────────────────────────────────────
