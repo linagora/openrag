@@ -10,7 +10,7 @@ import pytest
 from core.models.catalog import FileFence, FileFenceKind
 from core.models.workspace import Workspace
 from core.ports.file_fence_repo import FileFenceRepository
-from core.utils.exceptions import AmbiguousWorkspaceError
+from core.utils.exceptions import AmbiguousWorkspaceError, ConflictError
 from services.orchestrators.workspace_service import WorkspaceService
 
 
@@ -561,13 +561,17 @@ async def test_an_orphan_another_delete_holds_is_reported_failed_after_the_wait(
     fences = _InMemoryFileFences()
     fences.hold("p", "fA", FileFenceKind.DELETE, "other-delete")
     vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
-    svc = _fenced_svc(fences, wrepo=FakeWorkspaceRepo(orphaned=["fA"]), vstore=vstore, wait_timeout=0)
+    wrepo = FakeWorkspaceRepo(orphaned=["fA"])
+    svc = _fenced_svc(fences, wrepo=wrepo, vstore=vstore, wait_timeout=0)
 
     out = await svc.delete_workspace("p", "w1")
 
     assert out["orphaned_files_failed"] == ["fA"]
     assert vstore.holders == []
     assert fences.fences[("p", "fA")].holder_id == "other-delete"
+    # The claim delete_workspace took is given back: the file can be attached again.
+    assert wrepo.released == [("fA", "p")]
+    assert wrepo.failed == []
 
 
 @pytest.mark.asyncio
@@ -580,3 +584,41 @@ async def test_a_retried_cleanup_runs_under_the_delete_fence():
 
     assert vstore.holders[0].kind is FileFenceKind.DELETE
     assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_a_retry_of_a_file_not_eligible_leaves_an_indexing_fence_alone():
+    class NotEligible(FakeWorkspaceRepo):
+        async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+            return False
+
+    fences = _InMemoryFileFences()
+    fences.hold("p", "fA", FileFenceKind.INDEX, "task-running")
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+    svc = _fenced_svc(fences, wrepo=NotEligible(), vstore=vstore)
+
+    assert await svc.retry_failed_file_cleanup("fA", "p") is False
+
+    assert vstore.holders == []
+    assert fences.fences[("p", "fA")].holder_id == "task-running"
+    assert fences.fences[("p", "fA")].kind is FileFenceKind.INDEX
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_cannot_take_the_fence_leaves_the_cleanup_failed_for_the_next_retry(monkeypatch):
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "_WAIT_INTERVAL_SECONDS", 0)
+    fences = _InMemoryFileFences()
+    fences.hold("p", "fA", FileFenceKind.DELETE, "other-delete")
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+    wrepo = FakeWorkspaceRepo()
+    svc = _fenced_svc(fences, wrepo=wrepo, vstore=vstore, wait_timeout=0)
+
+    with pytest.raises(ConflictError):
+        await svc.retry_failed_file_cleanup("fA", "p")
+
+    assert vstore.holders == []
+    assert wrepo.retry_claimed == [("fA", "p")]
+    assert wrepo.failed == [("fA", "p")]
+    assert fences.fences[("p", "fA")].holder_id == "other-delete"

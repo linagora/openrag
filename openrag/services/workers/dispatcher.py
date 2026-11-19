@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import traceback
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
@@ -12,6 +13,7 @@ from core.indexing.file_fences import FileFences, indexing_in_progress
 from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
     COPY_CONTENT_CLAIM_TOKEN_PREFIX,
+    FILE_FENCE_TTL_SECONDS,
     INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
@@ -21,12 +23,12 @@ from core.models.catalog import (
     IndexationJob,
     reconcile_task_state,
 )
-from core.observability.file_fence_metrics import record_file_fence_renewal_failure
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
 from core.utils.exceptions import (
     ConflictError,
     DocumentNotFoundError,
+    FileFenceLostError,
     ServiceUnavailableError,
     mark_indexing_worker_may_be_running,
 )
@@ -284,8 +286,13 @@ class WorkerDispatcher(IndexingDispatcher):
         remote = _remote_actor_method(self._tsm, "renew_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose renewable file delete fencing")
+        # The Postgres fence was taken just before this loop starts.
+        confirmed_until = monotonic() + FILE_FENCE_TTL_SECONDS
         while True:
-            await asyncio.sleep(_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS)
+            delay = _FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS
+            if self._file_fences.enabled:
+                delay = min(delay, self._file_fences.next_renewal_in(confirmed_until))
+            await asyncio.sleep(delay)
             renewed = await retry_idempotent_ray_actor_method(
                 lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
                 recovery_timeout=self._timeout,
@@ -294,16 +301,18 @@ class WorkerDispatcher(IndexingDispatcher):
             if renewed is not True:
                 raise RuntimeError("File delete fence lease was lost during cleanup")
             if self._file_fences.enabled:
+                # Stops the delete one round before its lease could expire unrenewed:
+                # an upload that took the expired fence would lose the vectors it stores.
                 try:
-                    still_held = await self._file_fences.renew(partition=partition, file_id=file_id, holder_id=fence_id)
-                except Exception as exc:  # noqa: BLE001 - the lease outlasts several missed rounds
-                    record_file_fence_renewal_failure(holder_kind=FileFenceKind.DELETE.value)
-                    logger.bind(partition=partition, file_id=file_id).warning(
-                        "Failed to renew the file fence; retrying", error=str(exc)
+                    confirmed_until = await self._file_fences.renew_before_expiry(
+                        partition=partition,
+                        file_id=file_id,
+                        holder_id=fence_id,
+                        holder_kind=FileFenceKind.DELETE,
+                        confirmed_until=confirmed_until,
                     )
-                    continue
-                if not still_held:
-                    raise RuntimeError("File delete fence lease was lost during cleanup")
+                except FileFenceLostError as exc:
+                    raise RuntimeError("File delete fence lease was lost during cleanup") from exc
 
     async def _delete_with_renewable_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         delete_task = asyncio.create_task(self._delete_file_with_fence(file_id=file_id, partition=partition))
@@ -828,8 +837,9 @@ class WorkerDispatcher(IndexingDispatcher):
         fenced = await self._file_fences.acquire_for_indexing(
             partition=target_partition, file_id=target_file_id, holder_id=claim_token, operation="copy"
         )
-        try:
-            await self._copy_file(
+
+        def run_copy() -> Awaitable[None]:
+            return self._copy_file(
                 file_id,
                 metadata,
                 partition,
@@ -844,6 +854,19 @@ class WorkerDispatcher(IndexingDispatcher):
                 embedder_reference=embedder_reference,
                 embedder_fingerprint=embedder_fingerprint,
             )
+
+        try:
+            if fenced:
+                # Re-embedding into another vector field can outlast the lease.
+                await self._file_fences.run_holding(
+                    partition=target_partition,
+                    file_id=target_file_id,
+                    holder_id=claim_token,
+                    holder_kind=FileFenceKind.INDEX,
+                    work=run_copy,
+                )
+            else:
+                await run_copy()
         finally:
             if fenced:
                 await self._file_fences.release(
@@ -893,6 +916,10 @@ class WorkerDispatcher(IndexingDispatcher):
                 {"partition": partition, "file_id": file_id},
                 output_fields=["*"],
             )
+            # The source's record, embedder included, still describes vectors copied
+            # as they are. Read before the check below, so a replace finishing in
+            # between is refused instead of lending its record to the old vectors.
+            indexation_config = await self._document_repo.get_indexation_config(file_id, partition)
             await self._file_fences.check_unchanged(
                 partition=partition,
                 file_id=file_id,
@@ -918,8 +945,6 @@ class WorkerDispatcher(IndexingDispatcher):
                 entity[INDEXING_TASK_ID_METADATA_KEY] = claim_token
                 entities.append(entity)
 
-            # The source's record, embedder included, still describes vectors copied as they are.
-            indexation_config = await self._document_repo.get_indexation_config(file_id, partition)
             catalog_kwargs: dict[str, Any] = {}
             recorded_field = (indexation_config or {}).get("embedder_vector_field")
             if vector_field is not None and await self._move_to_vector_field(
@@ -935,8 +960,8 @@ class WorkerDispatcher(IndexingDispatcher):
                 catalog_kwargs["indexation_config"] = indexation_config
             if fenced:
                 catalog_kwargs["fence_holder_id"] = claim_token
-            await self._insert_entities(entities, protected_metadata=file_metadata)
             try:
+                await self._insert_entities(entities, protected_metadata=file_metadata)
                 await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
                     partition=target_partition,
@@ -949,7 +974,9 @@ class WorkerDispatcher(IndexingDispatcher):
                     chunk_count=len(entities),
                     **catalog_kwargs,
                 )
-            except Exception:
+            except (Exception, asyncio.CancelledError):
+                # Also a copy stopped because its target fence was lost: the
+                # vectors it inserted, all marked with its token, go with it.
                 await self._cleanup_submitted_vectors(
                     claim_token, metadata={"file_id": target_file_id}, partition=target_partition
                 )

@@ -247,6 +247,90 @@ async def test_run_holding_stops_the_work_once_the_fence_is_lost(monkeypatch: py
     assert stopped.is_set()
 
 
+def _short_lease(monkeypatch: pytest.MonkeyPatch) -> tuple[float, float]:
+    """A 0.4 s lease renewed every 0.1 s: the work must stop by 0.3 s without a renewal."""
+    monkeypatch.setattr(module, "FILE_FENCE_TTL_SECONDS", 0.4)
+    monkeypatch.setattr(module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
+    return 0.4, 0.1
+
+
+async def _run_until_stopped(repo: _Fences) -> tuple[float, asyncio.Event]:
+    stopped = asyncio.Event()
+
+    async def work():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(FileFenceLostError):
+        await asyncio.wait_for(
+            FileFences(repo).run_holding(
+                partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+            ),
+            timeout=5,
+        )
+    return asyncio.get_running_loop().time() - started, stopped
+
+
+@pytest.mark.asyncio
+async def test_run_holding_stops_the_work_a_round_before_an_unrenewed_lease_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ttl, interval = _short_lease(monkeypatch)
+    repo = _Fences()
+    attempts = 0
+
+    async def failing_renew(**_kwargs) -> bool:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("pg down")
+
+    repo.renew = failing_renew
+
+    elapsed, stopped = await _run_until_stopped(repo)
+
+    assert stopped.is_set()
+    # Failures are retried until the deadline, then the work stops before anyone could take the fence.
+    assert attempts >= 2
+    assert ttl - interval - 0.05 <= elapsed < ttl
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_that_hangs_counts_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    ttl, _ = _short_lease(monkeypatch)
+    repo = _Fences()
+
+    async def hanging_renew(**_kwargs) -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    repo.renew = hanging_renew
+
+    elapsed, stopped = await _run_until_stopped(repo)
+
+    assert stopped.is_set()
+    assert elapsed < ttl
+
+
+@pytest.mark.asyncio
+async def test_a_successful_renewal_moves_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    ttl, interval = _short_lease(monkeypatch)
+    repo = _Fences()
+    repo.hold(FileFenceKind.METADATA, "m")
+
+    async def work():
+        await asyncio.sleep(ttl * 2)
+        return "done"
+
+    result = await FileFences(repo).run_holding(
+        partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+    )
+
+    assert result == "done"
+
+
 @pytest.mark.asyncio
 async def test_run_holding_passes_the_works_failure_through() -> None:
     async def work():
