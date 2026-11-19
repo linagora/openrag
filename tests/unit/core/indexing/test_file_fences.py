@@ -332,6 +332,34 @@ async def test_a_renewal_that_hangs_counts_as_failed(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_a_renewal_whose_cancellation_stalls_does_not_hold_the_work_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ttl, _ = _short_lease(monkeypatch)
+    repo = _Fences()
+    unwound = asyncio.Event()
+
+    async def stalling_renew(**_kwargs) -> bool:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # A database call whose cancellation takes longer than the lease.
+            await asyncio.sleep(ttl)
+            unwound.set()
+            raise
+        return True
+
+    repo.renew = stalling_renew
+
+    elapsed, stopped = await _run_until_stopped(repo)
+
+    assert stopped.is_set()
+    assert elapsed < ttl
+    # The abandoned renewal still finishes its cancellation on its own.
+    await asyncio.wait_for(unwound.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_a_successful_renewal_moves_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     ttl, interval = _short_lease(monkeypatch)
     repo = _Fences()

@@ -81,6 +81,12 @@ def changed_during_copy(file_id: str, partition: str) -> ConflictError:
     )
 
 
+def _retrieve_outcome(task: asyncio.Future[Any]) -> None:
+    """Read the outcome of a renewal nobody awaits any more, so asyncio does not log it as lost."""
+    if not task.cancelled():
+        task.exception()
+
+
 def busy(fence: FileFence) -> ConflictError:
     """The 409 for a file another operation holds."""
     if fence.kind is FileFenceKind.INDEX:
@@ -261,14 +267,24 @@ class FileFences:
         """
         attempted_at = monotonic()
         deadline = confirmed_until - FILE_FENCE_RENEW_INTERVAL_SECONDS
+        log = logger.bind(partition=partition, file_id=file_id)
+        renewal = asyncio.ensure_future(self.renew(partition=partition, file_id=file_id, holder_id=holder_id))
         try:
-            # A renewal that hangs is a failed one: it must not carry the work past the deadline.
-            held = await asyncio.wait_for(
-                self.renew(partition=partition, file_id=file_id, holder_id=holder_id),
-                timeout=max(deadline - attempted_at, 0),
-            )
+            # Not wait_for: at its timeout it waits for the cancelled call to
+            # unwind, and a cancellation that stalls would carry the work past
+            # the deadline. A renewal still running at the deadline is left to
+            # finish its cancellation on its own.
+            done, _ = await asyncio.wait({renewal}, timeout=max(deadline - attempted_at, 0))
+        finally:
+            if not renewal.done():
+                renewal.cancel()
+                renewal.add_done_callback(_retrieve_outcome)
+        if renewal not in done:
+            log.warning("The file fence renewal did not answer before its lease ends; stopping")
+            raise FileFenceUnavailableError(file_id, partition)
+        try:
+            held = renewal.result()
         except Exception as exc:  # noqa: BLE001 - retried at the next round, up to the deadline
-            log = logger.bind(partition=partition, file_id=file_id)
             if monotonic() >= deadline:
                 log.warning("Failed to renew the file fence before its lease ends; stopping", error=str(exc))
                 raise FileFenceUnavailableError(file_id, partition) from exc
