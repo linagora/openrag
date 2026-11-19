@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from core.utils.exceptions import ValidationError
+from core.utils.exceptions import ValidationError, mark_indexing_worker_may_be_running
 from services.orchestrators.mcp_service import MCPService, _download_name
 
 #: index_url verifies downloaded bytes against the URL extension; these
@@ -809,6 +809,35 @@ async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch
 
     assert downloaded_path is not None
     assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_index_url_keeps_the_download_when_a_worker_may_be_running(monkeypatch):
+    """As for an upload: a worker that may have started has not necessarily read
+    the file yet, and it deletes its own input once it settles."""
+    error = asyncio.CancelledError()
+    mark_indexing_worker_may_be_running(error)
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing(add_error=error))
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(_PDF_HEADER + b"submitted")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f2",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None and downloaded_path.exists()
 
 
 @pytest.mark.asyncio

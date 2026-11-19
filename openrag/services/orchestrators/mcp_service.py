@@ -40,7 +40,7 @@ from core.indexing.validators import (
 )
 from core.models.document import Document
 from core.utils.consts import is_internal_metadata_key, is_reserved_partition_name, strip_protected_metadata
-from core.utils.exceptions import ConflictError, ValidationError
+from core.utils.exceptions import ConflictError, ValidationError, indexing_worker_may_be_running
 from core.utils.filename import make_unique_filename, sanitize_filename
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -650,8 +650,11 @@ class MCPService:
                 code=exc.code,
                 **exc.extra,
             ) from exc
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
+        except BaseException as exc:
+            # As for an upload: a worker that may still be running has not
+            # necessarily read the file yet, and it deletes its own input.
+            if not indexing_worker_may_be_running(exc):
+                tmp_path.unlink(missing_ok=True)
             raise
         return {
             "partition": partition,
