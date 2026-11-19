@@ -258,6 +258,14 @@ class QuotaExceededError(OpenRAGError):
         super().__init__(message, code="QUOTA_EXCEEDED", status_code=429, **kwargs)
 
 
+class IndexingAdmissionError(OpenRAGError):
+    """Temporary ingestion saturation. Maps to HTTP 429 with Retry-After."""
+
+    def __init__(self, message: str, *, retry_after_seconds: int = 5, **kwargs):
+        self.retry_after_seconds = max(1, int(retry_after_seconds))
+        super().__init__(message, code="INDEXING_ADMISSION_FULL", status_code=429, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Infrastructure — service availability
 # ---------------------------------------------------------------------------

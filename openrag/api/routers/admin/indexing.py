@@ -11,7 +11,9 @@ guards whose exact non-bracketed ``{"detail": ...}`` body the legacy
 endpoints returned via ``HTTPException``.
 """
 
+import asyncio
 import json
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -25,6 +27,7 @@ from api.dependencies.auth import (
     require_task_owner,
 )
 from api.dependencies.files import (
+    max_upload_size_bytes,
     save_file_to_disk,
     save_file_to_disk_with_sha256,
     validate_file_format,
@@ -34,7 +37,13 @@ from api.dependencies.files import (
 from core.models.catalog import TERMINAL_TASK_STATES
 from core.models.stage_progress import StageProgressEventCursor
 from core.utils.error_summary import summarize_task_error
-from core.utils.exceptions import ConflictError, OpenRAGError, indexing_worker_may_be_running
+from core.utils.exceptions import (
+    ConflictError,
+    IndexingAdmissionError,
+    OpenRAGError,
+    ServiceUnavailableError,
+    indexing_worker_may_be_running,
+)
 from core.utils.filename import sanitize_filename
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
@@ -53,6 +62,70 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 
 logger = get_logger()
+_UPLOAD_ADMISSION_RENEW_INTERVAL_SECONDS = 60.0
+
+
+async def _renew_upload_admission_until_transferred(service, reservation_id: str) -> None:
+    while True:
+        await asyncio.sleep(_UPLOAD_ADMISSION_RENEW_INTERVAL_SECONDS)
+        if not await service.renew_upload_admission(reservation_id):
+            raise IndexingAdmissionError(
+                "The upload admission reservation expired or was cancelled. Please retry the upload.",
+                retry_after_seconds=5,
+            )
+
+
+async def _run_with_upload_admission(service, reservation_id: str, operation: Awaitable[Any]) -> Any:
+    """Renew a reservation while saving and queuing a potentially slow upload."""
+    operation_task = asyncio.create_task(operation)
+    renewal_task = asyncio.create_task(_renew_upload_admission_until_transferred(service, reservation_id))
+    try:
+        done, _ = await asyncio.wait({operation_task, renewal_task}, return_when=asyncio.FIRST_COMPLETED)
+        if operation_task in done:
+            return await operation_task
+
+        renewal_error = renewal_task.exception()
+        operation_task.cancel()
+        await asyncio.gather(operation_task, return_exceptions=True)
+        if renewal_error is not None:
+            raise renewal_error
+        raise IndexingAdmissionError(
+            "The upload admission reservation could not be renewed. Please retry the upload.",
+            retry_after_seconds=5,
+        )
+    finally:
+        for task in (operation_task, renewal_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(operation_task, renewal_task, return_exceptions=True)
+
+
+def _uploaded_file_size_bytes(file: UploadFile) -> int:
+    size = getattr(file, "size", None)
+    if isinstance(size, int) and size >= 0:
+        return size
+    try:
+        original_position = file.file.tell()
+        file.file.seek(0, 2)
+        size = file.file.tell()
+        file.file.seek(original_position)
+    except (OSError, AttributeError) as exc:
+        raise ServiceUnavailableError(
+            "Could not determine the uploaded file size for indexing admission.",
+            code="INDEXING_ADMISSION_SIZE_UNAVAILABLE",
+        ) from exc
+    return max(0, int(size))
+
+
+def _validate_upload_limit_within_admission(config) -> None:
+    """Keep legacy queue callers' maximum file size within the shared byte cap."""
+    max_upload_bytes = max_upload_size_bytes()
+    max_admitted_bytes = config.ray.indexer.max_admitted_bytes
+    if max_upload_bytes <= 0 or max_upload_bytes > max_admitted_bytes:
+        raise ServiceUnavailableError(
+            "MAX_UPLOAD_SIZE_MB must be finite and no larger than RAY_MAX_ADMITTED_BYTES.",
+            code="INDEXING_ADMISSION_CONFIG_INVALID",
+        )
 
 
 def _validate_callback_url(callback_url: str | None, config) -> None:
@@ -207,7 +280,18 @@ Returns 201 Created with a task status URL for tracking indexing progress.
   admin, the callers the task-status route serves.
 - `DOCUMENT_CONTENT_EXISTS` — content deduplication matched an existing file
   (`extra.existing_file_id`).
+
+**Admission control:**
+- `429` with `INDEXING_ADMISSION_FULL` means the shared active-task or upload-byte
+  budget is full. Retry after the number of seconds in the `Retry-After` header.
+- `429` with `QUOTA_EXCEEDED` means the caller reached their file quota.
+- `413` means this file exceeds the configured aggregate upload-byte budget.
 """,
+    responses={
+        413: {"description": "The file exceeds the configured indexing admission byte limit."},
+        429: {"description": "Admission saturation includes `Retry-After`; file quota errors use `QUOTA_EXCEEDED`."},
+        503: {"description": "The upload-size ceiling exceeds the shared indexing admission byte budget."},
+    },
 )
 async def add_file(
     request: Request,
@@ -258,67 +342,77 @@ async def add_file(
 
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    try:
-        if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
-            saved_upload = await save_file_to_disk_with_sha256(
-                file,
-                Path(config.paths.data_dir),
-                with_random_prefix=True,
-                mimetype=metadata.get("mimetype"),
+    _validate_upload_limit_within_admission(config)
+    reservation_id = await service.reserve_upload_admission(
+        file_id=file_id,
+        partition=partition,
+        admitted_bytes=_uploaded_file_size_bytes(file),
+    )
+
+    async def save_and_queue() -> str:
+        try:
+            if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
+                saved_upload = await save_file_to_disk_with_sha256(
+                    file,
+                    Path(config.paths.data_dir),
+                    with_random_prefix=True,
+                    mimetype=metadata.get("mimetype"),
+                )
+                file_path = saved_upload.path
+                content_sha256 = saved_upload.sha256
+            else:
+                file_path = await save_file_to_disk(
+                    file,
+                    Path(config.paths.data_dir),
+                    with_random_prefix=True,
+                    mimetype=metadata.get("mimetype"),
+                )
+                content_sha256 = None
+        except BaseException as exc:
+            if isinstance(exc, OpenRAGError):
+                # Preserve domain status codes such as 413 and 400.
+                raise
+            if not isinstance(exc, Exception):
+                raise
+            logger.exception("Failed to save file to disk.", error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save uploaded file.",
             )
-            file_path = saved_upload.path
-            content_sha256 = saved_upload.sha256
-        else:
-            file_path = await save_file_to_disk(
-                file,
-                Path(config.paths.data_dir),
-                with_random_prefix=True,
-                mimetype=metadata.get("mimetype"),
+
+        try:
+            return await service.add_file(
+                file_path=str(file_path),
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                sanitized_filename=file.filename,
+                original_filename=original_filename,
+                user=user,
+                workspace_ids=parsed_workspace_ids,
+                content_sha256=content_sha256,
+                callback_url=callback_url,
+                callback_token=callback_token,
+                admission_reservation_id=reservation_id,
             )
-            content_sha256 = None
-    except OpenRAGError:
-        # Domain errors (e.g. 413 too-large, 400 bad filename) carry their own
-        # HTTP status; let the OpenRAGError handler map them instead of masking
-        # the upload rejection as a 500.
-        raise
-    except Exception as e:
-        # Log the full error server-side; return a generic message so we don't
-        # leak filesystem paths or internals to the client.
-        logger.exception("Failed to save file to disk.", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save uploaded file.",
-        )
+        except BaseException as exc:
+            # An unknown submission may still be using this file; its worker owns cleanup.
+            if not indexing_worker_may_be_running(exc):
+                file_path.unlink(missing_ok=True)
+            await _point_conflict_at_running_task(
+                exc,
+                request,
+                config,
+                user=user,
+                job_service=job_service,
+                auth_service=auth_service,
+            )
+            raise
 
     try:
-        task_id = await service.add_file(
-            file_path=str(file_path),
-            file_id=file_id,
-            partition=partition,
-            metadata=metadata,
-            sanitized_filename=file.filename,
-            original_filename=original_filename,
-            user=user,
-            workspace_ids=parsed_workspace_ids,
-            content_sha256=content_sha256,
-            callback_url=callback_url,
-            callback_token=callback_token,
-        )
-    except BaseException as exc:
-        # A submission whose outcome is unknown may have left a worker running
-        # that has not read the file yet; deleting it would fail an indexing
-        # run that could still succeed. The worker cleans up its own input.
-        if not indexing_worker_may_be_running(exc):
-            file_path.unlink(missing_ok=True)
-        await _point_conflict_at_running_task(
-            exc,
-            request,
-            config,
-            user=user,
-            job_service=job_service,
-            auth_service=auth_service,
-        )
-        raise
+        task_id = await _run_with_upload_admission(service, reservation_id, save_and_queue())
+    finally:
+        await service.release_upload_admission(reservation_id)
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -393,6 +487,11 @@ JSON string containing file metadata. Example:
 **Response:**
 Returns 202 Accepted with a task status URL for tracking indexing progress.
 """,
+    responses={
+        413: {"description": "The file exceeds the configured indexing admission byte limit."},
+        429: {"description": "Admission saturation includes `Retry-After`; file quota errors use `QUOTA_EXCEEDED`."},
+        503: {"description": "The upload-size ceiling exceeds the shared indexing admission byte budget."},
+    },
 )
 async def put_file(
     request: Request,
@@ -425,54 +524,69 @@ async def put_file(
     # duplicates behind (recoverable; #658/#660 reconciliation covers that).
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    try:
-        if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
-            saved_upload = await save_file_to_disk_with_sha256(
-                file,
-                Path(config.paths.data_dir),
-                with_random_prefix=True,
-                mimetype=metadata.get("mimetype"),
+    _validate_upload_limit_within_admission(config)
+    reservation_id = await service.reserve_upload_admission(
+        file_id=file_id,
+        partition=partition,
+        admitted_bytes=_uploaded_file_size_bytes(file),
+        replace=True,
+    )
+
+    async def save_and_queue() -> str:
+        try:
+            if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
+                saved_upload = await save_file_to_disk_with_sha256(
+                    file,
+                    Path(config.paths.data_dir),
+                    with_random_prefix=True,
+                    mimetype=metadata.get("mimetype"),
+                )
+                file_path = saved_upload.path
+                content_sha256 = saved_upload.sha256
+            else:
+                file_path = await save_file_to_disk(
+                    file,
+                    Path(config.paths.data_dir),
+                    with_random_prefix=True,
+                    mimetype=metadata.get("mimetype"),
+                )
+                content_sha256 = None
+        except BaseException as exc:
+            if isinstance(exc, OpenRAGError):
+                raise
+            if not isinstance(exc, Exception):
+                raise
+            logger.exception("Failed to save file to disk.", error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save uploaded file.",
             )
-            file_path = saved_upload.path
-            content_sha256 = saved_upload.sha256
-        else:
-            file_path = await save_file_to_disk(
-                file,
-                Path(config.paths.data_dir),
-                with_random_prefix=True,
-                mimetype=metadata.get("mimetype"),
+
+        try:
+            return await service.add_file(
+                file_path=str(file_path),
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                sanitized_filename=file.filename,
+                original_filename=original_filename,
+                user=user,
+                replace=True,
+                content_sha256=content_sha256,
+                callback_url=callback_url,
+                callback_token=callback_token,
+                admission_reservation_id=reservation_id,
             )
-            content_sha256 = None
-    except OpenRAGError:
-        raise
-    except Exception as e:
-        logger.exception("Failed to save file to disk.", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save uploaded file.",
-        )
+        except BaseException as exc:
+            # An unknown submission may still be using this file; its worker owns cleanup.
+            if not indexing_worker_may_be_running(exc):
+                file_path.unlink(missing_ok=True)
+            raise
 
     try:
-        task_id = await service.add_file(
-            file_path=str(file_path),
-            file_id=file_id,
-            partition=partition,
-            metadata=metadata,
-            sanitized_filename=file.filename,
-            original_filename=original_filename,
-            user=user,
-            replace=True,
-            content_sha256=content_sha256,
-            callback_url=callback_url,
-            callback_token=callback_token,
-        )
-    except BaseException as exc:
-        # A submission whose outcome is unknown may have left a worker running
-        # that has not read the file yet; deleting it would fail an indexing
-        # run that could still succeed. The worker cleans up its own input.
-        if not indexing_worker_may_be_running(exc):
-            file_path.unlink(missing_ok=True)
-        raise
+        task_id = await _run_with_upload_admission(service, reservation_id, save_and_queue())
+    finally:
+        await service.release_upload_admission(reservation_id)
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,

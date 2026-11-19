@@ -32,6 +32,7 @@ from core.utils.exceptions import (
     ConflictError,
     EmbeddingError,
     EmbeddingResponseError,
+    IndexingAdmissionError,
     InferenceError,
     InferenceTimeoutError,
     LLMParsingError,
@@ -169,7 +170,10 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError) -> JSON
         # Copy so we never mutate the exception's own ``extra`` dict —
         # the same instance may be re-raised / logged elsewhere.
         body["extra"] = {**body.get("extra", {}), "request_id": request_id}
-    return JSONResponse(status_code=status_code, content=body)
+    headers = {}
+    if isinstance(exc, IndexingAdmissionError):
+        headers["Retry-After"] = str(exc.retry_after_seconds)
+    return JSONResponse(status_code=status_code, content=body, headers=headers)
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

@@ -39,6 +39,11 @@ def _max_upload_size_bytes() -> int:
     return int(os.getenv("MAX_UPLOAD_SIZE_MB", "1024")) * 1024 * 1024
 
 
+def max_upload_size_bytes() -> int:
+    """Public accessor for the active upload ceiling used by admission checks."""
+    return _max_upload_size_bytes()
+
+
 async def validate_file_id(file_id: str):
     return core_validators.validate_file_id(file_id, FORBIDDEN_CHARS_IN_FILE_ID)
 
@@ -145,7 +150,7 @@ async def _save_file_to_disk(
     except ValueError:
         raise ValidationError("Uploaded filename resolves outside destination directory.", status_code=400)
 
-    max_bytes = _max_upload_size_bytes()
+    max_bytes = max_upload_size_bytes()
     total = 0
     hasher = hashlib.sha256() if calculate_sha256 else None
     try:

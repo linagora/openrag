@@ -63,15 +63,19 @@ def __check_file_exists(base_url, partition, file_name, headers):
 
 def __is_indexing_capacity_full(response):
     """Return whether the API response asks the uploader to retry capacity pressure."""
-    if response.status_code != 503:
+    if response.status_code not in (429, 503):
         return False
     try:
         body = response.json()
     except ValueError:
         return False
     detail = body.get("detail") if isinstance(body, dict) else None
-    # Keep matching the legacy API code while it covers active queue capacity too.
-    return isinstance(detail, str) and detail.startswith("[INDEXING_OUTCOME_BACKLOG]")
+    if not isinstance(detail, str):
+        return False
+    if response.status_code == 429:
+        return detail.startswith("[INDEXING_ADMISSION_FULL]")
+    # Preserve retries for the separate durable job-outcome safety cap.
+    return detail.startswith("[INDEXING_OUTCOME_BACKLOG]")
 
 
 def __upload_with_indexing_capacity_retry(url, filename, file_ext, file_handle, headers):
@@ -96,10 +100,13 @@ def __upload_with_indexing_capacity_retry(url, filename, file_ext, file_handle, 
                 f"{_MAX_INDEXING_CAPACITY_RETRIES} retries"
             )
             raise SystemExit(1)
-        delay = min(
-            _INITIAL_INDEXING_CAPACITY_RETRY_SECONDS * (2**retry),
-            _MAX_INDEXING_CAPACITY_RETRY_SECONDS,
-        )
+        retry_after = getattr(response, "headers", {}).get("Retry-After")
+        try:
+            retry_after_seconds = max(float(retry_after), 0.0)
+        except (TypeError, ValueError):
+            retry_after_seconds = 0.0
+        backoff_seconds = _INITIAL_INDEXING_CAPACITY_RETRY_SECONDS * (2**retry)
+        delay = min(max(backoff_seconds, retry_after_seconds), _MAX_INDEXING_CAPACITY_RETRY_SECONDS)
         logger.warning(f"Indexing capacity is full; retrying {filename} in {delay:g}s")
         time.sleep(delay)
     return None

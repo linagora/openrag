@@ -67,6 +67,12 @@ class RayIndexerConfig(ConfigMixin):
     # Indexing capacity = pool_size (worker actors) × max_tasks_per_worker (files per worker).
     pool_size: int = Field(default=1, ge=1)
     max_tasks_per_worker: int = Field(default=50, ge=1)
+    # When unset, admission is limited to the worker pool's execution capacity.
+    max_admitted_tasks: int | None = Field(default=None, ge=1)
+    # Aggregate raw file bytes reserved by active indexing tasks. Keep this at
+    # least as large as the API's finite MAX_UPLOAD_SIZE_MB ceiling, and drain
+    # old API replicas before lowering it.
+    max_admitted_bytes: int = Field(default=1_073_741_824, ge=1)
 
 
 class RayServeConfig(ConfigMixin):

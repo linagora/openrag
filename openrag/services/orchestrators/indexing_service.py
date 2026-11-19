@@ -22,7 +22,14 @@ from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
 from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
-from core.utils.exceptions import AuthError, ConfigError, DocumentNotFoundError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import (
+    AuthError,
+    ConfigError,
+    DocumentNotFoundError,
+    PartitionNotFoundError,
+    ServiceUnavailableError,
+    ValidationError,
+)
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -291,6 +298,45 @@ class IndexingService:
         except Exception as exc:  # noqa: BLE001 - a stale-cache probe must not fail an upload
             logger.warning(f"Preset cache staleness check failed; using the cached config: {exc}")
 
+    async def reserve_upload_admission(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        admitted_bytes: int,
+        replace: bool = False,
+    ) -> str:
+        reserve = getattr(self._dispatcher, "reserve_upload_admission", None)
+        if not callable(reserve):
+            raise ServiceUnavailableError(
+                "The indexing service cannot reserve upload capacity before saving the file.",
+                code="INDEXING_ADMISSION_UNAVAILABLE",
+            )
+        return await reserve(
+            file_id=file_id,
+            partition=partition,
+            admitted_bytes=admitted_bytes,
+            replace=replace,
+        )
+
+    async def release_upload_admission(self, task_id: str) -> None:
+        release = getattr(self._dispatcher, "release_upload_admission", None)
+        if not callable(release):
+            return
+        try:
+            await release(task_id)
+        except Exception as exc:  # noqa: BLE001 - a failed release expires safely in TaskStateManager
+            logger.warning(f"Could not release an upload admission reservation: {exc}")
+
+    async def renew_upload_admission(self, task_id: str) -> bool:
+        renew = getattr(self._dispatcher, "renew_upload_admission", None)
+        if not callable(renew):
+            raise ServiceUnavailableError(
+                "The indexing service cannot renew upload capacity reservations.",
+                code="INDEXING_ADMISSION_UNAVAILABLE",
+            )
+        return await renew(task_id)
+
     async def add_file(
         self,
         *,
@@ -306,6 +352,7 @@ class IndexingService:
         content_sha256: str | None = None,
         callback_url: str | None = None,
         callback_token: str | None = None,
+        admission_reservation_id: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
@@ -334,19 +381,25 @@ class IndexingService:
             require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
             indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
             legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
+            dispatch_kwargs: dict[str, Any] = {
+                "path": file_path,
+                "metadata": full_metadata,
+                "partition": partition,
+                "user": user,
+                "workspace_ids": workspace_ids,
+                "replace": replace,
+                "indexation_config": indexation_config,
+                "embedder_name": embedder_name,
+                "callback_url": callback_url,
+                "callback_token": callback_token,
+                "require_existing_partition": require_existing_partition,
+                "allow_legacy_require_existing_partition_retry": legacy_actor_preserves_partition_guard,
+            }
+            if admission_reservation_id is not None:
+                dispatch_kwargs["task_id"] = admission_reservation_id
+                dispatch_kwargs["require_upload_reservation"] = True
             return await self._dispatcher.dispatch_indexing(
-                path=file_path,
-                metadata=full_metadata,
-                partition=partition,
-                user=user,
-                workspace_ids=workspace_ids,
-                replace=replace,
-                indexation_config=indexation_config,
-                embedder_name=embedder_name,
-                callback_url=callback_url,
-                callback_token=callback_token,
-                require_existing_partition=require_existing_partition,
-                allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+                **dispatch_kwargs,
             )
 
     async def delete_file(self, file_id: str, partition: str) -> None:

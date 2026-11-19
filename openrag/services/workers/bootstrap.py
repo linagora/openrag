@@ -127,10 +127,16 @@ def _supports_task_state_recovery(actor) -> bool:
         # The Boolean contract cannot distinguish a cancellation from actor
         # eviction after the catalog commit, so those actors are incompatible.
         and getattr(actor, "supports_explicit_completion_outcomes", None) is not None
+        # The queue method now reserves active task count and source bytes;
+        # an older detached actor would keep accepting the former 2,000 cap.
+        and getattr(actor, "supports_bounded_ingestion_admission", None) is not None
         # Admission is fenced against a task already indexing the same file at
         # queue time. The dispatcher degrades to the unfenced method against an
         # older actor, so keeping one would silently readmit duplicate uploads.
         and getattr(actor, "set_queued_details_v2", None) is not None
+        # Upload reservations must stay live during slow request processing and
+        # queue transfer must prove the reservation still exists.
+        and getattr(actor, "renew_upload_admission", None) is not None
         # has_object_ref marks the release that reads the worker refs it holds;
         # an older actor drops them unread, and Ray prints each failed one as an
         # unhandled error (#1296).
