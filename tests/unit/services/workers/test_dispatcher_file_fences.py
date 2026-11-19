@@ -8,7 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from core.models.catalog import COPY_CONTENT_CLAIM_TOKEN_PREFIX, FileFence, FileFenceKind
+from core.models.catalog import COPY_CONTENT_CLAIM_TOKEN_PREFIX, DocumentStatus, FileFence, FileFenceKind
 from core.ports.file_fence_repo import FileFenceRepository
 from core.utils.exceptions import ConflictError, FileFenceLostError, ServiceUnavailableError
 from services.workers.dispatcher import WorkerDispatcher
@@ -280,6 +280,34 @@ async def test_a_submission_whose_outcome_is_unknown_keeps_the_fence() -> None:
         await _upload(_dispatcher(fences, pool=pool))
 
     assert fences.holder() is not None
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_during_the_queued_job_write_releases_the_fence() -> None:
+    fences = InMemoryFileFences()
+    repo = _document_repo()
+    pool = MagicMock()
+    pool.submit = _remote_mock([object()])
+    dispatcher = _dispatcher(fences, document_repo=repo, pool=pool)
+    writing = asyncio.Event()
+
+    async def upsert_job(job) -> None:
+        if job.status is DocumentStatus.QUEUED:
+            writing.set()
+            await asyncio.Event().wait()
+
+    dispatcher._job_repo = MagicMock()
+    dispatcher._job_repo.upsert_job = AsyncMock(side_effect=upsert_job)
+    upload = asyncio.ensure_future(_upload(dispatcher, content_sha256="abc"))
+    await asyncio.wait_for(writing.wait(), timeout=5)
+    upload.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+
+    assert fences.holder() is None
+    repo.release_content_sha256_claim.assert_awaited_once()
+    pool.submit.remote.assert_not_awaited()
 
 
 # ── Delete ───────────────────────────────────────────────────────────

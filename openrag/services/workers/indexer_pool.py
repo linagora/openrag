@@ -540,8 +540,7 @@ class IndexerWorkerActor:
         # a renewal answered False cancels this task.
         working = True
         fence_file_id = str(metadata.get("file_id") or "")
-        # The workspace attachment below is the file's last write: the fence is
-        # released after it, not by the worker when it reports the outcome.
+        # The workspace attachment below is the file's last write.
         attachment_follows = bool(workspace_ids) and not replace and bool(fence_file_id)
         fence_renewal: asyncio.Task | None = None
         lease_started = asyncio.Event()
@@ -621,6 +620,65 @@ class IndexerWorkerActor:
                     callback_token=callback_token,
                 )
                 raise
+            file_id = metadata.get("file_id", "")
+
+            async def attach_to_workspaces() -> None:
+                results = await asyncio.gather(
+                    *(
+                        self._catalog_store.workspace_repo.add_files_to_workspace(partition, workspace_id, [file_id])
+                        for workspace_id in workspace_ids
+                    ),
+                    return_exceptions=True,
+                )
+                cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
+                if cancelled is not None:
+                    raise cancelled
+                failures = [
+                    (workspace_id, result)
+                    for workspace_id, result in zip(workspace_ids, results, strict=True)
+                    if isinstance(result, Exception) or result
+                ]
+                if not failures:
+                    await self._catalog_store.document_repo.finalize_file_workspace_ownership(
+                        file_id, partition, workspace_ids
+                    )
+                    return
+                protected = await self._catalog_store.document_repo.mark_file_independently_indexed(file_id, partition)
+                if not protected and not await self._worker.holds_file_fence(
+                    partition=partition, file_id=file_id, holder_id=fence_holder_id
+                ):
+                    # A delete took the file over once it was indexed:
+                    # there is nothing left to attach or protect.
+                    self._logger.bind(file_id=file_id, partition=partition, task_id=task_id).info(
+                        "File deleted during its workspace attachment."
+                    )
+                    return
+                if not protected:
+                    raise RuntimeError(
+                        f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
+                    )
+                for workspace_id, error in failures:
+                    # Bound, not passed to warning(): keyword arguments make loguru
+                    # str.format the message, which holds the exception text.
+                    reason = (
+                        {"error_reason": failure_reason_from_exception(error)} if isinstance(error, Exception) else {}
+                    )
+                    self._logger.bind(
+                        file_id=file_id,
+                        partition=partition,
+                        task_id=task_id,
+                        workspace_id=workspace_id,
+                        **reason,
+                    ).warning(
+                        f"Failed to attach indexed file to workspace '{workspace_id}'; "
+                        f"file retained independently: {error}"
+                    )
+
+            # With a Postgres fence the attachment runs inside the worker's run,
+            # before the fence is released and the task reported COMPLETED: a
+            # client that reacts to the outcome must find the file fully written
+            # and free. Without one, the run is reported first, as before.
+            attach_inside_run = attachment_follows and bool(fence_holder_id)
             token = self._active_indexation_config.set(indexation_config)
             try:
                 result = await self._worker.process_file(
@@ -639,80 +697,25 @@ class IndexerWorkerActor:
                     resolved_prompts=resolved_prompts,
                     on_failure_report=stop_lease_interrupting,
                     fence_holder_id=fence_holder_id,
-                    release_fence_on_success=not attachment_follows,
+                    before_success=attach_to_workspaces if attach_inside_run else None,
                 )
             finally:
                 self._active_indexation_config.reset(token)
-            file_id = metadata.get("file_id", "")
-            try:
-                if attachment_follows:
-                    results = await asyncio.gather(
-                        *(
-                            self._catalog_store.workspace_repo.add_files_to_workspace(
-                                partition, workspace_id, [file_id]
-                            )
-                            for workspace_id in workspace_ids
-                        ),
-                        return_exceptions=True,
-                    )
-                    cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
-                    if cancelled is not None:
-                        raise cancelled
-                    failures = [
-                        (workspace_id, result)
-                        for workspace_id, result in zip(workspace_ids, results, strict=True)
-                        if isinstance(result, Exception) or result
-                    ]
-                    if failures:
-                        protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
-                            file_id, partition
-                        )
-                        if not protected and not await self._worker.holds_file_fence(
-                            partition=partition, file_id=file_id, holder_id=fence_holder_id
-                        ):
-                            # A delete took the file over once it was indexed:
-                            # there is nothing left to attach or protect.
-                            self._logger.bind(file_id=file_id, partition=partition, task_id=task_id).info(
-                                "File deleted during its workspace attachment."
-                            )
-                            return result
-                        if not protected:
-                            raise RuntimeError(
-                                f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
-                            )
-                        for workspace_id, error in failures:
-                            # Bound, not passed to warning(): keyword arguments make loguru
-                            # str.format the message, which holds the exception text.
-                            reason = (
-                                {"error_reason": failure_reason_from_exception(error)}
-                                if isinstance(error, Exception)
-                                else {}
-                            )
-                            self._logger.bind(
-                                file_id=file_id,
-                                partition=partition,
-                                task_id=task_id,
-                                workspace_id=workspace_id,
-                                **reason,
-                            ).warning(
-                                f"Failed to attach indexed file to workspace '{workspace_id}'; "
-                                f"file retained independently: {error}"
-                            )
-                    else:
-                        await self._catalog_store.document_repo.finalize_file_workspace_ownership(
-                            file_id, partition, workspace_ids
-                        )
-            except Exception as exc:
-                # The file is already indexed and reported COMPLETED by the worker.
-                self._logger.bind(file_id=file_id, partition=partition, task_id=task_id).opt(exception=exc).error(
-                    "Workspace attachment failed after indexing.", error_reason=failure_reason_from_exception(exc)
-                )
-                raise
-            finally:
-                if attachment_follows:
+                if attach_inside_run:
+                    # The worker releases after the attachment, but not when a
+                    # cancellation stops it there. Releasing twice is harmless.
                     await self._worker.release_file_fence(
                         partition=partition, file_id=fence_file_id, holder_id=fence_holder_id
                     )
+            if attachment_follows and not attach_inside_run:
+                try:
+                    await attach_to_workspaces()
+                except Exception as exc:
+                    # The file is already indexed and reported COMPLETED by the worker.
+                    self._logger.bind(file_id=file_id, partition=partition, task_id=task_id).opt(exception=exc).error(
+                        "Workspace attachment failed after indexing.", error_reason=failure_reason_from_exception(exc)
+                    )
+                    raise
             return result
         except asyncio.CancelledError:
             # The lease stopped this worker because the task state stopped

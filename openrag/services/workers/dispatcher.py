@@ -472,18 +472,19 @@ class WorkerDispatcher(IndexingDispatcher):
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
 
-        await self._record_job(
-            task_id,
-            status=DocumentStatus.QUEUED,
-            partition=partition,
-            file_id=file_id,
-            filename=task_details["metadata"].get("filename"),
-            user_id=task_details["user_id"],
-        )
-
         task: Any | None = None
         submission_started = False
         try:
+            # Inside the try: _record_job swallows errors but not a cancellation,
+            # which would otherwise leave the fence and the content claim held.
+            await self._record_job(
+                task_id,
+                status=DocumentStatus.QUEUED,
+                partition=partition,
+                file_id=file_id,
+                filename=task_details["metadata"].get("filename"),
+                user_id=task_details["user_id"],
+            )
             worker_metadata = dict(metadata)
             if claimed_content:
                 worker_metadata[CONTENT_CLAIM_TOKEN_METADATA_KEY] = content_claim_token

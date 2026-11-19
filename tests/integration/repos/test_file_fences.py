@@ -37,6 +37,18 @@ async def _job(store, status: DocumentStatus) -> str:
     return job_id
 
 
+async def _wait_until_blocked_by(store, conn, timeout=5.0) -> None:
+    """Return once another backend waits on a lock that *conn* holds."""
+    blocker = await conn.fetchval("SELECT pg_backend_pid()")
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not await store.pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))", blocker
+    ):
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"nothing blocked on backend {blocker} within {timeout}s")
+        await asyncio.sleep(0.02)
+
+
 async def _file_row(store) -> bool:
     return bool(
         await store.pool.fetchval(
@@ -169,7 +181,7 @@ async def test_a_refusal_names_the_holder_that_won_a_concurrent_take_over(store)
             FILE_ID,
         )
         refused = asyncio.ensure_future(_acquire(store, "task-b"))
-        await asyncio.sleep(0.3)
+        await _wait_until_blocked_by(store, conn)
         assert not refused.done()
         await transaction.commit()
     finally:
@@ -340,7 +352,7 @@ async def test_a_fenced_commit_during_a_partition_delete_waits_instead_of_deadlo
         commit = asyncio.ensure_future(
             store.document_repo.add_file_to_partition(file_id=FILE_ID, partition=PARTITION, fence_holder_id="task-a")
         )
-        await asyncio.sleep(0.3)
+        await _wait_until_blocked_by(store, conn)
         await conn.execute("DELETE FROM partitions WHERE partition = $1", PARTITION)
         await transaction.commit()
     finally:
@@ -368,7 +380,7 @@ async def test_a_take_over_waits_for_a_commit_in_flight(store):
                 ttl_seconds=120,
             )
         )
-        await asyncio.sleep(0.3)
+        await _wait_until_blocked_by(store, conn)
         assert not take_over.done()
         await transaction.commit()
     finally:

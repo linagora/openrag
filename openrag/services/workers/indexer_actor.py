@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -98,10 +98,10 @@ class IndexerWorker:
     async def release_file_fence(self, *, partition: str, file_id: str, holder_id: str | None) -> None:
         """Free the file after its last write (#1430).
 
-        On success that is before the outcome is reported, so a client that sees
-        the task settle may replace the file at once; when a workspace
-        attachment follows, the worker actor releases after it instead. The
-        pool's own release, when the task settles, is a backstop.
+        On success that is before the outcome is reported, and after the
+        workspace attachment when one follows, so a client that sees the task
+        settle may replace the file at once. The pool's own release, when the
+        task settles, is a backstop.
         """
         if self._file_fence_repo is None or not holder_id or not file_id:
             return
@@ -230,7 +230,7 @@ class IndexerWorker:
         resolved_prompts: dict[str, str] | None = None,
         on_failure_report: Callable[[], None] | None = None,
         fence_holder_id: str | None = None,
-        release_fence_on_success: bool = True,
+        before_success: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -247,9 +247,11 @@ class IndexerWorker:
 
         With *fence_holder_id*, the catalog write is refused unless this task
         still holds the file's fence (#1430); the failure path then removes the
-        vectors it stored. With *release_fence_on_success* False, a successful
-        run keeps the fence for the caller's own last writes (the workspace
-        attachment); a failed run always releases it.
+        vectors it stored. *before_success* runs the caller's own last writes
+        (the workspace attachment) after the catalog write and while the fence
+        is still held, so the fence is released, the task completed and the
+        callback sent only once the file is fully written. If it raises, the
+        run fails like any other.
         """
         file_id = metadata.get("file_id", "")
         log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
@@ -351,8 +353,9 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            if release_fence_on_success:
-                await self.release_file_fence(partition=partition, file_id=file_id, holder_id=fence_holder_id)
+            if before_success is not None:
+                await before_success()
+            await self.release_file_fence(partition=partition, file_id=file_id, holder_id=fence_holder_id)
             finish_stage_tracker_once()
             completion_outcome = await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),
