@@ -29,11 +29,13 @@ and deleted the ``components/auth/middleware.py`` shim.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import quote
 
@@ -42,7 +44,7 @@ from core.config.auth import AuthBypassConfig
 from core.utils.consts import DEFAULT_ADMIN_USER_ID
 from core.utils.logging import get_logger
 from fastapi import HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from limits import parse
 from limits.aio.storage import MemoryStorage
 from limits.aio.strategies import MovingWindowRateLimiter
@@ -208,7 +210,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self._get_auth_service = get_auth_service
         self._bypass_config = bypass_config or AuthBypassConfig()
         self._auth_failure_limiter = AuthFailureRateLimiter()
-        self._recently_authenticated_tokens: OrderedDict[bytes, float] = OrderedDict()
+        self._recently_authenticated_tokens: OrderedDict[tuple[str, bytes], float] = OrderedDict()
+        self._recent_auth_locks: dict[tuple[str, bytes], tuple[asyncio.Lock, int]] = {}
         # A bucket can fill near the end of one window; retain the last
         # successful token through the remaining lockout window too.
         self._recently_authenticated_token_ttl = 2 * self._auth_failure_limiter.window_seconds
@@ -232,34 +235,64 @@ class AuthMiddleware(BaseHTTPMiddleware):
     def _token_fingerprint(token: str) -> bytes:
         return hashlib.sha256(token.encode("utf-8")).digest()
 
-    def _has_recently_authenticated_token(self, token: str) -> bool:
-        fingerprint = self._token_fingerprint(token)
+    def _has_recently_authenticated_token(self, identity: str, token: str) -> bool:
+        cache_key = (identity, self._token_fingerprint(token))
         now = time.monotonic()
-        expires_at = self._recently_authenticated_tokens.get(fingerprint)
+        expires_at = self._recently_authenticated_tokens.get(cache_key)
         if expires_at is None:
             return False
         if expires_at <= now:
-            self._recently_authenticated_tokens.pop(fingerprint, None)
+            self._recently_authenticated_tokens.pop(cache_key, None)
             return False
-        self._recently_authenticated_tokens.move_to_end(fingerprint)
+        self._recently_authenticated_tokens.move_to_end(cache_key)
         return True
 
-    def _remember_authenticated_token(self, token: str) -> None:
-        fingerprint = self._token_fingerprint(token)
+    def _remember_authenticated_token(self, identity: str, token: str) -> None:
+        cache_key = (identity, self._token_fingerprint(token))
         now = time.monotonic()
         cache = self._recently_authenticated_tokens
 
-        for cached_fingerprint, expires_at in tuple(cache.items()):
+        for cached_key, expires_at in tuple(cache.items()):
             if expires_at <= now:
-                del cache[cached_fingerprint]
+                del cache[cached_key]
 
-        cache[fingerprint] = now + self._recently_authenticated_token_ttl
-        cache.move_to_end(fingerprint)
+        cache[cache_key] = now + self._recently_authenticated_token_ttl
+        cache.move_to_end(cache_key)
         while len(cache) > _RECENT_AUTHENTICATED_TOKEN_CACHE_MAX_ENTRIES:
             cache.popitem(last=False)
 
-    def _forget_authenticated_token(self, token: str) -> None:
-        self._recently_authenticated_tokens.pop(self._token_fingerprint(token), None)
+    def _forget_authenticated_token(self, identity: str, token: str) -> None:
+        self._recently_authenticated_tokens.pop((identity, self._token_fingerprint(token)), None)
+
+    @asynccontextmanager
+    async def _lock_recently_authenticated_tokens(
+        self, identity: str, credentials: tuple[str, ...]
+    ) -> AsyncIterator[None]:
+        keys = sorted({(identity, self._token_fingerprint(token)) for token in credentials})
+        entries: list[tuple[tuple[str, bytes], asyncio.Lock]] = []
+        acquired: list[asyncio.Lock] = []
+        try:
+            for key in keys:
+                current = self._recent_auth_locks.get(key)
+                lock, references = current if current is not None else (asyncio.Lock(), 0)
+                self._recent_auth_locks[key] = (lock, references + 1)
+                entries.append((key, lock))
+
+            for _, lock in entries:
+                await lock.acquire()
+                acquired.append(lock)
+            yield
+        finally:
+            for lock in reversed(acquired):
+                lock.release()
+            for key, lock in entries:
+                current = self._recent_auth_locks.get(key)
+                if current is None or current[0] is not lock:
+                    continue
+                if current[1] == 1:
+                    del self._recent_auth_locks[key]
+                else:
+                    self._recent_auth_locks[key] = (lock, current[1] - 1)
 
     def _resolve_auth_service(self, request: Request) -> tuple[Any, JSONResponse | None]:
         """Resolve the auth service, or the response to send when it is unavailable.
@@ -290,6 +323,115 @@ class AuthMiddleware(BaseHTTPMiddleware):
         except RuntimeError:
             logger.warning("Auth service unavailable", reason="service_unavailable", status=503, path=path)
             return None, JSONResponse(status_code=503, content={"detail": "Service unavailable"})
+
+    async def _authenticate_request(
+        self,
+        request: Request,
+        *,
+        path: str,
+        auth_mode: str,
+        oidc_gated: bool,
+        enc_key: str,
+        token: str | None,
+        cookie_token: str | None,
+        identity: str,
+    ) -> tuple[Any, Any, str | None, Any] | Response:
+        user = None
+        session = None
+        authenticated_credential = None
+        auth_service, unavailable = self._resolve_auth_service(request)
+        if unavailable is not None:
+            return unavailable
+
+        # --- 1) Cookie session (OIDC UI flow). Gated on oidc mode so the
+        #        legacy token-mode contract remains strictly Bearer-only —
+        #        a stray openrag_session cookie must not authenticate a
+        #        request when AUTH_MODE=token.
+        if cookie_token:
+            session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
+            if session is not None:
+                refreshed = await auth_service.refresh_session_if_needed(
+                    session=session,
+                    enc_key=enc_key,
+                )
+                if refreshed is None:
+                    # Refresh failed or session unusable → revoke and fall through.
+                    try:
+                        await auth_service.revoke_oidc_session_by_id_for_request(session["id"])
+                    except Exception as e:
+                        logger.bind(error=str(e)).warning("Failed to revoke invalid OIDC session")
+                    session = None
+                    self._forget_authenticated_token(identity, cookie_token)
+                else:
+                    session = refreshed
+                    user = await auth_service.get_user_for_request(session["user_id"])
+                    if user is None:
+                        self._forget_authenticated_token(identity, cookie_token)
+                    else:
+                        authenticated_credential = cookie_token
+            else:
+                self._forget_authenticated_token(identity, cookie_token)
+
+        # --- 2) Fallback: Bearer / ?token= (programmatic clients + internal
+        #        callers like Chainlit's header_auth_callback which forwards
+        #        the browser cookie value in the Authorization header).
+        if user is None:
+            if token is not None:
+                # In oidc mode, a Bearer may carry an OIDC session token (not
+                # a ``users.token`` hash). Try the session lookup first with
+                # the same lazy-refresh semantics as the cookie branch above.
+                if auth_mode == "oidc":
+                    session = await auth_service.get_oidc_session_by_token_for_request(token)
+                    if session is not None:
+                        refreshed = await auth_service.refresh_session_if_needed(
+                            session=session,
+                            enc_key=enc_key,
+                        )
+                        if refreshed is None:
+                            try:
+                                await auth_service.revoke_oidc_session_by_id_for_request(session["id"])
+                            except Exception as e:
+                                logger.bind(error=str(e)).warning("Failed to revoke invalid OIDC session (bearer path)")
+                            session = None
+                            self._forget_authenticated_token(identity, token)
+                        else:
+                            session = refreshed
+                            user = await auth_service.get_user_for_request(session["user_id"])
+                            if user is None:
+                                self._forget_authenticated_token(identity, token)
+                            else:
+                                authenticated_credential = token
+
+                if user is None:
+                    # Either token mode, or oidc mode with no matching session
+                    # — fall back to the long-lived ``users.token`` used by
+                    # programmatic clients (CI, scripts, service agents).
+                    user = await auth_service.get_user_by_token_for_request(token)
+                    if user is None:
+                        self._forget_authenticated_token(identity, token)
+                    else:
+                        authenticated_credential = token
+                    if not user and auth_mode == "token":
+                        # Legacy test contract: robot suite asserts 403 + "Invalid token".
+                        return await self._auth_failure(request, status_code=403, detail="Invalid token")
+            elif auth_mode == "token":
+                # Token mode: no cookie + no bearer → legacy 403 "Missing token".
+                return await self._auth_failure(request, status_code=403, detail="Missing token")
+
+        # --- 3) Unauthenticated: redirect UI (and the oidc-gated docs) in oidc
+        #        mode, else 401 JSON. ``oidc_gated`` is already mode-checked.
+        if user is None:
+            if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
+                if cookie_token is not None or token is not None:
+                    limited = await self._auth_failure_limiter.record_failure(request)
+                    if limited is not None:
+                        return limited
+                return _login_redirect(request, path)
+            return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
+
+        # The caller records the successful credential and sets request state
+        # after any limited-request cache lock has been released.
+        return user, session, authenticated_credential, auth_service
 
     async def dispatch(self, request: Request, call_next):
         # Read env lazily so tests can flip AUTH_MODE per-test.
@@ -383,109 +525,52 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         token = self._request_token(request, path)
         cookie_token = request.cookies.get(SESSION_COOKIE_NAME) if auth_mode == "oidc" else None
+        identity = self._auth_failure_limiter._identity(request)
         limited = await self._auth_failure_limiter.is_limited(request)
-        recently_authenticated = limited and any(
-            self._has_recently_authenticated_token(credential) for credential in (token, cookie_token) if credential
+        recent_credentials = (
+            tuple(
+                credential
+                for credential in (token, cookie_token)
+                if credential is not None and self._has_recently_authenticated_token(identity, credential)
+            )
+            if limited
+            else ()
         )
-        # Only credentials that authenticated successfully during this process's
-        # current failure window may pass the pre-check. They are still checked
-        # against the auth service on every request, so revoked tokens stop
-        # working immediately. New credentials stay throttled without a lookup.
-        if limited and not recently_authenticated:
+        # Recently authenticated credentials from this client IP may pass the
+        # pre-check for up to two failure windows. Revalidate them on every
+        # request, and serialize limited requests per credential so concurrent
+        # failures cannot keep querying storage after the cache entry is evicted.
+        if limited and not recent_credentials:
             return await self._auth_failure_limiter.limited_response(request)
 
-        user = None
-        session = None
-        authenticated_credential = None
-        auth_service, unavailable = self._resolve_auth_service(request)
-        if unavailable is not None:
-            return unavailable
+        args = {
+            "path": path,
+            "auth_mode": auth_mode,
+            "oidc_gated": oidc_gated,
+            "enc_key": enc_key,
+            "token": token,
+            "cookie_token": cookie_token,
+            "identity": identity,
+        }
+        if limited:
+            async with self._lock_recently_authenticated_tokens(identity, recent_credentials):
+                if not any(
+                    self._has_recently_authenticated_token(identity, credential)
+                    for credential in (token, cookie_token)
+                    if credential is not None
+                ):
+                    return await self._auth_failure_limiter.limited_response(request)
+                result = await self._authenticate_request(request, **args)
+                if not isinstance(result, Response) and result[2] is not None:
+                    self._remember_authenticated_token(identity, result[2])
+        else:
+            result = await self._authenticate_request(request, **args)
 
-        # --- 1) Cookie session (OIDC UI flow). Gated on oidc mode so the
-        #        legacy token-mode contract remains strictly Bearer-only —
-        #        a stray openrag_session cookie must not authenticate a
-        #        request when AUTH_MODE=token.
-        if cookie_token:
-            session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
-            if session is not None:
-                refreshed = await auth_service.refresh_session_if_needed(
-                    session=session,
-                    enc_key=enc_key,
-                )
-                if refreshed is None:
-                    # Refresh failed or session unusable → revoke and fall through.
-                    try:
-                        await auth_service.revoke_oidc_session_by_id_for_request(session["id"])
-                    except Exception as e:
-                        logger.bind(error=str(e)).warning("Failed to revoke invalid OIDC session")
-                    session = None
-                    self._forget_authenticated_token(cookie_token)
-                else:
-                    session = refreshed
-                    user = await auth_service.get_user_for_request(session["user_id"])
-                    if user is None:
-                        self._forget_authenticated_token(cookie_token)
-                    else:
-                        authenticated_credential = cookie_token
-            else:
-                self._forget_authenticated_token(cookie_token)
-
-        # --- 2) Fallback: Bearer / ?token= (programmatic clients + internal
-        #        callers like Chainlit's header_auth_callback which forwards
-        #        the browser cookie value in the Authorization header).
-        if user is None:
-            if token is not None:
-                # In oidc mode, a Bearer may carry an OIDC session token (not
-                # a ``users.token`` hash). Try the session lookup first with
-                # the same lazy-refresh semantics as the cookie branch above.
-                if auth_mode == "oidc":
-                    session = await auth_service.get_oidc_session_by_token_for_request(token)
-                    if session is not None:
-                        refreshed = await auth_service.refresh_session_if_needed(
-                            session=session,
-                            enc_key=enc_key,
-                        )
-                        if refreshed is None:
-                            try:
-                                await auth_service.revoke_oidc_session_by_id_for_request(session["id"])
-                            except Exception as e:
-                                logger.bind(error=str(e)).warning("Failed to revoke invalid OIDC session (bearer path)")
-                            session = None
-                            self._forget_authenticated_token(token)
-                        else:
-                            session = refreshed
-                            user = await auth_service.get_user_for_request(session["user_id"])
-                            if user is None:
-                                self._forget_authenticated_token(token)
-                            else:
-                                authenticated_credential = token
-
-                if user is None:
-                    # Either token mode, or oidc mode with no matching session
-                    # — fall back to the long-lived ``users.token`` used by
-                    # programmatic clients (CI, scripts, service agents).
-                    user = await auth_service.get_user_by_token_for_request(token)
-                    if user is None:
-                        self._forget_authenticated_token(token)
-                    else:
-                        authenticated_credential = token
-                    if not user and auth_mode == "token":
-                        # Legacy test contract: robot suite asserts 403 + "Invalid token".
-                        return await self._auth_failure(request, status_code=403, detail="Invalid token")
-            elif auth_mode == "token":
-                # Token mode: no cookie + no bearer → legacy 403 "Missing token".
-                return await self._auth_failure(request, status_code=403, detail="Missing token")
-
-        # --- 3) Unauthenticated: redirect UI (and the oidc-gated docs) in oidc
-        #        mode, else 401 JSON. ``oidc_gated`` is already mode-checked.
-        if user is None:
-            if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
-                return _login_redirect(request, path)
-            return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
-
-        # --- Happy path: user resolved.
-        if authenticated_credential is not None:
-            self._remember_authenticated_token(authenticated_credential)
+        if isinstance(result, Response):
+            return result
+        user, session, authenticated_credential, auth_service = result
+        if authenticated_credential is not None and not limited:
+            self._remember_authenticated_token(identity, authenticated_credential)
         request.state.user = user
         request.state.user_partitions = await auth_service.list_user_partitions_for_request(user["id"])
         request.state.oidc_session = session  # None when authenticated via Bearer
