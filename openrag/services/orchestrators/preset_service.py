@@ -85,7 +85,7 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
         "default": {
             "type": "single",
             "top_k": 50,
-            "similarity_threshold": 0.6,
+            "similarity_threshold": 0.2,
         },
         "multiquery": {
             "type": "multiQuery",
