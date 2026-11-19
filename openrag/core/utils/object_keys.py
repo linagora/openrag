@@ -161,6 +161,17 @@ def markdown_sidecar_key(key: str) -> str:
     return _finish(key + MARKDOWN_SIDECAR_SUFFIX)
 
 
+def validate_suffix(suffix: str) -> str:
+    """Return ``suffix`` if it is empty or a dot and 1 to 16 letters or digits, else raise.
+
+    The rule for the suffix a key ends with, and for the one a store's
+    ``local_copy`` is asked to give its path: it can't hold a separator.
+    """
+    if not isinstance(suffix, str) or (suffix and _SUFFIX_RE.fullmatch(suffix) is None):
+        raise InvalidObjectKeyError("A suffix is a dot followed by 1 to 16 letters or digits.")
+    return suffix
+
+
 def validate_key(key: str) -> str:
     """Return ``key`` if this module could have built it, else raise ``InvalidObjectKeyError``."""
     parse_key(key)
@@ -206,9 +217,7 @@ def parse_key(key: str) -> ParsedKey:
 def _leaf(object_id: str, suffix: str) -> str:
     if not isinstance(object_id, str) or _HEX_ID_RE.fullmatch(object_id) is None:
         raise InvalidObjectKeyError("An upload id is 32 lowercase hex digits.")
-    if suffix and (not isinstance(suffix, str) or _SUFFIX_RE.fullmatch(suffix) is None):
-        raise InvalidObjectKeyError("A suffix is a dot followed by 1 to 16 letters or digits.")
-    return object_id + suffix
+    return object_id + validate_suffix(suffix)
 
 
 def _check_relative_path(relative_path: str | PurePath) -> str:
@@ -266,4 +275,5 @@ __all__ = [
     "tmp_key",
     "upload_key",
     "validate_key",
+    "validate_suffix",
 ]

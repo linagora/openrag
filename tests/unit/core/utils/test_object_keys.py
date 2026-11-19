@@ -109,6 +109,14 @@ def test_malformed_suffix_is_refused(suffix):
         keys.upload_key(UPLOAD_ID, suffix)
 
 
+def test_validate_suffix():
+    assert keys.validate_suffix(".pdf") == ".pdf"
+    assert keys.validate_suffix("") == ""
+    for bad in ("pdf", "../x", ".a/b", ".a.b", None):
+        with pytest.raises(InvalidObjectKeyError):
+            keys.validate_suffix(bad)
+
+
 def test_long_partition_or_file_id_is_refused():
     with pytest.raises(InvalidObjectKeyError):
         keys.original_key("p" * 192, "f", UPLOAD_ID)
