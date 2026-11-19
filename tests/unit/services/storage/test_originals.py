@@ -148,3 +148,34 @@ async def test_nothing_to_delete_asks_nothing(data_dir):
 def test_batch_size_must_be_positive(data_dir):
     with pytest.raises(ValueError):
         OriginalsCleaner(FakeDocumentRepo(), data_dir, batch_size=0)
+
+
+# --- source_of ------------------------------------------------------------------------------
+
+
+class MetadataRepo(FakeDocumentRepo):
+    def __init__(self, metadata=None, *, fail_read: bool = False):
+        super().__init__()
+        self.metadata = metadata
+        self.fail_read = fail_read
+
+    async def get_file_metadata(self, file_id, partition):
+        if self.fail_read:
+            raise ConnectionError("catalog down")
+        return self.metadata
+
+
+@pytest.mark.parametrize(
+    ("repo", "expected"),
+    [
+        (MetadataRepo({"source": "/data/1_report.pdf", "filename": "report.pdf"}), "/data/1_report.pdf"),
+        (MetadataRepo(None), None),
+        (MetadataRepo({"filename": "report.pdf"}), None),
+        (MetadataRepo({"source": ""}), None),
+        (MetadataRepo({"source": 42}), None),
+        (MetadataRepo(fail_read=True), None),
+    ],
+    ids=["source", "no-row", "no-source", "empty", "not-a-string", "read-fails"],
+)
+async def test_source_of(data_dir, repo, expected):
+    assert await OriginalsCleaner(repo, data_dir).source_of("f1", "docs") == expected

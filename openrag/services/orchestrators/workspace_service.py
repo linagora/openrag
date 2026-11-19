@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
     from core.vector_stores import VectorStore
+    from services.storage.originals import OriginalsCleaner
 
 logger = get_logger()
 
@@ -45,11 +46,14 @@ class WorkspaceService:
         document_repo: DocumentRepository,
         vector_store: VectorStore,
         collection: str,
+        originals_cleaner: OriginalsCleaner | None = None,
     ) -> None:
         self._workspace_repo = workspace_repo
         self._document_repo = document_repo
         self._vector_store = vector_store
         self._collection = collection
+        # Deletes an orphaned file's uploaded original; ``None`` keeps it.
+        self._originals_cleaner = originals_cleaner
 
     # ------------------------------------------------------------------
     # CRUD / lookups (thin repo delegations)
@@ -203,8 +207,11 @@ class WorkspaceService:
         Drops the file's chunks from the vector store (via the clean
         port: query ids by filter + delete), then finalizes its catalog
         deletion. The catalog row was claimed before vector cleanup started,
-        so a concurrent workspace attachment cannot be lost.
+        so a concurrent workspace attachment cannot be lost. Once the row
+        is gone, so is the uploaded original, unless a copy references it.
         """
+        cleaner = self._originals_cleaner
+        source = await cleaner.source_of(file_id, partition) if cleaner is not None else None
         vector_cleanup_started = cleanup_started
         try:
             ids = await self._vector_store.query_ids_by_filter(
@@ -241,6 +248,8 @@ class WorkspaceService:
                         error=str(release_error),
                     )
             raise
+        if cleaner is not None and source is not None:
+            await cleaner.delete_unreferenced([source])
         logger.info("Deleted orphaned file", file_id=file_id, partition=partition)
 
     async def retry_failed_file_cleanup(self, file_id: str, partition: str) -> bool:

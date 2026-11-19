@@ -3531,3 +3531,92 @@ async def test_wait_for_task_to_settle_still_times_out_on_its_own_wait() -> None
             partition="tenant-a",
             file_id="file-1",
         )
+
+
+class _RecordingCleaner:
+    """Stands for OriginalsCleaner and logs its delete into the dispatcher's call order."""
+
+    def __init__(self, call_order: list[str], source: str | None = "/data/1_report.pdf"):
+        self.call_order = call_order
+        self.source = source
+        self.read: list[tuple[str, str]] = []
+        self.deleted: list[list[str]] = []
+
+    async def source_of(self, file_id: str, partition: str) -> str | None:
+        self.read.append((file_id, partition))
+        return self.source
+
+    async def delete_unreferenced(self, sources) -> int:
+        self.call_order.append("originals")
+        self.deleted.append(list(sources))
+        return 1
+
+
+def _dispatcher_recording_delete(cleaner_source: str | None = "/data/1_report.pdf"):
+    from services.workers.dispatcher import WorkerDispatcher
+
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    workspace_repo = _workspace_repo()
+    call_order: list[str] = []
+    cleaner = _RecordingCleaner(call_order, cleaner_source)
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+        originals_cleaner=cleaner,
+    )
+    workspace_repo.remove_file_from_all_workspaces = AsyncMock(
+        side_effect=lambda *a, **k: call_order.append("workspace")
+    )
+    document_repo.remove_file_from_partition = AsyncMock(side_effect=lambda *a, **k: call_order.append("document"))
+    vector_store.delete_by_filter = AsyncMock(side_effect=lambda *a, **k: call_order.append("delete_by_filter") or 2)
+    return dispatcher, cleaner, call_order, document_repo, vector_store
+
+
+@pytest.mark.asyncio
+async def test_delete_file_deletes_the_original_right_after_its_row() -> None:
+    dispatcher, cleaner, call_order, _, _ = _dispatcher_recording_delete()
+
+    await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert cleaner.read == [("file-1", "tenant-a")]
+    assert cleaner.deleted == [["/data/1_report.pdf"]]
+    assert call_order == ["delete_by_filter", "workspace", "document", "originals", "delete_by_filter"]
+
+
+@pytest.mark.asyncio
+async def test_delete_file_without_a_source_deletes_no_original() -> None:
+    dispatcher, cleaner, call_order, _, _ = _dispatcher_recording_delete(cleaner_source=None)
+
+    await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert cleaner.deleted == []
+    assert call_order == ["delete_by_filter", "workspace", "document", "delete_by_filter"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_row_removal_keeps_the_original() -> None:
+    dispatcher, cleaner, _, document_repo, _ = _dispatcher_recording_delete()
+    document_repo.remove_file_from_partition = AsyncMock(side_effect=RuntimeError("database unavailable"))
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert cleaner.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_the_original_goes_even_when_the_leftover_vector_cleanup_fails() -> None:
+    dispatcher, cleaner, _, _, vector_store = _dispatcher_recording_delete()
+    vector_store.delete_by_filter = AsyncMock(side_effect=[2, RuntimeError("milvus down")])
+
+    with pytest.raises(RuntimeError, match="milvus down"):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    # Its retry would find no row, hence no source: the original had to go now.
+    assert cleaner.deleted == [["/data/1_report.pdf"]]

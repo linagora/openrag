@@ -100,3 +100,54 @@ Choices the plan (IDX_00 to IDX_09) left open or that depart from it. One file f
   - IDX_01 says both "injects it where `data_dir` is used" and "nothing uses the port yet". Injecting it means changing those callers, which is 1C;
   - a setting with one possible value is dead configuration; `UPLOAD_STORE=fs|s3` comes with the S3 adapter (1D).
 - **Rejected:** a container field that is rebuilt on each read. One store per process keeps one set of per-key locks (D6).
+
+## D8. A replace reads the previous `source` before its commit, under the fence
+
+**1A**, `indexer_actor.process_file`. Status: taken.
+
+- **Decision:** the worker reads the row's `source` with `get_file_metadata` before `update_file_in_partition`, and deletes it once the commit succeeds, before it releases the fence.
+- **Why:** `update_file_in_partition` returns a bool that five tests assert on. Under Postgres fences (the v2.4.0 default) replaces are serialized, so the read is exact.
+- **Rejected:** `UPDATE … RETURNING` (IDX_01), which changes that return type for no gain under Postgres fences.
+- **Impact:** under Ray fences nothing is deleted (D11), so the leak two concurrent replaces could cause there never happens. A delete checks references first, so it never takes an original a row references at that moment; a copy still running is the exception (D12).
+
+## D9. A failed job's upload is deleted where the job settles, unless a row references it
+
+**1A**, `indexer_pool`. Status: taken.
+
+- **Decision:** at settle, with `SAVE_UPLOADED_FILES=true` and an unsuccessful task, the pool deletes the upload and its `.md` unless a catalog row references it.
+- **Why:**
+  - pre-flight failures and a lost worker lease never enter `process_file`'s failure path (IDX_01's place);
+  - a job that fails after its catalog commit leaves an indexed file, whose original must stay;
+  - no row references a failed upload, so deleting it after the fence is released is safe.
+- **Rejected:** deleting it in `process_file`'s failure path, which misses those failures.
+
+## D10. Originals are deleted only under `data_dir`, after a reference check
+
+**1A**, `services/storage/originals.py`. Status: taken.
+
+- **Decision:** `OriginalsCleaner` deletes a path, with its `.md`, only if it resolves under `data_dir` (symlinks followed) and `referenced_sources` no longer names it. If the check fails, the whole batch stays.
+- **Why:** a copy keeps its source's `source`, possibly in another partition. The resolve keeps a bad path from reaching outside the data directory.
+- **Impact:** an MCP `index_url` original, which sits in the node's temp directory, is never deleted by 1A. It's kept only with `SAVE_UPLOADED_FILES=true`, and 1C moves it into the store (#1003).
+
+## D11. Originals are deleted only with `FILE_FENCES=postgres`
+
+**1A**, `ServiceContainer.originals_cleaner`, and the worker's cleaner in step 5. Status: taken.
+
+- **Decision:** the container builds the cleaner only with `FILE_FENCES=postgres`, the v2.4.0 default. Otherwise there is none, and every delete keeps its original, as today.
+- **Why:** IDX_00 keeps behavior changes off until v2.4.0, and 2.3.x is cut from `develop`. A deleted file can't be brought back, so this lands with the release that announces it. Tying it to the fences adds no setting.
+- **Rejected:**
+  - shipping it in 2.3.x as a plain fix: `SAVE_UPLOADED_FILES` defaults to `true`, so every deployment would start deleting at once;
+  - a setting of its own, dead once v2.4.0 makes it the default.
+- **Impact:** 2.3.x keeps #1428. An operator who wants the fix sooner sets `FILE_FENCES=postgres`, and gets its 409s with it.
+
+## D12. A copy running while its source is deleted can lose its original
+
+**1A**, `WorkerDispatcher.copy_file`. Status: taken.
+
+- **Decision:** the copy keeps running without the source file's fence, and the gap is accepted.
+- **Why:**
+  - the copy reads the source row, then writes its own row with the same `source` seconds later, or minutes when it re-embeds. A delete of the source in between finds no row left and deletes the original;
+  - the copy stays searchable: only its download and a re-index fail;
+  - a move (a copy, then a delete) is safe, since the route answers 201 only once the copy's row is written.
+- **Rejected:** holding the source's fence for the whole copy. A delete or replace of the source would then wait on the copy, a change to #1459's code for a rare case.
+- **Impact:** the orphan script can't bring that file back. If it happens in practice, the fence above is the fix.

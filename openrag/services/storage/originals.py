@@ -66,6 +66,22 @@ class OriginalsCleaner:
         self._data_dir = Path(data_dir).resolve()
         self._batch_size = batch_size
 
+    async def source_of(self, file_id: str, partition: str) -> str | None:
+        """The ``source`` of a file whose row is about to go, read before the delete.
+
+        ``None`` when the row has none, or when it can't be read: the original
+        then stays, and the delete goes on.
+        """
+        try:
+            metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        except Exception as exc:  # noqa: BLE001 - must not fail the delete it precedes
+            logger.bind(file_id=file_id, partition=partition, error=str(exc)).warning(
+                "Could not read a file's original before deleting it; it stays."
+            )
+            return None
+        source = metadata.get("source") if isinstance(metadata, dict) else None
+        return source if isinstance(source, str) and source else None
+
     async def delete_unreferenced(self, sources: Iterable[str | None]) -> int:
         """Delete each of ``sources`` that no catalog row references. Returns how many originals went.
 
