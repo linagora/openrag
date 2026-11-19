@@ -590,38 +590,64 @@ async def test_a_retried_cleanup_runs_under_the_delete_fence():
 
 
 @pytest.mark.asyncio
-async def test_a_retry_of_a_file_not_eligible_leaves_an_indexing_fence_alone():
-    class NotEligible(FakeWorkspaceRepo):
-        async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
-            return False
-
+async def test_a_retry_of_a_file_being_indexed_is_refused_and_leaves_its_fence_alone():
     fences = _InMemoryFileFences()
     fences.hold("p", "fA", FileFenceKind.INDEX, "task-running")
     vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
-    svc = _fenced_svc(fences, wrepo=NotEligible(), vstore=vstore)
+    wrepo = FakeWorkspaceRepo()
+    svc = _fenced_svc(fences, wrepo=wrepo, vstore=vstore)
 
-    assert await svc.retry_failed_file_cleanup("fA", "p") is False
+    with pytest.raises(ConflictError) as caught:
+        await svc.retry_failed_file_cleanup("fA", "p")
 
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert wrepo.retry_claimed == []
     assert vstore.holders == []
     assert fences.fences[("p", "fA")].holder_id == "task-running"
     assert fences.fences[("p", "fA")].kind is FileFenceKind.INDEX
 
 
 @pytest.mark.asyncio
-async def test_a_retry_that_cannot_take_the_fence_leaves_the_cleanup_failed_for_the_next_retry(monkeypatch):
+async def test_a_retry_of_a_file_not_eligible_gives_its_fence_back():
+    class NotEligible(FakeWorkspaceRepo):
+        async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+            return False
+
+    fences = _InMemoryFileFences()
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+    svc = _fenced_svc(fences, wrepo=NotEligible(), vstore=vstore)
+
+    assert await svc.retry_failed_file_cleanup("fA", "p") is False
+
+    assert vstore.holders == []
+    assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_a_retry_waits_for_the_fence_before_it_holds_a_cleanup_session(monkeypatch):
+    # The session holds a pooled connection for the whole deletion; waiting for
+    # the fence while holding it could exhaust the pool.
     import core.indexing.file_fences as fences_module
 
     monkeypatch.setattr(fences_module, "_WAIT_INTERVAL_SECONDS", 0)
     fences = _InMemoryFileFences()
     fences.hold("p", "fA", FileFenceKind.DELETE, "other-delete")
     vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
-    wrepo = FakeWorkspaceRepo()
+    sessions: list[str] = []
+
+    class RecordingSessions(FakeWorkspaceRepo):
+        @asynccontextmanager
+        async def cleanup_session(self, file_id, partition):
+            sessions.append(file_id)
+            yield self
+
+    wrepo = RecordingSessions()
     svc = _fenced_svc(fences, wrepo=wrepo, vstore=vstore, wait_timeout=0)
 
     with pytest.raises(ConflictError):
         await svc.retry_failed_file_cleanup("fA", "p")
 
-    assert vstore.holders == []
-    assert wrepo.retry_claimed == [("fA", "p")]
-    assert wrepo.failed == [("fA", "p")]
+    assert sessions == []
+    assert wrepo.retry_claimed == []
+    assert wrepo.failed == []
     assert fences.fences[("p", "fA")].holder_id == "other-delete"

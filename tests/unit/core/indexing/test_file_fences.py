@@ -357,6 +357,34 @@ async def test_a_renewal_that_hangs_counts_as_failed(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_a_renewal_whose_cancellation_stalls_does_not_hold_the_work_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ttl, _ = _short_lease(monkeypatch)
+    repo = _Fences()
+    unwound = asyncio.Event()
+
+    async def stalling_renew(**_kwargs) -> bool:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # A database call whose cancellation takes longer than the lease.
+            await asyncio.sleep(ttl)
+            unwound.set()
+            raise
+        return True
+
+    repo.renew = stalling_renew
+
+    elapsed, stopped = await _run_until_stopped(repo)
+
+    assert stopped.is_set()
+    assert elapsed < ttl
+    # The abandoned renewal still finishes its cancellation on its own.
+    await asyncio.wait_for(unwound.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_a_successful_renewal_moves_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     ttl, interval = _short_lease(monkeypatch)
     repo = _Fences()
@@ -418,6 +446,20 @@ async def test_a_delete_still_waiting_at_the_timeout_names_the_holder() -> None:
         await FileFences(repo, wait_timeout=0).acquire_for_delete(partition=PARTITION, file_id=FILE_ID, holder_id="d")
 
     assert caught.value.code == "DOCUMENT_METADATA_UPDATE_IN_PROGRESS"
+
+
+@pytest.mark.asyncio
+async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead() -> None:
+    repo = _Fences()
+    repo.hold(FileFenceKind.INDEX, "task-1")
+
+    with pytest.raises(ConflictError) as caught:
+        await FileFences(repo).acquire_for_delete(
+            partition=PARTITION, file_id=FILE_ID, holder_id="d", take_over_indexing=False
+        )
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert repo.fences[(PARTITION, FILE_ID)].holder_id == "task-1"
 
 
 # ── Metrics ──────────────────────────────────────────────────────────

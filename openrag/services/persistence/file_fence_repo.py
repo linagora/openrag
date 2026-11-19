@@ -49,21 +49,15 @@ SELECT partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
  WHERE partition_name = $1 AND file_id = $2
 """
 
-# The fence only while an operation holds it: the negation of what _ACQUIRE_SQL
-# may take (an expired lease, or an index fence whose job is terminal).
+# The fence while its lease runs. Unlike _ACQUIRE_SQL, a terminal job does not
+# free an index fence here: a job can turn FAILED while its worker still writes
+# (fail_orphaned_jobs at startup), and only the lease is kept fresh by the
+# holder that is actually running.
 _LIVE_SQL = """
 SELECT partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
   FROM file_fences
  WHERE partition_name = $1 AND file_id = $2
    AND expires_at > now()
-   AND NOT (
-       holder_kind = 'index'
-       AND EXISTS (
-           SELECT 1 FROM jobs
-            WHERE jobs.id = file_fences.holder_id
-              AND jobs.status = ANY($3::text[])
-       )
-   )
 """
 
 # Each retry means the holder released the fence between the two statements;
@@ -206,7 +200,7 @@ class PgFileFenceRepository(FileFenceRepository):
         return _row_to_fence(row) if row is not None else None
 
     async def get_live(self, *, partition: str, file_id: str) -> FileFence | None:
-        row = await self.pool.fetchrow(_LIVE_SQL, partition, file_id, _TERMINAL_JOB_STATUSES)
+        row = await self.pool.fetchrow(_LIVE_SQL, partition, file_id)
         return _row_to_fence(row) if row is not None else None
 
 

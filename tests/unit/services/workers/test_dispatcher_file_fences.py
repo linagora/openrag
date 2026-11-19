@@ -755,6 +755,50 @@ async def test_a_copy_that_loses_its_target_fence_writes_no_catalog_row(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_a_copy_whose_commit_went_through_despite_the_error_keeps_its_vectors() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    committed: dict[str, str] = {}
+
+    async def commit_then_lose_the_connection(**kwargs) -> None:
+        committed["indexed_at"] = kwargs["indexed_at"].isoformat()
+        raise ConnectionError("connection lost after COMMIT was sent")
+
+    async def read_metadata(file_id, _partition) -> dict:
+        if file_id == FILE_ID and committed:
+            return {"file_id": FILE_ID, "indexed_at": committed["indexed_at"]}
+        return dict(SOURCE_ROW)
+
+    repo.add_file_to_partition.side_effect = commit_then_lose_the_connection
+    repo.get_file_metadata.side_effect = read_metadata
+
+    with pytest.raises(ConnectionError):
+        await _copy(dispatcher)
+
+    store.delete_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_cannot_tell_whether_it_committed_keeps_its_vectors() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+
+    async def read_metadata(file_id, _partition) -> dict:
+        if file_id == FILE_ID:
+            raise ConnectionError("database unreachable")
+        return dict(SOURCE_ROW)
+
+    repo.add_file_to_partition.side_effect = ConnectionError("database unreachable")
+    repo.get_file_metadata.side_effect = read_metadata
+
+    with pytest.raises(ConnectionError):
+        await _copy(dispatcher)
+
+    # Vectors without a row are an orphan to reconcile; a row without its vectors would be worse.
+    store.delete_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_copy_reads_the_source_record_before_its_final_check() -> None:
     fences = InMemoryFileFences()
     dispatcher, repo, _ = _copy_dispatcher(fences)

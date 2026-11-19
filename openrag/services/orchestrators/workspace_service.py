@@ -234,7 +234,8 @@ class WorkspaceService:
         partition: str,
         *,
         work: Callable[[], Awaitable[T]],
-        give_back: Callable[[], Awaitable[None]],
+        give_back: Callable[[], Awaitable[None]] | None = None,
+        take_over_indexing: bool = True,
     ) -> T:
         """Run a file delete under the file's delete fence, as a file delete does (#1430).
 
@@ -242,12 +243,16 @@ class WorkspaceService:
         task's catalog commit is refused then, and it removes its own vectors.
         When the fence can't be taken, *give_back* returns the file's cleanup
         claim to a state its recovery accepts before the failure is raised.
+        ``take_over_indexing=False`` refuses a file being indexed instead.
         """
         holder_id = uuid.uuid4().hex
         try:
-            await self._file_fences.acquire_for_delete(partition=partition, file_id=file_id, holder_id=holder_id)
+            await self._file_fences.acquire_for_delete(
+                partition=partition, file_id=file_id, holder_id=holder_id, take_over_indexing=take_over_indexing
+            )
         except (Exception, asyncio.CancelledError):
-            await give_back()
+            if give_back is not None:
+                await give_back()
             raise
         try:
             return await self._file_fences.run_holding(
@@ -307,31 +312,24 @@ class WorkspaceService:
     async def retry_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
         """Retry a failed or abandoned cleanup while keeping attachment fenced.
 
-        The cleanup is claimed before the fence is taken: a file not eligible
-        returns ``False`` without taking an indexing task's fence over.
+        The fence comes first, so its wait holds no pooled connection: the
+        cleanup session holds one for the whole deletion. It does not take an
+        indexing task's fence over (a file being indexed answers 409), so a
+        file that turns out not to be eligible costs no task its fence.
         """
+        return await self._with_delete_fence(
+            file_id,
+            partition,
+            work=lambda: self._retry_claimed_file_cleanup(file_id, partition),
+            take_over_indexing=False,
+        )
+
+    async def _retry_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
         async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
             if owned is None or not await owned.claim_failed_file_cleanup(file_id, partition):
                 return False
-            await self._with_delete_fence(
-                file_id,
-                partition,
-                work=lambda: self._delete_owned_file(file_id, partition, owned, cleanup_started=True),
-                give_back=lambda: self._mark_cleanup_failed(owned, file_id, partition),
-            )
+            await self._delete_owned_file(file_id, partition, owned, cleanup_started=True)
             return True
-
-    async def _mark_cleanup_failed(self, owned: WorkspaceRepository, file_id: str, partition: str) -> None:
-        """Put a reclaimed cleanup back to failed, where the next retry finds it."""
-        try:
-            await owned.mark_cleanup_failed(file_id, partition)
-        except Exception as mark_error:  # noqa: BLE001 - preserve the fence failure
-            logger.error(
-                "Failed to persist workspace cleanup failure state",
-                file_id=file_id,
-                partition=partition,
-                error=str(mark_error),
-            )
 
 
 __all__ = ["WorkspaceService"]

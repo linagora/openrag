@@ -83,9 +83,11 @@ class FileFenceRepository(ABC):
 
     @abstractmethod
     async def get_live(self, *, partition: str, file_id: str) -> FileFence | None:
-        """The fence an operation holds now, or ``None`` when it is free.
+        """The fence whose lease still runs, or ``None``.
 
-        Free by the rule of ``acquire``: no row, an expired lease, or an
-        ``INDEX`` fence whose task's ``jobs`` row is terminal. A row whose
-        release failed therefore stops counting once its lease ends.
+        The lease is what a running holder keeps renewing, so this is the
+        fence an operation may still be writing under. Unlike ``acquire``, a
+        terminal ``jobs`` row does not free an ``INDEX`` fence here: a job can
+        turn terminal while its worker still writes. A row whose release
+        failed stops counting once its lease ends.
         """

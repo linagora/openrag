@@ -966,10 +966,13 @@ class WorkerDispatcher(IndexingDispatcher):
                 )
             except (Exception, asyncio.CancelledError):
                 # Also a copy stopped because its target fence was lost: the
-                # vectors it inserted, all marked with its token, go with it.
-                await self._cleanup_submitted_vectors(
-                    claim_token, metadata={"file_id": target_file_id}, partition=target_partition
-                )
+                # vectors it inserted, all marked with its token, go with it,
+                # unless its catalog row committed after all (a failure at the
+                # commit itself), which must keep them.
+                if not await self._copy_committed(target_file_id, target_partition, indexed_at):
+                    await self._cleanup_submitted_vectors(
+                        claim_token, metadata={"file_id": target_file_id}, partition=target_partition
+                    )
                 raise
         finally:
             if claimed_content:
@@ -979,6 +982,26 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                     claim_token=claim_token,
                 )
+
+    async def _copy_committed(self, file_id: str, partition: str, indexed_at: datetime) -> bool:
+        """Whether this copy's catalog row is in, told apart from any other by its ``indexed_at``.
+
+        An answer the database can't give counts as committed: vectors left
+        without a row are an orphan the reconciliation removes, while a row
+        left without its vectors would show a file with nothing to search.
+        """
+        try:
+            row = await self._document_repo.get_file_metadata(file_id, partition)
+        except Exception as exc:  # noqa: BLE001 - kept vectors are the recoverable side
+            logger.warning(
+                "Could not tell whether a failed copy committed; keeping its vectors",
+                file_id=file_id,
+                partition=partition,
+                error=str(exc),
+            )
+            return True
+        recorded = (row or {}).get("indexed_at")
+        return recorded is not None and datetime.fromisoformat(recorded) == indexed_at
 
     async def _move_to_vector_field(
         self,
