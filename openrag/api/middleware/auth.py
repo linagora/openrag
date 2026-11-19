@@ -244,7 +244,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if expires_at <= now:
             self._recently_authenticated_tokens.pop(cache_key, None)
             return False
-        self._recently_authenticated_tokens.move_to_end(cache_key)
         return True
 
     def _remember_authenticated_token(self, identity: str, token: str) -> None:
@@ -252,9 +251,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         now = time.monotonic()
         cache = self._recently_authenticated_tokens
 
-        for cached_key, expires_at in tuple(cache.items()):
-            if expires_at <= now:
-                del cache[cached_key]
+        # Every entry has the same TTL. Only successful validation changes
+        # its position, so the oldest entries are also the first to expire.
+        while cache and next(iter(cache.values())) <= now:
+            cache.popitem(last=False)
 
         cache[cache_key] = now + self._recently_authenticated_token_ttl
         cache.move_to_end(cache_key)
@@ -422,10 +422,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         #        mode, else 401 JSON. ``oidc_gated`` is already mode-checked.
         if user is None:
             if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
-                if cookie_token is not None or token is not None:
-                    limited = await self._auth_failure_limiter.record_failure(request)
-                    if limited is not None:
-                        return limited
                 return _login_redirect(request, path)
             return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
 
@@ -548,23 +544,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "auth_mode": auth_mode,
             "oidc_gated": oidc_gated,
             "enc_key": enc_key,
-            "token": token,
-            "cookie_token": cookie_token,
             "identity": identity,
         }
         if limited:
             async with self._lock_recently_authenticated_tokens(identity, recent_credentials):
-                if not any(
-                    self._has_recently_authenticated_token(identity, credential)
-                    for credential in (token, cookie_token)
-                    if credential is not None
-                ):
-                    return await self._auth_failure_limiter.limited_response(request)
-                result = await self._authenticate_request(request, **args)
-                if not isinstance(result, Response) and result[2] is not None:
-                    self._remember_authenticated_token(identity, result[2])
-        else:
-            result = await self._authenticate_request(request, **args)
+                limited = await self._auth_failure_limiter.is_limited(request)
+                if limited:
+                    eligible = {
+                        credential
+                        for credential in recent_credentials
+                        if self._has_recently_authenticated_token(identity, credential)
+                    }
+                    if not eligible:
+                        return await self._auth_failure_limiter.limited_response(request)
+                    result = await self._authenticate_request(
+                        request,
+                        token=token if token in eligible else None,
+                        cookie_token=cookie_token if cookie_token in eligible else None,
+                        **args,
+                    )
+                    if not isinstance(result, Response) and result[2] is not None:
+                        self._remember_authenticated_token(identity, result[2])
+        if not limited:
+            result = await self._authenticate_request(request, token=token, cookie_token=cookie_token, **args)
 
         if isinstance(result, Response):
             return result
