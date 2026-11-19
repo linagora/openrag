@@ -1072,6 +1072,10 @@ class TestOriginalsCleanerWiring:
         c = ServiceContainer(self._settings(tmp_path / "data"))
         assert c.workspace_service._originals_cleaner is c.originals_cleaner
 
+    def test_the_partition_service_gets_it(self, tmp_path):
+        c = ServiceContainer(self._settings(tmp_path / "data"))
+        assert c.partition_service._originals_cleaner is c.originals_cleaner
+
     def test_the_dispatcher_gets_it(self, tmp_path, monkeypatch):
         c = ServiceContainer(self._settings(tmp_path / "data"))
         assert self._dispatcher_kwargs(c, monkeypatch)["originals_cleaner"] is c.originals_cleaner
@@ -1085,4 +1089,5 @@ class TestOriginalsCleanerWiring:
         c = ServiceContainer(self._settings(tmp_path / "data", file_fences="ray"))
         assert c.originals_cleaner is None
         assert c.workspace_service._originals_cleaner is None
+        assert c.partition_service._originals_cleaner is None
         assert self._dispatcher_kwargs(c, monkeypatch)["originals_cleaner"] is None

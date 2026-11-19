@@ -179,3 +179,27 @@ class MetadataRepo(FakeDocumentRepo):
 )
 async def test_source_of(data_dir, repo, expected):
     assert await OriginalsCleaner(repo, data_dir).source_of("f1", "docs") == expected
+
+
+# --- sources_in_partition ---------------------------------------------------------------
+
+
+class ListingRepo(FakeDocumentRepo):
+    def __init__(self, sources=(), *, fail_read: bool = False):
+        super().__init__()
+        self.sources = list(sources)
+        self.fail_read = fail_read
+
+    async def list_partition_sources(self, partition):
+        if self.fail_read:
+            raise ConnectionError("catalog down")
+        return list(self.sources)
+
+
+async def test_sources_in_partition(data_dir):
+    repo = ListingRepo(["/data/1_a.pdf", "/data/2_b.pdf"])
+    assert await OriginalsCleaner(repo, data_dir).sources_in_partition("docs") == ["/data/1_a.pdf", "/data/2_b.pdf"]
+
+
+async def test_sources_in_partition_that_cannot_be_read_are_none(data_dir):
+    assert await OriginalsCleaner(ListingRepo(fail_read=True), data_dir).sources_in_partition("docs") == []

@@ -481,6 +481,7 @@ class ServiceContainer:
                 task_state_manager_factory=get_task_state_manager,
                 prompt_repo=self.prompt_repo,
                 topic_tag_repo=self.topic_tag_repo,
+                originals_cleaner=self.originals_cleaner,
             )
         return self._partition_service
 

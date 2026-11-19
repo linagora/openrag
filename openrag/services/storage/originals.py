@@ -82,6 +82,19 @@ class OriginalsCleaner:
         source = metadata.get("source") if isinstance(metadata, dict) else None
         return source if isinstance(source, str) and source else None
 
+    async def sources_in_partition(self, partition: str) -> list[str]:
+        """The ``source`` of every row in a partition about to go, read before the delete.
+
+        Empty when they can't be read: the originals then stay, and the delete goes on.
+        """
+        try:
+            return await self._document_repo.list_partition_sources(partition)
+        except Exception as exc:  # noqa: BLE001 - must not fail the delete it precedes
+            logger.bind(partition=partition, error=str(exc)).warning(
+                "Could not list a partition's originals before deleting it; they stay."
+            )
+            return []
+
     async def delete_unreferenced(self, sources: Iterable[str | None]) -> int:
         """Delete each of ``sources`` that no catalog row references. Returns how many originals went.
 

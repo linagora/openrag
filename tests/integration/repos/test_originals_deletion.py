@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from core.models.workspace import Workspace
+from services.orchestrators.partition_service import PartitionService
 from services.orchestrators.workspace_service import WorkspaceService
 from services.storage.originals import OriginalsCleaner, markdown_sidecar_path
 from services.workers.indexer_actor import _write_catalog_record
@@ -89,3 +91,34 @@ async def test_a_file_kept_by_keep_files_keeps_its_original(postgres_store, tmp_
 
     assert Path(kept).exists()
     assert await store.document_repo.file_exists_in_partition("kept", "p")
+
+
+async def test_deleting_a_partition_deletes_its_originals_but_not_a_copys(postgres_store, tmp_path):
+    store = postgres_store
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    await store.partition_repo.create_partition("p")
+    await store.partition_repo.create_partition("q")
+    alone = original(data_dir, "1_alone.pdf")
+    shared = original(data_dir, "2_shared.pdf")
+    await upload(store, "alone", alone)
+    await upload(store, "shared", shared)
+    await upload(store, "shared-copy", shared, partition="q")
+
+    vectors = AsyncMock()
+    vectors.collection_exists.return_value = False
+    service = PartitionService(
+        partition_repo=store.partition_repo,
+        membership_repo=store.membership_repo,
+        document_repo=store.document_repo,
+        vector_store=vectors,
+        user_repo=store.user_repo,
+        collection="test",
+        originals_cleaner=OriginalsCleaner(store.document_repo, data_dir),
+    )
+    await service.delete_partition("p")
+    await asyncio.gather(*list(service._original_cleanups))
+
+    assert not Path(alone).exists() and not markdown_sidecar_path(alone).exists()
+    assert Path(shared).exists() and markdown_sidecar_path(shared).exists()
+    assert await store.document_repo.file_exists_in_partition("shared-copy", "q")
