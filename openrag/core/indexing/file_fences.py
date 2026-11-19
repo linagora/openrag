@@ -187,8 +187,9 @@ class FileFences:
     async def run_holding(self, *, partition: str, file_id: str, holder_id: str, work: Callable[[], Awaitable[T]]) -> T:
         """Run *work* while renewing the fence; stop it with ``FileFenceLostError`` if the fence is lost.
 
-        A database error during a renewal is retried at the next round; the
-        lease outlasts three missed rounds.
+        Call it right after taking the fence: the lease is counted from here. A
+        database error during a renewal is retried at the next round, until less
+        than one round of the confirmed lease is left (see ``renew_before_expiry``).
         """
         if self._repo is None:
             return await work()
@@ -206,17 +207,49 @@ class FileFences:
             await asyncio.gather(work_task, renewal, return_exceptions=True)
 
     async def _keep_alive(self, *, partition: str, file_id: str, holder_id: str) -> None:
+        confirmed_until = monotonic() + FILE_FENCE_TTL_SECONDS
         while True:
-            await asyncio.sleep(FILE_FENCE_RENEW_INTERVAL_SECONDS)
-            try:
-                held = await self.renew(partition=partition, file_id=file_id, holder_id=holder_id)
-            except Exception as exc:  # noqa: BLE001 - retried at the next round
-                logger.bind(partition=partition, file_id=file_id).warning(
-                    "Failed to renew the file fence; retrying", error=str(exc)
-                )
-                continue
-            if not held:
-                raise FileFenceLostError(file_id, partition)
+            await asyncio.sleep(self.next_renewal_in(confirmed_until))
+            confirmed_until = await self.renew_before_expiry(
+                partition=partition, file_id=file_id, holder_id=holder_id, confirmed_until=confirmed_until
+            )
+
+    @staticmethod
+    def next_renewal_in(confirmed_until: float) -> float:
+        """Seconds to wait before the next renewal: one round, or less when the deadline comes first."""
+        deadline = confirmed_until - FILE_FENCE_RENEW_INTERVAL_SECONDS
+        return max(min(FILE_FENCE_RENEW_INTERVAL_SECONDS, deadline - monotonic()), 0)
+
+    async def renew_before_expiry(
+        self, *, partition: str, file_id: str, holder_id: str, confirmed_until: float
+    ) -> float:
+        """Renew the fence of work that must stop before it can be taken; return the new confirmed expiry.
+
+        *confirmed_until* is the ``monotonic()`` time the lease is known to last
+        until. A database error is retried at the next round until one round
+        before that time; there, and once the fence is lost, this raises
+        ``FileFenceLostError``. With the defaults that is after three failed
+        rounds, 30 s before another operation could take the expired fence: the
+        time a write the work had already sent has to complete.
+        """
+        attempted_at = monotonic()
+        deadline = confirmed_until - FILE_FENCE_RENEW_INTERVAL_SECONDS
+        try:
+            # A renewal that hangs is a failed one: it must not carry the work past the deadline.
+            held = await asyncio.wait_for(
+                self.renew(partition=partition, file_id=file_id, holder_id=holder_id),
+                timeout=max(deadline - attempted_at, 0),
+            )
+        except Exception as exc:  # noqa: BLE001 - retried at the next round, up to the deadline
+            log = logger.bind(partition=partition, file_id=file_id)
+            if monotonic() >= deadline:
+                log.warning("Failed to renew the file fence before its lease ends; stopping", error=str(exc))
+                raise FileFenceLostError(file_id, partition) from exc
+            log.warning("Failed to renew the file fence; retrying", error=str(exc))
+            return confirmed_until
+        if not held:
+            raise FileFenceLostError(file_id, partition)
+        return attempted_at + FILE_FENCE_TTL_SECONDS
 
     async def renew(self, *, partition: str, file_id: str, holder_id: str) -> bool:
         """Extend the fence; ``False`` once ``holder_id`` no longer holds it, ``True`` without fences.

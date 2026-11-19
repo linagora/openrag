@@ -82,7 +82,9 @@ COPY_CONTENT_CLAIM_TOKEN_PREFIX = "copy:"
 # the fence of a holder that crashed. A lapsed lease never fails its holder by
 # itself: the catalog commit checks the holder, not the expiry.
 FILE_FENCE_TTL_SECONDS = 120.0
-# Four renewals per lease: a holder survives three missed rounds in a row.
+# Four renewals per lease. An indexing worker survives three missed rounds in a
+# row (its catalog commit is checked); a delete, a metadata update or a copy
+# stops at the third, one round before the lease ends (FileFences.renew_before_expiry).
 FILE_FENCE_RENEW_INTERVAL_SECONDS = FILE_FENCE_TTL_SECONDS / 4
 
 

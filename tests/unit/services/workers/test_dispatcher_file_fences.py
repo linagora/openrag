@@ -485,6 +485,33 @@ async def test_a_delete_whose_fence_was_lost_stops(monkeypatch: pytest.MonkeyPat
         await _dispatcher(fences, document_repo=repo).delete_file(FILE_ID, PARTITION)
 
 
+@pytest.mark.asyncio
+async def test_a_delete_that_cannot_renew_stops_before_its_lease_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.indexing.file_fences as fences_module
+    import services.workers.dispatcher as module
+
+    # A 0.4 s lease renewed every 0.1 s: without a renewal the delete must stop by 0.3 s.
+    monkeypatch.setattr(module, "FILE_FENCE_TTL_SECONDS", 0.4)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_TTL_SECONDS", 0.4)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
+    monkeypatch.setattr(module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
+    fences = InMemoryFileFences()
+    fences.renew = AsyncMock(side_effect=ConnectionError("postgres unreachable"))
+    repo = _document_repo()
+
+    async def slow_remove(**_kwargs) -> None:
+        await asyncio.sleep(5)
+
+    repo.remove_file_from_partition.side_effect = slow_remove
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(RuntimeError, match="lease was lost"):
+        await _dispatcher(fences, document_repo=repo).delete_file(FILE_ID, PARTITION)
+
+    assert asyncio.get_running_loop().time() - started < 0.4
+    assert fences.renew.await_count >= 2
+
+
 # ── Metadata update ──────────────────────────────────────────────────
 
 

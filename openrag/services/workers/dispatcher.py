@@ -5,6 +5,7 @@ import traceback
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
@@ -12,6 +13,7 @@ from core.indexing.file_fences import FileFences, indexing_in_progress
 from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
     COPY_CONTENT_CLAIM_TOKEN_PREFIX,
+    FILE_FENCE_TTL_SECONDS,
     INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
@@ -25,6 +27,7 @@ from core.utils.error_summary import extract_task_error_reason, failure_reason_f
 from core.utils.exceptions import (
     ConflictError,
     DocumentNotFoundError,
+    FileFenceLostError,
     ServiceUnavailableError,
     mark_indexing_worker_may_be_running,
 )
@@ -282,8 +285,13 @@ class WorkerDispatcher(IndexingDispatcher):
         remote = _remote_actor_method(self._tsm, "renew_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose renewable file delete fencing")
+        # The Postgres fence was taken just before this loop starts.
+        confirmed_until = monotonic() + FILE_FENCE_TTL_SECONDS
         while True:
-            await asyncio.sleep(_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS)
+            delay = _FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS
+            if self._file_fences.enabled:
+                delay = min(delay, self._file_fences.next_renewal_in(confirmed_until))
+            await asyncio.sleep(delay)
             renewed = await retry_idempotent_ray_actor_method(
                 lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
                 recovery_timeout=self._timeout,
@@ -292,15 +300,14 @@ class WorkerDispatcher(IndexingDispatcher):
             if renewed is not True:
                 raise RuntimeError("File delete fence lease was lost during cleanup")
             if self._file_fences.enabled:
+                # Stops the delete one round before its lease could expire unrenewed:
+                # an upload that took the expired fence would lose the vectors it stores.
                 try:
-                    still_held = await self._file_fences.renew(partition=partition, file_id=file_id, holder_id=fence_id)
-                except Exception as exc:  # noqa: BLE001 - the lease outlasts several missed rounds
-                    logger.bind(partition=partition, file_id=file_id).warning(
-                        "Failed to renew the file fence; retrying", error=str(exc)
+                    confirmed_until = await self._file_fences.renew_before_expiry(
+                        partition=partition, file_id=file_id, holder_id=fence_id, confirmed_until=confirmed_until
                     )
-                    continue
-                if not still_held:
-                    raise RuntimeError("File delete fence lease was lost during cleanup")
+                except FileFenceLostError as exc:
+                    raise RuntimeError("File delete fence lease was lost during cleanup") from exc
 
     async def _delete_with_renewable_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         delete_task = asyncio.create_task(self._delete_file_with_fence(file_id=file_id, partition=partition))
