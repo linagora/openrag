@@ -8,10 +8,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from core.models.catalog import FileFence, FileFenceKind
+from core.models.catalog import COPY_CONTENT_CLAIM_TOKEN_PREFIX, FileFence, FileFenceKind
 from core.ports.file_fence_repo import FileFenceRepository
-from core.utils.exceptions import ConflictError, ServiceUnavailableError
+from core.utils.exceptions import ConflictError, FileFenceLostError, ServiceUnavailableError
 from services.workers.dispatcher import WorkerDispatcher
+from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
 PARTITION = "tenant-a"
 FILE_ID = "file-1"
@@ -623,6 +624,79 @@ async def test_a_copy_writes_its_target_under_the_targets_index_fence() -> None:
     assert holder.kind is FileFenceKind.INDEX
     assert repo.add_file_to_partition.await_args.kwargs["fence_holder_id"] == holder.holder_id
     assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_long_copy_renews_its_target_fence(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    fences = InMemoryFileFences()
+    renewed: list[str] = []
+
+    async def counting_renew(**kwargs) -> bool:
+        renewed.append(kwargs["file_id"])
+        return await InMemoryFileFences.renew(fences, **kwargs)
+
+    fences.renew = counting_renew
+    dispatcher, _, store = _copy_dispatcher(fences)
+
+    async def slow_insert(*_args, **_kwargs) -> None:
+        await asyncio.sleep(0.1)
+
+    store.insert_entities.side_effect = slow_insert
+
+    await _copy(dispatcher)
+
+    assert renewed
+    assert set(renewed) == {FILE_ID}
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_loses_its_target_fence_writes_no_catalog_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    fences = InMemoryFileFences()
+    fences.renew = AsyncMock(return_value=False)
+    dispatcher, repo, store = _copy_dispatcher(fences)
+
+    async def slow_insert(*_args, **_kwargs) -> None:
+        await asyncio.sleep(1)
+
+    store.insert_entities.side_effect = slow_insert
+
+    with pytest.raises(FileFenceLostError):
+        await _copy(dispatcher)
+
+    repo.add_file_to_partition.assert_not_awaited()
+    # The vectors the stopped insert may have written, marked with the copy's token, are removed.
+    cleanup_filter = store.delete_by_filter.await_args.args[0]
+    assert cleanup_filter["file_id"] == FILE_ID
+    assert cleanup_filter[INDEXING_TASK_ID_METADATA_KEY].startswith(COPY_CONTENT_CLAIM_TOKEN_PREFIX)
+
+
+@pytest.mark.asyncio
+async def test_a_copy_reads_the_source_record_before_its_final_check() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, _ = _copy_dispatcher(fences)
+    reads: list[str] = []
+
+    async def read_metadata(*_args) -> dict:
+        reads.append("metadata")
+        return dict(SOURCE_ROW)
+
+    async def read_config(*_args) -> None:
+        reads.append("indexation_config")
+
+    repo.get_file_metadata.side_effect = read_metadata
+    repo.get_indexation_config.side_effect = read_config
+
+    await _copy(dispatcher)
+
+    # The last read is the final check: a replace finishing after the record was read is refused.
+    assert reads == ["metadata", "indexation_config", "metadata"]
 
 
 @pytest.mark.asyncio

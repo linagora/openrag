@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
@@ -831,8 +831,9 @@ class WorkerDispatcher(IndexingDispatcher):
         fenced = await self._file_fences.acquire_for_indexing(
             partition=target_partition, file_id=target_file_id, holder_id=claim_token
         )
-        try:
-            await self._copy_file(
+
+        def run_copy() -> Awaitable[None]:
+            return self._copy_file(
                 file_id,
                 metadata,
                 partition,
@@ -847,6 +848,15 @@ class WorkerDispatcher(IndexingDispatcher):
                 embedder_reference=embedder_reference,
                 embedder_fingerprint=embedder_fingerprint,
             )
+
+        try:
+            if fenced:
+                # Re-embedding into another vector field can outlast the lease.
+                await self._file_fences.run_holding(
+                    partition=target_partition, file_id=target_file_id, holder_id=claim_token, work=run_copy
+                )
+            else:
+                await run_copy()
         finally:
             if fenced:
                 await self._file_fences.release(
@@ -896,6 +906,10 @@ class WorkerDispatcher(IndexingDispatcher):
                 {"partition": partition, "file_id": file_id},
                 output_fields=["*"],
             )
+            # The source's record, embedder included, still describes vectors copied
+            # as they are. Read before the check below, so a replace finishing in
+            # between is refused instead of lending its record to the old vectors.
+            indexation_config = await self._document_repo.get_indexation_config(file_id, partition)
             await self._file_fences.check_unchanged(
                 partition=partition,
                 file_id=file_id,
@@ -921,8 +935,6 @@ class WorkerDispatcher(IndexingDispatcher):
                 entity[INDEXING_TASK_ID_METADATA_KEY] = claim_token
                 entities.append(entity)
 
-            # The source's record, embedder included, still describes vectors copied as they are.
-            indexation_config = await self._document_repo.get_indexation_config(file_id, partition)
             catalog_kwargs: dict[str, Any] = {}
             recorded_field = (indexation_config or {}).get("embedder_vector_field")
             if vector_field is not None and await self._move_to_vector_field(
@@ -938,8 +950,8 @@ class WorkerDispatcher(IndexingDispatcher):
                 catalog_kwargs["indexation_config"] = indexation_config
             if fenced:
                 catalog_kwargs["fence_holder_id"] = claim_token
-            await self._insert_entities(entities, protected_metadata=file_metadata)
             try:
+                await self._insert_entities(entities, protected_metadata=file_metadata)
                 await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
                     partition=target_partition,
@@ -952,7 +964,9 @@ class WorkerDispatcher(IndexingDispatcher):
                     chunk_count=len(entities),
                     **catalog_kwargs,
                 )
-            except Exception:
+            except (Exception, asyncio.CancelledError):
+                # Also a copy stopped because its target fence was lost: the
+                # vectors it inserted, all marked with its token, go with it.
                 await self._cleanup_submitted_vectors(
                     claim_token, metadata={"file_id": target_file_id}, partition=target_partition
                 )
