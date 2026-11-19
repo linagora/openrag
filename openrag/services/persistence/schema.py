@@ -277,6 +277,9 @@ files = Table(
     Index("ix_partition_file", "partition_name", "file_id"),
     Index("ix_relationship_partition", "relationship_id", "partition_name"),
     Index("ix_parent_partition", "parent_id", "partition_name"),
+    # Before an uploaded original is deleted, a lookup by its path checks that
+    # no other row still references it (a copy keeps its source's ``source``).
+    Index("ix_files_source", text("(file_metadata ->> 'source')")),
     Index(
         "uix_files_partition_content_sha256",
         "partition_name",

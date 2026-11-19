@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -93,6 +93,20 @@ class DocumentRepository(ABC):
     @abstractmethod
     async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
         """Return file metadata with authoritative partition and ISO indexed_at columns."""
+        ...
+
+    @abstractmethod
+    async def referenced_sources(self, sources: Iterable[str]) -> set[str]:
+        """The paths among ``sources`` that a catalog row still holds as its ``source``.
+
+        A copy of a file keeps its source's ``source``, so an uploaded original
+        is only deleted once no row references it.
+        """
+        ...
+
+    @abstractmethod
+    async def list_partition_sources(self, partition: str) -> list[str]:
+        """The distinct ``source`` paths of a partition's files."""
         ...
 
     @abstractmethod
