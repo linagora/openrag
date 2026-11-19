@@ -42,7 +42,8 @@ jobs:
       #            unit tests read pages and env files under docs/
       #   ui       anything under ui/, or this file
       #   site     anything the documentation site is built from: docs/, the
-      #            Astro config, the root package files, astro.yml or this file
+      #            Astro config, the root package files, astro.yml, the shared
+      #            build-docs action or this file
       - name: Find the areas this pull request changes
         id: areas
         uses: actions/github-script@v7
@@ -69,7 +70,9 @@ jobs:
                   areas.unit = paths.some((path) => !isUi(path) && !isTopLevelMarkdown(path));
                   areas.ui = paths.some((path) => isUi(path) || path === '.github/workflows/ci.yml');
                   const siteFiles = ['astro.config.mjs', 'package.json', 'package-lock.json', 'tsconfig.json', '.github/workflows/astro.yml', '.github/workflows/ci.yml'];
-                  areas.site = paths.some((path) => path.startsWith('docs/') || siteFiles.includes(path));
+                  areas.site = paths.some(
+                    (path) => path.startsWith('docs/') || path.startsWith('.github/actions/build-docs/') || siteFiles.includes(path)
+                  );
                 }
               } catch (error) {
                 core.warning(`Could not list the changed files, running every job: ${error.message}`);
@@ -544,10 +547,9 @@ jobs:
 
   docs-build:
     # The site deploys only from main (astro.yml), so a page that breaks the
-    # build would otherwise surface on release day. This builds it, as
-    # astro.yml does, without deploying anything. It copies astro.yml's Node
-    # version and build command rather than running that workflow, so a change
-    # to either belongs in both.
+    # build would otherwise surface on release day. This runs the same build
+    # as astro.yml, through the shared .github/actions/build-docs, without
+    # deploying anything.
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.site != 'false' }}
     runs-on: ubuntu-latest
@@ -555,6 +557,8 @@ jobs:
 
     permissions:
       contents: read
+      # configure-pages reads the site URL and base path the deploy uses.
+      pages: read
 
     steps:
       - name: Checkout repository
@@ -562,15 +566,5 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
       - name: Build the documentation site
-        run: npx --no-install astro build
+        uses: ./.github/actions/build-docs
