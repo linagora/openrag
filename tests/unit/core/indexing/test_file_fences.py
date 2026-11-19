@@ -80,6 +80,17 @@ class _Fences(FileFenceRepository):
 # ── Without fences ───────────────────────────────────────────────────
 
 
+def test_fences_start_their_metric_series_only_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    started: list[bool] = []
+    monkeypatch.setattr(module, "start_file_fence_series", lambda: started.append(True))
+
+    FileFences(None)
+    assert started == []
+
+    FileFences(_Fences())
+    assert started == [True]
+
+
 @pytest.mark.asyncio
 async def test_without_a_repository_every_rule_is_a_no_op() -> None:
     fences = FileFences(None)

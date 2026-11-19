@@ -105,7 +105,7 @@ Supporting metrics:
 | `openrag_circuit_breaker_state` | gauge | `name` | both | 0 closed, 1 open, 2 half-open, -1 unknown |
 | `openrag_file_fence_conflicts_total` | counter | `file_operation`, `holder_kind` | both | Operations refused because another operation held the file (`FILE_FENCES=postgres` only) |
 | `openrag_file_fence_commits_refused_total` | counter | — | both | Catalog writes refused because their operation lost the file's fence, most often an indexing task whose file was deleted meanwhile |
-| `openrag_file_fence_renewal_failures_total` | counter | `holder_kind` | both | Fence renewals that failed and are retried; a sustained rate means fences are about to lapse |
+| `openrag_file_fence_renewal_failures_total` | counter | `holder_kind` | both | Fence renewals that failed. Most are retried; a delete, metadata update or copy whose renewals keep failing stops before its lease ends (`503 FILE_FENCE_UNAVAILABLE`). A sustained rate means the catalog database is not answering |
 
 `both` means each process exports its own calls, under the same name once the
 Ray series are renamed. Neither side is limited to one kind of call: the API

@@ -410,7 +410,7 @@ FILE_FENCE_COMMITS_REFUSED_TOTAL = MetricSpec(
 #: fences are about to lapse.
 FILE_FENCE_RENEWAL_FAILURES_TOTAL = MetricSpec(
     name="openrag_file_fence_renewal_failures_total",
-    description="File fence renewals that failed and are retried, by the kind of holder",
+    description="File fence renewals that failed, retried or ending the operation, by the kind of holder",
     kind="counter",
     labels=("holder_kind",),
 )

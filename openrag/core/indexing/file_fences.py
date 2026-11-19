@@ -33,6 +33,7 @@ from core.models.catalog import (
 from core.observability.file_fence_metrics import (
     record_file_fence_conflict,
     record_file_fence_renewal_failure,
+    start_file_fence_series,
 )
 from core.ports.file_fence_repo import FileFenceRepository
 from core.utils.exceptions import ConflictError, FileFenceLostError
@@ -89,6 +90,9 @@ class FileFences:
     def __init__(self, repo: FileFenceRepository | None, *, wait_timeout: float = DEFAULT_WAIT_TIMEOUT_SECONDS) -> None:
         self._repo = repo
         self._wait_timeout = wait_timeout
+        if repo is not None:
+            # The API side: its conflicts and renewals are counted from 0.
+            start_file_fence_series()
 
     @property
     def enabled(self) -> bool:
