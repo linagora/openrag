@@ -10,7 +10,7 @@ from core.indexing import file_fences as module
 from core.indexing.file_fences import FileFences
 from core.models.catalog import FileFence, FileFenceKind
 from core.ports.file_fence_repo import FileFenceRepository
-from core.utils.exceptions import ConflictError, FileFenceLostError
+from core.utils.exceptions import ConflictError, FileFenceLostError, FileFenceUnavailableError
 
 PARTITION = "tenant-a"
 FILE_ID = "file-1"
@@ -75,6 +75,10 @@ class _Fences(FileFenceRepository):
 
     async def get(self, *, partition, file_id) -> FileFence | None:
         return self.fences.get((partition, file_id))
+
+    async def get_live(self, *, partition, file_id) -> FileFence | None:
+        current = self.fences.get((partition, file_id))
+        return current if current is not None and current.expires_at > datetime.now(UTC) else None
 
 
 # ── Without fences ───────────────────────────────────────────────────
@@ -169,6 +173,31 @@ async def test_check_free_refuses_a_file_another_operation_holds() -> None:
         await FileFences(repo).check_free(partition=PARTITION, file_id=FILE_ID)
 
     assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+
+
+@pytest.mark.asyncio
+async def test_check_free_ignores_a_fence_whose_lease_ended() -> None:
+    # A release that failed leaves the row: it must stop refusing once its lease is over.
+    repo = _Fences()
+    repo.hold(FileFenceKind.INDEX, "task-gone")
+    fence = repo.fences[(PARTITION, FILE_ID)]
+    repo.fences[(PARTITION, FILE_ID)] = fence.model_copy(
+        update={"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    await FileFences(repo).check_free(partition=PARTITION, file_id=FILE_ID)
+
+
+@pytest.mark.asyncio
+async def test_a_file_a_copy_is_writing_is_refused_without_a_task_to_poll() -> None:
+    repo = _Fences()
+    repo.hold(FileFenceKind.INDEX, "copy:abc")
+
+    with pytest.raises(ConflictError) as caught:
+        await FileFences(repo).check_free(partition=PARTITION, file_id=FILE_ID)
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert "existing_task_id" not in caught.value.extra
 
 
 @pytest.mark.asyncio
@@ -275,13 +304,15 @@ async def _run_until_stopped(repo: _Fences) -> tuple[float, asyncio.Event]:
             stopped.set()
 
     started = asyncio.get_running_loop().time()
-    with pytest.raises(FileFenceLostError):
+    # A 503, not a lost fence: nothing else touched the file.
+    with pytest.raises(FileFenceUnavailableError) as caught:
         await asyncio.wait_for(
             FileFences(repo).run_holding(
                 partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
             ),
             timeout=5,
         )
+    assert caught.value.status_code == 503
     return asyncio.get_running_loop().time() - started, stopped
 
 
@@ -340,6 +371,28 @@ async def test_a_successful_renewal_moves_the_deadline(monkeypatch: pytest.Monke
     )
 
     assert result == "done"
+
+
+@pytest.mark.asyncio
+async def test_work_that_ends_in_the_round_its_fence_is_lost_reports_its_own_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Both tasks yield once, then finish in the same loop iteration: the work
+    # returns while the renewal finds the fence gone.
+    monkeypatch.setattr(module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0)
+    repo = _Fences()
+    repo.renew_results = [False]
+
+    async def work():
+        await asyncio.sleep(0)
+        return "committed"
+
+    result = await FileFences(repo).run_holding(
+        partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+    )
+
+    assert result == "committed"
+    assert repo.renew_results == []
 
 
 @pytest.mark.asyncio

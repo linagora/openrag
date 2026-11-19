@@ -326,10 +326,19 @@ Another one arriving meanwhile is answered:
 | Copy, into this `file_id` | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
 
 The code is the `[CODE]` prefix of `detail`. `DOCUMENT_INDEXING_IN_PROGRESS` carries
-`extra.existing_task_id`. Every `409` here is temporary: retry once the other operation has ended.
-Copies of one file can run side by side; a copy whose source changed while it was read answers
-`409 DOCUMENT_CHANGED_DURING_COPY`. Deleting a workspace deletes the files it orphaned the same way
-as a file delete.
+`extra.existing_task_id` when an indexing task holds the file; a copy into it has no task to point
+at. Every `409` here is temporary: retry once the other operation has ended. Copies of one file can
+run side by side; a copy whose source changed while it was read answers
+`409 DOCUMENT_CHANGED_DURING_COPY`.
+
+Deleting a workspace deletes the files it orphaned under the same rules, with one difference: it
+does not stop a file's indexing task, it takes the file over. The task runs on until its final
+write, which is refused, and then removes the chunks it stored.
+
+A delete, metadata update or copy keeps the file for as long as it runs. If the catalog database
+stops answering meanwhile, the operation stops before another one could take the file and answers
+`503 FILE_FENCE_UNAVAILABLE`: retry once the database is back. One whose file was taken over
+meanwhile answers `409 FILE_FENCE_LOST`.
 
 #### Check Indexing Status
 ```http

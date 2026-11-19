@@ -25,6 +25,7 @@ from time import monotonic
 from typing import Any, TypeVar
 
 from core.models.catalog import (
+    COPY_CONTENT_CLAIM_TOKEN_PREFIX,
     FILE_FENCE_RENEW_INTERVAL_SECONDS,
     FILE_FENCE_TTL_SECONDS,
     FileFence,
@@ -36,7 +37,7 @@ from core.observability.file_fence_metrics import (
     start_file_fence_series,
 )
 from core.ports.file_fence_repo import FileFenceRepository
-from core.utils.exceptions import ConflictError, FileFenceLostError
+from core.utils.exceptions import ConflictError, FileFenceLostError, FileFenceUnavailableError
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -53,6 +54,14 @@ def indexing_in_progress(file_id: str, partition: str, task_id: str) -> Conflict
         f"File '{file_id}' is already being indexed in partition '{partition}'.",
         code="DOCUMENT_INDEXING_IN_PROGRESS",
         existing_task_id=task_id,
+    )
+
+
+def copy_in_progress(file_id: str, partition: str) -> ConflictError:
+    """Same code as indexing: a copy writes the file the way an upload does, but has no task id."""
+    return ConflictError(
+        f"File '{file_id}' is being copied into partition '{partition}'. Please retry.",
+        code="DOCUMENT_INDEXING_IN_PROGRESS",
     )
 
 
@@ -80,6 +89,9 @@ def changed_during_copy(file_id: str, partition: str) -> ConflictError:
 def busy(fence: FileFence) -> ConflictError:
     """The 409 for a file another operation holds."""
     if fence.kind is FileFenceKind.INDEX:
+        if fence.holder_id.startswith(COPY_CONTENT_CLAIM_TOKEN_PREFIX):
+            # A copy into the file: no task a client could poll.
+            return copy_in_progress(fence.file_id, fence.partition)
         return indexing_in_progress(fence.file_id, fence.partition, fence.holder_id)
     if fence.kind is FileFenceKind.DELETE:
         return delete_in_progress(fence.file_id, fence.partition)
@@ -168,7 +180,9 @@ class FileFences:
         """Refuse with 409 if an operation other than *own_holder_id* holds the file."""
         if self._repo is None:
             return
-        fence = await self._repo.get(partition=partition, file_id=file_id)
+        # Only a live fence counts: a row left by a release that failed stops
+        # refusing once its lease ends, as it would for acquire.
+        fence = await self._repo.get_live(partition=partition, file_id=file_id)
         if fence is not None and fence.holder_id != own_holder_id:
             raise self._refused(fence, "copy")
 
@@ -207,7 +221,8 @@ class FileFences:
 
         Call it right after taking the fence: the lease is counted from here. A
         database error during a renewal is retried at the next round, until less
-        than one round of the confirmed lease is left (see ``renew_before_expiry``).
+        than one round of the confirmed lease is left; the work then stops with
+        ``FileFenceUnavailableError`` (see ``_renew_before_expiry``).
         """
         if self._repo is None:
             return await work()
@@ -217,8 +232,11 @@ class FileFences:
         )
         try:
             done, _ = await asyncio.wait({work_task, renewal}, return_when=asyncio.FIRST_COMPLETED)
-            if renewal in done:
+            if work_task not in done:
+                # The renewal only ends by raising: the fence was lost or could not be kept.
                 await renewal
+            # Work that finished is reported as it ended, even if the fence went
+            # in the same round: its catalog write was checked against the fence.
             return await work_task
         finally:
             for task in (work_task, renewal):
@@ -229,8 +247,8 @@ class FileFences:
     async def _keep_alive(self, *, partition: str, file_id: str, holder_id: str, holder_kind: FileFenceKind) -> None:
         confirmed_until = monotonic() + FILE_FENCE_TTL_SECONDS
         while True:
-            await asyncio.sleep(self.next_renewal_in(confirmed_until))
-            confirmed_until = await self.renew_before_expiry(
+            await asyncio.sleep(self._next_renewal_in(confirmed_until))
+            confirmed_until = await self._renew_before_expiry(
                 partition=partition,
                 file_id=file_id,
                 holder_id=holder_id,
@@ -239,22 +257,23 @@ class FileFences:
             )
 
     @staticmethod
-    def next_renewal_in(confirmed_until: float) -> float:
+    def _next_renewal_in(confirmed_until: float) -> float:
         """Seconds to wait before the next renewal: one round, or less when the deadline comes first."""
         deadline = confirmed_until - FILE_FENCE_RENEW_INTERVAL_SECONDS
         return max(min(FILE_FENCE_RENEW_INTERVAL_SECONDS, deadline - monotonic()), 0)
 
-    async def renew_before_expiry(
+    async def _renew_before_expiry(
         self, *, partition: str, file_id: str, holder_id: str, holder_kind: FileFenceKind, confirmed_until: float
     ) -> float:
         """Renew the fence of work that must stop before it can be taken; return the new confirmed expiry.
 
         *confirmed_until* is the ``monotonic()`` time the lease is known to last
         until. A database error is retried at the next round until one round
-        before that time; there, and once the fence is lost, this raises
-        ``FileFenceLostError``. With the defaults that is after three failed
-        rounds, 30 s before another operation could take the expired fence: the
-        time a write the work had already sent has to complete.
+        before that time; there this raises ``FileFenceUnavailableError`` (a
+        503: nothing else touched the file). With the defaults that is after
+        three failed rounds, 30 s before another operation could take the
+        expired fence: the time a write the work had already sent has to
+        complete. A fence another operation took raises ``FileFenceLostError``.
         """
         attempted_at = monotonic()
         deadline = confirmed_until - FILE_FENCE_RENEW_INTERVAL_SECONDS
@@ -269,7 +288,7 @@ class FileFences:
             log = logger.bind(partition=partition, file_id=file_id)
             if monotonic() >= deadline:
                 log.warning("Failed to renew the file fence before its lease ends; stopping", error=str(exc))
-                raise FileFenceLostError(file_id, partition) from exc
+                raise FileFenceUnavailableError(file_id, partition) from exc
             log.warning("Failed to renew the file fence; retrying", error=str(exc))
             return confirmed_until
         if not held:
@@ -310,6 +329,7 @@ __all__ = [
     "FileFences",
     "busy",
     "changed_during_copy",
+    "copy_in_progress",
     "delete_in_progress",
     "indexing_in_progress",
     "metadata_update_in_progress",
