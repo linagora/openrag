@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +13,7 @@ from core.models.workspace import Workspace
 from services.orchestrators.partition_service import PartitionService
 from services.orchestrators.workspace_service import WorkspaceService
 from services.storage.originals import OriginalsCleaner, markdown_sidecar_path
+from services.storage.orphan_originals import scan_orphan_originals
 from services.workers.indexer_actor import IndexerWorker, _write_catalog_record
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
@@ -169,3 +172,34 @@ async def test_a_replace_deletes_the_previous_original_but_not_a_copys(postgres_
 
     assert not Path(old).exists() and not markdown_sidecar_path(old).exists()
     assert Path(copied).exists() and markdown_sidecar_path(copied).exists()
+
+
+async def test_the_orphan_scan_deletes_only_what_no_row_references(postgres_store, tmp_path):
+    store = postgres_store
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    await store.partition_repo.create_partition("p")
+    await store.partition_repo.create_partition("q")
+    kept = original(data_dir, "1713700000000_a1b2_kept.pdf")
+    copied = original(data_dir, "1713700000001_c3d4_copied.pdf")
+    orphan = original(data_dir, "1713700000002_e5f6_deleted_before.pdf")
+    young = original(data_dir, "1713700000003_aaaa_in_flight.pdf")
+    await upload(store, "kept", kept)
+    await upload(store, "copy", copied, partition="q")
+    day_ago = time.time() - 24 * 3600 - 60
+    for path in (kept, copied, orphan):
+        for target in (path, str(markdown_sidecar_path(path))):
+            os.utime(target, (day_ago, day_ago))
+
+    async def scan(**kwargs):
+        return [
+            e async for e in scan_orphan_originals(store.document_repo, data_dir, min_age_seconds=24 * 3600, **kwargs)
+        ]
+
+    events = await scan(delete=True)
+
+    assert [e["path"] for e in events if e["type"] == "orphan"] == [orphan, str(markdown_sidecar_path(orphan))]
+    assert events[-1]["deleted"] == 2 and events[-1]["referenced"] == 4 and events[-1]["young"] == 2
+    assert not Path(orphan).exists() and not markdown_sidecar_path(orphan).exists()
+    assert all(Path(path).exists() and markdown_sidecar_path(path).exists() for path in (kept, copied, young))
+    assert (await scan())[-1]["orphans"] == 0

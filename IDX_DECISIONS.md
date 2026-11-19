@@ -151,3 +151,15 @@ Choices the plan (IDX_00 to IDX_09) left open or that depart from it. One file f
   - a move (a copy, then a delete) is safe, since the route answers 201 only once the copy's row is written.
 - **Rejected:** holding the source's fence for the whole copy. A delete or replace of the source would then wait on the copy, a change to #1459's code for a rare case.
 - **Impact:** the orphan script can't bring that file back. If it happens in practice, the fence above is the fix.
+
+## D13. The orphan script considers only uploads, and deletes nothing where the catalog knows none
+
+**1A**, `scripts/find_orphan_originals.py`, `services/storage/orphan_originals.py`. Status: taken.
+
+- **Decision:**
+  - it lists only files directly under `data_dir` named like an upload (`make_unique_filename`), with their `.md` copies, older than `--min-age-hours` (24 by default, at least 1);
+  - `--delete` fails, deleting nothing, when no upload there is referenced;
+  - it isn't gated by `FILE_FENCES` (D11): an operator runs it on purpose, and listing is the default.
+- **Why:** `data_dir` holds more than uploads, and the catalog stores paths as the API sees them. Run on the host, or against another database, every upload would look unreferenced.
+- **Rejected:** a `--force` past that refusal. A catalog that really references no upload is rare, and the list shows what to remove by hand.
+
