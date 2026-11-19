@@ -63,6 +63,10 @@ def _to_dt(val: Any) -> datetime:
     raise TypeError(f"Expected datetime or ISO string, got {type(val).__name__}")
 
 
+def session_needs_refresh(session: dict[str, Any], *, now: datetime | None = None) -> bool:
+    return _to_dt(session["access_token_expires_at"]) <= (now or datetime.now()) + _REFRESH_BUFFER
+
+
 async def refresh_session_if_needed(
     *,
     session: dict[str, Any],
@@ -89,10 +93,10 @@ async def refresh_session_if_needed(
     ``PartitionFileManager._oidc_session_to_dict``.
     """
     now = datetime.now()
-    access_exp = _to_dt(session["access_token_expires_at"])
 
-    if access_exp > now + _REFRESH_BUFFER:
+    if not session_needs_refresh(session, now=now):
         return session
+    access_exp = _to_dt(session["access_token_expires_at"])
 
     # --- Stampede short-circuit -------------------------------------------
     # If a sibling request just refreshed this same session, re-read the row

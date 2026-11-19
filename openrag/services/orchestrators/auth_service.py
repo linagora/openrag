@@ -414,6 +414,12 @@ class AuthService:
         logger.info("Revoked OIDC sessions by user", user_id=user_id, count=count)
         return count
 
+    @staticmethod
+    def oidc_session_needs_refresh(session: dict[str, Any]) -> bool:
+        from services.auth.refresh import session_needs_refresh
+
+        return session_needs_refresh(session)
+
     async def refresh_session_if_needed(self, *, session: dict[str, Any], enc_key: str) -> dict[str, Any] | None:
         """Refresh the IdP access token when it is near expiry.
 

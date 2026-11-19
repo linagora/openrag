@@ -328,28 +328,45 @@ class AuthMiddleware(BaseHTTPMiddleware):
             logger.warning("Auth service unavailable", reason="service_unavailable", status=503, path=path)
             return None, JSONResponse(status_code=503, content={"detail": "Service unavailable"})
 
-    async def _authenticate_oidc_session(
-        self, auth_service: Any, identity: str, token: str, enc_key: str
-    ) -> tuple[Any, Any]:
-        # Refresh tokens rotate per session, regardless of client IP or how
-        # the client sent its session token. Read and revoke under the same lock.
-        async with self._lock_credentials([("oidc-session", self._token_fingerprint(token))]):
-            session = await auth_service.get_oidc_session_by_token_for_request(token)
-            if session is not None:
-                refreshed = await auth_service.refresh_session_if_needed(session=session, enc_key=enc_key)
-                if refreshed is None:
-                    try:
-                        await auth_service.revoke_oidc_session_by_id_for_request(session["id"])
-                    except Exception as exc:
-                        logger.bind(error=str(exc)).warning("Failed to revoke invalid OIDC session")
-                else:
-                    user = await auth_service.get_user_for_request(refreshed["user_id"])
-                    if user is not None:
-                        self._remember_authenticated_token(identity, token, "session")
-                        return user, refreshed
+    async def _can_revalidate(
+        self, request: Request, identity: str, token: str, kind: _CredentialKind, *, limited: bool
+    ) -> bool:
+        if not limited or self._has_recently_authenticated_token(identity, token, kind):
+            return True
+        return not await self._auth_failure_limiter.is_limited(request)
 
-            self._forget_authenticated_token(identity, token, "session")
-            return None, None
+    async def _authenticate_oidc_session(
+        self, request: Request, auth_service: Any, identity: str, token: str, enc_key: str, *, limited: bool
+    ) -> tuple[Any, Any] | None:
+        if not await self._can_revalidate(request, identity, token, "session", limited=limited):
+            return None
+        session = await auth_service.get_oidc_session_by_token_for_request(token)
+        if session is not None and auth_service.oidc_session_needs_refresh(session):
+            # Rotation is per session, independent of IP or transport. Read
+            # again under the lock so we act on the latest stored tokens.
+            async with self._lock_credentials([("oidc-session", self._token_fingerprint(token))]):
+                if not await self._can_revalidate(request, identity, token, "session", limited=limited):
+                    return None
+                session = await auth_service.get_oidc_session_by_token_for_request(token)
+                if session is not None:
+                    session_id = session["id"]
+                    session = await auth_service.refresh_session_if_needed(session=session, enc_key=enc_key)
+                    if session is None:
+                        try:
+                            await auth_service.revoke_oidc_session_by_id_for_request(session_id)
+                        except Exception as exc:
+                            logger.bind(error=str(exc)).warning("Failed to revoke invalid OIDC session")
+                if session is None:
+                    self._forget_authenticated_token(identity, token, "session")
+                    return None, None
+
+        if session is not None:
+            user = await auth_service.get_user_for_request(session["user_id"])
+            if user is not None:
+                self._remember_authenticated_token(identity, token, "session")
+                return user, session
+        self._forget_authenticated_token(identity, token, "session")
+        return None, None
 
     async def _authenticate_request(
         self,
@@ -363,34 +380,45 @@ class AuthMiddleware(BaseHTTPMiddleware):
         cookie_token: str | None,
         oidc_bearer_token: str | None,
         identity: str,
+        limited: bool,
     ) -> tuple[Any, Any, Any] | Response:
-        user = None
-        session = None
         auth_service, unavailable = self._resolve_auth_service(request)
         if unavailable is not None:
             return unavailable
 
-        if cookie_token:
-            user, session = await self._authenticate_oidc_session(auth_service, identity, cookie_token, enc_key)
-        if user is None and oidc_bearer_token is not None:
-            user, session = await self._authenticate_oidc_session(auth_service, identity, oidc_bearer_token, enc_key)
-        if user is None and token is not None:
-            user = await auth_service.get_user_by_token_for_request(token)
-            if user is None:
+        blocked_credential = False
+        for session_token in dict.fromkeys((cookie_token, oidc_bearer_token)):
+            if not session_token:
+                continue
+            result = await self._authenticate_oidc_session(
+                request, auth_service, identity, session_token, enc_key, limited=limited
+            )
+            if result is None:
+                blocked_credential = True
+            else:
+                user, session = result
+                if user is not None:
+                    return user, session, auth_service
+
+        if token is not None:
+            if await self._can_revalidate(request, identity, token, "token", limited=limited):
+                user = await auth_service.get_user_by_token_for_request(token)
+                if user is not None:
+                    self._remember_authenticated_token(identity, token, "token")
+                    return user, None, auth_service
                 self._forget_authenticated_token(identity, token, "token")
             else:
-                self._remember_authenticated_token(identity, token, "token")
+                blocked_credential = True
 
-        if user is None:
-            if auth_mode == "token":
-                # The API's existing token-mode contract is a 403 with this detail.
-                detail = "Invalid token" if token is not None else "Missing token"
-                return await self._auth_failure(request, status_code=403, detail=detail)
-            if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
-                return _login_redirect(request, path)
-            return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
-
-        return user, session, auth_service
+        if blocked_credential:
+            return await self._auth_failure_limiter.limited_response(request)
+        if auth_mode == "token":
+            # The API's existing token-mode contract is a 403 with this detail.
+            detail = "Invalid token" if token is not None else "Missing token"
+            return await self._auth_failure(request, status_code=403, detail=detail)
+        if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
+            return _login_redirect(request, path)
+        return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
 
     async def dispatch(self, request: Request, call_next):
         # Read env lazily so tests can flip AUTH_MODE per-test.
@@ -531,11 +559,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         token=token if (token, "token") in eligible else None,
                         cookie_token=cookie_token if (cookie_token, "session") in eligible else None,
                         oidc_bearer_token=oidc_bearer_token if (oidc_bearer_token, "session") in eligible else None,
+                        limited=True,
                         **args,
                     )
         if not limited:
             result = await self._authenticate_request(
-                request, token=token, cookie_token=cookie_token, oidc_bearer_token=oidc_bearer_token, **args
+                request,
+                token=token,
+                cookie_token=cookie_token,
+                oidc_bearer_token=oidc_bearer_token,
+                limited=False,
+                **args,
             )
 
         if isinstance(result, Response):
