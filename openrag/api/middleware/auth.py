@@ -342,6 +342,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return None
         session = await auth_service.get_oidc_session_by_token_for_request(token)
         if session is not None and auth_service.oidc_session_needs_refresh(session):
+            observed_session = session
             # Rotation is per session, independent of IP or transport. Read
             # again under the lock so we act on the latest stored tokens.
             async with self._lock_credentials([("oidc-session", self._token_fingerprint(token))]):
@@ -349,13 +350,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return None
                 session = await auth_service.get_oidc_session_by_token_for_request(token)
                 if session is not None:
-                    session_id = session["id"]
-                    session = await auth_service.refresh_session_if_needed(session=session, enc_key=enc_key)
-                    if session is None:
-                        try:
-                            await auth_service.revoke_oidc_session_by_id_for_request(session_id)
-                        except Exception as exc:
-                            logger.bind(error=str(exc)).warning("Failed to revoke invalid OIDC session")
+                    if not auth_service.oidc_session_was_refreshed_since(observed_session, session):
+                        session_id = session["id"]
+                        session = await auth_service.refresh_session_if_needed(session=session, enc_key=enc_key)
+                        if session is None:
+                            try:
+                                await auth_service.revoke_oidc_session_by_id_for_request(session_id)
+                            except Exception as exc:
+                                logger.bind(error=str(exc)).warning("Failed to revoke invalid OIDC session")
                 if session is None:
                     self._forget_authenticated_token(identity, token, "session")
                     return None, None
@@ -381,6 +383,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         oidc_bearer_token: str | None,
         identity: str,
         limited: bool,
+        unfiltered_credentials: tuple[str | None, str | None, str | None] | None = None,
+        retry_unfiltered_if_bucket_reopens: bool = False,
     ) -> tuple[Any, Any, Any] | Response:
         auth_service, unavailable = self._resolve_auth_service(request)
         if unavailable is not None:
@@ -410,8 +414,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
             else:
                 blocked_credential = True
 
-        if blocked_credential:
-            return await self._auth_failure_limiter.limited_response(request)
+        if limited:
+            if await self._auth_failure_limiter.is_limited(request):
+                return await self._auth_failure_limiter.limited_response(request)
+            if unfiltered_credentials is not None and (retry_unfiltered_if_bucket_reopens or blocked_credential):
+                unfiltered_token, unfiltered_cookie, unfiltered_oidc_bearer = unfiltered_credentials
+                return await self._authenticate_request(
+                    request,
+                    path=path,
+                    auth_mode=auth_mode,
+                    oidc_gated=oidc_gated,
+                    enc_key=enc_key,
+                    token=unfiltered_token,
+                    cookie_token=unfiltered_cookie,
+                    oidc_bearer_token=unfiltered_oidc_bearer,
+                    identity=identity,
+                    limited=False,
+                )
         if auth_mode == "token":
             # The API's existing token-mode contract is a 403 with this detail.
             detail = "Invalid token" if token is not None else "Missing token"
@@ -554,12 +573,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     }
                     if not eligible:
                         return await self._auth_failure_limiter.limited_response(request)
+                    skipped_credentials = any(
+                        credential is not None and (credential, kind) not in eligible for credential, kind in candidates
+                    )
                     result = await self._authenticate_request(
                         request,
                         token=token if (token, "token") in eligible else None,
                         cookie_token=cookie_token if (cookie_token, "session") in eligible else None,
                         oidc_bearer_token=oidc_bearer_token if (oidc_bearer_token, "session") in eligible else None,
                         limited=True,
+                        unfiltered_credentials=(token, cookie_token, oidc_bearer_token),
+                        retry_unfiltered_if_bucket_reopens=skipped_credentials,
                         **args,
                     )
         if not limited:
