@@ -121,8 +121,14 @@ class FileFences:
             raise busy(fence)
         return True
 
-    async def acquire_for_delete(self, *, partition: str, file_id: str, holder_id: str) -> None:
-        """Take the fence for a delete: over indexing, after a delete or a metadata update."""
+    async def acquire_for_delete(
+        self, *, partition: str, file_id: str, holder_id: str, take_over_indexing: bool = True
+    ) -> None:
+        """Take the fence for a delete: over indexing, after a delete or a metadata update.
+
+        With ``take_over_indexing=False`` a file being indexed is refused with
+        409 instead: for a delete that may turn out to have nothing to do.
+        """
         if self._repo is None:
             return
         deadline = monotonic() + self._wait_timeout
@@ -136,6 +142,8 @@ class FileFences:
             )
             if fence.holder_id == holder_id:
                 return
+            if fence.kind is FileFenceKind.INDEX and not take_over_indexing:
+                raise busy(fence)
             if fence.kind is FileFenceKind.INDEX:
                 if await self._repo.take_over(
                     partition=partition,

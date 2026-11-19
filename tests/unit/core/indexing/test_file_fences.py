@@ -387,3 +387,17 @@ async def test_a_delete_still_waiting_at_the_timeout_names_the_holder() -> None:
         await FileFences(repo, wait_timeout=0).acquire_for_delete(partition=PARTITION, file_id=FILE_ID, holder_id="d")
 
     assert caught.value.code == "DOCUMENT_METADATA_UPDATE_IN_PROGRESS"
+
+
+@pytest.mark.asyncio
+async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead() -> None:
+    repo = _Fences()
+    repo.hold(FileFenceKind.INDEX, "task-1")
+
+    with pytest.raises(ConflictError) as caught:
+        await FileFences(repo).acquire_for_delete(
+            partition=PARTITION, file_id=FILE_ID, holder_id="d", take_over_indexing=False
+        )
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert repo.fences[(PARTITION, FILE_ID)].holder_id == "task-1"
