@@ -131,9 +131,9 @@ Choices the plan (IDX_00 to IDX_09) left open or that depart from it. One file f
 
 ## D11. Originals are deleted only with `FILE_FENCES=postgres`
 
-**1A**, `ServiceContainer.originals_cleaner`, and the worker's cleaner in step 5. Status: taken.
+**1A**, `originals_cleaner_for`, used by the API container and each indexer worker. Status: taken.
 
-- **Decision:** the container builds the cleaner only with `FILE_FENCES=postgres`, the v2.4.0 default. Otherwise there is none, and every delete keeps its original, as today.
+- **Decision:** a process builds the cleaner only with `FILE_FENCES=postgres`, the v2.4.0 default. Otherwise there is none: every delete, replace and failed job keeps its original, as today.
 - **Why:** IDX_01 says 1A can ship in 2.3.x, but IDX_00 keeps behavior changes off until v2.4.0, and 2.3.x is cut from `develop`. A deleted file can't be brought back, so this lands with the release that announces it. Tying it to the fences adds no setting.
 - **Rejected:**
   - shipping it in 2.3.x as a plain fix: `SAVE_UPLOADED_FILES` defaults to `true`, so every deployment would start deleting at once;

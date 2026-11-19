@@ -5,7 +5,7 @@ import traceback
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.models.catalog import (
     FILE_FENCE_RENEW_INTERVAL_SECONDS,
@@ -32,6 +32,9 @@ from services.workers.stage_event_writer import StageEventWriter
 from services.workers.stage_tracker import StageTracker
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+if TYPE_CHECKING:
+    from services.storage.originals import OriginalsCleaner
 
 logger = get_logger()
 
@@ -73,6 +76,7 @@ class IndexerWorker:
         stage_snapshot_sink: Any = None,
         stage_writer_max_active_tasks: int = 1,
         file_fence_repo: Any = None,
+        originals_cleaner: OriginalsCleaner | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -82,6 +86,7 @@ class IndexerWorker:
         self._collection = collection
         self._job_repo = job_repo
         self._file_fence_repo = file_fence_repo
+        self._originals_cleaner = originals_cleaner
         initialize_stage_writer_counters()
         self._stage_writer = (
             StageEventWriter(
@@ -319,6 +324,11 @@ class IndexerWorker:
             degraded_stages = normalize_degraded_stages(row.get("degraded_stages"))
 
             if self._document_repo is not None:
+                cleaner = self._originals_cleaner
+                # Read under the fence, before the commit points the row elsewhere.
+                replaced_source = (
+                    await cleaner.source_of(file_id, partition) if replace and cleaner is not None else None
+                )
                 wrote_catalog = await _write_catalog_record(
                     doc_repo=self._document_repo,
                     metadata=metadata,
@@ -342,6 +352,10 @@ class IndexerWorker:
                     row=row,
                     timeout=getattr(getattr(self._pipeline, "timeouts", None), "store", None),
                 )
+                if cleaner is not None and replaced_source is not None:
+                    # Before the fence is released: once it is, another
+                    # replace of this file can start.
+                    await cleaner.delete_unreferenced([replaced_source])
             if self._topic_tag_repo is not None:
                 await _replace_topic_tags_if_needed(
                     topic_tag_repo=self._topic_tag_repo,

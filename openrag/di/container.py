@@ -561,17 +561,13 @@ class ServiceContainer:
     def originals_cleaner(self) -> OriginalsCleaner | None:
         """Deletes uploaded originals under ``paths.data_dir`` once no row references them.
 
-        ``None`` unless ``FILE_FENCES=postgres``: deleting originals arrives
-        with the v2.4.0 defaults, and until then every delete keeps its
-        original, as before.
+        ``None`` unless ``FILE_FENCES=postgres`` (``originals_cleaner_for``).
         """
         settings = self._require_settings()
-        if settings.loader.file_fences != "postgres":
-            return None
         if self._originals_cleaner is None:
-            from services.storage.originals import OriginalsCleaner
+            from services.storage.originals import originals_cleaner_for
 
-            self._originals_cleaner = OriginalsCleaner(self.document_repo, settings.paths.data_dir)
+            self._originals_cleaner = originals_cleaner_for(settings, self.document_repo)
         return self._originals_cleaner
 
     @property

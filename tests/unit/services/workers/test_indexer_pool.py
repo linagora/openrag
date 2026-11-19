@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -1685,7 +1686,9 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        loader=SimpleNamespace(
+            parse_timeout=3600, save_uploaded_files=True, save_markdown=False, file_fences="postgres"
+        ),
         paths=SimpleNamespace(data_dir="/tmp/data"),
         ray=SimpleNamespace(indexer=SimpleNamespace(max_tasks_per_worker=50)),
         semaphore=SimpleNamespace(vlm_semaphore=7),
@@ -1736,11 +1739,16 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     monkeypatch.setattr(module, "IndexerWorker", Worker)
 
     actor_class = module.IndexerWorkerActor.__ray_metadata__.modified_class
-    actor_class(namespace="tenant-ray")
+    actor = actor_class(namespace="tenant-ray")
 
     assert actor_calls
     assert actor_calls[0][0][0] == "TaskStateManager"
     assert actor_calls[0][1].get("namespace") == "tenant-ray"
+    # One cleaner over the actor's own catalog, for the worker's replaces and
+    # the failed jobs this actor settles.
+    assert actor._worker.kwargs["originals_cleaner"] is actor._originals_cleaner
+    assert actor._originals_cleaner._document_repo is Store.document_repo
+    assert actor._originals_cleaner._data_dir == Path("/tmp/data").resolve()
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
     assert captured["vlm_factory"] is vlm_factory
@@ -1788,7 +1796,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False, file_fences="ray"),
         paths=SimpleNamespace(data_dir="/tmp/data"),
         ray=SimpleNamespace(indexer=SimpleNamespace(max_tasks_per_worker=50)),
         semaphore=SimpleNamespace(vlm_semaphore=10),
@@ -1890,7 +1898,7 @@ def _AsyncReturn(value):
     return _call
 
 
-def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
+def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker, originals_cleaner=None):
     """Bare IndexerWorkerActor with only the attributes process_file touches."""
     from services.workers.indexer_pool import IndexerWorkerActor
 
@@ -1925,6 +1933,7 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         ),
     )
     actor._save_uploaded_files = save_uploaded_files
+    actor._originals_cleaner = originals_cleaner
     actor._logger = MagicMock()
     actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=lambda *a: "ref"))
     actor._active_indexation_config = ContextVar("test_active_indexation_config", default=None)
@@ -2653,6 +2662,67 @@ async def test_actor_keeps_upload_on_pre_worker_failure_when_saving(tmp_path) ->
         await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
 
     assert path.exists()
+
+
+class _FailedUploadCleaner:
+    """Stands in for OriginalsCleaner at the settle: records what a job asks it to delete."""
+
+    def __init__(self) -> None:
+        self.deleted: list[list[str]] = []
+
+    async def delete_unreferenced(self, sources) -> int:
+        self.deleted.append(list(sources))
+        return 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("where", ["worker", "pre-worker"])
+async def test_a_failed_job_deletes_its_upload_unless_referenced(tmp_path, where) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    cleaner = _FailedUploadCleaner()
+    worker = _RecordingWorker(error=RuntimeError("boom") if where == "worker" else None)
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker, originals_cleaner=cleaner)
+    if where == "pre-worker":
+
+        async def _boom(*_a, **_k):
+            raise RuntimeError("boom")
+
+        actor._ensure_catalog = _boom
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    # The cleaner keeps it if the job wrote its row before it failed.
+    assert cleaner.deleted == [[str(path)]]
+
+
+@pytest.mark.asyncio
+async def test_a_successful_job_keeps_its_upload(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    cleaner = _FailedUploadCleaner()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker(), originals_cleaner=cleaner)
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert cleaner.deleted == []
+    assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_without_saving_uploads_a_failed_job_is_purged_as_before(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    cleaner = _FailedUploadCleaner()
+    worker = _RecordingWorker(error=RuntimeError("boom"))
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=worker, originals_cleaner=cleaner)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert not path.exists()
+    assert cleaner.deleted == []
 
 
 @pytest.mark.asyncio

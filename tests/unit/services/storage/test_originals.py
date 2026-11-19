@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from services.storage.originals import OriginalsCleaner, markdown_sidecar_path
+from services.storage.originals import OriginalsCleaner, markdown_sidecar_path, originals_cleaner_for
 
 
 class FakeDocumentRepo:
@@ -203,3 +204,19 @@ async def test_sources_in_partition(data_dir):
 
 async def test_sources_in_partition_that_cannot_be_read_are_none(data_dir):
     assert await OriginalsCleaner(ListingRepo(fail_read=True), data_dir).sources_in_partition("docs") == []
+
+
+# --- originals_cleaner_for ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("file_fences", ["ray", "postgres"])
+def test_a_cleaner_only_with_postgres_fences(data_dir, file_fences):
+    settings = SimpleNamespace(
+        loader=SimpleNamespace(file_fences=file_fences), paths=SimpleNamespace(data_dir=data_dir)
+    )
+    repo = FakeDocumentRepo()
+    cleaner = originals_cleaner_for(settings, repo)
+    if file_fences == "ray":
+        assert cleaner is None
+    else:
+        assert cleaner._data_dir == data_dir.resolve() and cleaner._document_repo is repo

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from core.models.workspace import Workspace
 from services.orchestrators.partition_service import PartitionService
 from services.orchestrators.workspace_service import WorkspaceService
 from services.storage.originals import OriginalsCleaner, markdown_sidecar_path
-from services.workers.indexer_actor import _write_catalog_record
+from services.workers.indexer_actor import IndexerWorker, _write_catalog_record
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
 
@@ -122,3 +122,50 @@ async def test_deleting_a_partition_deletes_its_originals_but_not_a_copys(postgr
     assert not Path(alone).exists() and not markdown_sidecar_path(alone).exists()
     assert Path(shared).exists() and markdown_sidecar_path(shared).exists()
     assert await store.document_repo.file_exists_in_partition("shared-copy", "q")
+
+
+def replacing_worker(store, cleaner: OriginalsCleaner) -> IndexerWorker:
+    class StoredPipeline:
+        async def run(self, row):
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    tsm = MagicMock()
+    tsm.set_state.remote = AsyncMock(return_value=None)
+    tsm.complete_with_degraded_stages.remote = AsyncMock(return_value="completed")
+    return IndexerWorker(
+        pipeline=StoredPipeline(),
+        task_state_manager=tsm,
+        document_repo=store.document_repo,
+        originals_cleaner=cleaner,
+    )
+
+
+async def test_a_replace_deletes_the_previous_original_but_not_a_copys(postgres_store, tmp_path):
+    store = postgres_store
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    await store.partition_repo.create_partition("p")
+    await store.partition_repo.create_partition("q")
+    old = original(data_dir, "1_old.pdf")
+    copied = original(data_dir, "2_copied.pdf")
+    await upload(store, "f", old)
+    await upload(store, "g", copied)
+    await upload(store, "g-copy", copied, partition="q")
+    cleaner = OriginalsCleaner(store.document_repo, data_dir)
+
+    for file_id in ("f", "g"):
+        new = original(data_dir, f"3_{file_id}_new.txt")
+        await replacing_worker(store, cleaner).process_file(
+            task_id=f"t-{file_id}",
+            path=new,
+            metadata={"file_id": file_id, "source": new},
+            partition="p",
+            replace=True,
+        )
+        assert (await store.document_repo.get_file_metadata(file_id, "p"))["source"] == new
+        assert Path(new).exists()
+
+    assert not Path(old).exists() and not markdown_sidecar_path(old).exists()
+    assert Path(copied).exists() and markdown_sidecar_path(copied).exists()

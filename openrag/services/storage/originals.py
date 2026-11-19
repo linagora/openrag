@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from core.config.root import Settings
     from core.ports.document_repo import DocumentRepository
 
 logger = get_logger()
@@ -150,4 +151,15 @@ class OriginalsCleaner:
         return resolved != self._data_dir and resolved.is_relative_to(self._data_dir)
 
 
-__all__ = ["DEFAULT_BATCH_SIZE", "OriginalsCleaner", "markdown_sidecar_path"]
+def originals_cleaner_for(settings: Settings, document_repo: DocumentRepository) -> OriginalsCleaner | None:
+    """The cleaner a process deletes originals with, or ``None`` while that is off.
+
+    Deleting originals comes with the v2.4.0 defaults, so it is on only with
+    ``FILE_FENCES=postgres``. Until then every original stays, as before.
+    """
+    if settings.loader.file_fences != "postgres":
+        return None
+    return OriginalsCleaner(document_repo, settings.paths.data_dir)
+
+
+__all__ = ["DEFAULT_BATCH_SIZE", "OriginalsCleaner", "markdown_sidecar_path", "originals_cleaner_for"]
