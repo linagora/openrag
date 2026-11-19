@@ -501,10 +501,12 @@ class TaskCompletionTracker:
         recent may belong to an upload not yet queued.
 
         Releasing early keeps the count exact: the catalog insert counts the
-        file anyway when its slot is gone. The quota is what gives: the freed
-        slot can admit another upload meanwhile, so each early release can
-        leave the user one file over quota until they delete files. Keeping a
-        slot too long would block the user's uploads instead.
+        file anyway when its slot is gone. For an upload the quota is what
+        gives: the freed slot can admit another upload meanwhile, so each early
+        release can leave the user one file over quota until they delete files.
+        A copy has no task here, so a long one can lose its slot this way; its
+        insert re-checks the quota instead and refuses the copy when it is full.
+        Keeping a slot too long would block the user's uploads instead.
         """
         live_ids: list[str] = []
         settled_ids: list[str] = []
@@ -704,7 +706,14 @@ def _holds_no_running_worker(info: dict) -> bool:
 
     A CANCELLED task whose worker was submitted counts as running until the
     worker settles and ``finished_at`` is recorded, as in :meth:`recover`.
+
+    A recorded ``finished_at`` settles the task whatever its state: it is only
+    stamped once the worker has settled. That covers an orphaned worker whose
+    state writes were lost, left non-terminal: when releasing its slot failed
+    in :meth:`track`, this is what lets the sweep retry it.
     """
+    if _has_finished_at(info.get("details")):
+        return True
     state = info.get("state")
     if state not in _TERMINAL_STATES:
         return False

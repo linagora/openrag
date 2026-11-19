@@ -1320,12 +1320,13 @@ async def test_an_orphaned_worker_keeps_its_slot_until_it_settles(user_repo, mon
 
 @pytest.mark.asyncio
 async def test_a_failed_slot_release_does_not_stop_the_settlement(user_repo) -> None:
-    user_repo.release_error = RuntimeError("postgres down")
+    user_repo.release_file_slot = AsyncMock(side_effect=RuntimeError("postgres down"))
     tsm = _task_state_manager()
     tsm.get_details.remote.return_value = _settled_details()
 
     await _track_until_settled(tsm, RuntimeError("parser failed"))
 
+    user_repo.release_file_slot.assert_awaited_once_with("task-1")
     tsm.set_details.remote.assert_awaited_once()
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
@@ -1380,15 +1381,36 @@ async def test_the_slot_sweep_keeps_a_cancelled_task_whose_worker_has_not_settle
 
 
 @pytest.mark.asyncio
+async def test_the_slot_sweep_releases_a_stamped_task_left_non_terminal(user_repo) -> None:
+    """An orphaned worker's lost state writes leave it SERIALIZING after it settled.
+
+    ``track`` stamps ``finished_at`` once the worker settles; if releasing its
+    slot failed then, the stamp is what lets the sweep give the slot back.
+    """
+    from services.workers.task_completion import TASK_FINISHED_AT_METADATA_KEY, TaskCompletionTracker
+
+    finished = {"metadata": {TASK_FINISHED_AT_METADATA_KEY: "2026-01-01T00:00:00+00:00"}}
+    await TaskCompletionTracker().reconcile_file_slots(
+        {
+            "stamped": {"state": "SERIALIZING", "details": finished},
+            "running": {"state": "SERIALIZING", "details": {"metadata": {}}},
+        }
+    )
+
+    (sweep,) = user_repo.sweeps
+    assert sweep["live_ids"] == ["running"]
+    assert sweep["settled_ids"] == ["stamped"]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_slot_sweep_is_swallowed(user_repo) -> None:
     from services.workers.task_completion import TaskCompletionTracker
 
-    async def boom(**_kwargs):
-        raise RuntimeError("postgres down")
-
-    user_repo.release_stale_file_slots = boom
+    user_repo.release_stale_file_slots = AsyncMock(side_effect=RuntimeError("postgres down"))
 
     await TaskCompletionTracker().reconcile_file_slots({"task-1": {"state": "FAILED"}})
+
+    user_repo.release_stale_file_slots.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1415,18 +1437,19 @@ async def test_recover_sweeps_the_slots_a_restart_left_behind(user_repo) -> None
 async def test_the_periodic_reconcile_sweeps_slots_too(user_repo) -> None:
     repo = _FakeJobRepo()
     tracker = _tracker_with_repo(repo)
+    snapshot = {"task-live": {"state": "SERIALIZING"}}
     tracker._task_state_manager = MagicMock()
-    tracker._call_task_state = AsyncMock(return_value={"task-live": {"state": "SERIALIZING"}})
-    sweeps_before_cancel: list[int] = []
+    # The second fetch stops the loop, so a loop that skips the sweep still ends.
+    tracker._call_task_state = AsyncMock(side_effect=[snapshot, asyncio.CancelledError()])
+    swept: list[dict] = []
 
     async def reconcile_file_slots(all_info):
-        sweeps_before_cancel.append(len(all_info))
-        raise asyncio.CancelledError()
+        swept.append(all_info)
 
     tracker.reconcile_file_slots = reconcile_file_slots
 
     with pytest.raises(asyncio.CancelledError):
         await tracker._periodic_reconcile(interval=0)
 
-    assert sweeps_before_cancel == [1]
+    assert swept == [snapshot]
     assert repo.failed_calls[0]["active_ids"] == ["task-live"]

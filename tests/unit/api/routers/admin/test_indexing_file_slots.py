@@ -142,12 +142,12 @@ async def test_a_queued_upload_runs_under_its_reservation_and_keeps_it(tmp_path,
 
 
 @pytest.mark.parametrize(
-    ("service", "content", "data", "status"),
+    ("service", "content", "data", "status", "dispatched"),
     [
-        (_IndexingService(exists=True), b"data", None, 409),
-        (_IndexingService(), b"x" * 100, None, 413),
-        (_IndexingService(workspace=False), b"data", {"workspace_ids": '["ws-1"]'}, 404),
-        (_IndexingService(), b"data", {"workspace_ids": "not-json"}, 400),
+        (_IndexingService(exists=True), b"data", None, 409, False),
+        (_IndexingService(), b"x" * 100, None, 413, False),
+        (_IndexingService(workspace=False), b"data", {"workspace_ids": '["ws-1"]'}, 404, False),
+        (_IndexingService(), b"data", {"workspace_ids": "not-json"}, 400, False),
         (
             _IndexingService(
                 error=ConflictError(
@@ -159,14 +159,15 @@ async def test_a_queued_upload_runs_under_its_reservation_and_keeps_it(tmp_path,
             b"data",
             None,
             409,
+            True,
         ),
-        (_IndexingService(error=RuntimeError("dispatcher unavailable")), b"data", None, 500),
+        (_IndexingService(error=RuntimeError("dispatcher unavailable")), b"data", None, 500, True),
     ],
     ids=["file-exists", "upload-too-large", "unknown-workspace", "bad-workspace-ids", "already-indexing", "dispatch"],
 )
 @pytest.mark.asyncio
 async def test_an_upload_that_is_never_queued_gives_its_slot_back(
-    tmp_path, monkeypatch, service, content, data, status
+    tmp_path, monkeypatch, service, content, data, status, dispatched
 ):
     repo = _SlotRepo()
     app = _build_app(tmp_path, monkeypatch, repo=repo, service=service, content=content)
@@ -174,6 +175,8 @@ async def test_an_upload_that_is_never_queued_gives_its_slot_back(
     resp = await _send(app, "POST", "/indexer/partition/p1/file/f1", data=data)
 
     assert resp.status_code == status
+    # A failure before dispatch must not be mistaken for the dispatch failing.
+    assert len(service.add_calls) == (1 if dispatched else 0)
     assert len(repo.reserved) == 1
     assert repo.released == repo.reserved
 

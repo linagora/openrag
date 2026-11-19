@@ -16,6 +16,7 @@ import pytest
 import pytest_asyncio
 from core.config.infrastructure import RDBConfig
 from core.models.user import FileSlotGrant
+from core.utils.exceptions import OpenRAGError
 from services.persistence.user_repo import PgUserRepository
 from services.storage.postgres_store import PostgresStore
 
@@ -83,7 +84,14 @@ async def _assert_counter_matches(store: PostgresStore, user_id: int, *, baselin
     assert await _file_count(store, user_id) == baseline + files + held
 
 
-async def _add_file(store: PostgresStore, file_id: str, user_id: int, reservation_id: str | None) -> bool:
+async def _add_file(
+    store: PostgresStore,
+    file_id: str,
+    user_id: int,
+    reservation_id: str | None,
+    *,
+    recheck_quota_if_slot_gone: bool = False,
+) -> bool:
     if not await store.partition_repo.partition_exists("quota"):
         await store.partition_repo.create_partition("quota")
     return await store.document_repo.add_file_to_partition(
@@ -91,6 +99,7 @@ async def _add_file(store: PostgresStore, file_id: str, user_id: int, reservatio
         "quota",
         user_id=user_id,
         quota_reservation_id=reservation_id,
+        recheck_quota_if_slot_gone=recheck_quota_if_slot_gone,
     )
 
 
@@ -299,6 +308,26 @@ async def test_deleting_the_user_drops_their_reservations(postgres_store):
     assert await postgres_store.pool.fetchval("SELECT COUNT(*)::int FROM file_quota_reservations") == 0
 
 
+async def test_releases_racing_a_user_deletion_do_not_deadlock(postgres_store, wide_user_repo):
+    """Deletion locks the user, then its reservations; cleanup must lock in that order too."""
+    for attempt in range(10):
+        user_id = await _create_user(postgres_store, file_quota=10)
+        for index in range(3):
+            await wide_user_repo.try_reserve_file_slot(user_id, f"d{attempt}-{index}", default_quota=-1)
+
+        results = await asyncio.gather(
+            wide_user_repo.release_file_slot(f"d{attempt}-0"),
+            wide_user_repo.release_stale_file_slots(
+                live_ids=[], settled_ids=[f"d{attempt}-1", f"d{attempt}-2"], older_than_seconds=300
+            ),
+            wide_user_repo.delete_user(user_id),
+            return_exceptions=True,
+        )
+
+        assert not [r for r in results if isinstance(r, BaseException)]
+        assert await _reservations(postgres_store, user_id) == 0
+
+
 # ── Consume ──────────────────────────────────────────────────────────
 
 
@@ -342,6 +371,45 @@ async def test_an_insert_without_a_held_slot_counts_the_file(postgres_store, res
 
     assert await _file_count(postgres_store, user_id) == 1
     await _assert_counter_matches(postgres_store, user_id)
+
+
+async def test_a_copy_whose_slot_was_swept_is_refused_when_the_quota_is_full(postgres_store):
+    """The sweep freed the copy's slot and another upload took it (#1315)."""
+    user_id = await _create_user(postgres_store, file_quota=1)
+    repo = postgres_store.user_repo
+    await repo.try_reserve_file_slot(user_id, "copy", default_quota=-1)
+    await repo.release_stale_file_slots(live_ids=[], settled_ids=["copy"], older_than_seconds=300)
+    await repo.try_reserve_file_slot(user_id, "upload", default_quota=-1)
+
+    with pytest.raises(OpenRAGError) as exc:
+        await _add_file(postgres_store, "doc-1", user_id, "copy", recheck_quota_if_slot_gone=True)
+
+    assert exc.value.code == "FILE_QUOTA_EXCEEDED"
+    assert await postgres_store.pool.fetchval("SELECT COUNT(*)::int FROM files WHERE file_id = 'doc-1'") == 0
+    assert await _file_count(postgres_store, user_id) == 1
+    await _assert_counter_matches(postgres_store, user_id)
+
+
+async def test_a_copy_whose_slot_was_swept_is_counted_while_the_quota_has_room(postgres_store):
+    user_id = await _create_user(postgres_store, file_quota=2)
+    repo = postgres_store.user_repo
+    await repo.try_reserve_file_slot(user_id, "copy", default_quota=-1)
+    await repo.release_file_slot("copy")
+
+    assert await _add_file(postgres_store, "doc-1", user_id, "copy", recheck_quota_if_slot_gone=True) is True
+
+    assert await _file_count(postgres_store, user_id) == 1
+    await _assert_counter_matches(postgres_store, user_id)
+
+
+async def test_a_copy_that_still_holds_its_slot_consumes_it_at_full_quota(postgres_store):
+    user_id = await _create_user(postgres_store, file_quota=1)
+    await postgres_store.user_repo.try_reserve_file_slot(user_id, "copy", default_quota=-1)
+
+    assert await _add_file(postgres_store, "doc-1", user_id, "copy", recheck_quota_if_slot_gone=True) is True
+
+    assert await _file_count(postgres_store, user_id) == 1
+    assert await _reservations(postgres_store, user_id) == 0
 
 
 async def test_a_reservation_held_by_another_user_is_not_consumed(postgres_store):
