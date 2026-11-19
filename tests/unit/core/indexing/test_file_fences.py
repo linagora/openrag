@@ -76,6 +76,10 @@ class _Fences(FileFenceRepository):
     async def get(self, *, partition, file_id) -> FileFence | None:
         return self.fences.get((partition, file_id))
 
+    async def get_live(self, *, partition, file_id) -> FileFence | None:
+        current = self.fences.get((partition, file_id))
+        return current if current is not None and current.expires_at > datetime.now(UTC) else None
+
 
 # ── Without fences ───────────────────────────────────────────────────
 

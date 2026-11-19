@@ -134,6 +134,50 @@ async def test_a_delete_fence_is_not_freed_by_a_job_row(store):
     assert fence.holder_id == holder
 
 
+# ── What still holds the file (get_live): the rule of acquire ─────────
+
+
+async def test_a_held_fence_is_live(store):
+    await _acquire(store, "task-a")
+
+    fence = await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID)
+
+    assert fence.holder_id == "task-a"
+
+
+async def test_an_expired_fence_is_not_live_though_its_row_is_still_there(store):
+    await _acquire(store, "task-a", ttl=0)
+
+    assert await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID) is None
+    assert (await store.file_fence_repo.get(partition=PARTITION, file_id=FILE_ID)).holder_id == "task-a"
+
+
+@pytest.mark.parametrize("status", [DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED])
+async def test_an_index_fence_whose_job_is_over_is_not_live(store, status):
+    await _acquire(store, await _job(store, status))
+
+    assert await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID) is None
+
+
+@pytest.mark.parametrize("status", [DocumentStatus.QUEUED, DocumentStatus.SERIALIZING])
+async def test_an_index_fence_whose_job_runs_is_live(store, status):
+    holder = await _job(store, status)
+    await _acquire(store, holder)
+
+    assert (await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID)).holder_id == holder
+
+
+async def test_a_delete_fence_is_live_whatever_its_job_row_says(store):
+    holder = await _job(store, DocumentStatus.COMPLETED)
+    await _acquire(store, holder, kind=FileFenceKind.DELETE)
+
+    assert (await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID)).holder_id == holder
+
+
+async def test_a_free_file_has_no_live_fence(store):
+    assert await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID) is None
+
+
 async def test_fences_of_different_files_are_independent(store):
     await _acquire(store, "task-a")
 

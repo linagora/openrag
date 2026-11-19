@@ -158,7 +158,9 @@ class FileFences:
         """Refuse with 409 if an operation other than *own_holder_id* holds the file."""
         if self._repo is None:
             return
-        fence = await self._repo.get(partition=partition, file_id=file_id)
+        # Only a live fence counts: a row left by a release that failed stops
+        # refusing once its lease ends, as it would for acquire.
+        fence = await self._repo.get_live(partition=partition, file_id=file_id)
         if fence is not None and fence.holder_id != own_holder_id:
             raise busy(fence)
 

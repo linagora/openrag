@@ -503,6 +503,9 @@ class _InMemoryFileFences(FileFenceRepository):
     async def get(self, *, partition, file_id) -> FileFence | None:
         return self.fences.get((partition, file_id))
 
+    async def get_live(self, *, partition, file_id) -> FileFence | None:
+        return self.fences.get((partition, file_id))
+
 
 class _FenceObservingVectorStore(FakeVectorStore):
     """Records who holds each file's fence when its chunks are deleted."""

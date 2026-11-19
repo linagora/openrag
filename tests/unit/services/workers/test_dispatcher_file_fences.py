@@ -79,6 +79,9 @@ class InMemoryFileFences(FileFenceRepository):
     async def get(self, *, partition, file_id) -> FileFence | None:
         return self.fences.get((partition, file_id))
 
+    async def get_live(self, *, partition, file_id) -> FileFence | None:
+        return self.fences.get((partition, file_id))
+
 
 def _remote_mock(return_value: Any = None) -> MagicMock:
     method = MagicMock()
