@@ -855,7 +855,7 @@ async def test_copy_file_sets_target_fields():
 async def test_copy_file_forwards_the_reserved_file_slot():
     disp = FakeDispatcher()
 
-    await _service(disp=disp).copy_file(
+    await _service(doc=FakeDocumentRepo(exists=True), disp=disp).copy_file(
         source_file_id="src",
         source_partition="p-src",
         target_file_id="dst",
