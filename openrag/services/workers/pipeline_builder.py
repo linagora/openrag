@@ -24,6 +24,7 @@ from core.utils.exceptions import ConfigError, NoIndexableContentError, Pipeline
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.storage.originals import markdown_sidecar_path
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage, drop_uncaptioned_image_refs
@@ -881,15 +882,6 @@ def build_indexing_pipeline(
         save_markdown=save_markdown,
         data_dir=data_dir,
     )
-
-
-def markdown_sidecar_path(source_path: str | Path) -> Path:
-    """Path of the ``SAVE_MARKDOWN`` copy for an upload stored at ``source_path``.
-
-    The suffix is appended rather than swapped so a markdown upload is never
-    overwritten.
-    """
-    return Path(f"{source_path}.md")
 
 
 async def _save_markdown(row: MutableMapping[str, Any], data_dir: Path | None) -> None:

@@ -1,0 +1,150 @@
+"""OriginalsCleaner: what it deletes, what it keeps, and that it never raises."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+from services.storage.originals import OriginalsCleaner, markdown_sidecar_path
+
+
+class FakeDocumentRepo:
+    """Answers ``referenced_sources`` from a set, and records each call."""
+
+    def __init__(self, referenced: set[str] | None = None, *, fail: bool = False) -> None:
+        self.referenced = referenced or set()
+        self.fail = fail
+        self.calls: list[list[str]] = []
+
+    async def referenced_sources(self, sources):
+        batch = list(sources)
+        self.calls.append(batch)
+        if self.fail:
+            raise ConnectionError("catalog down")
+        return {source for source in batch if source in self.referenced}
+
+
+@pytest.fixture
+def data_dir(tmp_path) -> Path:
+    path = tmp_path / "data"
+    path.mkdir()
+    return path
+
+
+def upload(data_dir: Path, name: str, *, sidecar: bool = False) -> str:
+    path = data_dir / name
+    path.write_bytes(b"content")
+    if sidecar:
+        markdown_sidecar_path(path).write_text("# parsed")
+    return str(path.resolve())
+
+
+async def test_deletes_an_unreferenced_original_and_its_sidecar(data_dir):
+    source = upload(data_dir, "1713700000000_a1b2_report.pdf", sidecar=True)
+    cleaner = OriginalsCleaner(FakeDocumentRepo(), data_dir)
+    assert await cleaner.delete_unreferenced([source]) == 1
+    assert list(data_dir.iterdir()) == []
+
+
+async def test_keeps_an_original_a_copy_still_references(data_dir):
+    source = upload(data_dir, "1713700000000_a1b2_report.pdf", sidecar=True)
+    cleaner = OriginalsCleaner(FakeDocumentRepo(referenced={source}), data_dir)
+    assert await cleaner.delete_unreferenced([source]) == 0
+    assert Path(source).exists() and markdown_sidecar_path(source).exists()
+
+
+async def test_a_markdown_upload_and_its_sidecar_both_go(data_dir):
+    source = upload(data_dir, "1713700000000_a1b2_notes.md", sidecar=True)
+    assert markdown_sidecar_path(source).name == "1713700000000_a1b2_notes.md.md"
+    assert await OriginalsCleaner(FakeDocumentRepo(), data_dir).delete_unreferenced([source]) == 1
+    assert list(data_dir.iterdir()) == []
+
+
+async def test_a_leftover_sidecar_goes_even_when_the_original_is_gone(data_dir):
+    source = upload(data_dir, "1713700000000_a1b2_report.pdf", sidecar=True)
+    Path(source).unlink()
+    assert await OriginalsCleaner(FakeDocumentRepo(), data_dir).delete_unreferenced([source]) == 0
+    assert list(data_dir.iterdir()) == []
+
+
+async def test_a_missing_original_is_not_an_error(data_dir):
+    cleaner = OriginalsCleaner(FakeDocumentRepo(), data_dir)
+    assert await cleaner.delete_unreferenced([str(data_dir / "gone.pdf")]) == 0
+
+
+# --- the data directory is a boundary ------------------------------------------------
+
+
+async def test_never_deletes_outside_the_data_directory(data_dir, tmp_path):
+    outside = tmp_path / "index_url_download.pdf"
+    outside.write_bytes(b"temp download")
+    cleaner = OriginalsCleaner(FakeDocumentRepo(), data_dir)
+    assert await cleaner.delete_unreferenced([str(outside), str(data_dir)]) == 0
+    assert outside.exists() and data_dir.is_dir()
+
+
+async def test_a_symlinked_directory_cannot_lead_out_of_the_data_directory(data_dir, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.pdf").write_bytes(b"secret")
+    (data_dir / "escape").symlink_to(outside, target_is_directory=True)
+    cleaner = OriginalsCleaner(FakeDocumentRepo(), data_dir)
+    assert await cleaner.delete_unreferenced([str(data_dir / "escape" / "secret.pdf")]) == 0
+    assert (outside / "secret.pdf").exists()
+
+
+async def test_a_relative_data_directory_is_resolved(data_dir, monkeypatch):
+    monkeypatch.chdir(data_dir.parent)
+    source = upload(data_dir, "1713700000000_a1b2_report.pdf")
+    assert await OriginalsCleaner(FakeDocumentRepo(), "data").delete_unreferenced([source]) == 1
+
+
+# --- best effort ------------------------------------------------------------------------
+
+
+async def test_a_failed_reference_check_keeps_the_whole_batch(data_dir):
+    sources = [upload(data_dir, f"{i}_report.pdf") for i in range(3)]
+    cleaner = OriginalsCleaner(FakeDocumentRepo(fail=True), data_dir)
+    assert await cleaner.delete_unreferenced(sources) == 0
+    assert all(Path(source).exists() for source in sources)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+async def test_a_file_that_cannot_be_deleted_does_not_stop_the_others(data_dir):
+    locked_dir = data_dir / "locked"
+    locked_dir.mkdir()
+    locked = locked_dir / "1_report.pdf"
+    locked.write_bytes(b"x")
+    free = upload(data_dir, "2_report.pdf")
+    locked_dir.chmod(0o500)
+    try:
+        cleaner = OriginalsCleaner(FakeDocumentRepo(), data_dir)
+        assert await cleaner.delete_unreferenced([str(locked.resolve()), free]) == 1
+    finally:
+        locked_dir.chmod(0o700)
+    assert locked.exists() and not Path(free).exists()
+
+
+# --- batches -------------------------------------------------------------------------------
+
+
+async def test_checks_references_in_batches_without_repeats_or_blanks(data_dir):
+    sources = [upload(data_dir, f"{i}_report.pdf") for i in range(5)]
+    repo = FakeDocumentRepo(referenced={sources[1]})
+    cleaner = OriginalsCleaner(repo, data_dir, batch_size=2)
+    deleted = await cleaner.delete_unreferenced([*sources, sources[0], None, ""])
+    assert deleted == 4
+    assert repo.calls == [sources[0:2], sources[2:4], sources[4:5]]
+    assert [Path(s).exists() for s in sources] == [False, True, False, False, False]
+
+
+async def test_nothing_to_delete_asks_nothing(data_dir):
+    repo = FakeDocumentRepo()
+    assert await OriginalsCleaner(repo, data_dir).delete_unreferenced([None, ""]) == 0
+    assert repo.calls == []
+
+
+def test_batch_size_must_be_positive(data_dir):
+    with pytest.raises(ValueError):
+        OriginalsCleaner(FakeDocumentRepo(), data_dir, batch_size=0)
