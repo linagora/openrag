@@ -29,6 +29,7 @@ import re
 from typing import ClassVar
 
 from core.models.user import PartitionRole
+from core.secret_policy import OIDC_REQUIRED_ENV_VARS, parse_auth_mode
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .base import ConfigMixin
@@ -159,13 +160,6 @@ class OIDCConfig(BaseModel):
 
     # The five env vars required when AUTH_MODE=oidc; unset/empty values
     # trip the validator with a single error listing every missing key.
-    _REQUIRED_WHEN_ENABLED: ClassVar[tuple[str, ...]] = (
-        "OIDC_ENDPOINT",
-        "OIDC_CLIENT_ID",
-        "OIDC_CLIENT_SECRET",
-        "OIDC_REDIRECT_URI",
-        "OIDC_TOKEN_ENCRYPTION_KEY",
-    )
     _VALID_CLAIM_SOURCES: ClassVar[frozenset[str]] = frozenset({"id_token", "userinfo"})
 
     @classmethod
@@ -181,19 +175,13 @@ class OIDCConfig(BaseModel):
         composition root surfaces misconfiguration before the app
         starts serving.
         """
-        auth_mode = os.getenv("AUTH_MODE", "token").strip().lower()
-        if auth_mode not in ("token", "oidc"):
-            raise RuntimeError(f"Invalid AUTH_MODE={auth_mode!r}. Expected 'token' or 'oidc'.")
+        try:
+            auth_mode = parse_auth_mode(os.getenv("AUTH_MODE", "token"))
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid AUTH_MODE. {exc}") from exc
 
         enabled = auth_mode == "oidc"
-
-        env_values = {
-            "OIDC_ENDPOINT": os.getenv("OIDC_ENDPOINT"),
-            "OIDC_CLIENT_ID": os.getenv("OIDC_CLIENT_ID"),
-            "OIDC_CLIENT_SECRET": os.getenv("OIDC_CLIENT_SECRET"),
-            "OIDC_REDIRECT_URI": os.getenv("OIDC_REDIRECT_URI"),
-            "OIDC_TOKEN_ENCRYPTION_KEY": os.getenv("OIDC_TOKEN_ENCRYPTION_KEY"),
-        }
+        env_values = {name: os.getenv(name) for name in OIDC_REQUIRED_ENV_VARS}
         claim_source = os.getenv("OIDC_CLAIM_SOURCE", "id_token").strip().lower()
         claim_mapping = os.getenv("OIDC_CLAIM_MAPPING", "").strip()
 

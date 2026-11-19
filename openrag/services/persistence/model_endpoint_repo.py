@@ -7,7 +7,7 @@ replaces the earlier stub with real SQL.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import asyncpg
 from core.config.model_endpoints import (
@@ -136,13 +136,19 @@ _FORGET_DROPPED_VECTOR_FIELD_SQL = """
 # answers "how many partitions point here"; this answers "how much already-built
 # data rides on it", which is what sizes an in-place repoint.
 _EMBEDDER_INDEXED_USAGE_SQL = """
-    SELECT p.partition AS partition, COUNT(f.file_id)::int AS file_count
+    SELECT f.partition_name AS partition, COUNT(*)::int AS file_count
     FROM model_endpoints e
-    JOIN partitions p ON (p.embedder = e.name OR (e.is_default AND p.embedder = $3))
-    JOIN files f ON f.partition_name = p.partition
+    JOIN files f ON (
+        f.indexation_config->>'embedder_vector_field' = e.vector_field
+        OR EXISTS (
+            SELECT 1 FROM partitions p
+            WHERE p.partition = f.partition_name
+              AND (p.embedder = e.name OR (e.is_default AND p.embedder = $3))
+        )
+    )
     WHERE e.name = $1 AND e.model_type = $2
-    GROUP BY p.partition
-    ORDER BY file_count DESC, p.partition
+    GROUP BY f.partition_name
+    ORDER BY file_count DESC, f.partition_name
     """
 
 
@@ -481,10 +487,13 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         model_type: str,
         *,
         guard: EndpointEditGuard | None = None,
+        extra_patch: Mapping[str, object] | None = None,
         **fields: object,
     ) -> ModelEndpointRow | None:
         updates = {k: v for k, v in fields.items() if k in _ALLOWED_UPDATE_FIELDS}
-        if not updates:
+        if extra_patch is not None and (model_type != "embedder" or "extra" in updates):
+            raise ValueError("extra_patch is only valid for embedder updates without a replacement extra object")
+        if not updates and not extra_patch:
             return await self.get(name, model_type)
 
         params: list = [name, model_type]
@@ -493,6 +502,10 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             idx = len(params) + 1
             sets.append(f"{col} = ${idx}::jsonb" if col == "extra" else f"{col} = ${idx}")
             params.append(val)
+        if extra_patch is not None:
+            idx = len(params) + 1
+            sets.append(f"extra = COALESCE(extra, '{{}}'::jsonb) || ${idx}::jsonb")
+            params.append(dict(extra_patch))
         sql = (
             f"UPDATE model_endpoints SET {', '.join(sets)}, updated_at = now() "
             f"WHERE name = $1 AND model_type = $2 RETURNING *"
@@ -516,15 +529,20 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     return None
                 existing = self._to_model(locked)
                 if model_type == "embedder":
-                    await self._refuse_edit_under_a_swap(conn, existing, updates)
+                    swap_updates = updates
+                    if extra_patch is not None:
+                        swap_updates = {**updates, "extra": {**existing.extra, **extra_patch}}
+                    await self._refuse_edit_under_a_swap(conn, existing, swap_updates)
                 if guard is not None:
                     await guard(existing, lambda: self._indexed_file_usage(conn, name, model_type))
                 rec = await conn.fetchrow(sql, *params)
         return self._to_model(rec) if rec else None
 
-    @staticmethod
     async def _refuse_edit_under_a_swap(
-        conn: asyncpg.Connection, existing: ModelEndpointRow, updates: dict[str, object]
+        self,
+        conn: asyncpg.Connection,
+        existing: ModelEndpointRow,
+        updates: dict[str, object],
     ) -> None:
         """Refuse an edit that changes the vectors of an embedder a running swap fills.
 
@@ -535,7 +553,10 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         or let it finish. A swap starts with this row locked FOR SHARE, so it is
         either counted here or starts after the edit.
         """
-        changed = material_embedder_changes(existing, updates)
+        changed = material_embedder_changes(
+            existing,
+            updates,
+        )
         if not changed:
             return
         swapping = await conn.fetchval(_RUNNING_SWAPS_ONTO_SQL, existing.name, EmbedderSwapStatus.RUNNING.value)

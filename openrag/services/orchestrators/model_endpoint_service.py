@@ -24,6 +24,7 @@ from core.config.model_endpoints import (
     STT_REQUEST_CONTROL_EXTRA_KEYS,
     ModelEndpointConfig,
     ModelEndpointRow,
+    embedder_fingerprint,
     is_placeholder_api_key,
     material_embedder_changes,
 )
@@ -62,7 +63,9 @@ _ENV_OWNED_TUNABLES: dict[str, dict[str, str]] = {
 # ``RERANKER_PROVIDER`` is set by default, so owning it would undo every admin's
 # reranker choice on each boot.
 _ENV_OWNED_EXTRA: dict[str, dict[str, str]] = {
-    "embedder": {"implementation": "EMBEDDER_PROVIDER"},
+    "embedder": {
+        "implementation": "EMBEDDER_PROVIDER",
+    },
 }
 
 
@@ -193,9 +196,9 @@ _API_REPOINT_REMEDY = (
     "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move partitions to it."
 )
 _BOOT_REPOINT_REMEDY = (
-    "To keep the database's model, set EMBEDDER_MODEL_NAME (or the legacy EMBEDDING_MODEL, when set; "
-    "vllm.embedderModelName in the Helm chart) to it. To switch models, change it through the admin API with "
-    "acknowledge_indexed_data=true."
+    "If indexed files still prevent the change, set the embedder environment values to match the saved configuration, "
+    "or apply it through the admin API with acknowledge_indexed_data=true. Include any replacement API key in the "
+    "same acknowledged edit, and preserve other entries in extra because the API replaces that object as a whole."
 )
 
 
@@ -429,52 +432,153 @@ class ModelEndpointService:
             if os.getenv(env_var) is not None and field in data:
                 fields[field] = data[field]
 
-        # An embedder holding indexed files changes model only through the guard
-        # the admin API enforces: env changing under it (a new default model
-        # after an upgrade, #1099) would otherwise write vectors from another
-        # model into the field every indexed file was embedded with, and search
-        # would compare the two. Only the model is guarded. A new URL is how an
-        # operator moves the same model to another server, and EMBEDDER_PROVIDER
-        # how they name the client that server needs; if that server serves
-        # another model the readiness probe reports the embedder unavailable
-        # (not for tei: its probe checks only /health). Refused, the row keeps
-        # its model and takes the rest.
+        # Reuse the admin API's vector fingerprint check. The endpoint URL and
+        # provider implementation can change the vectors even when the model
+        # name stays the same. A boot sync has no interactive acknowledgement,
+        # so material changes wait for an explicit API edit.
         guard = None
+        guarded_changes: list[str] = []
         if model_type == "embedder":
-            guard = functools.partial(
-                _refuse_unacknowledged_repoint,
-                fields={"model_name": fields["model_name"]},
-                remedy=_BOOT_REPOINT_REMEDY,
-            )
+
+            async def guard(
+                locked: ModelEndpointRow,
+                indexed_file_usage: Callable[[], Awaitable[list[dict]]],
+            ) -> None:
+                guarded_changes[:] = material_embedder_changes(
+                    locked,
+                    fields,
+                )
+                await _refuse_unacknowledged_repoint(
+                    locked,
+                    indexed_file_usage,
+                    fields=fields,
+                    remedy=_BOOT_REPOINT_REMEDY,
+                )
+
         try:
             await self._repo.update(row.name, model_type, guard=guard, **fields)
         except ConflictError as exc:
             if exc.code == "EMBEDDER_SWAP_IN_PROGRESS":
-                # A running swap refuses any change to its target's vectors, the
-                # URL included, so holding back the model alone would be refused
-                # again and fail boot before the swap resumes. Both wait for it.
-                held, label = ("endpoint", "model_name"), "URL and model"
-                logger.bind(endpoint=row.name, model_type=model_type).warning(
-                    f"Not syncing the {label} of embedder '{row.name}' from env "
-                    f"(MODEL_ENDPOINT_SYNC_ON_BOOT=true): env asks for '{fields['endpoint']}' and "
-                    f"'{fields['model_name']}', the database keeps '{row.endpoint}' and '{row.model_name}'. "
-                    f"{exc.message} Restart once the swap ends to sync them."
-                )
+                # The repository found this conflict against its freshly locked
+                # row; the seeding snapshot may be stale. Hold the full material
+                # configuration rather than guessing which fields changed.
+                held = {"endpoint", "model_name", "extra"}
+                label = "requested vector configuration"
+                reason = "a running embedder swap"
+                remedy = f"Restart once the swap ends to retry sync. {_BOOT_REPOINT_REMEDY}"
+            elif exc.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA":
+                changed_fields = guarded_changes
+                reason = "indexed files depend on the stored configuration"
+                remedy = ""
+                held = set(changed_fields)
+                if "endpoint" in held or any(field.startswith("extra.") for field in held):
+                    held.add("extra")
+                label = ", ".join(changed_fields)
             else:
-                # A warning, and worded as a disagreement: the database's model may
-                # be the stale one (#1099) or an admin's deliberate, acknowledged
-                # change that env was never updated for; this cannot tell which.
-                held, label = ("model_name",), "model"
+                raise
+
+            for field in ("endpoint", "model_name"):
+                if field in held:
+                    fields.pop(field, None)
+            if "extra" in held:
+                fields.pop("extra", None)
+
+            if exc.code == "EMBEDDER_SWAP_IN_PROGRESS":
+                warning_detail = f"Not syncing the {label} from env"
+            else:
+                warning_detail = f"Not syncing embedder field(s) {label} from env"
+            logger.bind(endpoint=row.name, model_type=model_type).warning(
+                f"{warning_detail} (MODEL_ENDPOINT_SYNC_ON_BOOT=true) for '{row.name}' because {reason}. "
+                f"{exc.message}{f' {remedy}' if remedy else ''}"
+            )
+            try:
+                # Recheck the safe remainder while holding the live row. A
+                # concurrent endpoint edit or swap must not make this fallback
+                # bypass the same guard that rejected the first update.
+                await self._repo.update(row.name, model_type, guard=guard, **fields)
+            except ConflictError as retry_exc:
                 logger.bind(endpoint=row.name, model_type=model_type).warning(
-                    f"Not syncing the model of embedder '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true): "
-                    f"env asks for '{fields['model_name']}', the database keeps '{row.model_name}'. {exc.message}"
+                    f"Not syncing the remaining env-managed fields for '{row.name}' because the embedder changed "
+                    f"during boot-sync recovery. {retry_exc.message}"
                 )
-            for field in held:
-                del fields[field]
-            await self._repo.update(row.name, model_type, **fields)
-            logger.info(f"Synced {model_type} endpoint '{row.name}' from env, except its {label}.")
+                if await self._sync_embedder_api_key(row, data):
+                    logger.bind(endpoint=row.name).info("Rotated the env-managed embedder API key.")
+                return
+            key_rotated = False
+            if model_type == "embedder" and "extra" in held:
+                key_rotated = await self._sync_embedder_api_key(row, data)
+            if exc.code == "EMBEDDER_SWAP_IN_PROGRESS":
+                sync_detail = "holding back the vector configuration"
+                if key_rotated:
+                    sync_detail += " while rotating its env-managed API key"
+                logger.info(f"Synced {model_type} endpoint '{row.name}' from env, {sync_detail}.")
+            else:
+                rotation = " The env-managed API key was rotated." if key_rotated else ""
+                logger.info(f"Synced {model_type} endpoint '{row.name}' from env, except its {label}.{rotation}")
             return
         logger.info(f"Synced {model_type} endpoint '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true).")
+
+    async def _sync_embedder_api_key(self, row: ModelEndpointRow, data: dict[str, Any]) -> bool:
+        """Rotate an env-owned key when material embedder fields are held.
+
+        The repository merges the key patch into the locked row so concurrent
+        admin changes survive. Refuse the write if the endpoint/provider or API
+        key changed since the seeding snapshot.
+        """
+        requested_extra: dict = data.get("extra", {}) or {}
+        api_key = requested_extra.get("api_key")
+        if is_placeholder_api_key(api_key):
+            return False
+
+        requested_endpoint = data["endpoint"]
+        provider_is_env_managed = bool(os.getenv("EMBEDDER_PROVIDER"))
+        requested_provider = (
+            requested_extra.get("implementation") if provider_is_env_managed else row.extra.get("implementation")
+        )
+
+        requested_snapshot: dict[str, Any] = {"endpoint": requested_endpoint}
+        requested_snapshot["extra"] = (
+            {**row.extra, "implementation": requested_provider} if provider_is_env_managed else row.extra
+        )
+        if material_embedder_changes(
+            row,
+            requested_snapshot,
+        ):
+            return False
+
+        saved_fingerprint = embedder_fingerprint(row.endpoint, row.model_name, row.extra)
+
+        async def key_guard(
+            locked: ModelEndpointRow,
+            indexed_file_usage: Callable[[], Awaitable[list[dict]]],
+        ) -> None:
+            locked_fingerprint = embedder_fingerprint(locked.endpoint, locked.model_name, locked.extra)
+            if any(locked_fingerprint[key] != saved_fingerprint[key] for key in ("endpoint", "extra.implementation")):
+                raise ConflictError(
+                    "The requested embedder endpoint or provider differs from the saved configuration.",
+                    code="EMBEDDER_BOOT_SYNC_CONFLICT",
+                )
+
+            if locked.extra.get("api_key") != row.extra.get("api_key"):
+                raise ConflictError(
+                    "The embedder API key changed during boot sync.",
+                    code="EMBEDDER_BOOT_SYNC_CONFLICT",
+                )
+
+        try:
+            updated = await self._repo.update(
+                row.name,
+                "embedder",
+                guard=key_guard,
+                extra_patch={"api_key": api_key},
+            )
+            return updated is not None
+        except ConflictError as exc:
+            logger.bind(endpoint=row.name, model_type="embedder").warning(
+                f"Not syncing the env-managed API key for '{row.name}' during boot-sync recovery because "
+                f"the endpoint configuration changed. {exc.message}"
+            )
+            return False
 
     def _build_default_seeds(self) -> dict[str, dict[str, Any]]:
         """Build seed data from env overrides + existing Settings fallbacks.
@@ -757,7 +861,10 @@ class ModelEndpointService:
 
         guard = None
         if model_type == "embedder" and not acknowledge_indexed_data:
-            guard = functools.partial(_refuse_unacknowledged_repoint, fields=fields)
+            guard = functools.partial(
+                _refuse_unacknowledged_repoint,
+                fields=fields,
+            )
 
         if fields:
             updated = await self._repo.update(name, model_type, guard=guard, **fields)

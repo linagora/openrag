@@ -30,6 +30,24 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  compose-grafana-secret-check:
+    image: python:3.12-slim
+    command: ["python3", "/workspace/scripts/gen_env.py", "--check-compose-grafana"]
+    environment:
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
+      ALLOW_INSECURE_SECRETS: ${ALLOW_INSECURE_SECRETS:-false}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro
+      - ../../openrag/core:/workspace/openrag/core:ro
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   grafana:
     image: grafana/grafana:11.2.2
     container_name: openrag-grafana
@@ -48,7 +66,10 @@ services:
       - ../charts/openrag-stack/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_started
+      compose-grafana-secret-check:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   node-exporter:
