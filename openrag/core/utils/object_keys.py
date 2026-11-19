@@ -25,6 +25,8 @@ How a key is made safe:
 * The suffix is the one the file is parsed as (``.pdf``), so a path-based
   parser can open the stored file as it is. It is the only part of the
   filename in the key; the filename itself travels as object metadata.
+* A legacy path has no empty, ``.``, ``..`` or hidden (``.name``) part: the
+  filesystem store keeps its own files under hidden names.
 * No component is longer than 255 bytes (a filesystem name limit) and no
   key longer than 1,024 bytes (S3's limit). A partition or file id over
   191 bytes encodes past 255 and is refused.
@@ -233,8 +235,10 @@ def _check_relative_path(relative_path: str | PurePath) -> str:
         # objects: a legacy key must not reach them under another prefix.
         raise InvalidObjectKeyError("A legacy path cannot start with an object key prefix.")
     for part in parts:
-        if part in ("", ".", ".."):
-            raise InvalidObjectKeyError("A legacy path must be relative, without empty, '.' or '..' parts.")
+        if not part or part.startswith("."):
+            # Covers "." and "..", and the hidden names a store keeps its own
+            # files under. Uploads were always written under a timestamp.
+            raise InvalidObjectKeyError("A legacy path must be relative, without empty or hidden ('.') parts.")
         _check_component_length(part)
     return text
 

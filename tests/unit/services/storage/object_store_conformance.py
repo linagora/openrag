@@ -74,6 +74,8 @@ def invalid_keys() -> Iterable[str]:
         "unknown/x",
         "legacy/../x",
         "legacy/tmp/x",
+        "legacy/.part-0123",
+        "legacy/a/.b.pdf",
         "originals/a/b",
         "uploads/" + "0" * 31,
         "legacy/" + "x" * 1100,

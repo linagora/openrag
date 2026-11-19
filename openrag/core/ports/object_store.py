@@ -12,8 +12,10 @@ The contract, for every adapter:
 * **Keys.** A method refuses a key :func:`core.utils.object_keys.validate_key`
   refuses, with ``InvalidObjectKeyError``, before any I/O.
 * **Writes are whole.** A reader sees an object entirely or not at all. A
-  ``put_stream`` whose stream raises, or that is cancelled, leaves the key as
-  it was: no partial object, and any previous object still there.
+  ``put_stream`` whose stream raises, or that is cancelled while it reads the
+  stream, leaves the key as it was: no partial object, and any previous
+  object still there. Once the stream is read, the write completes even if
+  the call is cancelled.
 * **Missing objects.** ``open_stream``, ``local_copy``, ``stat`` and ``copy``
   raise ``ObjectNotFoundError``. ``delete`` and ``delete_many`` treat a
   missing key as already deleted.
