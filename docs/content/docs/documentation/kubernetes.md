@@ -402,6 +402,39 @@ counts without exposing partition or preset names.
   and an empty `BASE_URL` does not remove it, even with `MODEL_ENDPOINT_SYNC_ON_BOOT=true`. Chat keeps
   failing with `Connection error` until you repoint or remove that LLM endpoint in the admin UI.
 
+## Rotating a secret
+
+What restarts the pods after a credential in the env Secret changes (`AUTH_TOKEN`,
+`POSTGRES_PASSWORD`, `METRICS_TOKEN`, an API key) depends on where that Secret comes from:
+
+- **`env.secrets`** (the default `values` provider): a `helm upgrade` that changes any of
+  them, or `postgresql.auth.password`, rolls the API Deployment. Its pod template carries a
+  checksum of the Secret's values.
+- **`env.secretsProvider.type: vaultStaticSecret`**: the Vault Secrets Operator rolls the
+  API Deployment itself once it has written the new value.
+- **`env.secretsProvider.type: externalSecret`** or **`env.existingSecret`**: the chart
+  never sees the values, so nothing rolls. Once the Secret holds the new value (the External
+  Secrets Operator refreshes it on its `refreshInterval`), restart the API, or run a
+  controller such as Reloader that does it:
+
+  ```bash
+  kubectl rollout restart -n <release namespace> deploy/<fullname>-openrag
+  ```
+
+Until it restarts, a pod keeps the value it started with: a rotated `AUTH_TOKEN` is still
+accepted, and the Prometheus scrapes fail with 403 after a `METRICS_TOKEN` change.
+
+With `ray.enabled: true`, also delete the Ray pods after any rotation, whichever provider
+you use. KubeRay never replaces a running Ray pod when the cluster's spec changes, so the
+head (which runs the API under Ray Serve) and the workers keep the old values until they
+are recreated:
+
+```bash
+kubectl delete pod -n <release namespace> -l ray.io/cluster=<fullname>-raycluster
+```
+
+`<fullname>` is `openrag` with the default `fullnameOverride`.
+
 ## Operator-managed accounts
 
 Service accounts whose token comes from your secret store (cozy-stack's, for example) are
@@ -445,9 +478,8 @@ The Secret value is hashed exactly as stored, as for `AUTH_TOKEN`: a trailing ne
 (common with `echo` piped into `base64`) becomes part of the token and the client's bearer
 no longer matches. Use `printf '%s'` or `stringData` when writing the Secret.
 
-Restarting the pods automatically when an External Secrets Operator Secret rotates
-(Reloader, or a Secret checksum annotation) is not done here; it is tracked in
-[#985](https://github.com/linagora/openrag/issues/985).
+What restarts the pods when the token rotates depends on the secrets provider: see
+[Rotating a secret](#rotating-a-secret).
 
 ## Monitoring
 
