@@ -11,6 +11,7 @@ import unicodedata
 
 from core.config import load_config
 from core.utils.logging import get_logger
+from core.utils.source_filtering import neutralize_sources_tags
 
 DEFAULT_FALLBACK_ENCODING = "utf-8"
 
@@ -146,12 +147,6 @@ def sanitize_text(
 #   - "----------"        : the inter-source separator (SOURCE_SEPARATOR)
 # Neutralize them inside untrusted chunk/web text so they can only originate
 # from our own formatter, never from document content.
-# The block regex captures an optional trailing colon: the answer parser's
-# bracket is optional (\[?), so neutralizing only "[" would leave
-# "(Sources: 1, 2]" — still a parser match. Dropping the colon defangs the
-# keyword the parser keys on.
-_INJECT_SOURCE_BLOCK_RE = re.compile(r"\[\s*(sources?)\b(\s*:)?", re.IGNORECASE)
-_INJECT_SOURCES_TAG_RE = re.compile(r"(?im)^([ \t]*)(sources?)(\s*:\s*)(\[?[\d,\s]+\]?)[ \t]*$")
 _INJECT_SEPARATOR_RE = re.compile(r"-{4,}")
 
 
@@ -164,13 +159,9 @@ def neutralize_prompt_control_tokens(text: str) -> str:
     """
     if not text:
         return text
-    # "[Source...]" / "[Sources...]" -> open paren so it can't start a marker,
-    # and drop any "[Sources:" colon so the answer-tag parser can't match the
-    # remainder.
-    text = _INJECT_SOURCE_BLOCK_RE.sub(lambda m: "(" + m.group(1) + (" " if m.group(2) else ""), text)
-    # Break the unbracketed line-terminal "Sources: 1, 2" form the answer parser
-    # also matches, by replacing the colon.
-    text = _INJECT_SOURCES_TAG_RE.sub(r"\1\2 \4", text)
+    # Keep source-marker and citation-label neutralization beside the parser so
+    # its accepted forms cannot drift from this boundary.
+    text = neutralize_sources_tags(text)
     # Cap long hyphen runs so a chunk can't reproduce the source separator.
     text = _INJECT_SEPARATOR_RE.sub("---", text)
     return text

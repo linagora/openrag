@@ -847,15 +847,15 @@ function RetrievalPresetForm({
         <div className="space-y-1.5">
           <Label className="text-xs">Similarity threshold</Label>
           <p className="text-[0.7rem] text-muted-foreground">
-            Minimum cosine similarity (0–1) for vector results; higher = stricter, fewer results.
+            Minimum cosine similarity (0–1), applied to the semantic (embedding) search only, before it is merged with the keyword search. Higher = stricter. The right scale depends on the embedding model.
           </p>
           <Input
             type="number"
             min={0}
             max={1}
             step={0.05}
-            value={configGet(config, "similarity_threshold", 0.6)}
-            onChange={(e) => set("similarity_threshold", numOr(e.target.value, 0.6))}
+            value={configGet(config, "similarity_threshold", 0.2)}
+            onChange={(e) => set("similarity_threshold", numOr(e.target.value, 0.2))}
           />
         </div>
       </section>
