@@ -14,6 +14,7 @@ The hierarchy is organised by concern:
     |   +-- AuthenticationError          (401)
     +-- ValidationError                  (422)
     |   +-- AmbiguousWorkspaceError
+    |   +-- InvalidObjectKeyError        (400)
     +-- NotFoundError                    (404)
     |   +-- DocumentNotFoundError
     |   +-- PartitionNotFoundError
@@ -173,6 +174,17 @@ class AmbiguousWorkspaceError(ValidationError):
             partitions=list(partitions),
             **kwargs,
         )
+
+
+class InvalidObjectKeyError(ValidationError):
+    """An object key, or a part of one, that ``core.utils.object_keys`` would not build.
+
+    400: the parts come from the request (partition, file id, suffix), so a
+    refusal is the caller's input, never a server fault.
+    """
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, status_code=400, code="INVALID_OBJECT_KEY", **kwargs)
 
 
 class ContextWindowExceededError(ValidationError):
