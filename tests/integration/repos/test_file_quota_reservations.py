@@ -197,6 +197,37 @@ async def test_a_reused_reservation_id_takes_no_second_slot(postgres_store):
     assert await _file_count(postgres_store, user_id) == 1
 
 
+async def test_a_slot_taken_on_the_callers_connection_commits_with_its_transaction(postgres_store):
+    user_id = await _create_user(postgres_store, file_quota=1)
+    repo = postgres_store.user_repo
+
+    async with postgres_store.pool.acquire() as conn, conn.transaction():
+        grant = await repo.try_reserve_file_slot(user_id, "r-1", default_quota=-1, _connection=conn)
+        assert grant is FileSlotGrant.RESERVED
+        # Not visible outside the caller's transaction until it commits.
+        assert await _file_count(postgres_store, user_id) == 0
+
+    assert await _file_count(postgres_store, user_id) == 1
+    assert await _reservations(postgres_store, user_id) == 1
+
+
+async def test_a_slot_taken_on_the_callers_connection_rolls_back_with_its_transaction(postgres_store):
+    user_id = await _create_user(postgres_store, file_quota=1)
+    repo = postgres_store.user_repo
+
+    class _Abort(Exception):
+        pass
+
+    with pytest.raises(_Abort):
+        async with postgres_store.pool.acquire() as conn, conn.transaction():
+            await repo.try_reserve_file_slot(user_id, "r-1", default_quota=-1, _connection=conn)
+            raise _Abort
+
+    assert await _file_count(postgres_store, user_id) == 0
+    assert await _reservations(postgres_store, user_id) == 0
+    assert await repo.try_reserve_file_slot(user_id, "r-2", default_quota=-1) is FileSlotGrant.RESERVED
+
+
 # ── Release ──────────────────────────────────────────────────────────
 
 

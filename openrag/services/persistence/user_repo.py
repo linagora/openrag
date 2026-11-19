@@ -305,40 +305,57 @@ class PgUserRepository(UserRepository):
         reservation_id: str,
         *,
         default_quota: int,
+        _connection: asyncpg.Connection | None = None,
     ) -> FileSlotGrant:
+        """See the port. ``_connection`` runs the reservation on the caller's
+        connection: inside the caller's transaction (as a savepoint), so the
+        slot commits or rolls back with the caller's own writes, e.g. a job
+        row inserted by an enqueue (#1431)."""
+        if _connection is not None:
+            async with _connection.transaction():
+                return await self._reserve_file_slot_on(_connection, user_id, reservation_id, default_quota)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                # The check and the increment are one statement, so the row
-                # lock serialises concurrent admissions: each one re-reads the
-                # count the previous one left. ``COALESCE`` resolves a NULL
-                # per-user quota to the default before the sign test, so a
-                # negative default never lifts an explicit per-user limit.
-                taken = await conn.fetchval(
-                    """
-                    UPDATE users
-                       SET file_count = file_count + 1
-                     WHERE id = $1
-                       AND NOT is_admin
-                       AND COALESCE(file_quota, $2::int) >= 0
-                       AND file_count < COALESCE(file_quota, $2::int)
-                    RETURNING 1
-                    """,
-                    user_id,
-                    default_quota,
-                )
-                if taken:
-                    await conn.execute(
-                        "INSERT INTO file_quota_reservations (id, user_id) VALUES ($1, $2)",
-                        reservation_id,
-                        user_id,
-                    )
-                    return FileSlotGrant.RESERVED
-                unlimited = await conn.fetchval(
-                    "SELECT is_admin OR COALESCE(file_quota, $2::int) < 0 FROM users WHERE id = $1",
-                    user_id,
-                    default_quota,
-                )
-                return FileSlotGrant.UNLIMITED if unlimited else FileSlotGrant.DENIED
+                return await self._reserve_file_slot_on(conn, user_id, reservation_id, default_quota)
+
+    @staticmethod
+    async def _reserve_file_slot_on(
+        conn: asyncpg.Connection,
+        user_id: int,
+        reservation_id: str,
+        default_quota: int,
+    ) -> FileSlotGrant:
+        # The check and the increment are one statement, so the row
+        # lock serialises concurrent admissions: each one re-reads the
+        # count the previous one left. ``COALESCE`` resolves a NULL
+        # per-user quota to the default before the sign test, so a
+        # negative default never lifts an explicit per-user limit.
+        taken = await conn.fetchval(
+            """
+            UPDATE users
+               SET file_count = file_count + 1
+             WHERE id = $1
+               AND NOT is_admin
+               AND COALESCE(file_quota, $2::int) >= 0
+               AND file_count < COALESCE(file_quota, $2::int)
+            RETURNING 1
+            """,
+            user_id,
+            default_quota,
+        )
+        if taken:
+            await conn.execute(
+                "INSERT INTO file_quota_reservations (id, user_id) VALUES ($1, $2)",
+                reservation_id,
+                user_id,
+            )
+            return FileSlotGrant.RESERVED
+        unlimited = await conn.fetchval(
+            "SELECT is_admin OR COALESCE(file_quota, $2::int) < 0 FROM users WHERE id = $1",
+            user_id,
+            default_quota,
+        )
+        return FileSlotGrant.UNLIMITED if unlimited else FileSlotGrant.DENIED
 
     async def release_file_slot(self, reservation_id: str) -> bool:
         # Deleting the row is what makes this one-shot: a concurrent consume or
