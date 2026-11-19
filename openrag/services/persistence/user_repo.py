@@ -358,22 +358,11 @@ class PgUserRepository(UserRepository):
         return FileSlotGrant.UNLIMITED if unlimited else FileSlotGrant.DENIED
 
     async def release_file_slot(self, reservation_id: str) -> bool:
-        # Deleting the row is what makes this one-shot: a concurrent consume or
-        # release of the same id finds nothing and leaves the count alone.
-        released = await self.pool.fetchval(
-            """
-            WITH released AS (
-                DELETE FROM file_quota_reservations WHERE id = $1 RETURNING user_id
-            )
-            UPDATE users
-               SET file_count = GREATEST(users.file_count - 1, 0)
-              FROM released
-             WHERE users.id = released.user_id
-            RETURNING 1
-            """,
-            reservation_id,
-        )
-        return bool(released)
+        async with self.pool.acquire() as conn, conn.transaction():
+            user_id = await conn.fetchval("SELECT user_id FROM file_quota_reservations WHERE id = $1", reservation_id)
+            if user_id is None:
+                return False
+            return bool(await self._release_locked(conn, [user_id], "id = $1", reservation_id))
 
     async def release_stale_file_slots(
         self,
@@ -382,30 +371,47 @@ class PgUserRepository(UserRepository):
         settled_ids: list[str],
         older_than_seconds: float,
     ) -> int:
+        # The cutoff is computed from the database's clock, the one that
+        # stamped ``created_at``, not the caller's.
+        eligible = "id <> ALL($1::text[]) AND (id = ANY($2::text[]) OR created_at < now() - make_interval(secs => $3))"
+        args = (list(live_ids), list(settled_ids), float(older_than_seconds))
         async with self.pool.acquire() as conn, conn.transaction():
-            # The cutoff is computed from the database's ``now()``, the clock
-            # that stamped ``created_at``, not the caller's.
-            rows = await conn.fetch(
-                """
-                DELETE FROM file_quota_reservations
-                 WHERE id <> ALL($1::text[])
-                   AND (id = ANY($2::text[]) OR created_at < now() - make_interval(secs => $3))
-                RETURNING user_id
-                """,
-                list(live_ids),
-                list(settled_ids),
-                float(older_than_seconds),
+            rows = await conn.fetch(f"SELECT DISTINCT user_id FROM file_quota_reservations WHERE {eligible}", *args)
+            return await self._release_locked(conn, [row["user_id"] for row in rows], eligible, *args)
+
+    @staticmethod
+    async def _release_locked(conn: asyncpg.Connection, user_ids: list[int], where: str, *args: Any) -> int:
+        """Delete the reservations matching ``where`` among ``user_ids`` and give their slots back.
+
+        The users rows are locked first, in id order. Deleting a user locks its
+        row and then its reservations (``ON DELETE CASCADE``), and admission and
+        the catalog insert also take the user's row before the reservation, so
+        taking the reservation first here could deadlock with any of them.
+        Eligibility is re-checked by the DELETE once the locks are held, and
+        only the rows it removes are decremented, so two cleanups racing on one
+        slot still release it once. ``where`` binds ``args`` as ``$1``...``$n``.
+        """
+        if not user_ids:
+            return 0
+        locked = await conn.fetch(
+            "SELECT id FROM users WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE",
+            sorted(set(user_ids)),
+        )
+        if not locked:
+            return 0
+        rows = await conn.fetch(
+            f"DELETE FROM file_quota_reservations WHERE {where} AND user_id = ANY(${len(args) + 1}::int[]) RETURNING user_id",
+            *args,
+            [row["id"] for row in locked],
+        )
+        counts = Counter(row["user_id"] for row in rows)
+        for user_id in sorted(counts):
+            await conn.execute(
+                "UPDATE users SET file_count = GREATEST(file_count - $1, 0) WHERE id = $2",
+                counts[user_id],
+                user_id,
             )
-            # Lock users rows in id order, as ``decrement_file_counts`` does,
-            # so a sweep and a concurrent delete cannot deadlock.
-            counts = Counter(row["user_id"] for row in rows)
-            for user_id in sorted(counts):
-                await conn.execute(
-                    "UPDATE users SET file_count = GREATEST(file_count - $1, 0) WHERE id = $2",
-                    counts[user_id],
-                    user_id,
-                )
-            return len(rows)
+        return len(rows)
 
     async def count_indexed_files(self, user_id: int) -> int | None:
         return await self.pool.fetchval(

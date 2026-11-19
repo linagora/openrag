@@ -547,7 +547,11 @@ file_quota_reservations = Table(
     metadata,
     Column("id", String, primary_key=True),
     Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-    Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    # ``clock_timestamp()``, not ``now()``: the reservation is inserted after the
+    # quota UPDATE, which can wait on the user's row lock, and ``now()`` is the
+    # transaction start, so a long wait would stamp a row already past the
+    # sweep's grace window.
+    Column("created_at", DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False),
     Index("ix_file_quota_reservations_user_id", "user_id"),
 )
 

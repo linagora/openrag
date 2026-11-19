@@ -35,7 +35,9 @@ def upgrade() -> None:
             _TABLE,
             sa.Column("id", sa.String(), primary_key=True),
             sa.Column("user_id", sa.Integer(), nullable=False),
-            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+            sa.Column(
+                "created_at", sa.DateTime(timezone=True), server_default=sa.text("clock_timestamp()"), nullable=False
+            ),
             # Unnamed, so this and ``create_all`` converge on the Postgres
             # default name.
             sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
