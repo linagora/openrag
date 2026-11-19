@@ -1861,6 +1861,10 @@ class _RecordingWorker:
         self.last_kwargs = kwargs
         if self._error is not None:
             raise self._error
+        # The real worker runs the hook after its catalog write, before it
+        # releases the fence and reports the outcome.
+        if kwargs.get("before_success") is not None:
+            await kwargs["before_success"]()
         return {"stored_count": 1, "stage": "stored"}
 
     async def release_file_fence(self, **kwargs) -> None:
@@ -1985,8 +1989,8 @@ async def test_actor_logs_a_workspace_attachment_failure_after_indexing(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_actor_releases_the_fence_after_the_workspace_attachment(tmp_path) -> None:
-    """The attachment is the file's last write, so the worker doesn't release first (#1430)."""
+async def test_actor_attaches_inside_the_run_with_a_postgres_fence(tmp_path) -> None:
+    """The attachment is the file's last write: it runs before the worker frees the file and reports (#1430)."""
     path = tmp_path / "doc.txt"
     path.write_bytes(b"x")
     worker = _RecordingWorker()
@@ -2006,7 +2010,7 @@ async def test_actor_releases_the_fence_after_the_workspace_attachment(tmp_path)
         fence_holder_id="t",
     )
 
-    assert worker.last_kwargs["release_fence_on_success"] is False
+    assert worker.last_kwargs["before_success"] is not None
     assert events == ["attached", "released"]
     worker.release_file_fence.assert_awaited_once_with(partition="p", file_id="f", holder_id="t")
 
@@ -2029,8 +2033,35 @@ async def test_actor_leaves_the_release_to_the_worker_without_an_attachment(tmp_
         fence_holder_id="t",
     )
 
-    assert worker.last_kwargs["release_fence_on_success"] is True
+    assert worker.last_kwargs["before_success"] is None
     assert worker.released == []
+
+
+@pytest.mark.asyncio
+async def test_actor_attaches_after_the_run_without_a_postgres_fence(tmp_path) -> None:
+    """With the Ray fences the run is reported first, as before #1430."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    events: list[str] = []
+
+    class _OrderedWorker(_RecordingWorker):
+        async def process_file(self, **kwargs) -> dict:
+            result = await super().process_file(**kwargs)
+            events.append("run reported")
+            return result
+
+    worker = _OrderedWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(
+        side_effect=lambda *_: events.append("attached") or []
+    )
+
+    await actor.process_file(
+        task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", workspace_ids=["ws1"]
+    )
+
+    assert worker.last_kwargs["before_success"] is None
+    assert events == ["run reported", "attached"]
 
 
 @pytest.mark.asyncio

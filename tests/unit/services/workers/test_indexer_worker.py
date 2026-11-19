@@ -2157,38 +2157,76 @@ async def test_process_file_frees_the_file_before_reporting_the_outcome(tmp_path
     fences.release.assert_awaited_with(partition="p", file_id="f1", holder_id="t")
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("fails", [False, True])
-async def test_process_file_keeps_the_fence_for_a_later_write_only_on_success(tmp_path: Path, fails: bool) -> None:
-    """The worker actor releases after the workspace attachment; a failure still releases here (#1430)."""
+def _ordered_worker(tmp_path: Path, events: list[str], monkeypatch: pytest.MonkeyPatch) -> tuple[IndexerWorker, Path]:
+    """A fenced worker whose release, outcome report and callback append to *events*."""
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
     processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
     chunks = [Chunk(id="c1", text="content", partition="p")]
-    fences = SimpleNamespace(release=AsyncMock(return_value=True))
-    repo = FakeDocumentRepo()
-    if fails:
-        repo.add_file_to_partition = AsyncMock(side_effect=RuntimeError("pg down"))
+    fences = SimpleNamespace(release=AsyncMock(side_effect=lambda **_: events.append("released") or True))
+    tsm = _fake_tsm()
+    tsm.complete_with_degraded_stages.remote.side_effect = lambda *_: events.append("completed") or "completed"
+    tsm.set_failed_if_not_cancelled.remote.side_effect = lambda *_args, **_kwargs: events.append("failed") or True
+
+    async def callback(_url, _partition, _file_id, status, *_args, **_kwargs) -> None:
+        events.append(f"callback {status}")
+
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
     worker = IndexerWorker(
         pipeline=_make_pipeline(processed, chunks),
-        task_state_manager=_fake_tsm(),
-        document_repo=repo,
+        task_state_manager=tsm,
+        document_repo=FakeDocumentRepo(),
         file_fence_repo=fences,
     )
+    return worker, path
 
-    try:
+
+@pytest.mark.asyncio
+async def test_process_file_runs_the_last_writes_before_freeing_the_file_and_reporting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client that sees the task settle finds the file attached and free (#1430)."""
+    events: list[str] = []
+    worker, path = _ordered_worker(tmp_path, events, monkeypatch)
+
+    async def attach() -> None:
+        events.append("attached")
+
+    await worker.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        callback_url="https://client.example/done",
+        fence_holder_id="t",
+        before_success=attach,
+    )
+
+    assert events == ["attached", "released", "completed", "callback success"]
+
+
+@pytest.mark.asyncio
+async def test_process_file_fails_the_run_when_its_last_writes_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    worker, path = _ordered_worker(tmp_path, events, monkeypatch)
+
+    async def attach() -> None:
+        raise RuntimeError("workspace store down")
+
+    with pytest.raises(RuntimeError, match="workspace store down"):
         await worker.process_file(
             task_id="t",
             path=str(path),
             metadata={"file_id": "f1"},
             partition="p",
+            callback_url="https://client.example/done",
             fence_holder_id="t",
-            release_fence_on_success=False,
+            before_success=attach,
         )
-    except RuntimeError:
-        assert fails
 
-    assert fences.release.await_count == (1 if fails else 0)
+    assert events == ["released", "failed", "callback error"]
 
 
 @pytest.mark.asyncio
