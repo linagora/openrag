@@ -14,6 +14,7 @@ from core.utils.logging import (
     AccessLogMinimiser,
     escape_markup,
     get_logger,
+    hash_oidc_sub,
     json_record,
     json_sink,
     mask_email,
@@ -568,3 +569,16 @@ def test_verbose_config_defaults_are_production_safe():
     config = VerboseConfig()
     assert config.level == "INFO"
     assert config.personal_data is False
+
+def test_hash_oidc_sub_is_deterministic():
+    assert hash_oidc_sub("kc-bob") == hash_oidc_sub("kc-bob")
+
+
+def test_hash_oidc_sub_differs_for_different_subjects():
+    assert hash_oidc_sub("kc-bob") != hash_oidc_sub("kc-alice")
+
+
+def test_hash_oidc_sub_returns_sha256_hex_digest():
+    result = hash_oidc_sub("private-subject-123")
+    assert len(result) == 64
+    assert "private-subject-123" not in result

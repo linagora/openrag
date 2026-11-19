@@ -12,7 +12,9 @@ import pytest
 from core.config.auth import OIDCConfig
 from core.models.user import PartitionRole, User, UserPartition
 from core.utils.exceptions import OpenRAGError
+from core.utils.logging import hash_oidc_sub
 from cryptography.fernet import Fernet
+from loguru import logger
 from services.auth import StateCookieSerializer, hash_session_token
 from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY, LogoutTokenClaims, TokenBundle
 from services.orchestrators.auth_service import AuthService, OIDCFlowError
@@ -358,13 +360,30 @@ async def test_callback_auto_provision_email_collision_returns_conflict():
         cfg=_cfg(auto_provision_login=True),
     )
 
-    state, cookie = await _login_and_get_state(svc)
-    with pytest.raises(OIDCFlowError) as ei:
-        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        level="ERROR",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        with pytest.raises(OIDCFlowError) as ei:
+            await svc.handle_oidc_callback(
+                code="abc",
+                state=state,
+                state_cookie_raw=cookie,
+            )
+    finally:
+        logger.remove(handler_id)
 
     assert ei.value.status_code == 409
     assert "already exists" in ei.value.message
     assert not urepo.created
+
+    captured_logs = "".join(log_messages)
+    assert "kc-new" not in captured_logs
+    assert f"sub_hash={hash_oidc_sub('kc-new')}" in captured_logs
 
 
 @pytest.mark.asyncio

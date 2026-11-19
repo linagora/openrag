@@ -14,7 +14,6 @@ The cryptographic / cookie primitives (``OIDCClient``, the state-cookie
 serializer, Fernet token (de)encryption, opaque session-token issuance)
 come from ``services.auth`` — the infrastructure adapters for OIDC.
 """
-
 from __future__ import annotations
 
 import os
@@ -27,7 +26,7 @@ from urllib.parse import urlencode, urlparse
 from core.models.user import OIDCSession, PartitionRole, User, UserPartition
 from core.utils.consts import is_reserved_partition_name
 from core.utils.exceptions import AuthError, OpenRAGError
-from core.utils.logging import get_logger, mask_email
+from core.utils.logging import get_logger, hash_oidc_sub, mask_email
 from services.auth import (
     OIDCClient,
     StateCookiePayload,
@@ -296,7 +295,7 @@ class AuthService:
         # IdP so it doesn't retry).
         logger.warning(
             f"Received sid-less back-channel logout token — not supported; "
-            f"ignoring per implementation policy (sub={claims.sub!r})"
+            f"ignoring per implementation policy (sub_hash={hash_oidc_sub(claims.sub)})"
         )
         return 0
 
@@ -707,7 +706,9 @@ class AuthService:
             return self._refuse_managed(user)
 
         if not self._config.auto_provision_login:
-            logger.warning(f"OIDC login rejected — user not registered (sub={sub!r})")
+            logger.warning(
+    f"OIDC login rejected — user not registered (sub_hash={hash_oidc_sub(sub)})"
+    )
             raise OIDCFlowError("User not registered", status_code=403)
 
         display_name = self._display_name_from_claims(claims, sub)
@@ -725,7 +726,10 @@ class AuthService:
             # Concurrent first-login race or DB failure. Re-read by sub first;
             # if an email collision caused the insert failure, return an
             # actionable conflict instead of an opaque 500.
-            logger.exception(f"OIDC auto-provisioning failed for sub={sub!r}: {e}")
+            logger.error(
+                f"OIDC auto-provisioning failed for sub_hash={hash_oidc_sub(sub)} "
+                f"(error_type={type(e).__name__})"
+           )
             user = await self._user_repo.get_user_by_external_id(sub)
             if user is not None:
                 return self._refuse_managed(user)
@@ -733,7 +737,7 @@ class AuthService:
                 existing = await self._user_repo.get_user_by_email(email)
                 if existing is not None:
                     logger.error(
-                        f"OIDC auto-provisioning blocked for sub={sub!r}: an account with email "
+                        f"OIDC auto-provisioning blocked for sub_hash={hash_oidc_sub(sub)}: an account with email "
                         f"{mask_email(email)} already exists under a different identity. Set that "
                         f"user's external_user_id to this sub to allow login."
                     )
@@ -744,7 +748,9 @@ class AuthService:
                     ) from e
             raise OIDCFlowError("Failed to provision user", status_code=500) from e
         else:
-            logger.info(f"OIDC user auto-provisioned (id={user.id}, sub={sub!r})")
+            logger.info(
+                f"OIDC auto-provisioned new user — user_id={user.id}, sub_hash={hash_oidc_sub(sub)}"
+            )
         return user
 
     @staticmethod
