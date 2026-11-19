@@ -410,7 +410,8 @@ makes workers emit stage history, and v15 to v17 (develop) add stage snapshots a
 workbook parser; v18 on this branch preserves unsettled terminal outcomes, while independent v18
 on `develop` added worker-ref ownership through `has_object_ref` and replaces older task-state
 actors (#1296). v19 combines both contracts because the two v18 actor generations cannot be safely
-reused under the same detached actor names. Without the bump, new
+reused under the same detached actor names. v20 makes workers consume the upload's file-quota
+reservation at the catalog insert (#664). Without the bump, new
 replicas attach to the previous release's actors and every submit raises `TypeError`. Old generations
 are retired with `services/workers/retire_indexer_generation.py`.
 
