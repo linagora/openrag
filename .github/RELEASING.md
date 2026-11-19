@@ -240,7 +240,7 @@ under the same version (rule 5 below). A printed subject that nobody compared
 let that pass, so this is a gate:
 
 ```bash
-git fetch origin main --tags || exit 1
+git fetch --no-tags origin main "+refs/tags/$VER:refs/tags/$VER" || exit 1
 fail=0
 git merge-base --is-ancestor "$VER" origin/main \
   && echo "OK    $VER is on main" \
