@@ -26,7 +26,6 @@ import difflib
 import ipaddress
 import mimetypes
 import socket
-import tempfile
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -42,6 +41,7 @@ from core.indexing.validators import (
 from core.models.document import Document
 from core.utils.consts import is_internal_metadata_key, is_reserved_partition_name, strip_protected_metadata
 from core.utils.exceptions import ConflictError, ValidationError
+from core.utils.filename import make_unique_filename, sanitize_filename
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
 from core.utils.url_safety import is_blocked_address, is_safe_url
@@ -90,6 +90,7 @@ class MCPService:
         conversion_service: ConversionService,
         vector_store: VectorStore,
         collection: str,
+        data_dir: Path,
         default_top_k: int = 5,
         max_top_k: int = 50,
         similarity_threshold: float = 0.2,
@@ -103,6 +104,8 @@ class MCPService:
         self._conversion = conversion_service
         self._vector_store = vector_store
         self._collection = collection
+        # ``paths.data_dir``, where ``index_url`` stores its download, like an upload.
+        self._data_dir = Path(data_dir)
         self.default_top_k = default_top_k
         self.max_top_k = max_top_k
         self.similarity_threshold = similarity_threshold
@@ -588,10 +591,15 @@ class MCPService:
         if guessed_mime and "mimetype" not in metadata:
             metadata["mimetype"] = guessed_mime
 
-        # Downloaded under the suffix it is parsed as, like an upload, so the
-        # path-based parsers read this file rather than a second copy.
+        # Stored like an upload: in data_dir, which every node mounts, so a
+        # worker or parser on another node can open it, and under the suffix
+        # it is parsed as, so the path-based parsers read this file rather
+        # than a second copy. Once a task is queued it is kept or deleted with
+        # the task, by the SAVE_UPLOADED_FILES rule an upload follows.
         suffix = Document.type_suffix(filename, metadata.get("mimetype"))
-        tmp_path = await _to_thread_undone_on_cancel(_remove_file, _create_download_target, suffix)
+        tmp_path = await _to_thread_undone_on_cancel(
+            _remove_file, _create_download_target, self._data_dir, _download_name(filename, suffix)
+        )
         download_complete = False
         try:
             await self._safe_download(url, tmp_path)
@@ -757,10 +765,39 @@ def _discard_download(fh: Any) -> None:
     Path(fh.name).unlink(missing_ok=True)
 
 
-def _create_download_target(suffix: str) -> Path:
-    """Create an empty temp file for ``index_url`` to download into (blocking; run in a thread)."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        return Path(tmp.name)
+# The longest name a file system takes is 255 bytes; ``make_unique_filename``
+# adds its prefix and SAVE_MARKDOWN's copy adds ``.md``.
+_MAX_DOWNLOAD_NAME_BYTES = 255 - len(make_unique_filename("")) - len(".md")
+
+
+def _download_name(filename: str, suffix: str) -> str:
+    """The name ``index_url`` stores a download under: the URL's file name, as an upload's is.
+
+    Sanitized and given a random prefix, as the upload routes do, ending in
+    the *suffix* it is parsed as. A name from a URL has no length limit, unlike
+    a file a client uploads, so it is cut to fit the file system.
+    """
+    name = sanitize_filename(filename)
+    stem = name[: -len(suffix)] if suffix and name.endswith(suffix) else name
+    if len(suffix.encode()) > _MAX_DOWNLOAD_NAME_BYTES:
+        stem, suffix = stem + suffix, ""
+    budget = _MAX_DOWNLOAD_NAME_BYTES - len(suffix.encode())
+    stem = stem.encode()[:budget].decode(errors="ignore")
+    return make_unique_filename((stem or "download") + suffix)
+
+
+def _create_download_target(data_dir: Path, name: str) -> Path:
+    """Create the empty file ``index_url`` downloads into, in *data_dir* (blocking; run in a thread).
+
+    Never an existing file: another upload under the same name is left alone.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = data_dir.resolve()
+    path = (data_dir / name).resolve()
+    if path.parent != data_dir:
+        raise ValueError(f"download name {name!r} resolves outside the data directory")
+    path.touch(exist_ok=False)
+    return path
 
 
 def _check_downloaded_content(extension: str, path: Path) -> None:
