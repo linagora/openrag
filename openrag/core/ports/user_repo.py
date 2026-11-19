@@ -8,6 +8,7 @@ Partition memberships moved to
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any
 
 from core.models.user import ApiKey, FileSlotGrant, User
@@ -87,18 +88,28 @@ class UserRepository(ABC):
         """
 
     @abstractmethod
+    async def file_slot_cutoff(self, grace_seconds: float) -> datetime:
+        """The database clock now, minus ``grace_seconds``.
+
+        Read before the caller takes its snapshot of live tasks: a reservation
+        stamped later is newer than the cutoff, so passing it as
+        ``created_before`` spares it however long the sweep takes to run.
+        """
+
+    @abstractmethod
     async def release_stale_file_slots(
         self,
         *,
         live_ids: list[str],
         settled_ids: list[str],
-        older_than_seconds: float,
+        created_before: datetime | None,
     ) -> int:
         """Release reservations no live task can still consume.
 
         Keeps every id in ``live_ids``. Releases the rest when they are in
-        ``settled_ids`` or older than ``older_than_seconds``, measured on the
-        database clock that stamped them. Returns how many were released.
+        ``settled_ids`` or were stamped before ``created_before`` (from
+        :meth:`file_slot_cutoff`); with ``None``, only the settled ones.
+        Returns how many were released.
         """
 
     @abstractmethod

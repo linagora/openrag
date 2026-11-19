@@ -318,7 +318,7 @@ async def test_releases_racing_a_user_deletion_do_not_deadlock(postgres_store, w
         results = await asyncio.gather(
             wide_user_repo.release_file_slot(f"d{attempt}-0"),
             wide_user_repo.release_stale_file_slots(
-                live_ids=[], settled_ids=[f"d{attempt}-1", f"d{attempt}-2"], older_than_seconds=300
+                live_ids=[], settled_ids=[f"d{attempt}-1", f"d{attempt}-2"], created_before=None
             ),
             wide_user_repo.delete_user(user_id),
             return_exceptions=True,
@@ -378,7 +378,9 @@ async def test_a_copy_whose_slot_was_swept_is_refused_when_the_quota_is_full(pos
     user_id = await _create_user(postgres_store, file_quota=1)
     repo = postgres_store.user_repo
     await repo.try_reserve_file_slot(user_id, "copy", default_quota=-1)
-    await repo.release_stale_file_slots(live_ids=[], settled_ids=["copy"], older_than_seconds=300)
+    await repo.release_stale_file_slots(
+        live_ids=[], settled_ids=["copy"], created_before=await repo.file_slot_cutoff(300)
+    )
     await repo.try_reserve_file_slot(user_id, "upload", default_quota=-1)
 
     with pytest.raises(OpenRAGError) as exc:
@@ -464,13 +466,43 @@ async def test_the_sweep_keeps_live_and_recent_slots_and_releases_the_rest(postg
     released = await repo.release_stale_file_slots(
         live_ids=["live-old"],
         settled_ids=["settled-new"],
-        older_than_seconds=300,
+        created_before=await repo.file_slot_cutoff(300),
     )
 
     assert released == 2
     remaining = await postgres_store.pool.fetch("SELECT id FROM file_quota_reservations ORDER BY id")
     assert [row["id"] for row in remaining] == ["live-old", "pending-new"]
     assert await _file_count(postgres_store, user_id) == 2
+
+
+async def test_a_slot_taken_after_the_cutoff_is_spared_however_late_the_sweep_runs(postgres_store):
+    """The cutoff is read before the snapshot; a slot admitted after it is not in the snapshot."""
+    user_id = await _create_user(postgres_store, file_quota=10)
+    repo = postgres_store.user_repo
+    await repo.try_reserve_file_slot(user_id, "before", default_quota=-1)
+    cutoff = await repo.file_slot_cutoff(0)
+    await repo.try_reserve_file_slot(user_id, "after", default_quota=-1)
+
+    released = await repo.release_stale_file_slots(live_ids=[], settled_ids=[], created_before=cutoff)
+
+    assert released == 1
+    remaining = await postgres_store.pool.fetch("SELECT id FROM file_quota_reservations")
+    assert [row["id"] for row in remaining] == ["after"]
+    await _assert_counter_matches(postgres_store, user_id)
+
+
+async def test_without_a_cutoff_the_sweep_releases_only_settled_slots(postgres_store):
+    user_id = await _create_user(postgres_store, file_quota=10)
+    repo = postgres_store.user_repo
+    for reservation_id in ("settled", "orphan"):
+        await repo.try_reserve_file_slot(user_id, reservation_id, default_quota=-1)
+    await postgres_store.pool.execute("UPDATE file_quota_reservations SET created_at = now() - interval '1 hour'")
+
+    released = await repo.release_stale_file_slots(live_ids=[], settled_ids=["settled"], created_before=None)
+
+    assert released == 1
+    remaining = await postgres_store.pool.fetch("SELECT id FROM file_quota_reservations")
+    assert [row["id"] for row in remaining] == ["orphan"]
 
 
 async def test_the_sweep_decrements_each_user_by_their_own_slots(postgres_store):
@@ -484,7 +516,7 @@ async def test_the_sweep_decrements_each_user_by_their_own_slots(postgres_store)
     released = await repo.release_stale_file_slots(
         live_ids=[],
         settled_ids=[],
-        older_than_seconds=-1,
+        created_before=await repo.file_slot_cutoff(-1),
     )
 
     assert released == 4
@@ -499,7 +531,7 @@ async def test_the_sweep_with_nothing_to_release_changes_nothing(postgres_store)
     released = await postgres_store.user_repo.release_stale_file_slots(
         live_ids=[],
         settled_ids=[],
-        older_than_seconds=300,
+        created_before=await postgres_store.user_repo.file_slot_cutoff(300),
     )
 
     assert released == 0

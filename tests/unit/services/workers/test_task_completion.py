@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import weakref
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -43,6 +44,18 @@ class _FakeUserRepo:
         self.released: list[str] = []
         self.sweeps: list[dict[str, Any]] = []
         self.release_error: BaseException | None = None
+        # The fake database clock: each cutoff read is one step later, so a
+        # test can tell which read a sweep received.
+        self.cutoff_reads: list[datetime] = []
+
+    async def file_slot_cutoff(self, grace_seconds: float) -> datetime:
+        cutoff = (
+            datetime(2026, 1, 1, tzinfo=UTC)
+            + timedelta(seconds=len(self.cutoff_reads))
+            - timedelta(seconds=grace_seconds)
+        )
+        self.cutoff_reads.append(cutoff)
+        return cutoff
 
     async def release_file_slot(self, reservation_id: str) -> bool:
         if self.release_error is not None:
@@ -50,9 +63,9 @@ class _FakeUserRepo:
         self.released.append(reservation_id)
         return True
 
-    async def release_stale_file_slots(self, *, live_ids, settled_ids, older_than_seconds) -> int:
+    async def release_stale_file_slots(self, *, live_ids, settled_ids, created_before) -> int:
         self.sweeps.append(
-            {"live_ids": sorted(live_ids), "settled_ids": sorted(settled_ids), "older_than_seconds": older_than_seconds}
+            {"live_ids": sorted(live_ids), "settled_ids": sorted(settled_ids), "created_before": created_before}
         )
         return 0
 
@@ -1351,23 +1364,9 @@ async def test_the_slot_sweep_keeps_live_tasks_and_releases_settled_ones(user_re
     (sweep,) = user_repo.sweeps
     assert sweep["live_ids"] == ["queued", "registering", "running"]
     assert sweep["settled_ids"] == ["cancelled", "done", "failed"]
-    # Slots the actor does not know are spared for the grace window: they may
-    # belong to an upload that has not been queued yet. The cutoff is passed
-    # as an age so the repository measures it on the database clock.
-    assert sweep["older_than_seconds"] == task_completion._ORPHAN_GRACE_SECONDS
-
-
-@pytest.mark.asyncio
-async def test_the_slot_sweep_widens_the_grace_by_the_snapshot_age(user_repo, monkeypatch) -> None:
-    """A slot taken after the snapshot is not in it; the grace must count from the snapshot."""
-    from services.workers import task_completion
-
-    monkeypatch.setattr(task_completion, "monotonic", lambda: 1_400.0)
-
-    await task_completion.TaskCompletionTracker().reconcile_file_slots({}, snapshot_at=1_000.0)
-
-    (sweep,) = user_repo.sweeps
-    assert sweep["older_than_seconds"] == task_completion._ORPHAN_GRACE_SECONDS + 400.0
+    # Without a cutoff, slots the actor does not know are all spared: only
+    # settled tasks give theirs back.
+    assert sweep["created_before"] is None
 
 
 @pytest.mark.asyncio
@@ -1437,6 +1436,15 @@ async def test_recover_sweeps_the_slots_a_restart_left_behind(user_repo) -> None
     )
     tsm.get_object_ref.remote.return_value = {"ref": object()}
 
+    all_info = tsm.get_all_info.remote.return_value
+    cutoff_reads_at_snapshot: list[int] = []
+
+    async def snapshot(*_args, **_kwargs):
+        cutoff_reads_at_snapshot.append(len(user_repo.cutoff_reads))
+        return all_info
+
+    tsm.get_all_info.remote.side_effect = snapshot
+
     with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
         tracker = _tracker_with_repo(repo)
         await tracker.recover()
@@ -1444,6 +1452,10 @@ async def test_recover_sweeps_the_slots_a_restart_left_behind(user_repo) -> None
     (sweep,) = user_repo.sweeps
     assert sweep["live_ids"] == ["task-live"]
     assert sweep["settled_ids"] == ["task-done"]
+    # The cutoff was read before the snapshot, and is the one the sweep used:
+    # a slot taken after the snapshot is newer than it, so it keeps its grace.
+    assert cutoff_reads_at_snapshot == [1]
+    assert sweep["created_before"] == user_repo.cutoff_reads[0]
 
 
 @pytest.mark.asyncio
@@ -1456,14 +1468,13 @@ async def test_the_periodic_reconcile_sweeps_slots_too(user_repo) -> None:
     tracker._call_task_state = AsyncMock(side_effect=[snapshot, asyncio.CancelledError()])
     swept: list[dict] = []
 
-    async def reconcile_file_slots(all_info, *, snapshot_at):
-        assert isinstance(snapshot_at, float)
-        swept.append(all_info)
+    async def reconcile_file_slots(all_info, *, created_before):
+        swept.append((all_info, created_before))
 
     tracker.reconcile_file_slots = reconcile_file_slots
 
     with pytest.raises(asyncio.CancelledError):
         await tracker._periodic_reconcile(interval=0)
 
-    assert swept == [snapshot]
+    assert swept == [(snapshot, user_repo.cutoff_reads[0])]
     assert repo.failed_calls[0]["active_ids"] == ["task-live"]

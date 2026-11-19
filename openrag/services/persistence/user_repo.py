@@ -35,6 +35,7 @@ import os
 import secrets
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -364,17 +365,23 @@ class PgUserRepository(UserRepository):
                 return False
             return bool(await self._release_locked(conn, [user_id], "id = $1", reservation_id))
 
+    async def file_slot_cutoff(self, grace_seconds: float) -> datetime:
+        # ``clock_timestamp()``, the clock that stamps ``created_at``.
+        return await self.pool.fetchval(
+            "SELECT clock_timestamp() - make_interval(secs => $1)",
+            float(grace_seconds),
+        )
+
     async def release_stale_file_slots(
         self,
         *,
         live_ids: list[str],
         settled_ids: list[str],
-        older_than_seconds: float,
+        created_before: datetime | None,
     ) -> int:
-        # The cutoff is computed from the database's clock, the one that
-        # stamped ``created_at``, not the caller's.
-        eligible = "id <> ALL($1::text[]) AND (id = ANY($2::text[]) OR created_at < now() - make_interval(secs => $3))"
-        args = (list(live_ids), list(settled_ids), float(older_than_seconds))
+        # A NULL cutoff matches no ``created_at``: only settled ids go.
+        eligible = "id <> ALL($1::text[]) AND (id = ANY($2::text[]) OR created_at < $3::timestamptz)"
+        args = (list(live_ids), list(settled_ids), created_before)
         async with self.pool.acquire() as conn, conn.transaction():
             rows = await conn.fetch(f"SELECT DISTINCT user_id FROM file_quota_reservations WHERE {eligible}", *args)
             return await self._release_locked(conn, [row["user_id"] for row in rows], eligible, *args)

@@ -104,13 +104,13 @@ class TaskCompletionTracker:
             try:
                 task_state_manager = self._task_state_manager()
                 tracker = ray.get_actor("TaskCompletionTracker", namespace=self._namespace)
-                snapshot_at = monotonic()
+                created_before = await self._file_slot_cutoff()
                 all_info = await self._call_task_state(
                     task_state_manager.get_all_info.remote,
                     "get_all_info_for_completion_recovery",
                 )
                 await self.reconcile_jobs(list(all_info))
-                await self.reconcile_file_slots(all_info, snapshot_at=snapshot_at)
+                await self.reconcile_file_slots(all_info, created_before=created_before)
                 if self._reconcile_loop is None or self._reconcile_loop.done():
                     self._reconcile_loop = asyncio.ensure_future(self._periodic_reconcile())
                 for task_id, info in all_info.items():
@@ -491,7 +491,20 @@ class TaskCompletionTracker:
                 error=str(exc),
             )
 
-    async def reconcile_file_slots(self, all_info: dict[str, dict], *, snapshot_at: float | None = None) -> None:
+    async def _file_slot_cutoff(self) -> datetime | None:
+        """The sweep's age cutoff, read on the database clock before a snapshot.
+
+        ``None`` when Postgres can't be reached: that sweep then releases only
+        the slots of settled tasks.
+        """
+        try:
+            repo = await self._user_repo()
+            return await repo.file_slot_cutoff(_ORPHAN_GRACE_SECONDS)
+        except Exception as exc:
+            self._logger.warning("Failed to read the file-slot sweep cutoff", error=str(exc))
+            return None
+
+    async def reconcile_file_slots(self, all_info: dict[str, dict], *, created_before: datetime | None = None) -> None:
         """Release the quota slots no live task can still consume (#664).
 
         The backstop for :meth:`_release_file_slot`: a release that failed, a
@@ -509,11 +522,11 @@ class TaskCompletionTracker:
         insert re-checks the quota instead and refuses the copy when it is full.
         Keeping a slot too long would block the user's uploads instead.
 
-        ``snapshot_at`` is the ``monotonic()`` time just before ``all_info`` was
-        fetched. A slot taken after that is missing from the snapshot, so the
-        grace window is widened by the time elapsed since, however long the
-        steps in between took. Only a duration crosses to the database, which
-        measures it against its own clock.
+        ``created_before`` is :meth:`_file_slot_cutoff`, read just before
+        ``all_info`` was fetched. A slot taken after that is missing from the
+        snapshot but stamped later than the cutoff, so it keeps its grace
+        however long the steps in between, or the wait for a connection, take.
+        Without a cutoff only the settled tasks' slots are released.
         """
         live_ids: list[str] = []
         settled_ids: list[str] = []
@@ -524,7 +537,7 @@ class TaskCompletionTracker:
             released = await repo.release_stale_file_slots(
                 live_ids=live_ids,
                 settled_ids=settled_ids,
-                older_than_seconds=_ORPHAN_GRACE_SECONDS + (0.0 if snapshot_at is None else monotonic() - snapshot_at),
+                created_before=created_before,
             )
             if released:
                 self._logger.info("Released file slots no live indexing task holds", released=released)
@@ -646,7 +659,7 @@ class TaskCompletionTracker:
             await asyncio.sleep(interval)
             try:
                 task_state_manager = self._task_state_manager()
-                snapshot_at = monotonic()
+                created_before = await self._file_slot_cutoff()
                 all_info = await self._call_task_state(
                     task_state_manager.get_all_info.remote,
                     "get_all_info_for_periodic_reconcile",
@@ -669,7 +682,7 @@ class TaskCompletionTracker:
                         # write succeeds, so the periodic scan can retry it.
                         self._schedule_terminal_settlement(task_id)
                 await self.reconcile_jobs(list(all_info))
-                await self.reconcile_file_slots(all_info, snapshot_at=snapshot_at)
+                await self.reconcile_file_slots(all_info, created_before=created_before)
             except Exception as exc:
                 self._logger.warning("Periodic indexing job reconciliation failed", error=str(exc))
 
