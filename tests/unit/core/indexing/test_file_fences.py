@@ -160,6 +160,31 @@ async def test_check_free_refuses_a_file_another_operation_holds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_check_free_ignores_a_fence_whose_lease_ended() -> None:
+    # A release that failed leaves the row: it must stop refusing once its lease is over.
+    repo = _Fences()
+    repo.hold(FileFenceKind.INDEX, "task-gone")
+    fence = repo.fences[(PARTITION, FILE_ID)]
+    repo.fences[(PARTITION, FILE_ID)] = fence.model_copy(
+        update={"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    await FileFences(repo).check_free(partition=PARTITION, file_id=FILE_ID)
+
+
+@pytest.mark.asyncio
+async def test_a_file_a_copy_is_writing_is_refused_without_a_task_to_poll() -> None:
+    repo = _Fences()
+    repo.hold(FileFenceKind.INDEX, "copy:abc")
+
+    with pytest.raises(ConflictError) as caught:
+        await FileFences(repo).check_free(partition=PARTITION, file_id=FILE_ID)
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert "existing_task_id" not in caught.value.extra
+
+
+@pytest.mark.asyncio
 async def test_check_unchanged_passes_when_nothing_happened() -> None:
     row = {"indexed_at": "2026-11-18T10:00:00+00:00", "title": "a"}
 
@@ -319,6 +344,26 @@ async def test_a_successful_renewal_moves_the_deadline(monkeypatch: pytest.Monke
     result = await FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work)
 
     assert result == "done"
+
+
+@pytest.mark.asyncio
+async def test_work_that_ends_in_the_round_its_fence_is_lost_reports_its_own_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Both tasks yield once, then finish in the same loop iteration: the work
+    # returns while the renewal finds the fence gone.
+    monkeypatch.setattr(module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0)
+    repo = _Fences()
+    repo.renew_results = [False]
+
+    async def work():
+        await asyncio.sleep(0)
+        return "committed"
+
+    result = await FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work)
+
+    assert result == "committed"
+    assert repo.renew_results == []
 
 
 @pytest.mark.asyncio

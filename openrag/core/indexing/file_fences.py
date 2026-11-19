@@ -25,6 +25,7 @@ from time import monotonic
 from typing import Any, TypeVar
 
 from core.models.catalog import (
+    COPY_CONTENT_CLAIM_TOKEN_PREFIX,
     FILE_FENCE_RENEW_INTERVAL_SECONDS,
     FILE_FENCE_TTL_SECONDS,
     FileFence,
@@ -48,6 +49,14 @@ def indexing_in_progress(file_id: str, partition: str, task_id: str) -> Conflict
         f"File '{file_id}' is already being indexed in partition '{partition}'.",
         code="DOCUMENT_INDEXING_IN_PROGRESS",
         existing_task_id=task_id,
+    )
+
+
+def copy_in_progress(file_id: str, partition: str) -> ConflictError:
+    """Same code as indexing: a copy writes the file the way an upload does, but has no task id."""
+    return ConflictError(
+        f"File '{file_id}' is being copied into partition '{partition}'. Please retry.",
+        code="DOCUMENT_INDEXING_IN_PROGRESS",
     )
 
 
@@ -75,6 +84,9 @@ def changed_during_copy(file_id: str, partition: str) -> ConflictError:
 def busy(fence: FileFence) -> ConflictError:
     """The 409 for a file another operation holds."""
     if fence.kind is FileFenceKind.INDEX:
+        if fence.holder_id.startswith(COPY_CONTENT_CLAIM_TOKEN_PREFIX):
+            # A copy into the file: no task a client could poll.
+            return copy_in_progress(fence.file_id, fence.partition)
         return indexing_in_progress(fence.file_id, fence.partition, fence.holder_id)
     if fence.kind is FileFenceKind.DELETE:
         return delete_in_progress(fence.file_id, fence.partition)
@@ -200,8 +212,11 @@ class FileFences:
         renewal = asyncio.ensure_future(self._keep_alive(partition=partition, file_id=file_id, holder_id=holder_id))
         try:
             done, _ = await asyncio.wait({work_task, renewal}, return_when=asyncio.FIRST_COMPLETED)
-            if renewal in done:
+            if work_task not in done:
+                # The renewal only ends by raising: the fence was lost or could not be kept.
                 await renewal
+            # Work that finished is reported as it ended, even if the fence went
+            # in the same round: its catalog write was checked against the fence.
             return await work_task
         finally:
             for task in (work_task, renewal):
@@ -284,6 +299,7 @@ __all__ = [
     "FileFences",
     "busy",
     "changed_during_copy",
+    "copy_in_progress",
     "delete_in_progress",
     "indexing_in_progress",
     "metadata_update_in_progress",
