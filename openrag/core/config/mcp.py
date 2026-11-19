@@ -18,7 +18,7 @@ class MCPServerConfig(ConfigMixin):
     path: str = "/mcp"
     default_top_k: int = 5
     max_top_k: int = 50
-    similarity_threshold: float = 0.8
+    similarity_threshold: float = 0.2
     # Bounds for the index_url server-side fetch (SSRF/DoS hardening).
     download_timeout: float = 30.0
     max_download_bytes: int = 100 * 1024 * 1024  # 100 MiB

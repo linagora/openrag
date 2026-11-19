@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 
@@ -172,6 +172,10 @@ class LoaderConfig(ConfigMixin):
     csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
     xlsx_batch_size: int = Field(default=10_000, gt=0, strict=True)
     xlsx_limits: dict[str, Annotated[int, Field(gt=0, strict=True)]] = Field(default_factory=dict)
+    # Charts in workbooks: "full" (with all their data, hidden sources
+    # included), "without_hidden_data" (data read from hidden worksheets, rows
+    # or columns left out) or "off".
+    xlsx_charts: Literal["full", "without_hidden_data", "off"] = "full"
 
     @field_validator("xlsx_limits")
     @classmethod
