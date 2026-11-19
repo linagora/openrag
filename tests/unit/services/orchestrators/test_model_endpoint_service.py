@@ -966,7 +966,7 @@ async def test_key_rotation_during_swap_uses_the_saved_provider_when_env_does_no
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("during_swap", [True, False])
-async def test_key_rotation_ignores_stale_vector_extras_from_seed_snapshot(monkeypatch, during_swap):
+async def test_key_rotation_preserves_concurrent_max_model_len(monkeypatch, during_swap):
     from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
 
     monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
@@ -988,7 +988,7 @@ async def test_key_rotation_ignores_stale_vector_extras_from_seed_snapshot(monke
     async def update_with_changed_locked_limit(name, model_type, *, guard=None, extra_patch=None, **fields):
         nonlocal raced
         racing_update = fields.get("model_name") == "new-model" if during_swap else "model_name" not in fields
-        if not raced and racing_update and extra_patch is None:
+        if not raced and racing_update and not (extra_patch and "api_key" in extra_patch):
             current = repo._store[(name, model_type)]
             repo._store[(name, model_type)] = current.model_copy(
                 update={"extra": {**current.extra, "max_model_len": 4096}}
@@ -1005,6 +1005,42 @@ async def test_key_rotation_ignores_stale_vector_extras_from_seed_snapshot(monke
     assert raced
     assert saved.extra["api_key"] == "rotated-key"
     assert saved.extra["max_model_len"] == 4096
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_api_key", ["EMPTY", "env-rotated-key"])
+async def test_indexed_retry_preserves_a_concurrent_api_key_rotation(monkeypatch, configured_api_key):
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    _, repo = _indexed_env_managed_embedder()
+    original_update = repo.update
+    raced = False
+
+    async def update_with_concurrent_key(name, model_type, *, guard=None, extra_patch=None, **fields):
+        nonlocal raced
+        # The initial model update is refused because indexed files use the
+        # saved model. Rotate the key just before the safe-field retry locks it.
+        if not raced and "model_name" not in fields and extra_patch and "api_key" not in extra_patch:
+            current = repo._store[(name, model_type)]
+            repo._store[(name, model_type)] = current.model_copy(
+                update={"extra": {**current.extra, "api_key": "admin-rotated-key"}}
+            )
+            raced = True
+        return await original_update(name, model_type, guard=guard, extra_patch=extra_patch, **fields)
+
+    repo.update = update_with_concurrent_key
+    svc = _make_service(
+        repo,
+        settings=_sync_settings(model_name="new-model", api_key=configured_api_key),
+    )
+
+    await _seed_capturing_warnings(svc)
+
+    saved = repo._store[("indexed-model", "embedder")]
+    assert raced
+    assert saved.model_name == "indexed-model"
+    assert saved.extra["api_key"] == "admin-rotated-key"
 
 
 @pytest.mark.asyncio

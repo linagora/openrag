@@ -1410,6 +1410,6 @@ On one deployment, this brought 291,628 physical rows down to 144,474 for
 
 With `MODEL_ENDPOINT_SYNC_ON_BOOT=true`, startup can hold an embedder URL or provider change when indexed files depend on the saved configuration. Align the environment with the saved endpoint or apply the change through the admin API with `acknowledge_indexed_data=true`.
 
-If the boot log reports `EMBEDDER_SWAP_IN_PROGRESS`, let the swap finish or cancel it first. The admin API refuses vector configuration changes while the swap is running, even with acknowledgement. Restart to retry boot sync after the swap ends. The indexed-data check still applies.
+If the boot warning mentions a running embedder swap, let the swap finish or cancel it first. The admin API reports `EMBEDDER_SWAP_IN_PROGRESS` and refuses vector configuration changes while the swap is running, even with acknowledgement. Restart to retry boot sync after the swap ends. The indexed-data check still applies.
 
 When startup holds a configuration change, it can rotate the API key if the saved URL and provider still match.

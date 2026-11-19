@@ -287,6 +287,14 @@ def test_policy_value_matches_compose_dollar_interpolation(
     assert gen_env._policy_value(value) == (expected, needs_interpolation)
 
 
+@pytest.mark.parametrize(
+    ("escape", "decoded"),
+    [(r"\a", "\a"), (r"\b", "\b"), (r"\f", "\f"), (r"\v", "\v")],
+)
+def test_policy_value_decodes_compose_double_quoted_control_escapes(escape: str, decoded: str) -> None:
+    assert gen_env._policy_value(f'"before{escape}after"') == (f"before{decoded}after", False)
+
+
 def test_double_quoted_backslash_does_not_escape_following_interpolation() -> None:
     assert gen_env._policy_value(r'"\\$RUNTIME_DB_PASSWORD"') == (r"\$RUNTIME_DB_PASSWORD", True)
 
@@ -299,6 +307,34 @@ def test_quote_end_closes_after_a_pair_of_backslashes_before_single_quote() -> N
     assert syntax_problems == []
     assert values["operator_notes"][0] == "folder\\\\"
     assert values["POSTGRES_PASSWORD"][0] == "operator-password-1234567890"
+
+
+def test_check_fails_closed_when_an_assignment_follows_a_quoted_value(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    template = _write(
+        tmp_path / ".env.example",
+        "POSTGRES_PASSWORD=operator-password-1234567890\nNOTES=ready\n",
+    )
+    output = _write(
+        tmp_path / ".env",
+        'POSTGRES_PASSWORD=operator-password-1234567890\nNOTES="ready" POSTGRES_PASSWORD=postgres\n',
+    )
+
+    rc = gen_env.main(["--check", "-t", str(template), "-o", str(output)])
+
+    assert rc == 1
+    error = capsys.readouterr().err
+    assert "NOTES" in error
+    assert "unsupported text after its quoted value" in error
+    assert "postgres" not in error
+
+
+def test_quoted_value_still_accepts_a_trailing_comment() -> None:
+    values, _, syntax_problems, _ = gen_env._parse_env_assignments('NOTES="ready" # comment\n')
+
+    assert syntax_problems == []
+    assert values["NOTES"] == ("ready", False)
 
 
 def test_check_fails_closed_on_unterminated_multiline_quote(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

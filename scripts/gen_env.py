@@ -173,6 +173,19 @@ def _quote_end(value: str, quote: str, start: int = 0) -> int | None:
     return None
 
 
+def _has_unsupported_quoted_tail(value: str) -> bool:
+    """Whether non-comment text follows a quoted value on the same line."""
+    value = value.strip()
+    quote = value[:1]
+    if quote not in ("'", '"'):
+        return False
+    end = _quote_end(value, quote, start=1)
+    if end is None:
+        return False
+    trailing = value[end + 1 :].strip()
+    return bool(trailing and not trailing.startswith("#"))
+
+
 def _compose_dollars(value: str) -> tuple[str, bool]:
     """Unescape Compose's literal-dollar forms and detect actual interpolation."""
     literal: list[str] = []
@@ -203,8 +216,7 @@ def _policy_value(raw_value: str) -> tuple[str, bool]:
         end = _quote_end(value, "'", start=1)
         if end is None:
             return value, True
-        trailing = value[end + 1 :].strip()
-        if trailing and not trailing.startswith("#"):
+        if _has_unsupported_quoted_tail(value):
             return value, True
         return value[1:end].replace("\\'", "'"), False
 
@@ -212,11 +224,20 @@ def _policy_value(raw_value: str) -> tuple[str, bool]:
         end = _quote_end(value, '"', start=1)
         if end is None:
             return value, True
-        trailing = value[end + 1 :].strip()
-        if trailing and not trailing.startswith("#"):
+        if _has_unsupported_quoted_tail(value):
             return value, True
         chars: list[str] = []
-        escapes = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+        escapes = {
+            "a": "\a",
+            "b": "\b",
+            "f": "\f",
+            "n": "\n",
+            "r": "\r",
+            "t": "\t",
+            "v": "\v",
+            "\\": "\\",
+            '"': '"',
+        }
         index = 1
         while index < end:
             char = value[index]
@@ -298,6 +319,10 @@ def _parse_env_assignments(
                 break
 
         value, unresolved = _policy_value(raw_value)
+        if _has_unsupported_quoted_tail(raw_value):
+            syntax_problems.append(
+                f"{key} has unsupported text after its quoted value; put each assignment on a separate line."
+            )
         values[key] = (value, unresolved)
         assignments.append(_ParsedAssignment(key, value, unresolved, start_line, end_line, prefix, raw_value))
         index = end_line + 1

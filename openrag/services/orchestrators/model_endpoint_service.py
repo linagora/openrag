@@ -403,10 +403,11 @@ class ModelEndpointService:
         value for them regardless, so trusting the seed would overwrite an
         admin's choice with the config default.
 
-        ``extra`` is merged, never replaced: the marker and the API key come from
-        env, everything else an admin put there survives. The key is only
-        overwritten when env supplies a *real* one, so neither an unset
-        ``*_API_KEY`` nor its ``EMPTY`` placeholder can clear a working credential.
+        For embedders, only env-owned ``extra`` keys are patched into the locked
+        row, and API-key rotation uses its own saved-key guard. This preserves
+        unrelated settings and concurrent credential changes. Other endpoint
+        types retain their merged ``extra`` snapshot. A placeholder key never
+        clears a working credential.
 
         The row is deliberately **not renamed** when the model changes. The name
         is a stable identifier that partitions (``chat_llm``) and presets store by
@@ -414,20 +415,30 @@ class ModelEndpointService:
         references and the next job could not resolve the endpoint.
         """
         seed_extra: dict = data.get("extra", {}) or {}
-        new_extra = {**row.extra, ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
-        env_api_key = seed_extra.get("api_key")
-        if not is_placeholder_api_key(env_api_key):
-            new_extra["api_key"] = env_api_key
-        for key, env_var in _ENV_OWNED_EXTRA.get(model_type, {}).items():
-            # Empty is unset, as for the config loader.
-            if os.getenv(env_var) and key in seed_extra:
-                new_extra[key] = seed_extra[key]
-
         fields: dict[str, Any] = {
             "endpoint": data["endpoint"],
             "model_name": data["model_name"] or None,
-            "extra": new_extra,
         }
+        embedder_extra_patch: dict[str, Any] | None = None
+        if model_type == "embedder":
+            # Patch only env-owned values onto the row held under the database
+            # lock. A full ``extra`` snapshot could restore a stale API key or
+            # overwrite an admin's unrelated settings during retry recovery.
+            embedder_extra_patch = {ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
+            for key, env_var in _ENV_OWNED_EXTRA.get(model_type, {}).items():
+                # Empty is unset, as for the config loader.
+                if os.getenv(env_var) and key in seed_extra:
+                    embedder_extra_patch[key] = seed_extra[key]
+        else:
+            new_extra = {**row.extra, ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
+            env_api_key = seed_extra.get("api_key")
+            if not is_placeholder_api_key(env_api_key):
+                new_extra["api_key"] = env_api_key
+            for key, env_var in _ENV_OWNED_EXTRA.get(model_type, {}).items():
+                # Empty is unset, as for the config loader.
+                if os.getenv(env_var) and key in seed_extra:
+                    new_extra[key] = seed_extra[key]
+            fields["extra"] = new_extra
         for field, env_var in _ENV_OWNED_TUNABLES.get(model_type, {}).items():
             if os.getenv(env_var) is not None and field in data:
                 fields[field] = data[field]
@@ -444,19 +455,28 @@ class ModelEndpointService:
                 locked: ModelEndpointRow,
                 indexed_file_usage: Callable[[], Awaitable[list[dict]]],
             ) -> None:
+                candidate_fields = fields
+                if embedder_extra_patch is not None:
+                    candidate_fields = {
+                        **fields,
+                        "extra": {**locked.extra, **embedder_extra_patch},
+                    }
                 guarded_changes[:] = material_embedder_changes(
                     locked,
-                    fields,
+                    candidate_fields,
                 )
                 await _refuse_unacknowledged_repoint(
                     locked,
                     indexed_file_usage,
-                    fields=fields,
+                    fields=candidate_fields,
                     remedy=_BOOT_REPOINT_REMEDY,
                 )
 
         try:
-            await self._repo.update(row.name, model_type, guard=guard, **fields)
+            update_fields = dict(fields)
+            if embedder_extra_patch is not None:
+                update_fields["extra_patch"] = embedder_extra_patch
+            synced_row = await self._repo.update(row.name, model_type, guard=guard, **update_fields)
         except ConflictError as exc:
             if exc.code == "EMBEDDER_SWAP_IN_PROGRESS":
                 # The repository found this conflict against its freshly locked
@@ -481,7 +501,11 @@ class ModelEndpointService:
                 if field in held:
                     fields.pop(field, None)
             if "extra" in held:
-                fields.pop("extra", None)
+                if embedder_extra_patch is not None:
+                    for key in _ENV_OWNED_EXTRA.get(model_type, {}):
+                        embedder_extra_patch.pop(key, None)
+                else:
+                    fields.pop("extra", None)
 
             if exc.code == "EMBEDDER_SWAP_IN_PROGRESS":
                 warning_detail = f"Not syncing the {label} from env"
@@ -495,7 +519,10 @@ class ModelEndpointService:
                 # Recheck the safe remainder while holding the live row. A
                 # concurrent endpoint edit or swap must not make this fallback
                 # bypass the same guard that rejected the first update.
-                await self._repo.update(row.name, model_type, guard=guard, **fields)
+                update_fields = dict(fields)
+                if embedder_extra_patch is not None:
+                    update_fields["extra_patch"] = embedder_extra_patch
+                await self._repo.update(row.name, model_type, guard=guard, **update_fields)
             except ConflictError as retry_exc:
                 logger.bind(endpoint=row.name, model_type=model_type).warning(
                     f"Not syncing the remaining env-managed fields for '{row.name}' because the embedder changed "
@@ -505,7 +532,7 @@ class ModelEndpointService:
                     logger.bind(endpoint=row.name).info("Rotated the env-managed embedder API key.")
                 return
             key_rotated = False
-            if model_type == "embedder" and "extra" in held:
+            if model_type == "embedder":
                 key_rotated = await self._sync_embedder_api_key(row, data)
             if exc.code == "EMBEDDER_SWAP_IN_PROGRESS":
                 sync_detail = "holding back the vector configuration"
@@ -516,6 +543,11 @@ class ModelEndpointService:
                 rotation = " The env-managed API key was rotated." if key_rotated else ""
                 logger.info(f"Synced {model_type} endpoint '{row.name}' from env, except its {label}.{rotation}")
             return
+        key_rotated = False
+        if model_type == "embedder":
+            key_rotated = await self._sync_embedder_api_key(synced_row or row, data)
+        if key_rotated:
+            logger.bind(endpoint=row.name).info("Rotated the env-managed embedder API key.")
         logger.info(f"Synced {model_type} endpoint '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true).")
 
     async def _sync_embedder_api_key(self, row: ModelEndpointRow, data: dict[str, Any]) -> bool:
