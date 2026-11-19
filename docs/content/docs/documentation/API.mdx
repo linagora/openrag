@@ -127,10 +127,11 @@ Upload a new file to a specific partition for indexing.
     task is indexing it any more, for example because it settled a moment ago.
   - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
     expired before indexing started. Nothing was queued; retry the upload.
-  - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted and its catalog
-    entry is already gone; while the delete still holds it, `POST` answers the plain
-    "already exists" `409`. Nothing was queued; retry once the delete has succeeded.
-    Earlier releases answered `500`.
+  - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. Until the delete
+    has removed the file from the catalog, `POST` answers the plain "already exists"
+    `409` instead; once it has, `POST` answers this code. The refused upload shows as
+    a cancelled job in the Jobs history. Retry once the delete has succeeded. Earlier
+    releases answered `500`.
 - `415 Unsupported Media Type`: the file's extension and mimetype are both
   unsupported, or its content does not match its extension (for example a `.pdf`
   that is not a PDF, or a `.docx` that is not a readable Office package)
@@ -286,8 +287,9 @@ Replace an existing file in the partition. Deletes the current entry and creates
     returns `DOCUMENT_INDEXING_IN_PROGRESS`.
   - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
     expired before indexing started. Nothing was queued; retry the request.
-  - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. Nothing was
-    queued. Once the delete has succeeded the file no longer exists, so a `PUT`
+  - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. The refused
+    upload shows as a cancelled job in the Jobs history. Once the delete has
+    succeeded the file no longer exists, so a `PUT`
     answers `404`: upload it again with `POST`, passing `workspace_ids` to add it
     back to the workspaces the delete removed it from. Earlier releases answered `500`.
 - `415 Unsupported Media Type` / `422 Unprocessable Entity`: same cases as the
