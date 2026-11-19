@@ -1358,6 +1358,19 @@ async def test_the_slot_sweep_keeps_live_tasks_and_releases_settled_ones(user_re
 
 
 @pytest.mark.asyncio
+async def test_the_slot_sweep_widens_the_grace_by_the_snapshot_age(user_repo, monkeypatch) -> None:
+    """A slot taken after the snapshot is not in it; the grace must count from the snapshot."""
+    from services.workers import task_completion
+
+    monkeypatch.setattr(task_completion, "monotonic", lambda: 1_400.0)
+
+    await task_completion.TaskCompletionTracker().reconcile_file_slots({}, snapshot_at=1_000.0)
+
+    (sweep,) = user_repo.sweeps
+    assert sweep["older_than_seconds"] == task_completion._ORPHAN_GRACE_SECONDS + 400.0
+
+
+@pytest.mark.asyncio
 async def test_the_slot_sweep_keeps_a_cancelled_task_whose_worker_has_not_settled(user_repo) -> None:
     """A cancelled worker that was submitted may still insert its file (#664).
 
@@ -1443,7 +1456,8 @@ async def test_the_periodic_reconcile_sweeps_slots_too(user_repo) -> None:
     tracker._call_task_state = AsyncMock(side_effect=[snapshot, asyncio.CancelledError()])
     swept: list[dict] = []
 
-    async def reconcile_file_slots(all_info):
+    async def reconcile_file_slots(all_info, *, snapshot_at):
+        assert isinstance(snapshot_at, float)
         swept.append(all_info)
 
     tracker.reconcile_file_slots = reconcile_file_slots
