@@ -42,7 +42,7 @@ jobs:
       #            unit tests read pages and env files under docs/
       #   ui       anything under ui/, or this file
       #   site     anything the documentation site is built from: docs/, the
-      #            Astro config, the root package files, or this file
+      #            Astro config, the root package files, astro.yml or this file
       - name: Find the areas this pull request changes
         id: areas
         uses: actions/github-script@v7
@@ -68,7 +68,7 @@ jobs:
                   areas.backend = paths.some((path) => !isUi(path) && !isDocs(path));
                   areas.unit = paths.some((path) => !isUi(path) && !isTopLevelMarkdown(path));
                   areas.ui = paths.some((path) => isUi(path) || path === '.github/workflows/ci.yml');
-                  const siteFiles = ['astro.config.mjs', 'package.json', 'package-lock.json', 'tsconfig.json', '.github/workflows/ci.yml'];
+                  const siteFiles = ['astro.config.mjs', 'package.json', 'package-lock.json', 'tsconfig.json', '.github/workflows/astro.yml', '.github/workflows/ci.yml'];
                   areas.site = paths.some((path) => path.startsWith('docs/') || siteFiles.includes(path));
                 }
               } catch (error) {
@@ -545,7 +545,9 @@ jobs:
   docs-build:
     # The site deploys only from main (astro.yml), so a page that breaks the
     # build would otherwise surface on release day. This builds it, as
-    # astro.yml does, without deploying anything.
+    # astro.yml does, without deploying anything. It copies astro.yml's Node
+    # version and build command rather than running that workflow, so a change
+    # to either belongs in both.
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.site != 'false' }}
     runs-on: ubuntu-latest
