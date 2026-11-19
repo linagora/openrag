@@ -86,7 +86,7 @@ class PostgresStore(CatalogStore):
         # reinitialised between tests.
         pool_getter = self._pool_getter
 
-        self._document_repo = PgDocumentRepository(pool_getter)
+        self._document_repo = PgDocumentRepository(pool_getter, default_file_quota=config.default_file_quota)
         self._user_repo = PgUserRepository(pool_getter)
         self._partition_repo = PgPartitionRepository(pool_getter, connect=self._conn.connect)
         self._membership_repo = PgPartitionMembershipRepository(pool_getter)

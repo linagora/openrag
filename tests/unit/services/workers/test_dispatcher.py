@@ -1718,6 +1718,7 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
         indexed_at=copied_at,
         chunk_count=1,
         quota_reservation_id=None,
+        recheck_quota_if_slot_gone=True,
     )
     vector_store.upsert_entities.assert_awaited_once()
     vector_store.insert_entities.assert_awaited_once()

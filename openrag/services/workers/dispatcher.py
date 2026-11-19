@@ -809,6 +809,9 @@ class WorkerDispatcher(IndexingDispatcher):
                     indexed_at=indexed_at,
                     chunk_count=len(entities),
                     quota_reservation_id=quota_reservation_id,
+                    # A copy holds its slot in the request, with no task to keep
+                    # it live, so a long copy can outlast the sweep's grace.
+                    recheck_quota_if_slot_gone=True,
                     **catalog_kwargs,
                 )
             except Exception:
