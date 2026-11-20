@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
-from core.indexing.file_fences import FileFences, indexing_in_progress
+from core.indexing.file_fences import FileFences, delete_in_progress, indexing_in_progress
 from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
     COPY_CONTENT_CLAIM_TOKEN_PREFIX,
@@ -42,6 +42,7 @@ from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 from services.workers.task_state import (
     QUEUE_REFUSED_CANCELLED,
+    QUEUE_REFUSED_FILE_DELETING,
     QUEUE_REFUSED_FILE_INDEXING,
     QUEUE_REFUSED_INDEXING_CAPACITY,
     TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
@@ -446,6 +447,8 @@ class WorkerDispatcher(IndexingDispatcher):
             reason = admission.get("reason")
             if reason == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
                 raise indexing_in_progress(file_id, partition, busy_task_id)
+            if reason == QUEUE_REFUSED_FILE_DELETING:
+                raise delete_in_progress(file_id, partition)
             if reason == QUEUE_REFUSED_CANCELLED:
                 raise RuntimeError(f"Task {task_id} was cancelled before it queued")
             if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
@@ -455,9 +458,8 @@ class WorkerDispatcher(IndexingDispatcher):
                     # Preserve this API code so existing clients keep retrying it.
                     code="INDEXING_OUTCOME_BACKLOG",
                 )
-            raise RuntimeError(
-                f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
-            )
+            # Only an older TaskStateManager, whose boolean answer gives no reason.
+            raise RuntimeError(f"Task {task_id} for file {file_id!r} in partition {partition!r} was refused")
 
         task: Any | None = None
         submission_started = False
