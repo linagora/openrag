@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from api.dependencies.auth import current_user
 from core.auth.chainlit import (
     CHAINLIT_AUTH_COOKIE_NAME,
+    CHAINLIT_IDP_LOGOUT_COOKIE_NAME,
     CHAINLIT_LOGOUT_COOKIE_NAME,
     CHAINLIT_LOGOUT_SIGNAL_HEADER,
     CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
@@ -176,6 +177,8 @@ async def callback(
 
     redirect = RedirectResponse(url=result.next_url, status_code=302)
     _delete_state_cookie(redirect)
+    # A Chat logout still pending in this browser must not end the new session.
+    redirect.delete_cookie(key=CHAINLIT_IDP_LOGOUT_COOKIE_NAME, path="/")
     redirect.set_cookie(
         key=result.session_cookie_name,
         value=result.session_cookie_value,
@@ -258,7 +261,12 @@ async def logout(
             content={"detail": "Cross-site logout requests are not allowed"},
         )
 
-    redirect_target = await service.logout(request.cookies.get(SESSION_COOKIE_NAME))
+    # After Chat logout, the session cookie is gone and the session's value is
+    # carried by the Chat logout cookie instead (see app_front.on_logout).
+    session_cookie_value = request.cookies.get(SESSION_COOKIE_NAME) or request.cookies.get(
+        CHAINLIT_IDP_LOGOUT_COOKIE_NAME
+    )
+    redirect_target = await service.logout(session_cookie_value)
 
     if redirect_target:
         response: Response = RedirectResponse(url=redirect_target, status_code=302)
@@ -267,6 +275,7 @@ async def logout(
         # logout in-place. The cookie deletion below still takes effect.
         response = JSONResponse(status_code=200, content={"detail": "Logged out"})
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(key=CHAINLIT_IDP_LOGOUT_COOKIE_NAME, path="/")
     response.delete_cookie(key=CHAINLIT_TOKEN_COOKIE_NAME, path=CHAINLIT_TOKEN_COOKIE_PATH)
     return response
 

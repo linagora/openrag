@@ -108,6 +108,24 @@ class PgOIDCSessionRepository(OIDCSessionRepository):
         )
         return self._row_to_session(row) if row else None
 
+    async def get_recently_revoked_by_token_hash(self, token_hash: str, within: timedelta) -> OIDCSession | None:
+        """Lookup a session revoked less than ``within`` ago.
+
+        Only for logout: Chat logout revokes its session, and the IdP logout
+        that follows still needs the session's ``id_token`` as a hint, even
+        if the session has expired since.
+        """
+        row = await self.pool.fetchrow(
+            """
+            SELECT * FROM oidc_sessions
+            WHERE session_token_hash = $1
+              AND revoked_at >= NOW() - $2::interval
+            """,
+            token_hash,
+            within,
+        )
+        return self._row_to_session(row) if row else None
+
     async def get_by_id(self, session_id: int) -> OIDCSession | None:
         """Lookup by primary key, filtering out revoked / expired rows."""
         row = await self.pool.fetchrow(

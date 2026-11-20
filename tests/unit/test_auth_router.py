@@ -82,6 +82,7 @@ _PREVIOUS_MODULES = _install_dependencies_stub()
 from api.routers.auth.oidc import router as auth_router  # noqa: E402
 from core.auth.chainlit import (  # noqa: E402
     CHAINLIT_AUTH_COOKIE_NAME,
+    CHAINLIT_IDP_LOGOUT_COOKIE_NAME,
     CHAINLIT_LOGOUT_COOKIE_NAME,
     CHAINLIT_LOGOUT_SIGNAL_HEADER,
     CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
@@ -297,7 +298,41 @@ def test_logout_redirects_to_idp_and_clears_session(oidc_env, client, stub):
     assert r.status_code == 302
     assert r.headers["location"] == stub.logout_target
     assert stub.calls == [("logout", "sess")]
-    assert any(SESSION_COOKIE_NAME in c and ("Max-Age=0" in c or "expires=" in c.lower()) for c in _set_cookies(r))
+    assert _cleared(r, SESSION_COOKIE_NAME)
+
+
+def _cleared(response, name) -> bool:
+    """Whether the response deletes the root-scoped cookie ``name``."""
+    for cookie in _set_cookies(response):
+        pair, *attributes = (part.strip() for part in cookie.split(";"))
+        if pair.split("=", 1)[0] != name:
+            continue
+        parsed = {key.lower(): value for key, _, value in (attribute.partition("=") for attribute in attributes)}
+        if parsed.get("max-age") == "0" and parsed.get("path") == "/":
+            return True
+    return False
+
+
+def test_logout_after_chat_logout_reads_the_handoff_cookie_and_clears_it(oidc_env, client, stub):
+    r = client.get(
+        "/auth/logout",
+        cookies={CHAINLIT_IDP_LOGOUT_COOKIE_NAME: "sess"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert stub.calls == [("logout", "sess")]
+    assert _cleared(r, CHAINLIT_IDP_LOGOUT_COOKIE_NAME)
+    assert _cleared(r, SESSION_COOKIE_NAME)
+
+
+def test_callback_clears_a_pending_chat_logout(oidc_env, client, stub):
+    r = client.get(
+        "/auth/callback?code=ac&state=st",
+        cookies={STATE_COOKIE_NAME: "raw-state", CHAINLIT_IDP_LOGOUT_COOKIE_NAME: "old-session"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert _cleared(r, CHAINLIT_IDP_LOGOUT_COOKIE_NAME)
 
 
 def test_logout_without_idp_target_confirms_in_place(oidc_env, client, stub):

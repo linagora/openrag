@@ -307,6 +307,82 @@ async def test_chainlit_logout_signal_cookie_is_cross_site_compatible_on_https(m
     assert "Secure" in logout_cookie
 
 
+def _set_cookies(response):
+    return [value.decode() for key, value in response.raw_headers if key.lower() == b"set-cookie"]
+
+
+def _cleared_cookies(response):
+    return [cookie.split("=", 1)[0] for cookie in _set_cookies(response) if "Max-Age=0" in cookie]
+
+
+class _FakeAuthService:
+    def __init__(self, error: Exception | None = None):
+        self.ended: list[str] = []
+        self._error = error
+
+    async def end_oidc_session(self, session_cookie_value):
+        self.ended.append(session_cookie_value)
+        if self._error is not None:
+            raise self._error
+        return True
+
+
+@pytest.mark.asyncio
+async def test_chainlit_oidc_logout_ends_the_session_and_asks_for_the_idp_logout(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_logout_ends_session_test")
+    auth_service = _FakeAuthService()
+    monkeypatch.setattr(module, "get_auth_service", lambda: auth_service)
+    request = SimpleNamespace(cookies={module.OPENRAG_SESSION_COOKIE_NAME: "oidc-session-token"}, headers={})
+    response = Response()
+
+    returned = await module.on_logout(request, response)
+
+    assert returned == {"success": True}
+    assert auth_service.ended == ["oidc-session-token"]
+    # The session cookie is gone; its value moves to the cookie /auth/logout reads.
+    assert module.OPENRAG_SESSION_COOKIE_NAME in _cleared_cookies(response)
+    idp_logout = next(
+        c
+        for c in _set_cookies(response)
+        if c.startswith(f"{module.CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=oidc-session-token")
+    )
+    assert "HttpOnly" in idp_logout
+    assert f"Max-Age={module.CHAINLIT_IDP_LOGOUT_MAX_AGE_SECONDS}" in idp_logout
+    assert any(c.startswith(f"{module.CHAINLIT_LOGOUT_COOKIE_NAME}=1") for c in _set_cookies(response))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auth_mode", "cookies"),
+    [("oidc", {}), ("token", {"openrag_session": "stale-cookie"})],
+)
+async def test_chainlit_logout_without_an_oidc_session_ends_nothing(monkeypatch, auth_mode, cookies):
+    module = _load_app_front(monkeypatch, auth_mode=auth_mode, module_name=f"app_front_logout_no_session_{auth_mode}")
+    monkeypatch.setattr(module, "get_auth_service", lambda: pytest.fail("no session to end"))
+    response = Response()
+
+    returned = await module.on_logout(SimpleNamespace(cookies=cookies, headers={}), response)
+
+    assert returned == {"success": True}
+    assert not any(c.startswith(module.CHAINLIT_IDP_LOGOUT_COOKIE_NAME) for c in _set_cookies(response))
+
+
+@pytest.mark.asyncio
+async def test_chainlit_logout_completes_when_the_session_cannot_be_ended(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_logout_failure_test")
+    monkeypatch.setattr(module, "get_auth_service", lambda: _FakeAuthService(error=RuntimeError("db down")))
+    request = SimpleNamespace(cookies={module.OPENRAG_SESSION_COOKIE_NAME: "oidc-session-token"}, headers={})
+    response = Response()
+
+    returned = await module.on_logout(request, response)
+
+    # The browser keeps no session cookie; the IdP logout on the next page load
+    # revokes the session again.
+    assert returned == {"success": True}
+    assert module.OPENRAG_SESSION_COOKIE_NAME in _cleared_cookies(response)
+    assert any(c.startswith(f"{module.CHAINLIT_IDP_LOGOUT_COOKIE_NAME}=") for c in _set_cookies(response))
+
+
 @pytest.mark.asyncio
 async def test_chat_start_handles_expired_handoff_without_exception_log(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_chat_start_expired_handoff_test")
