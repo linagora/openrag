@@ -7,6 +7,7 @@ import {
   getModelEndpointIndexedUsage,
   listModelEndpoints,
   type ModelEndpointResponse,
+  revealModelEndpointApiKey,
   setDefaultModelEndpoint,
   updateModelEndpoint,
   validateModelEndpoint,
@@ -38,6 +39,7 @@ const validateModelEndpointMock = vi.mocked(validateModelEndpoint);
 const getIndexedUsageMock = vi.mocked(getModelEndpointIndexedUsage);
 const setDefaultMock = vi.mocked(setDefaultModelEndpoint);
 const createModelEndpointMock = vi.mocked(createModelEndpoint);
+const revealModelEndpointApiKeyMock = vi.mocked(revealModelEndpointApiKey);
 
 beforeAll(() => {
   vi.stubGlobal(
@@ -1137,5 +1139,454 @@ describe("ModelsPage LLM context size", () => {
     await waitFor(() => expect(rowValue(cardFor("vllm-qwen"), "Context size")).toBe("131,072 (detected)"), {
       timeout: 4000,
     });
+  });
+});
+
+describe("ModelsPage endpoint form layout", () => {
+  const llmEndpoint = {
+    name: "chat",
+    model_type: "llm",
+    endpoint: "http://llm:8000/v1",
+    model_name: "qwen-chat",
+    batch_size: 8,
+    timeout: 45,
+    extra: { implementation: "ollama" },
+    has_api_key: false,
+    is_default: true,
+    created_at: "2026-01-01T00:00:00+00:00",
+    updated_at: "2026-01-01T00:00:00+00:00",
+  };
+  const DISCOVERY_WAIT = { timeout: 4000 };
+  // Discovery requests carry an abort signal (the browser-side deadline).
+  const WITH_SIGNAL = expect.objectContaining({ signal: expect.anything() });
+
+  beforeEach(() => {
+    listModelEndpointsMock.mockReset().mockResolvedValue([]);
+    updateModelEndpointMock.mockReset().mockResolvedValue(llmEndpoint as never);
+    createModelEndpointMock.mockReset().mockResolvedValue(llmEndpoint as never);
+    validateModelEndpointMock.mockReset().mockImplementation(async (req) => ({
+      reachable: true,
+      model_found: req.model_name ? true : null,
+      models_served: ["qwen-chat", "llama-3"],
+      transcription_supported: true,
+    }));
+  });
+
+  async function openAddDialog(tab: string) {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("No embedder endpoints configured.");
+    if (tab !== "embedder") await user.click(screen.getByRole("tab", { name: tab }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+    return { user, dialog: screen.getByRole("dialog") };
+  }
+
+  it("puts the vendor right after the name, and the extra JSON last", async () => {
+    const { dialog } = await openAddDialog("llm");
+    const text = dialog.textContent ?? "";
+    const order = [
+      "Name",
+      "Vendor",
+      "Endpoint URL",
+      "API key",
+      "Model Name",
+      "Batch Size",
+      "Timeout (s)",
+      "Max context size",
+      "Extra (JSON)",
+    ];
+    const positions = order.map((label) => text.indexOf(label));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it("keeps the LLM vendors to vllm and ollama", async () => {
+    const { user, dialog } = await openAddDialog("llm");
+    await user.click(within(dialog).getByRole("combobox"));
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["vllm", "ollama"]);
+  });
+
+  it("shows the default of every numeric setting", async () => {
+    const { dialog } = await openAddDialog("llm");
+    expect(within(dialog).getByPlaceholderText("32")).toBeTruthy();
+    expect(within(dialog).getByPlaceholderText("30")).toBeTruthy();
+    expect(within(dialog).getByText("Default: 32")).toBeTruthy();
+    expect(within(dialog).getByText("Default: 30")).toBeTruthy();
+  });
+
+  it("fills the model choices from what the endpoint lists", async () => {
+    const { user, dialog } = await openAddDialog("llm");
+    await user.type(within(dialog).getAllByRole("textbox")[1], "http://llm:8000/v1");
+    await user.tab();
+
+    await waitFor(
+      () =>
+        expect(validateModelEndpointMock).toHaveBeenCalledWith(
+          expect.objectContaining({ endpoint: "http://llm:8000/v1", model_type: "llm" }),
+          WITH_SIGNAL,
+        ),
+      DISCOVERY_WAIT,
+    );
+    expect(validateModelEndpointMock.mock.calls[0][0].model_name).toBeUndefined();
+    await within(dialog).findByText(/2 models listed/);
+
+    await user.click(within(dialog).getByRole("button", { name: "Pick a listed model" }));
+    await user.click(await screen.findByRole("option", { name: "llama-3" }));
+    expect((within(dialog).getAllByRole("textbox")[2] as HTMLInputElement).value).toBe("llama-3");
+  });
+
+  it("never sends the API key to a URL still being typed", async () => {
+    const { user, dialog } = await openAddDialog("llm");
+    await user.type(within(dialog).getByPlaceholderText("Optional API key"), "sk-secret");
+    const url = within(dialog).getAllByRole("textbox")[1];
+    await user.type(url, "http://api.example.co");
+    await new Promise((r) => setTimeout(r, 900));
+    expect(validateModelEndpointMock).not.toHaveBeenCalled();
+
+    await user.type(url, "m/v1");
+    await user.tab();
+    await waitFor(
+      () =>
+        expect(validateModelEndpointMock).toHaveBeenCalledWith(
+          expect.objectContaining({ endpoint: "http://api.example.com/v1", api_key: "sk-secret" }),
+          WITH_SIGNAL,
+        ),
+      DISCOVERY_WAIT,
+    );
+    expect(validateModelEndpointMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never tries a key while it is being typed", async () => {
+    const { user, dialog } = await openAddDialog("llm");
+    await user.type(within(dialog).getAllByRole("textbox")[1], "http://gateway/v1");
+    await user.tab();
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalledTimes(1), DISCOVERY_WAIT);
+
+    const key = within(dialog).getByPlaceholderText("Optional API key");
+    await user.type(key, "sk-");
+    await new Promise((r) => setTimeout(r, 900));
+    expect(validateModelEndpointMock).toHaveBeenCalledTimes(1);
+
+    await user.type(key, "secret");
+    await user.tab();
+    await waitFor(
+      () =>
+        expect(validateModelEndpointMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ endpoint: "http://gateway/v1", api_key: "sk-secret" }),
+          WITH_SIGNAL,
+        ),
+      DISCOVERY_WAIT,
+    );
+    expect(validateModelEndpointMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a URL's list when the admin comes back to it, with no probe in flight", async () => {
+    let resolveB: (value: Awaited<ReturnType<typeof validateModelEndpoint>>) => void = () => {};
+    validateModelEndpointMock.mockImplementation(async (req) => {
+      if (req.endpoint === "http://b/v1") {
+        return new Promise((resolve) => {
+          resolveB = resolve;
+        });
+      }
+      return { reachable: true, model_found: null, models_served: ["model-a"] };
+    });
+    const { user, dialog } = await openAddDialog("llm");
+    const url = within(dialog).getAllByRole("textbox")[1];
+    await user.type(url, "http://a/v1");
+    await user.tab();
+    await within(dialog).findByText(/1 model listed/, undefined, DISCOVERY_WAIT);
+
+    await user.clear(url);
+    await user.type(url, "http://b/v1");
+    await user.tab();
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalledTimes(2), DISCOVERY_WAIT);
+    expect(within(dialog).getByText(/Looking up the models/)).toBeTruthy();
+
+    await user.clear(url);
+    await user.type(url, "http://a/v1");
+    await user.tab();
+    expect(within(dialog).getByText(/1 model listed/)).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 900));
+    expect(validateModelEndpointMock).toHaveBeenCalledTimes(2);
+    resolveB({ reachable: true, model_found: null, models_served: ["model-b1", "model-b2"] });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(within(dialog).getByText(/1 model listed/)).toBeTruthy();
+
+    await user.click(within(dialog).getByRole("button", { name: "Refresh model list" }));
+    await waitFor(
+      () =>
+        expect(validateModelEndpointMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ endpoint: "http://a/v1" }),
+          WITH_SIGNAL,
+        ),
+      DISCOVERY_WAIT,
+    );
+    expect(validateModelEndpointMock).toHaveBeenCalledTimes(3);
+  });
+
+  async function openEditDialog(endpoint: object) {
+    listModelEndpointsMock.mockResolvedValue([endpoint as never]);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "llm" }));
+    await screen.findByText("qwen-chat");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    return { user, dialog: screen.getByRole("dialog") };
+  }
+
+  it("never sends a revealed stored key to a new URL", async () => {
+    revealModelEndpointApiKeyMock.mockResolvedValue({ api_key: "sk-stored-secret" });
+    const { user, dialog } = await openEditDialog({
+      ...llmEndpoint,
+      has_api_key: true,
+      extra: { implementation: "ollama", api_key: "sk-s********" },
+    });
+    await waitFor(
+      () =>
+        expect(validateModelEndpointMock).toHaveBeenCalledWith(
+          expect.objectContaining({ endpoint: "http://llm:8000/v1", stored_api_key_name: "chat" }),
+          WITH_SIGNAL,
+        ),
+      DISCOVERY_WAIT,
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "Show API key" }));
+    await within(dialog).findByDisplayValue("sk-stored-secret");
+    const url = within(dialog).getByDisplayValue("http://llm:8000/v1");
+    await user.clear(url);
+    await user.type(url, "http://elsewhere/v1");
+    await user.tab();
+    await within(dialog).findByText(/The stored API key is only used with the saved URL/);
+    await new Promise((r) => setTimeout(r, 900));
+
+    for (const [req] of validateModelEndpointMock.mock.calls) {
+      expect(req.endpoint).toBe("http://llm:8000/v1");
+      expect(req.api_key).toBeUndefined();
+    }
+  });
+
+  it("keeps a typed key on the URL it was entered for when the URL changes", async () => {
+    const { user, dialog } = await openAddDialog("llm");
+    const url = within(dialog).getAllByRole("textbox")[1];
+    const key = within(dialog).getByPlaceholderText("Optional API key");
+    await user.type(url, "http://a/v1");
+    await user.tab();
+    await user.type(key, "sk-for-a");
+    await user.tab();
+    await waitFor(
+      () =>
+        expect(validateModelEndpointMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ endpoint: "http://a/v1", api_key: "sk-for-a" }),
+          WITH_SIGNAL,
+        ),
+      DISCOVERY_WAIT,
+    );
+    const callsForA = validateModelEndpointMock.mock.calls.length;
+
+    // The URL changes while the key typed for A is still in the field, and the
+    // admin passes through the key field without editing it.
+    await user.clear(url);
+    await user.type(url, "http://b/v1");
+    await user.click(key);
+    await user.tab();
+    await within(dialog).findByText(/The API key was entered for another URL/);
+    await new Promise((r) => setTimeout(r, 900));
+    expect(validateModelEndpointMock).toHaveBeenCalledTimes(callsForA);
+
+    // Refresh sends it to B on purpose.
+    await user.click(within(dialog).getByRole("button", { name: "Refresh model list" }));
+    await waitFor(
+      () =>
+        expect(validateModelEndpointMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ endpoint: "http://b/v1", api_key: "sk-for-a" }),
+          WITH_SIGNAL,
+        ),
+      DISCOVERY_WAIT,
+    );
+
+    // A key entered for C goes with C.
+    await user.clear(url);
+    await user.type(url, "http://c/v1");
+    await user.tab();
+    await within(dialog).findByText(/The API key was entered for another URL/);
+    await user.clear(key);
+    await user.type(key, "sk-for-c");
+    await user.tab();
+    await waitFor(
+      () =>
+        expect(validateModelEndpointMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ endpoint: "http://c/v1", api_key: "sk-for-c" }),
+          WITH_SIGNAL,
+        ),
+      DISCOVERY_WAIT,
+    );
+    const sent = validateModelEndpointMock.mock.calls.map(([req]) => `${req.endpoint} ${req.api_key ?? "-"}`);
+    expect(sent.filter((s) => !s.startsWith("http://a/v1 "))).toEqual([
+      "http://b/v1 sk-for-a",
+      "http://c/v1 sk-for-c",
+    ]);
+  });
+
+  it("asks again when the form is reopened after a failed listing", async () => {
+    validateModelEndpointMock.mockImplementationOnce(async () => ({
+      reachable: false,
+      model_found: null,
+      detail: "gateway down",
+    }));
+    const { user, dialog } = await openEditDialog(llmEndpoint);
+    await within(dialog).findByText(/Couldn't list models: gateway down/, undefined, DISCOVERY_WAIT);
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const reopened = screen.getByRole("dialog");
+    await within(reopened).findByText(/2 models listed/, undefined, DISCOVERY_WAIT);
+    expect(validateModelEndpointMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up on a listing OpenRAG never answers, and lets the admin retry", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      validateModelEndpointMock.mockImplementationOnce(
+        (_req, options) =>
+          new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("The operation was aborted.", "AbortError")),
+            );
+          }),
+      );
+      const { user, dialog } = await openAddDialog("llm");
+      await user.type(within(dialog).getAllByRole("textbox")[1], "http://stalled/v1");
+      await user.tab();
+      await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalledTimes(1), DISCOVERY_WAIT);
+      const refresh = within(dialog).getByRole("button", { name: "Refresh model list" }) as HTMLButtonElement;
+      expect(refresh.disabled).toBe(true);
+
+      await act(async () => {
+        vi.advanceTimersByTime(15_000);
+      });
+      await within(dialog).findByText("Couldn't list models: OpenRAG did not answer within 15 s. You can still type the name.");
+      expect(refresh.disabled).toBe(false);
+
+      await user.click(refresh);
+      await within(dialog).findByText(/2 models listed/, undefined, DISCOVERY_WAIT);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says why the list is missing when the endpoint refuses the key", async () => {
+    validateModelEndpointMock.mockImplementation(async () => ({
+      reachable: true,
+      model_found: null,
+      models_served: null,
+      detail: "Model list returned HTTP 401.",
+    }));
+    const { user, dialog } = await openAddDialog("llm");
+    await user.type(within(dialog).getAllByRole("textbox")[1], "http://gateway/v1");
+    await user.tab();
+    await within(dialog).findByText(/Model list returned HTTP 401/, undefined, DISCOVERY_WAIT);
+    expect(within(dialog).queryByText(/No models listed/)).toBeNull();
+  });
+
+  it("still takes a typed model name when nothing is listed", async () => {
+    validateModelEndpointMock.mockImplementation(async () => ({
+      reachable: true,
+      model_found: null,
+      models_served: [],
+    }));
+    const { user, dialog } = await openAddDialog("llm");
+    await user.type(within(dialog).getAllByRole("textbox")[1], "http://gateway/v1");
+    await user.tab();
+    await within(dialog).findByText(/No models listed/, undefined, DISCOVERY_WAIT);
+
+    const picker = within(dialog).getByRole("button", { name: "Pick a listed model" }) as HTMLButtonElement;
+    expect(picker.disabled).toBe(true);
+    await user.type(within(dialog).getAllByRole("textbox")[2], "my-model");
+    expect((within(dialog).getAllByRole("textbox")[2] as HTMLInputElement).value).toBe("my-model");
+  });
+
+  it("says so when the endpoint cannot be reached for listing", async () => {
+    validateModelEndpointMock.mockImplementation(async () => ({
+      reachable: false,
+      model_found: null,
+      detail: "connection refused",
+    }));
+    const { user, dialog } = await openAddDialog("llm");
+    await user.type(within(dialog).getAllByRole("textbox")[1], "http://down/v1");
+    await user.tab();
+    await within(dialog).findByText(
+      "Couldn't list models: connection refused. You can still type the name.",
+      undefined,
+      DISCOVERY_WAIT,
+    );
+  });
+
+  it("keeps a plain model name field for STT, with no listing", async () => {
+    const { user, dialog } = await openAddDialog("stt");
+    await user.type(within(dialog).getAllByRole("textbox")[1], "http://moss:8000/v1");
+    await user.tab();
+    await new Promise((r) => setTimeout(r, 900));
+
+    expect(within(dialog).queryByRole("button", { name: "Pick a listed model" })).toBeNull();
+    expect(within(dialog).queryByText("Vendor")).toBeNull();
+    expect(validateModelEndpointMock).not.toHaveBeenCalled();
+    await user.type(within(dialog).getAllByRole("textbox")[2], "moss-transcribe-diarize");
+    expect(within(dialog).getByDisplayValue("moss-transcribe-diarize")).toBeTruthy();
+    expect(within(dialog).getByText("Default: 3600")).toBeTruthy();
+  });
+
+  it("saves the same payload on create", async () => {
+    const { user, dialog } = await openAddDialog("llm");
+    const boxes = within(dialog).getAllByRole("textbox");
+    await user.type(boxes[0], "chat");
+    await user.type(boxes[1], "http://llm:8000/v1");
+    await user.type(boxes[2], "qwen-chat");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+    const create = within(dialog).getByRole("button", { name: "Create" }) as HTMLButtonElement;
+    await waitFor(() => expect(create.disabled).toBe(false));
+    await user.click(create);
+
+    await waitFor(() =>
+      expect(createModelEndpointMock).toHaveBeenCalledWith({
+        name: "chat",
+        model_type: "llm",
+        endpoint: "http://llm:8000/v1",
+        model_name: "qwen-chat",
+        batch_size: 32,
+        timeout: 30,
+        extra: { implementation: "vllm" },
+      }),
+    );
+  });
+
+  it("opens an edit with the stored values and saves the same payload", async () => {
+    listModelEndpointsMock.mockResolvedValue([llmEndpoint as never]);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "llm" }));
+    await screen.findByText("qwen-chat");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByDisplayValue("http://llm:8000/v1")).toBeTruthy();
+    expect(within(dialog).getByDisplayValue("qwen-chat")).toBeTruthy();
+    expect(within(dialog).getByDisplayValue("8")).toBeTruthy();
+    expect(within(dialog).getByDisplayValue("45")).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+    const update = within(dialog).getByRole("button", { name: "Update" }) as HTMLButtonElement;
+    await waitFor(() => expect(update.disabled).toBe(false));
+    await user.click(update);
+
+    await waitFor(() =>
+      expect(updateModelEndpointMock).toHaveBeenCalledWith("llm", "chat", {
+        endpoint: "http://llm:8000/v1",
+        model_name: "qwen-chat",
+        batch_size: 8,
+        timeout: 45,
+        extra: { implementation: "ollama" },
+      }),
+    );
   });
 });
