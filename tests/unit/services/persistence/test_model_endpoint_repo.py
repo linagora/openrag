@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 
 import pytest
@@ -73,7 +74,10 @@ class _FakeConn:
         return self._fetch_result
 
     async def fetchrow(self, query: str, *params):
-        self.executed.append((query, params))
+        snapshot = (
+            tuple(deepcopy(param) for param in params) if query.startswith("UPDATE model_endpoints SET") else params
+        )
+        self.executed.append((query, snapshot))
         if "FROM partitions" in query:
             return self.embedder_usage
         return self._fetchrow_result
@@ -350,6 +354,66 @@ async def test_update_with_a_guard_vets_the_locked_row_in_the_same_transaction()
 
 
 @pytest.mark.asyncio
+async def test_update_serializes_guard_merged_extra_after_locked_row_check():
+    """A guard can merge a key into the row it locked before JSONB encoding."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(
+        name="jina",
+        is_default=False,
+        extra={"implementation": "vllm", "api_key": "old-key", "max_model_len": 8192},
+    )
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+    candidate_extra = {"implementation": "vllm", "api_key": "new-key", "max_model_len": 8192}
+
+    async def guard(locked, indexed_file_usage):
+        candidate_extra.clear()
+        candidate_extra.update(locked.extra)
+        candidate_extra["api_key"] = "new-key"
+        candidate_extra["custom_kwarg"] = "concurrent-admin-value"
+
+    await repo.update("jina", "embedder", guard=guard, extra=candidate_extra)
+
+    update_params = next(
+        params for query, params in pool.conn.executed if query.startswith("UPDATE model_endpoints SET")
+    )
+    assert update_params[-1] == {
+        "implementation": "vllm",
+        "api_key": "new-key",
+        "max_model_len": 8192,
+        "custom_kwarg": "concurrent-admin-value",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_merges_extra_patch_without_material_fields_from_a_stale_snapshot():
+    """A key-only patch keeps the locked model limit and is safe during a swap."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(
+        name="jina",
+        is_default=False,
+        extra={"implementation": "tei", "api_key": "old-key", "max_model_len": 4096},
+    )
+    pool.conn.running_swaps = 1
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    async def guard(locked, indexed_file_usage):
+        assert locked.extra["max_model_len"] == 4096
+
+    await repo.update("jina", "embedder", guard=guard, extra_patch={"api_key": "new-key"})
+
+    update_query, update_params = next(
+        (query, params) for query, params in pool.conn.executed if query.startswith("UPDATE model_endpoints SET")
+    )
+    assert "extra = COALESCE(extra, '{}'::jsonb) || $3::jsonb" in update_query
+    assert update_params[-1] == {"api_key": "new-key"}
+    assert not any("FROM partition_embedder_swaps" in query for query, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
 async def test_update_refused_by_its_guard_writes_nothing():
     from core.utils.exceptions import ConflictError
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
@@ -405,6 +469,42 @@ async def test_an_edit_changing_the_vectors_of_a_swap_target_is_refused_even_ack
     assert "FOR UPDATE" in queries[0]
     assert not any("UPDATE model_endpoints" in q for q in queries)
     assert pool.executed == []
+
+
+@pytest.mark.asyncio
+async def test_a_null_window_override_is_saved_as_inherited_and_leaves_swap_target_unchanged():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="bge-m3", is_default=False)
+    pool.conn.running_swaps = 1
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.update("bge-m3", "embedder", extra={"max_model_len": None, "api_key": "saved-key"})
+
+    queries = [query for query, _ in pool.conn.executed]
+    assert "UPDATE model_endpoints SET" in queries[-1]
+    assert not any("partition_embedder_swaps" in query for query in queries)
+    update_params = next(
+        params for query, params in pool.conn.executed if query.startswith("UPDATE model_endpoints SET")
+    )
+    assert update_params[-1] == {"api_key": "saved-key"}
+
+
+@pytest.mark.asyncio
+async def test_update_normalizes_null_extra_to_an_empty_object():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="jina", is_default=False, extra={"implementation": "ollama"})
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.update("jina", "embedder", extra=None)
+
+    update_params = next(
+        params for query, params in pool.conn.executed if query.startswith("UPDATE model_endpoints SET")
+    )
+    assert update_params[-1] == {}
 
 
 @pytest.mark.asyncio
@@ -1085,6 +1185,10 @@ async def test_indexed_file_usage_counts_files_per_partition():
     # Resolved, not literal: partitions riding the `default` alias count too, or
     # editing the default embedder would report zero files at stake.
     assert "e.is_default" in sql
+    assert "f.indexation_config->>'embedder_vector_field' = e.vector_field" in sql
+    assert "UNION ALL" in sql
+    assert "f.partition_name = p.partition" in sql
+    assert "COUNT(*)" in sql
     assert params[:2] == ("qwen", "embedder")
 
 

@@ -238,18 +238,38 @@ def embedder_fingerprint(
     return fingerprint
 
 
-def material_embedder_changes(existing: ModelEndpointRow, fields: Mapping[str, object]) -> list[str]:
+def material_embedder_changes(
+    existing: ModelEndpointRow,
+    fields: Mapping[str, object],
+) -> list[str]:
     """Fields of an embedder update that would change the vectors it produces."""
     endpoint = fields.get("endpoint")
     model_name = fields.get("model_name", existing.model_name)
-    extra = fields.get("extra")
-    before = embedder_fingerprint(existing.endpoint, existing.model_name, existing.extra)
+    extra = fields.get("extra", existing.extra)
+    if extra is None:
+        extra = {}
+    elif not isinstance(extra, Mapping):
+        extra = existing.extra
+    before = embedder_fingerprint(
+        existing.endpoint,
+        existing.model_name,
+        existing.extra,
+    )
     after = embedder_fingerprint(
         endpoint if isinstance(endpoint, str) else existing.endpoint,
         None if model_name is None else str(model_name),
-        extra if isinstance(extra, dict) else existing.extra,
+        extra,
     )
     return [key for key in before if before[key] != after[key]]
+
+
+def normalize_embedder_extra(extra: Mapping[str, Any]) -> dict[str, Any]:
+    """Treat null window/concurrency overrides as inheritance from settings."""
+    normalized = dict(extra)
+    for key in ("max_model_len", "embed_concurrency"):
+        if normalized.get(key) is None:
+            normalized.pop(key, None)
+    return normalized
 
 
 __all__ = [
@@ -267,4 +287,5 @@ __all__ = [
     "embedder_fingerprint",
     "is_placeholder_api_key",
     "material_embedder_changes",
+    "normalize_embedder_extra",
 ]

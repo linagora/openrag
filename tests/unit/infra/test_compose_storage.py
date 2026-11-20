@@ -70,6 +70,43 @@ def test_compose_defaults_preserve_existing_host_paths() -> None:
     assert "${DB_VOLUME:-pgdata}:/var/lib/postgresql/data" not in rdb_volumes
 
 
+def test_bundled_storage_waits_for_secret_preflight() -> None:
+    for path in (COMPOSE_DIR / "milvus" / "milvus.yaml", COMPOSE_DIR / "milvus" / "milvus.named-volumes.yaml"):
+        services = _load_yaml(path)["services"]
+        check = services["compose-secret-check"]
+        assert check["command"] == ["python3", "/workspace/scripts/gen_env.py", "--check-compose-storage"]
+        assert check["network_mode"] == "none"
+        assert check["read_only"] is True
+        assert check["volumes"] == [
+            "../../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro",
+            "../../../openrag/core:/workspace/openrag/core:ro",
+        ]
+        assert "MINIO_ACCESS_KEY" in check["environment"]
+        assert "MINIO_SECRET_KEY" in check["environment"]
+        assert services["minio"]["depends_on"]["compose-secret-check"]["condition"] == "service_completed_successfully"
+        assert (
+            services["milvus-init"]["depends_on"]["compose-secret-check"]["condition"]
+            == "service_completed_successfully"
+        )
+
+
+def test_postgres_waits_for_effective_password_preflight() -> None:
+    services = _load_yaml(COMPOSE_DIR / "docker-compose.yaml")["services"]
+    check = services["compose-postgres-secret-check"]
+
+    assert check["command"] == ["python3", "/workspace/scripts/gen_env.py", "--check-compose-postgres"]
+    assert check["network_mode"] == "none"
+    assert check["read_only"] is True
+    assert check["volumes"] == [
+        "../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro",
+        "../../openrag/core:/workspace/openrag/core:ro",
+    ]
+    assert "POSTGRES_PASSWORD" in check["environment"]
+    assert (
+        services["rdb"]["depends_on"]["compose-postgres-secret-check"]["condition"] == "service_completed_successfully"
+    )
+
+
 def test_milvus_compose_defaults_preserve_existing_host_paths() -> None:
     compose = _load_yaml(COMPOSE_DIR / "milvus" / "milvus.yaml")
     services = compose["services"]

@@ -1508,14 +1508,15 @@ def _build_embedder_factory(cfg: Settings) -> Any:
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             # Backfill max_model_len/embed_concurrency from static settings when the
-            # endpoint's `extra` omits them — otherwise truncate_prompt_tokens is off
-            # and pooling models hang/400 on boundary inputs (vllm#29496). Explicit
-            # `extra` wins. Mirrors the API container's _embedder_extra_kwargs.
+            # endpoint's `extra` omits them or sets them to null (inherit) — otherwise
+            # truncate_prompt_tokens is off and pooling models hang/400 on boundary
+            # inputs (vllm#29496). Explicit values win. Mirrors the API container's
+            # _embedder_extra_kwargs.
             embed_defaults = getattr(cfg, "embedder", None)
             for default_key in ("max_model_len", "embed_concurrency"):
                 default = getattr(embed_defaults, default_key, None)
-                if default is not None:
-                    impl_kwargs.setdefault(default_key, default)
+                if default is not None and impl_kwargs.get(default_key) is None:
+                    impl_kwargs[default_key] = default
             instance = set_provider_name(
                 embedder_registry.create(
                     impl,

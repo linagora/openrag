@@ -104,6 +104,27 @@ who did go over their quota can upload again once their file count is below the
 limit: they delete enough files to get below it, or an administrator raises the
 quota above their current count.
 
+## OpenRAG 2.3.6: credential checks and embedder sync
+
+Compose now checks service credentials before PostgreSQL, MinIO, Milvus initialization,
+and bundled Grafana start. The first startup may need to download the `python:3.12-slim`
+image. Empty required credentials always stop the dependent service; policy violations
+also stop it unless `ALLOW_INSECURE_SECRETS=true`. In OIDC mode, confirm
+`OIDC_TOKEN_ENCRYPTION_KEY` is a valid Fernet key before restarting.
+
+Before 2.3.6, `MODEL_ENDPOINT_SYNC_ON_BOOT=true` could change an env-managed embedder
+URL while indexed files still depended on its vectors. From 2.3.6, startup holds that
+change and logs the affected fields. The indexed-data guard also detects vectors still
+recorded on files after a cancelled swap, even when their partition now points to a
+different embedder. Compare the environment with the saved endpoint in the admin API,
+or apply the change there with `acknowledge_indexed_data=true`.
+
+If the warning mentions a running embedder swap, let it finish or cancel it first.
+The admin API refuses vector-configuration edits during a swap, even with
+acknowledgement. Restart after the swap to retry boot sync; the indexed-data check
+still applies. While a change is held, startup can rotate the API key only when the
+saved URL and provider still match.
+
 ## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
 
 The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any

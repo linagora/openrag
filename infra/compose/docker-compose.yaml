@@ -182,11 +182,32 @@ services:
         condition: service_healthy
     # No hard dependency on vllm-cpu (see the GPU service above).
 
+  compose-postgres-secret-check:
+    image: python:3.12-slim
+    command: ["python3", "/workspace/scripts/gen_env.py", "--check-compose-postgres"]
+    environment:
+      ALLOW_INSECURE_SECRETS: ${ALLOW_INSECURE_SECRETS:-false}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro
+      - ../../openrag/core:/workspace/openrag/core:ro
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   rdb:
     image: postgres:15
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
       - POSTGRES_USER=${POSTGRES_USER:-root}
+    depends_on:
+      compose-postgres-secret-check:
+        condition: service_completed_successfully
     volumes:
       - ${DB_VOLUME:-../../db}:/var/lib/postgresql/data
       - ../../scripts/postgres-init:/docker-entrypoint-initdb.d:ro

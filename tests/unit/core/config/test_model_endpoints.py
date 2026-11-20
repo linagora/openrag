@@ -174,3 +174,37 @@ def test_material_embedder_changes_names_what_moved_against_the_fingerprint():
         "extra.max_model_len",
     ]
     assert material_embedder_changes(row, {"timeout": 90.0, "extra": {"implementation": "vllm"}}) == []
+
+
+def test_material_embedder_changes_detect_an_explicit_window_override():
+    from core.config.model_endpoints import material_embedder_changes
+
+    row = ModelEndpointRow(**_row_payload(model_type="embedder", model_name="bge-m3"))
+
+    assert (
+        material_embedder_changes(
+            row,
+            {"extra": {"max_model_len": None}},
+        )
+        == []
+    )
+    assert material_embedder_changes(
+        row,
+        {"extra": {"max_model_len": 2047}},
+    ) == ["extra.max_model_len"]
+
+
+def test_clearing_extra_compares_against_an_empty_object():
+    from core.config.model_endpoints import material_embedder_changes
+
+    row = ModelEndpointRow(
+        **_row_payload(
+            model_type="embedder",
+            extra={"implementation": "ollama", "max_model_len": 512},
+        )
+    )
+
+    assert material_embedder_changes(row, {"extra": None}) == [
+        "extra.implementation",
+        "extra.max_model_len",
+    ]
