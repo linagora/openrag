@@ -10,6 +10,7 @@ from services.persistence.chunk_repo import PgChunkRepository
 from services.persistence.conversation_repo import PgConversationRepository
 from services.persistence.document_repo import PgDocumentRepository
 from services.persistence.entity_repo import PgEntityRepository
+from services.persistence.file_fence_repo import PgFileFenceRepository
 from services.persistence.idempotency_repo import PgIdempotencyRepository
 from services.persistence.job_repo import PgJobRepository
 from services.persistence.model_endpoint_repo import PgModelEndpointRepository
@@ -32,6 +33,7 @@ _EXPECTED_REPO_TYPES = {
     "oidc_session_repo": PgOIDCSessionRepository,
     "workspace_repo": PgWorkspaceRepository,
     "job_repo": PgJobRepository,
+    "file_fence_repo": PgFileFenceRepository,
     "chunk_repo": PgChunkRepository,
     "prompt_repo": PgPromptRepository,
     "conversation_repo": PgConversationRepository,
@@ -54,7 +56,7 @@ class TestComposite:
         assert postgres_store.pool is not None
 
     @pytest.mark.parametrize("name", sorted(_EXPECTED_REPO_TYPES))
-    async def test_all_fifteen_repos_exposed(
+    async def test_all_repos_exposed(
         self,
         postgres_store: PostgresStore,
         name: str,

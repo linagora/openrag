@@ -999,7 +999,10 @@ async def test_copy_file_uses_non_task_content_claim_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active() -> None:
+@pytest.mark.parametrize("replace", [False, True])
+async def test_dispatch_indexing_refuses_a_file_being_deleted_with_409(replace: bool) -> None:
+    """Not a 500: the client can retry once the delete is done (#1457)."""
+    from core.utils.exceptions import ConflictError
     from services.workers.dispatcher import WorkerDispatcher
 
     pool = _pool_with_ref(object())
@@ -1020,16 +1023,18 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
         patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(RuntimeError, match="is being deleted"):
+        with pytest.raises(ConflictError) as caught:
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
                 partition="tenant-a",
                 user={"id": 42},
                 workspace_ids=["ws-1"],
-                replace=True,
+                replace=replace,
             )
 
+    assert caught.value.status_code == 409
+    assert caught.value.code == "DOCUMENT_DELETE_IN_PROGRESS"
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()

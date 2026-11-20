@@ -16,7 +16,7 @@ from .test_users_managed_by_config_migration import _alembic_config
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
 
 REVISION = "a2b3c4d5e6f7"
-PREVIOUS = "4d7e2b9c1f35"
+PREVIOUS = "934e9f4e871f"
 
 
 @pytest_asyncio.fixture(loop_scope="session")

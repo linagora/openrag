@@ -13,7 +13,7 @@ divergence as a pending schema change.
 
 from datetime import datetime
 
-from core.models.catalog import DocumentStatus
+from core.models.catalog import DocumentStatus, FileFenceKind
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -310,6 +310,39 @@ file_content_claims = Table(
         server_default=text("now() + interval '24 hours'"),
         nullable=False,
     ),
+)
+
+
+_FILE_FENCE_KIND_CHECK = "holder_kind IN ({})".format(",".join(f"'{kind.value}'" for kind in FileFenceKind))
+
+
+# One row per file an operation is changing right now (#1430): indexing (a new
+# file or a replace) or a delete; metadata updates and copies don't take one
+# yet. The primary key is what makes it exclusive. ``holder_id`` is the fencing token:
+# the indexing task id, or a fresh id for a request. A row rather than an
+# advisory lock, because the process that takes an indexing fence (the API at
+# admission) is not the one that releases it (whatever settles the task).
+#
+# ``expires_at`` is the last resort for a holder that died; an indexing fence
+# whose ``jobs`` row is terminal is free before that. The catalog write checks
+# the fence in its own transaction (``PgDocumentRepository``), so an operation
+# that lost it never makes a file visible. Deleting the partition drops its
+# fences, as it does its content claims.
+file_fences = Table(
+    "file_fences",
+    metadata,
+    Column(
+        "partition_name",
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("file_id", String, primary_key=True),
+    Column("holder_kind", String, nullable=False),
+    Column("holder_id", String, nullable=False),
+    Column("acquired_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(_FILE_FENCE_KIND_CHECK, name="ck_file_fences_holder_kind"),
 )
 
 

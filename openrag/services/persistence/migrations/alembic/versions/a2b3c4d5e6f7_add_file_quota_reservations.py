@@ -8,7 +8,7 @@ No data migration: ``users.file_count`` already counts each user's files, and
 with no reservation rows yet that is exactly what it must hold.
 
 Revision ID: a2b3c4d5e6f7
-Revises: 4d7e2b9c1f35
+Revises: 934e9f4e871f
 Create Date: 2026-10-30
 """
 
@@ -19,7 +19,7 @@ from alembic import op
 from schema_helpers import index_exists, table_exists
 
 revision: str = "a2b3c4d5e6f7"
-down_revision: str | Sequence[str] | None = "4d7e2b9c1f35"
+down_revision: str | Sequence[str] | None = "934e9f4e871f"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
