@@ -307,9 +307,11 @@ class FileFences:
             raise
         finally:
             if stopped:
-                logger.bind(partition=partition, file_id=file_id).warning(
-                    "File work stopped before it ended; its fence is left to expire"
-                )
+                # Without fences (``FILE_FENCES=ray``) there is none to leave.
+                if self._repo is not None:
+                    logger.bind(partition=partition, file_id=file_id).warning(
+                        "File work stopped before it ended; its fence is left to expire"
+                    )
             else:
                 await self.release(partition=partition, file_id=file_id, holder_id=holder_id)
 

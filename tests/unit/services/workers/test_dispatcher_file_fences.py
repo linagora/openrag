@@ -1013,6 +1013,21 @@ async def test_a_copy_into_an_existing_file_is_refused_and_writes_nothing() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_copy_into_an_existing_file_is_refused_without_fences_too() -> None:
+    # The FILE_FENCES=ray default: earlier releases answered 201 and added the
+    # copied chunks to the existing file.
+    dispatcher, repo, store = _copy_dispatcher(None)
+    repo.file_exists_in_partition.return_value = True
+
+    with pytest.raises(ConflictError) as caught:
+        await _copy(dispatcher)
+
+    assert caught.value.code == "DOCUMENT_ALREADY_EXISTS"
+    store.insert_entities.assert_not_awaited()
+    repo.add_file_to_partition.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_copy_whose_catalog_insert_is_refused_removes_its_chunks_and_answers_409() -> None:
     # Without fences nothing keeps the target free between the check and the
     # insert: a refused insert is a conflict, not a 201 with stray chunks.

@@ -516,6 +516,56 @@ async def test_hold_leaves_the_fence_of_work_whose_caller_was_cancelled_to_expir
     assert repo.fences[(PARTITION, FILE_ID)].holder_id == "m"
 
 
+class _Warnings:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def bind(self, **_kwargs) -> _Warnings:
+        return self
+
+    def warning(self, message: str, *_args, **_kwargs) -> None:
+        self.messages.append(message)
+
+
+async def _cancel_held_work(fences: FileFences) -> None:
+    started = asyncio.Event()
+
+    async def work():
+        started.set()
+        await asyncio.Event().wait()
+
+    holding = asyncio.ensure_future(
+        fences.hold(partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work)
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    holding.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await holding
+
+
+@pytest.mark.asyncio
+async def test_cancelled_work_warns_that_its_fence_is_left_to_expire(monkeypatch: pytest.MonkeyPatch) -> None:
+    warnings = _Warnings()
+    monkeypatch.setattr(module, "logger", warnings)
+    repo = _Fences()
+    repo.hold(FileFenceKind.METADATA, "m")
+
+    await _cancel_held_work(FileFences(repo))
+
+    assert warnings.messages == ["File work stopped before it ended; its fence is left to expire"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_work_without_fences_logs_no_fence_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    # FILE_FENCES=ray: there is no fence, so none is "left to expire".
+    warnings = _Warnings()
+    monkeypatch.setattr(module, "logger", warnings)
+
+    await _cancel_held_work(FileFences(None))
+
+    assert warnings.messages == []
+
+
 # ── Delete ───────────────────────────────────────────────────────────
 
 
