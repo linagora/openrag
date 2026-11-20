@@ -201,7 +201,7 @@ describe("JobListPage filters", () => {
     expect(screen.queryByText("Caption, Topic tagging")).toBeNull();
   });
 
-  it("shows only lifecycle status in All and stage progress in Active", async () => {
+  it("shows stage progress for running rows in every tab and lifecycle status for the rest", async () => {
     const activeTask = task("active-task", "SERIALIZING", "active.pdf", "docs", {
       stage_progress: {
         stage_id: "parse",
@@ -234,11 +234,13 @@ describe("JobListPage filters", () => {
     renderJobs();
 
     expect(await screen.findByText("active.pdf")).not.toBeNull();
-    expect(screen.getByText("Active", { selector: "[data-slot='badge']" })).not.toBeNull();
+    const allTabParsing = screen.getByText("Parsing");
+    expect(allTabParsing.closest("[data-slot='badge']")?.textContent).toMatch(/^Parsing · /);
+    expect(allTabParsing.closest("tr")?.textContent).toContain("active.pdf");
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
     expect(screen.getByText("COMPLETED", { selector: "[data-slot='badge']" })).not.toBeNull();
     expect(screen.getByText("QUEUED", { selector: "[data-slot='badge']" })).not.toBeNull();
-    expect(screen.queryByText("Parsing")).toBeNull();
-    expect(screen.queryByText("Contextualization")).toBeNull();
+    expect(screen.queryByText(/Contextualization|Finalizing/)).toBeNull();
     expect(screen.queryByText("Completed with degradation")).toBeNull();
     expect(screen.queryByText("SERIALIZING")).toBeNull();
 
