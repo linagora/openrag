@@ -23,7 +23,7 @@ class Workspace(BaseModel):
     partition: str
     display_name: str | None = None
     created_by: int | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime | None = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class WorkspaceScope(BaseModel):
