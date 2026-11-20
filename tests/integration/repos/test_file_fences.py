@@ -387,3 +387,64 @@ async def test_a_take_over_waits_for_a_commit_in_flight(store):
         await store.pool.release(conn)
 
     assert await asyncio.wait_for(take_over, timeout=5) is True
+
+
+async def test_renew_all_extends_only_the_fences_still_held(store):
+    repo = store.file_fence_repo
+    first = await _acquire(store, "task-a", ttl=60)
+    await _acquire(store, "task-b", ttl=60, file_id="doc-2")
+    await repo.take_over(
+        partition=PARTITION,
+        file_id="doc-2",
+        kind=FileFenceKind.DELETE,
+        holder_id="delete-1",
+        expected_holder_id="task-b",
+        ttl_seconds=60,
+    )
+
+    renewed = await repo.renew_all(
+        [(PARTITION, FILE_ID, "task-a"), (PARTITION, "doc-2", "task-b")],
+        ttl_seconds=HOUR,
+    )
+
+    assert renewed == 1
+    assert (await repo.get(partition=PARTITION, file_id=FILE_ID)).expires_at > first.expires_at
+    assert (await repo.get(partition=PARTITION, file_id="doc-2")).holder_id == "delete-1"
+
+
+async def test_renew_all_skips_a_fence_a_commit_is_holding(store):
+    await _acquire(store, "task-a")
+    await _acquire(store, "task-b", file_id="doc-2")
+    conn = await store.pool.acquire()
+    try:
+        transaction = conn.transaction()
+        await transaction.start()
+        await _require_file_fence(conn, PARTITION, FILE_ID, "task-a")
+
+        renewed = await asyncio.wait_for(
+            store.file_fence_repo.renew_all(
+                [(PARTITION, FILE_ID, "task-a"), (PARTITION, "doc-2", "task-b")], ttl_seconds=HOUR
+            ),
+            timeout=5,
+        )
+
+        await transaction.commit()
+    finally:
+        await store.pool.release(conn)
+
+    assert renewed == 1
+
+
+async def test_renew_all_of_nothing_renews_nothing(store):
+    assert await store.file_fence_repo.renew_all([], ttl_seconds=HOUR) == 0
+
+
+async def test_an_expired_fence_still_held_lets_its_holder_commit(store):
+    """A lapsed lease only lets someone else in; it never fails its holder by itself."""
+    await _acquire(store, "task-a", ttl=0)
+
+    written = await store.document_repo.add_file_to_partition(
+        file_id=FILE_ID, partition=PARTITION, fence_holder_id="task-a"
+    )
+
+    assert written is True

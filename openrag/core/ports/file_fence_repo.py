@@ -65,6 +65,15 @@ class FileFenceRepository(ABC):
         """Extend the lease. ``False`` when ``holder_id`` no longer holds the fence."""
 
     @abstractmethod
+    async def renew_all(self, fences: list[tuple[str, str, str]], *, ttl_seconds: float) -> int:
+        """Extend every ``(partition, file_id, holder_id)`` lease still held, in one statement.
+
+        Returns how many were renewed. A fence its holder lost is skipped, and
+        so is one a catalog commit has locked right now: the commit is the
+        holder finishing, and waiting for it would hold up every other renewal.
+        """
+
+    @abstractmethod
     async def release(self, *, partition: str, file_id: str, holder_id: str) -> bool:
         """Drop the fence if ``holder_id`` holds it. A second release is a no-op."""
 
