@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
 from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
-from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, ConfigError, DocumentNotFoundError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -58,10 +58,10 @@ def _human_readable_size(size_bytes: int) -> str:
 
 
 def _refuse_reserved_partition(partition: str) -> None:
-    """Refuse to change a file in a partition named like the `all` wildcard.
+    """Refuse to change or copy a file in a partition named like the `all` wildcard.
 
-    The vector store reads that name as every partition, so deleting or
-    updating file X there would reach file X in every partition.
+    The vector store reads that name as every partition, so deleting, updating
+    or copying file X there would reach file X in every partition.
     """
     if is_reserved_partition_name(partition):
         raise ValidationError(
@@ -397,6 +397,11 @@ class IndexingService:
         metadata: dict,
         user: dict | None,
     ) -> None:
+        _refuse_reserved_partition(source_partition)
+        _refuse_reserved_partition(target_partition)
+        # Refuse a missing source before creating or pinning the destination.
+        if not await self._document_repo.file_exists_in_partition(file_id=source_file_id, partition=source_partition):
+            raise DocumentNotFoundError(f"File '{source_file_id}' not found in partition '{source_partition}'.")
         # Same guard as update_metadata (#713): the copy carries caller-supplied
         # metadata onto the new rows, so a spoofed ``source`` would land there too.
         metadata, dropped = strip_protected_metadata(metadata)

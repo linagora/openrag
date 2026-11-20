@@ -1261,3 +1261,34 @@ async def test_caption_stage_succeeds_on_a_document_with_only_remote_images():
     assert vlm.calls == []
     assert row["stage"] == "captioned"
     assert "degraded_stages" not in row
+
+
+def test_drop_uncaptioned_image_refs_keeps_only_text_that_still_means_something():
+    """An uncaptioned image's ref points at bytes nothing reads any more: it
+    goes, leaving its alt text if any. A captioned image's ref is already gone,
+    and a remote image keeps its link, which still resolves."""
+    from services.workers.stages.caption import drop_uncaptioned_image_refs
+
+    processed = ProcessedDocument(
+        document_id="d",
+        text_blocks=[
+            TextBlock(text="a ![](docling_img_0) b ![chart](data-0) c", page_number=1),
+            TextBlock(text="d ![](https://example.com/x.png) e <image_description>cap</image_description>"),
+        ],
+        images=[
+            ImageBlock(metadata={"markdown_ref": "![](docling_img_0)"}),
+            ImageBlock(metadata={"markdown_ref": "![chart](data-0)", "alt": "chart"}),
+            ImageBlock(
+                source_url="https://example.com/x.png", metadata={"markdown_ref": "![](https://example.com/x.png)"}
+            ),
+            ImageBlock(caption="cap", metadata={"markdown_ref": "![](docling_img_9)"}),
+        ],
+    )
+
+    out = drop_uncaptioned_image_refs(processed)
+
+    assert [block.text for block in out.text_blocks] == [
+        "a  b chart c",
+        "d ![](https://example.com/x.png) e <image_description>cap</image_description>",
+    ]
+    assert out.text_blocks[0].page_number == 1

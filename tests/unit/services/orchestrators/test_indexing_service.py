@@ -525,7 +525,7 @@ async def test_copy_file_pins_the_target_partition_before_dispatch():
     config = SimpleNamespace(partitions={})
     partition_service = _PinningPartitionService(config)
     config.partitions["p-dst"] = partition_service._cfg("p-dst")
-    svc = _service(disp=disp, config=config, partition_service=partition_service)
+    svc = _service(doc=FakeDocumentRepo(exists=True), disp=disp, config=config, partition_service=partition_service)
 
     await svc.copy_file(
         source_file_id="src",
@@ -807,7 +807,7 @@ async def test_update_metadata_cannot_override_content_hash():
 @pytest.mark.asyncio
 async def test_copy_file_sets_target_fields():
     disp = FakeDispatcher()
-    svc = _service(disp=disp)
+    svc = _service(doc=FakeDocumentRepo(exists=True), disp=disp)
     await svc.copy_file(
         source_file_id="src",
         source_partition="p-src",
@@ -824,10 +824,30 @@ async def test_copy_file_sets_target_fields():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "target"), [("all", "p-dst"), ("ALL", "p-dst"), ("p-src", "all"), ("p-src", " All ")]
+)
+async def test_copy_file_refuses_a_reserved_partition(source, target):
+    """The store reads `all` as every partition: copying file X from there copies X's chunks from everywhere."""
+    disp = FakeDispatcher()
+    with pytest.raises(ValidationError) as exc:
+        await _service(disp=disp).copy_file(
+            source_file_id="src",
+            source_partition=source,
+            target_file_id="dst",
+            target_partition=target,
+            metadata={},
+            user={"id": 1},
+        )
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
+    assert disp.copied == []
+
+
+@pytest.mark.asyncio
 async def test_copy_file_preserves_content_hash_when_deduplication_is_enabled():
     disp = FakeDispatcher()
     config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
-    svc = _service(doc=FakeDocumentRepo(content_sha256="abc123"), disp=disp, config=config)
+    svc = _service(doc=FakeDocumentRepo(exists=True, content_sha256="abc123"), disp=disp, config=config)
 
     await svc.copy_file(
         source_file_id="src",
@@ -907,7 +927,7 @@ async def test_update_metadata_drops_protected_keys():
 @pytest.mark.asyncio
 async def test_copy_file_drops_protected_keys():
     disp = FakeDispatcher()
-    svc = _service(disp=disp)
+    svc = _service(doc=FakeDocumentRepo(exists=True), disp=disp)
     await svc.copy_file(
         source_file_id="src",
         source_partition="p1",
@@ -1054,7 +1074,7 @@ def _copy_destination(vector_field: str, embedder: str) -> dict:
 
 def _copy_service(config: SimpleNamespace, disp: FakeDispatcher, partition_service=None) -> IndexingService:
     return IndexingService(
-        document_repo=FakeDocumentRepo(),
+        document_repo=FakeDocumentRepo(exists=True),
         workspace_repo=FakeWorkspaceRepo(),
         dispatcher=disp,
         config=config,

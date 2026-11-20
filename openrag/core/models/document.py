@@ -93,6 +93,10 @@ class ImageBlock(BaseModel):
       EML image attachments), ``metadata["markdown_ref"]`` is omitted;
       the caption stage produces a free-standing captioned ``TextBlock``
       instead.
+    - An image left uncaptioned (captioning off, or failed on it) has its
+      ref taken out of the text before chunking and extractText
+      (``drop_uncaptioned_image_refs``), its ``metadata["alt"]`` kept. A
+      remote image keeps its link.
 
     Bytes vs. URL:
     - Locally-extracted images set ``image_bytes`` (raw PNG / JPEG bytes)

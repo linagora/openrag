@@ -5,23 +5,31 @@ import traceback
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
 from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
     COPY_CONTENT_CLAIM_TOKEN_PREFIX,
+    FILE_FENCE_TTL_SECONDS,
     INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     DocumentStatus,
+    FileFenceKind,
     IndexationJob,
     reconcile_task_state,
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
-from core.utils.exceptions import ConflictError, ServiceUnavailableError, mark_indexing_worker_may_be_running
+from core.utils.exceptions import (
+    ConflictError,
+    DocumentNotFoundError,
+    ServiceUnavailableError,
+    mark_indexing_worker_may_be_running,
+)
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
@@ -36,6 +44,7 @@ from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 from services.workers.task_state import (
     QUEUE_REFUSED_CANCELLED,
+    QUEUE_REFUSED_FILE_DELETING,
     QUEUE_REFUSED_FILE_INDEXING,
     QUEUE_REFUSED_INDEXING_CAPACITY,
     TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
@@ -46,6 +55,7 @@ logger = get_logger()
 
 DEFAULT_TIMEOUT = 60.0
 _FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS = 30.0
+_FILE_FENCE_WAIT_INTERVAL_SECONDS = 0.5
 _REQUIRE_EXISTING_PARTITION_KWARG = "require_existing_partition"
 
 
@@ -67,6 +77,7 @@ class WorkerDispatcher(IndexingDispatcher):
         workspace_repo: Any,
         collection: str,
         job_repo: Any = None,
+        file_fence_repo: Any = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._pool = pool
@@ -76,6 +87,9 @@ class WorkerDispatcher(IndexingDispatcher):
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
         self._job_repo = job_repo
+        # Set only with ``FILE_FENCES=postgres``; ``None`` keeps the
+        # TaskStateManager fences alone.
+        self._file_fences = file_fence_repo
         self._collection = collection
         self._timeout = timeout
 
@@ -281,6 +295,18 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             if renewed is not True:
                 raise RuntimeError("File delete fence lease was lost during cleanup")
+            if self._file_fences is not None:
+                try:
+                    still_held = await self._file_fences.renew(
+                        partition=partition, file_id=file_id, holder_id=fence_id, ttl_seconds=FILE_FENCE_TTL_SECONDS
+                    )
+                except Exception as exc:  # noqa: BLE001 - the lease outlasts several missed rounds
+                    logger.bind(partition=partition, file_id=file_id).warning(
+                        "Failed to renew the file fence; retrying", error=str(exc)
+                    )
+                    continue
+                if not still_held:
+                    raise RuntimeError("File delete fence lease was lost during cleanup")
 
     async def _delete_with_renewable_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         delete_task = asyncio.create_task(self._delete_file_with_fence(file_id=file_id, partition=partition))
@@ -297,6 +323,123 @@ class WorkerDispatcher(IndexingDispatcher):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(delete_task, renewal_task, return_exceptions=True)
+
+    async def _acquire_index_fence(self, *, partition: str, file_id: str, task_id: str) -> bool:
+        """Take the file's Postgres fence for this task, or refuse with 409.
+
+        Returns whether a fence was taken: ``False`` without Postgres fences or
+        without a file id.
+        """
+        if self._file_fences is None or not file_id:
+            return False
+        fence = await self._file_fences.acquire(
+            partition=partition,
+            file_id=file_id,
+            kind=FileFenceKind.INDEX,
+            holder_id=task_id,
+            ttl_seconds=FILE_FENCE_TTL_SECONDS,
+        )
+        if fence.holder_id == task_id:
+            return True
+        if fence.kind is FileFenceKind.INDEX:
+            raise _indexing_in_progress(file_id, partition, fence.holder_id)
+        if fence.kind is FileFenceKind.DELETE:
+            raise _delete_in_progress(file_id, partition)
+        raise _metadata_update_in_progress(file_id, partition)
+
+    async def _acquire_delete_fence(self, *, partition: str, file_id: str, fence_id: str) -> None:
+        """Take the file's Postgres fence for a delete.
+
+        A delete wins over indexing: it takes an ``index`` fence over, and the
+        indexing task can then no longer commit. Another delete or a metadata
+        update is short, so the delete waits for it, up to the dispatcher's
+        timeout.
+        """
+        if self._file_fences is None:
+            return
+        deadline = monotonic() + self._timeout
+        while True:
+            fence = await self._file_fences.acquire(
+                partition=partition,
+                file_id=file_id,
+                kind=FileFenceKind.DELETE,
+                holder_id=fence_id,
+                ttl_seconds=FILE_FENCE_TTL_SECONDS,
+            )
+            if fence.holder_id == fence_id:
+                return
+            if fence.kind is FileFenceKind.INDEX:
+                if await self._file_fences.take_over(
+                    partition=partition,
+                    file_id=file_id,
+                    kind=FileFenceKind.DELETE,
+                    holder_id=fence_id,
+                    expected_holder_id=fence.holder_id,
+                    ttl_seconds=FILE_FENCE_TTL_SECONDS,
+                ):
+                    return
+                # The holder changed in between: look again.
+                continue
+            if monotonic() >= deadline:
+                if fence.kind is FileFenceKind.DELETE:
+                    raise _delete_in_progress(file_id, partition)
+                raise _metadata_update_in_progress(file_id, partition)
+            await asyncio.sleep(_FILE_FENCE_WAIT_INTERVAL_SECONDS)
+
+    async def _release_file_fence(self, *, partition: str, file_id: str, holder_id: str) -> None:
+        if self._file_fences is None:
+            return
+        try:
+            await self._file_fences.release(partition=partition, file_id=file_id, holder_id=holder_id)
+        except Exception as exc:  # noqa: BLE001 - the lease expires on its own
+            logger.bind(partition=partition, file_id=file_id).warning(
+                "Failed to release the file fence; it expires on its own",
+                error=str(exc),
+            )
+
+    async def _claim_content(
+        self,
+        *,
+        partition: str,
+        file_id: str,
+        content_sha256: str | None,
+        claim_token: str,
+        replace: bool,
+    ) -> bool:
+        """Reserve the upload's content in the partition. Returns whether a claim was taken."""
+        if not content_sha256:
+            return False
+        claim_kwargs = {
+            "file_id": file_id,
+            "partition": partition,
+            "content_sha256": content_sha256,
+            "claim_token": claim_token,
+            "replace": replace,
+        }
+        conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
+        if conflicting_file_id is not None and await self._recover_inactive_content_claim(
+            partition=partition,
+            content_sha256=content_sha256,
+        ):
+            conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
+        if conflicting_file_id is not None:
+            # A retry of an upload still being indexed sends the same bytes
+            # under the same file_id, so it is the first task's own claim
+            # that turns it away here, before the admission fence below
+            # ever sees it. Name that task rather than pointing the client
+            # at a file the catalog does not show yet. Only for a first-time
+            # upload, the one the fence applies to: a replace keeps the
+            # content conflict it always got.
+            if conflicting_file_id == file_id and not replace:
+                busy_task_id = await self._active_indexing_task_for_file(partition=partition, file_id=file_id)
+                if busy_task_id is not None:
+                    raise _indexing_in_progress(file_id, partition, busy_task_id)
+            raise ConflictError(
+                f"This document already exists in partition '{partition}'.",
+                code="DOCUMENT_CONTENT_EXISTS",
+                existing_file_id=conflicting_file_id,
+            )
+        return True
 
     async def dispatch_indexing(
         self,
@@ -319,39 +462,23 @@ class WorkerDispatcher(IndexingDispatcher):
         content_sha256 = metadata.get("content_sha256")
         content_claim_token = f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}"
         claimed_content = False
+        fenced = await self._acquire_index_fence(partition=partition, file_id=file_id, task_id=task_id)
 
-        if content_sha256:
-            claim_kwargs = {
-                "file_id": file_id,
-                "partition": partition,
-                "content_sha256": content_sha256,
-                "claim_token": content_claim_token,
-                "replace": replace,
-            }
-            conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
-            if conflicting_file_id is not None and await self._recover_inactive_content_claim(
+        async def release_fence() -> None:
+            if fenced:
+                await self._release_file_fence(partition=partition, file_id=file_id, holder_id=task_id)
+
+        try:
+            claimed_content = await self._claim_content(
                 partition=partition,
+                file_id=file_id,
                 content_sha256=content_sha256,
-            ):
-                conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
-            if conflicting_file_id is not None:
-                # A retry of an upload still being indexed sends the same bytes
-                # under the same file_id, so it is the first task's own claim
-                # that turns it away here, before the admission fence below
-                # ever sees it. Name that task rather than pointing the client
-                # at a file the catalog does not show yet. Only for a first-time
-                # upload, the one the fence applies to: a replace keeps the
-                # content conflict it always got.
-                if conflicting_file_id == file_id and not replace:
-                    busy_task_id = await self._active_indexing_task_for_file(partition=partition, file_id=file_id)
-                    if busy_task_id is not None:
-                        raise _indexing_in_progress(file_id, partition, busy_task_id)
-                raise ConflictError(
-                    f"This document already exists in partition '{partition}'.",
-                    code="DOCUMENT_CONTENT_EXISTS",
-                    existing_file_id=conflicting_file_id,
-                )
-            claimed_content = True
+                claim_token=content_claim_token,
+                replace=replace,
+            )
+        except BaseException:
+            await release_fence()
+            raise
 
         user_metadata = {
             key: value
@@ -374,6 +501,7 @@ class WorkerDispatcher(IndexingDispatcher):
         }
 
         async def release_claim() -> None:
+            await release_fence()
             if claimed_content:
                 await self._document_repo.release_content_sha256_claim(
                     file_id=file_id,
@@ -398,6 +526,8 @@ class WorkerDispatcher(IndexingDispatcher):
             reason = admission.get("reason")
             if reason == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
                 raise _indexing_in_progress(file_id, partition, busy_task_id)
+            if reason == QUEUE_REFUSED_FILE_DELETING:
+                raise _delete_in_progress(file_id, partition)
             if reason == QUEUE_REFUSED_CANCELLED:
                 raise RuntimeError(f"Task {task_id} was cancelled before it queued")
             if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
@@ -407,22 +537,22 @@ class WorkerDispatcher(IndexingDispatcher):
                     # Preserve this API code so existing clients keep retrying it.
                     code="INDEXING_OUTCOME_BACKLOG",
                 )
-            raise RuntimeError(
-                f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
-            )
-
-        await self._record_job(
-            task_id,
-            status=DocumentStatus.QUEUED,
-            partition=partition,
-            file_id=file_id,
-            filename=task_details["metadata"].get("filename"),
-            user_id=task_details["user_id"],
-        )
+            # Only an older TaskStateManager, whose boolean answer gives no reason.
+            raise RuntimeError(f"Task {task_id} for file {file_id!r} in partition {partition!r} was refused")
 
         task: Any | None = None
         submission_started = False
         try:
+            # Inside the try: _record_job swallows errors but not a cancellation,
+            # which would otherwise leave the fence and the content claim held.
+            await self._record_job(
+                task_id,
+                status=DocumentStatus.QUEUED,
+                partition=partition,
+                file_id=file_id,
+                filename=task_details["metadata"].get("filename"),
+                user_id=task_details["user_id"],
+            )
             worker_metadata = dict(metadata)
             if claimed_content:
                 worker_metadata[CONTENT_CLAIM_TOKEN_METADATA_KEY] = content_claim_token
@@ -441,6 +571,10 @@ class WorkerDispatcher(IndexingDispatcher):
             }
             if require_existing_partition:
                 submit_kwargs[_REQUIRE_EXISTING_PARTITION_KWARG] = True
+            if fenced:
+                # The worker's catalog write checks this holder, and the pool
+                # renews the fence until the task settles.
+                submit_kwargs["fence_holder_id"] = task_id
             if claimed_content:
                 still_owned = await self._document_repo.renew_content_sha256_claim(
                     file_id=file_id,
@@ -465,9 +599,14 @@ class WorkerDispatcher(IndexingDispatcher):
         except BaseException as exc:
             submission_outcome_unknown = submission_started and task is None
             mark_submit_failed = not submission_outcome_unknown
+            # Whether no worker can still commit: never submitted, or cancelled
+            # and settled. Only then is the fence released here; otherwise the
+            # pool releases it when the task settles.
+            worker_stopped = task is None and not submission_outcome_unknown
             try:
                 if task is not None:
                     mark_submit_failed = await self._cancel_submitted_task(task_id, task)
+                    worker_stopped = mark_submit_failed
                     if mark_submit_failed:
                         await self._cleanup_submitted_vectors(task_id, metadata=metadata, partition=partition)
                 if not submission_outcome_unknown:
@@ -492,6 +631,8 @@ class WorkerDispatcher(IndexingDispatcher):
                             completed_at=datetime.now(UTC),
                         )
             finally:
+                if worker_stopped:
+                    await release_fence()
                 if claimed_content and not submission_outcome_unknown and (task is None or mark_submit_failed):
                     await self._document_repo.release_content_sha256_claim(
                         file_id=file_id,
@@ -637,7 +778,15 @@ class WorkerDispatcher(IndexingDispatcher):
         await self._begin_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         delete_failed = False
         try:
-            await self._delete_with_renewable_fence(file_id=file_id, partition=partition, fence_id=fence_id)
+            # Taken over only once the TaskStateManager fence is held: a delete
+            # that fails before that must not cost a running upload its fence.
+            # One that fails after it still has: the upload's commit is refused,
+            # and the client retries the delete.
+            await self._acquire_delete_fence(partition=partition, file_id=file_id, fence_id=fence_id)
+            try:
+                await self._delete_with_renewable_fence(file_id=file_id, partition=partition, fence_id=fence_id)
+            finally:
+                await self._release_file_fence(partition=partition, file_id=file_id, holder_id=fence_id)
         except Exception:
             delete_failed = True
             raise
@@ -729,7 +878,7 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
-            return
+            raise DocumentNotFoundError(f"File '{file_id}' not found in partition '{partition}'.")
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
@@ -757,7 +906,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 output_fields=["*"],
             )
             if not rows:
-                return
+                raise DocumentNotFoundError(f"No indexed chunks found for file '{file_id}' in partition '{partition}'.")
 
             public_metadata = strip_internal_metadata(metadata)
             indexed_at = datetime.now(UTC)
@@ -1039,6 +1188,7 @@ def from_ray_namespace(
     workspace_repo: Any,
     collection: str,
     job_repo: Any = None,
+    file_fence_repo: Any = None,
 ) -> WorkerDispatcher:
     import ray
     from services.workers.indexer_pool import build_indexer_pool
@@ -1052,6 +1202,7 @@ def from_ray_namespace(
         workspace_repo=workspace_repo,
         collection=collection,
         job_repo=job_repo,
+        file_fence_repo=file_fence_repo,
         timeout=timeout,
     )
 
@@ -1083,6 +1234,20 @@ def _indexing_in_progress(file_id: str, partition: str, task_id: str) -> Conflic
         f"File '{file_id}' is already being indexed in partition '{partition}'.",
         code="DOCUMENT_INDEXING_IN_PROGRESS",
         existing_task_id=task_id,
+    )
+
+
+def _delete_in_progress(file_id: str, partition: str) -> ConflictError:
+    return ConflictError(
+        f"File '{file_id}' is being deleted from partition '{partition}'.",
+        code="DOCUMENT_DELETE_IN_PROGRESS",
+    )
+
+
+def _metadata_update_in_progress(file_id: str, partition: str) -> ConflictError:
+    return ConflictError(
+        f"The metadata of file '{file_id}' in partition '{partition}' is being updated. Please retry.",
+        code="DOCUMENT_METADATA_UPDATE_IN_PROGRESS",
     )
 
 
