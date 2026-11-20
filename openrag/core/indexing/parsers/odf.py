@@ -6,7 +6,8 @@ with one :class:`ImageBlock` per ref carrying it in ``metadata['markdown_ref']``
 as the DOCX and PPTX parsers do. Captioning is not done here.
 
 Left out, as from the other parsers: comments and footnotes, which ``xberg`` writes
-as Markdown footnotes whatever ``ContentFilterConfig`` says.
+as Markdown footnotes whatever ``ContentFilterConfig`` says, so :func:`_patch_content`
+takes them out first.
 
 :func:`_patched` rewrites what xberg 1.3 reads wrongly, before it reads it. Each
 rewrite has a test, and goes when xberg gets that case right. It is not a parser:
@@ -41,14 +42,13 @@ _EXTRACTION_TIMEOUT_SECONDS = 300
 _MAX_COMPRESSION_RATIO = 100_000
 
 _IMAGE_REF = re.compile(r"!\[[^\]]*\]\(image_(\d+)\.\w+\)")
-_FOOTNOTE_DEFINITION = re.compile(r"^\[\^[^\]\n]+\]:\n(?:(?: {4}.*)?\n?)*", re.MULTILINE)
-_FOOTNOTE_REF = re.compile(r"\[\^[^\]\n]+\]")
 _SLIDE_SEPARATOR = re.compile(r"^-----$", re.MULTILINE)
 # Impress stores a preview picture beside every table, which xberg takes for a
 # picture of the slide. It renders straight after the table.
 _TABLE_PREVIEW = re.compile(r"(?<=\|\n\n)!\[[^\]]*\]\(image_\d+\.\w+\)\n?")
 _MAX_XML_BYTES = 64 * 1024 * 1024
 _MAX_PACKAGE_BYTES = 500 * 1024 * 1024
+_OFFICE = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
 _TEXT = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
 _DRAW = "{urn:oasis:names:tc:opendocument:xmlns:drawing:1.0}"
 _TABLE = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
@@ -116,6 +116,9 @@ def _detach(element) -> None:
 def _patch_content(root, package: zipfile.ZipFile) -> None:
     from lxml import etree
 
+    # Footnotes, endnotes and comments are not indexed.
+    for note in list(root.iter(f"{_TEXT}note", f"{_OFFICE}annotation", f"{_OFFICE}annotation-end")):
+        _detach(note)
     # A lone <text:s/> is dropped, which merges the two words around it.
     for space in list(root.iter(f"{_TEXT}s")):
         space.tail = " " + (space.tail or "")
@@ -249,10 +252,6 @@ def _patched(raw: bytes) -> bytes:
         return raw
 
 
-def _strip_footnotes(markdown: str) -> str:
-    return _FOOTNOTE_REF.sub("", _FOOTNOTE_DEFINITION.sub("", markdown))
-
-
 class _Pictures:
     """Turns xberg's image refs into synthetic ones, collecting the pictures."""
 
@@ -291,13 +290,13 @@ class _Pictures:
 def text_markdown(extracted: Any, image_prefix: str) -> tuple[str, list[ImageBlock]]:
     """The body of an ``.odt``, as one Markdown string, and its pictures."""
     pictures = _Pictures(extracted.images or [], image_prefix)
-    return pictures.rewrite(_strip_footnotes(extracted.content or ""), 1).strip(), pictures.images
+    return pictures.rewrite(extracted.content or "", 1).strip(), pictures.images
 
 
 def slides_markdown(extracted: Any, image_prefix: str) -> tuple[int, list[tuple[int, str]], list[ImageBlock]]:
     """An ``.odp``'s slide count, its non-empty slides by number, and its pictures."""
     slide_notes: list[list[str]] = []
-    master_text: str | None = None
+    master_texts: list[str] = []
     for node in extracted.document.nodes:
         # NodeContent exposes its fields through its JSON form only.
         content = json.loads(str(node.content))
@@ -305,13 +304,14 @@ def slides_markdown(extracted: Any, image_prefix: str) -> tuple[int, list[tuple[
             slide_notes.append([])
         elif content["node_type"] == "raw_block" and content["format"] == _NOTES_FORMAT and slide_notes:
             slide_notes[-1].append(content["content"].strip())
-        elif content["node_type"] == "raw_block" and content["format"] == _MASTER_FORMAT and master_text is None:
-            master_text = content["content"]
+        elif content["node_type"] == "raw_block" and content["format"] == _MASTER_FORMAT:
+            master_texts.append(content["content"])
 
-    body = _strip_footnotes(extracted.content or "")
-    # Master pages come after the last slide, and their prompts are not its content.
-    if master_text and (start := body.find(master_text, body.rfind("-----"))) != -1:
-        body = body[:start]
+    body = (extracted.content or "").rstrip()
+    # Master pages' text ends the output, after the last slide, and is not its content.
+    masters = "".join(master_texts).rstrip()
+    if masters and body.endswith(masters):
+        body = body[: -len(masters)]
 
     sections = _SLIDE_SEPARATOR.split(body)[1:]
     if len(sections) != len(slide_notes):

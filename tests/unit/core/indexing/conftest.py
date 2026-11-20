@@ -33,6 +33,7 @@ def build_odf(
     *,
     automatic_styles: str = "",
     styles: str | None = None,
+    master_styles: str = "",
     pictures: dict[str, bytes] | None = None,
     mimetype: str | None = None,
     include_mimetype: bool = True,
@@ -42,7 +43,8 @@ def build_odf(
 
     *body* is the XML inside ``office:text`` or ``office:presentation``.
     ``mimetype`` is written first and stored, as ODF asks. *doctype* goes
-    between the XML declaration and the root element.
+    between the XML declaration and the root element. *master_styles* goes in
+    ``styles.xml``'s ``office:master-styles``.
     """
     container = "text" if kind == "odt" else "presentation"
     content = (
@@ -57,11 +59,12 @@ def build_odf(
         if include_mimetype:
             zf.writestr(zipfile.ZipInfo("mimetype"), mimetype or ODF_MIMETYPES[kind], compress_type=zipfile.ZIP_STORED)
         zf.writestr("content.xml", content, compress_type=zipfile.ZIP_DEFLATED)
-        if styles is not None:
+        if styles is not None or master_styles:
             zf.writestr(
                 "styles.xml",
                 f'<?xml version="1.0" encoding="UTF-8"?><office:document-styles {_NAMESPACES}>'
-                f"<office:styles>{styles}</office:styles></office:document-styles>",
+                f"<office:styles>{styles or ''}</office:styles>"
+                f"<office:master-styles>{master_styles}</office:master-styles></office:document-styles>",
             )
         for name, data in (pictures or {}).items():
             zf.writestr(name, data)

@@ -337,6 +337,39 @@ async def test_a_note_repeating_the_title_leaves_the_title_alone(odf_package):
     assert processed.text_blocks[0].text == "# Budget\n\nBudget 2024 review\n\n### Notes:\nBudget"
 
 
+@pytest.mark.asyncio
+async def test_a_last_slide_repeating_master_page_text_keeps_it(odf_package):
+    master = (
+        f'<style:master-page style:name="Default">{_frame("outline", "<text:p>ACME Corp</text:p>")}</style:master-page>'
+    )
+    processed = await _parse(
+        odf_package(
+            "odp",
+            "<draw:page>"
+            f"{_frame('title', '<text:p>Contact</text:p>')}"
+            f"{_frame('outline', '<text:p>Write to ACME Corp support. Phone 555-0100.</text:p>')}"
+            "</draw:page>",
+            master_styles=master,
+        )
+    )
+
+    assert [block.text for block in processed.text_blocks] == [
+        "# Contact\n\nWrite to ACME Corp support. Phone 555-0100."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_literal_footnote_like_brackets_are_kept(odf_package):
+    processed = await _parse(
+        odf_package(
+            "odp",
+            f"<draw:page>{_frame('outline', '<text:p>Run grep -E &quot;^[^#]&quot; on [^0-9].</text:p>')}</draw:page>",
+        )
+    )
+
+    assert processed.text_blocks[0].text == 'Run grep -E "^[^#]" on [^0-9].'
+
+
 # ---------------------------------------------------------------------------
 # A deck LibreOffice wrote (26.8, exported from a python-pptx deck)
 # ---------------------------------------------------------------------------

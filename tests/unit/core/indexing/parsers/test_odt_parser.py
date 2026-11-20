@@ -314,6 +314,13 @@ async def test_comments_and_footnotes_are_left_out(odf_package):
 
 
 @pytest.mark.asyncio
+async def test_literal_footnote_like_brackets_are_kept(odf_package):
+    md = await _markdown(odf_package, '<text:p>Run grep -E "^[^#]" or match [^0-9] in the field.</text:p>')
+
+    assert md == 'Run grep -E "^[^#]" or match [^0-9] in the field.'
+
+
+@pytest.mark.asyncio
 async def test_a_chart_keeps_its_title_and_data_table(odf_package):
     chart = (
         '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
