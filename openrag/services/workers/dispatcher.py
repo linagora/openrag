@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
-from core.indexing.file_fences import FileFences, delete_in_progress, indexing_in_progress
+from core.indexing.file_fences import FileFences, delete_in_progress, indexing_in_progress, target_exists
 from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
     COPY_CONTENT_CLAIM_TOKEN_PREFIX,
@@ -25,6 +25,7 @@ from core.utils.error_summary import extract_task_error_reason, failure_reason_f
 from core.utils.exceptions import (
     ConflictError,
     DocumentNotFoundError,
+    PartitionNotFoundError,
     ServiceUnavailableError,
     mark_indexing_worker_may_be_running,
 )
@@ -294,10 +295,12 @@ class WorkerDispatcher(IndexingDispatcher):
                 raise RuntimeError("File delete fence lease was lost during cleanup")
 
     async def _delete_with_renewable_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
-        # The Postgres fence is renewed on its own (run_holding), so a slow
-        # TaskStateManager renewal can't hold it past its deadline.
+        # The Postgres fence is renewed on its own (hold), so a slow
+        # TaskStateManager renewal can't hold it past its deadline. hold also
+        # releases it, except after a delete stopped midway, whose vector
+        # delete may still land: that fence is left to expire.
         delete_task = asyncio.create_task(
-            self._file_fences.run_holding(
+            self._file_fences.hold(
                 partition=partition,
                 file_id=file_id,
                 holder_id=fence_id,
@@ -704,10 +707,7 @@ class WorkerDispatcher(IndexingDispatcher):
             # One that fails after it still has: the upload's commit is refused,
             # and the client retries the delete.
             await self._file_fences.acquire_for_delete(partition=partition, file_id=file_id, holder_id=fence_id)
-            try:
-                await self._delete_with_renewable_fence(file_id=file_id, partition=partition, fence_id=fence_id)
-            finally:
-                await self._file_fences.release(partition=partition, file_id=file_id, holder_id=fence_id)
+            await self._delete_with_renewable_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         except Exception:
             delete_failed = True
             raise
@@ -758,27 +758,27 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
-        catalog_metadata = await self._document_repo.get_file_metadata(file_id, partition)
-        if catalog_metadata is None:
+        # A file that isn't there takes no fence.
+        if await self._document_repo.get_file_metadata(file_id, partition) is None:
             return
         # Every chunk is read and written back by a Milvus upsert, which
         # re-inserts a row that is gone: without the fence, an update that
         # reads before a delete and writes after it brings the chunks back.
         holder_id = uuid.uuid4().hex
         await self._file_fences.acquire_for_metadata(partition=partition, file_id=file_id, holder_id=holder_id)
-        try:
-            await self._file_fences.run_holding(
-                partition=partition,
-                file_id=file_id,
-                holder_id=holder_id,
-                work=lambda: self._update_file_metadata(file_id, metadata, partition, catalog_metadata),
-            )
-        finally:
-            await self._file_fences.release(partition=partition, file_id=file_id, holder_id=holder_id)
+        await self._file_fences.hold(
+            partition=partition,
+            file_id=file_id,
+            holder_id=holder_id,
+            work=lambda: self._update_file_metadata(file_id, metadata, partition),
+        )
 
-    async def _update_file_metadata(
-        self, file_id: str, metadata: dict, partition: str, catalog_metadata: dict[str, Any]
-    ) -> None:
+    async def _update_file_metadata(self, file_id: str, metadata: dict, partition: str) -> None:
+        # Read under the fence: an update or a delete that ended before it was
+        # taken changed the row, and the protected values must match the chunks.
+        catalog_metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        if catalog_metadata is None:
+            return
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
@@ -818,6 +818,12 @@ class WorkerDispatcher(IndexingDispatcher):
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
             raise DocumentNotFoundError(f"File '{file_id}' not found in partition '{partition}'.")
+        if metadata.get("content_sha256"):
+            # Read again after the snapshot: the hash the caller read before it
+            # can belong to a revision a replace has since swapped out, which
+            # check_unchanged would not see. A replace after the snapshot is
+            # refused by check_unchanged, whichever hash this reads.
+            metadata = {**metadata, "content_sha256": await self._document_repo.get_content_sha256(file_id, partition)}
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
         # Also the holder of the target's fence: the copy is the one operation
@@ -844,19 +850,13 @@ class WorkerDispatcher(IndexingDispatcher):
                 embedder_fingerprint=embedder_fingerprint,
             )
 
-        try:
-            if fenced:
-                # Re-embedding into another vector field can outlast the lease.
-                await self._file_fences.run_holding(
-                    partition=target_partition, file_id=target_file_id, holder_id=claim_token, work=run_copy
-                )
-            else:
-                await run_copy()
-        finally:
-            if fenced:
-                await self._file_fences.release(
-                    partition=target_partition, file_id=target_file_id, holder_id=claim_token
-                )
+        if fenced:
+            # Re-embedding into another vector field can outlast the lease.
+            await self._file_fences.hold(
+                partition=target_partition, file_id=target_file_id, holder_id=claim_token, work=run_copy
+            )
+        else:
+            await run_copy()
 
     async def _copy_file(  # noqa: PLR0913 - the arguments of copy_file, resolved once
         self,
@@ -893,6 +893,11 @@ class WorkerDispatcher(IndexingDispatcher):
             claimed_content = True
 
         try:
+            # Checked under the target's fence, which no upload can hold
+            # meanwhile: the insert below would otherwise add these chunks to
+            # the file already there, and its catalog write refuse the row.
+            if await self._document_repo.file_exists_in_partition(file_id=target_file_id, partition=target_partition):
+                raise target_exists(target_file_id, target_partition)
             # The source holds no fence, so copies of one file can run side by
             # side; it must be free before the read and unchanged after it.
             await self._file_fences.check_free(partition=partition, file_id=file_id, own_holder_id=claim_token)
@@ -947,7 +952,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 catalog_kwargs["fence_holder_id"] = claim_token
             try:
                 await self._insert_entities(entities, protected_metadata=file_metadata)
-                await self._document_repo.add_file_to_partition(
+                inserted = await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
                     partition=target_partition,
                     file_metadata=file_metadata,
@@ -959,6 +964,14 @@ class WorkerDispatcher(IndexingDispatcher):
                     chunk_count=len(entities),
                     **catalog_kwargs,
                 )
+                # A refusal, not a success: the target appeared (without fences,
+                # nothing kept it free since the check) or its partition went.
+                if not inserted:
+                    if await self._document_repo.file_exists_in_partition(
+                        file_id=target_file_id, partition=target_partition
+                    ):
+                        raise target_exists(target_file_id, target_partition)
+                    raise PartitionNotFoundError(f"Partition '{target_partition}' no longer exists.")
             except (Exception, asyncio.CancelledError):
                 # Also a copy stopped because its target fence was lost: the
                 # vectors it inserted, all marked with its token, go with it,
