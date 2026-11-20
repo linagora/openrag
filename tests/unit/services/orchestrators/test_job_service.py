@@ -101,6 +101,19 @@ async def test_get_queue_info_rolls_up_states():
 
 
 @pytest.mark.asyncio
+async def test_get_queue_info_uses_current_pool_config_over_stale_task_state_manager():
+    tsm = FakeTSM(pool={"total_capacity": 50, "pool_size": 1, "max_tasks_per_worker": 50})
+    service = JobService(
+        tsm,
+        worker_pool_info={"total_capacity": 10, "pool_size": 1, "max_tasks_per_worker": 10},
+    )
+
+    out = await service.get_queue_info()
+
+    assert out["workers"] == {"total_slots": 10, "pool_size": 1, "max_per_actor": 10}
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_admin_sees_all():
     info = {
         "t1": {

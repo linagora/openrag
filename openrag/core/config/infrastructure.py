@@ -66,7 +66,7 @@ class RDBConfig(ConfigMixin):
 class RayIndexerConfig(ConfigMixin):
     # Indexing capacity = pool_size (worker actors) × max_tasks_per_worker (files per worker).
     pool_size: int = Field(default=1, ge=1)
-    max_tasks_per_worker: int = Field(default=50, ge=1)
+    max_tasks_per_worker: int = Field(default=10, ge=1)
 
 
 class RayServeConfig(ConfigMixin):

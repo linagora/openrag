@@ -762,10 +762,19 @@ class ServiceContainer:
             from services.orchestrators.job_service import JobService
             from services.workers.bootstrap import get_stage_progress_manager, get_task_state_manager
 
+            settings = self._require_settings()
+            indexer_config = settings.ray.indexer
+            pool_size = indexer_config.pool_size
+            max_tasks_per_worker = indexer_config.max_tasks_per_worker
             self._job_service = JobService(
                 task_state_manager=get_task_state_manager(),
                 job_repo=self.job_repo,
                 stage_progress_manager=get_stage_progress_manager(),
+                worker_pool_info={
+                    "pool_size": pool_size,
+                    "max_tasks_per_worker": max_tasks_per_worker,
+                    "total_capacity": pool_size * max_tasks_per_worker,
+                },
             )
         return self._job_service
 

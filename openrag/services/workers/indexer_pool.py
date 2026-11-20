@@ -92,7 +92,11 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # counts the file without consuming the slot, so the upload is counted twice
 # until its task settles and the user's next upload can be refused; a worker
 # from a v20 build of #664 alone would not take fence_holder_id.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v21"
+# v22 sizes each worker's max_concurrency from max_tasks_per_worker when Ray
+# creates it, so a v21 worker reused by name keeps the limit it was created
+# with: the files-in-flight default (#1364) needs a new generation to apply on
+# a shared Ray.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v22"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
