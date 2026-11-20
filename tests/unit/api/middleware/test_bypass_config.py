@@ -780,7 +780,7 @@ async def test_fresh_oidc_session_reads_are_concurrent(monkeypatch, read) -> Non
         reads += 1
         if reads == 2:
             both_reading.set()
-        await both_reading.wait()
+        await asyncio.wait_for(both_reading.wait(), timeout=5)
         return session if read == "session" else user
 
     svc = type("S", (), {})()
@@ -802,7 +802,7 @@ async def test_fresh_oidc_session_reads_are_concurrent(monkeypatch, read) -> Non
                 for _ in range(2)
             )
         ),
-        timeout=5,
+        timeout=10,
     )
 
     assert [response.status_code for response in responses] == [200, 200]
