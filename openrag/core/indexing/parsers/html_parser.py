@@ -23,6 +23,25 @@ from .document_parser import DocumentParser
 from .registry import parser_registry
 
 
+class _LiteralAttributeValue(str):
+    """Mark an HTML attribute value that must not undergo entity substitution."""
+
+
+class _CaptionHTMLFormatter(HTMLFormatter):
+    """Preserve literal image attributes while escaping HTML text nodes."""
+
+    def attributes(self, tag):
+        for name, value in super().attributes(tag):
+            if tag.name == "img" and name in {"alt", "src"} and value is not None:
+                value = _LiteralAttributeValue(value)
+            yield name, value
+
+    def substitute(self, value):
+        if isinstance(value, _LiteralAttributeValue):
+            return str(value)
+        return super().substitute(value)
+
+
 @parser_registry.register("html")
 class HtmlParser(DocumentParser):
     """Parse HTML documents into a single Markdown text block."""
@@ -67,7 +86,7 @@ class HtmlParser(DocumentParser):
         if re.search(r"<caption(?=[\s/>])", html, re.IGNORECASE):
             soup = BeautifulSoup(html, "html5lib")
 
-            formatter = HTMLFormatter(
+            formatter = _CaptionHTMLFormatter(
                 entity_substitution=EntitySubstitution.substitute_html,
                 void_element_close_prefix=None,
             )

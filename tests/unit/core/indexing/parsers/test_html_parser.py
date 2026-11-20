@@ -181,6 +181,33 @@ async def test_html_parser_preserves_escaped_angle_brackets_in_caption():
 
 
 @pytest.mark.asyncio
+async def test_html_parser_preserves_literal_image_attributes_with_caption():
+    html = (
+        "<table>"
+        "<caption>Image table</caption>"
+        "<tbody><tr><td>"
+        '<img alt="été" src="https://example.com/image.png?a=1&b=2">'
+        "</td></tr></tbody>"
+        "</table>"
+    )
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="image-caption.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "été" in text
+    assert "&eacute;" not in text
+    assert "a=1&b=2" in text
+    assert "a=1&amp;b=2" not in text
+
+
+@pytest.mark.asyncio
 async def test_html_parser_preserves_content_around_table_with_bare_col():
     html = (
         "<p>T\u00e9l\u00e9chargez le rapport</p>"
