@@ -129,8 +129,11 @@ Upload a new file to a specific partition for indexing.
     expired before indexing started. Nothing was queued; retry the upload.
   - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. Until the delete
     has removed the file from the catalog, `POST` answers the plain "already exists"
-    `409` instead; once it has, `POST` answers this code. The refused upload shows as
-    a cancelled job in the Jobs history. Retry once the delete has succeeded. Earlier
+    `409` instead; once it has, `POST` answers this code. The content check runs
+    first, so if another file in the partition holds the same bytes the answer is
+    `DOCUMENT_CONTENT_EXISTS` instead. The refused upload shows as a cancelled job in
+    the Jobs history. With `FILE_FENCES=postgres` the delete check runs first and the
+    refused upload leaves no job. Retry once the delete has succeeded. Earlier
     releases answered `500`.
 - `415 Unsupported Media Type`: the file's extension and mimetype are both
   unsupported, or its content does not match its extension (for example a `.pdf`
@@ -287,8 +290,11 @@ Replace an existing file in the partition. Deletes the current entry and creates
     returns `DOCUMENT_INDEXING_IN_PROGRESS`.
   - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
     expired before indexing started. Nothing was queued; retry the request.
-  - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. The refused
-    upload shows as a cancelled job in the Jobs history. Once the delete has
+  - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. The content
+    check runs first, so if another file in the partition holds the same bytes the
+    answer is `DOCUMENT_CONTENT_EXISTS` instead. The refused upload shows as a
+    cancelled job in the Jobs history; with `FILE_FENCES=postgres` the delete check
+    runs first and the refused upload leaves no job. Once the delete has
     succeeded the file no longer exists, so a `PUT`
     answers `404`: upload it again with `POST`, passing `workspace_ids` to add it
     back to the workspaces the delete removed it from. Earlier releases answered `500`.
