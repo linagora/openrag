@@ -104,6 +104,28 @@ who did go over their quota can upload again once their file count is below the
 limit: they delete enough files to get below it, or an administrator raises the
 quota above their current count.
 
+## OpenRAG 2.3.6: fewer files indexed at once by default
+
+`RAY_MAX_TASKS_PER_WORKER`, the number of files each indexer worker processes at
+once, now defaults to 10 instead of 50, in the configuration and in the chart. With
+the default single worker (`RAY_POOL_SIZE=1`), at most 10 files are in flight; the
+others wait their turn. Each file in flight holds its parsed content and chunks in
+memory while it waits for the LLM, VLM and parser limits, in the pod that also
+serves chat when Ray is embedded.
+
+To keep the previous behaviour, set `RAY_MAX_TASKS_PER_WORKER=50` (under
+`env.config` on Kubernetes).
+
+Ray sets a worker's limit when it creates the worker, so 2.3.6 moves the indexer
+actors from generation `v19` to `v22`: the new replicas create `v22` workers with
+the new limit instead of reusing the `v19` ones. With Ray inside the OpenRAG pod
+or container, the upgrade restarts Ray and nothing extra is needed. On a shared
+Ray cluster (`ray.enabled: true`, or an external cluster), the `v19` workers stay
+until they are retired: follow
+[Upgrades that change the indexer generation](/openrag/documentation/kubernetes/#upgrades-that-change-the-indexer-generation),
+and on an external cluster retire `v19` as in
+[Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
+
 ## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
 
 The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any
@@ -171,30 +193,6 @@ upgrade stops the old pod before it starts the new one. A rolling update ran bot
 for a moment, each with its own Ray, and the new pod's job reconciler could mark
 the old pod's queued jobs failed for good. Expect the API to be unavailable while
 the new pod starts. With a shared Ray cluster, the rolling update is unchanged.
-
-## Next OpenRAG release: fewer files indexed at once by default
-
-`RAY_MAX_TASKS_PER_WORKER`, the number of files each indexer worker processes at
-once, now defaults to 10 instead of 50, in the configuration and in the chart. With
-the default single worker (`RAY_POOL_SIZE=1`), at most 10 files are in flight; the
-others wait their turn. Each file in flight holds its parsed content and chunks in
-memory while it waits for the LLM, VLM and parser limits, in the pod that also
-serves chat when Ray is embedded.
-
-To keep the previous behaviour, set `RAY_MAX_TASKS_PER_WORKER=50` (under
-`env.config` on Kubernetes).
-
-This also moves detached indexer actors from `v19` to `v20`: Ray fixes a
-worker's concurrency when it is created, so existing `v19` workers keep the old
-limit across an API-only rollout. Embedded Ray recreates them with the OpenRAG
-pod. For KubeRay, follow the Ray pod restart procedure above. For an external
-Ray cluster, stop traffic to the old API replicas and retire `v19` before
-starting the new release; see
-[Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
-
-The currently published `v2.3.5` app and Ray images still run v19. The new
-actor generation and queue-capacity reporting take effect with images built
-from this change; the chart and image tags are updated together in the release.
 
 ## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
 

@@ -148,7 +148,7 @@ PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
   --confirm-legacy-idle
 ```
 
-Protocol-aware generations drain automatically. Retiring the previous `v19` generation rejects new submissions, waits for all accepted jobs to settle, and only then removes its dispatcher and workers:
+Protocol-aware generations drain automatically. For example, retiring `v19` rejects new submissions, waits for all accepted jobs to settle, and only then removes that generation's dispatcher and workers:
 
 ```bash
 PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
