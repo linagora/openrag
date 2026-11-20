@@ -929,13 +929,28 @@ async def test_a_copy_whose_source_changed_during_the_read_is_refused() -> None:
 @pytest.mark.asyncio
 async def test_two_copies_of_one_source_do_not_conflict() -> None:
     fences = InMemoryFileFences()
-    dispatcher, _, _ = _copy_dispatcher(fences)
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    reading = 0
+    both_reading = asyncio.Event()
+
+    async def read_source(*_args, **_kwargs) -> list[dict]:
+        # Each read waits for the other: copies that took turns on the source never get here together.
+        nonlocal reading
+        reading += 1
+        if reading == 2:
+            both_reading.set()
+        await asyncio.wait_for(both_reading.wait(), timeout=5)
+        return [{"_id": 1, "text": "a", "file_id": "source"}]
+
+    store.query_chunks_by_filter.side_effect = read_source
 
     await asyncio.gather(
         dispatcher.copy_file("source", {"file_id": "copy-a", "partition": PARTITION}, PARTITION, None),
         dispatcher.copy_file("source", {"file_id": "copy-b", "partition": PARTITION}, PARTITION, None),
     )
 
+    written = {call.kwargs["file_id"] for call in repo.add_file_to_partition.await_args_list}
+    assert written == {"copy-a", "copy-b"}
     assert fences.fences == {}
 
 
@@ -1029,3 +1044,46 @@ async def test_a_copy_whose_target_partition_went_is_refused_and_removes_its_chu
 
     assert store.delete_by_filter.await_args.args[0]["file_id"] == FILE_ID
     assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_deduplicated_copy_of_a_source_without_a_hash_yet_reads_it_after_the_snapshot() -> None:
+    # The caller read no hash; a replace adding one settled before the snapshot.
+    # Without the read, the copy would store the replacement with no hash and skip dedup.
+    fences = InMemoryFileFences()
+    dispatcher, repo, _ = _copy_dispatcher(fences)
+    repo.get_content_sha256 = AsyncMock(return_value="sha-of-replacement")
+
+    await dispatcher.copy_file(
+        "source",
+        {"file_id": FILE_ID, "partition": PARTITION, "content_sha256": None},
+        PARTITION,
+        None,
+        deduplicate=True,
+    )
+
+    assert repo.claim_content_sha256.await_args.kwargs["content_sha256"] == "sha-of-replacement"
+    assert repo.add_file_to_partition.await_args.kwargs["content_sha256"] == "sha-of-replacement"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_copy_removes_its_chunks_even_when_the_catalog_cannot_be_read() -> None:
+    # A refused insert is known not to have committed: a failed lookup must not keep its chunks.
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    repo.add_file_to_partition.return_value = False
+    repo.file_exists_in_partition.side_effect = [False, ConnectionError("database unreachable")]
+
+    async def read_metadata(file_id, _partition) -> dict:
+        if file_id == FILE_ID:
+            raise ConnectionError("database unreachable")
+        return dict(SOURCE_ROW)
+
+    repo.get_file_metadata.side_effect = read_metadata
+
+    with pytest.raises(ConnectionError):
+        await _copy(dispatcher)
+
+    cleanup_filter = store.delete_by_filter.await_args.args[0]
+    assert cleanup_filter["file_id"] == FILE_ID
+    assert cleanup_filter[INDEXING_TASK_ID_METADATA_KEY].startswith(COPY_CONTENT_CLAIM_TOKEN_PREFIX)

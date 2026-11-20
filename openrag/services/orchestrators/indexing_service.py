@@ -428,7 +428,14 @@ class IndexingService:
                 await self._pin_partition_embedder(target_partition)
                 destination = self._copy_destination(target_partition)
                 await copying.enter_async_context(self._copy_in_flight(target_partition))
-            await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user, **destination)
+            await self._dispatcher.copy_file(
+                source_file_id,
+                metadata,
+                source_partition,
+                user,
+                deduplicate=self._deduplication_enabled(),
+                **destination,
+            )
 
     def _copy_in_flight(self, partition: str) -> AbstractAsyncContextManager[None]:
         copy_in_flight = getattr(self._partition_service, "copy_in_flight", None)

@@ -79,8 +79,12 @@ class IndexingDispatcher(ABC):
         embedder: Embedder | None = None,
         embedder_reference: str | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        deduplicate: bool = False,
     ) -> None:
         """Copy a file's chunks into another partition / file id.
+
+        With ``deduplicate``, the source's content hash is read with its
+        snapshot and claimed for the target, whatever ``metadata`` carries.
 
         With ``vector_field``, the copy's vectors end up in that field only,
         re-embedded with ``embedder`` where the source has none there. A copy

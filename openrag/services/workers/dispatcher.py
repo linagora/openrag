@@ -814,15 +814,17 @@ class WorkerDispatcher(IndexingDispatcher):
         embedder: Any = None,
         embedder_reference: str | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        deduplicate: bool = False,
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
             raise DocumentNotFoundError(f"File '{file_id}' not found in partition '{partition}'.")
-        if metadata.get("content_sha256"):
-            # Read again after the snapshot: the hash the caller read before it
-            # can belong to a revision a replace has since swapped out, which
-            # check_unchanged would not see. A replace after the snapshot is
-            # refused by check_unchanged, whichever hash this reads.
+        if deduplicate or metadata.get("content_sha256"):
+            # Read after the snapshot: a hash the caller read before it can
+            # belong to a revision a replace has since swapped out (or be None
+            # while the replace adds one), which check_unchanged would not see.
+            # A replace after the snapshot is refused by check_unchanged,
+            # whichever hash this reads.
             metadata = {**metadata, "content_sha256": await self._document_repo.get_content_sha256(file_id, partition)}
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
@@ -950,6 +952,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 catalog_kwargs["indexation_config"] = indexation_config
             if fenced:
                 catalog_kwargs["fence_holder_id"] = claim_token
+            refused = False
             try:
                 await self._insert_entities(entities, protected_metadata=file_metadata)
                 inserted = await self._document_repo.add_file_to_partition(
@@ -967,6 +970,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 # A refusal, not a success: the target appeared (without fences,
                 # nothing kept it free since the check) or its partition went.
                 if not inserted:
+                    refused = True
                     if await self._document_repo.file_exists_in_partition(
                         file_id=target_file_id, partition=target_partition
                     ):
@@ -976,8 +980,9 @@ class WorkerDispatcher(IndexingDispatcher):
                 # Also a copy stopped because its target fence was lost: the
                 # vectors it inserted, all marked with its token, go with it,
                 # unless its catalog row committed after all (a failure at the
-                # commit itself), which must keep them.
-                if not await self._copy_committed(target_file_id, target_partition, indexed_at):
+                # commit itself), which must keep them. A refused insert is
+                # known not to have committed: no lookup can say otherwise.
+                if refused or not await self._copy_committed(target_file_id, target_partition, indexed_at):
                     await self._cleanup_submitted_vectors(
                         claim_token, metadata={"file_id": target_file_id}, partition=target_partition
                     )
