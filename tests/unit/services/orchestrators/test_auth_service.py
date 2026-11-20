@@ -323,31 +323,73 @@ async def test_callback_state_mismatch():
 
 @pytest.mark.asyncio
 async def test_callback_unregistered_user_rejected():
-    svc = _service(user_repo=FakeUserRepo({}), client=FakeOIDCClient(bundle=_bundle()))
-    state, cookie = await _login_and_get_state(svc)
-    with pytest.raises(OIDCFlowError) as ei:
-        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+    sub = "kc-unregistered"
+    svc = _service(
+        user_repo=FakeUserRepo({}),
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": sub})),
+    )
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        level="WARNING",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        with pytest.raises(OIDCFlowError) as ei:
+            await svc.handle_oidc_callback(
+                code="abc",
+                state=state,
+                state_cookie_raw=cookie,
+            )
+    finally:
+        logger.remove(handler_id)
+
     assert ei.value.status_code == 403
     assert ei.value.message == "User not registered"
+
+    captured_logs = "".join(log_messages)
+    assert sub not in captured_logs
+    assert f"sub_hash={hash_oidc_sub(sub)}" in captured_logs
 
 
 @pytest.mark.asyncio
 async def test_callback_auto_provisions_when_enabled():
+    sub = "kc-bob"
     urepo = FakeUserRepo({})
     svc = _service(
         user_repo=urepo,
-        client=FakeOIDCClient(bundle=_bundle(claims={"sub": "kc-bob", "name": "Bob", "email": "bob@x.io"})),
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": sub, "name": "Bob", "email": "bob@x.io"})),
         cfg=_cfg(auto_provision_login=True),
     )
-    state, cookie = await _login_and_get_state(svc)
-    result = await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        level="INFO",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        result = await svc.handle_oidc_callback(
+            code="abc",
+            state=state,
+            state_cookie_raw=cookie,
+        )
+    finally:
+        logger.remove(handler_id)
 
     assert len(urepo.created) == 1
     created = urepo.created[0]
-    assert created.external_user_id == "kc-bob"
+    assert created.external_user_id == sub
     assert created.display_name == "Bob"
     assert created.is_admin is False
     assert result.next_url == "/home"
+
+    captured_logs = "".join(log_messages)
+    assert sub not in captured_logs
+    assert f"sub_hash={hash_oidc_sub(sub)}" in captured_logs
 
 
 @pytest.mark.asyncio
@@ -415,6 +457,55 @@ async def test_callback_refuses_an_account_managed_by_config():
     assert (managed.display_name, managed.email, managed.is_admin) == ("cozy-stack", None, True)
     assert mrepo.assigned == [] and mrepo.updated == [] and mrepo.removed == []
     assert srepo.created == []
+
+
+class FailingUserRepo(FakeUserRepo):
+    async def create_user(self, user: User) -> User:
+        raise RuntimeError("database connection failed")
+
+
+@pytest.mark.asyncio
+async def test_callback_auto_provision_failure_does_not_log_raw_sub():
+    sub = "kc-provision-failure"
+    svc = _service(
+        user_repo=FailingUserRepo({}),
+        client=FakeOIDCClient(
+            bundle=_bundle(
+                claims={
+                    "sub": sub,
+                    "name": "Bob",
+                    "email": "bob@example.com",
+                }
+            )
+        ),
+        cfg=_cfg(auto_provision_login=True),
+    )
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        format="{message} {extra}",
+        level="ERROR",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        with pytest.raises(OIDCFlowError) as ei:
+            await svc.handle_oidc_callback(
+                code="abc",
+                state=state,
+                state_cookie_raw=cookie,
+            )
+    finally:
+        logger.remove(handler_id)
+
+    assert ei.value.status_code == 500
+
+    captured_logs = "".join(log_messages)
+    assert sub not in captured_logs
+    assert hash_oidc_sub(sub) in captured_logs
+    assert "RuntimeError" in captured_logs
+    assert "database connection failed" not in captured_logs
 
 
 @pytest.mark.asyncio
