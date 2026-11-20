@@ -88,7 +88,12 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # generation can safely be reused with the combined worker and task-state API.
 # v20: submit and process_file take fence_holder_id (#1430); a v19 worker
 # rejects it, and a v19 pool would never renew the fence.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v20"
+# v21 combines v20 with the #664 contract: workers consume the upload's
+# file-quota reservation at the catalog insert. A v20 worker reused by name
+# counts the file without consuming the slot, so the upload is counted twice
+# until its task settles and the user's next upload can be refused; a worker
+# from a v20 build of #664 alone would not take fence_holder_id.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v21"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a

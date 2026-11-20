@@ -5,7 +5,7 @@ row still references it: a copy keeps its source's ``source``. The index
 makes that lookup, by ``file_metadata ->> 'source'``, an index scan.
 
 Revision ID: 9ed228e7ea17
-Revises: 934e9f4e871f
+Revises: a2b3c4d5e6f7
 Create Date: 2026-11-19
 """
 
@@ -15,7 +15,7 @@ from alembic import op
 from schema_helpers import index_exists
 
 revision: str = "9ed228e7ea17"
-down_revision: str | Sequence[str] | None = "934e9f4e871f"
+down_revision: str | Sequence[str] | None = "a2b3c4d5e6f7"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

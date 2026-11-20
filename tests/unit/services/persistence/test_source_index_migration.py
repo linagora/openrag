@@ -39,7 +39,7 @@ def _install(monkeypatch, migration, *, exists: bool) -> _FakeOp:
 
 
 def test_chains_after_the_file_fences_revision(migration):
-    assert migration.down_revision == "934e9f4e871f"
+    assert migration.down_revision == "a2b3c4d5e6f7"
 
 
 def test_upgrade_creates_the_expression_index(monkeypatch, migration):

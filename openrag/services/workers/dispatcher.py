@@ -45,6 +45,7 @@ from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 from services.workers.task_state import (
     QUEUE_REFUSED_CANCELLED,
+    QUEUE_REFUSED_FILE_DELETING,
     QUEUE_REFUSED_FILE_INDEXING,
     QUEUE_REFUSED_INDEXING_CAPACITY,
     TASK_JOB_OUTCOME_PENDING_METADATA_KEY,
@@ -459,8 +460,9 @@ class WorkerDispatcher(IndexingDispatcher):
         callback_token: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
+        task_id: str | None = None,
     ) -> str:
-        task_id = uuid.uuid4().hex
+        task_id = task_id or uuid.uuid4().hex
         file_id = str(metadata.get("file_id") or "")
         content_sha256 = metadata.get("content_sha256")
         content_claim_token = f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}"
@@ -529,6 +531,8 @@ class WorkerDispatcher(IndexingDispatcher):
             reason = admission.get("reason")
             if reason == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
                 raise _indexing_in_progress(file_id, partition, busy_task_id)
+            if reason == QUEUE_REFUSED_FILE_DELETING:
+                raise _delete_in_progress(file_id, partition)
             if reason == QUEUE_REFUSED_CANCELLED:
                 raise RuntimeError(f"Task {task_id} was cancelled before it queued")
             if reason == QUEUE_REFUSED_INDEXING_CAPACITY:
@@ -538,9 +542,8 @@ class WorkerDispatcher(IndexingDispatcher):
                     # Preserve this API code so existing clients keep retrying it.
                     code="INDEXING_OUTCOME_BACKLOG",
                 )
-            raise RuntimeError(
-                f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
-            )
+            # Only an older TaskStateManager, whose boolean answer gives no reason.
+            raise RuntimeError(f"Task {task_id} for file {file_id!r} in partition {partition!r} was refused")
 
         task: Any | None = None
         submission_started = False
@@ -632,6 +635,12 @@ class WorkerDispatcher(IndexingDispatcher):
                             error_reason=error_reason,
                             completed_at=datetime.now(UTC),
                         )
+            except BaseException as cleanup_exc:
+                # A cancel that failed or timed out never confirmed the worker
+                # stopped, so its error must keep the upload and its slot too.
+                if not worker_stopped:
+                    mark_indexing_worker_may_be_running(cleanup_exc)
+                raise
             finally:
                 if worker_stopped:
                     await release_fence()
@@ -883,6 +892,7 @@ class WorkerDispatcher(IndexingDispatcher):
         embedder: Any = None,
         embedder_reference: str | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        quota_reservation_id: str | None = None,
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
@@ -958,6 +968,10 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                     indexed_at=indexed_at,
                     chunk_count=len(entities),
+                    quota_reservation_id=quota_reservation_id,
+                    # A copy holds its slot in the request, with no task to keep
+                    # it live, so a long copy can outlast the sweep's grace.
+                    recheck_quota_if_slot_gone=True,
                     **catalog_kwargs,
                 )
             except Exception:

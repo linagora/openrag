@@ -17,7 +17,7 @@ from .test_users_managed_by_config_migration import _alembic_config
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
 
 REVISION = "9ed228e7ea17"
-PREVIOUS = "934e9f4e871f"
+PREVIOUS = "a2b3c4d5e6f7"
 
 
 async def _add(store: PostgresStore, file_id: str, partition: str, source: str | None) -> None:
