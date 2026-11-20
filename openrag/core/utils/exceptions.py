@@ -275,6 +275,22 @@ class ConflictError(OpenRAGError):
         super().__init__(message, code=code, status_code=409, **kwargs)
 
 
+class FileFenceLostError(ConflictError):
+    """A catalog write whose operation no longer holds the file's fence (#1430).
+
+    Another operation took the fence meanwhile, most often a delete, which wins
+    over indexing. The write is refused so the file is not made visible again;
+    the caller's failure path removes the vectors it stored.
+    """
+
+    def __init__(self, file_id: str, partition: str, **kwargs):
+        super().__init__(
+            f"File '{file_id}' in partition '{partition}' was changed by another operation while this one ran.",
+            code="FILE_FENCE_LOST",
+            **kwargs,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Quota
 # ---------------------------------------------------------------------------
