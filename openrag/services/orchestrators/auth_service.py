@@ -71,6 +71,11 @@ class OIDCFlowError(OpenRAGError):
         self.error_description = error_description
 
 
+# Shown to the user when a login is refused because group sync could not take
+# access away; the cause is in the server log only.
+_GROUP_SYNC_FAILED = "OIDC group sync failed"
+
+
 # In-process replay cache for back-channel logout token jti values, mapping
 # jti -> replay expiry. A logout token may only be consumed once (OIDC spec). This
 # is per-worker; with multiple workers a replay could still reach a different
@@ -148,9 +153,7 @@ class AuthService:
     ) -> None:
         self._user_repo = user_repo
         self._oidc_session_repo = oidc_session_repo
-        # Retained for the role/membership helpers that later phases will
-        # route through this service (8B onward); the OIDC flow itself
-        # does not touch it.
+        # Read to authorize requests, and written by the OIDC group sync at login.
         self._membership_repo = membership_repo
         self._oidc_client = oidc_client
         self._config = config
@@ -844,10 +847,13 @@ class AuthService:
         missing claim never prunes, to avoid mass-revocation on a
         misconfiguration. ``is_admin`` is never touched here.
 
-        Never raises: a single bad/unknown group (e.g. a partition that does
-        not exist yet, which trips the FK) is logged and skipped so it cannot
-        block an otherwise-valid login. Reads groups from the claims already in
-        hand — no extra IdP round-trip.
+        A failure that would leave the user with *less* access than the token
+        grants (an add or a role raise, e.g. on a partition that does not exist
+        yet, which trips the FK) is logged and skipped so it cannot block an
+        otherwise-valid login. A failure that would leave *more* access (a role
+        lowered, a membership pruned, or memberships that cannot be read) raises
+        :class:`OIDCFlowError`, so no session is created on stale rights. Reads
+        groups from the claims already in hand — no extra IdP round-trip.
         """
         if not (self._config.claim_groups or "").strip():
             return
@@ -857,14 +863,15 @@ class AuthService:
         try:
             current_memberships = await self._membership_repo.list_user_partitions(user.id)
         except Exception as e:
-            logger.bind(user_id=user.id).warning(f"OIDC group sync: failed to read memberships: {e}")
-            return
+            logger.bind(user_id=user.id).exception("OIDC group sync: failed to read memberships")
+            raise OIDCFlowError(_GROUP_SYNC_FAILED, status_code=500) from e
         current = {m.partition: m.role.value for m in current_memberships}
 
         # Add missing / update changed roles from the token.
         for partition, role in desired.items():
             if current.get(partition) == role:
                 continue
+            lowering = partition in current and self.ROLE_HIERARCHY[role] < self.ROLE_HIERARCHY[current[partition]]
             try:
                 if partition in current:
                     await self._membership_repo.update_partition_role(user.id, partition, PartitionRole(role))
@@ -879,7 +886,11 @@ class AuthService:
                         "OIDC group sync: added partition membership"
                     )
             except Exception as e:
-                logger.bind(user_id=user.id, partition=partition, role=role).warning(
+                log = logger.bind(user_id=user.id, partition=partition, role=role)
+                if lowering:
+                    log.exception("OIDC group sync: could not lower partition role")
+                    raise OIDCFlowError(_GROUP_SYNC_FAILED, status_code=500) from e
+                log.warning(
                     f"OIDC group sync: could not apply membership (partition may not exist or other error): {e}"
                 )
 
@@ -916,7 +927,8 @@ class AuthService:
                         "OIDC group sync: pruned partition membership"
                     )
                 except Exception as e:
-                    logger.bind(user_id=user.id, partition=partition).warning(f"OIDC group sync: prune failed: {e}")
+                    logger.bind(user_id=user.id, partition=partition).exception("OIDC group sync: prune failed")
+                    raise OIDCFlowError(_GROUP_SYNC_FAILED, status_code=500) from e
 
 
 __all__ = [
