@@ -407,9 +407,10 @@ counts without exposing partition or preset names.
 What restarts the pods after a credential in the env Secret changes (`AUTH_TOKEN`,
 `POSTGRES_PASSWORD`, `METRICS_TOKEN`, an API key) depends on where that Secret comes from:
 
-- **`env.secrets`** (the default `values` provider): a `helm upgrade` that changes any of
-  them, or `postgresql.auth.password`, rolls the API Deployment. Its pod template carries a
-  checksum of the Secret's values.
+- **`env.secrets`** (the default `values` provider): from OpenRAG 2.3.6, a `helm upgrade`
+  that changes any of them, or `postgresql.auth.password`, rolls the API Deployment. Its pod
+  template carries a checksum of the Secret's values. With the chart of an earlier release,
+  nothing rolls: restart the API as for `env.existingSecret` below.
 
   With the bundled PostgreSQL (`postgresql.enabled: true`), changing
   `postgresql.auth.password` changes only the password the API sends. PostgreSQL sets the
