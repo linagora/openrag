@@ -103,38 +103,38 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
 
 ## D8. A replace reads the previous `source` before its commit, under the fence
 
-**1A**, `indexer_actor.process_file`. Status: taken.
+**#1428**, `indexer_actor.process_file` (#1472). Status: taken.
 
 - **Decision:** the worker reads the row's `source` with `get_file_metadata` before `update_file_in_partition`, and deletes it once the commit succeeds, before it releases the fence.
 - **Why:** `update_file_in_partition` returns a bool that five tests assert on. Under Postgres fences (the v2.4.0 default) replaces are serialized, so the read is exact.
-- **Rejected:** `UPDATE … RETURNING` (IDX_01), which changes that return type for no gain under Postgres fences.
+- **Rejected:** `UPDATE … RETURNING`, which changes that return type for no gain under Postgres fences.
 - **Impact:** under Ray fences nothing is deleted (D11), so the leak two concurrent replaces could cause there never happens. A delete checks references first, so it never takes an original a row references at that moment; a copy still running is the exception (D12).
 
 ## D9. A failed job's upload is deleted where the job settles, unless a row references it
 
-**1A**, `indexer_pool`. Status: taken.
+**#1428**, `indexer_pool` (#1472). Status: taken.
 
 - **Decision:** at settle, with `SAVE_UPLOADED_FILES=true` and an unsuccessful task, the pool deletes the upload and its `.md` unless a catalog row references it.
 - **Why:**
-  - pre-flight failures and a lost worker lease never enter `process_file`'s failure path (IDX_01's place);
+  - pre-flight failures and a lost worker lease never enter `process_file`'s failure path;
   - a job that fails after its catalog commit leaves an indexed file, whose original must stay;
   - no row references a failed upload, so deleting it after the fence is released is safe.
 - **Rejected:** deleting it in `process_file`'s failure path, which misses those failures.
 
 ## D10. Originals are deleted only under `data_dir`, after a reference check
 
-**1A**, `services/storage/originals.py`. Status: taken.
+**#1428**, `services/storage/originals.py` (#1472). Status: taken.
 
 - **Decision:** `OriginalsCleaner` deletes a path, with its `.md`, only if it resolves under `data_dir` (symlinks followed) and `referenced_sources` no longer names it. If the check fails, the whole batch stays.
 - **Why:** a copy keeps its source's `source`, possibly in another partition. The resolve keeps a bad path from reaching outside the data directory.
-- **Impact:** an MCP `index_url` original, which sits in the node's temp directory, is never deleted by 1A. It's kept only with `SAVE_UPLOADED_FILES=true`, and 1C moves it into the store (#1003).
+- **Impact:** an MCP `index_url` original, which sits in the node's temp directory, is never deleted by this change. It's kept only with `SAVE_UPLOADED_FILES=true`, until #1003 moves it into `data_dir`.
 
 ## D11. Originals are deleted only with `FILE_FENCES=postgres`
 
-**1A**, `originals_cleaner_for`, used by the API container and each indexer worker. Status: taken.
+**#1428**, `originals_cleaner_for`, used by the API container and each indexer worker (#1472). Status: taken.
 
 - **Decision:** a process builds the cleaner only with `FILE_FENCES=postgres`, the v2.4.0 default. Otherwise there is none: every delete, replace and failed job keeps its original, as today.
-- **Why:** IDX_01 says 1A can ship in 2.3.x, but IDX_00 keeps behavior changes off until v2.4.0, and 2.3.x is cut from `develop`. A deleted file can't be brought back, so this lands with the release that announces it. Tying it to the fences adds no setting.
+- **Why:** #1428 is a bug users have today, which could ship in a 2.3.x release, but the refactor keeps its behavior changes off until v2.4.0, and 2.3.x is cut from `develop`. A deleted file can't be brought back, so this lands with the release that announces it. Tying it to the fences adds no setting.
 - **Rejected:**
   - shipping it in 2.3.x as a plain fix: `SAVE_UPLOADED_FILES` defaults to `true`, so every deployment would start deleting at once;
   - a setting of its own, dead once v2.4.0 makes it the default.
@@ -142,7 +142,7 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
 
 ## D12. A copy running while its source is deleted can lose its original
 
-**1A**, `WorkerDispatcher.copy_file`. Status: taken.
+**#1428**, `WorkerDispatcher.copy_file` (#1472). Status: taken.
 
 - **Decision:** the copy keeps running without the source file's fence, and the gap is accepted.
 - **Why:**
@@ -154,7 +154,7 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
 
 ## D13. The orphan script considers only uploads, and deletes nothing where the catalog knows none
 
-**1A**, `scripts/find_orphan_originals.py`, `services/storage/orphan_originals.py`. Status: taken.
+**#1428**, `scripts/find_orphan_originals.py`, `services/storage/orphan_originals.py` (#1472). Status: taken.
 
 - **Decision:**
   - it lists only files directly under `data_dir` named like an upload (`make_unique_filename`), with their `.md` copies, older than `--min-age-hours` (24 by default, at least 1);
