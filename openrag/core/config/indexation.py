@@ -89,6 +89,8 @@ class FileLoadersConfig(ConfigMixin):
     pptx: str = "PPTXLoader"
     xlsx: str = "XlsxParser"
     xlsm: str = "XlsxParser"
+    odt: str = "OdtLoader"
+    odp: str = "OdpLoader"
     doc: str = "DocLoader"
     png: str = "ImageLoader"
     jpeg: str = "ImageLoader"
@@ -137,6 +139,8 @@ class MimetypesConfig(ConfigMixin):
         default=".xlsm",
         alias="application/vnd.ms-excel.sheet.macroEnabled.12",
     )
+    application_odt: str = Field(default=".odt", alias="application/vnd.oasis.opendocument.text")
+    application_odp: str = Field(default=".odp", alias="application/vnd.oasis.opendocument.presentation")
     application_msword: str = Field(default=".doc", alias="application/msword")
     image_png: str = Field(default=".png", alias="image/png")
     image_jpeg: str = Field(default=".jpeg", alias="image/jpeg")
