@@ -464,7 +464,7 @@ class TestPhase8OrchestratorWiring:
 
         container = ServiceContainer(_settings())
         embedder = AsyncMock()
-        embedder.embed.return_value = [[0.1]]
+        embedder.embed_query.return_value = [[0.1]]
         monkeypatch.setattr(container, "create_embedder", lambda *a, **kw: embedder)
         monkeypatch.setattr(container, "create_llm", lambda *a, **kw: MagicMock())
         monkeypatch.setattr(container, "embedder_factory", lambda name: embedder)
@@ -698,8 +698,9 @@ class TestPhase14NamedComponentFactories:
         llm = c.llm_factory("chat-a")
         vlm = c.vlm_factory("vision-a")
 
-        # max_model_len / embed_concurrency aren't carried by the endpoint config,
-        # so the embedder factory backfills them from the static ``embedder`` settings.
+        # max_model_len / embed_concurrency / query_timeout aren't carried by the
+        # endpoint config, so the embedder factory backfills them from the static
+        # ``embedder`` settings.
         assert embedder.kwargs == {
             "endpoint": "http://embedder:8000/v1",
             "model_name": "embed-model",
@@ -709,6 +710,7 @@ class TestPhase14NamedComponentFactories:
             "dimension": 384,
             "max_model_len": 2047,
             "embed_concurrency": 4,
+            "query_timeout": 10.0,
         }
         assert reranker.kwargs["endpoint"] == "http://reranker:8000"
         assert reranker.kwargs["model_name"] == "rank-model"
@@ -723,17 +725,22 @@ class TestPhase14NamedComponentFactories:
         assert "batch_size" not in llm.kwargs
         assert "batch_size" not in vlm.kwargs
         assert "batch_size" not in reranker.kwargs
+        assert "query_timeout" not in llm.kwargs
+        assert "query_timeout" not in vlm.kwargs
+        assert "query_timeout" not in reranker.kwargs
 
     def test_embedder_extra_overrides_backfilled_embedder_defaults(self):
         """Per-endpoint embedder extras win over the settings defaults."""
         settings = _settings_with_named_models()
         settings.models.embedder["embed-a"].extra["max_model_len"] = 4096
         settings.models.embedder["embed-a"].extra["embed_concurrency"] = 9
+        settings.models.embedder["embed-a"].extra["query_timeout"] = 3.0
         c = ServiceContainer(settings)
 
         embedder = c.embedder_factory("embed-a")
         assert embedder.kwargs["max_model_len"] == 4096
         assert embedder.kwargs["embed_concurrency"] == 9
+        assert embedder.kwargs["query_timeout"] == 3.0
 
     def test_embedder_extra_batch_size_wins_over_top_level(self):
         """An explicit extra['batch_size'] must override the top-level value.
