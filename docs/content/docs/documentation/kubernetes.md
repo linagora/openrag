@@ -327,9 +327,9 @@ do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.
 
 The bundled Infinity reranker answers `/health` only once its model is loaded
-and its warmup benchmark has run. On our test machines that took 100 to 125 s on
-its default 4 CPUs, 180 to 210 s on 2 and 340 to 380 s on 1, whether or not the
-model was already cached. Its startup probe allows 10 minutes for that, plus a
+and its warmup benchmark has run. On CPU (`reranker.gpu.mode: none`), that took
+100 to 125 s on our test machines with its default 4 CPUs, 180 to 210 s on 2 and
+340 to 380 s on 1, whether or not the model was already cached. Its startup probe allows 10 minutes for that, plus a
 first-boot model download, and the liveness and readiness probes start only
 once it passes. A start that hangs is therefore restarted after 10 minutes.
 All three probes are set under `reranker.probes`, where each is merged over its
@@ -448,6 +448,58 @@ no longer matches. Use `printf '%s'` or `stringData` when writing the Secret.
 Restarting the pods automatically when an External Secrets Operator Secret rotates
 (Reloader, or a Secret checksum annotation) is not done here; it is tracked in
 [#985](https://github.com/linagora/openrag/issues/985).
+
+## Sharing a GPU with the reranker
+
+`nvidia.com/gpu` is an integer resource: a pod requesting `1` takes the whole card. The
+OpenRAG (and Ray) pods request it, so on a single card the Infinity reranker reaches the GPU
+through the container runtime instead. `reranker.gpu.mode` picks the path:
+
+| Mode | What the chart renders | Use when |
+|------|------------------------|----------|
+| `runtime` (default) | `runtimeClassName`, `NVIDIA_VISIBLE_DEVICES` from `reranker.gpu.visibleDevices`, no `nvidia.com/gpu` request | The reranker shares a card with a pod that requested it |
+| `request` | `nvidia.com/gpu: <reranker.gpu.count>` in requests and limits, plus `runtimeClassName` when set | The reranker gets a device through the scheduler |
+| `none` | `NVIDIA_VISIBLE_DEVICES=void`, no `runtimeClassName` | You want it on CPU |
+
+`request` mode gives the reranker a card of its own only if the device plugin advertises
+whole GPUs. With time-slicing (or another sharing mode that advertises replicas as
+`nvidia.com/gpu`), the device it receives is shared, so don't rely on this mode for
+isolation there. It also renders `reranker.runtimeClassName`: set that to `""` when NVIDIA
+is the node's default runtime and the cluster has no `nvidia` `RuntimeClass`.
+
+The device list is set by the chart, not taken from the image's `ENV`, so a changed image
+cannot silently hide the GPU from the reranker. Both GPU modes also set
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility`, so an image cannot hide CUDA either. Which
+device Infinity then computes on is its own setting (`--device`, or `INFINITY_DEVICE`),
+`auto` by default, which takes the GPU when one is visible; the chart does not set it.
+`runtime` mode refuses to render without `reranker.runtimeClassName` (default `nvidia`) or
+with a `reranker.gpu.visibleDevices` that exposes no GPU: one that names no device once
+split on commas (such as `""` or `,`), or has a `none` or `void` entry. Only a missing or
+`null` value means `all`, and a YAML list is joined with commas. `request` mode refuses a
+`reranker.gpu.count` that is not a positive integer, `true` included. Every mode refuses
+`NVIDIA_VISIBLE_DEVICES` and `NVIDIA_DRIVER_CAPABILITIES` in `reranker.extraEnv`, and
+`request` mode refuses `env.config.NVIDIA_VISIBLE_DEVICES`: a copy there would replace the
+device list the chart or the device plugin set. Every mode also refuses an `nvidia.com/`
+resource in `reranker.resources`, whether `nvidia.com/gpu` or a MIG or shared-GPU resource
+such as `nvidia.com/mig-1g.5gb`: `request` mode renders `nvidia.com/gpu` itself, and in
+`runtime` mode the chart's device list would override the device the plugin assigned. To
+share a MIG slice, set its device UUID in `reranker.gpu.visibleDevices`.
+
+`runtime` mode relies on the NVIDIA Container Toolkit honouring `NVIDIA_VISIBLE_DEVICES`
+from unprivileged containers (`accept-nvidia-visible-devices-envvar-when-unprivileged`,
+on by default). A cluster that turns this off ignores the variable, so the reranker would
+run on CPU. The chart cannot detect this at render time. Use `request` mode on such
+clusters: their device plugin has to pass the device some other way than this variable,
+as volume mounts or through CDI (`deviceListStrategy`), or the reranker still sees no
+GPU. On a node with several GPUs, `all` exposes every card, including ones the
+scheduler gave to other pods; set `reranker.gpu.visibleDevices` to the card the reranker
+should share (for example `"0"`).
+
+When `reranker.nodeSelector` is empty, the GPU modes schedule onto
+`reranker.gpu.nodeSelector` (default `nvidia.com/gpu.present: "true"`, the GPU operator's
+node label). A non-empty `reranker.nodeSelector` replaces that default. To schedule with
+no selector at all, set `reranker.gpu.nodeSelector: null`: Helm merges `{}` with the
+default and keeps the label.
 
 ## Monitoring
 

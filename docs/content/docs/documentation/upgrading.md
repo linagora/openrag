@@ -104,6 +104,31 @@ who did go over their quota can upload again once their file count is below the
 limit: they delete enough files to get below it, or an administrator raises the
 quota above their current count.
 
+## OpenRAG 2.3.6 on Kubernetes: the reranker runs on the GPU
+
+Until 2.3.6, the bundled reranker reached a GPU only when the node's runtime and
+the image's `ENV` happened to give it one, and otherwise ran on CPU without an
+error. From 2.3.6, `reranker.gpu.mode` sets the path, and the default, `runtime`,
+shares a card through the NVIDIA runtime: `runtimeClassName: nvidia`,
+`NVIDIA_VISIBLE_DEVICES=all`, `NVIDIA_DRIVER_CAPABILITIES=compute,utility`, and,
+when `reranker.nodeSelector` is empty, the GPU operator's node label
+`nvidia.com/gpu.present: "true"`. The modes are described in
+[Sharing a GPU with the reranker](/openrag/documentation/kubernetes/#sharing-a-gpu-with-the-reranker).
+
+| Your reranker | After `helm upgrade` | What to change |
+|---|---|---|
+| Runs on CPU, for example on a cluster without the `nvidia` RuntimeClass or GPU nodes | The pod is rejected (no `nvidia` RuntimeClass) or stays `Pending` (no node with the label) | Set `reranker.gpu.mode: none` |
+| Takes a GPU through `nvidia.com/gpu`, or another `nvidia.com/` resource such as a MIG slice, in `reranker.resources` | `helm upgrade` stops, and the error names the resource | Remove it, and set `reranker.gpu.mode: request` with `reranker.gpu.count`, or share the device in `runtime` mode through `reranker.gpu.visibleDevices` |
+| Already sets `runtimeClassName` and `nodeSelector`, as `values-linagora.yaml` does | Renders as before, plus the two NVIDIA variables, set to the values the Infinity image already carries | Nothing |
+| Sets `NVIDIA_VISIBLE_DEVICES` or `NVIDIA_DRIVER_CAPABILITIES` in `reranker.extraEnv` | `helm upgrade` stops, and the error names the variable | Remove it; set the device list in `reranker.gpu.visibleDevices` |
+
+`helm upgrade --reuse-values` keeps the previous chart's defaults, so none of the new ones
+apply: `reranker.runtimeClassName` stays `""`, and the upgrade stops at render time with
+`reranker.gpu.mode=runtime needs reranker.runtimeClassName`, whatever the reranker ran on.
+Add `--set reranker.gpu.mode=none` to keep a CPU reranker. To take the new GPU defaults
+instead, upgrade with `--reset-then-reuse-values` (Helm 3.14 and later), which loads the new
+chart's defaults under your previous values, or with your values file.
+
 ## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
 
 The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any

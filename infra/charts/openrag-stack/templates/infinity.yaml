@@ -71,6 +71,105 @@
 {{- fail (printf "env.config.RERANKER_BASE_URL renders %q but the reranker listens on port %s (reranker.service.port), so OpenRAG could not reach it. Set the port in reranker.service.port, which replaces reranker.servicePort, and env.config.RERANKER_BASE_URL to the chart default, which reads it." $url $port) }}
 {{- end }}
 {{- end }}
+{{- /* reranker.gpu.mode decides how Infinity reaches a GPU, and the rendered
+   manifest says which: a GPU mode with no way to a device fails here instead
+   of leaving the reranker on CPU without a word. */}}
+{{- $gpu := $reranker.gpu | default dict }}
+{{- /* Only a missing or null mode means runtime: `default` would also turn
+   false, which YAML reads from an unquoted off or no, into runtime. */}}
+{{- $gpuMode := "runtime" }}
+{{- if not (kindIs "invalid" $gpu.mode) }}
+{{- $gpuMode = $gpu.mode }}
+{{- end }}
+{{- if not (and (kindIs "string" $gpuMode) (has $gpuMode (list "runtime" "request" "none"))) }}
+{{- fail (printf "invalid reranker.gpu.mode: %q (accepted values: runtime, request, none; YAML reads an unquoted off or no as false)" (toString $gpuMode)) }}
+{{- end }}
+{{- if and (eq $gpuMode "runtime") (not $reranker.runtimeClassName) }}
+{{- fail "reranker.gpu.mode=runtime needs reranker.runtimeClassName (e.g. \"nvidia\"): without it the NVIDIA runtime hook never runs and the reranker silently falls back to CPU. Set gpu.mode=request to take a whole GPU through the scheduler, or gpu.mode=none to run it on CPU deliberately." }}
+{{- end }}
+{{- /* Neither this nor gpu.count uses `default`: sprig treats a numeric 0 as
+   empty, so GPU index 0 would become "all" and a count of 0 a one-GPU request.
+   Only a missing or null list means "all": the runtime hook reads an empty one
+   as no GPU. A YAML list is joined with commas, which toString would render as
+   "[0 1]". */}}
+{{- $visibleDevices := "all" }}
+{{- if kindIs "slice" $gpu.visibleDevices }}
+{{- $visibleDevices = join "," $gpu.visibleDevices | trim }}
+{{- else if not (kindIs "invalid" $gpu.visibleDevices) }}
+{{- $visibleDevices = $gpu.visibleDevices | toString | trim }}
+{{- end }}
+{{- /* Checked entry by entry, as the NVIDIA runtime hook reads the list: it
+   splits on commas and drops blank entries, and a list left with no entry
+   (an empty one included), or with a void or none one, exposes no GPU. */}}
+{{- $deviceEntries := list }}
+{{- range splitList "," $visibleDevices }}
+{{- if trim . }}
+{{- $deviceEntries = append $deviceEntries (trim . | lower) }}
+{{- end }}
+{{- end }}
+{{- if and (eq $gpuMode "runtime") (or (empty $deviceEntries) (has "none" $deviceEntries) (has "void" $deviceEntries)) }}
+{{- fail (printf "reranker.gpu.visibleDevices=%q exposes no GPU (empty, no device left after splitting on commas, or a none or void entry), so gpu.mode=runtime would run the reranker on CPU. Leave it unset for all GPUs, or set gpu.mode=none to run it on CPU deliberately." $visibleDevices) }}
+{{- end }}
+{{- $gpuCount := 1 }}
+{{- if not (kindIs "invalid" $gpu.count) }}
+{{- $gpuCount = $gpu.count }}
+{{- end }}
+{{- /* A boolean is refused before the conversions, which both read true as 1. */}}
+{{- if and (eq $gpuMode "request") (or (kindIs "bool" $gpuCount) (lt (int $gpuCount) 1) (ne (float64 (int $gpuCount)) (float64 $gpuCount))) }}
+{{- fail (printf "reranker.gpu.count must be a positive integer in gpu.mode=request (got %v). Set gpu.mode=none to run the reranker without a GPU." $gpuCount) }}
+{{- end }}
+{{- /* The mode owns the variables the NVIDIA runtime reads. The container's
+   env wins over what the device plugin sets, and a later entry over an earlier
+   one, so a copy in extraEnv would replace the device list rendered below, or
+   the one the device plugin assigned in request mode. */}}
+{{- range $reranker.extraEnv | default list }}
+{{- if has (toString .name) (list "NVIDIA_VISIBLE_DEVICES" "NVIDIA_DRIVER_CAPABILITIES") }}
+{{- fail (printf "reranker.extraEnv sets %s, which reranker.gpu.mode owns. Set the device list in reranker.gpu.visibleDevices (gpu.mode=runtime), the number of GPUs in reranker.gpu.count (gpu.mode=request), or gpu.mode=none for CPU, and remove %s from reranker.extraEnv." .name .name) }}
+{{- end }}
+{{- end }}
+{{- /* The env ConfigMap reaches the container through envFrom, below its env.
+   runtime and none modes render their own NVIDIA_VISIBLE_DEVICES, which wins;
+   request mode renders none, so a copy in env.config would replace the device
+   the device plugin assigned. */}}
+{{- if and (eq $gpuMode "request") (hasKey (.Values.env.config | default dict) "NVIDIA_VISIBLE_DEVICES") }}
+{{- fail "env.config.NVIDIA_VISIBLE_DEVICES reaches the reranker through the env ConfigMap, and in reranker.gpu.mode=request it would replace the device the device plugin assigned. Remove it from env.config, or use gpu.mode=runtime with reranker.gpu.visibleDevices." }}
+{{- end }}
+{{- /* gpu.mode owns the NVIDIA resources, and an entry left in reranker.resources
+   is refused rather than dropped: dropping one would move a reranker that had a
+   card of its own onto a shared one without a word. Kept, nvidia.com/gpu would
+   take the whole card in runtime mode, reserve an invisible one in none mode and
+   differ from gpu.count in request mode; a MIG or shared-GPU resource
+   (nvidia.com/mig-1g.5gb, nvidia.com/gpu.shared) would get a device that
+   runtime mode's device list then overrides. */}}
+{{- $resources := deepCopy ($reranker.resources | default dict) }}
+{{- range $section := list "requests" "limits" }}
+{{- $quantities := get $resources $section | default dict }}
+{{- range $name := keys $quantities | sortAlpha }}
+{{- if hasPrefix "nvidia.com/" $name }}
+{{- fail (printf "reranker.resources.%s sets %s, which reranker.gpu.mode owns. Remove it, and set gpu.mode=request with reranker.gpu.count for a card the scheduler assigns, gpu.mode=runtime with reranker.gpu.visibleDevices (an index, or a GPU or MIG device UUID) to share one, or gpu.mode=none for CPU." $section $name) }}
+{{- end }}
+{{- end }}
+{{- if eq $gpuMode "request" }}
+{{- $_ := set $quantities "nvidia.com/gpu" (int $gpuCount) }}
+{{- end }}
+{{- if $quantities }}
+{{- $_ := set $resources $section $quantities }}
+{{- end }}
+{{- end }}
+{{- /* runtime mode names the devices; request mode leaves that to the device
+   plugin; none mode pins void so an image default cannot hand it a GPU. Both
+   GPU modes set compute (CUDA) and utility (NVML), the NVIDIA toolkit's own
+   default, so a narrower list in the image's ENV cannot hide CUDA. */}}
+{{- $env := list }}
+{{- if eq $gpuMode "runtime" }}
+{{- $env = append $env (dict "name" "NVIDIA_VISIBLE_DEVICES" "value" $visibleDevices) }}
+{{- else if eq $gpuMode "none" }}
+{{- $env = append $env (dict "name" "NVIDIA_VISIBLE_DEVICES" "value" "void") }}
+{{- end }}
+{{- if ne $gpuMode "none" }}
+{{- $env = append $env (dict "name" "NVIDIA_DRIVER_CAPABILITIES" "value" "compute,utility") }}
+{{- end }}
+{{- $env = concat $env ($reranker.extraEnv | default list) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -93,10 +192,10 @@ spec:
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
       automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.reranker "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
-      {{- if .Values.reranker.runtimeClassName }}
+      {{- if and .Values.reranker.runtimeClassName (ne $gpuMode "none") }}
       runtimeClassName: {{ .Values.reranker.runtimeClassName }}
       {{- end }}
-      {{- with .Values.reranker.nodeSelector }}
+      {{- with .Values.reranker.nodeSelector | default (ternary dict ($gpu.nodeSelector | default dict) (eq $gpuMode "none")) }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
@@ -112,7 +211,7 @@ spec:
             - containerPort: {{ .Values.reranker.service.port }}
               name: reranker
           resources:
-            {{- toYaml .Values.reranker.resources | nindent 12 }}
+            {{- toYaml $resources | nindent 12 }}
           {{- /* The default probes live here, not in values.yaml: Helm deletes a
              null that overrides a default, so a probe set to null could not be
              told from one left out. With no default under reranker.probes, a
@@ -176,7 +275,7 @@ liveness:
           volumeMounts:
             - name: hf-cache
               mountPath: /app/.cache/huggingface
-          {{- with $reranker.extraEnv }}
+          {{- with $env }}
           env:
             {{- toYaml . | nindent 12 }}
           {{- end }}
