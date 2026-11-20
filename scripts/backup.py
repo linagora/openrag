@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # ruff: noqa: E402
 
+import io
 import json
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from typing import IO, Any
 
 from _bootstrap import ensure_openrag_source_path
@@ -162,32 +165,60 @@ def dump_vdb_part(
         logger.info(f"{cnt} chunks written")
 
 
-def open_output_file(file_name: str, logger: Any) -> IO[str]:
+def _give_to_folder_owner(fd: int, file_name: str) -> None:
+    """Run as root, give the file to the owner of the folder it is written to.
+
+    The documented commands run this script as root in a container, writing to
+    a mounted host folder: the operator who owns the folder must still be able
+    to read and copy the backup.
     """
-    Opens output file for writing
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        folder = os.stat(os.path.dirname(file_name) or ".")
+        os.fchown(fd, folder.st_uid, folder.st_gid)
 
-    Parameters:
-        file_name:  Path to the output file or '-' for STDOUT
-        logger:     Logger for status and error reporting.
 
-    Returns:
-        file object:  Opened file handle in text mode.
+def _remove_if_created(file_name: str, created: os.stat_result) -> None:
+    """Remove ``file_name`` only while it is still the file this run created."""
+    with suppress(FileNotFoundError):
+        if os.path.samestat(os.lstat(file_name), created):
+            os.unlink(file_name)
+
+
+@contextmanager
+def open_output_file(file_name: str) -> Iterator[IO[str]]:
+    """Open the backup output for writing, '-' meaning STDOUT.
+
+    A backup holds every exported partition's documents, so the file is
+    created readable and writable by its owner only, and written through the
+    descriptor that created it: the name is never opened again. It is removed
+    if the backup fails, so a retry is not refused. A name that already exists,
+    symlinks included, is refused and never touched.
     """
     if file_name in ["-"]:
-        return sys.stdout
+        yield sys.stdout
+        return
 
-    if os.path.isfile(file_name):
+    if os.path.lexists(file_name):
         raise Exception(f"File '{file_name}' already exists.")
 
+    fd = os.open(file_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    created = os.fstat(fd)
     try:
-        if file_name.endswith(".xz"):
-            import lzma
+        with os.fdopen(fd, "wb") as raw:
+            # The umask, or a default ACL on the folder, filters the mode
+            # given to os.open: set it explicitly.
+            os.fchmod(raw.fileno(), 0o600)
+            _give_to_folder_owner(raw.fileno(), file_name)
+            if file_name.endswith(".xz"):
+                import lzma
 
-            return lzma.open(file_name, "wt", encoding="utf-8", preset=9 | lzma.PRESET_EXTREME)
-        else:
-            return open(file_name, "w", encoding="utf-8")
-    except Exception as e:
-        logger.error(f"Failed while opening file '{file_name}' for writing:\n" + str(e))
+                with lzma.open(raw, "wt", encoding="utf-8", preset=9 | lzma.PRESET_EXTREME) as out_fh:
+                    yield out_fh
+            else:
+                with io.TextIOWrapper(raw, encoding="utf-8") as out_fh:
+                    yield out_fh
+    except BaseException:
+        _remove_if_created(file_name, created)
         raise
 
 
@@ -296,7 +327,7 @@ def main():
         raise
 
     try:
-        with open_output_file(args.output, logger) as out_fh:
+        with open_output_file(args.output) as out_fh:
             with create_engine(database_url).connect() as conn:
                 # Dump data from RDB (one line per document)
                 dump_rdb_part(out_fh, conn, partitions, logger, args.verbose)
