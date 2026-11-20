@@ -834,8 +834,8 @@ async def test_refresh_renews_eligibility_before_releasing_the_session_lock(monk
     the two — the outer eligibility lock in dispatch does not.
     """
     import asyncio
-    import time as time_module
     from datetime import datetime, timedelta
+    from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     from services.auth.refresh import session_was_refreshed_since
@@ -843,6 +843,8 @@ async def test_refresh_renews_eligibility_before_releasing_the_session_lock(monk
     monkeypatch.setenv("AUTH_MODE", "oidc")
     monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
     monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    cache_time = 100.0
+    monkeypatch.setattr("api.middleware.auth.time", SimpleNamespace(monotonic=lambda: cache_time))
     start_refresh = asyncio.Event()
     finish_refresh = asyncio.Event()
     waiter_reached_session_read = asyncio.Event()
@@ -904,8 +906,6 @@ async def test_refresh_renews_eligibility_before_releasing_the_session_lock(monk
     # One shared cache entry, valid at the waiter's eligibility checks but
     # expiring while the waiter waits for the session lock.
     middleware._remember_authenticated_token(identity, "session-token", "session")
-    for key in list(middleware._recently_authenticated_tokens):
-        middleware._recently_authenticated_tokens[key] = time_module.monotonic() + 0.5
 
     async def is_limited(request):
         # The owner passed its bucket check before the bucket filled; every
@@ -921,7 +921,7 @@ async def test_refresh_renews_eligibility_before_releasing_the_session_lock(monk
         await asyncio.wait_for(waiter_reached_session_read.wait(), timeout=5)
         # Let the shared cache entry expire while the waiter waits on the
         # session lock the owner still holds inside the refresh.
-        await asyncio.sleep(0.6)
+        cache_time += middleware._recently_authenticated_token_ttl
         finish_refresh.set()
         responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
     finally:

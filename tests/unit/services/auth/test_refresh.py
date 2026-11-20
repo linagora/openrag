@@ -5,9 +5,21 @@ import pytest
 from services.auth.refresh import refresh_session_if_needed
 
 
+@pytest.fixture
+def refresh_clock(monkeypatch):
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    FrozenDatetime.current = FrozenDatetime(2026, 1, 1)
+    monkeypatch.setattr("services.auth.refresh.datetime", FrozenDatetime)
+    return FrozenDatetime
+
+
 @pytest.mark.asyncio
-async def test_recently_refreshed_unexpired_session_is_reused_inside_refresh_buffer(monkeypatch) -> None:
-    now = datetime.now()
+async def test_recently_refreshed_unexpired_session_is_reused_inside_refresh_buffer(monkeypatch, refresh_clock) -> None:
+    now = refresh_clock.now()
     last_refresh_at = now - timedelta(seconds=1)
     session = {
         "id": 7,
@@ -33,32 +45,30 @@ async def test_recently_refreshed_unexpired_session_is_reused_inside_refresh_buf
 
 
 @pytest.mark.asyncio
-async def test_recent_session_reread_is_rejected_if_token_expires_during_lookup() -> None:
-    import asyncio
-
-    now = datetime.now()
-    expires_at = now + timedelta(seconds=0.5)
+async def test_recent_session_reread_is_rejected_if_token_expires_during_lookup(refresh_clock) -> None:
+    now = refresh_clock.now()
     session = {
         "id": 8,
         "last_refresh_at": now,
-        "access_token_expires_at": expires_at,
+        "access_token_expires_at": now + timedelta(seconds=1),
     }
 
-    async def delayed_read(_session_id: int) -> dict:
-        await asyncio.sleep(0.75)
+    async def read_session(_session_id: int) -> dict:
+        refresh_clock.current += timedelta(seconds=2)
         return session
 
     auth_service = type("AuthService", (), {})()
-    auth_service.get_oidc_session_by_id_for_request = delayed_read
+    auth_service.get_oidc_session_by_id_for_request = AsyncMock(side_effect=read_session)
 
     result = await refresh_session_if_needed(session=session, enc_key="test-key", auth_service=auth_service)
 
     assert result is None
+    auth_service.get_oidc_session_by_id_for_request.assert_awaited_once_with(8)
 
 
 @pytest.mark.asyncio
-async def test_failed_refresh_reuses_newer_valid_session_inside_refresh_buffer(monkeypatch) -> None:
-    now = datetime.now()
+async def test_failed_refresh_reuses_newer_valid_session_inside_refresh_buffer(monkeypatch, refresh_clock) -> None:
+    now = refresh_clock.now()
     session = {
         "id": 9,
         "refresh_token_encrypted": b"old-refresh-token",
