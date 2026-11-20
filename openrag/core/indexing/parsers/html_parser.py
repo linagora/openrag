@@ -10,6 +10,7 @@ No file I/O, JavaScript execution, or image fetching is performed.
 from __future__ import annotations
 
 import asyncio
+import re
 
 from core.indexing.image_preprocessor import normalize_data_uri_images
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
@@ -58,10 +59,13 @@ class HtmlParser(DocumentParser):
 
     @staticmethod
     def _to_markdown(html: str) -> str:
-        from bs4 import BeautifulSoup
         from html_to_markdown import convert
 
-        soup = BeautifulSoup(html, "html5lib")
-        normalized_html = str(soup)
+        if re.search(r"<caption(?=[\s/>])", html, re.IGNORECASE):
+            from bs4 import BeautifulSoup
+            from bs4.formatter import HTMLFormatter
 
-        return convert(normalized_html)
+            soup = BeautifulSoup(html, "html5lib")
+            html = soup.decode(formatter=HTMLFormatter(void_element_close_prefix=None))
+
+        return convert(html)

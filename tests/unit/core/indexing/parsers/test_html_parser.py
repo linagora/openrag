@@ -112,7 +112,7 @@ async def test_caption_inside_tbody_is_kept():
         Document(
             filename="u.html",
             content_type=DocumentType.HTML,
-            text=html,
+            raw_bytes=html.encode("utf-8"),
         )
     )
 
@@ -123,7 +123,7 @@ async def test_caption_inside_tbody_is_kept():
 
 
 @pytest.mark.asyncio
-async def test_html_parser_preserves_caption_outside_table():
+async def test_html_parser_preserves_plain_paragraph():
     html = "<p>Report caption: alpha beta</p>"
 
     processed = await HtmlParser().parse(
@@ -140,12 +140,12 @@ async def test_html_parser_preserves_caption_outside_table():
 
 
 @pytest.mark.asyncio
-async def test_html_parser_preserves_table_without_caption():
-    html = "<table><tbody><tr><td>alpha</td><td>beta</td></tr></tbody></table>"
+async def test_html_parser_preserves_valid_table_caption():
+    html = "<table><caption>Report summary</caption><tbody><tr><td>alpha</td></tr></tbody></table>"
 
     processed = await HtmlParser().parse(
         Document(
-            filename="table.html",
+            filename="caption.html",
             content_type=DocumentType.HTML,
             text=html,
         )
@@ -153,5 +153,31 @@ async def test_html_parser_preserves_table_without_caption():
 
     text = processed.text_blocks[0].text
 
+    assert "Report summary" in text
     assert "alpha" in text
-    assert "beta" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_content_around_table_with_bare_col():
+    html = (
+        "<p>T\u00e9l\u00e9chargez le rapport</p>"
+        "<table><colgroup><col></colgroup>"
+        "<tbody><caption>Table summary</caption>"
+        "<tr><td>a</td></tr></tbody></table>"
+        "<p>apr\u00e8s</p>"
+    )
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="col.html",
+            content_type=DocumentType.HTML,
+            raw_bytes=html.encode("utf-8"),
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "T\u00e9l\u00e9chargez le rapport" in text
+    assert "Table summary" in text
+    assert "a" in text
+    assert "apr\u00e8s" in text
