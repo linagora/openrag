@@ -14,10 +14,21 @@ from services.orchestrators.indexing_service import IndexingService
 
 
 class FakeDocumentRepo:
-    def __init__(self, *, exists: bool = False, raise_on_check: bool = False, content_sha256: str | None = None):
+    def __init__(
+        self,
+        *,
+        exists: bool = False,
+        raise_on_check: bool = False,
+        content_sha256: str | None = None,
+        stored_metadata: dict | None = None,
+    ):
         self._exists = exists
         self._raise = raise_on_check
         self._content_sha256 = content_sha256
+        self._stored_metadata = stored_metadata
+
+    async def get_file_metadata(self, file_id: str, partition: str) -> dict | None:
+        return self._stored_metadata
 
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool:
         if self._raise:
@@ -614,6 +625,105 @@ async def test_replace_sets_replace_flag(tmp_path):
         replace=True,
     )
     assert disp.dispatched[0]["replace"] is True
+
+
+# What the catalog holds for a file uploaded as report-v1.pdf, then patched.
+_STORED_V1 = {
+    "created_at": "2024-03-01T00:00:00+00:00",
+    "title": "Annual report",
+    "relationship_id": "thread-7",
+    "mimetype": "application/pdf",
+    "source": "/data/abc_report-v1.pdf",
+    "filename": "report-v1.pdf",
+    "original_filename": "report-v1.pdf",
+    "file_size": "2.00 MB",
+    "file_id": "f1",
+    "content_sha256": "old-hash",
+    "degraded_stages": ["captioning"],
+    "_openrag_marker": "internal",
+    "partition": "p1",
+    "indexed_at": "2024-03-01T00:05:00+00:00",
+}
+
+
+async def _replace(tmp_path, *, stored: dict | None, metadata: dict) -> dict:
+    f = tmp_path / "report-v2.docx"
+    f.write_text("new version")
+    disp = FakeDispatcher()
+    svc = _service(doc=FakeDocumentRepo(stored_metadata=stored), disp=disp)
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata=metadata,
+        sanitized_filename="report-v2.docx",
+        original_filename="report-v2.docx",
+        user=None,
+        replace=True,
+    )
+    return disp.dispatched[0]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_a_replace_keeps_the_metadata_the_file_was_given(tmp_path):
+    md = await _replace(tmp_path, stored=_STORED_V1, metadata={})
+
+    assert md["title"] == "Annual report"
+    assert md["relationship_id"] == "thread-7"
+    assert md["created_at"].startswith("2024-03-01")
+
+
+@pytest.mark.asyncio
+async def test_a_replace_takes_what_describes_the_new_file_from_the_new_file(tmp_path):
+    md = await _replace(tmp_path, stored=_STORED_V1, metadata={})
+
+    assert md["filename"] == "report-v2.docx"
+    assert md["original_filename"] == "report-v2.docx"
+    assert md["source"].endswith("report-v2.docx")
+    assert md["file_size"] == "11.00 B"
+    assert md["content_sha256"] is None
+    for key in ("mimetype", "degraded_stages", "_openrag_marker", "partition", "indexed_at"):
+        assert key not in md
+
+
+@pytest.mark.asyncio
+async def test_a_replace_lets_the_request_override_kept_metadata(tmp_path):
+    md = await _replace(
+        tmp_path,
+        stored=_STORED_V1,
+        metadata={"title": "Annual report, revised", "mimetype": "application/msword"},
+    )
+
+    assert md["title"] == "Annual report, revised"
+    assert md["mimetype"] == "application/msword"
+    assert md["relationship_id"] == "thread-7"
+
+
+@pytest.mark.asyncio
+async def test_a_replace_of_a_file_with_no_stored_metadata_uses_the_request(tmp_path):
+    md = await _replace(tmp_path, stored=None, metadata={"author": "alice"})
+
+    assert md["author"] == "alice"
+    assert "title" not in md
+
+
+@pytest.mark.asyncio
+async def test_a_plain_upload_does_not_read_previous_metadata(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    disp = FakeDispatcher()
+    svc = _service(doc=FakeDocumentRepo(stored_metadata=_STORED_V1), disp=disp)
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user=None,
+    )
+
+    assert "title" not in disp.dispatched[0]["metadata"]
 
 
 @pytest.mark.asyncio
