@@ -126,6 +126,8 @@ def _env_flag(name: str, default: bool) -> bool:
 
 _RECENT_AUTHENTICATED_TOKEN_CACHE_MAX_ENTRIES = 1024
 _CredentialKind = Literal["session", "token"]
+_Credential = tuple[str, _CredentialKind]
+_Authenticated = tuple[Any, Any]
 
 
 class AuthFailureRateLimiter:
@@ -328,18 +330,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             logger.warning("Auth service unavailable", reason="service_unavailable", status=503, path=path)
             return None, JSONResponse(status_code=503, content={"detail": "Service unavailable"})
 
-    async def _can_revalidate(
-        self, request: Request, identity: str, token: str, kind: _CredentialKind, *, limited: bool
-    ) -> bool:
-        if not limited or self._has_recently_authenticated_token(identity, token, kind):
-            return True
-        return not await self._auth_failure_limiter.is_limited(request)
-
     async def _authenticate_oidc_session(
-        self, request: Request, auth_service: Any, identity: str, token: str, enc_key: str, *, limited: bool
-    ) -> tuple[Any, Any] | None:
-        if not await self._can_revalidate(request, identity, token, "session", limited=limited):
-            return None
+        self, auth_service: Any, identity: str, token: str, enc_key: str, *, limited: bool
+    ) -> _Authenticated | None:
         session = await auth_service.get_oidc_session_by_token_for_request(token)
         if session is not None and auth_service.oidc_session_needs_refresh(session):
             observed_session = session
@@ -350,7 +343,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # waited must see the renewed entry, not a 429 after the refresh
             # succeeded.
             async with self._lock_credentials([("oidc-session", self._token_fingerprint(token))]):
-                if not await self._can_revalidate(request, identity, token, "session", limited=limited):
+                if limited and not self._has_recently_authenticated_token(identity, token, "session"):
                     return None
                 session = await auth_service.get_oidc_session_by_token_for_request(token)
                 if session is not None:
@@ -380,6 +373,44 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self._forget_authenticated_token(identity, token, "session")
         return None, None
 
+    async def _validate_credentials(
+        self,
+        auth_service: Any,
+        credentials: tuple[_Credential, ...],
+        *,
+        enc_key: str,
+        identity: str,
+        eligible: set[_Credential] | None = None,
+    ) -> tuple[_Authenticated | None, tuple[_Credential, ...]]:
+        skipped: list[_Credential] = []
+        for credential in credentials:
+            token, kind = credential
+            if eligible is not None and (
+                credential not in eligible or not self._has_recently_authenticated_token(identity, token, kind)
+            ):
+                skipped.append(credential)
+                continue
+
+            if kind == "session":
+                result = await self._authenticate_oidc_session(
+                    auth_service, identity, token, enc_key, limited=eligible is not None
+                )
+                if result is None:
+                    skipped.append(credential)
+                    continue
+                user, session = result
+            else:
+                session = None
+                user = await auth_service.get_user_by_token_for_request(token)
+                if user is not None:
+                    self._remember_authenticated_token(identity, token, kind)
+                else:
+                    self._forget_authenticated_token(identity, token, kind)
+
+            if user is not None:
+                return (user, session), tuple(skipped)
+        return None, tuple(skipped)
+
     async def _authenticate_request(
         self,
         request: Request,
@@ -390,75 +421,67 @@ class AuthMiddleware(BaseHTTPMiddleware):
         enc_key: str,
         token: str | None,
         cookie_token: str | None,
-        oidc_bearer_token: str | None,
-        identity: str,
-        limited: bool,
-        unfiltered_credentials: tuple[str | None, str | None, str | None] | None = None,
-        retry_unfiltered_if_bucket_reopens: bool = False,
     ) -> tuple[Any, Any, Any] | Response:
-        auth_service, unavailable = self._resolve_auth_service(request)
-        if unavailable is not None:
-            return unavailable
-
-        blocked_credential = False
-
-        async def retry_with_unfiltered_credentials_if_bucket_reopened(
-            *, bucket_reopened: bool = False
-        ) -> tuple[Any, Any, Any] | Response | None:
-            if unfiltered_credentials is None or not (retry_unfiltered_if_bucket_reopens or blocked_credential):
-                return None
-            if not bucket_reopened and await self._auth_failure_limiter.is_limited(request):
-                return None
-
-            unfiltered_token, unfiltered_cookie, unfiltered_oidc_bearer = unfiltered_credentials
-            return await self._authenticate_request(
-                request,
-                path=path,
-                auth_mode=auth_mode,
-                oidc_gated=oidc_gated,
-                enc_key=enc_key,
-                token=unfiltered_token,
-                cookie_token=unfiltered_cookie,
-                oidc_bearer_token=unfiltered_oidc_bearer,
-                identity=identity,
-                limited=False,
+        limiter = self._auth_failure_limiter
+        identity = limiter._identity(request)
+        candidates: tuple[tuple[str | None, _CredentialKind], ...] = (
+            (cookie_token, "session"),
+            (token if auth_mode == "oidc" else None, "session"),
+            (token, "token"),
+        )
+        credentials = tuple(
+            dict.fromkeys(
+                (value, kind) for value, kind in candidates if value is not None and (value or kind == "token")
             )
-
-        for session_token in dict.fromkeys((cookie_token, oidc_bearer_token)):
-            if not session_token:
-                continue
-            result = await self._authenticate_oidc_session(
-                request, auth_service, identity, session_token, enc_key, limited=limited
-            )
-            if result is None:
-                blocked_credential = True
-            else:
-                user, session = result
-                if user is not None:
-                    retry_result = await retry_with_unfiltered_credentials_if_bucket_reopened()
-                    if retry_result is not None:
-                        return retry_result
-                    return user, session, auth_service
-
-        if token is not None:
-            if await self._can_revalidate(request, identity, token, "token", limited=limited):
-                user = await auth_service.get_user_by_token_for_request(token)
-                if user is not None:
-                    self._remember_authenticated_token(identity, token, "token")
-                    retry_result = await retry_with_unfiltered_credentials_if_bucket_reopened()
-                    if retry_result is not None:
-                        return retry_result
-                    return user, None, auth_service
-                self._forget_authenticated_token(identity, token, "token")
-            else:
-                blocked_credential = True
-
+        )
+        limited = await limiter.is_limited(request)
         if limited:
-            if await self._auth_failure_limiter.is_limited(request):
-                return await self._auth_failure_limiter.limited_response(request)
-            retry_result = await retry_with_unfiltered_credentials_if_bucket_reopened(bucket_reopened=True)
-            if retry_result is not None:
-                return retry_result
+            recent = tuple(
+                credential
+                for credential in credentials
+                if self._has_recently_authenticated_token(identity, *credential)
+            )
+            if not recent:
+                return await limiter.limited_response(request)
+
+            # Serialize limited revalidation so waiters observe cache eviction
+            # before repeating a failed lookup.
+            async with self._lock_recently_authenticated_tokens(identity, tuple(value for value, _ in recent)):
+                limited = await limiter.is_limited(request)
+                if limited:
+                    eligible = {
+                        credential
+                        for credential in recent
+                        if self._has_recently_authenticated_token(identity, *credential)
+                    }
+                    if not eligible:
+                        return await limiter.limited_response(request)
+                    auth_service, unavailable = self._resolve_auth_service(request)
+                    if unavailable is not None:
+                        return unavailable
+                    result, skipped = await self._validate_credentials(
+                        auth_service, credentials, enc_key=enc_key, identity=identity, eligible=eligible
+                    )
+
+        if not limited:
+            auth_service, unavailable = self._resolve_auth_service(request)
+            if unavailable is not None:
+                return unavailable
+            result, _ = await self._validate_credentials(auth_service, credentials, enc_key=enc_key, identity=identity)
+        elif skipped or result is None:
+            if await limiter.is_limited(request):
+                if result is None:
+                    return await limiter.limited_response(request)
+            elif skipped:
+                # Earlier skipped candidates can take precedence after the
+                # bucket reopens. Keep a successful result if none validate.
+                retry, _ = await self._validate_credentials(auth_service, skipped, enc_key=enc_key, identity=identity)
+                if retry is not None:
+                    result = retry
+
+        if result is not None:
+            user, session = result
+            return user, session, auth_service
         if auth_mode == "token":
             # The API's existing token-mode contract is a 403 with this detail.
             detail = "Invalid token" if token is not None else "Missing token"
@@ -557,72 +580,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return _login_redirect(request, path)
             return await call_next(request)
 
-        token = self._request_token(request, path)
-        cookie_token = request.cookies.get(SESSION_COOKIE_NAME) if auth_mode == "oidc" else None
-        identity = self._auth_failure_limiter._identity(request)
-        limited = await self._auth_failure_limiter.is_limited(request)
-        oidc_bearer_token = token if auth_mode == "oidc" else None
-        candidates: tuple[tuple[str | None, _CredentialKind], ...] = (
-            (cookie_token, "session"),
-            (oidc_bearer_token, "session"),
-            (token, "token"),
+        result = await self._authenticate_request(
+            request,
+            path=path,
+            auth_mode=auth_mode,
+            oidc_gated=oidc_gated,
+            enc_key=enc_key,
+            token=self._request_token(request, path),
+            cookie_token=request.cookies.get(SESSION_COOKIE_NAME) if auth_mode == "oidc" else None,
         )
-        recent_credentials = (
-            tuple(
-                (credential, kind)
-                for credential, kind in candidates
-                if credential is not None and self._has_recently_authenticated_token(identity, credential, kind)
-            )
-            if limited
-            else ()
-        )
-        # Serialize limited requests so a failed revalidation evicts the
-        # cached credential before other waiters perform storage lookups.
-        if limited and not recent_credentials:
-            return await self._auth_failure_limiter.limited_response(request)
-
-        args = {
-            "path": path,
-            "auth_mode": auth_mode,
-            "oidc_gated": oidc_gated,
-            "enc_key": enc_key,
-            "identity": identity,
-        }
-        if limited:
-            async with self._lock_recently_authenticated_tokens(
-                identity, tuple(credential for credential, _ in recent_credentials)
-            ):
-                limited = await self._auth_failure_limiter.is_limited(request)
-                if limited:
-                    eligible = {
-                        (credential, kind)
-                        for credential, kind in recent_credentials
-                        if self._has_recently_authenticated_token(identity, credential, kind)
-                    }
-                    if not eligible:
-                        return await self._auth_failure_limiter.limited_response(request)
-                    skipped_credentials = any(
-                        credential is not None and (credential, kind) not in eligible for credential, kind in candidates
-                    )
-                    result = await self._authenticate_request(
-                        request,
-                        token=token if (token, "token") in eligible else None,
-                        cookie_token=cookie_token if (cookie_token, "session") in eligible else None,
-                        oidc_bearer_token=oidc_bearer_token if (oidc_bearer_token, "session") in eligible else None,
-                        limited=True,
-                        unfiltered_credentials=(token, cookie_token, oidc_bearer_token),
-                        retry_unfiltered_if_bucket_reopens=skipped_credentials,
-                        **args,
-                    )
-        if not limited:
-            result = await self._authenticate_request(
-                request,
-                token=token,
-                cookie_token=cookie_token,
-                oidc_bearer_token=oidc_bearer_token,
-                limited=False,
-                **args,
-            )
 
         if isinstance(result, Response):
             return result

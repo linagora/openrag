@@ -965,9 +965,14 @@ async def test_oidc_bearer_fallback_rechecks_eligibility_after_cookie_lookup(mon
 
     if bucket_reopened:
         assert response.status_code == 200
-        assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == ["bearer", "bearer"]
+        svc.get_user_by_token_for_request.assert_awaited_once_with("bearer")
+        assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == [
+            "cookie",
+            "bearer",
+        ]
     else:
         assert response.status_code == 429
+        svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("cookie")
         svc.get_user_by_token_for_request.assert_not_awaited()
 
 
@@ -980,7 +985,12 @@ async def test_uncached_bearer_is_checked_if_bucket_reopens_after_cached_cookie_
     monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
     svc = type("S", (), {})()
     svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
-    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 7})
+
+    async def lookup_bearer(_token):
+        assert middleware._credential_locks == {}
+        return {"id": 7}
+
+    svc.get_user_by_token_for_request = AsyncMock(side_effect=lookup_bearer)
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
     request = _request(
@@ -998,7 +1008,6 @@ async def test_uncached_bearer_is_checked_if_bucket_reopens_after_cached_cookie_
     assert response.status_code == 200
     svc.get_user_by_token_for_request.assert_awaited_once_with("valid-api-token")
     assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == [
-        "revoked-cookie",
         "revoked-cookie",
         "valid-api-token",
     ]
@@ -1038,6 +1047,38 @@ async def test_cookie_precedence_is_restored_if_bucket_reopens_during_bearer_loo
     assert response.body == b"1"
     svc.get_user_by_token_for_request.assert_awaited_once_with("api-token")
     svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("valid-cookie")
+
+
+@pytest.mark.asyncio
+async def test_successful_cached_cookie_needs_no_lower_priority_retry(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value={"id": 3, "user_id": 1})
+    svc.oidc_session_needs_refresh = lambda _session: False
+    svc.get_user_for_request = AsyncMock(return_value={"id": 1})
+    svc.get_user_by_token_for_request = AsyncMock()
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    request = _request(
+        path="/indexer/files",
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-cookie", "authorization": "Bearer api-token"},
+    )
+    limiter = middleware._auth_failure_limiter
+    middleware._remember_authenticated_token(limiter._identity(request), "valid-cookie", "session")
+    check = AsyncMock(side_effect=[True, True, False])
+    monkeypatch.setattr(limiter, "is_limited", check)
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    assert response.status_code == 200
+    assert check.await_count == 2
+    svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("valid-cookie")
+    svc.get_user_for_request.assert_awaited_once_with(1)
+    svc.get_user_by_token_for_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1129,6 +1170,10 @@ async def test_oidc_lockout_only_validates_cached_credentials(monkeypatch, recen
 
     assert response.status_code == status
     assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == lookups
+    if status == 429:
+        svc.get_user_by_token_for_request.assert_not_awaited()
+    else:
+        svc.get_user_by_token_for_request.assert_awaited_once_with("bearer")
 
 
 @pytest.mark.asyncio
