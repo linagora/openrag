@@ -339,14 +339,24 @@ at. Every `409` here is temporary: retry once the other operation has ended. Cop
 run side by side; a copy whose source changed while it was read answers
 `409 DOCUMENT_CHANGED_DURING_COPY`.
 
-Deleting a workspace deletes the files it orphaned under the same rules, with one difference: it
-does not stop a file's indexing task, it takes the file over. The task runs on until its final
-write, which is refused, and then removes the chunks it stored.
+The table applies to a file the catalog knows. Whether the file exists is checked first, so a file
+whose first upload hasn't finished indexing, or that a delete has already removed from the catalog,
+gets the answer for a missing file instead of a `409`: a metadata update returns `200` without
+changing anything, and a delete or a copy of it returns `404`. A copy into a `file_id` that already
+exists answers `409 DOCUMENT_ALREADY_EXISTS`, which retrying doesn't change.
+
+Deleting a workspace deletes the files it orphaned under the same rules, with two differences: it
+does not stop a file's indexing task, it takes the file over (the task runs on until its final
+write, which is refused, and then removes the chunks it stored); and a file it could not delete
+does not fail the request. Such files are listed in the response's `orphaned_files_failed`, and the
+codes below never come back from the workspace delete itself.
 
 A delete, metadata update or copy keeps the file for as long as it runs. If the catalog database
 stops answering meanwhile, the operation stops before another one could take the file and answers
-`503 FILE_FENCE_UNAVAILABLE`: retry once the database is back. One whose file was taken over
-meanwhile answers `409 FILE_FENCE_LOST`.
+`503 FILE_FENCE_UNAVAILABLE`: retry once the database is back. The file stays held for up to two
+minutes after that, so that a write already sent to the vector store lands before another operation
+starts. One whose file was taken over meanwhile answers `409 FILE_FENCE_LOST`. These two codes come
+from the file endpoints: upload, replace, delete, metadata update and copy.
 
 #### Check Indexing Status
 ```http

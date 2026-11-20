@@ -82,6 +82,7 @@ async def test_copy_existing_source_still_creates_target_and_returns_201(copy_ap
         {"title": "Copy", "file_id": "copy", "partition": "target", "content_sha256": None},
         "source",
         {"id": 7, "is_admin": False},
+        deduplicate=False,
     )
 
 

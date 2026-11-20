@@ -57,6 +57,14 @@ def indexing_in_progress(file_id: str, partition: str, task_id: str) -> Conflict
     )
 
 
+def target_exists(file_id: str, partition: str) -> ConflictError:
+    """A copy into a ``file_id`` already taken: not temporary, unlike the fence refusals."""
+    return ConflictError(
+        f"File '{file_id}' already exists in partition '{partition}'.",
+        code="DOCUMENT_ALREADY_EXISTS",
+    )
+
+
 def copy_in_progress(file_id: str, partition: str) -> ConflictError:
     """Same code as indexing: a copy writes the file the way an upload does, but has no task id."""
     return ConflictError(
@@ -143,7 +151,11 @@ class FileFences:
         """Take the fence for a delete: over indexing, after a delete or a metadata update.
 
         With ``take_over_indexing=False`` a file being indexed is refused with
-        409 instead: for a delete that may turn out to have nothing to do.
+        409 instead: for a delete that may turn out to have nothing to do. That
+        includes a task whose job already reads as finished while its lease
+        runs: its worker may still be writing (a job failed at startup by
+        ``fail_orphaned_jobs``), and a delete with nothing to do must not cost
+        it its fence.
         """
         if self._repo is None:
             return
@@ -155,6 +167,7 @@ class FileFences:
                 kind=FileFenceKind.DELETE,
                 holder_id=holder_id,
                 ttl_seconds=FILE_FENCE_TTL_SECONDS,
+                take_over_finished_task=take_over_indexing,
             )
             if fence.holder_id == holder_id:
                 return
@@ -177,7 +190,13 @@ class FileFences:
             await asyncio.sleep(_WAIT_INTERVAL_SECONDS)
 
     async def acquire_for_metadata(self, *, partition: str, file_id: str, holder_id: str) -> None:
-        """Take the fence for a metadata update, or refuse with 409."""
+        """Take the fence for a metadata update, or refuse with 409.
+
+        An indexing fence whose lease runs is refused even when its job already
+        reads as finished: its worker may still be writing chunks (a job failed
+        at startup by ``fail_orphaned_jobs``), and the update rewrites every
+        chunk it reads, which could put back chunks that worker then removes.
+        """
         if self._repo is None:
             return
         fence = await self._repo.acquire(
@@ -186,6 +205,7 @@ class FileFences:
             kind=FileFenceKind.METADATA,
             holder_id=holder_id,
             ttl_seconds=FILE_FENCE_TTL_SECONDS,
+            take_over_finished_task=False,
         )
         if fence.holder_id != holder_id:
             raise self._refused(fence, "metadata")
@@ -257,6 +277,41 @@ class FileFences:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(work_task, renewal, return_exceptions=True)
+
+    async def hold(
+        self,
+        *,
+        partition: str,
+        file_id: str,
+        holder_id: str,
+        holder_kind: FileFenceKind,
+        work: Callable[[], Awaitable[T]],
+    ) -> T:
+        """``run_holding``, then release the fence, unless the work was stopped before it ended.
+
+        Work stopped from outside (its lease could not be renewed, or its caller
+        was cancelled) may have a vector-store write in flight that cancelling
+        does not withdraw. Its fence is then left to expire rather than
+        released: releasing would let another operation take the file at once,
+        and the write could land after that operation started. Work that ended
+        on its own, or whose fence another operation already took, releases as
+        usual (the latter is a no-op).
+        """
+        stopped = False
+        try:
+            return await self.run_holding(
+                partition=partition, file_id=file_id, holder_id=holder_id, holder_kind=holder_kind, work=work
+            )
+        except (FileFenceUnavailableError, asyncio.CancelledError):
+            stopped = True
+            raise
+        finally:
+            if stopped:
+                logger.bind(partition=partition, file_id=file_id).warning(
+                    "File work stopped before it ended; its fence is left to expire"
+                )
+            else:
+                await self.release(partition=partition, file_id=file_id, holder_id=holder_id)
 
     async def _keep_alive(self, *, partition: str, file_id: str, holder_id: str, holder_kind: FileFenceKind) -> None:
         confirmed_until = monotonic() + FILE_FENCE_TTL_SECONDS
@@ -358,4 +413,5 @@ __all__ = [
     "delete_in_progress",
     "indexing_in_progress",
     "metadata_update_in_progress",
+    "target_exists",
 ]

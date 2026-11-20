@@ -41,6 +41,13 @@ logger = get_logger()
 
 T = TypeVar("T")
 
+# How many orphaned files one workspace delete cleans up at a time. Each holds a
+# pooled connection for its whole deletion, and its fence renewals need another
+# from the same pool: unbounded, a workspace with more orphans than the pool has
+# connections starved the renewals, and those files failed after their lease
+# deadline. The slot is taken before the fence, so no lease runs while waiting.
+_ORPHAN_CLEANUP_CONCURRENCY = 4
+
 
 class WorkspaceService:
     """Workspace lifecycle, file association and orphan cleanup."""
@@ -158,9 +165,8 @@ class WorkspaceService:
         associations and returns the file_ids that are no longer
         referenced by *any* workspace and were not independently indexed.
         Each of those is deleted from the
-        vector store and the relational catalog — concurrently, with
-        per-file failures collected rather than raised, matching the
-        legacy router's ``asyncio.gather(..., return_exceptions=True)``.
+        vector store and the relational catalog, ``_ORPHAN_CLEANUP_CONCURRENCY``
+        at a time, with per-file failures collected rather than raised.
 
         With ``keep_files=True`` the orphan cleanup is skipped entirely:
         the workspace and its membership rows are still removed, but the
@@ -177,8 +183,14 @@ class WorkspaceService:
             # and its membership rows are removed.
             kept_files = len(orphaned)
         elif orphaned:
+            slots = asyncio.Semaphore(_ORPHAN_CLEANUP_CONCURRENCY)
+
+            async def delete_orphan(file_id: str) -> None:
+                async with slots:
+                    await self._delete_file(file_id, partition)
+
             results = await asyncio.gather(
-                *[self._delete_file(file_id, partition) for file_id in orphaned],
+                *[delete_orphan(file_id) for file_id in orphaned],
                 return_exceptions=True,
             )
             for file_id, result in zip(orphaned, results, strict=True):
@@ -223,10 +235,23 @@ class WorkspaceService:
             )
 
     async def _delete_claimed_file(self, file_id: str, partition: str) -> None:
-        async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
-            if owned is None:
-                raise RuntimeError(f"Workspace cleanup already running for {file_id}")
-            await self._delete_owned_file(file_id, partition, owned)
+        # Once _delete_owned_file runs, it settles the claim itself. Before
+        # that (the session failing to open, or the work stopped while it
+        # opens, when the fence can't be renewed), nothing would: the claim
+        # would stay CLAIMED, which no retry accepts, with its workspace gone.
+        handed_over = False
+        try:
+            async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
+                if owned is None:
+                    # Another cleanup holds it: the claim is not ours to give back.
+                    handed_over = True
+                    raise RuntimeError(f"Workspace cleanup already running for {file_id}")
+                handed_over = True
+                await self._delete_owned_file(file_id, partition, owned)
+        except (Exception, asyncio.CancelledError):
+            if not handed_over:
+                await self._release_cleanup_claim(file_id, partition)
+            raise
 
     async def _with_delete_fence(
         self,
@@ -254,12 +279,9 @@ class WorkspaceService:
             if give_back is not None:
                 await give_back()
             raise
-        try:
-            return await self._file_fences.run_holding(
-                partition=partition, file_id=file_id, holder_id=holder_id, holder_kind=FileFenceKind.DELETE, work=work
-            )
-        finally:
-            await self._file_fences.release(partition=partition, file_id=file_id, holder_id=holder_id)
+        return await self._file_fences.hold(
+            partition=partition, file_id=file_id, holder_id=holder_id, holder_kind=FileFenceKind.DELETE, work=work
+        )
 
     async def _delete_owned_file(
         self, file_id: str, partition: str, owned: WorkspaceRepository, *, cleanup_started: bool = False

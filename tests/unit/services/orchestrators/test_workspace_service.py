@@ -474,7 +474,9 @@ class _InMemoryFileFences(FileFenceRepository):
             expires_at=now + timedelta(minutes=2),
         )
 
-    async def acquire(self, *, partition, file_id, kind, holder_id, ttl_seconds) -> FileFence:
+    async def acquire(
+        self, *, partition, file_id, kind, holder_id, ttl_seconds, take_over_finished_task=True
+    ) -> FileFence:
         if (partition, file_id) not in self.fences:
             self.hold(partition, file_id, kind, holder_id)
         return self.fences[(partition, file_id)]
@@ -651,3 +653,113 @@ async def test_a_retry_waits_for_the_fence_before_it_holds_a_cleanup_session(mon
     assert wrepo.retry_claimed == []
     assert wrepo.failed == []
     assert fences.fences[("p", "fA")].holder_id == "other-delete"
+
+
+class _SessionFailingFirst(FakeWorkspaceRepo):
+    """The cleanup's own session fails to open; the one that gives the claim back opens."""
+
+    def __init__(self, failure, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._failure = failure
+        self.sessions = 0
+
+    @asynccontextmanager
+    async def cleanup_session(self, file_id, partition):
+        self.sessions += 1
+        if self.sessions == 1:
+            await self._failure()
+        yield self
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_whose_cleanup_session_fails_to_open_gives_its_claim_back():
+    # Otherwise it stays CLAIMED, which no retry accepts, with its workspace gone.
+    async def unreachable():
+        raise ConnectionError("pool exhausted")
+
+    fences = _InMemoryFileFences()
+    wrepo = _SessionFailingFirst(unreachable, orphaned=["fA"])
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+
+    out = await _fenced_svc(fences, wrepo=wrepo, vstore=vstore).delete_workspace("p", "w1")
+
+    assert out["orphaned_files_failed"] == ["fA"]
+    assert wrepo.released == [("fA", "p")]
+    assert vstore.holders == []
+    assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_whose_cleanup_stops_while_its_session_opens_gives_its_claim_back(monkeypatch):
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "FILE_FENCE_TTL_SECONDS", 0.4)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
+
+    async def hangs():
+        await asyncio.sleep(5)
+
+    fences = _InMemoryFileFences()
+    fences.renew = _always_fails
+    wrepo = _SessionFailingFirst(hangs, orphaned=["fA"])
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+
+    out = await asyncio.wait_for(_fenced_svc(fences, wrepo=wrepo, vstore=vstore).delete_workspace("p", "w1"), timeout=5)
+
+    assert out["orphaned_files_failed"] == ["fA"]
+    assert wrepo.released == [("fA", "p")]
+    # Stopped from outside: the fence is left to expire rather than released.
+    assert fences.fences[("p", "fA")].kind is FileFenceKind.DELETE
+
+
+async def _always_fails(**_kwargs) -> bool:
+    raise ConnectionError("postgres unreachable")
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_another_cleanup_owns_keeps_that_cleanups_claim():
+    class OwnedElsewhere(FakeWorkspaceRepo):
+        @asynccontextmanager
+        async def cleanup_session(self, file_id, partition):
+            yield None
+
+    fences = _InMemoryFileFences()
+    wrepo = OwnedElsewhere(orphaned=["fA"])
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+
+    out = await _fenced_svc(fences, wrepo=wrepo, vstore=vstore).delete_workspace("p", "w1")
+
+    assert out["orphaned_files_failed"] == ["fA"]
+    assert wrepo.released == []
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_delete_cleans_up_a_bounded_number_of_orphans_at_a_time():
+    # Each cleanup holds a pooled connection; its fence renewals need another.
+    # Unbounded, many orphans starved the renewals and failed after the lease deadline.
+    import services.orchestrators.workspace_service as module
+
+    running = 0
+    peak = 0
+
+    class CountingSessions(FakeWorkspaceRepo):
+        @asynccontextmanager
+        async def cleanup_session(self, file_id, partition):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            try:
+                await asyncio.sleep(0.01)
+                yield self
+            finally:
+                running -= 1
+
+    orphans = [f"f{i}" for i in range(module._ORPHAN_CLEANUP_CONCURRENCY * 3)]
+    fences = _InMemoryFileFences()
+    vstore = _FenceObservingVectorStore(fences, {file_id: ["c"] for file_id in orphans})
+
+    out = await _fenced_svc(fences, wrepo=CountingSessions(orphaned=orphans), vstore=vstore).delete_workspace("p", "w1")
+
+    assert out["orphaned_files_deleted"] == len(orphans)
+    assert peak == module._ORPHAN_CLEANUP_CONCURRENCY
+    assert fences.fences == {}

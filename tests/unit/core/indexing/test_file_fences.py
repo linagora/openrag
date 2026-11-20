@@ -32,7 +32,11 @@ class _Fences(FileFenceRepository):
             expires_at=now + timedelta(minutes=2),
         )
 
-    async def acquire(self, *, partition, file_id, kind, holder_id, ttl_seconds) -> FileFence:
+    async def acquire(
+        self, *, partition, file_id, kind, holder_id, ttl_seconds, take_over_finished_task=True
+    ) -> FileFence:
+        # Which jobs read as finished is the database's business: recorded only.
+        self.took_over_finished_task = take_over_finished_task
         current = self.fences.get((partition, file_id))
         if current is None:
             now = datetime.now(UTC)
@@ -129,6 +133,8 @@ async def test_a_metadata_update_takes_a_free_fence() -> None:
     await FileFences(repo).acquire_for_metadata(partition=PARTITION, file_id=FILE_ID, holder_id="m")
 
     assert repo.fences[(PARTITION, FILE_ID)].kind is FileFenceKind.METADATA
+    # Never through a job that reads as finished: its worker may still write chunks.
+    assert repo.took_over_finished_task is False
 
 
 @pytest.mark.asyncio
@@ -434,6 +440,82 @@ async def test_run_holding_passes_the_works_failure_through() -> None:
         )
 
 
+# ── hold: release unless the work was stopped ───────────────────────
+
+
+async def _hold(repo: _Fences, work):
+    return await FileFences(repo).hold(
+        partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+    )
+
+
+@pytest.mark.asyncio
+async def test_hold_releases_the_fence_of_work_that_ended() -> None:
+    repo = _Fences()
+    repo.hold(FileFenceKind.METADATA, "m")
+
+    assert await _hold(repo, _returns("done")) == "done"
+
+    assert (PARTITION, FILE_ID) not in repo.fences
+
+
+@pytest.mark.asyncio
+async def test_hold_releases_the_fence_of_work_that_failed_on_its_own() -> None:
+    repo = _Fences()
+    repo.hold(FileFenceKind.METADATA, "m")
+
+    async def work():
+        raise ValueError("milvus down")
+
+    with pytest.raises(ValueError, match="milvus down"):
+        await _hold(repo, work)
+
+    assert (PARTITION, FILE_ID) not in repo.fences
+
+
+@pytest.mark.asyncio
+async def test_hold_leaves_the_fence_of_work_stopped_by_an_unrenewed_lease_to_expire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A write the stopped work already sent may still land: releasing would let
+    # another operation take the file before it does.
+    _short_lease(monkeypatch)
+    repo = _Fences()
+    repo.hold(FileFenceKind.METADATA, "m")
+
+    async def failing_renew(**_kwargs) -> bool:
+        raise RuntimeError("pg down")
+
+    repo.renew = failing_renew
+
+    async def work():
+        await asyncio.Event().wait()
+
+    with pytest.raises(FileFenceUnavailableError):
+        await asyncio.wait_for(_hold(repo, work), timeout=5)
+
+    assert repo.fences[(PARTITION, FILE_ID)].holder_id == "m"
+
+
+@pytest.mark.asyncio
+async def test_hold_leaves_the_fence_of_work_whose_caller_was_cancelled_to_expire() -> None:
+    repo = _Fences()
+    repo.hold(FileFenceKind.METADATA, "m")
+    started = asyncio.Event()
+
+    async def work():
+        started.set()
+        await asyncio.Event().wait()
+
+    holding = asyncio.ensure_future(_hold(repo, work))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    holding.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await holding
+
+    assert repo.fences[(PARTITION, FILE_ID)].holder_id == "m"
+
+
 # ── Delete ───────────────────────────────────────────────────────────
 
 
@@ -460,6 +542,8 @@ async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead() ->
 
     assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
     assert repo.fences[(PARTITION, FILE_ID)].holder_id == "task-1"
+    # Nor through a job that already reads as finished: its worker may still write.
+    assert repo.took_over_finished_task is False
 
 
 # ── Metrics ──────────────────────────────────────────────────────────
