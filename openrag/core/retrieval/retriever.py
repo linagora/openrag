@@ -80,7 +80,7 @@ class BaseRetriever(Retriever):
         self,
         searcher: RetrievalSearcher,
         top_k: int = 6,
-        similarity_threshold: float = 0.95,
+        similarity_threshold: float = 0.2,
         with_surrounding_chunks: bool = True,
         include_related: bool = False,
         include_ancestors: bool = False,

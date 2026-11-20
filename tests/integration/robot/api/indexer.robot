@@ -28,8 +28,8 @@ Add File and Patch it with new metadata
     ${response}=    Get File Metadata    0    test    &{file_metadata}
 
 Move File to New Partition
-    [Documentation]    Move a file from one partition to another and verify it no longer exists in the source partition.
-    # --- Step 1: Move file to destination partition
+    [Documentation]    A metadata PATCH does not move a file; copying then deleting it does.
+    # --- Step 1: A PATCH naming another partition is refused and moves nothing
     ${metadata}=    Create Dictionary    partition=test1
     ${metadata_json}=    Evaluate    json.dumps(${metadata})    json
     ${form_data}=    Create Dictionary    metadata=${metadata_json}
@@ -37,16 +37,27 @@ Move File to New Partition
     ...    ${BASE_URL}/indexer/partition/test/file/0
     ...    headers=${HEADERS}
     ...    data=${form_data}
+    ...    expected_status=400
+    ${response}=    GET
+    ...    ${BASE_URL}/partition/test/file/0
+    ...    headers=${HEADERS}
     ...    expected_status=200
-    ${json}=    Set Variable    ${response.json()}
-    Dictionary Should Contain Key    ${json}    message
 
-    # --- Step 2: Check that the file exists in destination partition
+    # --- Step 2: Copy the file to the destination partition, then delete it from the source
+    ${form_data}=    Create Dictionary    source_partition=test    source_file_id=0
+    ${response}=    POST
+    ...    ${BASE_URL}/indexer/partition/test1/file/0/copy
+    ...    headers=${HEADERS}
+    ...    data=${form_data}
+    ...    expected_status=201
+    Delete File    0    test    expected_status=204
+
+    # --- Step 3: Check that the file exists in destination partition
     ${response}=    GET
     ...    ${BASE_URL}/partition/test1/file/0
     ...    headers=${HEADERS}
     ...    expected_status=200
-    # --- Step 3: Verify that file no longer exists in the original partition
+    # --- Step 4: Verify that file no longer exists in the original partition
     ${response}=    GET
     ...    ${BASE_URL}/partition/test/file/0
     ...    headers=${HEADERS}

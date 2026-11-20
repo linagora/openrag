@@ -1,8 +1,5 @@
-from types import SimpleNamespace
-
 import pytest
 from api.dependencies.auth import (
-    check_user_file_quota,
     ensure_partition_role,
     require_partitions_viewer,
     require_task_owner,
@@ -24,32 +21,6 @@ class FakeAuthService:
         super_admin_mode: bool = False,
     ) -> bool:
         return True
-
-    @classmethod
-    def validate_file_quota(
-        cls,
-        user,
-        *,
-        pending_task_count: int,
-        default_quota: int,
-    ) -> None:
-        return None
-
-
-class EnforcingAuthService(FakeAuthService):
-    @classmethod
-    def validate_file_quota(
-        cls,
-        user,
-        *,
-        pending_task_count: int,
-        default_quota: int,
-    ) -> None:
-        quota = user.get("file_quota")
-        if quota is None:
-            quota = default_quota
-        if user.get("file_count", 0) + pending_task_count >= quota:
-            raise AuthError("File quota exceeded")
 
 
 class DenyingAuthService(FakeAuthService):
@@ -77,24 +48,14 @@ class FakePartitionService:
 
 
 class FakeJobService:
-    def __init__(self, *, details=None, pending_count=0) -> None:
+    def __init__(self, *, details=None) -> None:
         self.details = details
-        self.pending_count = pending_count
         self.detail_checks: list[str] = []
-        self.pending_checks: list[int | None] = []
 
     async def get_task_details(self, task_id: str, *, require_owner_identity: bool = False):
         self.detail_checks.append(task_id)
         self.require_owner_identity = require_owner_identity
         return self.details
-
-    async def get_user_pending_task_count(self, user_id: int | None) -> int:
-        self.pending_checks.append(user_id)
-        return self.pending_count
-
-
-def _config(default_file_quota: int):
-    return SimpleNamespace(rdb=SimpleNamespace(default_file_quota=default_file_quota))
 
 
 @pytest.mark.asyncio
@@ -247,62 +208,6 @@ async def test_require_task_owner_rejects_non_owner_non_admin():
             auth_service=AuthService,
         )
     assert exc.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_check_user_file_quota_reads_pending_count_through_job_service():
-    job_service = FakeJobService(pending_count=2)
-
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 1, "file_quota": 5},
-        auth_service=FakeAuthService,
-        job_service=job_service,
-        config=_config(default_file_quota=10),
-    )
-
-    assert user["id"] == 7
-    assert job_service.pending_checks == [7]
-
-
-@pytest.mark.asyncio
-async def test_check_user_file_quota_skips_pending_count_when_default_is_unlimited():
-    """Skip queue I/O when the resolved quota is unlimited."""
-    job_service = FakeJobService(pending_count=2)
-
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 1, "file_quota": None},
-        auth_service=FakeAuthService,
-        job_service=job_service,
-        config=_config(default_file_quota=-1),
-    )
-
-    assert user["id"] == 7
-    assert job_service.pending_checks == []
-
-
-@pytest.mark.asyncio
-async def test_check_user_file_quota_default_zero_enforces_zero():
-    allowed_job_service = FakeJobService(pending_count=0)
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 0, "file_quota": 1},
-        auth_service=EnforcingAuthService,
-        job_service=allowed_job_service,
-        config=_config(default_file_quota=0),
-    )
-    assert user["id"] == 7
-    assert allowed_job_service.pending_checks == [7]
-
-    denied_job_service = FakeJobService(pending_count=0)
-    with pytest.raises(HTTPException) as exc:
-        await check_user_file_quota(
-            user={"id": 8, "file_count": 1, "file_quota": None},
-            auth_service=EnforcingAuthService,
-            job_service=denied_job_service,
-            config=_config(default_file_quota=0),
-        )
-    assert exc.value.status_code == 403
-    assert exc.value.detail == "File quota exceeded"
-    assert denied_job_service.pending_checks == [8]
 
 
 # ---------------------------------------------------------------------------
@@ -475,39 +380,52 @@ async def test_admin_bypasses_partition_check_when_super_admin_mode_on(monkeypat
     )
 
 
-# --- quota: the in-flight half (the #664 race) was unverified ---
-
-
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.parametrize("role", ["viewer", "editor", "owner"])
 @pytest.mark.asyncio
-async def test_quota_denies_on_pending_tasks_alone():
-    """Pending tasks alone must be able to exhaust the quota.
-
-    Uses the real AuthService, not a fake: forcing `pending_task_count=0` in the
-    dependency previously failed no test, because every enforcing case already
-    passed pending_count=0. This is the in-flight half that #664 is about.
-    """
-    job_service = FakeJobService(pending_count=5)
-
+async def test_ensure_partition_role_refuses_a_reserved_partition_name(partition, role):
     with pytest.raises(HTTPException) as exc:
-        await check_user_file_quota(
-            user={"id": 7, "is_admin": False, "file_count": 0, "file_quota": 5},
-            auth_service=AuthService,
-            job_service=job_service,
-            config=_config(default_file_quota=10),
+        await ensure_partition_role(
+            partition=partition,
+            user={"id": 7, "is_admin": False},
+            user_partitions=[{"partition": partition, "role": "owner"}],
+            required_role=role,
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing={partition}),
         )
-
     assert exc.value.status_code == 403
-    assert job_service.pending_checks == [7]
 
 
 @pytest.mark.asyncio
-async def test_quota_allows_when_indexed_plus_pending_is_under_limit():
-    job_service = FakeJobService(pending_count=1)
+async def test_super_admin_may_read_through_a_reserved_name(monkeypatch):
+    import api.dependencies.auth as auth_dependencies
 
-    user = await check_user_file_quota(
-        user={"id": 7, "is_admin": False, "file_count": 1, "file_quota": 5},
-        auth_service=AuthService,
-        job_service=job_service,
-        config=_config(default_file_quota=10),
+    monkeypatch.setattr(auth_dependencies, "SUPER_ADMIN_MODE", True)
+    assert await ensure_partition_role(
+        partition="all",
+        user={"id": 1, "is_admin": True},
+        user_partitions=[],
+        required_role="viewer",
+        auth_service=FakeAuthService,
+        partition_service=FakePartitionService(existing=set()),
     )
-    assert user["id"] == 7
+
+
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.parametrize("role", ["editor", "owner"])
+@pytest.mark.asyncio
+async def test_super_admin_cannot_change_a_reserved_partition(monkeypatch, partition, role):
+    """The store reads `all` as every partition: deleting file X in it deleted X everywhere."""
+    import api.dependencies.auth as auth_dependencies
+
+    monkeypatch.setattr(auth_dependencies, "SUPER_ADMIN_MODE", True)
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            partition=partition,
+            user={"id": 1, "is_admin": True},
+            user_partitions=[],
+            required_role=role,
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing={"all"}),
+        )
+    assert exc.value.status_code == 403

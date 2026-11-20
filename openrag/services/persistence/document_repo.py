@@ -30,7 +30,8 @@ from typing import TYPE_CHECKING, Any
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import ContentClaimLease, DocumentRepository, IndexedCorpusState
-from core.utils.exceptions import ConflictError
+from core.utils.consts import is_reserved_partition_name
+from core.utils.exceptions import ConflictError, FileFenceLostError, OpenRAGError, ValidationError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -57,6 +58,35 @@ _LOCK_EMBEDDER_ENDPOINT_SQL = """
     WHERE model_type = 'embedder' AND (name = $1 OR ($1 = $2 AND is_default))
     FOR SHARE
     """
+
+
+async def _require_file_fence(conn: asyncpg.Connection, partition: str, file_id: str, holder_id: str) -> None:
+    """Refuse a catalog write by an operation that no longer holds the file's fence (#1430).
+
+    ``FOR SHARE`` keeps the fence from being taken over or dropped until this
+    transaction ends: a delete that takes the fence right after the write sees
+    the committed row and removes it, never a row it could miss.
+
+    The partition's row is locked first. A partition delete locks it before its
+    cascade removes the partition's fences, and the write locks it anyway (the
+    embedder check, the foreign key of a new file row): taking the fence first
+    would hold the two in the opposite order, and the delete and the write could
+    deadlock. Locked first, the write waits for the delete, then finds its fence
+    gone.
+    """
+    await conn.execute("SELECT 1 FROM partitions WHERE partition = $1 FOR KEY SHARE", partition)
+    held = await conn.fetchval(
+        """
+        SELECT 1 FROM file_fences
+         WHERE partition_name = $1 AND file_id = $2 AND holder_id = $3
+           FOR SHARE
+        """,
+        partition,
+        file_id,
+        holder_id,
+    )
+    if not held:
+        raise FileFenceLostError(file_id, partition)
 
 
 async def _refuse_if_embedder_changed(
@@ -100,8 +130,11 @@ async def _refuse_if_embedder_changed(
 class PgDocumentRepository(DocumentRepository):
     """asyncpg-backed implementation of :class:`DocumentRepository`."""
 
-    def __init__(self, pool_getter: Callable[[], asyncpg.Pool]) -> None:
+    def __init__(self, pool_getter: Callable[[], asyncpg.Pool], *, default_file_quota: int = -1) -> None:
         self._pool_getter = pool_getter
+        # Resolves a NULL ``users.file_quota`` when an insert re-checks the
+        # quota (``recheck_quota_if_slot_gone``), as admission does.
+        self._default_file_quota = default_file_quota
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -625,11 +658,27 @@ class PgDocumentRepository(DocumentRepository):
         independently_indexed: bool = True,
         chunk_count: int | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        quota_reservation_id: str | None = None,
+        recheck_quota_if_slot_gone: bool = False,
+        fence_holder_id: str | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
         Creates the partition row on first use (legacy behaviour). Returns
         ``False`` if a row with the same (file_id, partition) already exists.
+
+        ``quota_reservation_id`` names the file slot the uploader reserved at
+        admission (#664). The insert consumes it in the same transaction, so
+        ``users.file_count`` is not bumped twice. With no such reservation
+        (none was taken, or it was already released) the count is bumped here
+        instead, so it keeps matching the files either way.
+
+        ``recheck_quota_if_slot_gone`` is for a caller that passes an id only
+        when it really took a slot (a copy). If that slot is gone (the orphan
+        sweep released it), the file is counted only if the quota still has
+        room, and refused with ``FILE_QUOTA_EXCEEDED`` otherwise, rolling the
+        insert back. An upload task passes its task id whether or not a slot
+        was taken, so it leaves this off.
 
         ``indexed_at`` pins the indexation timestamp so it matches the Milvus
         chunks; when ``None`` the ``files.indexed_at`` server default applies.
@@ -637,9 +686,16 @@ class PgDocumentRepository(DocumentRepository):
         ``embedder_fingerprint`` is the config the file's vectors were built
         with; the file is refused if the partition's embedder no longer matches
         it (see ``_refuse_if_embedder_changed``).
+
+        ``fence_holder_id`` is the holder of the file's fence (#1430), for an
+        operation that took one. The insert then refuses with
+        :class:`FileFenceLostError` unless that holder still holds it, checked
+        in the same transaction. ``None`` writes without the check.
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                if fence_holder_id is not None:
+                    await _require_file_fence(conn, partition, file_id, fence_holder_id)
                 existing = await conn.fetchval(
                     "SELECT 1 FROM files WHERE file_id = $1 AND partition_name = $2",
                     file_id,
@@ -657,6 +713,12 @@ class PgDocumentRepository(DocumentRepository):
                     if not partition_exists:
                         return False
                 else:
+                    if is_reserved_partition_name(partition):
+                        raise ValidationError(
+                            f"Partition name '{partition}' is reserved.",
+                            status_code=400,
+                            code="RESERVED_PARTITION_NAME",
+                        )
                     # Auto-create partition + first-owner membership when missing —
                     # legacy side-effect documented in the phase-7 spec.
                     created = await conn.fetchval(
@@ -719,10 +781,36 @@ class PgDocumentRepository(DocumentRepository):
                     *values,
                 )
                 if user_id is not None:
-                    await conn.execute(
-                        "UPDATE users SET file_count = file_count + 1 WHERE id = $1",
+                    consumed = quota_reservation_id is not None and await conn.fetchval(
+                        "DELETE FROM file_quota_reservations WHERE id = $1 AND user_id = $2 RETURNING 1",
+                        quota_reservation_id,
                         user_id,
                     )
+                    if not consumed and recheck_quota_if_slot_gone and quota_reservation_id is not None:
+                        counted = await conn.fetchval(
+                            """
+                            UPDATE users
+                               SET file_count = file_count + 1
+                             WHERE id = $1
+                               AND (is_admin
+                                    OR COALESCE(file_quota, $2::int) < 0
+                                    OR file_count < COALESCE(file_quota, $2::int))
+                            RETURNING 1
+                            """,
+                            user_id,
+                            self._default_file_quota,
+                        )
+                        if not counted:
+                            raise OpenRAGError(
+                                "File quota exceeded. Delete a file or ask an administrator to raise your quota.",
+                                code="FILE_QUOTA_EXCEEDED",
+                                status_code=403,
+                            )
+                    elif not consumed:
+                        await conn.execute(
+                            "UPDATE users SET file_count = file_count + 1 WHERE id = $1",
+                            user_id,
+                        )
                 return True
 
     async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
@@ -846,6 +934,7 @@ class PgDocumentRepository(DocumentRepository):
         content_sha256: object = _UNSET,
         chunk_count: object = _UNSET,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        fence_holder_id: str | None = None,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
@@ -857,7 +946,8 @@ class PgDocumentRepository(DocumentRepository):
         matches the freshly re-upserted Milvus chunks; ``None`` leaves it.
 
         ``embedder_fingerprint`` refuses the update the way it refuses
-        ``add_file_to_partition``'s insert.
+        ``add_file_to_partition``'s insert, and ``fence_holder_id`` checks the
+        file's fence the same way.
         """
         sets: list[str] = []
         params: list[Any] = []
@@ -883,19 +973,26 @@ class PgDocumentRepository(DocumentRepository):
             params.append(chunk_count)
             sets.append(f"chunk_count = ${len(params)}")
         if not sets:
-            # Match legacy: report whether the row exists at all.
+            # Match legacy: report whether the row exists at all. A holder that
+            # lost the fence is refused here too, as it would be with fields.
+            if fence_holder_id is not None:
+                async with self.pool.acquire() as conn:
+                    await _require_file_fence(conn, partition, file_id, fence_holder_id)
             return await self.file_exists_in_partition(file_id, partition)
         params.extend([file_id, partition])
         sql = f"""
             UPDATE files SET {", ".join(sets)}
             WHERE file_id = ${len(params) - 1} AND partition_name = ${len(params)}
             """
-        if embedder_fingerprint is None:
+        if embedder_fingerprint is None and fence_holder_id is None:
             result = await self.pool.execute(sql, *params)
         else:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    await _refuse_if_embedder_changed(conn, partition, embedder_fingerprint)
+                    if fence_holder_id is not None:
+                        await _require_file_fence(conn, partition, file_id, fence_holder_id)
+                    if embedder_fingerprint is not None:
+                        await _refuse_if_embedder_changed(conn, partition, embedder_fingerprint)
                     result = await conn.execute(sql, *params)
         return result.endswith(" 1")
 

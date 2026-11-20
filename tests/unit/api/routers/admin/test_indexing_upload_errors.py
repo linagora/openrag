@@ -45,6 +45,14 @@ class _FileIndexingService(_FakeIndexingService):
         )
 
 
+class _FileDeletingService(_FakeIndexingService):
+    async def add_file(self, **_kwargs):
+        raise ConflictError(
+            "File 'f1' is being deleted from partition 'p1'.",
+            code="DOCUMENT_DELETE_IN_PROGRESS",
+        )
+
+
 class _DispatchFailureService(_FakeIndexingService):
     async def add_file(self, **_kwargs):
         raise RuntimeError("dispatcher unavailable")
@@ -365,3 +373,16 @@ async def test_put_file_keeps_upload_when_worker_may_still_be_running(tmp_path, 
 
     assert resp.status_code == 500
     assert len(list((tmp_path / "data").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_add_file_being_deleted_returns_409_and_removes_upload(tmp_path, monkeypatch):
+    app = _build_app(tmp_path, monkeypatch, content=b"same", service=_FileDeletingService())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"].startswith("[DOCUMENT_DELETE_IN_PROGRESS]")
+    assert list((tmp_path / "data").iterdir()) == []

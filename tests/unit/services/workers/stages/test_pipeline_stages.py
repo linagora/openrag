@@ -492,6 +492,79 @@ async def test_caption_stage_keeps_other_captions_when_one_image_fails():
 
 
 @pytest.mark.asyncio
+async def test_caption_stage_encodes_deferred_images_off_the_event_loop(monkeypatch):
+    """Encoding a figure-heavy PDF must not starve other coroutines (worker
+    lease renewals) running on the same loop."""
+    import time
+
+    ticks = 0
+    # Ticks seen when the encoding starts and ends: only that span counts.
+    window: list[int] = []
+
+    def _slow_encode(image):
+        window.append(ticks)
+        time.sleep(0.5)
+        window.append(ticks)
+        return b"png:" + image.encode()
+
+    monkeypatch.setattr(caption_module, "pil_to_png_bytes", _slow_encode)
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[TextBlock(text="a ![](ref)", page_number=1)],
+        images=[ImageBlock(pil_image="figure", page_number=1, metadata={"markdown_ref": "![](ref)"})],
+    )
+    vlm = FakeVLM(["a chart"])
+
+    async def _ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    task = asyncio.create_task(_ticker())
+    try:
+        await caption_stage({"processed_document": processed}, vlm)
+    finally:
+        task.cancel()
+
+    during_encode = window[1] - window[0]
+    assert during_encode >= 20, f"event loop was blocked while encoding the images (ticks={during_encode})"
+    assert vlm.calls == [(b"png:figure", None)]
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_leaves_a_figure_it_cannot_encode_uncaptioned(monkeypatch):
+    """Like a remote image, it is skipped: the others keep their captions and the
+    stage is not reported degraded, as when the parser used to drop it."""
+
+    def _encode(image):
+        if image == "broken":
+            raise OSError("truncated image")
+        return image.encode()
+
+    monkeypatch.setattr(caption_module, "pil_to_png_bytes", _encode)
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[TextBlock(text="a ![](ref-ok) b ![](ref-broken)", page_number=1)],
+        images=[
+            ImageBlock(pil_image="ok", page_number=1, metadata={"markdown_ref": "![](ref-ok)"}),
+            ImageBlock(pil_image="broken", page_number=1, metadata={"markdown_ref": "![](ref-broken)"}),
+        ],
+    )
+    row = {"processed_document": processed}
+    vlm = FakeVLM(["caption:ok"])
+
+    await caption_stage(row, vlm)
+
+    out = row["processed_document"]
+    assert vlm.calls == [(b"ok", None)]
+    assert [image.caption for image in out.images] == ["caption:ok", None]
+    assert "![](ref-broken)" in out.text_blocks[0].text
+    assert row["stage"] == "captioned"
+    assert "degraded_stages" not in row
+
+
+@pytest.mark.asyncio
 async def test_caption_stage_raises_when_every_image_fails():
     """All images failed: the stage fails as a whole so the #702 fallback applies."""
     processed = ProcessedDocument(
@@ -1188,3 +1261,34 @@ async def test_caption_stage_succeeds_on_a_document_with_only_remote_images():
     assert vlm.calls == []
     assert row["stage"] == "captioned"
     assert "degraded_stages" not in row
+
+
+def test_drop_uncaptioned_image_refs_keeps_only_text_that_still_means_something():
+    """An uncaptioned image's ref points at bytes nothing reads any more: it
+    goes, leaving its alt text if any. A captioned image's ref is already gone,
+    and a remote image keeps its link, which still resolves."""
+    from services.workers.stages.caption import drop_uncaptioned_image_refs
+
+    processed = ProcessedDocument(
+        document_id="d",
+        text_blocks=[
+            TextBlock(text="a ![](docling_img_0) b ![chart](data-0) c", page_number=1),
+            TextBlock(text="d ![](https://example.com/x.png) e <image_description>cap</image_description>"),
+        ],
+        images=[
+            ImageBlock(metadata={"markdown_ref": "![](docling_img_0)"}),
+            ImageBlock(metadata={"markdown_ref": "![chart](data-0)", "alt": "chart"}),
+            ImageBlock(
+                source_url="https://example.com/x.png", metadata={"markdown_ref": "![](https://example.com/x.png)"}
+            ),
+            ImageBlock(caption="cap", metadata={"markdown_ref": "![](docling_img_9)"}),
+        ],
+    )
+
+    out = drop_uncaptioned_image_refs(processed)
+
+    assert [block.text for block in out.text_blocks] == [
+        "a  b chart c",
+        "d ![](https://example.com/x.png) e <image_description>cap</image_description>",
+    ]
+    assert out.text_blocks[0].page_number == 1

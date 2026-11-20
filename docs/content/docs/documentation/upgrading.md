@@ -62,6 +62,60 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+The default similarity threshold is now `0.2`. The threshold filters the semantic
+(embedding) search only, before it is merged with the keyword search, and with
+the default embedder relevant passages score about 0.2-0.7, so the old values
+often emptied the semantic side. Retrieval results change: more passages come
+from the semantic search, mostly for questions in another language than the
+documents and for abbreviations. Each path reads its own value, so to keep the
+old behavior, set it back where that path reads it:
+
+- Chat uses the `similarity_threshold` of the partition's retrieval preset. A
+  migration sets it to `0.2` in every retrieval preset that still holds exactly
+  `0.6`, and a rollback does not restore `0.6`. A preset without the key, such
+  as the seeded `multiquery` and `hyde`, follows the new default of `0.2` (it was
+  `0.6`). A preset holding any other value keeps it. To keep `0.6`, set it in the
+  preset after the upgrade.
+- `GET /search` defaults to `0.2` (it was `0.75`). Pass `similarity_threshold` in
+  the request to keep the old value; the preset does not change it.
+- The MCP search tool reads `OPENRAG_MCP_SIMILARITY_THRESHOLD`, now `0.2` (it was
+  `0.8`). Set the variable to keep the old value; the preset does not change it.
+- `SIMILARITY_THRESHOLD` is now `0.2` (it was `0.6`). It is read only when no
+  partition is loaded.
+
+## OpenRAG 2.3.6 on a shared Ray cluster: file quota during the upgrade
+
+From OpenRAG 2.3.6, an upload by a user with a file quota takes a slot when it is
+accepted and holds it in Postgres until the file is recorded in the catalog,
+or until cleanup gives the slot back when the task fails or is cancelled.
+Admins and users without a limit take no slot. Uploads queued before the upgrade
+hold no slot. With Ray inside the OpenRAG pod or container, the upgrade restarts
+Ray and those tasks are gone. On a shared Ray cluster (`ray.enabled: true`, or an
+external cluster), the previous release's indexer workers keep running the tasks
+they had queued, and until those tasks finish a user's new uploads are accepted
+as if they were not there: a user with uploads queued at the time can end up over
+their quota by that many files. When upgrading from a release older than 2.3.5,
+the [2.3.5 note below](#openrag-235-on-a-shared-ray-cluster-stop-indexing-first)
+applies as well, and those queued files can stay `SERIALIZING` instead.
+
+To avoid it, stop upload traffic, wait until no indexing task is queued or
+running, upgrade, and resume uploads once every old replica has stopped. A user
+who did go over their quota can upload again once their file count is below the
+limit: they delete enough files to get below it, or an administrator raises the
+quota above their current count.
+
+## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
+
+The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any
+earlier 2.3.x. Workers of the old release keep a handle to the replaced actor, so
+a file they are still indexing loses its state writes and stays `SERIALIZING`.
+On a shared Ray cluster (`ray.enabled: true`, or an external cluster), stop
+traffic and wait until no indexing task is active before the first 2.3.5 replica
+starts, as in
+[Upgrades that change the indexer generation](/openrag/documentation/kubernetes/#upgrades-that-change-the-indexer-generation).
+On an external cluster, retire the `v13` generation there. With Ray inside the
+OpenRAG pod or container, nothing extra is needed.
+
 ## OpenRAG 2.3.5 on Kubernetes: recreate the Ray pods
 
 With `LOG_FORMAT=json` (the chart's default), the chart now sets
@@ -90,6 +144,33 @@ kubectl rollout status -n "$NS" deploy/"$FULLNAME-openrag"   # before resuming i
 
 The same applies after any upgrade that changes an `env.config` value read by
 Ray: the Ray containers read it only when they start.
+
+## OpenRAG 2.3.5 on Kubernetes: settings the chart refuses with the embedded Ray
+
+With `ray.enabled: false`, no `RAY_ADDRESS` and `ray.externalCluster: false` (the
+default), each OpenRAG pod starts its own Ray. From OpenRAG 2.3.5, the chart refuses two kinds of settings that break
+indexing in that mode. `helm upgrade` then stops before it changes anything, and
+the error names the setting.
+
+| The chart refuses | Why | What to change |
+|---|---|---|
+| `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, cancelling a task only sees one pod, and, from 2.3.6, each pod's quota sweep gives back the upload slots the other pods hold once they are older than five minutes, so a user can go over their file quota. | Keep `openrag.replicas: 1`, or share one Ray cluster: `ray.enabled: true` together with `env.config.RAY_ADDRESS` or `env.config.ENABLE_RAY_SERVE=true` (see [Notes](/openrag/documentation/kubernetes/#notes)), or an external cluster through `env.config.RAY_ADDRESS`, with `ray.externalCluster: true` when `RAY_ADDRESS` comes from a Secret the chart cannot read. |
+| Marker, Docling and Whisper workers that don't fit the OpenRAG pod's GPUs | Each worker reserves its `*_NUM_GPUS` of the pod's GPUs (`MARKER_POOL_SIZE` × `MARKER_NUM_GPUS`, `DOCLING_POOL_SIZE` × `DOCLING_NUM_GPUS`, `WHISPER_N_WORKERS` × `WHISPER_NUM_GPUS`). Ray keeps a fraction of a GPU on a single card, and takes a reservation of 1 or more as whole cards, so three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and files sent to them fail after the parser's timeout. A preset can select Marker or Docling even when `PDFLOADER` names another parser, and Whisper transcribes audio by default, so the check applies to every deployment with a GPU in the pod, whatever order the workers start in. | Lower the pool sizes or the `*_NUM_GPUS` values, or give the pod more GPUs. A reservation above 1 must be a whole number. |
+
+The chart can check the GPU settings only where it can read them: in `env.config`,
+and in `env.secrets` when it renders the Secret itself. A `MARKER_*`, `DOCLING_*` or
+`WHISPER_*` value in an `env.existingSecret` or in a secret from an external secrets
+operator is not checked, and it overrides `env.config` at runtime. Keep these
+settings in `env.config` only, removed from that Secret, or check the fit yourself.
+
+The chart also drops `RAY_NUM_GPUS` from its defaults: OpenRAG never read it, so a
+copy in your values does nothing.
+
+With the embedded Ray, the OpenRAG Deployment now uses the `Recreate` strategy: an
+upgrade stops the old pod before it starts the new one. A rolling update ran both
+for a moment, each with its own Ray, and the new pod's job reconciler could mark
+the old pod's queued jobs failed for good. Expect the API to be unavailable while
+the new pod starts. With a shared Ray cluster, the rolling update is unchanged.
 
 ## OpenRAG 2.3.5: fewer files indexed at once by default
 
@@ -135,6 +216,28 @@ Two changes to chunks indexed after the upgrade. Chunks already indexed don't ch
 
 - Contextualized chunks no longer have a `* filename:` line. The chunker's `[Source: ...]` header now names the file once, using the sanitized filename.
 - `structured_section` no longer has a `prepend_heading_path` option. A preset that still sets it to `false` keeps loading and ignores it, so its new chunks get a header, which leaves less room for each chunk's body and can move chunk boundaries.
+
+## OpenRAG 2.3.5: a partition named `all`
+
+Search and chat use `all` to mean every partition you can access (`partitions=all`,
+`openrag-all`). From 2.3.5 it is a reserved partition name, in any case and with or
+without surrounding whitespace. A partition can no longer be created with that name, and
+the files of one that already exists are no longer reachable through the API after
+the upgrade.
+
+Only an instance that ran 2.2.2 or earlier can have one. Check before you upgrade, in
+the OpenRAG database:
+
+```sql
+SELECT partition FROM partitions WHERE lower(regexp_replace(partition, '[^[:alnum:]]', '', 'g')) = 'all';
+```
+
+The query also lists a name such as `a.l.l`, which is not reserved: only a name that
+reads `all` once the whitespace around it is removed is. If it returns such a name,
+upload that partition's files again into a partition with another name before you
+upgrade. Don't delete or copy files out of the `all` partition first:
+on 2.3.4 and earlier, those operations also reach files with the same ID in other
+partitions.
 
 ## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
 

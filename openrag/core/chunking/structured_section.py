@@ -45,6 +45,7 @@ from core.chunking.markdown_utils import (
     MDElement,
     attach_captions,
     chunk_table,
+    chunk_xlsx_chart,
     split_md_elements,
 )
 from core.chunking.recursive import (
@@ -57,6 +58,7 @@ from core.chunking.recursive import (
 from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
+from core.utils.consts import XLSX_TEXT_CONTENT_KINDS
 from core.utils.text import sanitize_text
 
 # Markdown ATX heading: ``## Title``. Level = number of ``#``.
@@ -76,7 +78,8 @@ _EMPHASIS_RE = re.compile(r"[*_`\\]+")
 # ``#hashtag`` line is not mistaken for a heading when re-homing split pieces.
 _CAPTION_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
 # A body line that is a heading — markdown, or a structural keyword the parsers
-# emit as plain text. Used to spot a unit that carries no body of its own.
+# emit as plain text. Read on the text a chunk keeps, where a heading line has
+# lost its inline HTML; ``_is_heading_line`` adds the chunker's own heading test.
 _HEADING_LINE_RE = re.compile(
     r"^\s*(?:#{1,6}\s+\S|\*{0,2}(?:Livre|Titre|Chapitre|Section|Sous-section|Partie|Annexe)\b)",
     re.IGNORECASE,
@@ -299,7 +302,21 @@ class StructuredSectionChunker(BaseChunker):
         filename = str(metadata.get("filename") or metadata.get("source") or "")
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
-        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells":
+        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") == "chart":
+            # Pre-sized pieces, each opening with the chart context (see
+            # chunk_xlsx_chart); prose units would leave rows without it.
+            units = [
+                self._atomic_unit(MDElement(type="table", content=piece, metadata=metadata), [], 1)
+                # Sized like any packed chunk: the target less the source header,
+                # within the ceiling even when hard_max_tokens lowered it.
+                for piece in chunk_xlsx_chart(
+                    content, metadata, self._packing_budget(filename, [], {1}), self.length_function
+                )
+            ]
+        elif (
+            metadata.get("tabular_format") == "xlsx"
+            and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
+        ):
             units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
         else:
             units = self._page_units(content) if paginated else self._build_units(content)
@@ -324,12 +341,15 @@ class StructuredSectionChunker(BaseChunker):
         # metadata under it would bring back keys the unit dropped (whole-table
         # formula/format groups, a detached worksheet context, table columns on
         # a worksheet-note chunk).
-        xlsx_table = metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells"
+        xlsx_table = (
+            metadata.get("tabular_format") == "xlsx"
+            and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
+        )
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
             base = unit.metadata if xlsx_table and unit.metadata else metadata
-            header = self._build_header(filename, unit.heading_path, unit.pages)
             body = unit.text.strip()
+            header = self._build_header(filename, unit.heading_path, unit.pages, body=body)
             text = f"{header}\n\n{body}" if header else body
             chunks.append(
                 Chunk(
@@ -668,6 +688,18 @@ class StructuredSectionChunker(BaseChunker):
             return self._keyword_level[kw.group(1).lower()], text
         return None
 
+    def _is_heading_line(self, line: str) -> bool:
+        """Whether a line of a chunk's text is a heading.
+
+        ``_heading`` adds every heading keyword, ``Paragraphe`` and a
+        deployment's own included. It cannot stand alone: it judged the source
+        line, and the chunk keeps that line without its inline HTML, so a Marker
+        heading ``## <span id="page-1-0"></span>Article L110-5`` comes back as
+        ``## Article L110-5``, which ``_heading`` reads as an article, not a
+        heading.
+        """
+        return bool(_HEADING_LINE_RE.match(line)) or self._heading(line) is not None
+
     def _keyword_level_for(self, text: str) -> int | None:
         """Nesting level if ``text`` opens with a structural keyword, else None."""
         kw = self._keyword_re.match(text)
@@ -748,7 +780,7 @@ class StructuredSectionChunker(BaseChunker):
             # alone and re-attach the heading to the first piece, which is the
             # one it introduces. A caption labels the whole table, so it goes
             # back on every piece and counts against each piece's budget.
-            lead, table_text = _split_leading_headings(unit.text)
+            lead, table_text = _split_leading_headings(unit.text, self._is_heading_line)
             caption = f"{unit.caption}\n\n" if unit.caption else ""
             element = MDElement(
                 type="table",
@@ -848,9 +880,8 @@ class StructuredSectionChunker(BaseChunker):
         reserve = self._header_reserve(filename, path, unit.pages)
         pieces = _greedy_split(
             unit.text,
-            # Floored at ``min_tokens`` like ``_packing_budget`` /
-            # ``_effective_max``: a floor of 1 let a long filename or deep
-            # breadcrumb eat the whole budget and emit one-token pieces.
+            # The bounded header leaves room for body text even at small
+            # limits; keep the body budget positive for the splitter.
             max(1, target - reserve) if target is not None else self._packing_budget(filename, path, unit.pages),
             max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages),
             self.length_function,
@@ -939,7 +970,7 @@ class StructuredSectionChunker(BaseChunker):
         # introduces what comes *after*, so absorbing it backward leaves that
         # chunk ending on a heading whose body is in the next one — the orphan
         # this strategy exists to remove, arriving through the merge pass.
-        if _is_headings_only(unit):
+        if _is_headings_only(unit, self._is_heading_line):
             return False
         if prev.tokens + unit.tokens > self._effective_max(filename, merged_path, prev.pages | unit.pages):
             return False
@@ -973,17 +1004,47 @@ class StructuredSectionChunker(BaseChunker):
     # ------------------------------------------------------------------
     # Header
     # ------------------------------------------------------------------
-    @staticmethod
-    def _build_header(filename: str, heading_path: list[str], pages: set[int]) -> str:
-        parts: list[str] = []
-        if filename:
-            parts.append(f"Source: {filename}")
-        page_range = _page_range(pages)
-        if page_range:
-            parts.append(f"Page: {page_range}")
-        if heading_path:
-            parts.append(f"Section: {' > '.join(heading_path)}")
-        return f"[{' | '.join(parts)}]" if parts else ""
+    def _build_header(self, filename: str, heading_path: list[str], pages: set[int], *, body: str | None = None) -> str:
+        """Bound the rendered header, leaving at least half the target for body.
+
+        Like ``recursive.source_header``, measure the separator too. Prefer
+        the innermost headings when a breadcrumb is too long, then shorten
+        the remaining text fields. Full names and paths stay in metadata;
+        heading text also stays in the body. Very small budgets omit the
+        header rather than letting it overflow on every split piece.
+        """
+        limit = min(self.target_tokens, self.max_tokens) // 2
+        if body is not None and self.hard_max_tokens is not None:
+            # Rehoming a trailing heading or keeping an atomic block intact
+            # can grow the body after packing. Trim only the repeated header.
+            limit = min(limit, max(0, self.hard_max_tokens - self.length_function(body)))
+        path = [" ".join(sanitize_text(heading).split()) for heading in heading_path]
+        fields = {
+            "Source": " ".join(sanitize_text(filename).split()),
+            "Page": _page_range(pages),
+            "Section": " > ".join(path),
+        }
+        while any(fields.values()):
+            header = "[" + " | ".join(f"{key}: {value}" for key, value in fields.items() if value) + "]"
+            tokens = self.length_function(f"{header}\n\n")
+            if tokens <= limit and (
+                body is None
+                or self.hard_max_tokens is None
+                or self.length_function(f"{header}\n\n{body}") <= self.hard_max_tokens
+            ):
+                return header
+            if len(path) > 1:
+                path.pop(0)
+                fields["Section"] = " > ".join(path)
+                continue
+            # Strictly shorten on each pass, even for counters whose cost
+            # does not decrease with every removed character.
+            key = max(("Section", "Source"), key=lambda key: len(fields[key]))
+            value = fields[key]
+            if not value:
+                break  # Even the page-only header cannot fit.
+            fields[key] = value[: min(len(value) - 1, len(value) * limit // tokens)].rstrip()
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1078,22 +1139,32 @@ def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
         cur.heading_path = list(path)
 
 
-def _split_leading_headings(text: str) -> tuple[str, str]:
-    """Separate a block's leading heading lines from its content."""
-    lines = text.splitlines()
+def _split_leading_headings(text: str, is_heading: Callable[[str], bool]) -> tuple[str, str]:
+    """Separate a block's leading heading lines from its content.
+
+    Lines are split on ``\\n`` only (a ``\\r\\n`` ending counts as one), as
+    ``TABLE_RE`` and ``_build_units`` read them. ``str.splitlines()`` also
+    breaks on a lone ``\\r``, ``\\x0b``, ``\\x0c``, ``\\x1c``-``\\x1e``,
+    ``\\x85``, ``\\u2028`` and ``\\u2029``: inside a table cell that cut the row
+    in two, and the table parser then dropped both halves' text (#1375).
+
+    ``is_heading`` is ``_is_heading_line``, so every heading keyword is
+    recognised here too.
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
     cut = 0
     lead: list[str] = []
-    while cut < len(lines) and (not lines[cut].strip() or _HEADING_LINE_RE.match(lines[cut])):
+    while cut < len(lines) and (not lines[cut].strip() or is_heading(lines[cut])):
         if lines[cut].strip():
             lead.append(lines[cut].strip())
         cut += 1
     return "\n\n".join(lead), "\n".join(lines[cut:]).strip()
 
 
-def _is_headings_only(unit: _Unit) -> bool:
+def _is_headings_only(unit: _Unit, is_heading: Callable[[str], bool]) -> bool:
     """A unit carrying nothing but heading lines — no body of its own."""
-    lines = [line for line in unit.text.splitlines() if line.strip()]
-    return bool(lines) and all(_HEADING_LINE_RE.match(line) for line in lines)
+    lines = [line for line in unit.text.replace("\r\n", "\n").split("\n") if line.strip()]
+    return bool(lines) and all(is_heading(line) for line in lines)
 
 
 def _keeps_context(a: list[str], b: list[str]) -> bool:

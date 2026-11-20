@@ -1,9 +1,10 @@
 import { queryOptions, useQuery, type QueryClient } from "@tanstack/react-query";
 import { getMyInfo } from "@/lib/api/account";
-import { getQueueInfo, listTasks } from "@/lib/api/jobs";
+import { getQueueInfo, listTasks, type TaskListPagination } from "@/lib/api/jobs";
 import { useAuth } from "@/lib/auth";
 
 export const JOBS_REFETCH_INTERVAL_MS = 5_000;
+export const ACTIVE_JOBS_REFETCH_INTERVAL_MS = 5_000;
 
 export interface JobsQueryScope {
   userId: number;
@@ -19,8 +20,17 @@ export const jobsQueryKeys = {
   allTasks: ["tasks"] as const,
   activeCount: (scope: JobsQueryScope) =>
     ["tasks", "active-count", ...scopeKey(scope)] as const,
-  tasks: (scope: JobsQueryScope, taskStatus?: string) =>
-    ["tasks", ...scopeKey(scope), taskStatus?.toLowerCase() ?? "all"] as const,
+  tasks: (
+    scope: JobsQueryScope,
+    taskStatus?: string,
+    pagination?: Pick<TaskListPagination, "limit" | "offset">,
+  ) =>
+    [
+      "tasks",
+      ...scopeKey(scope),
+      taskStatus?.toLowerCase() ?? "all",
+      pagination ? { limit: pagination.limit, offset: pagination.offset } : "unpaged",
+    ] as const,
   allQueueInfo: ["queue-info"] as const,
   queueInfo: (scope: JobsQueryScope) => ["queue-info", ...scopeKey(scope)] as const,
 };
@@ -32,12 +42,19 @@ export function invalidateJobsQueries(queryClient: QueryClient) {
   ]);
 }
 
-export function jobsTaskListQueryOptions(scope: JobsQueryScope, taskStatus?: string) {
+export function jobsTaskListQueryOptions(
+  scope: JobsQueryScope,
+  taskStatus?: string,
+  pagination?: Pick<TaskListPagination, "limit" | "offset">,
+) {
+  const refetchInterval = taskStatus?.toLowerCase() === "active"
+    ? ACTIVE_JOBS_REFETCH_INTERVAL_MS
+    : JOBS_REFETCH_INTERVAL_MS;
   return queryOptions({
-    queryKey: jobsQueryKeys.tasks(scope, taskStatus),
-    queryFn: () => listTasks(taskStatus),
-    refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
-    staleTime: JOBS_REFETCH_INTERVAL_MS,
+    queryKey: jobsQueryKeys.tasks(scope, taskStatus, pagination),
+    queryFn: () => listTasks(taskStatus, pagination),
+    refetchInterval, // poll — OpenRag has no task SSE
+    staleTime: refetchInterval,
   });
 }
 
@@ -60,11 +77,11 @@ export function jobsQueueInfoQueryOptions(scope: JobsQueryScope) {
 }
 
 /**
- * Active tasks the caller may see — 0 until the first response lands. Admins
- * reuse the global queue summary; regular users reuse the lightweight pending
- * count already returned with their current-user information.
+ * Active tasks the caller may see — undefined while the first response is
+ * pending, then null if it fails. Admins reuse the global queue summary;
+ * regular users reuse the lightweight pending count from current-user info.
  */
-export function useActiveJobsCount(): number {
+export function useActiveJobsCount(): number | null | undefined {
   const { user } = useAuth();
   const scope = { userId: user?.id ?? 0, isAdmin: user?.is_admin === true };
   const adminQuery = useQuery({
@@ -75,5 +92,13 @@ export function useActiveJobsCount(): number {
     ...jobsUserActiveCountQueryOptions(scope),
     enabled: !!user && !scope.isAdmin,
   });
-  return scope.isAdmin ? (adminQuery.data?.tasks.active ?? 0) : (userQuery.data ?? 0);
+  if (scope.isAdmin) {
+    if (adminQuery.data !== undefined) return adminQuery.data.tasks.active;
+    if (adminQuery.isPending) return undefined;
+    return null;
+  }
+
+  if (userQuery.data !== undefined) return userQuery.data;
+  if (userQuery.isPending) return undefined;
+  return null;
 }

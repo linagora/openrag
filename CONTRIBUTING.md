@@ -9,7 +9,7 @@ long-lived branches, plus short-lived branches for features, releases, and hotfi
 
 | Branch | Purpose | Branches from | Merges into |
 |--------|---------|---------------|-------------|
-| `main` | Production. Every commit is a released, tagged version. **Never commit directly.** | — | — |
+| `main` | Production. Takes only release and hotfix merges, each tagged except a docs-only hotfix. **Never commit directly.** | — | — |
 | `develop` | Integration branch. The next release accumulates here. | — | — |
 | `feature/*` | A single feature or fix. | `develop` | `develop` |
 | `release/X.Y.Z` | Stabilize a version before shipping. | `develop` | `main` **and** `develop` |
@@ -48,6 +48,37 @@ Once cut:
 - `release/X.Y.Z` takes **only** release preparation — bug fixes, version bumps, changelog, docs. **No new features.**
 - `develop` reopens immediately for the next cycle's features (they proceed in parallel).
 
+#### Choosing the number
+
+A version number is chosen when `release/X.Y.Z` or `hotfix/*` is cut, never before. A hotfix can
+take the next patch number at any time, so a number written down on `develop` is a guess, and a
+hotfix turns it into a rename and a merge conflict. Until the release branch exists, nothing in the
+repository names the coming release:
+
+- `ui/src/lib/whats-new.ts` entries say `UNRELEASED` (see [Bumping the version](#bumping-the-version)).
+- The docs say `UNRELEASED` too. An upgrade-guide section about the coming release is headed
+  `## OpenRAG UNRELEASED: …`, and a note about when something changed says "from OpenRAG
+  UNRELEASED". The bump commit resolves them.
+- The chart's `version` stays at the last release's. Only the bump commit moves it
+  ([Helm chart](#helm-chart)).
+
+Milestones are the plan, so they do carry numbers. When a hotfix needs a number a milestone already
+has, the hotfix takes it and the planned patch milestones move up by one. Rename them highest first,
+because GitHub refuses a title another milestone already has, then create the hotfix's milestone
+under the freed number:
+
+```bash
+gh api --paginate 'repos/linagora/openrag/milestones?state=open' --jq '.[] | "\(.number) \(.title)"'
+# say v2.3.6 and v2.3.7 are planned, and the hotfix takes 2.3.6
+gh api -X PATCH repos/linagora/openrag/milestones/<number of v2.3.7> -f title=v2.3.8
+gh api -X PATCH repos/linagora/openrag/milestones/<number of v2.3.6> -f title=v2.3.7
+gh api -X POST repos/linagora/openrag/milestones -f title=v2.3.6
+```
+
+A rename keeps every issue and pull request in its milestone, and their pages show the new title. A
+minor milestone (`v2.4.0`) doesn't move. If `release/X.Y.Z` has already been cut, put the fix on that
+branch instead and ship that release: its number may already be on release candidates.
+
 #### Bumping the version
 
 The version is typed in exactly one place, `pyproject.toml` — `/version` is served from that file's
@@ -60,8 +91,9 @@ minors later, so nobody has to remember to delete it. A feature PR cannot know i
 this branch is where that number is chosen — so feature PRs write `UNRELEASED` and the release
 resolves it.
 
-Do both in the `chore(release): bump version to X.Y.Z` commit, and read the second from the first
-rather than typing the number twice:
+Do both in the `chore(release): bump version to X.Y.Z` commit, together with the docs' `UNRELEASED`
+placeholders ([Choosing the number](#choosing-the-number)), and read the number from `pyproject.toml`
+rather than typing it again:
 
 ```bash
 # 1. edit pyproject.toml's `version` to X.Y.Z, then read it back:
@@ -72,6 +104,21 @@ VER=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
 registry=ui/src/lib/whats-new.ts
 sed -E "s/^( *\"[^\"]+\": *)\"UNRELEASED\"(,?) *\$/\1\"$VER\"\2/" "$registry" > "$registry.new" \
   && mv "$registry.new" "$registry"
+
+# 3. resolve the docs' placeholders to it; in the docs the word is only ever a placeholder.
+#    git grep exits 0 on a match, 1 on none, and above 1 when it cannot search.
+pages=$(git grep -lw UNRELEASED -- docs/content)
+[ $? -le 1 ] || { echo "cannot search docs/content — aborting"; exit 1; }
+for page in $pages; do
+  sed "s/UNRELEASED/$VER/g" "$page" > "$page.new" && mv "$page.new" "$page" \
+    || { echo "could not rewrite $page — aborting"; exit 1; }
+done
+git grep -nw UNRELEASED -- docs/content
+case $? in
+  1) echo "docs clean" ;;
+  0) echo "the docs above still say UNRELEASED — aborting"; exit 1 ;;
+  *) echo "cannot search docs/content — aborting"; exit 1 ;;
+esac
 ```
 
 The guard is not ceremony: an empty `$VER` — a renamed field, a moved `version` line — would otherwise
@@ -88,6 +135,11 @@ An entry left unresolved badges every user forever, and nobody notices, because 
 dropdown expecting an option *not* to say NEW. So `verify-tag` in `.github/workflows/build.yml`
 refuses to publish GA images while any entry is still unresolved.
 
+A docs placeholder left unresolved would be published, and earlier than that: the site deploys when
+the release merges into `main`, before there is a tag. So the `Unreleased docs` job in
+`.github/workflows/ci.yml` fails a pull request into `main` while `docs/content` still says
+`UNRELEASED`.
+
 Three deployment files name the released image tag and are bumped by hand in the same commit — they
 are what an operator actually pulls, so a missed one ships the previous release under the new
 number:
@@ -97,6 +149,11 @@ number:
 | `infra/charts/openrag-stack/Chart.yaml` | `appVersion` (and see [Helm chart](#helm-chart) — its own `version` is separate) |
 | `infra/charts/openrag-stack/values.yaml` | the `tag: "vX.Y.Z"` of each OpenRag image |
 | `infra/compose/docker-compose.yaml` | the `linagoraai/openrag*:vX.Y.Z` images |
+
+The install command in the Kubernetes guide (`docs/content/docs/documentation/kubernetes.md`) names the
+chart instead: set its `--version` to the chart `version` this release publishes, in the same commit. A
+pin left on an older chart installs a chart without this release's changes; one ahead of the registry
+fails with a 404.
 
 Before opening the release PR, check the bump from both sides. First, nothing under `infra/` should
 still name the version you are replacing — this is what finds a file the table doesn't list:
@@ -157,23 +214,41 @@ predicted would ship.
 
 When the release is ready:
 
-1. Merge `release/X.Y.Z` into `main`.
-2. Tag `main` with `vX.Y.Z` — this triggers the GA image build (`.github/workflows/build.yml`).
-3. Once steps 1-8 of [`.github/RELEASING.md`](.github/RELEASING.md) pass, create the GitHub Release
+1. Check the documentation site builds from the release branch:
+   `gh workflow run astro.yml -R linagora/openrag --ref release/X.Y.Z`. Its Build job must pass. Its
+   Deploy job is refused, because the `github-pages` environment deploys only from `main`; the merge
+   in step 2 publishes the site. A docs fix found now goes into `release/X.Y.Z`, not into `main`
+   after the release.
+2. Merge `release/X.Y.Z` into `main`.
+3. Tag the merge commit on `main` with `vX.Y.Z`. This triggers the GA image build
+   (`.github/workflows/build.yml`). Once the images are built, the tag never moves (rule 5 of
+   [`.github/RELEASING.md`](.github/RELEASING.md)).
+4. Once steps 1-8 of [`.github/RELEASING.md`](.github/RELEASING.md) pass, publish the private
+   security advisories the release fixes, if any, each with its affected versions and `vX.Y.Z` as
+   the patched version. They go out before the GitHub Release, whose notes describe the changes they
+   cover. The release notes never link to an advisory: the advisory names the release, not the
+   other way round.
+5. Read this release's pages on the published documentation site, then create the GitHub Release
    (no workflow does) as a draft titled with the tag,
    `gh release create vX.Y.Z -R linagora/openrag --verify-tag --draft --title vX.Y.Z --generate-notes`,
    edit its notes, and publish it with `gh release edit vX.Y.Z -R linagora/openrag --draft=false`.
    Then run step 9 of RELEASING.md. Without `--verify-tag`, a mistyped tag is silently created on
    `develop` and a Release is created for a version that does not exist.
-4. Merge `release/X.Y.Z` back into `develop` so the stabilization fixes and version bump aren't lost.
+6. Merge `main` back into `develop` so the stabilization fixes and version bump aren't lost. GitHub
+   deletes `release/X.Y.Z` when its pull request merges, so the back-merge branches from `main`.
 
-Name the branch to match the tag scheme (`release/2.1.0` → tag `v2.1.0`).
+Name the branch `release/X.Y.Z`, matching the tag (`release/2.1.0` → tag `v2.1.0`), or `hotfix/*`
+for a hotfix. Step 7 of RELEASING.md refuses a tag on the merge of any other branch.
 
 ### Hotfixes
 
 For an urgent fix to something already in production that can't wait for the next release, branch
 `hotfix/*` off `main`, then merge it into **both** `main` (tag a new patch version) **and** `develop`.
-The new patch version is released like any other: steps 2 and 3 above.
+The new patch version is released like any other: steps 3 to 5 above.
+
+A docs-only fix that the published site needs before the next release takes the same path, without
+a tag: it changes no image, and the release tag stays where it is. A fix to code, configuration or
+the chart is a new patch version.
 
 ## Rule of thumb
 
@@ -185,14 +260,28 @@ The new patch version is released like any other: steps 2 and 3 above.
 
 `infra/charts/openrag-stack/` carries a version of its own, and it is not the application's:
 
-- **`version`** (`0.6.x`) — the chart's version. Bump it in *any* PR that changes the chart.
+- **`version`** — the chart's version. Only a release moves it: bump it once, in the release's
+  bump commit, never in a feature PR. Every release changes the chart (`appVersion` and the image
+  tags at least), so every release bumps it. The new `version` goes above the one on `main`, the
+  last one published, not above the one on `develop`: a hotfix may have bumped it on `main` before
+  reaching `develop`, and a bump from `develop`'s would publish that number a second time. Fetch
+  before reading it, since a stale `origin/main` misses exactly that hotfix:
+  `git fetch origin main && git show origin/main:infra/charts/openrag-stack/Chart.yaml`.
 - **`appVersion`** — the OpenRag release the chart deploys. Only a release bump moves it.
 
 `.github/workflows/helm.yaml` packages and pushes to `oci://ghcr.io/linagora/openrag-stack` on every
-push to `main` or `develop` that touches `infra/charts/**` — `X.Y.Z` from `main`, `X.Y.Z-dev` from
-`develop`. OCI tags are mutable, so a chart change that forgets to bump `version` silently
-republishes a tag someone has already pinned, with different content underneath. That is the failure
-the bump prevents; it is not bookkeeping.
+push to `main` or `develop` that touches `infra/charts/**`.
+
+- From `main` it publishes `version` as it is. OCI tags are mutable, so pushing a `version` that is
+  already published silently changes a chart someone has pinned, with different content underneath.
+  `main` only takes release and hotfix merges, and each brings a bump above the `version` already
+  there, so that can't happen.
+- From `develop` it publishes the next patch with `-dev`: `0.7.16-dev` while `Chart.yaml` says
+  `0.7.15`. Every such push overwrites that tag, by design, and it sorts above the last release.
+  These runs go one at a time, and a newer one replaces a queued older one, so the tag always ends
+  up on the newest chart.
+  A bump in a feature PR would protect nothing there. It would only use up a number that a hotfix
+  may need ([Choosing the number](#choosing-the-number)).
 
 ### Sub-chart dependencies
 

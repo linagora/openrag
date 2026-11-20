@@ -88,3 +88,9 @@ def test_empty_prefix_matches_any_group():
 def test_role_casing_is_normalised():
     cfg = _cfg(group_pattern=r"(.+)/(OWNER|EDITOR|VIEWER|owner|editor|viewer)$")
     assert extract_partition_roles({"groups": ["/openrag/alpha/EDITOR"]}, cfg) == [("alpha", "editor")]
+
+
+def test_groups_naming_a_reserved_partition_are_ignored():
+    cfg = _cfg()
+    claims = {"groups": ["/openrag/all/owner", "/openrag/All/viewer", "/openrag/alpha/editor"]}
+    assert extract_partition_roles(claims, cfg) == [("alpha", "editor")]

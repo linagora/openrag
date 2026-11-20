@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Sequence
+from contextlib import AbstractAsyncContextManager, nullcontext
 
 from core.llm import LLM
 from core.models.chunk import Chunk
@@ -50,10 +51,15 @@ class TopicTagger:
         system_prompt: str,
         *,
         timeout_seconds: float | None = None,
+        llm_semaphore: AbstractAsyncContextManager[object] | None = None,
     ) -> None:
         self._llm = llm
         self._system_prompt = system_prompt
         self._timeout = timeout_seconds
+        # Optional cluster-wide LLM gate, as for ChunkContextualizer: the chat
+        # call shares the global LLM concurrency budget. Acquired outside the
+        # timeout, so time spent waiting for a permit doesn't count against it.
+        self._semaphore = llm_semaphore or nullcontext()
 
     async def tag(
         self,
@@ -84,12 +90,13 @@ class TopicTagger:
                 max_tags=max_tags,
                 lang=lang,
             )
-            operation = self._llm.chat(messages)
-            response = (
-                await asyncio.wait_for(operation, timeout=self._timeout)
-                if self._timeout is not None
-                else await operation
-            )
+            async with self._semaphore:
+                operation = self._llm.chat(messages)
+                response = (
+                    await asyncio.wait_for(operation, timeout=self._timeout)
+                    if self._timeout is not None
+                    else await operation
+                )
             return _parse_topic_tags(_chat_response_text(response), max_tags=max_tags)
         except (
             TimeoutError,
