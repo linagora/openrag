@@ -468,7 +468,7 @@ Retrieve a specific document extract (chunk) by its ID.
 **Parameters:**
 - `extract_id` (path): The unique chunk identifier (from search or chunk-listing results)
 
-**Permissions:** Requires access to the partition containing the chunk — regular users are limited to their assigned partitions; admins can read any chunk.
+**Permissions:** Requires access to the partition containing the chunk: users, admins included, are limited to their own partitions; with `SUPER_ADMIN_MODE=true`, admins can read any chunk.
 
 **Response:** `200 OK`
 ```json
@@ -485,8 +485,7 @@ Retrieve a specific document extract (chunk) by its ID.
 ```
 
 **Errors:**
-- `403 Forbidden`: You don't have access to the chunk's partition
-- `404 Not Found`: No extract with that ID
+- `404 Not Found`: No extract with that ID in a partition you can read (a chunk you can't read answers the same)
 
 ---
 

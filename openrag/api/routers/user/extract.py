@@ -3,9 +3,8 @@
 Phase 8E: the chunk-by-id lookup moved to
 ``services.orchestrators.conversion_service.ConversionService`` (clean
 ``VectorStore`` port, no Ray). This module keeps HTTP transport only:
-the request-scoped partition authorization and the not-found / forbidden
-guards whose exact ``{"detail": ...}`` body the legacy endpoint
-returned via ``HTTPException``.
+the request-scoped partition authorization and the not-found guard. A chunk
+in a partition the caller cannot read answers the same 404 as a missing one.
 """
 
 from api.dependencies.auth import current_user_or_admin_partitions_list
@@ -27,9 +26,9 @@ router = APIRouter()
 - `extract_id`: The unique chunk identifier (from search or list results)
 
 **Permissions:**
-- Requires access to the partition containing the chunk
-- Regular users: Only chunks from assigned partitions
-- Admins: Any chunk
+- Requires access to the partition containing the chunk (404 otherwise)
+- Users, admins included: only chunks from their own partitions
+- Admins with `SUPER_ADMIN_MODE=true`: any chunk
 
 **Response:**
 Returns chunk details including:
@@ -71,8 +70,8 @@ async def get_extract(
     if chunk_partition not in user_partitions and user_partitions != ["all"]:
         log.warning("User does not have access to this extract.")
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"User does not have access to extract '{extract_id}'.",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Extract '{extract_id}' not found.",
         )
     log.info("Extract successfully retrieved.")
 

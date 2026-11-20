@@ -48,10 +48,7 @@ async def download_source(
     chunk_partition = metadata.get("partition")
     if chunk_partition not in user_partitions and user_partitions != ["all"]:
         log.warning("User does not have access to this file.")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User does not have access to this file.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
 
     source = metadata.get("source")
     if not source:
