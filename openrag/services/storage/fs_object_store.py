@@ -25,6 +25,12 @@ the process leaves an object whole or absent, but after a power loss or a
 crash of the file server a renamed file may hold less than was written,
 depending on the filesystem.
 
+Filesystem calls run in threads, which can't be stopped: a cancelled call
+waits for its thread, releases what the thread opened or created for it, then
+raises ``CancelledError``. Once a call is over, nothing still runs for it.
+An error's message names the key and the reason; the path, which is the
+server's, goes to the log only.
+
 ``local_copy`` yields the stored file itself when it has the suffix asked for,
 which the keys make the usual case, and a temporary copy otherwise.
 """
@@ -32,6 +38,8 @@ which the keys make the usual case, and a temporary copy otherwise.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -60,9 +68,6 @@ _META_SUFFIX = ".meta"
 # ``.meta``, so it can't also be the sidecar of another name.
 _HASHED_META_SUFFIX = ".hashed-meta"
 _LOCK_STRIPES = 64
-# Releases still waiting on the thread of a cancelled call (the event loop
-# keeps only a weak reference to a task).
-_PENDING_RELEASES: set[asyncio.Task[None]] = set()
 
 
 class FsObjectStore(ObjectStore):
@@ -90,7 +95,7 @@ class FsObjectStore(ObjectStore):
         self._lexical_path(key)
         checked = validate_metadata(metadata)
         path = await self._path(key)
-        temp, file = await self._io_owned(key, _discard_temp, self._create_temp, path.parent)
+        temp, file = await self._io(key, self._create_temp, path.parent, release=_discard_temp)
         hasher = hashlib.sha256()
         size = 0
         try:
@@ -99,17 +104,14 @@ class FsObjectStore(ObjectStore):
                 hasher.update(chunk)
                 size += len(chunk)
         except BaseException:
-            await asyncio.to_thread(_discard, file, temp)
+            # Logged by _io; the error to raise is the first one.
+            with contextlib.suppress(ObjectStoreError):
+                await self._io(key, _discard, file, temp)
             raise
         digest = hasher.hexdigest()
         # The stream is read: from here the write completes, closing the
-        # file included, even if the caller is cancelled while it runs.
-        commit = asyncio.ensure_future(self._io(key, self._close_and_commit, file, temp, path, digest, checked))
-        try:
-            await asyncio.shield(commit)
-        except asyncio.CancelledError:
-            await commit
-            raise
+        # file included, even if the caller is cancelled (_io waits for it).
+        await self._io(key, self._close_and_commit, file, temp, path, digest, checked)
         return ObjectInfo(key=key, size=size, sha256=digest, metadata=MappingProxyType(checked))
 
     async def copy(self, src: str, dst: str) -> ObjectInfo:
@@ -144,12 +146,12 @@ class FsObjectStore(ObjectStore):
     @asynccontextmanager
     async def open_stream(self, key: str, byte_range: ByteRange | None = None) -> AsyncIterator[AsyncIterator[bytes]]:
         path = await self._path(key)
-        file, size = await self._io_owned(key, _close_opened, _open_with_size, key, path)
+        file, size = await self._io(key, _open_with_size, key, path, release=_close_opened)
         try:
             offset, length = (0, size) if byte_range is None else byte_range.resolve(size)
             yield self._read_chunks(key, file, offset, length)
         finally:
-            await asyncio.to_thread(file.close)
+            await self._io(key, file.close)
 
     @asynccontextmanager
     async def local_copy(self, key: str, suffix: str | None = None) -> AsyncIterator[Path]:
@@ -161,11 +163,11 @@ class FsObjectStore(ObjectStore):
             # The stored file itself. Not ours to remove.
             yield path
             return
-        temp = await self._io_owned(key, _remove, _copy_to_temp, key, path, wanted)
+        temp = await self._io(key, _copy_to_temp, key, path, wanted, release=_remove)
         try:
             yield temp
         finally:
-            await asyncio.to_thread(temp.unlink, missing_ok=True)
+            await self._io(key, _remove, temp)
 
     async def stat(self, key: str) -> ObjectInfo:
         path = await self._path(key)
@@ -197,28 +199,29 @@ class FsObjectStore(ObjectStore):
         await self._io(key, self._confine, key, path)
         return path
 
-    async def _io(self, key: str, func: Callable[..., _T], *args: Any) -> _T:
-        """Run blocking filesystem work in a thread; an ``OSError`` becomes ``ObjectStoreError``."""
-        try:
-            return await asyncio.to_thread(func, *args)
-        except OSError as exc:
-            raise ObjectStoreError(f"Filesystem error on {key!r}: {exc}", key=key) from exc
+    async def _io(
+        self, key: str, func: Callable[..., _T], *args: Any, release: Callable[[_T], None] | None = None
+    ) -> _T:
+        """Run blocking filesystem work in a thread; an ``OSError`` becomes ``ObjectStoreError``.
 
-    async def _io_owned(self, key: str, release: Callable[[_T], None], func: Callable[..., _T], *args: Any) -> _T:
-        """``_io`` for a call that opens or creates something the caller must release.
-
-        A thread can't be interrupted: when the caller is cancelled, the thread
-        still finishes, and what it opened or created would be left with
-        nobody holding it. ``release`` gets it once the thread is done.
+        A thread can't be stopped, so a call cancelled while its thread runs
+        waits for it, then raises ``CancelledError``. ``release`` takes back
+        what the thread opened or created when the cancelled caller won't.
         """
-        job = asyncio.ensure_future(self._io(key, func, *args))
+        job = asyncio.ensure_future(asyncio.to_thread(func, *args))
+        cancelled = await _wait_out(job)
+        if cancelled is not None:
+            await _settle_cancelled(key, job, release)
+            raise cancelled
         try:
-            return await asyncio.shield(job)
-        except asyncio.CancelledError:
-            task = asyncio.ensure_future(_release_when_done(job, release))
-            _PENDING_RELEASES.add(task)
-            task.add_done_callback(_PENDING_RELEASES.discard)
-            raise
+            return job.result()
+        except OSError as exc:
+            # The message can reach the client: the key and the reason. The
+            # path is the server's, so it goes to the log only.
+            logger.bind(key=key, error=str(exc)).warning("Filesystem error in the object store.")
+            raise ObjectStoreError(
+                f"Filesystem error on {key!r}: {exc.strerror or type(exc).__name__}.", key=key
+            ) from exc
 
     async def _read_chunks(self, key: str, file: IO[bytes], offset: int, length: int) -> AsyncIterator[bytes]:
         await self._io(key, file.seek, offset)
@@ -233,7 +236,11 @@ class FsObjectStore(ObjectStore):
     # --- helpers, in a thread -------------------------------------------------------
 
     def _confine(self, key: str, path: Path) -> None:
-        resolved = path.resolve()
+        try:
+            resolved = path.resolve()
+        except RuntimeError as exc:
+            # A symlink loop, as Python 3.12 reports it.
+            raise OSError(errno.ELOOP, os.strerror(errno.ELOOP)) from exc
         if resolved == self._root or not resolved.is_relative_to(self._root):
             logger.bind(key=key).warning("An object path resolves outside the store's root.")
             raise ObjectStoreError(f"The path of {key!r} leaves the store's root.", key=key)
@@ -444,15 +451,34 @@ def _remove(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-async def _release_when_done(job: asyncio.Future[_T], release: Callable[[_T], None]) -> None:
-    try:
-        acquired = await job
-    except Exception:
-        return  # the call failed, so it holds nothing
-    try:
-        await asyncio.to_thread(release, acquired)
-    except OSError as exc:
-        logger.bind(error=str(exc)).warning("Could not release what a cancelled object store call acquired.")
+async def _wait_out(job: asyncio.Future[Any]) -> asyncio.CancelledError | None:
+    """Wait for ``job`` to end, however often the caller is cancelled; return the first cancel."""
+    cancelled: asyncio.CancelledError | None = None
+    while not job.done():
+        try:
+            await asyncio.shield(job)
+        except asyncio.CancelledError as exc:
+            if not job.cancelled():
+                cancelled = cancelled or exc
+        except BaseException:
+            break  # the job failed: its caller reads the error from it
+    return cancelled
+
+
+async def _settle_cancelled(key: str, job: asyncio.Future[_T], release: Callable[[_T], None] | None) -> None:
+    """After a cancel, once the thread is done: release what it acquired, or log how it failed."""
+    if job.cancelled():
+        return
+    if (error := job.exception()) is not None:
+        if isinstance(error, OSError):
+            logger.bind(key=key, error=str(error)).warning("A cancelled object store call failed.")
+        return
+    if release is None:
+        return
+    cleanup = asyncio.ensure_future(asyncio.to_thread(release, job.result()))
+    await _wait_out(cleanup)
+    if not cleanup.cancelled() and (error := cleanup.exception()) is not None:
+        logger.bind(key=key, error=str(error)).warning("Could not release what a cancelled object store call acquired.")
 
 
 __all__ = ["FsObjectStore"]

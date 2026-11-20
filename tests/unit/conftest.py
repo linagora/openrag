@@ -27,8 +27,8 @@ import pytest
 from core.embeddings.embedder import Embedder
 from core.ports.catalog_store import CatalogStore
 from core.ports.object_store import ByteRange, ObjectInfo, ObjectStore, validate_metadata
-from core.utils.exceptions import ObjectNotFoundError
-from core.utils.object_keys import validate_key, validate_suffix
+from core.utils.exceptions import ObjectNotFoundError, ObjectStoreError
+from core.utils.object_keys import LEGACY, validate_key, validate_suffix
 from core.vector_stores.vector_store import VectorStore
 
 
@@ -168,6 +168,14 @@ class InMemoryObjectStore(ObjectStore):
         except KeyError:
             raise ObjectNotFoundError(f"No object under {key!r}.") from None
 
+    def _store(self, key: str, data: bytes, digest: str, metadata: dict[str, str]) -> None:
+        if key.startswith(f"{LEGACY}/"):
+            # As on a filesystem, where a path is a file or a directory.
+            for other in self.objects:
+                if other.startswith(f"{key}/") or key.startswith(f"{other}/"):
+                    raise ObjectStoreError(f"{key!r} and {other!r} can't both hold an object.", key=key)
+        self.objects[key] = (data, digest, metadata)
+
     def _info(self, key: str) -> ObjectInfo:
         data, digest, metadata = self.objects[key]
         return ObjectInfo(key=key, size=len(data), sha256=digest, metadata=MappingProxyType(dict(metadata)))
@@ -181,7 +189,7 @@ class InMemoryObjectStore(ObjectStore):
         async for chunk in stream:
             hasher.update(chunk)
             parts.append(chunk)
-        self.objects[key] = (b"".join(parts), hasher.hexdigest(), checked)
+        self._store(key, b"".join(parts), hasher.hexdigest(), checked)
         return self._info(key)
 
     @asynccontextmanager
@@ -229,7 +237,7 @@ class InMemoryObjectStore(ObjectStore):
     async def copy(self, src: str, dst: str) -> ObjectInfo:
         validate_key(dst)
         data, digest, metadata = self._get(src)
-        self.objects[dst] = (data, digest, dict(metadata))
+        self._store(dst, data, digest, dict(metadata))
         return self._info(dst)
 
     async def presign_get(self, key: str, ttl_seconds: int) -> str | None:

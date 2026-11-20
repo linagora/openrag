@@ -52,7 +52,7 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
     - `stat(key) -> ObjectInfo` (size, SHA-256 or `None`, metadata);
     - `put_bytes`, a helper over `put_stream`;
     - `open_stream` as an async context manager.
-  - **Metadata rules:** keys are `[a-z0-9-]`, values any string, at most 640 UTF-8 bytes in all; `openrag-` is kept for the adapters' own entries.
+  - **Metadata rules:** keys are 1 to 64 characters of `[a-z0-9-]` starting with a letter or digit, values any text, at most 640 UTF-8 bytes in all; `openrag-` is kept for the adapters' own entries.
   - **Writes:** a failed `put_stream` leaves the key as it was.
   - **Not added yet:** `list`.
 - **Why:**

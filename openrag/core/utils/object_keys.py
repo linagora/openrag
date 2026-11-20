@@ -91,7 +91,7 @@ def encode_component(value: str) -> str:
     """Encode a partition or file id as one key component."""
     if not isinstance(value, str) or not value:
         raise InvalidObjectKeyError("An object key component cannot be empty.")
-    encoded = base64.urlsafe_b64encode(value.encode("utf-8")).rstrip(b"=").decode("ascii")
+    encoded = base64.urlsafe_b64encode(_utf8(value)).rstrip(b"=").decode("ascii")
     _check_component_length(encoded)
     return encoded
 
@@ -244,13 +244,22 @@ def _check_relative_path(relative_path: str | PurePath) -> str:
     return text
 
 
+def _utf8(text: str) -> bytes:
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate: a "\ud800" escape in JSON, or a non-UTF-8 name on
+        # disk read through os.fsdecode.
+        raise InvalidObjectKeyError("An object key must be valid UTF-8 text.") from None
+
+
 def _check_component_length(component: str) -> None:
-    if len(component.encode("utf-8")) > MAX_COMPONENT_BYTES:
+    if len(_utf8(component)) > MAX_COMPONENT_BYTES:
         raise InvalidObjectKeyError(f"An object key component is longer than {MAX_COMPONENT_BYTES} bytes.")
 
 
 def _check_key_length(key: str) -> None:
-    if len(key.encode("utf-8")) > MAX_KEY_BYTES:
+    if len(_utf8(key)) > MAX_KEY_BYTES:
         raise InvalidObjectKeyError(f"An object key is longer than {MAX_KEY_BYTES} bytes.")
 
 

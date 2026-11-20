@@ -30,6 +30,7 @@ from core.utils.exceptions import (
     InvalidByteRangeError,
     InvalidObjectKeyError,
     ObjectNotFoundError,
+    ObjectStoreError,
     ValidationError,
 )
 
@@ -80,6 +81,8 @@ def invalid_keys() -> Iterable[str]:
         "originals/a/b",
         "uploads/" + "0" * 31,
         "legacy/" + "x" * 1100,
+        # A lone surrogate, which no UTF-8 name can hold.
+        "legacy/\ud800x.pdf",
     ]
 
 
@@ -164,10 +167,15 @@ class ObjectStoreConformance:
         await store.put_bytes(key, b"x")
         assert dict((await store.stat(key)).metadata) == {}
 
-    async def test_invalid_metadata_is_refused_before_writing(self, store):
+    @pytest.mark.parametrize(
+        "metadata",
+        [{"Bad Key": "v"}, {"-tag": "v"}, {"k" * 65: "v"}, {"filename": "\ud800x.pdf"}],
+        ids=["uppercase", "leading-dash", "65-chars", "lone-surrogate"],
+    )
+    async def test_invalid_metadata_is_refused_before_writing(self, store, metadata):
         key = original()
         with pytest.raises(ValidationError):
-            await store.put_bytes(key, b"x", {"Bad Key": "v"})
+            await store.put_bytes(key, b"x", metadata)
         assert not await store.exists(key)
 
     # --- failed writes --------------------------------------------------------------
@@ -315,6 +323,24 @@ class ObjectStoreConformance:
         await store.delete(f"{key}/inside.pdf")
         await store.delete_many([f"{key}/inside.pdf"])
         assert await read_all(store, key) == b"kept"
+
+    async def test_a_key_and_a_key_under_it_cannot_both_hold_an_object(self, store):
+        outer = keys.legacy_key("1713700000000_a1b2_report.pdf")
+        inner = f"{outer}/inside.pdf"
+        await store.put_bytes(outer, b"outer")
+        with pytest.raises(ObjectStoreError):
+            await store.put_bytes(inner, b"inner")
+        with pytest.raises(ObjectStoreError):
+            await store.copy(outer, inner)
+        assert await read_all(store, outer) == b"outer"
+        assert not await store.exists(inner)
+
+        await store.delete(outer)
+        await store.put_bytes(inner, b"inner")
+        with pytest.raises(ObjectStoreError):
+            await store.put_bytes(outer, b"outer")
+        assert await read_all(store, inner) == b"inner"
+        assert not await store.exists(outer)
 
     async def test_delete_leaves_neighbours(self, store):
         key = original()

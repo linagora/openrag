@@ -1,5 +1,6 @@
 """Object keys: encoding, the builders, the limits and parsing back."""
 
+import os
 from pathlib import PurePosixPath
 
 import pytest
@@ -183,6 +184,31 @@ def test_legacy_key_for_source():
     ["/tmp/index_url_abc.pdf", "/app/data", "/app/database/x.pdf", "/app/data/../etc/passwd", "relative.pdf"],
 )
 def test_legacy_key_for_source_outside_data_dir_is_none(source):
+    assert keys.legacy_key_for_source(source, "/app/data") is None
+
+
+# --- text that isn't UTF-8 -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: keys.encode_component("\ud800"),
+        lambda: keys.original_key("\ud800docs", "f", UPLOAD_ID, ".pdf"),
+        lambda: keys.original_key("docs", "f\udcff", UPLOAD_ID, ".pdf"),
+        lambda: keys.legacy_key("\ud800x.pdf"),
+        lambda: keys.validate_key("legacy/\ud800x.pdf"),
+        lambda: keys.parse_key("legacy/a/\udcff.pdf"),
+    ],
+)
+def test_a_lone_surrogate_is_an_invalid_key(build):
+    # What a "\ud800" escape in JSON gives: refused as a bad key (400), not a 500.
+    with pytest.raises(InvalidObjectKeyError):
+        build()
+
+
+def test_a_name_on_disk_that_isnt_utf8_has_no_legacy_key():
+    source = "/app/data/" + os.fsdecode(b"\xff_report.pdf")
     assert keys.legacy_key_for_source(source, "/app/data") is None
 
 

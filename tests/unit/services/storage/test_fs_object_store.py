@@ -207,15 +207,62 @@ async def test_a_call_cancelled_while_its_thread_acquires_releases_what_it_got(s
     task = asyncio.create_task(operation)
     assert await asyncio.to_thread(gate.entered.wait, 5)
     task.cancel()
+    await asyncio.sleep(0.05)
+    # The thread can't be stopped: the call waits for it.
+    assert not task.done()
+    gate.release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    gate.release.set()
-    assert await asyncio.to_thread(gate.done.wait, 5)
-    for _ in range(250):
-        if released(gate.result):
-            break
-        await asyncio.sleep(0.02)
     assert released(gate.result)
+
+
+@pytest.mark.parametrize("ending", ["cancel", "timeout"])
+async def test_a_put_cancelled_while_its_commit_fails_ends_cancelled(store, root, ending):
+    def failing_commit(temp, path, digest, metadata):
+        temp.unlink()
+        raise OSError(5, "Input/output error")
+
+    gate = Gate(failing_commit)
+    store._commit = gate
+    deadline: list[asyncio.Timeout] = []
+
+    async def put():
+        async with asyncio.timeout(None) as timeout:
+            deadline.append(timeout)
+            await store.put_bytes(original(), b"x")
+
+    task = asyncio.create_task(put())
+    assert await asyncio.to_thread(gate.entered.wait, 5)
+    if ending == "cancel":
+        task.cancel()
+    else:
+        deadline[0].reschedule(asyncio.get_running_loop().time())
+    await asyncio.sleep(0.05)
+    gate.release.set()
+    # Not the commit's ObjectStoreError: the caller asked to stop.
+    with pytest.raises(asyncio.CancelledError if ending == "cancel" else TimeoutError):
+        await task
+    assert stray_files(root) == []
+
+
+async def test_a_put_cancelled_twice_while_it_commits_is_stored_when_it_ends(store, root):
+    gate = Gate(store._commit)
+    store._commit = gate
+    key = original()
+    task = asyncio.create_task(store.put_bytes(key, b"whole", {"filename": "a.pdf"}))
+    assert await asyncio.to_thread(gate.entered.wait, 5)
+    for _ in range(2):
+        task.cancel()
+        await asyncio.sleep(0.05)
+    assert not task.done()
+    gate.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Checked before anything else runs: a caller cleaning up on cancel
+    # finds the object in place.
+    path = root.joinpath(*key.split("/"))
+    assert path.read_bytes() == b"whole"
+    assert path.with_name(f".{path.name}.meta").exists()
 
 
 async def test_a_put_retries_when_its_directory_is_pruned_while_made(store, monkeypatch):
@@ -290,6 +337,35 @@ async def test_a_symlink_cannot_lead_a_key_out_of_the_root(store, root, tmp_path
     with pytest.raises(ObjectStoreError):
         await store.delete(key)
     assert sorted(p.name for p in outside.iterdir()) == ["secret.pdf"]
+
+
+async def test_a_symlink_loop_is_a_store_error(store, root):
+    root.mkdir()
+    (root / "loop").symlink_to("loop")
+    with pytest.raises(ObjectStoreError):
+        await store.stat("legacy/loop")
+    key = "legacy/loop/x.pdf"
+    with pytest.raises(ObjectStoreError):
+        await store.stat(key)
+    with pytest.raises(ObjectStoreError):
+        await read_all(store, key)
+    with pytest.raises(ObjectStoreError):
+        await store.put_bytes(key, b"x")
+    with pytest.raises(ObjectStoreError):
+        await store.delete(key)
+
+
+async def test_an_error_names_the_key_but_not_the_servers_path(store, root, monkeypatch):
+    def denied(src, dst):
+        raise PermissionError(13, "Permission denied", str(dst))
+
+    monkeypatch.setattr(fs_object_store.os, "replace", denied)
+    key = original()
+    with pytest.raises(ObjectStoreError) as excinfo:
+        await store.put_bytes(key, b"x")
+    message = str(excinfo.value)
+    assert key in message and "Permission denied" in message
+    assert str(root) not in message
 
 
 async def test_a_legacy_key_naming_a_directory_is_no_object(store, root):

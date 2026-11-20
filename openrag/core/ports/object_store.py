@@ -16,11 +16,24 @@ The contract, for every adapter:
   stream, leaves the key as it was: no partial object, and any previous
   object still there. Once the stream is read, the write completes even if
   the call is cancelled.
+* **A write that fails while it stores** (``ObjectStoreError`` from
+  ``put_stream`` or ``copy``), or a crash at that point, can leave the new
+  content without its metadata: the filesystem stores the two in separate
+  steps. ``stat`` then gives ``sha256=None`` and no metadata, as for a file
+  the port didn't write. Content is never paired with another write's
+  metadata. Write the key again, or delete it.
+* **Cancellation.** A cancelled call raises ``CancelledError``, never another
+  error, and only once the store has stopped acting for it: a caller that
+  cleans up on cancel sees what the call left.
 * **One writer per key.** Concurrent writes to one key from different
   processes or store instances are not supported: the filesystem adapter
   orders a key's writes only within its own process, and could pair one
   write's content with another's metadata. Callers write each key once, under
   a fresh upload id per revision.
+* **Nested keys.** Only ``legacy/`` keys can nest (``legacy/a.pdf`` and
+  ``legacy/a.pdf/b.pdf``). A store holds at most one of a key and the keys
+  under it, as a filesystem path is a file or a directory: writing the other
+  raises ``ObjectStoreError`` and leaves both keys as they were.
 * **Missing objects.** ``open_stream``, ``local_copy``, ``stat`` and ``copy``
   raise ``ObjectNotFoundError``. ``delete`` and ``delete_many`` treat a
   missing key as already deleted.
@@ -28,6 +41,8 @@ The contract, for every adapter:
   returned by ``stat`` exactly as given, non-ASCII values included
   (:func:`validate_metadata` has the rules). ``copy`` carries it over.
 * **Failures.** Anything else the backend reports is an ``ObjectStoreError``.
+  Its message can reach the client: it names the key and the reason, never a
+  path or an address of the backend.
 """
 
 from __future__ import annotations
@@ -59,7 +74,8 @@ class ObjectInfo:
     size: int
     # Hex SHA-256 of the content. Always set by ``put_stream``; ``copy`` and
     # ``stat`` give the one known for the object, ``None`` for a file the port
-    # didn't write (stored before the object store existed).
+    # didn't write (stored before the object store existed) or whose write
+    # failed while it stored (see the module docstring).
     sha256: str | None
     metadata: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
@@ -91,10 +107,11 @@ class ByteRange:
 def validate_metadata(metadata: Mapping[str, str] | None) -> dict[str, str]:
     """Return a copy of ``metadata`` if a store can keep it, else raise ``ValidationError``.
 
-    Keys are lowercase letters, digits and ``-`` (what S3 keeps unchanged),
-    up to 64 characters, and don't start with :data:`RESERVED_METADATA_PREFIX`,
-    which adapters keep for their own entries. Values are any string. Keys and
-    values together take at most :data:`MAX_METADATA_BYTES` in UTF-8.
+    Keys are 1 to 64 lowercase letters, digits and ``-`` (what S3 keeps
+    unchanged), start with a letter or a digit, and don't start with
+    :data:`RESERVED_METADATA_PREFIX`, which adapters keep for their own
+    entries. Values are any text. Keys and values together take at most
+    :data:`MAX_METADATA_BYTES` in UTF-8.
     """
     if metadata is None:
         return {}
@@ -107,7 +124,11 @@ def validate_metadata(metadata: Mapping[str, str] | None) -> dict[str, str]:
             raise ValidationError(f"Object metadata key {key!r} uses a reserved prefix.", status_code=400)
         if not isinstance(value, str):
             raise ValidationError(f"Object metadata value for {key!r} must be a string.", status_code=400)
-        total += len(key.encode("utf-8")) + len(value.encode("utf-8"))
+        try:
+            total += len(key.encode("utf-8")) + len(value.encode("utf-8"))
+        except UnicodeEncodeError:
+            # A lone surrogate, such as a "\ud800" escape in JSON.
+            raise ValidationError(f"Object metadata value for {key!r} is not valid text.", status_code=400) from None
         checked[key] = value
     if total > MAX_METADATA_BYTES:
         raise ValidationError(f"Object metadata is larger than {MAX_METADATA_BYTES} bytes.", status_code=400)
@@ -150,8 +171,10 @@ class ObjectStore(ABC):
 
         The path ends with ``suffix``, the key's own suffix by default, because
         the path-based parsers choose a reader from it. An adapter that can
-        yield the stored file itself does so. Otherwise it downloads a copy and
-        removes it on exit. Either way the caller only reads the path.
+        yield the stored file itself does so: the path is then valid only while
+        the object is neither deleted nor replaced, so a caller doesn't delete
+        what it is reading. Otherwise the adapter downloads a copy and removes
+        it on exit. Either way the caller only reads the path.
         """
 
     @abstractmethod

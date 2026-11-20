@@ -69,6 +69,12 @@ def test_metadata_value_must_be_a_string():
         validate_metadata({"size": 3})
 
 
+def test_metadata_value_with_a_lone_surrogate_is_refused():
+    # A "\ud800" escape in a JSON body: a 400, not a UnicodeEncodeError.
+    with pytest.raises(ValidationError):
+        validate_metadata({"filename": "\ud800x.pdf"})
+
+
 def test_metadata_size_is_counted_in_utf8_bytes():
     key = "k"
     fits = "x" * (MAX_METADATA_BYTES - len(key))
