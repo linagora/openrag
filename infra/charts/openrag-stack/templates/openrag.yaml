@@ -36,12 +36,18 @@
    after the ConfigMap, so its copy wins. With any other Secret, env.secrets
    never reaches the pod, and the Secret's own values are out of the chart's
    sight. openrag.extraEnv wins over both, since the container env overrides
-   envFrom. An extraEnv entry with valueFrom cannot be read at render time and
-   goes unchecked. The defaults are the app's (conf/config.yaml). */ -}}
+   envFrom. An extraEnv entry with valueFrom cannot be read at render time,
+   and it hides whatever env.config or env.secrets set for that name: when it
+   sets a sizing variable, the whole check is skipped, since the pools are
+   placed together. The defaults are the app's (conf/config.yaml). */ -}}
 {{- if $embeddedRay -}}
 {{- $resources := .Values.openrag.resources | default dict -}}
 {{- $podGpus := int (dig "limits" "nvidia.com/gpu" (dig "requests" "nvidia.com/gpu" 0 $resources) $resources) -}}
-{{- if gt $podGpus 0 -}}
+{{- $sizingUnknown := false -}}
+{{- range $entry := .Values.openrag.extraEnv | default list -}}
+{{- if and (not (hasKey $entry "value")) (has $entry.name (list "MARKER_POOL_SIZE" "MARKER_NUM_GPUS" "DOCLING_POOL_SIZE" "DOCLING_NUM_GPUS" "WHISPER_N_WORKERS" "WHISPER_NUM_GPUS")) -}}{{- $sizingUnknown = true -}}{{- end -}}
+{{- end -}}
+{{- if and (gt $podGpus 0) (not $sizingUnknown) -}}
 {{- $env := deepCopy (.Values.env.config | default dict) -}}
 {{- if and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") -}}
 {{- $env = mergeOverwrite $env (.Values.env.secrets | default dict) -}}
