@@ -28,6 +28,7 @@ from core.utils.exceptions import (
     ConflictError,
     DocumentNotFoundError,
     ServiceUnavailableError,
+    VDBFileIDAlreadyExistsError,
     mark_indexing_worker_may_be_running,
 )
 from core.utils.logging import get_logger
@@ -948,7 +949,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 catalog_kwargs["indexation_config"] = indexation_config
             await self._insert_entities(entities, protected_metadata=file_metadata)
             try:
-                await self._document_repo.add_file_to_partition(
+                written = await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
                     partition=target_partition,
                     file_metadata=file_metadata,
@@ -964,6 +965,11 @@ class WorkerDispatcher(IndexingDispatcher):
                     recheck_quota_if_slot_gone=True,
                     **catalog_kwargs,
                 )
+                if not written:
+                    # The file_id was taken while the chunks were copied.
+                    raise VDBFileIDAlreadyExistsError(
+                        f"File '{target_file_id}' already exists in partition '{target_partition}'."
+                    )
             except Exception:
                 await self._cleanup_submitted_vectors(
                     claim_token, metadata={"file_id": target_file_id}, partition=target_partition

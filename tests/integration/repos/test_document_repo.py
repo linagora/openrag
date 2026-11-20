@@ -346,3 +346,51 @@ async def test_get_indexation_config_reads_one_partitions_row(postgres_store):
     assert await repo.get_indexation_config("f1", a) == {"embedder": "e5"}
     assert await repo.get_indexation_config("f1", b) is None
     assert await repo.get_indexation_config("missing", a) is None
+
+
+class _MissesTheFileRowPool:
+    """Opens real connections whose existence check misses the file row: the
+    window in which another writer inserts it between the check and the INSERT."""
+
+    def __init__(self, pool):
+        self._pool = pool
+
+    def acquire(self):
+        pool = self._pool
+
+        class _Acquired:
+            async def __aenter__(self):
+                self._ctx = pool.acquire()
+                return _MissesTheFileRowConn(await self._ctx.__aenter__())
+
+            async def __aexit__(self, *exc):
+                return await self._ctx.__aexit__(*exc)
+
+        return _Acquired()
+
+
+class _MissesTheFileRowConn:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    async def fetchval(self, query, *args):
+        if query.startswith("SELECT 1 FROM files"):
+            return None
+        return await self._conn.fetchval(query, *args)
+
+
+async def test_a_file_id_taken_after_the_check_is_refused_and_leaves_the_row_alone(postgres_store):
+    from services.persistence.document_repo import PgDocumentRepository
+
+    partition = await _seed_partition(postgres_store, "p")
+    repo = postgres_store.document_repo
+    assert await repo.add_file_to_partition(file_id="f1", partition=partition, file_metadata={"title": "first"})
+    raced = PgDocumentRepository(pool_getter=lambda: _MissesTheFileRowPool(repo.pool))
+
+    refused = await raced.add_file_to_partition(file_id="f1", partition=partition, file_metadata={"title": "second"})
+
+    assert refused is False
+    assert (await repo.get_file_metadata("f1", partition))["title"] == "first"

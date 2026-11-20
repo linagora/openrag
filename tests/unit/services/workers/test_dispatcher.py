@@ -1879,6 +1879,7 @@ async def test_copy_receives_grace_before_catalog_write_and_matches_afterward() 
 
     async def add(**kwargs):
         entries[kwargs["partition"], kwargs["file_id"]] = kwargs["indexed_at"]
+        return True
 
     catalog.get_indexed_documents.side_effect = lookup
     catalog.list_indexed_documents = AsyncMock(side_effect=list_documents)
@@ -3554,6 +3555,39 @@ async def test_a_copy_the_catalog_refuses_leaves_none_of_its_chunks() -> None:
     # Only this copy's chunks: the marker is unique to it.
     marker = store.insert_entities.await_args.args[0][0][INDEXING_TASK_ID_METADATA_KEY]
     assert marker.startswith("copy:")
+    store.delete_by_filter.assert_awaited_once_with(
+        {"partition": "b", "file_id": "copy-1", INDEXING_TASK_ID_METADATA_KEY: marker}
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_finds_its_file_id_taken_at_the_catalog_leaves_none_of_its_chunks() -> None:
+    from core.utils.exceptions import VDBFileIDAlreadyExistsError
+    from services.workers.dispatcher import WorkerDispatcher
+    from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+    store = _vector_store()
+    store.query_chunks_by_filter = AsyncMock(
+        return_value=[{"_id": 1, "text": "hello", "vector_e5": [0.1, 0.2], "file_id": "file-1", "partition": "a"}]
+    )
+    repo = _document_repo()
+    # Another file took "copy-1" in "b" after the copy was admitted.
+    repo.add_file_to_partition = AsyncMock(return_value=False)
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(VDBFileIDAlreadyExistsError) as refused:
+        await dispatcher.copy_file("file-1", {"file_id": "copy-1", "partition": "b"}, "a", user=None)
+
+    assert refused.value.status_code == 409
+    marker = store.insert_entities.await_args.args[0][0][INDEXING_TASK_ID_METADATA_KEY]
     store.delete_by_filter.assert_awaited_once_with(
         {"partition": "b", "file_id": "copy-1", INDEXING_TASK_ID_METADATA_KEY: marker}
     )
