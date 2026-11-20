@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 from api.middleware.auth import (
+    SESSION_COOKIE_NAME,
     AuthFailureRateLimiter,
     AuthMiddleware,
     is_bypass_path,
@@ -183,11 +184,13 @@ def test_auth_middleware_accepts_custom_bypass_config() -> None:
     assert instance._bypass_config is custom
 
 
-def _request(headers=None, path="/indexer/files", app=None):
+def _request(headers=None, path="/indexer/files", app=None, client=None):
     raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
     scope = {"type": "http", "method": "GET", "path": path, "headers": raw, "query_string": b""}
     if app is not None:
         scope["app"] = app
+    if client is not None:
+        scope["client"] = client
     return Request(scope)
 
 
@@ -366,6 +369,852 @@ async def test_failed_bearer_limit_blocks_before_token_lookup(monkeypatch) -> No
     assert first.status_code == 403
     assert second.status_code == 429
     svc.get_user_by_token_for_request.assert_awaited_once_with("bad")
+
+
+@pytest.mark.asyncio
+async def test_only_recently_authenticated_tokens_pass_exhausted_failure_bucket(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "configured-admin-token")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    user = {"id": 7, "display_name": "Token User"}
+
+    async def get_user(token):
+        return user if token in {"known-user-token", "configured-admin-token"} else None
+
+    svc = type("S", (), {})()
+    svc.get_user_by_token_for_request = AsyncMock(side_effect=get_user)
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    known_token = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next
+    )
+    failed_token = await middleware.dispatch(_request(headers={"authorization": "Bearer bad-token"}), _unused_call_next)
+    known_token_after_lockout = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next
+    )
+    never_seen_admin_token = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer configured-admin-token"}), _unused_call_next
+    )
+
+    assert known_token.status_code == 200
+    assert failed_token.status_code == 403
+    assert known_token_after_lockout.status_code == 200
+    assert never_seen_admin_token.status_code == 429
+    assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == [
+        "known-user-token",
+        "bad-token",
+        "known-user-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recently_authenticated_token_does_not_bypass_another_ip_bucket(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "configured-admin-token")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    user = {"id": 7, "display_name": "Token User"}
+
+    async def get_user(token):
+        return user if token == "known-user-token" else None
+
+    svc = type("S", (), {})()
+    svc.get_user_by_token_for_request = AsyncMock(side_effect=get_user)
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    known_token = await middleware.dispatch(
+        _request(
+            headers={"authorization": "Bearer known-user-token"},
+            client=("192.0.2.10", 12345),
+        ),
+        _unused_call_next,
+    )
+    failed_token = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer bad-token"}, client=("192.0.2.20", 12345)),
+        _unused_call_next,
+    )
+    cross_ip_token = await middleware.dispatch(
+        _request(
+            headers={"authorization": "Bearer known-user-token"},
+            client=("192.0.2.20", 12345),
+        ),
+        _unused_call_next,
+    )
+
+    assert known_token.status_code == 200
+    assert failed_token.status_code == 403
+    assert cross_ip_token.status_code == 429
+    assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == [
+        "known-user-token",
+        "bad-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_revoked_token_requests_share_one_lookup(monkeypatch) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "configured-admin-token")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    token_is_valid = True
+    lookup_started = asyncio.Event()
+    finish_lookup = asyncio.Event()
+    user = {"id": 7, "display_name": "Token User"}
+
+    async def get_user(token):
+        if token == "known-user-token" and token_is_valid:
+            return user
+        if token == "known-user-token":
+            lookup_started.set()
+            await finish_lookup.wait()
+        return None
+
+    svc = type("S", (), {})()
+    svc.get_user_by_token_for_request = AsyncMock(side_effect=get_user)
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    client = ("192.0.2.30", 12345)
+
+    known = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer known-user-token"}, client=client), _unused_call_next
+    )
+    failed = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer bad-token"}, client=client), _unused_call_next
+    )
+    assert known.status_code == 200
+    assert failed.status_code == 403
+
+    token_is_valid = False
+    tasks = [
+        asyncio.create_task(
+            middleware.dispatch(
+                _request(headers={"authorization": "Bearer known-user-token"}, client=client), _unused_call_next
+            )
+        )
+    ]
+    try:
+        await asyncio.wait_for(lookup_started.wait(), timeout=5)
+        second_precheck_seen = asyncio.Event()
+        original_cache_check = middleware._has_recently_authenticated_token
+
+        def count_second_precheck(identity, credential, kind):
+            if credential == "known-user-token":
+                second_precheck_seen.set()
+            return original_cache_check(identity, credential, kind)
+
+        monkeypatch.setattr(middleware, "_has_recently_authenticated_token", count_second_precheck)
+        tasks.append(
+            asyncio.create_task(
+                middleware.dispatch(
+                    _request(headers={"authorization": "Bearer known-user-token"}, client=client), _unused_call_next
+                )
+            )
+        )
+        await asyncio.wait_for(second_precheck_seen.wait(), timeout=5)
+        finish_lookup.set()
+        responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert [response.status_code for response in responses] == [429, 429]
+    assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == [
+        "known-user-token",
+        "bad-token",
+        "known-user-token",
+    ]
+    assert middleware._credential_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_revoked_recent_token_is_removed_after_failed_revalidation(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "configured-admin-token")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    token_is_valid = True
+    user = {"id": 7, "display_name": "Token User"}
+
+    async def get_user(token):
+        return user if token == "known-user-token" and token_is_valid else None
+
+    svc = type("S", (), {})()
+    svc.get_user_by_token_for_request = AsyncMock(side_effect=get_user)
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    first = await middleware.dispatch(_request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next)
+    failed = await middleware.dispatch(_request(headers={"authorization": "Bearer bad-token"}), _unused_call_next)
+    token_is_valid = False
+    revoked = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next
+    )
+    revoked_retry = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next
+    )
+
+    assert first.status_code == 200
+    assert failed.status_code == 403
+    assert revoked.status_code == 429
+    assert revoked_retry.status_code == 429
+    assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == [
+        "known-user-token",
+        "bad-token",
+        "known-user-token",
+    ]
+
+
+def test_recent_token_cache_covers_late_failure_window(monkeypatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+
+    now = [100.0]
+    monkeypatch.setattr("api.middleware.auth.time.monotonic", lambda: now[0])
+    middleware._remember_authenticated_token("ip:unknown", "known-user-token", "token")
+
+    # A failure bucket can fill at the end of the first 60-second window and
+    # remain exhausted until that last failure expires near the 120-second mark.
+    now[0] = 219.9
+    assert middleware._has_recently_authenticated_token("ip:unknown", "known-user-token", "token")
+    now[0] = 220.0
+    assert not middleware._has_recently_authenticated_token("ip:unknown", "known-user-token", "token")
+
+
+def test_recent_token_cache_purges_expired_entries_in_validation_order(monkeypatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+    identity = "ip:unknown"
+
+    now = [100.0]
+    monkeypatch.setattr("api.middleware.auth.time.monotonic", lambda: now[0])
+    middleware._remember_authenticated_token(identity, "older", "token")
+    now[0] = 110.0
+    middleware._remember_authenticated_token(identity, "newer", "token")
+    assert middleware._has_recently_authenticated_token(identity, "older", "token")
+
+    now[0] = 220.0
+    middleware._remember_authenticated_token(identity, "latest", "token")
+
+    assert len(middleware._recently_authenticated_tokens) == 2
+    assert middleware._has_recently_authenticated_token(identity, "newer", "token")
+
+
+@pytest.mark.asyncio
+async def test_recent_oidc_cookie_passes_exhausted_failure_bucket(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("AUTH_TOKEN", "configured-admin-token")
+    monkeypatch.setenv("OIDC_TOKEN_ENCRYPTION_KEY", "test-key")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    session = {"id": 3, "user_id": 7}
+    user = {"id": 7, "display_name": "OIDC User"}
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(
+        side_effect=lambda token: session if token == "known-session-token" else None
+    )
+    svc.oidc_session_needs_refresh = lambda _session: False
+    svc.get_user_for_request = AsyncMock(return_value=user)
+    svc.get_user_by_token_for_request = AsyncMock(return_value=None)
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    known_session = await middleware.dispatch(
+        _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=known-session-token"}), _unused_call_next
+    )
+    failed_token = await middleware.dispatch(_request(headers={"authorization": "Bearer bad-token"}), _unused_call_next)
+    known_session_after_lockout = await middleware.dispatch(
+        _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=known-session-token"}), _unused_call_next
+    )
+
+    assert known_session.status_code == 200
+    assert failed_token.status_code == 401
+    assert known_session_after_lockout.status_code == 200
+    assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == [
+        "known-session-token",
+        "bad-token",
+        "known-session-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_oidc_cookie_miss_preserves_programmatic_token_eligibility(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 7})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    bearer = _request(headers={"authorization": "Bearer programmatic-token"})
+    cookie = _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=programmatic-token"})
+
+    assert (await middleware.dispatch(bearer, _unused_call_next)).status_code == 200
+    assert (await middleware.dispatch(cookie, _unused_call_next)).status_code == 302
+    await middleware._auth_failure_limiter.record_failure(bearer)
+    svc.get_oidc_session_by_token_for_request.reset_mock()
+
+    assert (await middleware.dispatch(cookie, _unused_call_next)).status_code == 429
+    assert (await middleware.dispatch(bearer, _unused_call_next)).status_code == 200
+    svc.get_oidc_session_by_token_for_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_succeeds", [True, False])
+async def test_oidc_refresh_is_shared_by_cookie_and_limited_bearer_requests(monkeypatch, refresh_succeeds) -> None:
+    import asyncio
+    from datetime import datetime, timedelta
+    from unittest.mock import AsyncMock
+
+    from services.auth.refresh import session_was_refreshed_since
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    start_refresh = asyncio.Event()
+    finish_refresh = asyncio.Event()
+    bearer_rechecked_bucket = asyncio.Event()
+    stored_session = {
+        "id": 3,
+        "user_id": 7,
+        "fresh": True,
+        "last_refresh_at": datetime.now() - timedelta(minutes=1),
+        "access_token_expires_at": datetime.now() + timedelta(hours=1),
+    }
+    exchanges = 0
+
+    async def refresh(*, session, enc_key):
+        nonlocal exchanges
+        if not session["fresh"]:
+            exchanges += 1
+            start_refresh.set()
+            await finish_refresh.wait()
+            if not refresh_succeeds:
+                return None
+            stored_session["fresh"] = True
+            stored_session["last_refresh_at"] = datetime.now()
+            # This remains inside the middleware's 60-second refresh buffer.
+            stored_session["access_token_expires_at"] = datetime.now() + timedelta(seconds=60)
+            return stored_session.copy()
+        return session
+
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(side_effect=lambda _token: stored_session.copy())
+    svc.oidc_session_needs_refresh = lambda session: not session["fresh"]
+    svc.oidc_session_was_refreshed_since = session_was_refreshed_since
+    svc.refresh_session_if_needed = AsyncMock(side_effect=refresh)
+    svc.get_user_for_request = AsyncMock(return_value={"id": 7})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    svc.revoke_oidc_session_by_id_for_request = AsyncMock()
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    limiter = middleware._auth_failure_limiter
+    cookie_ip = "192.0.2.20" if refresh_succeeds else "192.0.2.30"
+    cookie = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=session-token"}, client=(cookie_ip, 12345))
+    bearer = _request(headers={"authorization": "Bearer session-token"}, client=("192.0.2.30", 12345))
+    assert (await middleware.dispatch(bearer, _unused_call_next)).status_code == 200
+    stored_session["fresh"] = False
+    original_check = limiter.is_limited
+    bearer_checks = 0
+
+    async def observe_bucket_check(request):
+        nonlocal bearer_checks
+        limited = await original_check(request)
+        if request is bearer:
+            bearer_checks += 1
+            if bearer_checks == 2:
+                bearer_rechecked_bucket.set()
+        return limited
+
+    monkeypatch.setattr(limiter, "is_limited", observe_bucket_check)
+    tasks = [asyncio.create_task(middleware.dispatch(cookie, _unused_call_next))]
+    try:
+        await asyncio.wait_for(start_refresh.wait(), timeout=5)
+        await limiter.record_failure(bearer)
+        tasks.append(asyncio.create_task(middleware.dispatch(bearer, _unused_call_next)))
+        await asyncio.wait_for(bearer_rechecked_bucket.wait(), timeout=5)
+        finish_refresh.set()
+        responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert exchanges == 1
+    svc.refresh_session_if_needed.assert_awaited_once()
+    if refresh_succeeds:
+        assert [response.status_code for response in responses] == [200, 200]
+        svc.revoke_oidc_session_by_id_for_request.assert_not_awaited()
+        assert svc.get_oidc_session_by_token_for_request.await_count == 5
+    else:
+        assert [response.status_code for response in responses] == [429, 429]
+        svc.revoke_oidc_session_by_id_for_request.assert_awaited_once_with(3)
+        # The limited waiter skips the second read after the cache eviction.
+        assert svc.get_oidc_session_by_token_for_request.await_count == 4
+    assert middleware._credential_locks == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read", ["session", "user"])
+async def test_fresh_oidc_session_reads_are_concurrent(monkeypatch, read) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    session = {"id": 3, "user_id": 7}
+    user = {"id": 7}
+    both_reading = asyncio.Event()
+    reads = 0
+
+    async def concurrent_read(_key):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            both_reading.set()
+        await asyncio.wait_for(both_reading.wait(), timeout=5)
+        return session if read == "session" else user
+
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = (
+        concurrent_read if read == "session" else AsyncMock(return_value=session)
+    )
+    svc.oidc_session_needs_refresh = lambda _session: False
+    svc.refresh_session_if_needed = AsyncMock()
+    svc.get_user_for_request = concurrent_read if read == "user" else AsyncMock(return_value=user)
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    responses = await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                middleware.dispatch(
+                    _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=session-token"}), _unused_call_next
+                )
+                for _ in range(2)
+            )
+        ),
+        timeout=10,
+    )
+
+    assert [response.status_code for response in responses] == [200, 200]
+    svc.refresh_session_if_needed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refresh_renews_eligibility_before_releasing_the_session_lock(monkeypatch) -> None:
+    """A same-IP limited request whose cache entry expires while it waits on
+    the session lock still authenticates once the concurrent refresh
+    succeeds, even though the failure bucket stays full.
+
+    The refresh owner here is an unrestricted request (it passed its bucket
+    check before the bucket filled), so only the session lock coordinates
+    the two — the outer eligibility lock in dispatch does not.
+    """
+    import asyncio
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from services.auth.refresh import session_was_refreshed_since
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    cache_time = 100.0
+    monkeypatch.setattr("api.middleware.auth.time", SimpleNamespace(monotonic=lambda: cache_time))
+    start_refresh = asyncio.Event()
+    finish_refresh = asyncio.Event()
+    waiter_reached_session_read = asyncio.Event()
+    stored_session = {
+        "id": 3,
+        "user_id": 7,
+        "fresh": False,
+        "last_refresh_at": datetime.now() - timedelta(minutes=1),
+        "access_token_expires_at": datetime.now() + timedelta(hours=1),
+    }
+
+    async def refresh(*, session, enc_key):
+        start_refresh.set()
+        await finish_refresh.wait()
+        stored_session["fresh"] = True
+        stored_session["last_refresh_at"] = datetime.now()
+        # Still inside the middleware's 60s refresh buffer, so the re-read
+        # under the lock cannot be skipped via oidc_session_was_refreshed_since.
+        stored_session["access_token_expires_at"] = datetime.now() + timedelta(seconds=60)
+        return stored_session.copy()
+
+    session_reads = 0
+
+    async def lookup_session(_token):
+        nonlocal session_reads
+        session_reads += 1
+        # Read #3 is the waiter's first (pre-lock) session read: the owner
+        # did reads #1 (pre-lock) and #2 (under the lock). Signal it so the
+        # test can let the cache entry expire before releasing the refresh.
+        if session_reads == 3:
+            waiter_reached_session_read.set()
+        return stored_session.copy()
+
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(side_effect=lookup_session)
+    svc.oidc_session_needs_refresh = lambda session: not session["fresh"]
+    svc.oidc_session_was_refreshed_since = session_was_refreshed_since
+    svc.refresh_session_if_needed = AsyncMock(side_effect=refresh)
+
+    async def lookup_user(user_id):
+        # Yield so the waiter can run between the refresh owner releasing
+        # the session lock and renewing the cache entry — the window the
+        # review found.
+        await asyncio.sleep(0)
+        return {"id": user_id}
+
+    svc.get_user_for_request = AsyncMock(side_effect=lookup_user)
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    svc.revoke_oidc_session_by_id_for_request = AsyncMock()
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    limiter = middleware._auth_failure_limiter
+
+    # Same client identity for both requests (the shared-proxy case): they
+    # share the recent-success cache entry and the failure bucket.
+    owner = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=session-token"}, client=("192.0.2.40", 12345))
+    waiter = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=session-token"}, client=("192.0.2.40", 12346))
+    identity = limiter._identity(owner)
+    assert limiter._identity(waiter) == identity
+    # One shared cache entry, valid at the waiter's eligibility checks but
+    # expiring while the waiter waits for the session lock.
+    middleware._remember_authenticated_token(identity, "session-token", "session")
+
+    async def is_limited(request):
+        # The owner passed its bucket check before the bucket filled; every
+        # check the waiter makes sees a full bucket.
+        return request is waiter
+
+    monkeypatch.setattr(limiter, "is_limited", is_limited)
+
+    tasks = [asyncio.create_task(middleware.dispatch(owner, _unused_call_next))]
+    try:
+        await asyncio.wait_for(start_refresh.wait(), timeout=5)
+        tasks.append(asyncio.create_task(middleware.dispatch(waiter, _unused_call_next)))
+        await asyncio.wait_for(waiter_reached_session_read.wait(), timeout=5)
+        # Let the shared cache entry expire while the waiter waits on the
+        # session lock the owner still holds inside the refresh.
+        cache_time += middleware._recently_authenticated_token_ttl
+        finish_refresh.set()
+        responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    svc.refresh_session_if_needed.assert_awaited_once()
+    assert middleware._credential_locks == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_reopened", [False, True])
+async def test_oidc_bearer_fallback_rechecks_eligibility_after_cookie_lookup(monkeypatch, bucket_reopened) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 7})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    request = _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": "Bearer bearer"})
+    limiter = middleware._auth_failure_limiter
+    identity = limiter._identity(request)
+    middleware._remember_authenticated_token(identity, "cookie", "session")
+    middleware._remember_authenticated_token(identity, "bearer", "token")
+    await limiter.record_failure(request)
+
+    async def lookup_cookie(_token):
+        middleware._forget_authenticated_token(identity, "bearer", "token")
+        return None
+
+    svc.get_oidc_session_by_token_for_request = AsyncMock(side_effect=lookup_cookie)
+    checks = [True, True, not bucket_reopened, not bucket_reopened]
+    monkeypatch.setattr(limiter, "is_limited", AsyncMock(side_effect=checks))
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    if bucket_reopened:
+        assert response.status_code == 200
+        svc.get_user_by_token_for_request.assert_awaited_once_with("bearer")
+        assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == [
+            "cookie",
+            "bearer",
+        ]
+    else:
+        assert response.status_code == 429
+        svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("cookie")
+        svc.get_user_by_token_for_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_uncached_bearer_is_checked_if_bucket_reopens_after_cached_cookie_miss(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+
+    async def lookup_bearer(_token):
+        assert middleware._credential_locks == {}
+        return {"id": 7}
+
+    svc.get_user_by_token_for_request = AsyncMock(side_effect=lookup_bearer)
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    request = _request(
+        path="/indexer/files",
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=revoked-cookie", "authorization": "Bearer valid-api-token"},
+    )
+    limiter = middleware._auth_failure_limiter
+    identity = limiter._identity(request)
+    middleware._remember_authenticated_token(identity, "revoked-cookie", "session")
+    await limiter.record_failure(request)
+    monkeypatch.setattr(limiter, "is_limited", AsyncMock(side_effect=[True, True, False]))
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    assert response.status_code == 200
+    svc.get_user_by_token_for_request.assert_awaited_once_with("valid-api-token")
+    assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == [
+        "revoked-cookie",
+        "valid-api-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cookie_precedence_is_restored_if_bucket_reopens_during_bearer_lookup(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    session = {"id": 3, "user_id": 1}
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(
+        side_effect=lambda token: session if token == "valid-cookie" else None
+    )
+    svc.oidc_session_needs_refresh = lambda _session: False
+    svc.get_user_for_request = AsyncMock(return_value={"id": 1})
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 2})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    request = _request(
+        path="/indexer/files",
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-cookie", "authorization": "Bearer api-token"},
+    )
+    limiter = middleware._auth_failure_limiter
+    middleware._remember_authenticated_token(limiter._identity(request), "api-token", "token")
+    monkeypatch.setattr(limiter, "is_limited", AsyncMock(side_effect=[True, True, False]))
+
+    async def return_user_id(req):
+        return Response(str(req.state.user["id"]))
+
+    response = await middleware.dispatch(request, return_user_id)
+
+    assert response.status_code == 200
+    assert response.body == b"1"
+    svc.get_user_by_token_for_request.assert_awaited_once_with("api-token")
+    svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("valid-cookie")
+
+
+@pytest.mark.asyncio
+async def test_successful_cached_cookie_needs_no_lower_priority_retry(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value={"id": 3, "user_id": 1})
+    svc.oidc_session_needs_refresh = lambda _session: False
+    svc.get_user_for_request = AsyncMock(return_value={"id": 1})
+    svc.get_user_by_token_for_request = AsyncMock()
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    request = _request(
+        path="/indexer/files",
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-cookie", "authorization": "Bearer api-token"},
+    )
+    limiter = middleware._auth_failure_limiter
+    middleware._remember_authenticated_token(limiter._identity(request), "valid-cookie", "session")
+    check = AsyncMock(side_effect=[True, True, False])
+    monkeypatch.setattr(limiter, "is_limited", check)
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    assert response.status_code == 200
+    assert check.await_count == 2
+    svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("valid-cookie")
+    svc.get_user_for_request.assert_awaited_once_with(1)
+    svc.get_user_by_token_for_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expired_oidc_ui_credentials_redirect_without_exhausting_the_bucket(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "2/minute")
+
+    session = {"id": 3, "user_id": 7}
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(
+        side_effect=lambda token: session if token == "valid-session" else None
+    )
+    svc.oidc_session_needs_refresh = lambda _session: False
+    svc.get_user_for_request = AsyncMock(return_value={"id": 7})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    for token in ("expired-session-1", "expired-session-2"):
+        response = await middleware.dispatch(
+            _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}={token}"}), _unused_call_next
+        )
+        assert response.status_code == 302
+
+    valid = await middleware.dispatch(
+        _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-session"}), _unused_call_next
+    )
+    assert valid.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_still_limited", [True, False])
+async def test_failed_cached_oidc_ui_credential_rechecks_failure_bucket(monkeypatch, bucket_still_limited) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    request = _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=revoked-cookie"})
+    limiter = middleware._auth_failure_limiter
+    middleware._remember_authenticated_token(limiter._identity(request), "revoked-cookie", "session")
+    monkeypatch.setattr(
+        limiter,
+        "is_limited",
+        AsyncMock(side_effect=[True, True, bucket_still_limited]),
+    )
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    assert response.status_code == (429 if bucket_still_limited else 302)
+    if bucket_still_limited:
+        assert response.headers.get("Retry-After")
+    svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("revoked-cookie")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recent", "status", "lookups"),
+    [
+        ((("cookie", "session"),), 429, ["cookie"]),
+        ((("bearer", "token"),), 200, []),
+        ((("cookie", "session"), ("bearer", "token")), 200, ["cookie"]),
+    ],
+)
+async def test_oidc_lockout_only_validates_cached_credentials(monkeypatch, recent, status, lookups) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 7})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": "Bearer bearer"})
+    limiter = middleware._auth_failure_limiter
+    await limiter.record_failure(request)
+    for token, kind in recent:
+        middleware._remember_authenticated_token(limiter._identity(request), token, kind)
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    assert response.status_code == status
+    assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == lookups
+    if status == 429:
+        svc.get_user_by_token_for_request.assert_not_awaited()
+    else:
+        svc.get_user_by_token_for_request.assert_awaited_once_with("bearer")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_reopened", [False, True])
+async def test_lockout_rechecks_bucket_and_only_uses_locked_credentials(monkeypatch, bucket_reopened) -> None:
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 7})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": "Bearer bearer"})
+    limiter = middleware._auth_failure_limiter
+    await limiter.record_failure(request)
+    middleware._remember_authenticated_token(limiter._identity(request), "cookie", "session")
+    original_lock = middleware._lock_recently_authenticated_tokens
+
+    @asynccontextmanager
+    async def lock_after_cache_changed(identity, credentials):
+        assert credentials == ("cookie",)
+        middleware._forget_authenticated_token(identity, "cookie", "session")
+        middleware._remember_authenticated_token(identity, "bearer", "token")
+        async with original_lock(identity, credentials):
+            yield
+
+    monkeypatch.setattr(middleware, "_lock_recently_authenticated_tokens", lock_after_cache_changed)
+    monkeypatch.setattr(limiter, "is_limited", AsyncMock(side_effect=[True, not bucket_reopened]))
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    assert response.status_code == (200 if bucket_reopened else 429)
+    assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == (
+        ["cookie", "bearer"] if bucket_reopened else []
+    )
+    assert middleware._credential_locks == {}
 
 
 @pytest.mark.asyncio

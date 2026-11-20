@@ -63,6 +63,25 @@ def _to_dt(val: Any) -> datetime:
     raise TypeError(f"Expected datetime or ISO string, got {type(val).__name__}")
 
 
+def session_needs_refresh(session: dict[str, Any], *, now: datetime | None = None) -> bool:
+    return _to_dt(session["access_token_expires_at"]) <= (now or datetime.now()) + _REFRESH_BUFFER
+
+
+def session_was_refreshed_since(
+    previous: dict[str, Any], current: dict[str, Any], *, now: datetime | None = None
+) -> bool:
+    """Return whether a newer refresh produced an access token that is still valid."""
+    current_refresh_at = current.get("last_refresh_at")
+    if current_refresh_at is None:
+        return False
+
+    previous_refresh_at = previous.get("last_refresh_at")
+    if previous_refresh_at is not None and _to_dt(current_refresh_at) <= _to_dt(previous_refresh_at):
+        return False
+
+    return _to_dt(current["access_token_expires_at"]) > (now or datetime.now())
+
+
 async def refresh_session_if_needed(
     *,
     session: dict[str, Any],
@@ -74,8 +93,8 @@ async def refresh_session_if_needed(
     Behaviour:
       - If the access_token is still valid with the 60s buffer → return ``session`` unchanged.
       - Stampede guard: if another request has just refreshed this session
-        (``last_refresh_at`` within 5s), re-read the row and reuse the fresh
-        tokens without calling the IdP.
+        (``last_refresh_at`` within 5s), re-read the row and reuse its access
+        token while it remains valid, even if it is inside the refresh buffer.
       - If near/past expiry AND a ``refresh_token_encrypted`` blob is stored →
         call the IdP, persist rotated tokens, return an updated session dict.
       - If near/past expiry AND no refresh_token is stored → return ``session`` as-is
@@ -89,10 +108,10 @@ async def refresh_session_if_needed(
     ``PartitionFileManager._oidc_session_to_dict``.
     """
     now = datetime.now()
-    access_exp = _to_dt(session["access_token_expires_at"])
 
-    if access_exp > now + _REFRESH_BUFFER:
+    if not session_needs_refresh(session, now=now):
         return session
+    access_exp = _to_dt(session["access_token_expires_at"])
 
     # --- Stampede short-circuit -------------------------------------------
     # If a sibling request just refreshed this same session, re-read the row
@@ -112,9 +131,10 @@ async def refresh_session_if_needed(
                     "Stampede-guard re-read failed; falling through to refresh"
                 )
                 fresh = None
+            now = datetime.now()
             if fresh is not None:
                 fresh_exp = _to_dt(fresh["access_token_expires_at"])
-                if fresh_exp > now + _REFRESH_BUFFER:
+                if fresh_exp > now:
                     return fresh
 
     refresh_enc = session.get("refresh_token_encrypted")
@@ -144,10 +164,9 @@ async def refresh_session_if_needed(
                 "Post-failure re-read of OIDC session failed — invalidating"
             )
             return None
-        if fresh is not None:
-            fresh_exp = _to_dt(fresh["access_token_expires_at"])
-            if fresh_exp > now + _REFRESH_BUFFER:
-                return fresh
+        now = datetime.now()
+        if fresh is not None and session_was_refreshed_since(session, fresh, now=now):
+            return fresh
         return None
 
     new_access_exp = now + timedelta(seconds=max(int(bundle.expires_in or 0), 60))
