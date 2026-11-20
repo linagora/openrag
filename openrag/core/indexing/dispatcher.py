@@ -47,8 +47,14 @@ class IndexingDispatcher(ABC):
         callback_token: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
+        task_id: str | None = None,
     ) -> str:
-        """Queue an (re)indexing job, register its task state, return its id."""
+        """Queue an (re)indexing job, register its task state, return its id.
+
+        ``task_id`` lets the caller name the task; a quota-capped upload passes
+        the id of the file slot it reserved, which the worker's catalog insert
+        then consumes (#664). ``None`` mints a fresh id.
+        """
         ...
 
     @abstractmethod
@@ -80,11 +86,15 @@ class IndexingDispatcher(ABC):
         embedder_reference: str | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
         deduplicate: bool = False,
+        quota_reservation_id: str | None = None,
     ) -> None:
         """Copy a file's chunks into another partition / file id.
 
         With ``deduplicate``, the source's content hash is read with its
         snapshot and claimed for the target, whatever ``metadata`` carries.
+
+        ``quota_reservation_id`` names the file slot reserved for the copy; the
+        catalog insert consumes it (#664).
 
         With ``vector_field``, the copy's vectors end up in that field only,
         re-embedded with ``embedder`` where the source has none there. A copy
