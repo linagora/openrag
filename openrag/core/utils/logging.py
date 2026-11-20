@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 import ipaddress
 import json
@@ -11,7 +12,6 @@ from loguru import logger
 
 def escape_markup(s: str) -> str:
     return s.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>")
-
 
 def mask_email(email: str | None) -> str:
     """Mask an email address for logging — keep the first local character and
@@ -28,6 +28,10 @@ def mask_email(email: str | None) -> str:
     masked_local = f"{local[0]}***" if local else "***"
     return f"{masked_local}@{domain}"
 
+
+def hash_oidc_sub(sub: str) -> str:
+    """Return a stable SHA-256 pseudonym for an OIDC subject."""
+    return hashlib.sha256(sub.encode("utf-8")).hexdigest()
 
 def truncate_client_addr(client_addr: object) -> str:
     """Reduce uvicorn's ``host:port`` client address to its network.

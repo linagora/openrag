@@ -819,7 +819,20 @@ curl -X PATCH http://localhost:8080/users/42 \
   -d '{"external_user_id": "<new-sub-value>"}'
 ```
 
-Server logs record the attempted `sub` at `WARNING` level so admins can copy it over without having to decode the token themselves.
+Server logs record a stable SHA-256 hash of the OIDC `sub` (`sub_hash`) instead of the raw subject value.
+
+To identify the account associated with a log entry:
+
+1. Retrieve the user's exact `sub` from your identity provider (for example, Keycloak: **Users** → open the user → copy the **ID** field).
+2. Calculate its SHA-256 hash locally:
+   ```bash
+   printf '%s' "$OIDC_SUB" | shasum -a 256
+   ```
+   Set `OIDC_SUB` to the subject value retrieved from your identity provider. Do not share the raw subject or access token in logs or external services.
+3. Compare the resulting hash with the `sub_hash` in the OpenRAG log entry.
+4. Once you have identified the account, update its `external_user_id` using the admin-only `PATCH /users/{user_id}` endpoint shown above.
+
+**Note:** Updating `external_user_id` for an account managed by `auth.seed_users` is refused with `409`. Update the corresponding entry in the seed configuration instead.
 
 ### 5. "session not found" or "session expired"
 
