@@ -180,7 +180,13 @@ class FileFences:
             await asyncio.sleep(_WAIT_INTERVAL_SECONDS)
 
     async def acquire_for_metadata(self, *, partition: str, file_id: str, holder_id: str) -> None:
-        """Take the fence for a metadata update, or refuse with 409."""
+        """Take the fence for a metadata update, or refuse with 409.
+
+        An indexing fence whose lease runs is refused even when its job already
+        reads as finished: its worker may still be writing chunks (a job failed
+        at startup by ``fail_orphaned_jobs``), and the update rewrites every
+        chunk it reads, which could put back chunks that worker then removes.
+        """
         if self._repo is None:
             return
         fence = await self._repo.acquire(
@@ -189,6 +195,7 @@ class FileFences:
             kind=FileFenceKind.METADATA,
             holder_id=holder_id,
             ttl_seconds=FILE_FENCE_TTL_SECONDS,
+            take_over_finished_task=False,
         )
         if fence.holder_id != holder_id:
             raise busy(fence)

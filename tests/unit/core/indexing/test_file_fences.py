@@ -117,6 +117,8 @@ async def test_a_metadata_update_takes_a_free_fence() -> None:
     await FileFences(repo).acquire_for_metadata(partition=PARTITION, file_id=FILE_ID, holder_id="m")
 
     assert repo.fences[(PARTITION, FILE_ID)].kind is FileFenceKind.METADATA
+    # Never through a job that reads as finished: its worker may still write chunks.
+    assert repo.took_over_finished_task is False
 
 
 @pytest.mark.asyncio
