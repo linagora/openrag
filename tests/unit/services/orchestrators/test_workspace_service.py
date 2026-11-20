@@ -731,3 +731,35 @@ async def test_an_orphan_another_cleanup_owns_keeps_that_cleanups_claim():
 
     assert out["orphaned_files_failed"] == ["fA"]
     assert wrepo.released == []
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_delete_cleans_up_a_bounded_number_of_orphans_at_a_time():
+    # Each cleanup holds a pooled connection; its fence renewals need another.
+    # Unbounded, many orphans starved the renewals and failed after the lease deadline.
+    import services.orchestrators.workspace_service as module
+
+    running = 0
+    peak = 0
+
+    class CountingSessions(FakeWorkspaceRepo):
+        @asynccontextmanager
+        async def cleanup_session(self, file_id, partition):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            try:
+                await asyncio.sleep(0.01)
+                yield self
+            finally:
+                running -= 1
+
+    orphans = [f"f{i}" for i in range(module._ORPHAN_CLEANUP_CONCURRENCY * 3)]
+    fences = _InMemoryFileFences()
+    vstore = _FenceObservingVectorStore(fences, {file_id: ["c"] for file_id in orphans})
+
+    out = await _fenced_svc(fences, wrepo=CountingSessions(orphaned=orphans), vstore=vstore).delete_workspace("p", "w1")
+
+    assert out["orphaned_files_deleted"] == len(orphans)
+    assert peak == module._ORPHAN_CLEANUP_CONCURRENCY
+    assert fences.fences == {}

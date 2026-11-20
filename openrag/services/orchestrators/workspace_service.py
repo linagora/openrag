@@ -40,6 +40,13 @@ logger = get_logger()
 
 T = TypeVar("T")
 
+# How many orphaned files one workspace delete cleans up at a time. Each holds a
+# pooled connection for its whole deletion, and its fence renewals need another
+# from the same pool: unbounded, a workspace with more orphans than the pool has
+# connections starved the renewals, and those files failed after their lease
+# deadline. The slot is taken before the fence, so no lease runs while waiting.
+_ORPHAN_CLEANUP_CONCURRENCY = 4
+
 
 class WorkspaceService:
     """Workspace lifecycle, file association and orphan cleanup."""
@@ -157,9 +164,8 @@ class WorkspaceService:
         associations and returns the file_ids that are no longer
         referenced by *any* workspace and were not independently indexed.
         Each of those is deleted from the
-        vector store and the relational catalog — concurrently, with
-        per-file failures collected rather than raised, matching the
-        legacy router's ``asyncio.gather(..., return_exceptions=True)``.
+        vector store and the relational catalog, ``_ORPHAN_CLEANUP_CONCURRENCY``
+        at a time, with per-file failures collected rather than raised.
 
         With ``keep_files=True`` the orphan cleanup is skipped entirely:
         the workspace and its membership rows are still removed, but the
@@ -176,8 +182,14 @@ class WorkspaceService:
             # and its membership rows are removed.
             kept_files = len(orphaned)
         elif orphaned:
+            slots = asyncio.Semaphore(_ORPHAN_CLEANUP_CONCURRENCY)
+
+            async def delete_orphan(file_id: str) -> None:
+                async with slots:
+                    await self._delete_file(file_id, partition)
+
             results = await asyncio.gather(
-                *[self._delete_file(file_id, partition) for file_id in orphaned],
+                *[delete_orphan(file_id) for file_id in orphaned],
                 return_exceptions=True,
             )
             for file_id, result in zip(orphaned, results, strict=True):
