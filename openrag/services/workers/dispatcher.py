@@ -631,6 +631,12 @@ class WorkerDispatcher(IndexingDispatcher):
                             error_reason=error_reason,
                             completed_at=datetime.now(UTC),
                         )
+            except BaseException as cleanup_exc:
+                # A cancel that failed or timed out never confirmed the worker
+                # stopped, so its error must keep the upload and its slot too.
+                if not worker_stopped:
+                    mark_indexing_worker_may_be_running(cleanup_exc)
+                raise
             finally:
                 if worker_stopped:
                     await release_fence()

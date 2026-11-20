@@ -3011,6 +3011,54 @@ async def test_dispatch_indexing_marks_unknown_submission_so_upload_is_kept() ->
     assert indexing_worker_may_be_running(excinfo.value) is True
 
 
+@pytest.mark.parametrize(
+    "cancel_error",
+    [RuntimeError("ray.cancel failed"), TimeoutError("cancel wait timed out")],
+    ids=["cancel-raises", "cancel-times-out"],
+)
+@pytest.mark.asyncio
+async def test_dispatch_indexing_marks_a_failed_cancel_after_submission(cancel_error) -> None:
+    """A cancel that raises never confirmed the submitted worker stopped (#664).
+
+    Its error is what reaches the upload route, so it must carry the marker:
+    otherwise the route deletes the upload and releases the quota slot while
+    the worker may still insert the file.
+    """
+    from core.utils.exceptions import indexing_worker_may_be_running
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tracker = _completion_tracker()
+    tracker.track.remote.side_effect = RuntimeError("tracker unreachable")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=tracker,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher.read_ref_when_settled"),
+        patch.object(dispatcher, "_cancel_submitted_task", AsyncMock(side_effect=cancel_error)),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(type(cancel_error)) as excinfo:
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "content_sha256": "abc123"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    assert excinfo.value is cancel_error
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
 @pytest.mark.asyncio
 async def test_dispatch_indexing_does_not_mark_failure_before_worker_submission() -> None:
     """A failure before the worker was submitted leaves no worker to protect."""

@@ -22,7 +22,14 @@ from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
 from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
-from core.utils.exceptions import AuthError, ConfigError, DocumentNotFoundError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import (
+    AuthError,
+    ConfigError,
+    DocumentNotFoundError,
+    PartitionNotFoundError,
+    ValidationError,
+    mark_indexing_worker_may_be_running,
+)
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -331,29 +338,39 @@ class IndexingService:
             original_filename=original_filename,
             content_sha256=content_sha256,
         )
-        async with self._partition_admission(partition) as partition_existed_at_admission:
-            await self._ensure_no_embedder_swap(partition)
-            await self._ensure_partition_exists(partition, user)
-            await self._refresh_preset_config_if_stale()
-            await self._pin_partition_embedder(partition)
-            require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
-            indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
-            legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
-            return await self._dispatcher.dispatch_indexing(
-                path=file_path,
-                metadata=full_metadata,
-                partition=partition,
-                user=user,
-                workspace_ids=workspace_ids,
-                replace=replace,
-                indexation_config=indexation_config,
-                embedder_name=embedder_name,
-                callback_url=callback_url,
-                callback_token=callback_token,
-                require_existing_partition=require_existing_partition,
-                allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
-                task_id=task_id,
-            )
+        dispatched_task_id: str | None = None
+        try:
+            async with self._partition_admission(partition) as partition_existed_at_admission:
+                await self._ensure_no_embedder_swap(partition)
+                await self._ensure_partition_exists(partition, user)
+                await self._refresh_preset_config_if_stale()
+                await self._pin_partition_embedder(partition)
+                require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
+                indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
+                legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
+                dispatched_task_id = await self._dispatcher.dispatch_indexing(
+                    path=file_path,
+                    metadata=full_metadata,
+                    partition=partition,
+                    user=user,
+                    workspace_ids=workspace_ids,
+                    replace=replace,
+                    indexation_config=indexation_config,
+                    embedder_name=embedder_name,
+                    callback_url=callback_url,
+                    callback_token=callback_token,
+                    require_existing_partition=require_existing_partition,
+                    allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+                    task_id=task_id,
+                )
+        except BaseException as exc:
+            # Leaving admission (e.g. the advisory unlock) can fail after the
+            # task was queued: its worker will still run, so the caller must
+            # keep the upload and its quota slot (#664).
+            if dispatched_task_id is not None:
+                mark_indexing_worker_may_be_running(exc)
+            raise
+        return dispatched_task_id
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         _refuse_reserved_partition(partition)

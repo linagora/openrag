@@ -425,6 +425,82 @@ async def test_add_file_holds_partition_admission_fence_until_dispatch(tmp_path)
     assert psvc.admission_depth == 0
 
 
+class _UnlockFailsPartitionService(FakePartitionService):
+    """Admission whose exit raises, like a failed advisory unlock."""
+
+    @asynccontextmanager
+    async def indexing_admission(self, partition: str):
+        async with super().indexing_admission(partition) as existed:
+            yield existed
+        raise ConnectionError("advisory unlock failed")
+
+
+@pytest.mark.asyncio
+async def test_add_file_marks_an_admission_exit_failure_after_dispatch(tmp_path):
+    """The task is queued, so its worker may still insert the file (#664).
+
+    The route keeps the upload and its quota slot only for a marked error.
+    """
+    from core.utils.exceptions import indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+    disp = FakeDispatcher()
+    svc = _service(
+        disp=disp,
+        config=config,
+        partition_service=_UnlockFailsPartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert disp.dispatched
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_leaves_a_failed_dispatch_unmarked(tmp_path):
+    """No task was queued, so the route may delete the upload and free the slot."""
+    from core.utils.exceptions import indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+
+    class FailingDispatcher(FakeDispatcher):
+        async def dispatch_indexing(self, **kwargs):
+            raise RuntimeError("rejected before worker submission")
+
+    svc = _service(
+        disp=FailingDispatcher(),
+        config=config,
+        partition_service=FakePartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert indexing_worker_may_be_running(excinfo.value) is False
+
+
 @pytest.mark.asyncio
 async def test_add_file_requires_existing_partition_when_configless_partition_existed_at_admission(tmp_path):
     f = tmp_path / "doc.txt"
