@@ -12,6 +12,9 @@ from __future__ import annotations
 import asyncio
 import re
 
+from bs4 import BeautifulSoup
+from bs4.dammit import EntitySubstitution
+from bs4.formatter import HTMLFormatter
 from core.indexing.image_preprocessor import normalize_data_uri_images
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 
@@ -62,10 +65,12 @@ class HtmlParser(DocumentParser):
         from html_to_markdown import convert
 
         if re.search(r"<caption(?=[\s/>])", html, re.IGNORECASE):
-            from bs4 import BeautifulSoup
-            from bs4.formatter import HTMLFormatter
-
             soup = BeautifulSoup(html, "html5lib")
-            html = soup.decode(formatter=HTMLFormatter(void_element_close_prefix=None))
 
+            formatter = HTMLFormatter(
+                entity_substitution=EntitySubstitution.substitute_html,
+                void_element_close_prefix=None,
+            )
+
+            html = soup.decode(formatter=formatter)
         return convert(html)

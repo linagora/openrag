@@ -158,12 +158,35 @@ async def test_html_parser_preserves_valid_table_caption():
 
 
 @pytest.mark.asyncio
+async def test_html_parser_preserves_escaped_angle_brackets_in_caption():
+    html = (
+        "<table>"
+        "<caption>Table containing &lt;script&gt; as text</caption>"
+        "<tbody><tr><td>unique-caption-cell</td></tr></tbody>"
+        "</table>"
+    )
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="escaped-caption.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "Table containing <script> as text" in text
+    assert "unique-caption-cell" in text
+
+
+@pytest.mark.asyncio
 async def test_html_parser_preserves_content_around_table_with_bare_col():
     html = (
         "<p>T\u00e9l\u00e9chargez le rapport</p>"
         "<table><colgroup><col></colgroup>"
         "<tbody><caption>Table summary</caption>"
-        "<tr><td>a</td></tr></tbody></table>"
+        "<tr><td>unique-cell-value</td></tr></tbody></table>"
         "<p>apr\u00e8s</p>"
     )
 
@@ -179,5 +202,5 @@ async def test_html_parser_preserves_content_around_table_with_bare_col():
 
     assert "T\u00e9l\u00e9chargez le rapport" in text
     assert "Table summary" in text
-    assert "a" in text
+    assert "unique-cell-value" in text
     assert "apr\u00e8s" in text
