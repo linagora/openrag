@@ -222,10 +222,23 @@ class WorkspaceService:
             )
 
     async def _delete_claimed_file(self, file_id: str, partition: str) -> None:
-        async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
-            if owned is None:
-                raise RuntimeError(f"Workspace cleanup already running for {file_id}")
-            await self._delete_owned_file(file_id, partition, owned)
+        # Once _delete_owned_file runs, it settles the claim itself. Before
+        # that (the session failing to open, or the work stopped while it
+        # opens, when the fence can't be renewed), nothing would: the claim
+        # would stay CLAIMED, which no retry accepts, with its workspace gone.
+        handed_over = False
+        try:
+            async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
+                if owned is None:
+                    # Another cleanup holds it: the claim is not ours to give back.
+                    handed_over = True
+                    raise RuntimeError(f"Workspace cleanup already running for {file_id}")
+                handed_over = True
+                await self._delete_owned_file(file_id, partition, owned)
+        except (Exception, asyncio.CancelledError):
+            if not handed_over:
+                await self._release_cleanup_claim(file_id, partition)
+            raise
 
     async def _with_delete_fence(
         self,
@@ -253,12 +266,7 @@ class WorkspaceService:
             if give_back is not None:
                 await give_back()
             raise
-        try:
-            return await self._file_fences.run_holding(
-                partition=partition, file_id=file_id, holder_id=holder_id, work=work
-            )
-        finally:
-            await self._file_fences.release(partition=partition, file_id=file_id, holder_id=holder_id)
+        return await self._file_fences.hold(partition=partition, file_id=file_id, holder_id=holder_id, work=work)
 
     async def _delete_owned_file(
         self, file_id: str, partition: str, owned: WorkspaceRepository, *, cleanup_started: bool = False
