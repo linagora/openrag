@@ -42,6 +42,14 @@ fi
 # to be recreated once after upgrading (delete the volume / let it resync).
 umask 002
 
+# One-off commands (`docker compose run --rm openrag uv run ... migrate.py`)
+# run here, after the privilege drop and umask above. Overriding the entrypoint
+# instead (`--entrypoint ""`) would run them as root and leave root-owned,
+# owner-only files in the openrag_venv volume, breaking the next venv sync.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 ENV_ARGS=()
 if [[ -n "${SHARED_ENV}" ]]; then
   ENV_ARGS+=("--env-file=${SHARED_ENV}")
