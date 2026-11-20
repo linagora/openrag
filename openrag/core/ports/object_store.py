@@ -16,6 +16,11 @@ The contract, for every adapter:
   stream, leaves the key as it was: no partial object, and any previous
   object still there. Once the stream is read, the write completes even if
   the call is cancelled.
+* **One writer per key.** Concurrent writes to one key from different
+  processes or store instances are not supported: the filesystem adapter
+  orders a key's writes only within its own process, and could pair one
+  write's content with another's metadata. Callers write each key once, under
+  a fresh upload id per revision.
 * **Missing objects.** ``open_stream``, ``local_copy``, ``stat`` and ``copy``
   raise ``ObjectNotFoundError``. ``delete`` and ``delete_many`` treat a
   missing key as already deleted.
