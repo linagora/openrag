@@ -69,6 +69,8 @@ class FakeDispatcher:
         self.copied: list[tuple] = []
         self.cancelled: list[str] = []
         self.cancel_result = True
+        self.task_ids: list[str | None] = []
+        self.copy_reservations: list[str | None] = []
 
     async def dispatch_indexing(
         self,
@@ -85,7 +87,9 @@ class FakeDispatcher:
         callback_token=None,
         require_existing_partition=False,
         allow_legacy_require_existing_partition_retry=False,
+        task_id=None,
     ):
+        self.task_ids.append(task_id)
         self.dispatched.append(
             {
                 "path": path,
@@ -110,8 +114,9 @@ class FakeDispatcher:
     async def update_file_metadata(self, file_id, metadata, partition, user):
         self.updated.append((file_id, metadata, partition, user))
 
-    async def copy_file(self, file_id, metadata, partition, user, **destination):
+    async def copy_file(self, file_id, metadata, partition, user, *, quota_reservation_id=None, **destination):
         self.copied.append((file_id, metadata, partition, user))
+        self.copy_reservations.append(quota_reservation_id)
         self.copy_destination = destination
 
     async def get_task_state(self, task_id):
@@ -327,6 +332,28 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
     assert md["content_sha256"] is None
 
 
+@pytest.mark.parametrize("task_id", [None, "reservation-1"], ids=["dispatcher-mints", "reserved-upload"])
+@pytest.mark.asyncio
+async def test_add_file_runs_the_task_under_the_callers_reservation(tmp_path, task_id):
+    """A capped upload's task id is its file-slot reservation, which the worker consumes (#664)."""
+    f = tmp_path / "doc.txt"
+    f.write_text("hello world")
+    disp = FakeDispatcher()
+
+    await _service(disp=disp).add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+        task_id=task_id,
+    )
+
+    assert disp.task_ids == [task_id]
+
+
 @pytest.mark.asyncio
 async def test_add_file_drops_caller_supplied_degraded_stages(tmp_path):
     file_path = tmp_path / "doc.txt"
@@ -420,6 +447,130 @@ async def test_add_file_holds_partition_admission_fence_until_dispatch(tmp_path)
 
     assert psvc.admissions == ["tenant-a"]
     assert psvc.admission_depth == 0
+
+
+class _UnlockFailsPartitionService(FakePartitionService):
+    """Admission whose exit raises, like a failed advisory unlock."""
+
+    @asynccontextmanager
+    async def indexing_admission(self, partition: str):
+        async with super().indexing_admission(partition) as existed:
+            yield existed
+        raise ConnectionError("advisory unlock failed")
+
+
+class _UnlockAlwaysFailsPartitionService(FakePartitionService):
+    """Admission whose exit raises even while the body's error propagates."""
+
+    @asynccontextmanager
+    async def indexing_admission(self, partition: str):
+        try:
+            async with super().indexing_admission(partition) as existed:
+                yield existed
+        finally:
+            raise ConnectionError("advisory unlock failed")
+
+
+@pytest.mark.asyncio
+async def test_add_file_marks_an_admission_exit_failure_after_dispatch(tmp_path):
+    """The task is queued, so its worker may still insert the file (#664).
+
+    The route keeps the upload and its quota slot only for a marked error.
+    """
+    from core.utils.exceptions import indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+    disp = FakeDispatcher()
+    svc = _service(
+        disp=disp,
+        config=config,
+        partition_service=_UnlockFailsPartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert disp.dispatched
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_marks_an_admission_exit_failure_after_a_marked_dispatch_error(tmp_path):
+    """The unlock error replaces the dispatcher's marked one, whose worker may
+    still run (#664): the error reaching the route must stay marked."""
+    from core.utils.exceptions import indexing_worker_may_be_running, mark_indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+
+    class UnknownSubmissionDispatcher(FakeDispatcher):
+        async def dispatch_indexing(self, **kwargs):
+            exc = RuntimeError("submission outcome unknown")
+            mark_indexing_worker_may_be_running(exc)
+            raise exc
+
+    svc = _service(
+        disp=UnknownSubmissionDispatcher(),
+        config=config,
+        partition_service=_UnlockAlwaysFailsPartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_leaves_a_failed_dispatch_unmarked(tmp_path):
+    """No task was queued, so the route may delete the upload and free the slot."""
+    from core.utils.exceptions import indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+
+    class FailingDispatcher(FakeDispatcher):
+        async def dispatch_indexing(self, **kwargs):
+            raise RuntimeError("rejected before worker submission")
+
+    svc = _service(
+        disp=FailingDispatcher(),
+        config=config,
+        partition_service=FakePartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert indexing_worker_may_be_running(excinfo.value) is False
 
 
 @pytest.mark.asyncio
@@ -868,6 +1019,24 @@ async def test_copy_file_sets_target_fields():
     assert partition == "p-src"
     assert md == {"k": "v", "file_id": "dst", "partition": "p-dst", "content_sha256": None}
     assert user == {"id": 2}
+    assert disp.copy_reservations == [None]
+
+
+@pytest.mark.asyncio
+async def test_copy_file_forwards_the_reserved_file_slot():
+    disp = FakeDispatcher()
+
+    await _service(doc=_SOURCE_ONLY, disp=disp).copy_file(
+        source_file_id="src",
+        source_partition="p-src",
+        target_file_id="dst",
+        target_partition="p-dst",
+        metadata={},
+        user={"id": 2},
+        quota_reservation_id="reservation-1",
+    )
+
+    assert disp.copy_reservations == ["reservation-1"]
 
 
 @pytest.mark.asyncio

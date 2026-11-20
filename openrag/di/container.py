@@ -728,6 +728,9 @@ class ServiceContainer:
                     workspace_repo=self.workspace_repo,
                     collection=settings.vectordb.collection_name,
                     job_repo=self.job_repo,
+                    file_fence_repo=(
+                        self.catalog_store.file_fence_repo if settings.loader.file_fences == "postgres" else None
+                    ),
                 ),
                 config=settings,
                 partition_service=self.partition_service,

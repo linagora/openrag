@@ -29,6 +29,8 @@ from core.utils.exceptions import (
     PartitionNotFoundError,
     ValidationError,
     VDBFileIDAlreadyExistsError,
+    indexing_worker_may_be_running,
+    mark_indexing_worker_may_be_running,
 )
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
@@ -313,12 +315,17 @@ class IndexingService:
         content_sha256: str | None = None,
         callback_url: str | None = None,
         callback_token: str | None = None,
+        task_id: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
         *callback_url*/*callback_token* are forwarded to the worker as-is.
+
+        *task_id* is the id of the file-slot reservation the caller took at
+        admission, when it took one (#664); the task runs under it so the
+        worker consumes that slot. Otherwise the dispatcher picks an id.
         """
         if self._deduplication_enabled() and content_sha256 is None:
             content_sha256 = await asyncio.to_thread(_sha256_file, file_path)
@@ -333,28 +340,46 @@ class IndexingService:
             original_filename=original_filename,
             content_sha256=content_sha256,
         )
-        async with self._partition_admission(partition) as partition_existed_at_admission:
-            await self._ensure_no_embedder_swap(partition)
-            await self._ensure_partition_exists(partition, user)
-            await self._refresh_preset_config_if_stale()
-            await self._pin_partition_embedder(partition)
-            require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
-            indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
-            legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
-            return await self._dispatcher.dispatch_indexing(
-                path=file_path,
-                metadata=full_metadata,
-                partition=partition,
-                user=user,
-                workspace_ids=workspace_ids,
-                replace=replace,
-                indexation_config=indexation_config,
-                embedder_name=embedder_name,
-                callback_url=callback_url,
-                callback_token=callback_token,
-                require_existing_partition=require_existing_partition,
-                allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
-            )
+        dispatched_task_id: str | None = None
+        worker_may_run = False
+        try:
+            async with self._partition_admission(partition) as partition_existed_at_admission:
+                await self._ensure_no_embedder_swap(partition)
+                await self._ensure_partition_exists(partition, user)
+                await self._refresh_preset_config_if_stale()
+                await self._pin_partition_embedder(partition)
+                require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
+                indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
+                legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
+                try:
+                    dispatched_task_id = await self._dispatcher.dispatch_indexing(
+                        path=file_path,
+                        metadata=full_metadata,
+                        partition=partition,
+                        user=user,
+                        workspace_ids=workspace_ids,
+                        replace=replace,
+                        indexation_config=indexation_config,
+                        embedder_name=embedder_name,
+                        callback_url=callback_url,
+                        callback_token=callback_token,
+                        require_existing_partition=require_existing_partition,
+                        allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+                        task_id=task_id,
+                    )
+                except BaseException as exc:
+                    worker_may_run = indexing_worker_may_be_running(exc)
+                    raise
+                worker_may_run = True
+        except BaseException as exc:
+            # Leaving admission (e.g. the advisory unlock) can fail after the
+            # task was queued, or replace a dispatch error that said its worker
+            # may still run: either way the caller must keep the upload and its
+            # quota slot (#664).
+            if worker_may_run:
+                mark_indexing_worker_may_be_running(exc)
+            raise
+        return dispatched_task_id
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         _refuse_reserved_partition(partition)
@@ -403,7 +428,13 @@ class IndexingService:
         target_partition: str,
         metadata: dict,
         user: dict | None,
+        quota_reservation_id: str | None = None,
     ) -> None:
+        """Copy a file into another partition.
+
+        *quota_reservation_id* names the file slot the caller reserved for the
+        copy (#664); the catalog insert consumes it.
+        """
         _refuse_reserved_partition(source_partition)
         _refuse_reserved_partition(target_partition)
         # Refuse a missing source, or a destination file_id already taken,
@@ -441,7 +472,14 @@ class IndexingService:
                 await self._pin_partition_embedder(target_partition)
                 destination = self._copy_destination(target_partition)
                 await copying.enter_async_context(self._copy_in_flight(target_partition))
-            await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user, **destination)
+            await self._dispatcher.copy_file(
+                source_file_id,
+                metadata,
+                source_partition,
+                user,
+                quota_reservation_id=quota_reservation_id,
+                **destination,
+            )
 
     def _copy_in_flight(self, partition: str) -> AbstractAsyncContextManager[None]:
         copy_in_flight = getattr(self._partition_service, "copy_in_flight", None)

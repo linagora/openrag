@@ -33,13 +33,15 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
 from core.config.auth import ADMIN_TOKEN_ENV_VAR, SeedUserConfig
 from core.config.secrets_guard import ALLOW_INSECURE_SECRETS_ENV_VAR, MIN_SECRET_LENGTH, is_known_default
-from core.models.user import ApiKey, PartitionRole, User, UserPartition
+from core.models.user import ApiKey, FileSlotGrant, PartitionRole, User, UserPartition
 from core.ports.user_repo import UserRepository
 from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
@@ -295,6 +297,140 @@ class PgUserRepository(UserRepository):
 
     async def count_users(self) -> int:
         return await self.pool.fetchval("SELECT COUNT(*)::int FROM users")
+
+    # ── File-quota reservations (#664) ───────────────────────────────
+
+    async def try_reserve_file_slot(
+        self,
+        user_id: int,
+        reservation_id: str,
+        *,
+        default_quota: int,
+        _connection: asyncpg.Connection | None = None,
+    ) -> FileSlotGrant:
+        """See the port. ``_connection`` runs the reservation on the caller's
+        connection: inside the caller's transaction (as a savepoint), so the
+        slot commits or rolls back with the caller's own writes, e.g. a job
+        row inserted by an enqueue (#1431)."""
+        if _connection is not None:
+            async with _connection.transaction():
+                return await self._reserve_file_slot_on(_connection, user_id, reservation_id, default_quota)
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                return await self._reserve_file_slot_on(conn, user_id, reservation_id, default_quota)
+
+    @staticmethod
+    async def _reserve_file_slot_on(
+        conn: asyncpg.Connection,
+        user_id: int,
+        reservation_id: str,
+        default_quota: int,
+    ) -> FileSlotGrant:
+        # The check and the increment are one statement, so the row
+        # lock serialises concurrent admissions: each one re-reads the
+        # count the previous one left. ``COALESCE`` resolves a NULL
+        # per-user quota to the default before the sign test, so a
+        # negative default never lifts an explicit per-user limit.
+        taken = await conn.fetchval(
+            """
+            UPDATE users
+               SET file_count = file_count + 1
+             WHERE id = $1
+               AND NOT is_admin
+               AND COALESCE(file_quota, $2::int) >= 0
+               AND file_count < COALESCE(file_quota, $2::int)
+            RETURNING 1
+            """,
+            user_id,
+            default_quota,
+        )
+        if taken:
+            await conn.execute(
+                "INSERT INTO file_quota_reservations (id, user_id) VALUES ($1, $2)",
+                reservation_id,
+                user_id,
+            )
+            return FileSlotGrant.RESERVED
+        unlimited = await conn.fetchval(
+            "SELECT is_admin OR COALESCE(file_quota, $2::int) < 0 FROM users WHERE id = $1",
+            user_id,
+            default_quota,
+        )
+        return FileSlotGrant.UNLIMITED if unlimited else FileSlotGrant.DENIED
+
+    async def release_file_slot(self, reservation_id: str) -> bool:
+        async with self.pool.acquire() as conn, conn.transaction():
+            user_id = await conn.fetchval("SELECT user_id FROM file_quota_reservations WHERE id = $1", reservation_id)
+            if user_id is None:
+                return False
+            return bool(await self._release_locked(conn, [user_id], "id = $1", reservation_id))
+
+    async def file_slot_cutoff(self, grace_seconds: float) -> datetime:
+        # ``clock_timestamp()``, the clock that stamps ``created_at``.
+        return await self.pool.fetchval(
+            "SELECT clock_timestamp() - make_interval(secs => $1)",
+            float(grace_seconds),
+        )
+
+    async def release_stale_file_slots(
+        self,
+        *,
+        live_ids: list[str],
+        settled_ids: list[str],
+        created_before: datetime | None,
+    ) -> int:
+        # A NULL cutoff matches no ``created_at``: only settled ids go.
+        eligible = "id <> ALL($1::text[]) AND (id = ANY($2::text[]) OR created_at < $3::timestamptz)"
+        args = (list(live_ids), list(settled_ids), created_before)
+        async with self.pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(f"SELECT DISTINCT user_id FROM file_quota_reservations WHERE {eligible}", *args)
+            return await self._release_locked(conn, [row["user_id"] for row in rows], eligible, *args)
+
+    @staticmethod
+    async def _release_locked(conn: asyncpg.Connection, user_ids: list[int], where: str, *args: Any) -> int:
+        """Delete the reservations matching ``where`` among ``user_ids`` and give their slots back.
+
+        The users rows are locked first, in id order. Deleting a user locks its
+        row and then its reservations (``ON DELETE CASCADE``), and admission and
+        the catalog insert also take the user's row before the reservation, so
+        taking the reservation first here could deadlock with any of them.
+        Eligibility is re-checked by the DELETE once the locks are held, and
+        only the rows it removes are decremented, so two cleanups racing on one
+        slot still release it once. ``where`` binds ``args`` as ``$1``...``$n``.
+        """
+        if not user_ids:
+            return 0
+        locked = await conn.fetch(
+            "SELECT id FROM users WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE",
+            sorted(set(user_ids)),
+        )
+        if not locked:
+            return 0
+        rows = await conn.fetch(
+            f"DELETE FROM file_quota_reservations WHERE {where} AND user_id = ANY(${len(args) + 1}::int[]) RETURNING user_id",
+            *args,
+            [row["id"] for row in locked],
+        )
+        counts = Counter(row["user_id"] for row in rows)
+        for user_id in sorted(counts):
+            await conn.execute(
+                "UPDATE users SET file_count = GREATEST(file_count - $1, 0) WHERE id = $2",
+                counts[user_id],
+                user_id,
+            )
+        return len(rows)
+
+    async def count_indexed_files(self, user_id: int) -> int | None:
+        return await self.pool.fetchval(
+            """
+            SELECT u.file_count - (
+                SELECT COUNT(*)::int FROM file_quota_reservations r WHERE r.user_id = u.id
+            )
+            FROM users u
+            WHERE u.id = $1
+            """,
+            user_id,
+        )
 
     # ── API keys (stub — table not yet shipped) ──────────────────────
 
