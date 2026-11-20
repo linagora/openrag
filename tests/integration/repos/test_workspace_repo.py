@@ -187,6 +187,49 @@ class TestDeleteWorkspace:
         assert await repo.list_workspace_files("ws-p", "ws2") == []
 
 
+class TestDeleteWorkspaceConfirmation:
+    """The ``expected_created_at`` instance guard, against real SQL.
+
+    The unit test only asserts the generated query string; these exercise the
+    full list-to-delete round trip and the replacement-workspace conflict
+    through a real timestamp column.
+    """
+
+    async def test_matching_confirmation_deletes_the_listed_instance(self, postgres_store: PostgresStore):
+        await _seed_partition_and_files(postgres_store)
+        repo = postgres_store.workspace_repo
+        await repo.create_workspace(_workspace("ws1"))
+        await repo.add_files_to_workspace("ws-p", "ws1", ["f1"])
+        await postgres_store.pool.execute("UPDATE files SET independently_indexed = FALSE WHERE file_id = 'f1'")
+        listed = await repo.get_workspace("ws-p", "ws1")
+        assert listed is not None and listed.created_at is not None
+
+        orphans = await repo.delete_workspace("ws-p", "ws1", expected_created_at=listed.created_at)
+
+        assert orphans == ["f1"]
+        assert await repo.get_workspace("ws-p", "ws1") is None
+
+    async def test_stale_confirmation_after_replacement_is_a_no_op_conflict(self, postgres_store: PostgresStore):
+        await _seed_partition_and_files(postgres_store)
+        repo = postgres_store.workspace_repo
+        await repo.create_workspace(_workspace("ws1", display_name="original"))
+        await repo.add_files_to_workspace("ws-p", "ws1", ["f1"])
+        original = await repo.get_workspace("ws-p", "ws1")
+        await repo.delete_workspace("ws-p", "ws1")
+        await repo.create_workspace(_workspace("ws1", display_name="replacement"))
+        await repo.add_files_to_workspace("ws-p", "ws1", ["f2"])
+        replacement = await repo.get_workspace("ws-p", "ws1")
+        assert replacement is not None and replacement.created_at != original.created_at
+
+        # The confirmation named the *original* instance: the replacement and
+        # its membership must survive untouched.
+        orphans = await repo.delete_workspace("ws-p", "ws1", expected_created_at=original.created_at)
+
+        assert orphans is None
+        assert (await repo.get_workspace("ws-p", "ws1")).display_name == "replacement"
+        assert await repo.list_workspace_files("ws-p", "ws1") == ["f2"]
+
+
 class TestWorkspaceIdIsScopedToPartition:
     """The same ``workspace_id`` in two partitions is two unrelated workspaces."""
 

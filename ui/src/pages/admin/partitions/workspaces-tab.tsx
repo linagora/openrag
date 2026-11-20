@@ -27,6 +27,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { QueryErrorNotice } from "@/components/shared/query-error-notice";
+import { ApiError } from "@/lib/api/client";
 import { listPartitionFiles, listPartitions, type PartitionFile } from "@/lib/api/partitions";
 import {
   addFilesToWorkspace,
@@ -39,15 +40,24 @@ import {
   type Workspace,
 } from "@/lib/api/workspaces";
 import { usePermissions } from "@/lib/permissions";
+import { useAuth } from "@/lib/auth";
 
 const workspaceIdPattern = /^[A-Za-z0-9_-]+$/;
+const emptyWorkspaces: Workspace[] = [];
+const emptyPartitionFiles: PartitionFile[] = [];
 const fileLabel = (file: PartitionFile) => file.filename || file.file_id;
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "The request could not be completed.";
+const isWorkspaceChange = (error: unknown) =>
+  error instanceof ApiError &&
+  (error.status === 409 || (error.status === 404 && error.message === "Workspace not found"));
+const accountScopeKey = (userId: number, isAdmin: boolean) => [userId, isAdmin ? "admin" : "user"] as const;
 
 export function WorkspacesTab({ partition }: { partition: string }) {
   const queryClient = useQueryClient();
   const permissions = usePermissions();
+  const { user } = useAuth();
+  const accountKey = accountScopeKey(user?.id ?? 0, user?.is_admin === true);
   const [createOpen, setCreateOpen] = useState(false);
   const [workspaceId, setWorkspaceId] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -58,20 +68,28 @@ export function WorkspacesTab({ partition }: { partition: string }) {
   const [deleteTarget, setDeleteTarget] = useState<Workspace | null>(null);
   const [keepFiles, setKeepFiles] = useState(true);
 
-  const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
-  const role = partitionsQuery.data?.partitions.find((item) => item.partition === partition)?.role;
+  const partitionsQueryKey = ["partitions", ...accountKey] as const;
+  const workspacesQueryKey = ["partition-workspaces", partition, ...accountKey] as const;
+  const partitionFilesQueryKey = ["partition-files", partition, ...accountKey] as const;
+  const workspaceFilesQueryKey = (workspaceId: string, createdAt: string | null) =>
+    ["partition-workspace-files", partition, workspaceId, createdAt, ...accountKey] as const;
+
+  const partitionsQuery = useQuery({ queryKey: partitionsQueryKey, queryFn: listPartitions });
+  const role = partitionsQuery.isSuccess
+    ? partitionsQuery.data?.partitions.find((item) => item.partition === partition)?.role
+    : undefined;
   const canEdit = permissions.canWrite(role);
   const canDelete = permissions.canConfigurePartition(role);
 
   const workspacesQuery = useQuery({
-    queryKey: ["partition-workspaces", partition],
+    queryKey: workspacesQueryKey,
     queryFn: () => listWorkspaces(partition),
   });
-  const workspaces = workspacesQuery.data?.workspaces ?? [];
+  const workspaces = workspacesQuery.data?.workspaces ?? emptyWorkspaces;
   const workspaceFileQueries = useQueries({
     queries: workspaces.map((workspace) => ({
-      queryKey: ["partition-workspace-files", partition, workspace.workspace_id],
-      queryFn: () => listWorkspaceFiles(partition, workspace.workspace_id),
+      queryKey: workspaceFilesQueryKey(workspace.workspace_id, workspace.created_at),
+      queryFn: () => listWorkspaceFiles(partition, workspace.workspace_id, workspace.created_at),
       enabled:
         expandedWorkspaceIds.has(workspace.workspace_id) ||
         addTarget?.workspace_id === workspace.workspace_id,
@@ -82,6 +100,15 @@ export function WorkspacesTab({ partition }: { partition: string }) {
     : -1;
   const addTargetFilesQuery =
     addTargetIndex >= 0 ? workspaceFileQueries[addTargetIndex] : undefined;
+  const addTargetMissing = Boolean(
+    addTarget &&
+      workspacesQuery.isSuccess &&
+      !workspacesQuery.isFetching &&
+      !workspaces.some(
+        (workspace) =>
+          workspace.workspace_id === addTarget.workspace_id && workspace.created_at === addTarget.created_at,
+      ),
+  );
   const workspaceFiles = useMemo(
     () =>
       new Map<string, string[]>(
@@ -93,17 +120,21 @@ export function WorkspacesTab({ partition }: { partition: string }) {
     [workspaces, workspaceFileQueries],
   );
   const partitionFilesQuery = useQuery({
-    queryKey: ["partition-files", partition],
+    queryKey: partitionFilesQueryKey,
     queryFn: () => listPartitionFiles(partition),
     enabled: addTarget !== null || expandedWorkspaceIds.size > 0,
   });
-  const partitionFiles = partitionFilesQuery.data?.files ?? [];
+  const partitionFiles = partitionFilesQuery.data?.files ?? emptyPartitionFiles;
+  const partitionFileById = useMemo(
+    () => new Map(partitionFiles.map((file) => [file.file_id, file] as const)),
+    [partitionFiles],
+  );
 
-  const refreshWorkspaceData = async (workspaceIdToRefresh?: string) => {
-    await queryClient.invalidateQueries({ queryKey: ["partition-workspaces", partition] });
-    if (workspaceIdToRefresh) {
+  const refreshWorkspaceData = async (workspaceToRefresh?: Workspace) => {
+    await queryClient.invalidateQueries({ queryKey: workspacesQueryKey });
+    if (workspaceToRefresh) {
       await queryClient.invalidateQueries({
-        queryKey: ["partition-workspace-files", partition, workspaceIdToRefresh],
+        queryKey: workspaceFilesQueryKey(workspaceToRefresh.workspace_id, workspaceToRefresh.created_at),
       });
     }
   };
@@ -127,39 +158,75 @@ export function WorkspacesTab({ partition }: { partition: string }) {
   });
   const addMutation = useMutation({
     mutationFn: ({ target, fileIds }: { target: Workspace; fileIds: string[] }) =>
-      addFilesToWorkspace(partition, target.workspace_id, fileIds),
+      addFilesToWorkspace(partition, target.workspace_id, fileIds, target.created_at),
     onSuccess: async (_result, variables) => {
-      await refreshWorkspaceData(variables.target.workspace_id);
+      await refreshWorkspaceData(variables.target);
       toast.success("Files added to workspace.");
       setAddTarget(null);
       setSelectedFileIds([]);
       setFileSearch("");
     },
-    onError: (error) => toast.error(errorMessage(error)),
+    onError: async (error, variables) => {
+      await refreshWorkspaceData(variables.target);
+      if (isWorkspaceChange(error)) {
+        setAddTarget(null);
+        setSelectedFileIds([]);
+        setFileSearch("");
+        toast.error("Workspace changed or was deleted. Review the refreshed list before adding again.");
+        return;
+      }
+      if (error instanceof ApiError && error.status === 404) {
+        await queryClient.invalidateQueries({ queryKey: partitionFilesQueryKey });
+      }
+      toast.error(errorMessage(error));
+    },
   });
   const removeMutation = useMutation({
     mutationFn: ({ target, fileId }: { target: Workspace; fileId: string }) =>
-      removeFileFromWorkspace(partition, target.workspace_id, fileId),
+      removeFileFromWorkspace(partition, target.workspace_id, fileId, target.created_at),
     onSuccess: async (_result, variables) => {
-      await refreshWorkspaceData(variables.target.workspace_id);
+      await refreshWorkspaceData(variables.target);
       toast.success("File removed from workspace.");
     },
-    onError: (error) => toast.error(errorMessage(error)),
+    onError: async (error, variables) => {
+      await refreshWorkspaceData(variables.target);
+      if (isWorkspaceChange(error)) {
+        toast.error("Workspace changed or was deleted. Review the refreshed list before retrying.");
+        return;
+      }
+      if (error instanceof ApiError && error.status === 404) {
+        await queryClient.invalidateQueries({ queryKey: partitionFilesQueryKey });
+      }
+      toast.error(errorMessage(error));
+    },
   });
   const deleteMutation = useMutation({
     mutationFn: ({ target, keepFiles: retain }: { target: Workspace; keepFiles: boolean }) =>
-      deleteWorkspace(partition, target.workspace_id, retain),
+      deleteWorkspace(partition, target.workspace_id, retain, target.created_at),
     onSuccess: async (result, variables) => {
       await refreshWorkspaceData();
+      queryClient.removeQueries({
+        queryKey: workspaceFilesQueryKey(variables.target.workspace_id, variables.target.created_at),
+        exact: true,
+      });
+      setExpandedWorkspaceIds((current) => {
+        const next = new Set(current);
+        next.delete(variables.target.workspace_id);
+        return next;
+      });
       await queryClient.invalidateQueries({ queryKey: ["partition-files", partition] });
+      if (result.orphaned_files_deleted > 0) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["partition", partition] }),
+          queryClient.invalidateQueries({ queryKey: ["partitions"] }),
+        ]);
+      }
       if (!variables.keepFiles && result.orphaned_files_failed.length > 0) {
         toast.error(
           `Workspace deleted, but cleanup failed for ${result.orphaned_files_failed.length} orphaned file(s).`,
         );
       } else if (variables.keepFiles) {
-        toast.success(
-          `Workspace deleted. ${result.kept_files} file${result.kept_files === 1 ? "" : "s"} kept in the partition.`,
-        );
+        toast.success("Workspace deleted. Indexed files remain in the partition.");
       } else {
         toast.success(
           `Workspace deleted. ${result.orphaned_files_deleted} orphaned file${result.orphaned_files_deleted === 1 ? "" : "s"} deleted.`,
@@ -167,7 +234,15 @@ export function WorkspacesTab({ partition }: { partition: string }) {
       }
       setDeleteTarget(null);
     },
-    onError: (error) => toast.error(errorMessage(error)),
+    onError: async (error) => {
+      if (error instanceof ApiError && (error.status === 404 || error.status === 409)) {
+        await refreshWorkspaceData();
+        setDeleteTarget(null);
+        toast.error("Workspace changed or was deleted. Review the refreshed list before confirming again.");
+        return;
+      }
+      toast.error(errorMessage(error));
+    },
   });
 
   const normalizedWorkspaceId = workspaceId.trim();
@@ -182,6 +257,13 @@ export function WorkspacesTab({ partition }: { partition: string }) {
       .filter((file) => !query || `${fileLabel(file)} ${file.file_id}`.toLowerCase().includes(query))
       .sort((left, right) => fileLabel(left).localeCompare(fileLabel(right)));
   }, [addTarget, fileSearch, partitionFiles, workspaceFiles]);
+
+  const selectedFileIdsForAdd = (() => {
+    if (!addTargetFilesQuery?.data || !partitionFilesQuery.data) return selectedFileIds;
+    const availableFileIds = new Set(partitionFilesQuery.data.files.map((file) => file.file_id));
+    const currentFileIds = new Set(addTargetFilesQuery.data.file_ids);
+    return selectedFileIds.filter((fileId) => availableFileIds.has(fileId) && !currentFileIds.has(fileId));
+  })();
 
   const toggleFile = (fileId: string, checked: boolean) => {
     setSelectedFileIds((current) =>
@@ -214,6 +296,15 @@ export function WorkspacesTab({ partition }: { partition: string }) {
           </Button>
         )}
       </div>
+
+      {partitionsQuery.isError && (
+        <QueryErrorNotice
+          title="Partition permissions could not be loaded"
+          message={errorMessage(partitionsQuery.error)}
+          isRetrying={partitionsQuery.isFetching}
+          onRetry={() => void partitionsQuery.refetch()}
+        />
+      )}
 
       {role === "viewer" && (
         <p className="text-sm text-muted-foreground">
@@ -309,14 +400,18 @@ export function WorkspacesTab({ partition }: { partition: string }) {
                         title="Workspace files could not be loaded"
                         message={errorMessage(fileQuery.error)}
                         isRetrying={fileQuery.isFetching}
-                        onRetry={() => void fileQuery.refetch()}
+                        onRetry={() =>
+                          fileQuery.error instanceof ApiError && [404, 409].includes(fileQuery.error.status)
+                            ? void workspacesQuery.refetch()
+                            : void fileQuery.refetch()
+                        }
                       />
                     ) : fileIds.length === 0 ? (
                       <p className="text-sm text-muted-foreground">No files in this workspace yet.</p>
                     ) : (
                       <ul className="divide-y rounded-md border">
                         {fileIds.map((fileId) => {
-                          const file = partitionFiles.find((item) => item.file_id === fileId);
+                          const file = partitionFileById.get(fileId);
                           return (
                             <li
                               key={fileId}
@@ -353,7 +448,13 @@ export function WorkspacesTab({ partition }: { partition: string }) {
         </div>
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+      <Dialog
+        open={createOpen}
+        onOpenChange={(open) => {
+          if (!open && createMutation.isPending) return;
+          setCreateOpen(open);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Create workspace</DialogTitle>
@@ -405,7 +506,7 @@ export function WorkspacesTab({ partition }: { partition: string }) {
               />
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>
+              <Button type="button" variant="outline" disabled={createMutation.isPending} onClick={() => setCreateOpen(false)}>
                 Cancel
               </Button>
               <Button
@@ -422,7 +523,7 @@ export function WorkspacesTab({ partition }: { partition: string }) {
       <Dialog
         open={addTarget !== null}
         onOpenChange={(open) => {
-          if (!open) setAddTarget(null);
+          if (!open && !addMutation.isPending) setAddTarget(null);
         }}
       >
         <DialogContent className="sm:max-w-xl">
@@ -443,14 +544,23 @@ export function WorkspacesTab({ partition }: { partition: string }) {
                 className="pl-9"
               />
             </div>
-            {addTarget && !addTargetFilesQuery?.data && !addTargetFilesQuery?.isError ? (
+            {addTargetMissing ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                This workspace changed or is no longer available. Close this dialog and reopen the picker.
+              </p>
+            ) : addTarget && !addTargetFilesQuery?.data && !addTargetFilesQuery?.isError ? (
               <p className="py-6 text-center text-sm text-muted-foreground">Loading workspace membership…</p>
             ) : addTargetFilesQuery && addTargetFilesQuery.isError ? (
               <QueryErrorNotice
                 title="Workspace files could not be loaded"
                 message={errorMessage(addTargetFilesQuery.error)}
                 isRetrying={addTargetFilesQuery.isFetching}
-                onRetry={() => void addTargetFilesQuery.refetch()}
+                onRetry={() =>
+                  addTargetFilesQuery.error instanceof ApiError &&
+                  [404, 409].includes(addTargetFilesQuery.error.status)
+                    ? void workspacesQuery.refetch()
+                    : void addTargetFilesQuery.refetch()
+                }
               />
             ) : partitionFilesQuery.isLoading ? (
               <p className="py-6 text-center text-sm text-muted-foreground">Loading partition files…</p>
@@ -471,7 +581,7 @@ export function WorkspacesTab({ partition }: { partition: string }) {
                   <li key={file.file_id}>
                     <label className="flex cursor-pointer items-start gap-3 rounded-md p-2 hover:bg-muted">
                       <Checkbox
-                        checked={selectedFileIds.includes(file.file_id)}
+                        checked={selectedFileIdsForAdd.includes(file.file_id)}
                         onCheckedChange={(checked) => toggleFile(file.file_id, checked === true)}
                       />
                       <span className="min-w-0 text-sm">
@@ -487,24 +597,26 @@ export function WorkspacesTab({ partition }: { partition: string }) {
             )}
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setAddTarget(null)}>
+            <Button type="button" variant="outline" disabled={addMutation.isPending} onClick={() => setAddTarget(null)}>
               Cancel
             </Button>
             <Button
               disabled={
                 !addTarget ||
+                addTargetMissing ||
                 !addTargetFilesQuery?.data ||
                 addTargetFilesQuery?.isError ||
-                selectedFileIds.length === 0 ||
+                selectedFileIdsForAdd.length === 0 ||
                 addMutation.isPending
               }
               onClick={() => {
-                if (addTarget && selectedFileIds.length) {
-                  addMutation.mutate({ target: addTarget, fileIds: selectedFileIds });
+                if (addTarget && selectedFileIdsForAdd.length) {
+                  setSelectedFileIds(selectedFileIdsForAdd);
+                  addMutation.mutate({ target: addTarget, fileIds: selectedFileIdsForAdd });
                 }
               }}
             >
-              Add {selectedFileIds.length || ""} file{selectedFileIds.length === 1 ? "" : "s"}
+              Add {selectedFileIdsForAdd.length || ""} file{selectedFileIdsForAdd.length === 1 ? "" : "s"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -528,7 +640,11 @@ export function WorkspacesTab({ partition }: { partition: string }) {
           </AlertDialogHeader>
           <div className="space-y-2 rounded-md border p-3">
             <label className="flex cursor-pointer items-start gap-3">
-              <Checkbox checked={keepFiles} onCheckedChange={(checked) => setKeepFiles(checked === true)} />
+              <Checkbox
+                checked={keepFiles}
+                disabled={deleteMutation.isPending}
+                onCheckedChange={(checked) => setKeepFiles(checked === true)}
+              />
               <span className="text-sm">
                 <span className="font-medium">Keep indexed files in the partition</span>
                 <span className="mt-1 block text-muted-foreground">
