@@ -143,6 +143,17 @@ def test_check_requires_nonempty_postgres_password_when_template_uses_it(
     assert "POSTGRES_PASSWORD must be non-empty" in capsys.readouterr().err
 
 
+def test_check_rejects_empty_grafana_password_when_present_in_output(tmp_path: Path, capsys) -> None:
+    template = _write(tmp_path / ".env.example", "AUTH_TOKEN=__GENERATE_ME__\n")
+    output = _write(
+        tmp_path / ".env",
+        "AUTH_TOKEN=generated-admin-token-value\nGRAFANA_ADMIN_PASSWORD=\n",
+    )
+
+    assert gen_env.main(["--check", "-t", str(template), "-o", str(output)]) == 1
+    assert "GRAFANA_ADMIN_PASSWORD must be non-empty" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("key", ["MINIO_ACCESS_KEY", "MINIO_SECRET_KEY"])
 def test_check_requires_nonempty_minio_credentials_when_template_uses_them(
     tmp_path: Path, capsys: pytest.CaptureFixture, key: str

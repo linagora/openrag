@@ -263,6 +263,15 @@ def material_embedder_changes(
     return [key for key in before if before[key] != after[key]]
 
 
+def normalize_embedder_extra(extra: Mapping[str, Any]) -> dict[str, Any]:
+    """Treat null window/concurrency overrides as inheritance from settings."""
+    normalized = dict(extra)
+    for key in ("max_model_len", "embed_concurrency"):
+        if normalized.get(key) is None:
+            normalized.pop(key, None)
+    return normalized
+
+
 __all__ = [
     "LLM_CONTEXT_SIZE_KEY",
     "LLM_OUTPUT_TOKENS_KEY",
@@ -278,4 +287,5 @@ __all__ = [
     "embedder_fingerprint",
     "is_placeholder_api_key",
     "material_embedder_changes",
+    "normalize_embedder_extra",
 ]

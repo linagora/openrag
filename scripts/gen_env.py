@@ -41,7 +41,7 @@ DEFAULT_TEMPLATE = REPO_ROOT / "infra/compose/.env.example"
 DEFAULT_OUTPUT = REPO_ROOT / "infra/compose/.env"
 
 #: The marker an example file uses where a credential belongs. Also carried on
-#: the boot-time denylist in ``openrag/core/config/secrets_guard.py``, so a
+#: the startup policy in ``openrag/core/secret_policy.py``, so a
 #: copied-but-ungenerated file is refused rather than silently accepted.
 PLACEHOLDER = "__GENERATE_ME__"
 
@@ -575,8 +575,8 @@ def main(argv: list[str] | None = None) -> int:
             problems = True
 
         output_values, _, _, _ = _parse_env_assignments(output_text)
-        for key in ("POSTGRES_PASSWORD", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY"):
-            if key not in template_keys_set:
+        for key in ("POSTGRES_PASSWORD", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "GRAFANA_ADMIN_PASSWORD"):
+            if key not in template_keys_set and key != "GRAFANA_ADMIN_PASSWORD":
                 continue
             value = output_values.get(key)
             if value is not None and (value[1] or not value[0].strip()):

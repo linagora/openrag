@@ -158,8 +158,7 @@ class OIDCConfig(BaseModel):
     # sole source of truth). Default keeps manually-granted memberships.
     group_sync_prune: bool = False
 
-    # The five env vars required when AUTH_MODE=oidc; unset/empty values
-    # trip the validator with a single error listing every missing key.
+    # OIDC claim data is read from one of these token response sources.
     _VALID_CLAIM_SOURCES: ClassVar[frozenset[str]] = frozenset({"id_token", "userinfo"})
 
     @classmethod

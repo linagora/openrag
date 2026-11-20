@@ -32,9 +32,9 @@ python3 scripts/gen_env.py --check   # verify nothing is left unset
 | `AUTH_TOKEN` | Yes, unless using SSO | Bootstraps the admin user and guards the API. Minimum 12 characters. Leaving it unset enables the no-auth development mode only when `ALLOW_NO_AUTH=true`. |
 | `POSTGRES_PASSWORD` | Yes | Minimum 12 characters. Compose fails closed without it; the chart reads it from `postgresql.auth.password`. |
 | `CHAINLIT_AUTH_SECRET` | When the chat interface is enabled | Signs the chat session cookie. Minimum 12 characters; generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Rotating it invalidates live sessions. In the Helm chart the chat interface is off by default (`env.WITH_CHAINLIT_UI`). |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. Kubernetes deployments use external object storage instead. |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. The Helm chart uses separate values for bundled MinIO (`minioCredentials.*`) or external S3 (`milvus.externalS3.*`). |
 | `GRAFANA_ADMIN_PASSWORD` | When bundled Grafana is enabled | Minimum 12 characters. |
-| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | Formats are set by your identity provider and by Fernet respectively, so no length floor is applied. See the [OIDC guide](/openrag/documentation/oidc/). |
+| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | The identity provider sets the client-secret format. `OIDC_TOKEN_ENCRYPTION_KEY` must be a valid Fernet key; it has no generic 12-character minimum. See the [OIDC guide](/openrag/documentation/oidc/). |
 | `HF_TOKEN` | When pulling gated model weights | |
 | `API_KEY`, `VLM_API_KEY`, `EMBEDDER_API_KEY`, `RERANKER_API_KEY`, `TRANSCRIBER_API_KEY`, `WEBSEARCH_API_TOKEN` | Per integration | Set by the provider, so no length floor. Use the literal `EMPTY` for a local OpenAI-compatible server that requires no credential — that is the documented sentinel and is always accepted. |
 
@@ -295,7 +295,7 @@ The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker 
 
 The endpoint's **name never changes** — partitions (`chat_llm`) and presets store endpoint names by value and nothing cascades a rename, so a renamed row would leave those references dangling. After a model change the endpoint keeps its original name while serving the new model.
 
-Sync only writes what the environment actually owns: `endpoint`, `model_name` and `api_key` always, and `batch_size`/`timeout` only when their env var (`EMBEDDER_BATCH_SIZE`, `EMBEDDER_TIMEOUT`, `VLM_TIMEOUT`, `RERANKER_TIMEOUT`) is set, as is the embedder's vendor (`EMBEDDER_PROVIDER`) — otherwise a value you tuned in the admin UI would be replaced by the config default. The API key is likewise only overwritten when env supplies a real one, so an unset `*_API_KEY` (or its `EMPTY` placeholder) will not wipe a key you set by hand.
+Sync writes environment-owned endpoint and model values when the safety checks allow them. For embedders with indexed files or an active swap, it holds vector-affecting changes. Safe tunables can still sync. It updates `batch_size` and `timeout` only when their environment variables are set, and the embedder vendor only when `EMBEDDER_PROVIDER` is set. An unset API key or an `EMPTY` value leaves the saved key in place. If an embedder change is held, startup can rotate a supplied key only when the saved URL and provider still match.
 
 An endpoint created by hand is never modified or deleted. An endpoint seeded before the marker existed is adopted on the first sync **only if it still matches the environment exactly** — if you have edited it, it is left alone rather than silently taken over.
 :::

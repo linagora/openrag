@@ -284,6 +284,11 @@ files = Table(
         unique=True,
         postgresql_where=text("content_sha256 IS NOT NULL"),
     ),
+    Index(
+        "ix_files_embedder_vector_field",
+        text("(indexation_config->>'embedder_vector_field')"),
+        postgresql_where=text("indexation_config->>'embedder_vector_field' IS NOT NULL"),
+    ),
 )
 
 

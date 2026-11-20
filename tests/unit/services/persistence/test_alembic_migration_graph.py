@@ -16,4 +16,4 @@ def test_alembic_revision_graph_has_one_head(monkeypatch) -> None:
 
     heads = ScriptDirectory.from_config(config).get_heads()
 
-    assert heads == ["4d7e2b9c1f35"]
+    assert heads == ["f4a5b6c7d8e9"]

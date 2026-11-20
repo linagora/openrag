@@ -196,7 +196,8 @@ _API_REPOINT_REMEDY = (
     "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move partitions to it."
 )
 _BOOT_REPOINT_REMEDY = (
-    "If indexed files still prevent the change, set the embedder environment values to match the saved configuration, "
+    "If indexed files still prevent the change, compare the embedder environment values with the saved configuration "
+    "in the admin API. Set the environment to match the saved values, "
     "or apply it through the admin API with acknowledge_indexed_data=true. Include any replacement API key in the "
     "same acknowledged edit, and preserve other entries in extra because the API replaces that object as a whole."
 )
@@ -319,8 +320,9 @@ class ModelEndpointService:
         otherwise keep silently running at the provider default forever.
 
         When ``models.sync_on_boot`` is set (env ``MODEL_ENDPOINT_SYNC_ON_BOOT``),
-        the endpoint the seeder created is instead refreshed from Settings/env on
-        every boot, so operators can manage it via env vars + a pod rollout.
+        an env-managed endpoint is refreshed from Settings/env on each boot,
+        subject to the embedder indexed-data and running-swap safety checks.
+        Safe tunables can still sync while vector-affecting fields are held.
 
         That row is found by its ``ENV_MANAGED_KEY`` marker rather than by name,
         because the name is derived from the model slug: keying off the slug meant
@@ -328,11 +330,10 @@ class ModelEndpointService:
         silently did nothing and the old model stayed live. Rows seeded before the
         marker existed are adopted on first sync by matching the slug once.
 
-        For the marked row the sync also rotates ``api_key`` inside ``extra`` —
-        env is the source of truth for the credential it owns, and without this a
-        rotated key never reached the DB, so requests kept using the stale key and
-        failed once the provider revoked it. Every other ``extra`` key an admin set
-        is preserved. Endpoints created by hand (no marker) are never touched.
+        For the marked row the sync can rotate the env-owned ``api_key`` while
+        preserving other ``extra`` keys. During recovery from a held vector
+        change, the saved URL and provider must still match and a real env key must
+        be supplied. Endpoints created by hand (no marker) are never touched.
         """
         seeds = self._build_default_seeds()
         now = datetime.now(UTC)
@@ -395,13 +396,12 @@ class ModelEndpointService:
     async def _sync_env_managed(self, row: ModelEndpointRow, model_type: str, data: dict[str, Any]) -> None:
         """Refresh the env-seeded row from Settings/env.
 
-        Only fields the environment actually owns are written. ``endpoint`` and
-        ``model_name`` always are — they are what "point this at the configured
-        model" means. ``batch_size``/``timeout`` are written only when their env
-        var is set (see ``_ENV_OWNED_TUNABLES``), and the embedder's client only
-        when ``EMBEDDER_PROVIDER`` is (``_ENV_OWNED_EXTRA``); the seed carries a
-        value for them regardless, so trusting the seed would overwrite an
-        admin's choice with the config default.
+        Only fields the environment owns are requested for update. Embedder
+        endpoint, model and provider changes can be held when indexed data or a
+        running swap makes them unsafe; unaffected tunables can still sync.
+        ``batch_size``/``timeout`` are written only when their env var is set (see
+        ``_ENV_OWNED_TUNABLES``), and the embedder provider only when
+        ``EMBEDDER_PROVIDER`` is set (``_ENV_OWNED_EXTRA``).
 
         For embedders, only env-owned ``extra`` keys are patched into the locked
         row, and API-key rotation uses its own saved-key guard. This preserves
@@ -484,7 +484,7 @@ class ModelEndpointService:
                 # configuration rather than guessing which fields changed.
                 held = {"endpoint", "model_name", "extra"}
                 label = "requested vector configuration"
-                reason = "a running embedder swap"
+                reason = "there is a running embedder swap"
                 remedy = f"Restart once the swap ends to retry sync. {_BOOT_REPOINT_REMEDY}"
             elif exc.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA":
                 changed_fields = guarded_changes

@@ -472,7 +472,7 @@ async def test_an_edit_changing_the_vectors_of_a_swap_target_is_refused_even_ack
 
 
 @pytest.mark.asyncio
-async def test_a_null_window_override_leaves_the_swap_target_unchanged():
+async def test_a_null_window_override_is_saved_as_inherited_and_leaves_swap_target_unchanged():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 
     pool = _FakePool()
@@ -480,11 +480,31 @@ async def test_a_null_window_override_leaves_the_swap_target_unchanged():
     pool.conn.running_swaps = 1
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    await repo.update("bge-m3", "embedder", extra={"max_model_len": None})
+    await repo.update("bge-m3", "embedder", extra={"max_model_len": None, "api_key": "saved-key"})
 
     queries = [query for query, _ in pool.conn.executed]
     assert "UPDATE model_endpoints SET" in queries[-1]
     assert not any("partition_embedder_swaps" in query for query in queries)
+    update_params = next(
+        params for query, params in pool.conn.executed if query.startswith("UPDATE model_endpoints SET")
+    )
+    assert update_params[-1] == {"api_key": "saved-key"}
+
+
+@pytest.mark.asyncio
+async def test_update_normalizes_null_extra_to_an_empty_object():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="jina", is_default=False, extra={"implementation": "ollama"})
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.update("jina", "embedder", extra=None)
+
+    update_params = next(
+        params for query, params in pool.conn.executed if query.startswith("UPDATE model_endpoints SET")
+    )
+    assert update_params[-1] == {}
 
 
 @pytest.mark.asyncio
@@ -1166,8 +1186,8 @@ async def test_indexed_file_usage_counts_files_per_partition():
     # editing the default embedder would report zero files at stake.
     assert "e.is_default" in sql
     assert "f.indexation_config->>'embedder_vector_field' = e.vector_field" in sql
-    assert "EXISTS (" in sql
-    assert "p.partition = f.partition_name" in sql
+    assert "UNION ALL" in sql
+    assert "f.partition_name = p.partition" in sql
     assert "COUNT(*)" in sql
     assert params[:2] == ("qwen", "embedder")
 

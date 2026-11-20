@@ -166,20 +166,21 @@ class ServiceContainer:
 
         def _embedder_extra_kwargs(cfg: Any) -> dict[str, Any]:
             """Backfill max_model_len/embed_concurrency from static settings when the
-            endpoint's ``extra`` omits them (an explicit ``extra`` value wins).
+            endpoint's ``extra`` omits them or sets them to ``None`` (inherit).
+            An explicit non-null ``extra`` value wins.
 
             Also carries ``batch_size`` — only the embedder consumes it, so it is
             injected here rather than for every kind (see factories.py / #712).
-            Backfilled only when ``extra`` omits it, so an explicit ``extra``
-            value still wins (extra_kwargs_fn is merged last, so an
-            unconditional value would override the extra the base kwargs already
-            applied)."""
+            Backfilled only when ``extra`` omits it or sets it to ``None``, so an
+            explicit non-null ``extra`` value still wins (extra_kwargs_fn is merged
+            last, so an unconditional value would override the extra the base
+            kwargs already applied)."""
             defaults: dict[str, Any] = {}
             if "batch_size" not in cfg.extra:
                 defaults["batch_size"] = cfg.batch_size
-            if "max_model_len" not in cfg.extra:
+            if cfg.extra.get("max_model_len") is None:
                 defaults["max_model_len"] = embed_defaults.max_model_len
-            if "embed_concurrency" not in cfg.extra:
+            if cfg.extra.get("embed_concurrency") is None:
                 defaults["embed_concurrency"] = embed_defaults.embed_concurrency
             return defaults
 

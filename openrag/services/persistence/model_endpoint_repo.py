@@ -16,6 +16,7 @@ from core.config.model_endpoints import (
     ModelEndpointRow,
     ModelEndpointType,
     material_embedder_changes,
+    normalize_embedder_extra,
 )
 from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.readiness import ConfigurationReferenceFinding, ModelEndpointDiscovery, ModelEndpointTarget
@@ -132,23 +133,31 @@ _FORGET_DROPPED_VECTOR_FIELD_SQL = """
     WHERE indexation_config->>'embedder_vector_field' = $1
     """
 
-# Per-partition indexed-file counts for one endpoint. `usage_counts` above
-# answers "how many partitions point here"; this answers "how much already-built
-# data rides on it", which is what sizes an in-place repoint.
+# Count existing files by either their current partition assignment or their
+# recorded vector field. The separate branches let PostgreSQL use the partition
+# index and the vector-field expression index without scanning unrelated files.
 _EMBEDDER_INDEXED_USAGE_SQL = """
-    SELECT f.partition_name AS partition, COUNT(*)::int AS file_count
-    FROM model_endpoints e
-    JOIN files f ON (
-        f.indexation_config->>'embedder_vector_field' = e.vector_field
-        OR EXISTS (
-            SELECT 1 FROM partitions p
-            WHERE p.partition = f.partition_name
-              AND (p.embedder = e.name OR (e.is_default AND p.embedder = $3))
-        )
+    WITH target AS (
+        SELECT e.name, e.vector_field, e.is_default
+        FROM model_endpoints e
+        WHERE e.name = $1 AND e.model_type = $2
+    ), matching_files AS (
+        SELECT f.partition_name
+        FROM target e
+        JOIN files f ON f.indexation_config->>'embedder_vector_field' = e.vector_field
+
+        UNION ALL
+
+        SELECT f.partition_name
+        FROM target e
+        JOIN partitions p ON (p.embedder = e.name OR (e.is_default AND p.embedder = $3))
+        JOIN files f ON f.partition_name = p.partition
+        WHERE (f.indexation_config->>'embedder_vector_field' = e.vector_field) IS NOT TRUE
     )
-    WHERE e.name = $1 AND e.model_type = $2
-    GROUP BY f.partition_name
-    ORDER BY file_count DESC, f.partition_name
+    SELECT partition_name AS partition, COUNT(*)::int AS file_count
+    FROM matching_files
+    GROUP BY partition_name
+    ORDER BY file_count DESC, partition_name
     """
 
 
@@ -491,6 +500,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         **fields: object,
     ) -> ModelEndpointRow | None:
         updates = {k: v for k, v in fields.items() if k in _ALLOWED_UPDATE_FIELDS}
+        if "extra" in updates and updates["extra"] is None:
+            updates["extra"] = {}
+        proposed_extra = updates.get("extra")
+        if (
+            model_type == "embedder"
+            and isinstance(proposed_extra, Mapping)
+            and any(
+                key in proposed_extra and proposed_extra[key] is None for key in ("max_model_len", "embed_concurrency")
+            )
+        ):
+            updates["extra"] = normalize_embedder_extra(proposed_extra)
         if extra_patch is not None and (model_type != "embedder" or "extra" in updates):
             raise ValueError("extra_patch is only valid for embedder updates without a replacement extra object")
         if not updates and not extra_patch:
@@ -827,7 +847,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         return {(r["name"], r["model_type"]): r["cnt"] for r in rows}
 
     async def indexed_file_usage(self, name: str, model_type: str) -> list[dict]:
-        """Partitions resolving to this endpoint that already hold indexed files.
+        """Counts indexed files by partition assignment or recorded embedder vector field.
 
         What an in-place edit of an embedder's URL or model would strand (#762
         C). Unlike a delete or a rename, that edit never touches the partitions
