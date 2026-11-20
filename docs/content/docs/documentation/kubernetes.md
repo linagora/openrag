@@ -256,7 +256,7 @@ only**, by giving that pod more resources.
 
 From OpenRAG 2.3.5, the chart refuses both of these with the embedded Ray.
 
-- **`openrag.replicas` above 1 with the embedded Ray.** Each pod would have its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. The chart refuses it, and for the same reason replaces the pod on upgrade (`Recreate`) instead of rolling it, so two pods never run at once.
+- **`openrag.replicas` above 1 with the embedded Ray.** Each pod would have its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, cancelling a task only sees one pod, and each pod's quota sweep gives back the upload slots the other pods hold once they are older than five minutes, so a user can go over their file quota. The chart refuses it, and for the same reason replaces the pod on upgrade (`Recreate`) instead of rolling it, so two pods never run at once.
 - **GPU workers that don't fit the pod's GPUs.** Marker, Docling and Whisper workers each reserve part of a GPU, and Ray keeps a fraction on a single card: three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and the files sent to them fail after the parser's timeout. The chart refuses it too, as long as it can read these settings (see [Scaling up](#scaling-up)).
 
 ### Large batches

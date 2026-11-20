@@ -1,4 +1,4 @@
-"""Port interfaces — repository ABCs + CatalogStore aggregate root."""
+"""Port interfaces — repository ABCs, the CatalogStore aggregate root and the ObjectStore."""
 
 from .audit_log_repo import AuditLogRepository
 from .catalog_store import CatalogStore
@@ -9,6 +9,7 @@ from .entity_repo import EntityRepository
 from .idempotency_repo import IdempotencyRepository
 from .job_repo import JobRepository
 from .model_endpoint_repo import ModelEndpointRepository
+from .object_store import ObjectStore
 from .oidc_session_repo import OIDCSessionRepository
 from .partition_membership_repo import PartitionMembershipRepository
 from .partition_repo import PartitionRepository
@@ -28,6 +29,7 @@ __all__ = [
     "IdempotencyRepository",
     "JobRepository",
     "ModelEndpointRepository",
+    "ObjectStore",
     "OIDCSessionRepository",
     "PartitionMembershipRepository",
     "PartitionRepository",

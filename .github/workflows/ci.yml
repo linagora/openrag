@@ -34,18 +34,22 @@ jobs:
       backend: ${{ steps.areas.outputs.backend }}
       unit: ${{ steps.areas.outputs.unit }}
       ui: ${{ steps.areas.outputs.ui }}
+      site: ${{ steps.areas.outputs.site }}
     steps:
       # Pushes to main and develop run everything. On a pull request:
       #   backend  anything outside ui/, docs/ and the top-level *.md files
       #   unit     anything outside ui/ and the top-level *.md files, since
       #            unit tests read pages and env files under docs/
       #   ui       anything under ui/, or this file
+      #   site     anything the documentation site is built from: docs/, the
+      #            Astro config, the root package files, astro.yml, the shared
+      #            build-docs action or this file
       - name: Find the areas this pull request changes
         id: areas
         uses: actions/github-script@v7
         with:
           script: |
-            const areas = { backend: true, unit: true, ui: true };
+            const areas = { backend: true, unit: true, ui: true, site: true };
             if (context.eventName === 'pull_request') {
               try {
                 const files = await github.paginate(github.rest.pulls.listFiles, {
@@ -65,6 +69,10 @@ jobs:
                   areas.backend = paths.some((path) => !isUi(path) && !isDocs(path));
                   areas.unit = paths.some((path) => !isUi(path) && !isTopLevelMarkdown(path));
                   areas.ui = paths.some((path) => isUi(path) || path === '.github/workflows/ci.yml');
+                  const siteFiles = ['astro.config.mjs', 'package.json', 'package-lock.json', 'tsconfig.json', '.github/workflows/astro.yml', '.github/workflows/ci.yml'];
+                  areas.site = paths.some(
+                    (path) => path.startsWith('docs/') || path.startsWith('.github/actions/build-docs/') || siteFiles.includes(path)
+                  );
                 }
               } catch (error) {
                 core.warning(`Could not list the changed files, running every job: ${error.message}`);
@@ -130,6 +138,48 @@ jobs:
           python-version: "3.12"
       - name: Run layer guard
         run: python scripts/check_layer_imports.py
+
+  # On develop the docs name the coming release UNRELEASED, and the release's
+  # bump commit resolves it (CONTRIBUTING.md -> Choosing the number). The site
+  # deploys from main on every push (astro.yml), so a pull request into main is
+  # the last point where a placeholder can be fixed before readers see it.
+  unreleased-docs:
+    name: Unreleased docs
+    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Refuse docs that still say UNRELEASED
+        run: |
+          # A tree we cannot search is not a clean tree: git grep reports a
+          # missing path as "no match", so a moved docs directory would pass.
+          if [ ! -d docs/content ]; then
+            echo "::error::docs/content is missing, so the UNRELEASED check cannot run. If the docs moved, update this job."
+            exit 1
+          fi
+
+          set +e
+          hits=$(git grep -nw UNRELEASED -- docs/content)
+          status=$?
+          set -e
+
+          # Only exit 1 means no match; anything else is git grep failing.
+          if [ "$status" -eq 1 ]; then
+            echo "OK: the docs name no unreleased version"
+            exit 0
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "::error::could not search docs/content (git grep exited $status)."
+            exit 1
+          fi
+
+          printf '%s\n' "$hits" | while IFS=: read -r page line _; do
+            echo "::error file=$page,line=$line::still says UNRELEASED. Resolve it to the release's version in the bump commit (CONTRIBUTING.md -> Bumping the version)."
+          done
+          exit 1
 
   tests:
     # The required check is named "tests (3.12)", from the matrix this job
@@ -240,7 +290,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    steps:
+    steps: &api-tests-steps
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -334,6 +384,18 @@ jobs:
         working-directory: tests/integration/api/api_run
         run: |
           docker compose down -v
+
+  # The same suite with the per-file fences in Postgres (#1430). A separate job,
+  # not a matrix on api-tests: a matrix would rename that required check. Not
+  # required itself until FILE_FENCES=postgres becomes the default.
+  api-tests-postgres-fences:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FILE_FENCES: postgres
+    steps: *api-tests-steps
 
   # The PostgreSQL repository tests and the Ray metrics export test, in one job:
   # each is about a minute, most of it setup.
@@ -536,3 +598,27 @@ jobs:
         # vite.config.ts sets passWithNoTests: true for local runs; in CI an empty
         # test discovery means something broke, so make it a failure.
         run: npm test -- --passWithNoTests=false
+
+  docs-build:
+    # The site deploys only from main (astro.yml), so a page that breaks the
+    # build would otherwise surface on release day. This runs the same build
+    # as astro.yml, through the shared .github/actions/build-docs, without
+    # deploying anything.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.site != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      # configure-pages reads the site URL and base path the deploy uses.
+      pages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build the documentation site
+        uses: ./.github/actions/build-docs
