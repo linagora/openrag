@@ -194,9 +194,10 @@ class WorkspaceService:
         }
 
     async def _delete_file(self, file_id: str, partition: str) -> None:
-        # The original's catalog reads run outside the cleanup session: it
-        # holds a pool connection throughout, and orphans are deleted
-        # concurrently, so a read inside it could wait on the pool forever.
+        # The original's catalog reads run outside the cleanup session, and
+        # outside the file's delete fence once one wraps it: each holds a pool
+        # connection while the file is deleted, and orphans are deleted
+        # concurrently, so a read inside either could wait on the pool forever.
         source = await self._source_of_original(file_id, partition)
         async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
             if owned is None:
@@ -265,6 +266,7 @@ class WorkspaceService:
 
     async def retry_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
         """Retry a failed or abandoned cleanup while keeping attachment fenced."""
+        # Outside the cleanup session (and any fence), as in _delete_file.
         source = await self._source_of_original(file_id, partition)
         async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
             if owned is None or not await owned.claim_failed_file_cleanup(file_id, partition):
