@@ -16,7 +16,7 @@ to run them.
 
 Usage (from infra/compose, with DC and SVC set as in the upgrade guide):
 
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/backfill_chunk_headers.py --dry-run
 
 ``--dry-run`` writes nothing, ``--partition <name>`` limits it to one partition

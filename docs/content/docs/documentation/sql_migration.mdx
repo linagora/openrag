@@ -34,8 +34,8 @@ Replace **`<revision_message>`** with your descriptive message before running th
 docker compose up -d rdb
 docker compose \
     run --no-deps --build --rm \
-    --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini revision --autogenerate -m '<revision_message>'" \
-    openrag
+    openrag \
+    uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini revision --autogenerate -m '<revision_message>'
 ```
 
 It will create a new migration script in the `openrag/services/persistence/migrations/alembic/versions/` directory.
@@ -54,8 +54,8 @@ Rebuilds the image to ensure the migration runs against the exact code being dep
 docker compose up -d rdb
 docker compose \
     run --no-deps --build --rm \
-    --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head" \
-    openrag; docker compose down
+    openrag \
+    uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head; docker compose down
 ```
 
 #### Option B: Docker exec (stack already running)
@@ -110,8 +110,8 @@ This usually happens when two or more migration scripts are created independentl
      ```bash title="Merge Alembic heads"
      docker compose up -d rdb
      docker compose run --no-deps --build --rm \
-         --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini merge -m 'merge heads' <head1> <head2>" \
-         openrag
+         openrag \
+         uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini merge -m 'merge heads' <head1> <head2>
      ```
      This will generate a new migration script that merges the two branches.
 
@@ -120,8 +120,8 @@ This usually happens when two or more migration scripts are created independentl
      ```bash title="Apply migrations after merge"
      docker compose up -d rdb
      docker compose run --no-deps --build --rm \
-         --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head" \
-         openrag; docker compose down
+         openrag \
+         uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head; docker compose down
      ```
 
 ---

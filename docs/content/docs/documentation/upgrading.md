@@ -1124,10 +1124,16 @@ $DC stop "$SVC"
 
 #### 5. Run the Milvus migration
 
+The 2.3.0 image cannot run a command through its entrypoint, so the commands
+below bypass it and run as the image's app user (`--user`) rather than as root:
+run as root, `uv` leaves root-owned files in the `openrag_venv` volume, and the
+next start with another image fails with `Permission denied` while syncing it.
+
 A dry run first, which changes nothing and lists the pending migrations:
 
 ```bash
-$DC run --no-deps --rm --entrypoint "" "$SVC" \
+APP_UID=$($DC run --no-deps --rm -T --entrypoint printenv "$SVC" APP_UID)
+$DC run --no-deps --rm --entrypoint "" --user "$APP_UID:0" "$SVC" \
   uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
@@ -1161,7 +1167,7 @@ Check that the plan routes every partition to an embedder field, and review any
 lose their vector. Then apply it:
 
 ```bash
-$DC run --no-deps --rm --entrypoint "" "$SVC" \
+$DC run --no-deps --rm --entrypoint "" --user "$APP_UID:0" "$SVC" \
   uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 ```
 
