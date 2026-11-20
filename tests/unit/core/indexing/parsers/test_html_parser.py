@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import base64
+from contextlib import asynccontextmanager
 
 import pytest
 from core.indexing.parsers.html_parser import HtmlParser
 from core.models.document import Document, DocumentType
+from services.workers.stages import caption as caption_module
 from services.workers.stages.caption import caption_stage
+
+
+@pytest.fixture(autouse=True)
+async def _noop_vlm_semaphore(monkeypatch):
+    """Stub the cluster-wide VLM semaphore so caption tests don't boot Ray."""
+
+    @asynccontextmanager
+    async def _noop():
+        yield
+
+    monkeypatch.setattr(caption_module, "get_vlm_semaphore", _noop)
 
 
 def _html_with_image(payload: bytes = b"image-bytes") -> str:
@@ -89,3 +102,56 @@ async def test_html_parser_sanitizes_data_uri_links():
 
     assert processed.text_blocks[0].text == "logo"
     assert processed.images == []
+
+
+@pytest.mark.asyncio
+async def test_caption_inside_tbody_is_kept():
+    html = "<table><tbody><caption>alpha beta</caption><tr><td>cell</td></tr></tbody></table>"
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="u.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "cell" in text
+    assert "alpha" in text and "beta" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_caption_outside_table():
+    html = "<p>Report caption: alpha beta</p>"
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="caption.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "Report caption: alpha beta" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_table_without_caption():
+    html = "<table><tbody><tr><td>alpha</td><td>beta</td></tr></tbody></table>"
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="table.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "alpha" in text
+    assert "beta" in text

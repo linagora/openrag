@@ -58,6 +58,10 @@ class HtmlParser(DocumentParser):
 
     @staticmethod
     def _to_markdown(html: str) -> str:
+        from bs4 import BeautifulSoup
         from html_to_markdown import convert
 
-        return convert(html)
+        soup = BeautifulSoup(html, "html5lib")
+        normalized_html = str(soup)
+
+        return convert(normalized_html)
