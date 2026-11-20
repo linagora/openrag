@@ -16,7 +16,14 @@ all. The rename of the content and the rename of its sidecar are two steps:
 a lock per key orders them against other writes and against ``stat`` in this
 process. Two processes writing the same key at once could pair one's content
 with the other's metadata; OpenRag writes each key once (one upload id per
-revision), so that doesn't happen.
+revision), so that doesn't happen. The previous sidecar is moved aside before
+the content is replaced, so a failure or a crash between the steps leaves an
+object without metadata, never paired with another write's. A failed first
+write is removed; an overwrite that fails between the two renames leaves the
+new content without metadata. Nothing is fsynced before a rename: a crash of
+the process leaves an object whole or absent, but after a power loss or a
+crash of the file server a renamed file may hold less than was written,
+depending on the filesystem.
 
 ``local_copy`` yields the stored file itself when it has the suffix asked for,
 which the keys make the usual case, and a temporary copy otherwise.
@@ -42,16 +49,20 @@ from core.ports.object_store import ByteRange, ObjectInfo, ObjectStore, validate
 from core.utils import consts
 from core.utils.exceptions import ObjectNotFoundError, ObjectStoreError
 from core.utils.logging import get_logger
-from core.utils.object_keys import LEGACY, ORIGINALS, parse_key, validate_suffix
+from core.utils.object_keys import LEGACY, MAX_COMPONENT_BYTES, ORIGINALS, parse_key, validate_suffix
 
 logger = get_logger()
 
 _T = TypeVar("_T")
 _TEMP_PREFIX = ".part-"
 _META_SUFFIX = ".meta"
+# The sidecar of a name too long for ``.{name}.meta``. It doesn't end with
+# ``.meta``, so it can't also be the sidecar of another name.
+_HASHED_META_SUFFIX = ".hashed-meta"
 _LOCK_STRIPES = 64
-# Name-length limit of the filesystem, in bytes.
-_MAX_NAME_BYTES = 255
+# Releases still waiting on the thread of a cancelled call (the event loop
+# keeps only a weak reference to a task).
+_PENDING_RELEASES: set[asyncio.Task[None]] = set()
 
 
 class FsObjectStore(ObjectStore):
@@ -79,7 +90,7 @@ class FsObjectStore(ObjectStore):
         self._lexical_path(key)
         checked = validate_metadata(metadata)
         path = await self._path(key)
-        temp, file = await self._io(key, self._create_temp, path.parent)
+        temp, file = await self._io_owned(key, _discard_temp, self._create_temp, path.parent)
         hasher = hashlib.sha256()
         size = 0
         try:
@@ -87,14 +98,13 @@ class FsObjectStore(ObjectStore):
                 await self._io(key, file.write, chunk)
                 hasher.update(chunk)
                 size += len(chunk)
-            await self._io(key, file.close)
         except BaseException:
             await asyncio.to_thread(_discard, file, temp)
             raise
         digest = hasher.hexdigest()
-        # The stream is read: from here the write completes, even if the
-        # caller is cancelled while it runs.
-        commit = asyncio.ensure_future(self._io(key, self._commit, temp, path, digest, checked))
+        # The stream is read: from here the write completes, closing the
+        # file included, even if the caller is cancelled while it runs.
+        commit = asyncio.ensure_future(self._io(key, self._close_and_commit, file, temp, path, digest, checked))
         try:
             await asyncio.shield(commit)
         except asyncio.CancelledError:
@@ -134,7 +144,7 @@ class FsObjectStore(ObjectStore):
     @asynccontextmanager
     async def open_stream(self, key: str, byte_range: ByteRange | None = None) -> AsyncIterator[AsyncIterator[bytes]]:
         path = await self._path(key)
-        file, size = await self._io(key, _open_with_size, key, path)
+        file, size = await self._io_owned(key, _close_opened, _open_with_size, key, path)
         try:
             offset, length = (0, size) if byte_range is None else byte_range.resolve(size)
             yield self._read_chunks(key, file, offset, length)
@@ -151,7 +161,7 @@ class FsObjectStore(ObjectStore):
             # The stored file itself. Not ours to remove.
             yield path
             return
-        temp = await self._io(key, _copy_to_temp, key, path, wanted)
+        temp = await self._io_owned(key, _remove, _copy_to_temp, key, path, wanted)
         try:
             yield temp
         finally:
@@ -194,6 +204,22 @@ class FsObjectStore(ObjectStore):
         except OSError as exc:
             raise ObjectStoreError(f"Filesystem error on {key!r}: {exc}", key=key) from exc
 
+    async def _io_owned(self, key: str, release: Callable[[_T], None], func: Callable[..., _T], *args: Any) -> _T:
+        """``_io`` for a call that opens or creates something the caller must release.
+
+        A thread can't be interrupted: when the caller is cancelled, the thread
+        still finishes, and what it opened or created would be left with
+        nobody holding it. ``release`` gets it once the thread is done.
+        """
+        job = asyncio.ensure_future(self._io(key, func, *args))
+        try:
+            return await asyncio.shield(job)
+        except asyncio.CancelledError:
+            task = asyncio.ensure_future(_release_when_done(job, release))
+            _PENDING_RELEASES.add(task)
+            task.add_done_callback(_PENDING_RELEASES.discard)
+            raise
+
     async def _read_chunks(self, key: str, file: IO[bytes], offset: int, length: int) -> AsyncIterator[bytes]:
         await self._io(key, file.seek, offset)
         remaining = length
@@ -216,12 +242,12 @@ class FsObjectStore(ObjectStore):
         return self._locks[hash(path) % _LOCK_STRIPES]
 
     def _create_temp(self, directory: Path) -> tuple[Path, IO[bytes]]:
-        # A delete may remove an empty directory between our mkdir and our
-        # open: make it again and retry.
+        # A delete may remove an empty directory while we make it or before
+        # our open: make it again and retry.
         for attempt in range(3):
-            directory.mkdir(parents=True, exist_ok=True)
             temp = directory / f"{_TEMP_PREFIX}{uuid.uuid4().hex}"
             try:
+                directory.mkdir(parents=True, exist_ok=True)
                 return temp, open(temp, "xb")  # noqa: SIM115 - closed by the caller
             except FileNotFoundError:
                 if attempt == 2:
@@ -238,20 +264,49 @@ class FsObjectStore(ObjectStore):
             raise
         return temp
 
+    def _close_and_commit(
+        self, file: IO[bytes], temp: Path, path: Path, digest: str, metadata: Mapping[str, str]
+    ) -> None:
+        try:
+            file.close()
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+        self._commit(temp, path, digest, metadata)
+
     def _commit(self, temp: Path, path: Path, digest: str | None, metadata: Mapping[str, str]) -> None:
         try:
             meta_temp = self._write_meta_temp(path.parent, digest, metadata)
         except BaseException:
             temp.unlink(missing_ok=True)
             raise
+        meta_path = _meta_path(path)
+        aside = path.parent / f"{_TEMP_PREFIX}{uuid.uuid4().hex}"
         try:
             with self._lock(path):
-                os.replace(temp, path)
-                os.replace(meta_temp, _meta_path(path))
+                existed = os.path.lexists(path)
+                # The previous sidecar goes first: until the new one is in
+                # place, the object has no metadata rather than another's.
+                had_sidecar = _move_if_present(meta_path, aside)
+                try:
+                    os.replace(temp, path)
+                except BaseException:
+                    if had_sidecar:
+                        os.replace(aside, meta_path)
+                    raise
+                try:
+                    os.replace(meta_temp, meta_path)
+                except BaseException:
+                    if not existed:
+                        # Leave the key as it was: empty.
+                        path.unlink(missing_ok=True)
+                    raise
         except BaseException:
             temp.unlink(missing_ok=True)
             meta_temp.unlink(missing_ok=True)
             raise
+        finally:
+            aside.unlink(missing_ok=True)
 
     def _stat(self, key: str, path: Path) -> tuple[int, str | None, dict[str, str]]:
         with self._lock(path):
@@ -293,8 +348,9 @@ class FsObjectStore(ObjectStore):
         with self._lock(path):
             try:
                 path.unlink(missing_ok=True)
-            except IsADirectoryError:
-                # A legacy key naming a directory names no object.
+            except (IsADirectoryError, NotADirectoryError):
+                # A legacy key naming a directory, or a path under a file,
+                # names no object.
                 return
             _meta_path(path).unlink(missing_ok=True)
         if prefix == ORIGINALS:
@@ -308,10 +364,18 @@ class FsObjectStore(ObjectStore):
 
 def _meta_path(path: Path) -> Path:
     name = f".{path.name}{_META_SUFFIX}"
-    if len(name.encode("utf-8")) > _MAX_NAME_BYTES:
+    if len(name.encode("utf-8")) > MAX_COMPONENT_BYTES:
         # A long legacy name: the sidecar is named after its hash instead.
-        name = f".{hashlib.sha256(path.name.encode('utf-8')).hexdigest()}{_META_SUFFIX}"
+        name = f".{hashlib.sha256(path.name.encode('utf-8')).hexdigest()}{_HASHED_META_SUFFIX}"
     return path.with_name(name)
+
+
+def _move_if_present(src: Path, dst: Path) -> bool:
+    try:
+        os.replace(src, dst)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _read_meta(path: Path) -> tuple[str | None, dict[str, str]]:
@@ -365,6 +429,30 @@ def _discard(file: IO[bytes], temp: Path) -> None:
         file.close()
     finally:
         temp.unlink(missing_ok=True)
+
+
+def _discard_temp(created: tuple[Path, IO[bytes]]) -> None:
+    temp, file = created
+    _discard(file, temp)
+
+
+def _close_opened(opened: tuple[IO[bytes], int]) -> None:
+    opened[0].close()
+
+
+def _remove(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+async def _release_when_done(job: asyncio.Future[_T], release: Callable[[_T], None]) -> None:
+    try:
+        acquired = await job
+    except Exception:
+        return  # the call failed, so it holds nothing
+    try:
+        await asyncio.to_thread(release, acquired)
+    except OSError as exc:
+        logger.bind(error=str(exc)).warning("Could not release what a cancelled object store call acquired.")
 
 
 __all__ = ["FsObjectStore"]

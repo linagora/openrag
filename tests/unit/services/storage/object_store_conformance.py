@@ -18,6 +18,7 @@ is tested in that adapter's own module, not here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
@@ -204,6 +205,52 @@ class ObjectStoreConformance:
             await task
         assert not await store.exists(key)
 
+    async def test_a_put_in_flight_is_not_seen(self, store):
+        replaced, fresh = original(), original()
+        await store.put_bytes(replaced, b"previous", {"filename": "old.pdf"})
+        release, all_started = asyncio.Event(), asyncio.Event()
+        started: list[str] = []
+
+        async def paused(key: str) -> AsyncIterator[bytes]:
+            yield b"first chunk, "
+            # Runs once the store has taken the first chunk.
+            started.append(key)
+            if len(started) == 2:
+                all_started.set()
+            await release.wait()
+            yield b"then the rest"
+
+        writes = [
+            asyncio.create_task(store.put_stream(k, paused(k), {"filename": "new.pdf"})) for k in (replaced, fresh)
+        ]
+        await asyncio.wait_for(all_started.wait(), timeout=5)
+        info = await store.stat(replaced)
+        assert (await read_all(store, replaced), info.size, dict(info.metadata)) == (
+            b"previous",
+            len(b"previous"),
+            {"filename": "old.pdf"},
+        )
+        assert not await store.exists(fresh)
+        release.set()
+        await asyncio.gather(*writes)
+        for key in (replaced, fresh):
+            assert await read_all(store, key) == b"first chunk, then the rest"
+
+    async def test_a_put_cancelled_once_its_stream_is_read_completes(self, store):
+        key = original()
+        task: asyncio.Task | None = None
+
+        async def then_cancelled() -> AsyncIterator[bytes]:
+            yield b"whole"
+            # Delivered at the store's first await after the end of the stream.
+            asyncio.get_running_loop().call_soon(task.cancel)
+
+        task = asyncio.create_task(store.put_stream(key, then_cancelled(), {"filename": "a.pdf"}))
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert await read_all(store, key) == b"whole"
+        assert dict((await store.stat(key)).metadata) == {"filename": "a.pdf"}
+
     # --- ranged reads ---------------------------------------------------------------
 
     @pytest.mark.parametrize(
@@ -261,6 +308,13 @@ class ObjectStoreConformance:
         assert not await store.exists(key)
         await store.delete(key)
         await store.delete(original())
+
+    async def test_deleting_a_path_under_an_object_deletes_nothing(self, store):
+        key = keys.legacy_key("1713700000000_a1b2_report.pdf")
+        await store.put_bytes(key, b"kept")
+        await store.delete(f"{key}/inside.pdf")
+        await store.delete_many([f"{key}/inside.pdf"])
+        assert await read_all(store, key) == b"kept"
 
     async def test_delete_leaves_neighbours(self, store):
         key = original()

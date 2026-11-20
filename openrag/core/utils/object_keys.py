@@ -160,7 +160,8 @@ def markdown_sidecar_key(key: str) -> str:
     if parsed.prefix != LEGACY and not parsed.suffix:
         # ``{upload_id}`` + ``.md`` would read back as a markdown upload.
         raise InvalidObjectKeyError("Only an object stored under a suffix has a markdown sidecar.")
-    return _finish(key + MARKDOWN_SIDECAR_SUFFIX)
+    # Checked whole: a legacy name near 255 bytes has no room for ``.md``.
+    return validate_key(key + MARKDOWN_SIDECAR_SUFFIX)
 
 
 def validate_suffix(suffix: str) -> str:

@@ -218,6 +218,12 @@ def test_markdown_sidecar_key_refuses(key):
         keys.markdown_sidecar_key(key)
 
 
+def test_a_legacy_name_without_room_for_md_has_no_sidecar_key():
+    assert keys.parse_key(keys.markdown_sidecar_key(keys.legacy_key("r" * 252))).relative_path == "r" * 252 + ".md"
+    with pytest.raises(InvalidObjectKeyError):
+        keys.markdown_sidecar_key(keys.legacy_key("r" * 253))
+
+
 # --- parsing ---------------------------------------------------------------------
 
 

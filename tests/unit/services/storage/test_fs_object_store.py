@@ -9,6 +9,7 @@ import pytest
 from core.utils import object_keys as keys
 from core.utils.exceptions import ObjectNotFoundError, ObjectStoreError
 from object_store_conformance import ObjectStoreConformance, StreamFailed, failing, original, read_all
+from services.storage import fs_object_store
 from services.storage.fs_object_store import FsObjectStore
 
 
@@ -33,6 +34,45 @@ def store(root) -> FsObjectStore:
 def stray_files(root: Path) -> list[str]:
     """Temporary files the store left behind."""
     return sorted(str(p.relative_to(root)) for p in root.rglob(".part-*"))
+
+
+def files_under(root: Path) -> list[str]:
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+
+
+class Gate:
+    """Holds a call in its thread until released, and records what it returned."""
+
+    def __init__(self, func):
+        self.func = func
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.done = threading.Event()
+        self.result = None
+
+    def __call__(self, *args):
+        self.entered.set()
+        self.release.wait(timeout=5)
+        try:
+            self.result = self.func(*args)
+            return self.result
+        finally:
+            self.done.set()
+
+
+def failing_replace(monkeypatch, fails):
+    """Make ``os.replace`` raise for the first call ``fails(src, dst)`` picks."""
+    real_replace = fs_object_store.os.replace
+    failed = []
+
+    def replace(src, dst):
+        if not failed and fails(Path(src), Path(dst)):
+            failed.append((src, dst))
+            raise OSError(5, "Input/output error")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fs_object_store.os, "replace", replace)
+    return failed
 
 
 # --- where objects land -------------------------------------------------------------
@@ -130,6 +170,81 @@ async def test_a_cancelled_put_leaves_no_temporary_file(store, root):
     assert stray_files(root) == []
 
 
+@pytest.mark.parametrize("call", ["put", "open_stream", "local_copy"])
+async def test_a_call_cancelled_while_its_thread_acquires_releases_what_it_got(store, root, monkeypatch, call):
+    key = keys.original_key("docs", "report", keys.new_upload_id(), ".pdf")
+    await store.put_bytes(key, b"%PDF")
+
+    if call == "put":
+        gate = Gate(store._create_temp)
+        monkeypatch.setattr(store, "_create_temp", gate)
+        operation = store.put_bytes(original(), b"x")
+
+        def released(created):
+            return not created[0].exists() and created[1].closed
+
+    elif call == "open_stream":
+        gate = Gate(fs_object_store._open_with_size)
+        monkeypatch.setattr(fs_object_store, "_open_with_size", gate)
+        operation = read_all(store, key)
+
+        def released(opened):
+            return opened[0].closed
+
+    else:
+        gate = Gate(fs_object_store._copy_to_temp)
+        monkeypatch.setattr(fs_object_store, "_copy_to_temp", gate)
+
+        async def copy_under_another_suffix():
+            async with store.local_copy(key, ".txt"):
+                pass
+
+        operation = copy_under_another_suffix()
+
+        def released(copy):
+            return not copy.exists()
+
+    task = asyncio.create_task(operation)
+    assert await asyncio.to_thread(gate.entered.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate.release.set()
+    assert await asyncio.to_thread(gate.done.wait, 5)
+    for _ in range(250):
+        if released(gate.result):
+            break
+        await asyncio.sleep(0.02)
+    assert released(gate.result)
+
+
+async def test_a_put_retries_when_its_directory_is_pruned_while_made(store, monkeypatch):
+    real_mkdir = Path.mkdir
+    pruned = []
+
+    def mkdir(self, *args, **kwargs):
+        if not pruned:
+            # What a concurrent delete's rmdir of the parent looks like here.
+            pruned.append(self)
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    key = original()
+    await store.put_bytes(key, b"x")
+    assert pruned and await read_all(store, key) == b"x"
+
+
+async def test_a_first_put_whose_sidecar_cannot_be_renamed_leaves_nothing(store, root, monkeypatch):
+    failed = failing_replace(monkeypatch, lambda src, dst: dst.name.endswith(".meta"))
+    key = original()
+    with pytest.raises(ObjectStoreError):
+        await store.put_bytes(key, b"new", {"filename": "a.pdf"})
+    assert failed
+    assert not await store.exists(key)
+    assert files_under(root) == []
+
+
 async def test_delete_removes_the_sidecar_and_empty_directories(store, root):
     key = original()
     await store.put_bytes(key, b"x", {"filename": "a.pdf"})
@@ -198,6 +313,44 @@ async def test_an_unreadable_sidecar_reads_as_no_metadata(store, root):
     path.with_name(f".{path.name}.meta").write_text("{not json")
     info = await store.stat(key)
     assert (info.size, info.sha256, dict(info.metadata)) == (1, None, {})
+
+
+async def test_a_failed_overwrite_never_pairs_new_content_with_old_metadata(store, root, monkeypatch):
+    key = original()
+    await store.put_bytes(key, b"old", {"filename": "old.pdf"})
+    failing_replace(monkeypatch, lambda src, dst: src.name.startswith(".part-") and dst.name.endswith(".meta"))
+    with pytest.raises(ObjectStoreError):
+        await store.put_bytes(key, b"new!", {"filename": "new.pdf"})
+    info = await store.stat(key)
+    assert (await read_all(store, key), info.sha256, dict(info.metadata)) == (b"new!", None, {})
+    assert stray_files(root) == []
+
+
+async def test_a_failed_content_rename_keeps_the_previous_object_whole(store, root, monkeypatch):
+    key = original()
+    await store.put_bytes(key, b"old", {"filename": "old.pdf"})
+    path = root.joinpath(*key.split("/"))
+    failing_replace(monkeypatch, lambda src, dst: dst.name == path.name)
+    with pytest.raises(ObjectStoreError):
+        await store.put_bytes(key, b"new!", {"filename": "new.pdf"})
+    info = await store.stat(key)
+    assert (await read_all(store, key), info.sha256, dict(info.metadata)) == (
+        b"old",
+        hashlib.sha256(b"old").hexdigest(),
+        {"filename": "old.pdf"},
+    )
+    assert stray_files(root) == []
+
+
+async def test_a_hashed_sidecar_is_never_another_objects_sidecar(store, root):
+    long_name = "a" * 252
+    hashed_name = hashlib.sha256(long_name.encode()).hexdigest()
+    long_key, hashed_key = keys.legacy_key(long_name), keys.legacy_key(hashed_name)
+    await store.put_bytes(long_key, b"long", {"filename": "long.pdf"})
+    await store.put_bytes(hashed_key, b"hash", {"filename": "hash.pdf"})
+    assert dict((await store.stat(long_key)).metadata) == {"filename": "long.pdf"}
+    await store.delete(hashed_key)
+    assert dict((await store.stat(long_key)).metadata) == {"filename": "long.pdf"}
 
 
 async def test_a_long_legacy_name_gets_a_hashed_sidecar(store, root):
