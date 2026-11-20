@@ -345,6 +345,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             observed_session = session
             # Rotation is per session, independent of IP or transport. Read
             # again under the lock so we act on the latest stored tokens.
+            # The lock is held through the user lookup and the cache renewal:
+            # a same-identity waiter whose cached entry expired while it
+            # waited must see the renewed entry, not a 429 after the refresh
+            # succeeded.
             async with self._lock_credentials([("oidc-session", self._token_fingerprint(token))]):
                 if not await self._can_revalidate(request, identity, token, "session", limited=limited):
                     return None
@@ -361,6 +365,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 if session is None:
                     self._forget_authenticated_token(identity, token, "session")
                     return None, None
+                user = await auth_service.get_user_for_request(session["user_id"])
+                if user is not None:
+                    self._remember_authenticated_token(identity, token, "session")
+                    return user, session
+                self._forget_authenticated_token(identity, token, "session")
+                return None, None
 
         if session is not None:
             user = await auth_service.get_user_for_request(session["user_id"])
@@ -391,6 +401,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return unavailable
 
         blocked_credential = False
+
+        async def retry_with_unfiltered_credentials_if_bucket_reopened(
+            *, bucket_reopened: bool = False
+        ) -> tuple[Any, Any, Any] | Response | None:
+            if unfiltered_credentials is None or not (retry_unfiltered_if_bucket_reopens or blocked_credential):
+                return None
+            if not bucket_reopened and await self._auth_failure_limiter.is_limited(request):
+                return None
+
+            unfiltered_token, unfiltered_cookie, unfiltered_oidc_bearer = unfiltered_credentials
+            return await self._authenticate_request(
+                request,
+                path=path,
+                auth_mode=auth_mode,
+                oidc_gated=oidc_gated,
+                enc_key=enc_key,
+                token=unfiltered_token,
+                cookie_token=unfiltered_cookie,
+                oidc_bearer_token=unfiltered_oidc_bearer,
+                identity=identity,
+                limited=False,
+            )
+
         for session_token in dict.fromkeys((cookie_token, oidc_bearer_token)):
             if not session_token:
                 continue
@@ -402,6 +435,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             else:
                 user, session = result
                 if user is not None:
+                    retry_result = await retry_with_unfiltered_credentials_if_bucket_reopened()
+                    if retry_result is not None:
+                        return retry_result
                     return user, session, auth_service
 
         if token is not None:
@@ -409,6 +445,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 user = await auth_service.get_user_by_token_for_request(token)
                 if user is not None:
                     self._remember_authenticated_token(identity, token, "token")
+                    retry_result = await retry_with_unfiltered_credentials_if_bucket_reopened()
+                    if retry_result is not None:
+                        return retry_result
                     return user, None, auth_service
                 self._forget_authenticated_token(identity, token, "token")
             else:
@@ -417,20 +456,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if limited:
             if await self._auth_failure_limiter.is_limited(request):
                 return await self._auth_failure_limiter.limited_response(request)
-            if unfiltered_credentials is not None and (retry_unfiltered_if_bucket_reopens or blocked_credential):
-                unfiltered_token, unfiltered_cookie, unfiltered_oidc_bearer = unfiltered_credentials
-                return await self._authenticate_request(
-                    request,
-                    path=path,
-                    auth_mode=auth_mode,
-                    oidc_gated=oidc_gated,
-                    enc_key=enc_key,
-                    token=unfiltered_token,
-                    cookie_token=unfiltered_cookie,
-                    oidc_bearer_token=unfiltered_oidc_bearer,
-                    identity=identity,
-                    limited=False,
-                )
+            retry_result = await retry_with_unfiltered_credentials_if_bucket_reopened(bucket_reopened=True)
+            if retry_result is not None:
+                return retry_result
         if auth_mode == "token":
             # The API's existing token-mode contract is a 403 with this detail.
             detail = "Invalid token" if token is not None else "Missing token"
