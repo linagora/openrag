@@ -1549,6 +1549,19 @@ wheels = [
 ]
 
 [[package]]
+name = "html5lib"
+version = "1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+    { name = "webencodings" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/b6/b55c3f49042f1df3dcd422b7f224f939892ee94f22abcf503a9b7339eaf2/html5lib-1.1.tar.gz", hash = "sha256:b2e5b40261e20f354d198eae92afc10d750afb487ed5e50f9c4eaf07c184146f", size = 272215, upload-time = "2020-06-22T23:32:38.834Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6c/dd/a834df6482147d48e225a49515aabc28974ad5a4ca3215c18a882565b028/html5lib-1.1-py2.py3-none-any.whl", hash = "sha256:0d78f8fde1c230e99fe37986a60526d7049ed4bf8a9fadbad5f00e22e58e041d", size = 112173, upload-time = "2020-06-22T23:32:36.781Z" },
+]
+
+[[package]]
 name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
@@ -2936,6 +2949,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
     { name = "authlib" },
+    { name = "beautifulsoup4" },
     { name = "boto3" },
     { name = "cairosvg" },
     { name = "chainlit" },
@@ -2951,6 +2965,7 @@ dependencies = [
     { name = "filetype" },
     { name = "hdbscan" },
     { name = "html-to-markdown" },
+    { name = "html5lib" },
     { name = "httpx" },
     { name = "infinity-client" },
     { name = "itsdangerous" },
@@ -3013,6 +3028,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'", specifier = ">=0.2.1" },
     { name = "authlib", specifier = ">=1.3" },
+    { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "boto3", specifier = ">=1.38.33" },
     { name = "cairosvg", specifier = ">=2.7.1" },
     { name = "chainlit", specifier = ">=2.2.1" },
@@ -3028,6 +3044,7 @@ requires-dist = [
     { name = "filetype", specifier = ">=1.2.0" },
     { name = "hdbscan", specifier = ">=0.8.40" },
     { name = "html-to-markdown", specifier = ">=2.4.0" },
+    { name = "html5lib", specifier = ">=1.1" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "infinity-client", specifier = ">=0.0.76" },
     { name = "itsdangerous", specifier = ">=2.2" },
@@ -5287,7 +5304,7 @@ name = "sqlalchemy"
 version = "2.0.41"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "greenlet", marker = "(python_full_version < '3.14' and platform_machine == 'AMD64') or (python_full_version < '3.14' and platform_machine == 'WIN32') or (python_full_version < '3.14' and platform_machine == 'aarch64') or (python_full_version < '3.14' and platform_machine == 'amd64') or (python_full_version < '3.14' and platform_machine == 'ppc64le') or (python_full_version < '3.14' and platform_machine == 'win32') or (python_full_version < '3.14' and platform_machine == 'x86_64')" },
+    { name = "greenlet", marker = "python_full_version < '3.14' and (platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64')" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/63/66/45b165c595ec89aa7dcc2c1cd222ab269bc753f1fc7a1e68f8481bd957bf/sqlalchemy-2.0.41.tar.gz", hash = "sha256:edba70118c4be3c2b1f90754d308d0b79c6fe2c0fdc52d8ddf603916f83f4db9", size = 9689424, upload-time = "2025-05-14T17:10:32.339Z" }
