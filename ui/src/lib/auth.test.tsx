@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { renderHook, waitFor, act } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "./auth";
 import { ApiError } from "./api/client";
 
@@ -9,14 +10,23 @@ vi.mock("./api/account", () => ({ getMyInfo: vi.fn() }));
 import { getMyInfo, type MyInfo } from "./api/account";
 
 const mockInfo = getMyInfo as unknown as ReturnType<typeof vi.fn>;
-const wrapper = ({ children }: { children: ReactNode }) => <AuthProvider>{children}</AuthProvider>;
 const fetchMock = vi.fn();
+
+// AuthProvider resets the React Query cache on identity transitions, so the
+// wrapper provides a fresh client per test that assertions can inspect.
+let testClient: QueryClient;
+const wrapper = ({ children }: { children: ReactNode }) => (
+  <QueryClientProvider client={testClient}>
+    <AuthProvider>{children}</AuthProvider>
+  </QueryClientProvider>
+);
 
 function user(is_admin: boolean): MyInfo {
   return { id: 1, display_name: "Test", is_admin, file_quota: null };
 }
 
 beforeEach(() => {
+  testClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   fetchMock.mockResolvedValue({
     ok: true,
     json: async () => ({ logged_out: false }),
@@ -196,5 +206,78 @@ describe("useAuth (token model)", () => {
     expect(localStorage.getItem("openrag_token")).toBeNull();
     expect(result.current.isAuthenticated).toBe(false);
     expect(mockInfo).not.toHaveBeenCalled();
+  });
+});
+
+describe("query cache isolation across identity changes (issue #1435)", () => {
+  // Query keys are account-agnostic (["file-detail", partition, fileId]), so
+  // the cache itself is what must not survive an identity change.
+  const ALICE_FILE_KEY = ["file-detail", "legal-docs", "doc-001"];
+  const cachedFile = { metadata: { filename: "contract-template-2024.pdf" }, documents: [], topic_tags: [] };
+
+  async function flushCacheReset() {
+    // resetQueryCache runs void: cancelQueries → clear() settle in microtasks.
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  it("logout drops previously cached query data", async () => {
+    mockInfo.mockResolvedValue(user(true));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+
+    act(() => {
+      testClient.setQueryData(ALICE_FILE_KEY, cachedFile);
+    });
+    expect(testClient.getQueryData(ALICE_FILE_KEY)).toEqual(cachedFile);
+
+    act(() => {
+      result.current.logout();
+    });
+    await flushCacheReset();
+
+    expect(testClient.getQueryData(ALICE_FILE_KEY)).toBeUndefined();
+  });
+
+  it("login drops data cached under the previous account", async () => {
+    mockInfo.mockRejectedValueOnce(new Error("Not signed in"));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Stale data from a previous session is still in memory when the next
+    // login happens (same tab, module-level client).
+    act(() => {
+      testClient.setQueryData(ALICE_FILE_KEY, cachedFile);
+    });
+
+    mockInfo.mockResolvedValueOnce(user(false));
+    await act(async () => {
+      await result.current.loginWithToken("or-bob-token");
+    });
+    await flushCacheReset();
+
+    expect(testClient.getQueryData(ALICE_FILE_KEY)).toBeUndefined();
+    expect(result.current.isAuthenticated).toBe(true);
+  });
+
+  it("the Chainlit external logout path drops cached data too", async () => {
+    localStorage.setItem("openrag_token", "or-abc123");
+    mockInfo.mockResolvedValue(user(true));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+
+    act(() => {
+      testClient.setQueryData(ALICE_FILE_KEY, cachedFile);
+    });
+
+    document.cookie = "openrag_chainlit_logout=1; path=/";
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(false));
+    await flushCacheReset();
+
+    expect(testClient.getQueryData(ALICE_FILE_KEY)).toBeUndefined();
   });
 });
