@@ -832,3 +832,56 @@ class TestTaskCancellation:
         """Cancelling a task that does not exist must return 404."""
         response = api_client.delete("/indexer/task/nonexistent-cancel-task-99999")
         assert response.status_code == 404
+
+
+@pytest.mark.skipif(
+    os.environ.get("FILE_FENCES", "ray") != "postgres",
+    reason="Postgres file fences only (#1430)",
+)
+class TestPostgresFileFences:
+    """Run by the api-tests-postgres-fences job, where it fails if FILE_FENCES never reached the API.
+
+    On the Ray path a replace of a file being indexed is accepted.
+    """
+
+    def test_a_replace_while_the_file_is_indexing_is_refused(self, api_client, created_partition, tmp_path):
+        file_id = "fenced-replace-001"
+        first = api_client.post(
+            f"/indexer/partition/{created_partition}/file/{file_id}",
+            files={"file": ("first.txt", b"The first version of the file.", "text/plain")},
+            data={"metadata": "{}"},
+        )
+        assert first.status_code in [200, 201, 202]
+        wait_for_task(api_client, get_task_id(first.json()))
+
+        # Large enough to take seconds to chunk and embed, and needs no fixture
+        # file: the PDF the other tests use isn't present in CI.
+        large = tmp_path / "large.txt"
+        large.write_text(
+            "\n\n".join(f"Paragraph {i}: the fence holds this file while it is indexed." for i in range(20000))
+        )
+        with open(large, "rb") as f:
+            running = api_client.put(
+                f"/indexer/partition/{created_partition}/file/{file_id}",
+                files={"file": ("large.txt", f, "text/plain")},
+                data={"metadata": "{}"},
+            )
+        assert running.status_code in [200, 201, 202]
+        task_id = get_task_id(running.json())
+
+        refused = api_client.put(
+            f"/indexer/partition/{created_partition}/file/{file_id}",
+            files={"file": ("replacement.txt", b"A different, short replacement.", "text/plain")},
+            data={"metadata": "{}"},
+        )
+
+        if refused.status_code != 409:
+            state = api_client.get(f"/indexer/task/{task_id}").json().get("task_state")
+            pytest.fail(
+                f"the second replace answered {refused.status_code}, not 409; the first replace ({task_id}) "
+                f"is now {state}. COMPLETED means it may have finished before the second one arrived, "
+                "so the test indexed too fast for the race; any other state means the fence did not hold."
+            )
+        assert refused.json()["detail"].startswith("[DOCUMENT_INDEXING_IN_PROGRESS]")
+        assert refused.json()["extra"]["existing_task_id"] == task_id
+        wait_for_task(api_client, task_id)
