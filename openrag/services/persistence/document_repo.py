@@ -31,7 +31,7 @@ from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerp
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import ContentClaimLease, DocumentRepository, IndexedCorpusState
 from core.utils.consts import is_reserved_partition_name
-from core.utils.exceptions import ConflictError, FileFenceLostError, ValidationError
+from core.utils.exceptions import ConflictError, FileFenceLostError, OpenRAGError, ValidationError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -130,8 +130,11 @@ async def _refuse_if_embedder_changed(
 class PgDocumentRepository(DocumentRepository):
     """asyncpg-backed implementation of :class:`DocumentRepository`."""
 
-    def __init__(self, pool_getter: Callable[[], asyncpg.Pool]) -> None:
+    def __init__(self, pool_getter: Callable[[], asyncpg.Pool], *, default_file_quota: int = -1) -> None:
         self._pool_getter = pool_getter
+        # Resolves a NULL ``users.file_quota`` when an insert re-checks the
+        # quota (``recheck_quota_if_slot_gone``), as admission does.
+        self._default_file_quota = default_file_quota
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -655,12 +658,27 @@ class PgDocumentRepository(DocumentRepository):
         independently_indexed: bool = True,
         chunk_count: int | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        quota_reservation_id: str | None = None,
+        recheck_quota_if_slot_gone: bool = False,
         fence_holder_id: str | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
         Creates the partition row on first use (legacy behaviour). Returns
         ``False`` if a row with the same (file_id, partition) already exists.
+
+        ``quota_reservation_id`` names the file slot the uploader reserved at
+        admission (#664). The insert consumes it in the same transaction, so
+        ``users.file_count`` is not bumped twice. With no such reservation
+        (none was taken, or it was already released) the count is bumped here
+        instead, so it keeps matching the files either way.
+
+        ``recheck_quota_if_slot_gone`` is for a caller that passes an id only
+        when it really took a slot (a copy). If that slot is gone (the orphan
+        sweep released it), the file is counted only if the quota still has
+        room, and refused with ``FILE_QUOTA_EXCEEDED`` otherwise, rolling the
+        insert back. An upload task passes its task id whether or not a slot
+        was taken, so it leaves this off.
 
         ``indexed_at`` pins the indexation timestamp so it matches the Milvus
         chunks; when ``None`` the ``files.indexed_at`` server default applies.
@@ -763,10 +781,36 @@ class PgDocumentRepository(DocumentRepository):
                     *values,
                 )
                 if user_id is not None:
-                    await conn.execute(
-                        "UPDATE users SET file_count = file_count + 1 WHERE id = $1",
+                    consumed = quota_reservation_id is not None and await conn.fetchval(
+                        "DELETE FROM file_quota_reservations WHERE id = $1 AND user_id = $2 RETURNING 1",
+                        quota_reservation_id,
                         user_id,
                     )
+                    if not consumed and recheck_quota_if_slot_gone and quota_reservation_id is not None:
+                        counted = await conn.fetchval(
+                            """
+                            UPDATE users
+                               SET file_count = file_count + 1
+                             WHERE id = $1
+                               AND (is_admin
+                                    OR COALESCE(file_quota, $2::int) < 0
+                                    OR file_count < COALESCE(file_quota, $2::int))
+                            RETURNING 1
+                            """,
+                            user_id,
+                            self._default_file_quota,
+                        )
+                        if not counted:
+                            raise OpenRAGError(
+                                "File quota exceeded. Delete a file or ask an administrator to raise your quota.",
+                                code="FILE_QUOTA_EXCEEDED",
+                                status_code=403,
+                            )
+                    elif not consumed:
+                        await conn.execute(
+                            "UPDATE users SET file_count = file_count + 1 WHERE id = $1",
+                            user_id,
+                        )
                 return True
 
     async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
