@@ -187,6 +187,11 @@ The client can include the temporal field to allow temporal-aware search in sear
 
 :::info
 `created_at` is provided by the client in the metadata of the file during upload.
+In the admin UI's **Upload files** dialog, each selected file has an optional
+**Document date** field. The chosen creation date is sent as `created_at` at midnight
+UTC, so the calendar date does not change with the uploader's timezone. Leave it
+blank when the date is unknown: neither the upload time nor the local file's
+modification time is used as a substitute. Existing documents are not changed.
 This is a first iteration — additional temporal fields (e.g. `updated_at`) may be added in future releases as needed.
 :::
 
