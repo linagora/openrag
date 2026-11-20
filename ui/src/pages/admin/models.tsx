@@ -14,6 +14,8 @@ import {
   EyeOff,
   Copy,
   Info,
+  ChevronsUpDown,
+  RefreshCw,
 } from "lucide-react";
 import {
   listModelEndpoints,
@@ -80,7 +82,15 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  Command,
+  CommandEmpty,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -99,7 +109,19 @@ type RevealedApiKey = {
   value: string;
 };
 
+// Discovery waits for typing to pause, and probes with a short timeout so a
+// dead URL doesn't hold the model field's hint for the full request timeout.
+const DISCOVERY_DEBOUNCE_MS = 600;
+const DISCOVERY_TIMEOUT_S = 10;
+// That timeout bounds OpenRAG's call to the provider. The browser's own request
+// to OpenRAG gets a deadline too, so a stalled one ends with a retryable error
+// rather than a spinner that never stops.
+const DISCOVERY_DEADLINE_S = DISCOVERY_TIMEOUT_S + 5;
+
 const normalizeEndpointUrl = (value: string) => value.trim().replace(/\/+$/, "");
+// A server message ends with a period or not ("All connection attempts failed"):
+// end it with one, so the hint's next sentence doesn't run into it.
+const asSentence = (text: string) => (/[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`);
 
 // What deleting this endpoint actually does to the partitions pointing at it.
 // The two answers differ (#762): an embedder names the model a partition's
@@ -643,10 +665,20 @@ function EndpointDialog({
 }) {
   const [name, setName] = useState("");
   const [endpoint, setEndpoint] = useState("");
+  // The URL as it stood when the admin last left the field. Discovery probes
+  // this one, never a URL still being typed: the probe carries the API key,
+  // and a half-typed host is someone else's.
+  const [committedEndpoint, setCommittedEndpoint] = useState("");
   const [modelName, setModelName] = useState("");
   const [batchSize, setBatchSize] = useState("32");
   const [timeout, setTimeout] = useState("30");
   const [apiKey, setApiKey] = useState("");
+  // The key as it stood when the admin last left its field. Discovery waits for
+  // it, so a key being typed is never tried against the endpoint piece by piece.
+  const [committedApiKey, setCommittedApiKey] = useState("");
+  // The URL a typed key goes with: the one committed when the key was entered,
+  // or the first one committed after it. null while the key is being edited.
+  const [keyEndpoint, setKeyEndpoint] = useState<string | null>(null);
   const [maxContextSize, setMaxContextSize] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [languageHint, setLanguageHint] = useState("");
@@ -719,12 +751,22 @@ function EndpointDialog({
     data: UpdateModelEndpointRequest;
     changes: EndpointFieldChange[];
   } | null>(null);
+  // Every model listing this sitting of the form got, by the request that got
+  // it (see discoveryKey), so a URL listed once keeps its list.
+  const [discoveryResults, setDiscoveryResults] = useState<
+    ReadonlyMap<string, { models: string[]; detail?: string | null; reachable: boolean }>
+  >(new Map());
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setRevealedApiKey(null);
       setApiKeyVisible(false);
       setRevealingApiKey(false);
+      // A listing answers this sitting of the form only: reopened, the form
+      // asks again, as the gateway may have recovered or its key been rotated.
+      setDiscoveryResults(new Map());
+      setModelPickerOpen(false);
       return;
     }
     if (open) {
@@ -764,11 +806,14 @@ function EndpointDialog({
             : { llmContext: { maxContextSize: "", maxOutputTokens: "" }, extra: implExtra };
         setName(editing ? source.name : (seed?.name ?? source.name));
         setEndpoint(source.endpoint);
+        setCommittedEndpoint(source.endpoint);
         setModelName(source.model_name || "");
         setBatchSize(String(source.batch_size));
         setTimeout(String(source.timeout));
         // A stored key comes back redacted, so a copy cannot inherit it.
         setApiKey(editing ? displayApiKey : "");
+        setCommittedApiKey(editing ? displayApiKey : "");
+        setKeyEndpoint(null);
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
         setLanguageHint(storedLanguageHint);
@@ -790,6 +835,9 @@ function EndpointDialog({
       } else {
         setName("");
         setEndpoint("");
+        setCommittedEndpoint("");
+        setCommittedApiKey("");
+        setKeyEndpoint(null);
         setModelName("");
         setBatchSize(activeTab === "stt" ? "1" : "32");
         setTimeout(activeTab === "stt" ? "3600" : "30");
@@ -882,6 +930,28 @@ function EndpointDialog({
   const apiKeySubmitValue = () =>
     prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
 
+  const isTypedApiKey = (value: string) => {
+    const prepared = prepareModelEndpointExtraForSubmit({ api_key: value.trim() }).api_key;
+    return typeof prepared === "string" && prepared !== "" && prepared !== REDACTED_SECRET;
+  };
+
+  const commitEndpoint = () => {
+    setCommittedEndpoint(endpoint);
+    // A key entered before any URL goes with the first URL committed after it.
+    if (keyEndpoint === null && endpoint.trim() && apiKey === committedApiKey && isTypedApiKey(apiKey)) {
+      setKeyEndpoint(normalizeEndpointUrl(endpoint));
+    }
+  };
+
+  const commitApiKey = () => {
+    setCommittedApiKey(apiKey);
+    // A key just entered goes with the URL as it stands. Leaving the field
+    // without editing it (tabbing through) keeps the key with its URL.
+    if (keyEndpoint === null && committedEndpoint.trim()) {
+      setKeyEndpoint(normalizeEndpointUrl(committedEndpoint));
+    }
+  };
+
   const shouldReuseStoredApiKey = () => {
     const preparedApiKey = apiKeySubmitValue();
     return editing?.has_api_key === true && preparedApiKey === REDACTED_SECRET;
@@ -893,6 +963,140 @@ function EndpointDialog({
     revealedApiKey.name === editing.name
       ? revealedApiKey.value
       : null;
+
+  // Model discovery: ask the validate endpoint (no model name) which models the
+  // URL serves, once the admin has left the URL field and the key / vendor have
+  // settled. Not available for STT, whose validate call needs a model name.
+  const defaultBatchSize = isStt ? 1 : 32;
+  const defaultTimeout = isStt ? 3600 : 30;
+  // A key typed into this form only goes with the URL it was entered for (see
+  // keyEndpoint): on another URL, discovery waits for a key entered for it, or
+  // for Refresh, which sends it there on purpose. The stored key goes by
+  // reference (the server fills it in), and only to the saved URL. Revealing it
+  // only changes what the field shows: it is still the stored key.
+  const discoverySubmittedKey = apiKeySubmitValue();
+  const discoveryTypedKey =
+    typeof discoverySubmittedKey === "string" && discoverySubmittedKey !== REDACTED_SECRET
+      ? discoverySubmittedKey
+      : "";
+  const discoveryKeepsStoredKey =
+    !discoveryTypedKey && editing?.has_api_key === true && discoverySubmittedKey !== "";
+  const storedKeyOffSavedUrl =
+    discoveryKeepsStoredKey &&
+    !!committedEndpoint.trim() &&
+    normalizeEndpointUrl(committedEndpoint) !== normalizeEndpointUrl(editing.endpoint);
+  const fieldsCommitted =
+    open &&
+    !isStt &&
+    !!committedEndpoint.trim() &&
+    normalizeEndpointUrl(endpoint) === normalizeEndpointUrl(committedEndpoint) &&
+    apiKey === committedApiKey;
+  const typedKeyOffItsUrl =
+    !!discoveryTypedKey && keyEndpoint !== normalizeEndpointUrl(committedEndpoint);
+  const typedKeyAwaitsUrl = fieldsCommitted && typedKeyOffItsUrl && keyEndpoint !== null;
+  // The listing request for the fields as they stand. `sendTypedKeyHere` is
+  // Refresh's: it lets a typed key go to a URL it wasn't entered for.
+  const buildDiscoveryRequest = (sendTypedKeyHere: boolean) => {
+    if (!fieldsCommitted || storedKeyOffSavedUrl) return null;
+    if (typedKeyOffItsUrl && !sendTypedKeyHere) return null;
+    const base = {
+      endpoint: committedEndpoint,
+      model_type: modelType,
+      timeout: DISCOVERY_TIMEOUT_S,
+      extra: mergeModelEndpointImplementation({}, vendor),
+    };
+    if (discoveryTypedKey) return { ...base, api_key: discoveryTypedKey };
+    if (discoveryKeepsStoredKey && editing) {
+      return {
+        ...base,
+        stored_api_key_model_type: editing.model_type,
+        stored_api_key_name: editing.name,
+      };
+    }
+    return base;
+  };
+  const discoveryRequest = buildDiscoveryRequest(false);
+  const discoveryKey = discoveryRequest ? JSON.stringify(discoveryRequest) : "";
+  // Back on a URL / key already listed (A, then B, then A again, whether B has
+  // answered or not): A's answer stands and no new probe starts, so a list is
+  // never shown beside a request still in flight. Refresh forgets the answer
+  // for the fields as they stand, and only that one.
+  const discoveryCurrent = discoveryKey ? (discoveryResults.get(discoveryKey) ?? null) : null;
+  const discoveryAnswered = discoveryCurrent !== null;
+  const refreshDiscovery = () => {
+    const request = buildDiscoveryRequest(typedKeyAwaitsUrl);
+    // Refresh on a URL the typed key wasn't entered for sends it there on
+    // purpose: the key now goes with this URL.
+    if (typedKeyAwaitsUrl) setKeyEndpoint(normalizeEndpointUrl(committedEndpoint));
+    if (!request) return;
+    const key = JSON.stringify(request);
+    setDiscoveryResults((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
+      return next;
+    });
+  };
+  useEffect(() => {
+    if (!discoveryKey || discoveryAnswered) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      let outcome: { models: string[]; detail?: string | null; reachable: boolean };
+      let timedOut = false;
+      const deadline = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, DISCOVERY_DEADLINE_S * 1000);
+      try {
+        const res = await validateModelEndpoint(JSON.parse(discoveryKey), { signal: controller.signal });
+        // A reachable endpoint that answered with an error (wrong key, no model
+        // route) comes back with a detail and no list: that's a failed listing.
+        const listed = !!res?.reachable && !(res.detail && !res.models_served);
+        outcome = { reachable: listed, models: res?.models_served ?? [], detail: res?.detail };
+      } catch (e) {
+        const detail = timedOut
+          ? `OpenRAG did not answer within ${DISCOVERY_DEADLINE_S} s`
+          : e instanceof Error
+            ? e.message
+            : null;
+        outcome = { reachable: false, models: [], detail };
+      } finally {
+        window.clearTimeout(deadline);
+      }
+      if (!cancelled) setDiscoveryResults((prev) => new Map(prev).set(discoveryKey, outcome));
+    }, DISCOVERY_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [discoveryKey, discoveryAnswered]);
+  const discovery = {
+    status: !discoveryKey
+      ? "idle"
+      : !discoveryCurrent
+        ? "loading"
+        : discoveryCurrent.reachable
+          ? "ready"
+          : "unreachable",
+    models: discoveryCurrent?.reachable ? discoveryCurrent.models : [],
+    detail: discoveryCurrent?.detail,
+  };
+  const discoveryHint =
+    discovery.status === "loading"
+      ? "Looking up the models this endpoint serves..."
+      : discovery.status === "unreachable"
+        ? `Couldn't list models${discovery.detail ? `: ${asSentence(discovery.detail)}` : "."} You can still type the name.`
+        : discovery.status === "ready"
+          ? discovery.models.length === 0
+            ? "No models listed by this endpoint. Type the model name."
+            : `${discovery.models.length} model${discovery.models.length === 1 ? "" : "s"} listed. Pick one or type a name.`
+          : storedKeyOffSavedUrl
+            ? "The stored API key is only used with the saved URL. Enter the key for this URL to list its models, or type the name."
+            : typedKeyAwaitsUrl
+              ? "The API key was entered for another URL. Enter the key for this URL, or press Refresh to list its models with this one."
+            : "Enter the endpoint URL and API key to list its models, or type the name.";
 
   const fetchStoredApiKey = async ({ cache = true }: { cache?: boolean } = {}): Promise<string | null> => {
     const target = editing?.has_api_key
@@ -1163,6 +1367,29 @@ function EndpointDialog({
             />
             {nameError && <p className="text-xs text-destructive">{nameError}</p>}
           </div>
+          {!isStt && (
+          <div className="space-y-2">
+            <Label>Vendor</Label>
+            <Select value={vendor} onValueChange={setVendor}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {vendorOptions.map((option) => (
+                  <SelectItem key={option} value={option} className="py-2">
+                    <span className="flex items-center gap-2.5 text-base">
+                      <VendorIcon vendor={option} className="h-5 w-5" />
+                      {option}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Client implementation used to talk to this endpoint.
+            </p>
+          </div>
+          )}
           <div className="space-y-2">
             {isStt ? (
               <LabelWithInfo
@@ -1172,7 +1399,71 @@ function EndpointDialog({
             ) : (
               <Label>Endpoint URL</Label>
             )}
-            <Input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} required />
+            <Input
+              value={endpoint}
+              onChange={(e) => setEndpoint(e.target.value)}
+              onBlur={commitEndpoint}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitEndpoint();
+              }}
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>API key</Label>
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={handleToggleApiKeyVisibility}
+                  disabled={revealingApiKey || (!apiKey.trim() && !editing?.has_api_key)}
+                  aria-label={apiKeyVisible ? "Hide API key" : "Show API key"}
+                  title={apiKeyVisible ? "Hide API key" : "Show API key"}
+                >
+                  {revealingApiKey ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : apiKeyVisible ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={handleCopyApiKey}
+                  disabled={revealingApiKey || (!apiKey.trim() && !editing?.has_api_key)}
+                  aria-label="Copy API key"
+                  title="Copy API key"
+                >
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+            <Input
+              className="font-mono"
+              type={apiKeyVisible ? "text" : "password"}
+              value={apiKeyVisible && revealedApiKeyForEditing ? revealedApiKeyForEditing : apiKey}
+              onChange={(e) => {
+                setApiKey(e.target.value);
+                setRevealedApiKey(null);
+                setKeyEndpoint(null);
+              }}
+              onBlur={commitApiKey}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitApiKey();
+              }}
+              placeholder={editing?.has_api_key ? "Stored API key" : "Optional API key"}
+              autoComplete="off"
+            />
+            <p className="text-xs text-muted-foreground">
+              {editing?.has_api_key
+                ? "Leave unchanged to keep the stored key, or type a new key to rotate it."
+                : "Stored in the endpoint extra payload when provided."}
+            </p>
           </div>
           <div className="space-y-2">
             {isStt ? (
@@ -1183,7 +1474,64 @@ function EndpointDialog({
             ) : (
               <Label>Model Name</Label>
             )}
-            <Input value={modelName} onChange={(e) => setModelName(e.target.value)} required={isStt} />
+            <div className="flex items-center gap-1">
+              <Input
+                value={modelName}
+                onChange={(e) => setModelName(e.target.value)}
+                required={isStt}
+                autoComplete="off"
+              />
+              {!isStt && (
+                <>
+                  <Popover modal open={modelPickerOpen} onOpenChange={setModelPickerOpen}>
+                    <PopoverTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        disabled={discovery.models.length === 0}
+                        aria-label="Pick a listed model"
+                        title="Pick a listed model"
+                      >
+                        <ChevronsUpDown className="h-4 w-4" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="end" className="w-80 p-0">
+                      <Command>
+                        <CommandInput placeholder="Filter models..." />
+                        <CommandList>
+                          <CommandEmpty>No matching model.</CommandEmpty>
+                          {discovery.models.map((id) => (
+                            <CommandItem
+                              key={id}
+                              value={id}
+                              onSelect={() => {
+                                setModelName(id);
+                                setModelPickerOpen(false);
+                              }}
+                            >
+                              {id}
+                            </CommandItem>
+                          ))}
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={refreshDiscovery}
+                    disabled={(!discoveryRequest && !typedKeyAwaitsUrl) || discovery.status === "loading"}
+                    aria-label="Refresh model list"
+                    title="Refresh model list"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${discovery.status === "loading" ? "animate-spin" : ""}`} />
+                  </Button>
+                </>
+              )}
+            </div>
+            {!isStt && <p className="text-xs text-muted-foreground">{discoveryHint}</p>}
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -1195,11 +1543,25 @@ function EndpointDialog({
               ) : (
                 <Label>Batch Size</Label>
               )}
-              <Input type="number" min="1" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
+              <Input
+                type="number"
+                min="1"
+                value={batchSize}
+                onChange={(e) => setBatchSize(e.target.value)}
+                placeholder={String(defaultBatchSize)}
+              />
+              <p className="text-xs text-muted-foreground">Default: {defaultBatchSize}</p>
             </div>
             <div className="space-y-2">
               <Label>Timeout (s)</Label>
-              <Input type="number" step="0.1" value={timeout} onChange={(e) => setTimeout(e.target.value)} />
+              <Input
+                type="number"
+                step="0.1"
+                value={timeout}
+                onChange={(e) => setTimeout(e.target.value)}
+                placeholder={String(defaultTimeout)}
+              />
+              <p className="text-xs text-muted-foreground">Default: {defaultTimeout}</p>
             </div>
           </div>
           {isLlm && (
@@ -1272,80 +1634,6 @@ function EndpointDialog({
                 aria-label="Enable speaker-aware MOSS transcript normalization"
               />
             </div>
-          )}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>API key</Label>
-              <div className="flex items-center gap-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={handleToggleApiKeyVisibility}
-                  disabled={revealingApiKey || (!apiKey.trim() && !editing?.has_api_key)}
-                  aria-label={apiKeyVisible ? "Hide API key" : "Show API key"}
-                  title={apiKeyVisible ? "Hide API key" : "Show API key"}
-                >
-                  {revealingApiKey ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : apiKeyVisible ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={handleCopyApiKey}
-                  disabled={revealingApiKey || (!apiKey.trim() && !editing?.has_api_key)}
-                  aria-label="Copy API key"
-                  title="Copy API key"
-                >
-                  <Copy className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <Input
-              className="font-mono"
-              type={apiKeyVisible ? "text" : "password"}
-              value={apiKeyVisible && revealedApiKeyForEditing ? revealedApiKeyForEditing : apiKey}
-              onChange={(e) => {
-                setApiKey(e.target.value);
-                setRevealedApiKey(null);
-              }}
-              placeholder={editing?.has_api_key ? "Stored API key" : "Optional API key"}
-              autoComplete="off"
-            />
-            <p className="text-xs text-muted-foreground">
-              {editing?.has_api_key
-                ? "Leave unchanged to keep the stored key, or type a new key to rotate it."
-                : "Stored in the endpoint extra payload when provided."}
-            </p>
-          </div>
-          {!isStt && (
-          <div className="space-y-2">
-            <Label>Vendor</Label>
-            <Select value={vendor} onValueChange={setVendor}>
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {vendorOptions.map((option) => (
-                  <SelectItem key={option} value={option} className="py-2">
-                    <span className="flex items-center gap-2.5 text-base">
-                      <VendorIcon vendor={option} className="h-5 w-5" />
-                      {option}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Client implementation used to talk to this endpoint.
-            </p>
-          </div>
           )}
           <div className="space-y-2">
             <Label>Extra (JSON)</Label>
