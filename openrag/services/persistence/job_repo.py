@@ -764,6 +764,13 @@ class PgJobRepository(JobRepository):
             before,
         )
 
+    async def count_unsettled_jobs(self, *, created_before: datetime) -> int:
+        return await self.pool.fetchval(
+            "SELECT COUNT(*)::int FROM jobs WHERE status <> ALL($1::text[]) AND created_at < $2",
+            _TERMINAL_STATUSES,
+            created_before,
+        )
+
     async def purge_terminal_jobs(self, *, older_than: datetime) -> int:
         return await self.pool.fetchval(
             """

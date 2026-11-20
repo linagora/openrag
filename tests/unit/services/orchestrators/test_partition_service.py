@@ -350,6 +350,7 @@ def _svc(
     task_cancel_timeout=60.0,
     config=None,
     trepo=None,
+    cleaner=None,
 ) -> PartitionService:
     """Build a service over fake repos with an optional topic-tag repo."""
     return PartitionService(
@@ -363,6 +364,7 @@ def _svc(
         task_cancel_timeout=task_cancel_timeout,
         config=config,
         topic_tag_repo=trepo,
+        originals_cleaner=cleaner,
     )
 
 
@@ -861,6 +863,160 @@ async def test_delete_partition_reports_failure_when_post_delete_cleanup_fails()
 
     assert prepo.deleted == ["p1"]
     assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
+
+
+# --------------------------------------------------------------------------- #
+# delete_partition: uploaded originals
+# --------------------------------------------------------------------------- #
+
+
+class RecordingCleaner:
+    """Stands in for OriginalsCleaner: lists a partition's sources, records the deletes."""
+
+    def __init__(self, sources=("/data/1_a.pdf", "/data/2_b.pdf"), *, events=None, release=None):
+        self.sources = list(sources)
+        self.events = events if events is not None else []
+        self.release = release
+        self.deleted: list[list[str]] = []
+
+    async def sources_in_partition(self, partition, list_sources=None):
+        self.events.append("sources")
+        if list_sources is not None:
+            return await list_sources(partition)
+        return list(self.sources)
+
+    async def delete_unreferenced(self, sources):
+        if self.release is not None:
+            await self.release.wait()
+        self.deleted.append(list(sources))
+        self.events.append("originals")
+        return len(sources)
+
+
+class RecordingPartitionRepo(FakePartitionRepo):
+    def __init__(self, existing, events, *, fail=False):
+        super().__init__(existing)
+        self.events = events
+        self.fail = fail
+
+    async def delete_partition(self, name: str) -> bool:
+        if self.fail:
+            raise ConnectionError("catalog down")
+        self.events.append("rows")
+        return await super().delete_partition(name)
+
+
+async def _cleanups_settle(svc: PartitionService) -> None:
+    await asyncio.gather(*list(svc._original_cleanups))
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_reads_its_originals_before_the_rows_and_deletes_them_after():
+    events: list[str] = []
+    cleaner = RecordingCleaner(events=events)
+    svc = _svc(prepo=RecordingPartitionRepo({"p1"}, events), cleaner=cleaner)
+
+    await svc.delete_partition("p1")
+    await _cleanups_settle(svc)
+
+    assert events == ["sources", "rows", "originals"]
+    assert cleaner.deleted == [["/data/1_a.pdf", "/data/2_b.pdf"]]
+    assert svc._original_cleanups == set()
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_reads_its_originals_on_the_lock_connection():
+    class Guard:
+        """The operation lock's connection: a read on the pool could wait for ever while it's held."""
+
+        def __init__(self):
+            self.listed: list[str] = []
+
+        async def list_partition_sources(self, name):
+            self.listed.append(name)
+            return ["/data/held.pdf"]
+
+    guard = Guard()
+
+    class LockingRepo(FakePartitionRepo):
+        @asynccontextmanager
+        async def partition_operation_lock(self, name):
+            yield guard
+
+    cleaner = RecordingCleaner()
+    svc = _svc(prepo=LockingRepo({"p1"}), cleaner=cleaner)
+
+    await svc.delete_partition("p1")
+    await _cleanups_settle(svc)
+
+    assert guard.listed == ["p1"]
+    assert cleaner.deleted == [["/data/held.pdf"]]
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_does_not_wait_for_its_originals():
+    release = asyncio.Event()
+    cleaner = RecordingCleaner(release=release)
+    svc = _svc(prepo=FakePartitionRepo({"p1"}), cleaner=cleaner)
+
+    # Times out, rather than hangs, if the delete waits for the cleanup.
+    await asyncio.wait_for(svc.delete_partition("p1"), timeout=5)
+
+    assert cleaner.deleted == [] and len(svc._original_cleanups) == 1
+    release.set()
+    await _cleanups_settle(svc)
+    assert cleaner.deleted == [["/data/1_a.pdf", "/data/2_b.pdf"]]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_row_delete_keeps_the_originals():
+    events: list[str] = []
+    cleaner = RecordingCleaner(events=events)
+    svc = _svc(prepo=RecordingPartitionRepo({"p1"}, events, fail=True), cleaner=cleaner)
+
+    with pytest.raises(ConnectionError):
+        await svc.delete_partition("p1")
+
+    assert svc._original_cleanups == set()
+    assert cleaner.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_the_originals_go_even_when_the_leftover_vector_cleanup_fails():
+    class FailingSecondSweepVectorStore(FakeVectorStore):
+        async def delete_by_filter(self, filters) -> int:
+            self.deleted_filters.append(dict(filters))
+            if len(self.deleted_filters) == 2:
+                raise Exception("Milvus connection failed")
+            return 1
+
+    cleaner = RecordingCleaner()
+    svc = _svc(prepo=FakePartitionRepo({"p1"}), vstore=FailingSecondSweepVectorStore(), cleaner=cleaner)
+
+    with pytest.raises(Exception, match="Milvus connection failed"):
+        await svc.delete_partition("p1")
+    await _cleanups_settle(svc)
+
+    assert cleaner.deleted == [["/data/1_a.pdf", "/data/2_b.pdf"]]
+
+
+@pytest.mark.asyncio
+async def test_a_partition_without_originals_starts_no_cleanup():
+    cleaner = RecordingCleaner(sources=())
+    svc = _svc(prepo=FakePartitionRepo({"p1"}), cleaner=cleaner)
+
+    await svc.delete_partition("p1")
+
+    assert svc._original_cleanups == set()
+    assert cleaner.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_the_refused_default_partition_reads_no_originals():
+    cleaner = RecordingCleaner()
+    with pytest.raises(ConflictError):
+        await _svc(prepo=FakePartitionRepo({"default"}), cleaner=cleaner).delete_partition("default")
+    assert cleaner.events == []
 
 
 # --------------------------------------------------------------------------- #

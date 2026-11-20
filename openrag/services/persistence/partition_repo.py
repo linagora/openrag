@@ -25,6 +25,7 @@ from core.models.embedder_swap import EmbedderSwapStatus
 from core.ports.partition_repo import PartitionRepository
 from core.utils.exceptions import NotFoundError, ServiceUnavailableError, ValidationError
 from core.utils.logging import get_logger
+from services.persistence.document_repo import fetch_partition_sources
 from services.persistence.file_count import decrement_file_counts
 
 if TYPE_CHECKING:
@@ -148,6 +149,9 @@ class _PartitionOperationGuard:
 
     async def pin_default_embedder(self, name: str) -> str | None:
         return await self._repo._pin_default_embedder_on_conn(self._conn, name)
+
+    async def list_partition_sources(self, name: str) -> list[str]:
+        return await fetch_partition_sources(self._conn, name)
 
 
 @dataclass(eq=False)

@@ -1066,3 +1066,65 @@ class TestPhase14ServiceWiring:
             "swaps.watch",
         ]
         assert c.is_initialized is True
+
+
+class TestOriginalsCleanerWiring:
+    """One cleaner, under ``paths.data_dir``, shared by the services that delete files.
+
+    Built only with ``FILE_FENCES=postgres``, the v2.4.0 default.
+    """
+
+    @staticmethod
+    def _settings(data_dir, file_fences: str = "postgres") -> Settings:
+        settings = _settings()
+        return settings.model_copy(
+            update={
+                "paths": settings.paths.model_copy(update={"data_dir": data_dir}),
+                "loader": settings.loader.model_copy(update={"file_fences": file_fences}),
+            }
+        )
+
+    @staticmethod
+    def _dispatcher_kwargs(container, monkeypatch) -> dict:
+        import services.workers.dispatcher as dispatcher_module
+
+        seen: dict = {}
+
+        def fake_from_ray_namespace(**kwargs):
+            seen.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(dispatcher_module, "from_ray_namespace", fake_from_ray_namespace)
+        _ = container.indexing_service
+        return seen
+
+    def test_the_cleaner_works_under_data_dir_and_is_built_once(self, tmp_path):
+        c = ServiceContainer(self._settings(tmp_path / "data"))
+        cleaner = c.originals_cleaner
+        assert cleaner is c.originals_cleaner
+        assert cleaner._data_dir == (tmp_path / "data").resolve()
+        assert cleaner._document_repo is c.document_repo
+
+    def test_the_workspace_service_gets_it(self, tmp_path):
+        c = ServiceContainer(self._settings(tmp_path / "data"))
+        assert c.workspace_service._originals_cleaner is c.originals_cleaner
+
+    def test_the_partition_service_gets_it(self, tmp_path):
+        c = ServiceContainer(self._settings(tmp_path / "data"))
+        assert c.partition_service._originals_cleaner is c.originals_cleaner
+
+    def test_the_dispatcher_gets_it(self, tmp_path, monkeypatch):
+        c = ServiceContainer(self._settings(tmp_path / "data"))
+        assert self._dispatcher_kwargs(c, monkeypatch)["originals_cleaner"] is c.originals_cleaner
+
+    def test_the_cleaner_needs_settings(self):
+        with pytest.raises(RuntimeError, match="without a Settings instance"):
+            _ = ServiceContainer().originals_cleaner
+
+    def test_ray_fences_the_default_keep_every_original(self, tmp_path, monkeypatch):
+        assert _settings().loader.file_fences == "ray"
+        c = ServiceContainer(self._settings(tmp_path / "data", file_fences="ray"))
+        assert c.originals_cleaner is None
+        assert c.workspace_service._originals_cleaner is None
+        assert c.partition_service._originals_cleaner is None
+        assert self._dispatcher_kwargs(c, monkeypatch)["originals_cleaner"] is None

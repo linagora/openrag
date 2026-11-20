@@ -2273,3 +2273,114 @@ async def test_holds_file_fence_without_fences_is_always_true() -> None:
     worker = IndexerWorker(pipeline=MagicMock(), task_state_manager=_fake_tsm())
 
     assert await worker.holds_file_fence(partition="p", file_id="f1", holder_id=None) is True
+
+
+# --- the original a replace leaves behind --------------------------------------------
+
+
+class _ReplacedOriginalCleaner:
+    """Stands in for OriginalsCleaner: names the row's current source, records the deletes."""
+
+    def __init__(self, events: list[str], source: str | None = "/data/1_old.pdf") -> None:
+        self.events = events
+        self.source = source
+        self.deleted: list[list[str]] = []
+
+    async def source_of(self, file_id: str, partition: str) -> str | None:
+        self.events.append("read source")
+        return self.source
+
+    async def delete_unreferenced(self, sources) -> int:
+        self.events.append("delete original")
+        self.deleted.append(list(sources))
+        return len(self.deleted[-1])
+
+
+def _replacing_worker(events: list[str], cleaner: Any, *, commits: bool = True) -> IndexerWorker:
+    class ReplacePipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
+            row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = ["old-1"]
+            return row
+
+    class CatalogRepo:
+        async def update_file_in_partition(self, **kwargs: Any) -> bool:
+            events.append("commit")
+            return commits
+
+        async def add_file_to_partition(self, **kwargs: Any) -> bool:
+            events.append("commit")
+            return commits
+
+    class VectorStore(FakeVectorStore):
+        async def delete(self, ids: list[str], collection: str = "default") -> int:
+            events.append("delete old chunks")
+            return await super().delete(ids, collection)
+
+    worker = IndexerWorker(
+        pipeline=ReplacePipeline(),
+        task_state_manager=_fake_tsm(),
+        document_repo=CatalogRepo(),
+        vector_store=VectorStore(),
+        originals_cleaner=cleaner,
+    )
+    worker.release_file_fence = AsyncMock(side_effect=lambda **_: events.append("release fence"))
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_a_replace_deletes_the_previous_original_before_it_releases_the_fence(tmp_path: Path) -> None:
+    path = tmp_path / "2_new.txt"
+    path.write_bytes(b"content")
+    events: list[str] = []
+    cleaner = _ReplacedOriginalCleaner(events)
+
+    async def attach() -> None:
+        events.append("attach")
+
+    await _replacing_worker(events, cleaner).process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f1", "source": str(path)},
+        partition="p",
+        replace=True,
+        before_success=attach,
+    )
+
+    assert events == ["read source", "commit", "delete old chunks", "delete original", "attach", "release fence"]
+    assert cleaner.deleted == [["/data/1_old.pdf"]]
+
+
+@pytest.mark.asyncio
+async def test_a_replace_that_does_not_commit_keeps_the_previous_original(tmp_path: Path) -> None:
+    path = tmp_path / "2_new.txt"
+    path.write_bytes(b"content")
+    events: list[str] = []
+    cleaner = _ReplacedOriginalCleaner(events)
+
+    with pytest.raises(RuntimeError, match="Catalog row was not written"):
+        await _replacing_worker(events, cleaner, commits=False).process_file(
+            task_id="t", path=str(path), metadata={"file_id": "f1"}, partition="p", replace=True
+        )
+
+    assert cleaner.deleted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("replace", "source"), [(False, "/data/1_old.pdf"), (True, None)], ids=["new-file", "no-previous-source"]
+)
+async def test_nothing_is_deleted_without_a_previous_original(tmp_path: Path, replace: bool, source) -> None:
+    path = tmp_path / "2_new.txt"
+    path.write_bytes(b"content")
+    events: list[str] = []
+    cleaner = _ReplacedOriginalCleaner(events, source=source)
+
+    await _replacing_worker(events, cleaner).process_file(
+        task_id="t", path=str(path), metadata={"file_id": "f1"}, partition="p", replace=replace
+    )
+
+    assert cleaner.deleted == []
+    assert ("read source" in events) is replace

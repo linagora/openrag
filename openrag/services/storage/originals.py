@@ -1,0 +1,196 @@
+"""Deleting uploaded originals once the catalog no longer references them.
+
+An upload is kept under ``paths.data_dir`` as the file its catalog row's
+``source`` names, and with ``SAVE_MARKDOWN`` a ``<source>.md`` copy of its
+parse sits next to it. Deleting a file, a workspace's orphaned files or a
+partition, replacing a file, and a failed job all leave such an original
+behind; :class:`OriginalsCleaner` removes it.
+
+Two rules make that safe:
+
+* **Only what no row references.** A copy of a file keeps its source's
+  ``source``, possibly in another partition, so a path is deleted only when
+  :meth:`DocumentRepository.referenced_sources` no longer names it, checked
+  just before the delete. That holds for each file deleted: an original, its
+  ``.md`` copy, and a ``.md`` copy whose upload a row still references.
+* **Only under ``data_dir``.** The path is resolved, symlinks included, and
+  must stay inside it. Anything else (an MCP ``index_url`` download in the
+  node's temp directory, a row from an older ``DATA_DIR``) is left alone.
+
+Deleting is best effort: it runs after the user's operation has committed, so
+a failure is logged and the file stays, for the orphan script to find later.
+Nothing here raises.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Awaitable, Callable, Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from core.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from core.config.root import Settings
+    from core.ports.document_repo import DocumentRepository
+
+logger = get_logger()
+
+# Paths checked against the catalog in one query, and deleted in one thread hop.
+DEFAULT_BATCH_SIZE = 500
+MARKDOWN_SUFFIX = ".md"
+
+
+def markdown_sidecar_path(source_path: str | os.PathLike[str]) -> Path:
+    """Path of the ``SAVE_MARKDOWN`` copy for an upload stored at ``source_path``.
+
+    The suffix is appended rather than swapped so a markdown upload is never
+    overwritten.
+    """
+    return Path(f"{source_path}{MARKDOWN_SUFFIX}")
+
+
+class OriginalsCleaner:
+    """Deletes uploaded originals, with their markdown sidecar, once nothing references them."""
+
+    def __init__(
+        self,
+        document_repo: DocumentRepository,
+        data_dir: str | os.PathLike[str],
+        *,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+    ) -> None:
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        self._document_repo = document_repo
+        # Resolved once: every path to delete is compared against the real directory.
+        self._data_dir = Path(data_dir).resolve()
+        self._batch_size = batch_size
+
+    async def source_of(self, file_id: str, partition: str) -> str | None:
+        """The ``source`` of a file whose row is about to go, read before the delete.
+
+        ``None`` when the row has none, or when it can't be read: the original
+        then stays, and the delete goes on.
+        """
+        try:
+            metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        except Exception as exc:  # noqa: BLE001 - must not fail the delete it precedes
+            logger.bind(file_id=file_id, partition=partition, error=str(exc)).warning(
+                "Could not read a file's original before deleting it; it stays."
+            )
+            return None
+        source = metadata.get("source") if isinstance(metadata, dict) else None
+        return source if isinstance(source, str) and source else None
+
+    async def sources_in_partition(
+        self, partition: str, list_sources: Callable[[str], Awaitable[list[str]]] | None = None
+    ) -> list[str]:
+        """The ``source`` of every row in a partition about to go, read before the delete.
+
+        ``list_sources`` reads them on a connection the caller already holds;
+        the repository's pool is used otherwise. Empty when they can't be
+        read: the originals then stay, and the delete goes on.
+        """
+        try:
+            if list_sources is not None:
+                return await list_sources(partition)
+            return await self._document_repo.list_partition_sources(partition)
+        except Exception as exc:  # noqa: BLE001 - must not fail the delete it precedes
+            logger.bind(partition=partition, error=str(exc)).warning(
+                "Could not list a partition's originals before deleting it; they stay."
+            )
+            return []
+
+    async def delete_unreferenced(self, sources: Iterable[str | None], *, with_sidecars: bool = True) -> int:
+        """Delete each of ``sources`` that no catalog row references. Returns how many of them went.
+
+        With ``with_sidecars``, each one's ``.md`` copy goes with it unless a
+        row references that copy. Without, exactly ``sources`` are deleted:
+        the orphan script deletes only the files that passed its filters. A
+        ``.md`` path stays while the upload it was parsed from is referenced.
+        Empty and repeated paths are skipped. A batch whose reference check
+        fails is left whole: when in doubt, keep the file.
+        """
+        candidates = list(dict.fromkeys(source for source in sources if source))
+        deleted = 0
+        for start in range(0, len(candidates), self._batch_size):
+            batch = candidates[start : start + self._batch_size]
+            sidecars = {source: str(markdown_sidecar_path(source)) for source in batch} if with_sidecars else {}
+            parsed_from = [_parsed_from(source) for source in batch if _parsed_from(source)]
+            try:
+                referenced = await self._document_repo.referenced_sources([*batch, *sidecars.values(), *parsed_from])
+            except Exception as exc:  # noqa: BLE001 - best effort, after the user's operation committed
+                logger.bind(count=len(batch), error=str(exc)).warning(
+                    "Could not check whether uploaded originals are still referenced; keeping them."
+                )
+                continue
+            unreferenced = [
+                source for source in batch if source not in referenced and _parsed_from(source) not in referenced
+            ]
+            if len(unreferenced) < len(batch):
+                logger.bind(count=len(batch) - len(unreferenced)).debug(
+                    "Kept uploaded originals that another catalog row still references."
+                )
+            extra = [sidecars[source] for source in unreferenced if source in sidecars]
+            extra = [sidecar for sidecar in extra if sidecar not in referenced]
+            if unreferenced:
+                deleted += await asyncio.to_thread(self._delete_files, unreferenced, extra)
+        return deleted
+
+    def _delete_files(self, sources: list[str], sidecars: list[str]) -> int:
+        deleted = sum(self._delete_file(source) for source in sources)
+        for sidecar in sidecars:
+            self._delete_file(sidecar)
+        if deleted:
+            logger.bind(count=deleted).info("Deleted uploaded originals no catalog row references.")
+        return deleted
+
+    def _delete_file(self, source: str) -> bool:
+        path = Path(source)
+        if not self._is_under_data_dir(path):
+            logger.bind(source=source).debug("Not deleting an original outside the data directory.")
+            return False
+        try:
+            if path.is_file():
+                path.unlink()
+                return True
+        except OSError as exc:
+            logger.bind(path=source, error=str(exc)).warning(
+                "Could not delete an uploaded original; it stays until the orphan script removes it."
+            )
+        return False
+
+    def _is_under_data_dir(self, path: Path) -> bool:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return False
+        return resolved != self._data_dir and resolved.is_relative_to(self._data_dir)
+
+
+def _parsed_from(source: str) -> str | None:
+    """The upload a ``.md`` path may be the parse of; ``None`` for any other path."""
+    return source.removesuffix(MARKDOWN_SUFFIX) if source.endswith(MARKDOWN_SUFFIX) else None
+
+
+def originals_cleaner_for(settings: Settings, document_repo: DocumentRepository) -> OriginalsCleaner | None:
+    """The cleaner a process deletes originals with, or ``None`` while that is off.
+
+    Deleting originals comes with the v2.4.0 defaults, so it is on only with
+    ``FILE_FENCES=postgres``. Until then every original stays, as before.
+    """
+    if settings.loader.file_fences != "postgres":
+        return None
+    return OriginalsCleaner(document_repo, settings.paths.data_dir)
+
+
+__all__ = [
+    "DEFAULT_BATCH_SIZE",
+    "MARKDOWN_SUFFIX",
+    "OriginalsCleaner",
+    "markdown_sidecar_path",
+    "originals_cleaner_for",
+]
