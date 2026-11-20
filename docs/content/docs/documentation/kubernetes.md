@@ -410,6 +410,33 @@ What restarts the pods after a credential in the env Secret changes (`AUTH_TOKEN
 - **`env.secrets`** (the default `values` provider): a `helm upgrade` that changes any of
   them, or `postgresql.auth.password`, rolls the API Deployment. Its pod template carries a
   checksum of the Secret's values.
+
+  With the bundled PostgreSQL (`postgresql.enabled: true`), changing
+  `postgresql.auth.password` changes only the password the API sends. PostgreSQL sets the
+  role's password when it creates its volume and ignores the value after that, so the
+  restarted API pods can't connect until the database has the new password too. Do one of:
+
+  - Change it in the database just before the `helm upgrade`: open `psql` as the
+    application role (`root` unless you changed `postgresql.auth.username`), run
+    `\password root`, and type the new password.
+
+    ```bash
+    kubectl exec -it -n <release namespace> <fullname>-postgresql-0 -- sh -c 'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" psql -h 127.0.0.1 -U root -d postgres'
+    ```
+
+  - Or set `postgresql.passwordUpdateJob.enabled: true` in the `helm upgrade` that changes
+    the password. The sub-chart then runs a job before the upgrade that changes it in the
+    database, signing in with the old password from the Secret already deployed, so it
+    needs `helm upgrade`, not `helm template` or Argo CD. The job also changes the
+    `postgres` superuser's password and refuses to render without
+    `postgresql.auth.postgresPassword`: set it to the current one, or the job changes it too.
+
+    ```bash
+    kubectl get secret -n <release namespace> <fullname>-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d
+    ```
+
+  Either way, connections the old pods open between the database change and the end of the
+  rollout are refused.
 - **`env.secretsProvider.type: vaultStaticSecret`**: the Vault Secrets Operator rolls the
   API Deployment itself once it has written the new value.
 - **`env.secretsProvider.type: externalSecret`** or **`env.existingSecret`**: the chart
