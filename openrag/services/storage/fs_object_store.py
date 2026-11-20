@@ -4,7 +4,10 @@ A key maps to a path under the root, component by component:
 ``originals/{p}/{f}/{id}.pdf`` is ``{root}/originals/{p}/{f}/{id}.pdf``. A
 ``legacy/{path}`` key is the file already at ``{root}/{path}``, where uploads
 were written before the object store, so nothing is copied. Every path is
-resolved and must stay under the root, so a symlink can't lead a key out of it.
+resolved and must stay under the root when the key is resolved, so a symlink
+under the root can't lead a key out of it. The check isn't repeated at each
+write: only OpenRag writes under ``data_dir``, and a process that could swap a
+directory there for a symlink mid-call could already change the files.
 
 Next to each object, a hidden sidecar ``.{name}.meta`` holds its SHA-256 and
 metadata. A file the store didn't write (a legacy one) has none: ``stat``

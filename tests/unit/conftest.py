@@ -210,9 +210,9 @@ class InMemoryObjectStore(ObjectStore):
         data = self._get(key)[0]
         suffix = PurePosixPath(key).suffix if suffix is None else validate_suffix(suffix)
         fd, name = tempfile.mkstemp(suffix=suffix)
-        with os.fdopen(fd, "wb") as file:
-            file.write(data)
         try:
+            with os.fdopen(fd, "wb") as file:
+                file.write(data)
             yield Path(name)
         finally:
             Path(name).unlink(missing_ok=True)

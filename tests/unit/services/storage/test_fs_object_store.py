@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import os
 import threading
 from pathlib import Path
 
@@ -41,23 +42,70 @@ def files_under(root: Path) -> list[str]:
 
 
 class Gate:
-    """Holds a call in its thread until released, and records what it returned."""
+    """Holds a call in its thread until released, and records what it returned.
+
+    A gate that times out fails the call rather than letting it through, and
+    ``make_gate`` fails the test.
+    """
 
     def __init__(self, func):
         self.func = func
         self.entered = threading.Event()
         self.release = threading.Event()
         self.done = threading.Event()
+        self.timed_out = False
         self.result = None
 
     def __call__(self, *args):
         self.entered.set()
-        self.release.wait(timeout=5)
         try:
+            if not self.release.wait(timeout=30):
+                self.timed_out = True
+                raise TimeoutError("The test never released the gate.")
             self.result = self.func(*args)
             return self.result
         finally:
             self.done.set()
+
+
+@pytest.fixture
+def make_gate():
+    """Makes gates, and releases them all when the test ends, so none holds a thread past it."""
+    gates: list[Gate] = []
+
+    def make(func) -> Gate:
+        gates.append(Gate(func))
+        return gates[-1]
+
+    yield make
+    for gate in gates:
+        gate.release.set()
+    assert not any(gate.timed_out for gate in gates), "A gate timed out before its test released it."
+
+
+class RecordingFile:
+    """A file whose reads and writes record whether they run on the event loop."""
+
+    def __init__(self, file, record):
+        self._file = file
+        self._record = record
+
+    def read(self, *args):
+        self._record("read")
+        return self._file.read(*args)
+
+    def write(self, *args):
+        self._record("write")
+        return self._file.write(*args)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._file.close()
+
+    def __getattr__(self, name):
+        return getattr(self._file, name)
 
 
 def failing_replace(monkeypatch, fails):
@@ -171,12 +219,14 @@ async def test_a_cancelled_put_leaves_no_temporary_file(store, root):
 
 
 @pytest.mark.parametrize("call", ["put", "open_stream", "local_copy"])
-async def test_a_call_cancelled_while_its_thread_acquires_releases_what_it_got(store, root, monkeypatch, call):
+async def test_a_call_cancelled_while_its_thread_acquires_releases_what_it_got(
+    store, root, monkeypatch, make_gate, call
+):
     key = keys.original_key("docs", "report", keys.new_upload_id(), ".pdf")
     await store.put_bytes(key, b"%PDF")
 
     if call == "put":
-        gate = Gate(store._create_temp)
+        gate = make_gate(store._create_temp)
         monkeypatch.setattr(store, "_create_temp", gate)
         operation = store.put_bytes(original(), b"x")
 
@@ -184,7 +234,7 @@ async def test_a_call_cancelled_while_its_thread_acquires_releases_what_it_got(s
             return not created[0].exists() and created[1].closed
 
     elif call == "open_stream":
-        gate = Gate(fs_object_store._open_with_size)
+        gate = make_gate(fs_object_store._open_with_size)
         monkeypatch.setattr(fs_object_store, "_open_with_size", gate)
         operation = read_all(store, key)
 
@@ -192,7 +242,7 @@ async def test_a_call_cancelled_while_its_thread_acquires_releases_what_it_got(s
             return opened[0].closed
 
     else:
-        gate = Gate(fs_object_store._copy_to_temp)
+        gate = make_gate(fs_object_store._copy_to_temp)
         monkeypatch.setattr(fs_object_store, "_copy_to_temp", gate)
 
         async def copy_under_another_suffix():
@@ -217,12 +267,12 @@ async def test_a_call_cancelled_while_its_thread_acquires_releases_what_it_got(s
 
 
 @pytest.mark.parametrize("ending", ["cancel", "timeout"])
-async def test_a_put_cancelled_while_its_commit_fails_ends_cancelled(store, root, ending):
+async def test_a_put_cancelled_while_its_commit_fails_ends_cancelled(store, root, make_gate, ending):
     def failing_commit(temp, path, digest, metadata):
         temp.unlink()
         raise OSError(5, "Input/output error")
 
-    gate = Gate(failing_commit)
+    gate = make_gate(failing_commit)
     store._commit = gate
     deadline: list[asyncio.Timeout] = []
 
@@ -245,8 +295,8 @@ async def test_a_put_cancelled_while_its_commit_fails_ends_cancelled(store, root
     assert stray_files(root) == []
 
 
-async def test_a_put_cancelled_twice_while_it_commits_is_stored_when_it_ends(store, root):
-    gate = Gate(store._commit)
+async def test_a_put_cancelled_twice_while_it_commits_is_stored_when_it_ends(store, root, make_gate):
+    gate = make_gate(store._commit)
     store._commit = gate
     key = original()
     task = asyncio.create_task(store.put_bytes(key, b"whole", {"filename": "a.pdf"}))
@@ -465,17 +515,34 @@ async def test_delete_many_tries_every_key_and_names_the_failures(store, root, m
 
 async def test_filesystem_calls_run_off_the_event_loop(store, monkeypatch):
     loop_thread = threading.get_ident()
-    on_loop: list[bool] = []
-    real_resolve = Path.resolve
+    calls: list[tuple[str, bool]] = []
 
-    def recording_resolve(self, *args, **kwargs):
-        on_loop.append(threading.get_ident() == loop_thread)
-        return real_resolve(self, *args, **kwargs)
+    def record(name):
+        calls.append((name, threading.get_ident() == loop_thread))
 
-    key = original()
-    await store.put_bytes(key, b"x")
-    monkeypatch.setattr(Path, "resolve", recording_resolve)
+    def recording(name, func):
+        def call(*args, **kwargs):
+            record(name)
+            return func(*args, **kwargs)
+
+        return call
+
+    def recording_open(*args, **kwargs):
+        record("open")
+        return RecordingFile(open(*args, **kwargs), record)
+
+    # Installed before the first call: path resolution, opening, reading,
+    # writing and renaming, in every operation.
+    monkeypatch.setattr(Path, "resolve", recording("resolve", Path.resolve))
+    monkeypatch.setattr(fs_object_store.os, "replace", recording("replace", os.replace))
+    monkeypatch.setattr(fs_object_store, "open", recording_open, raising=False)
+    key = original(".pdf")
+    await store.put_bytes(key, b"%PDF", {"filename": "a.pdf"})
     await store.stat(key)
     await read_all(store, key)
+    await store.copy(key, original(".pdf"))
+    async with store.local_copy(key, ".txt"):
+        pass
     await store.delete(key)
-    assert on_loop and not any(on_loop)
+    assert {name for name, _ in calls} == {"resolve", "open", "read", "write", "replace"}
+    assert [name for name, on_loop in calls if on_loop] == []

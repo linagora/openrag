@@ -231,15 +231,16 @@ class ObjectStoreConformance:
         writes = [
             asyncio.create_task(store.put_stream(k, paused(k), {"filename": "new.pdf"})) for k in (replaced, fresh)
         ]
-        await asyncio.wait_for(all_started.wait(), timeout=5)
-        info = await store.stat(replaced)
-        assert (await read_all(store, replaced), info.size, dict(info.metadata)) == (
-            b"previous",
-            len(b"previous"),
-            {"filename": "old.pdf"},
-        )
-        assert not await store.exists(fresh)
-        release.set()
+        try:
+            await asyncio.wait_for(all_started.wait(), timeout=5)
+            # Bounded: a reader that waits for the write would never return.
+            info = await asyncio.wait_for(store.stat(replaced), timeout=5)
+            content = await asyncio.wait_for(read_all(store, replaced), timeout=5)
+            assert (content, info.size, dict(info.metadata)) == (b"previous", len(b"previous"), {"filename": "old.pdf"})
+            assert not await asyncio.wait_for(store.exists(fresh), timeout=5)
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*writes, return_exceptions=True), timeout=5)
         await asyncio.gather(*writes)
         for key in (replaced, fresh):
             assert await read_all(store, key) == b"first chunk, then the rest"
@@ -500,8 +501,10 @@ class ObjectStoreConformance:
                 pass
 
     async def test_a_hostile_file_id_stays_its_own_object(self, store):
-        hostile = keys.original_key("docs", "..", keys.new_upload_id(), ".pdf")
-        neighbour = keys.original_key("docs", ".", keys.new_upload_id(), ".pdf")
+        # One upload id for both: the keys differ only if the file ids do.
+        upload_id = keys.new_upload_id()
+        hostile = keys.original_key("docs", "..", upload_id, ".pdf")
+        neighbour = keys.original_key("docs", ".", upload_id, ".pdf")
         await store.put_bytes(hostile, b"dotdot")
         await store.put_bytes(neighbour, b"dot")
         assert await read_all(store, hostile) == b"dotdot"
