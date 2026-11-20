@@ -163,11 +163,18 @@ def _init_ray() -> None:
         # exported but never collected. The Compose monitoring overlay
         # sets it. Like the dashboard it is unauthenticated, so it must
         # not be published on the host.
+        #
+        # The embedded cluster is this one node, so nothing outside the
+        # process needs its other ports either (GCS, raylet, agents): they
+        # listen on loopback. Ray puts the metrics port on the node's address,
+        # loopback included, so a configured metrics port, which a scraper in
+        # another container or pod must reach, keeps the default address.
         metrics_port = os.environ.get("RAY_METRICS_EXPORT_PORT", "").strip()
         ray.init(
             dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
             ignore_reinit_error=True,
             _metrics_export_port=int(metrics_port) if metrics_port else None,
+            _node_ip_address=None if metrics_port else "127.0.0.1",
         )
 
 

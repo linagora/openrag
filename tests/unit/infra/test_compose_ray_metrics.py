@@ -152,3 +152,29 @@ def test_ray_prefix_is_stripped_from_openrag_series_only():
         {"source_labels": ["__name__"], "regex": "ray_(openrag_.+)", "target_label": "__name__", "replacement": "$1"}
     ]
     assert not [r for r in relabels if r.get("action") in ("labeldrop", "labelkeep", "drop")]
+
+
+def test_embedded_ray_listens_on_loopback_unless_its_metrics_are_scraped():
+    """The embedded cluster is one node: its GCS, raylet and agents need no
+    routable address. Ray puts the metrics port on the node's address, so a
+    configured metrics port, scraped from another container, keeps the default.
+    """
+    tree = ast.parse(MAIN.read_text(encoding="utf-8"))
+    keywords = {kw.arg: ast.unparse(kw.value) for kw in _embedded_ray_init(tree).keywords}
+
+    assert keywords["_node_ip_address"] == "None if metrics_port else '127.0.0.1'"
+
+
+def test_the_mcp_servers_embedded_ray_listens_on_loopback():
+    tree = ast.parse((REPO / "openrag/api/mcp/server.py").read_text(encoding="utf-8"))
+    embedded = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "init"
+        and any(kw.arg == "dashboard_host" for kw in node.keywords)
+    ]
+
+    assert len(embedded) == 1
+    assert {kw.arg: ast.unparse(kw.value) for kw in embedded[0].keywords}["_node_ip_address"] == "'127.0.0.1'"

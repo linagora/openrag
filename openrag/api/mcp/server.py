@@ -81,10 +81,12 @@ async def _startup() -> None:
         else:
             # Bind the Ray dashboard to localhost by default; it is
             # unauthenticated (CVE-2023-48022). Override via RAY_DASHBOARD_HOST
-            # behind an auth proxy.
+            # behind an auth proxy. The cluster is this one node, so its other
+            # ports listen on loopback too.
             ray.init(
                 dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
                 ignore_reinit_error=True,
+                _node_ip_address="127.0.0.1",
             )
     ensure_worker_bootstrap(config)
     container = ServiceContainer(config)
