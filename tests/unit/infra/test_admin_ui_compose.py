@@ -1,11 +1,87 @@
+import ipaddress
+import json
 import re
+import shutil
+import subprocess
+from os import environ
 from pathlib import Path
 
+import pytest
 import yaml
+
+COMPOSE_DIR = Path(__file__).resolve().parents[3] / "infra/compose"
+
+
+@pytest.mark.parametrize("scenario", ["default", "custom-subnet", "explicit-allowlist", "tls-overlay"])
+def test_compose_proxy_trust(tmp_path, scenario):
+    if (
+        shutil.which("docker") is None
+        or subprocess.run(["docker", "compose", "version"], capture_output=True, check=False).returncode
+    ):
+        pytest.skip("Docker Compose is required to render the configuration")
+
+    project_values = (
+        "POSTGRES_PASSWORD=render-test-only\nMINIO_SECRET_KEY=render-test-only\nMINIO_ACCESS_KEY=render-test-only\n"
+    )
+    project_env = tmp_path / ".env"
+    project_env.write_text(project_values, encoding="utf-8")
+    shared_env = tmp_path / "shared.env"
+    override = "127.0.0.1,192.0.2.10" if scenario == "explicit-allowlist" else None
+    if override is not None:
+        project_values += f"UVICORN_FORWARDED_ALLOW_IPS={override}\n"
+    shared_env.write_text(project_values, encoding="utf-8")
+    render_env = {"SHARED_ENV": str(shared_env)}
+    if scenario == "custom-subnet":
+        render_env.update(
+            OPENRAG_COMPOSE_SUBNET="172.31.252.0/24",
+            OPENRAG_COMPOSE_DYNAMIC_RANGE="172.31.252.0/25",
+            OPENRAG_ADMIN_UI_PROXY_IP="172.31.252.200",
+        )
+
+    # Avoid inheriting an operator override for any of the inputs under test.
+    env = {key: value for key, value in environ.items() if key in {"HOME", "PATH"}}
+    env.update(render_env)
+    compose_files = ["-f", "docker-compose.yaml"]
+    if scenario == "tls-overlay":
+        compose_files.extend(("-f", "proxy.docker-compose.yaml"))
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(project_env),
+            *compose_files,
+            "--profile",
+            "*",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=COMPOSE_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    config = json.loads(result.stdout)
+    proxy_ip = config["services"]["admin-ui"]["networks"]["default"]["ipv4_address"]
+    ipam = config["networks"]["default"]["ipam"]["config"][0]
+
+    assert ipaddress.ip_address(proxy_ip) in ipaddress.ip_network(ipam["subnet"])
+    assert ipaddress.ip_address(proxy_ip) not in ipaddress.ip_network(ipam["ip_range"])
+    if scenario == "tls-overlay":
+        tls_proxy_ip = config["services"]["nginx"]["networks"]["default"]["ipv4_address"]
+        assert tls_proxy_ip != proxy_ip
+        assert ipaddress.ip_address(tls_proxy_ip) in ipaddress.ip_network(ipam["subnet"])
+        assert ipaddress.ip_address(tls_proxy_ip) not in ipaddress.ip_network(ipam["ip_range"])
+    for api in ("openrag", "openrag-cpu"):
+        assert config["services"][api]["environment"]["UVICORN_FORWARDED_ALLOW_IPS"] == (
+            override or f"127.0.0.1,{proxy_ip}"
+        )
 
 
 def test_admin_ui_compose_service_uses_project_scoped_container_name():
-    compose_path = Path(__file__).resolve().parents[3] / "infra/compose/docker-compose.yaml"
+    compose_path = COMPOSE_DIR / "docker-compose.yaml"
 
     with compose_path.open(encoding="utf-8") as handle:
         compose = yaml.safe_load(handle)
