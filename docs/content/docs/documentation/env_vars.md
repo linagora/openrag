@@ -758,7 +758,7 @@ The `/auth/*` limits and failed-login budget use the client IP. If the API canno
 
 Keep the allowlist limited to proxies you control. A wildcard or a shared container or pod subnet gives unrelated clients the ability to supply forwarding headers. Configure the edge proxy to supply the actual client address and only accept forwarded addresses from trusted upstreams.
 
-Compose uses a fixed bridge subnet so it can reserve the admin UI address. For an overlapping network or another stack on the same host, set `OPENRAG_COMPOSE_SUBNET`, `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP` in the Compose environment. The proxy address belongs inside the subnet and outside the dynamic range. If an existing project network still uses its old subnet, recreate the project network before starting the updated stack.
+Compose uses a fixed bridge subnet so it can reserve the admin UI address. For an overlapping network or another stack on the same host, set `OPENRAG_COMPOSE_SUBNET`, `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP` in the Compose environment. If you use the TLS overlay, also set `OPENRAG_NPM_PROXY_IP` and set `UVICORN_FORWARDED_ALLOW_IPS` to include loopback and both new proxy addresses. Keep the proxy addresses distinct, inside the subnet, and outside the dynamic range. If an existing project network still uses its old subnet, recreate the project network before starting the updated stack.
 :::
 
 ### Admin UI
