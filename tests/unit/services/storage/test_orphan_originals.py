@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from services.storage.orphan_originals import OrphanScanRefused, scan_orphan_originals
+from services.storage.orphan_originals import JOB_AFTER_UPLOAD, OrphanScanRefused, scan_orphan_originals
 
 DAY = 24 * 3600
 NOW = time.time()
@@ -29,6 +30,18 @@ class FakeDocumentRepo:
         return {source for source in batch if source in self.referenced}
 
 
+class FakeJobRepo:
+    """Answers ``count_unsettled_jobs`` from the creation times of unsettled jobs."""
+
+    def __init__(self, unsettled_created_at=()) -> None:
+        self.unsettled_created_at = [datetime.fromtimestamp(t, UTC) for t in unsettled_created_at]
+        self.calls: list[datetime] = []
+
+    async def count_unsettled_jobs(self, *, created_before):
+        self.calls.append(created_before)
+        return sum(created < created_before for created in self.unsettled_created_at)
+
+
 @pytest.fixture
 def data_dir(tmp_path) -> Path:
     path = tmp_path / "data"
@@ -44,6 +57,8 @@ def put(data_dir: Path, name: str, *, age: float = 2 * DAY, content: bytes = b"c
 
 
 async def scan(repo, data_dir, **kwargs):
+    if kwargs.get("delete"):
+        kwargs.setdefault("job_repo", FakeJobRepo())
     events = [event async for event in scan_orphan_originals(repo, data_dir, min_age_seconds=DAY, now=NOW, **kwargs)]
     return [e["path"] for e in events if e["type"] == "orphan"], events[-1]
 
@@ -116,7 +131,7 @@ async def test_delete_refuses_when_no_upload_is_referenced(data_dir):
     events = []
     with pytest.raises(OrphanScanRefused, match="Nothing was deleted"):
         async for event in scan_orphan_originals(
-            FakeDocumentRepo(), data_dir, min_age_seconds=DAY, now=NOW, delete=True
+            FakeDocumentRepo(), data_dir, min_age_seconds=DAY, now=NOW, delete=True, job_repo=FakeJobRepo()
         ):
             events.append(event)
     assert [e["type"] for e in events] == ["orphan"]
@@ -132,6 +147,63 @@ async def test_delete_goes_ahead_when_only_young_uploads_are_referenced(data_dir
 
     assert orphans == [orphan] and summary["deleted"] == 1 and summary["referenced"] == 0
     assert Path(today).exists() and not Path(orphan).exists()
+
+
+async def test_delete_spares_a_young_md_copy_of_an_old_orphan(data_dir):
+    kept = put(data_dir, "1713700000000_a1b2_kept.pdf")
+    orphan = put(data_dir, "1713700000001_c3d4_gone.pdf")
+    young_md = put(data_dir, "1713700000001_c3d4_gone.pdf.md", age=3600)
+
+    orphans, summary = await scan(FakeDocumentRepo({kept}), data_dir, delete=True)
+
+    assert orphans == [orphan] and summary["deleted"] == 1
+    assert not Path(orphan).exists() and Path(young_md).exists()
+
+
+async def test_delete_keeps_an_md_copy_whose_upload_became_referenced(data_dir):
+    kept = put(data_dir, "1713700000000_a1b2_kept.pdf")
+    late = put(data_dir, "1713700000001_c3d4_late.pdf")
+    late_md = put(data_dir, "1713700000001_c3d4_late.pdf.md")
+
+    class JobWritesItsRowMeanwhile(FakeDocumentRepo):
+        async def referenced_sources(self, sources):
+            answer = await super().referenced_sources(sources)
+            self.referenced.add(late)
+            return answer
+
+    orphans, summary = await scan(JobWritesItsRowMeanwhile({kept}), data_dir, delete=True)
+
+    assert orphans == [late, late_md] and summary["deleted"] == 0
+    assert Path(late).exists() and Path(late_md).exists()
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [NOW - 2 * DAY, NOW - DAY + 60],
+    ids=["before-the-cutoff", "just-after-the-cutoff"],
+)
+async def test_delete_refuses_while_a_job_old_enough_to_own_an_orphan_runs(data_dir, created_at):
+    kept = put(data_dir, "1713700000000_a1b2_kept.pdf")
+    orphan = put(data_dir, "1713700000001_c3d4_queued.pdf")
+    with pytest.raises(OrphanScanRefused, match="haven't settled"):
+        await scan(FakeDocumentRepo({kept}), data_dir, delete=True, job_repo=FakeJobRepo([created_at]))
+    assert Path(orphan).exists()
+
+
+async def test_delete_goes_ahead_while_only_recent_jobs_run(data_dir):
+    kept = put(data_dir, "1713700000000_a1b2_kept.pdf")
+    orphan = put(data_dir, "1713700000001_c3d4_gone.pdf")
+    jobs = FakeJobRepo([NOW - 3600])
+
+    orphans, summary = await scan(FakeDocumentRepo({kept}), data_dir, delete=True, job_repo=jobs)
+
+    assert orphans == [orphan] and summary["deleted"] == 1
+    assert jobs.calls == [datetime.fromtimestamp(NOW - DAY, UTC) + JOB_AFTER_UPLOAD]
+
+
+async def test_delete_needs_the_job_repository(data_dir):
+    with pytest.raises(ValueError, match="job repository"):
+        _ = [e async for e in scan_orphan_originals(FakeDocumentRepo(), data_dir, min_age_seconds=DAY, delete=True)]
 
 
 async def test_a_failed_check_fails_the_scan_instead_of_reporting_orphans(data_dir):

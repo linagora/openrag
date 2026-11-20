@@ -56,6 +56,8 @@ async def test_scan_opens_the_catalog_without_migrations_and_closes_it_on_failur
     import services.persistence.connection
     import services.storage.orphan_originals
     from core.config.infrastructure import RDBConfig, VectorDBConfig
+    from services.persistence.document_repo import PgDocumentRepository
+    from services.persistence.job_repo import PgJobRepository
 
     settings = SimpleNamespace(
         rdb=RDBConfig(database=None),
@@ -69,7 +71,10 @@ async def test_scan_opens_the_catalog_without_migrations_and_closes_it_on_failur
 
     async def failed_scan(repo, data_dir, **kwargs):
         assert data_dir == tmp_path
+        job_repo = kwargs.pop("job_repo")
         assert kwargs == {"min_age_seconds": 48 * 3600, "delete": True}
+        # The job records sit in the catalog database, behind the same connection.
+        assert isinstance(job_repo, PgJobRepository) and isinstance(repo, PgDocumentRepository)
         yield {"type": "orphan"}
         raise RuntimeError("scan interrupted")
 

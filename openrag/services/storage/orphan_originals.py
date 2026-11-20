@@ -11,17 +11,23 @@ name carries the prefix every upload gets (``1713700000000_a1b2_report.pdf``),
 ``.md`` copies included. Anything else there, subdirectories included, is
 never listed.
 
-Three rules keep the delete safe:
+Four rules keep the delete safe:
 
 * **Old enough.** An upload is on disk before its job writes its row, so a
   file younger than ``min_age_seconds`` is skipped.
+* **No job left behind.** A job still queued or running past that age would
+  lose its upload, and a job's record doesn't name its file, so nothing is
+  deleted while a job created before the cutoff hasn't settled. Job records
+  are written best effort: one whose write failed isn't seen.
 * **The catalog must know this directory.** When no upload under
   ``data_dir``, young ones included, is referenced at all, the scan most
   likely runs with another ``DATA_DIR`` or database than the API, and nothing
   is deleted.
 * **A failed check fails the scan** instead of reporting files as
   unreferenced, and :class:`OriginalsCleaner` checks each file again just
-  before deleting it.
+  before deleting it. Only the files listed are deleted: a ``.md`` copy
+  younger than its upload stays, and so does one whose upload became
+  referenced meanwhile.
 """
 
 from __future__ import annotations
@@ -32,20 +38,23 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from services.storage.originals import DEFAULT_BATCH_SIZE, OriginalsCleaner
+from services.storage.originals import DEFAULT_BATCH_SIZE, MARKDOWN_SUFFIX, OriginalsCleaner
 
 if TYPE_CHECKING:
     from core.ports.document_repo import DocumentRepository
+    from core.ports.job_repo import JobRepository
 
 # ``make_unique_filename``: a millisecond timestamp and four hex digits.
 UPLOAD_NAME = re.compile(r"\d{13}_[0-9a-f]{4}_.")
-MARKDOWN_SUFFIX = ".md"
 # Below an hour, an upload still waiting in the queue could be taken for an orphan.
 MIN_AGE_SECONDS_FLOOR = 3600.0
+# A job is created once its upload is on disk, moments later: one created
+# this long after the cutoff can still own an upload older than it.
+JOB_AFTER_UPLOAD = timedelta(minutes=10)
 
 
 class OrphanScanRefused(RuntimeError):
@@ -63,16 +72,20 @@ async def scan_orphan_originals(
     *,
     min_age_seconds: float,
     delete: bool = False,
+    job_repo: JobRepository | None = None,
     now: float | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield one ``orphan`` event per unreferenced upload, then a ``summary``.
 
-    With ``delete``, the orphans and their ``.md`` copies are deleted once the
-    scan is complete. Raises :class:`OrphanScanRefused` instead when no upload
-    is referenced, and lets a failed catalog check propagate.
+    With ``delete`` (which needs ``job_repo``), the orphans listed are deleted
+    once the scan is complete. Raises :class:`OrphanScanRefused` instead when
+    no upload is referenced or a job old enough to own one hasn't settled, and
+    lets a failed catalog check propagate.
     """
     validate_min_age(min_age_seconds)
+    if delete and job_repo is None:
+        raise ValueError("Deleting orphans needs the job repository, to spare the uploads of unsettled jobs")
     root = Path(data_dir).resolve()
     cutoff = (time.time() if now is None else now) - min_age_seconds
     uploads, young = await asyncio.to_thread(_uploads_by_age, root, cutoff)
@@ -108,7 +121,18 @@ async def scan_orphan_originals(
                 f"No upload under {root} is referenced by the catalog, so DATA_DIR or the database "
                 "probably differ from the API's. Run this where the API runs. Nothing was deleted."
             )
-        await OriginalsCleaner(document_repo, root, batch_size=batch_size).delete_unreferenced(orphans)
+        if orphans:
+            assert job_repo is not None
+            jobs_before = datetime.fromtimestamp(cutoff, UTC) + JOB_AFTER_UPLOAD
+            if unsettled := await job_repo.count_unsettled_jobs(created_before=jobs_before):
+                raise OrphanScanRefused(
+                    f"{unsettled} indexing job(s) created before {jobs_before.isoformat()} haven't settled, and "
+                    "the upload such a job reads has no catalog row yet. Nothing was deleted; run again once "
+                    "they have."
+                )
+        await OriginalsCleaner(document_repo, root, batch_size=batch_size).delete_unreferenced(
+            orphans, with_sidecars=False
+        )
         deleted = await asyncio.to_thread(lambda: sum(not Path(source).exists() for source in orphans))
 
     yield {
@@ -147,4 +171,10 @@ async def _any_referenced(document_repo: DocumentRepository, sources: list[str],
     return False
 
 
-__all__ = ["MIN_AGE_SECONDS_FLOOR", "OrphanScanRefused", "scan_orphan_originals", "validate_min_age"]
+__all__ = [
+    "JOB_AFTER_UPLOAD",
+    "MIN_AGE_SECONDS_FLOOR",
+    "OrphanScanRefused",
+    "scan_orphan_originals",
+    "validate_min_age",
+]

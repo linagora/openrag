@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
 import pytest_asyncio
 from alembic import command
+from core.models.catalog import DocumentStatus, IndexationJob
 from services.storage.postgres_store import PostgresStore
 
 from .conftest import _admin_dsn, _connect_admin
@@ -59,6 +61,27 @@ async def test_list_partition_sources(postgres_store):
     sources = await postgres_store.document_repo.list_partition_sources("a")
     assert sorted(sources) == ["/data/1_report.pdf", "/data/2_notes.md"]
     assert await postgres_store.document_repo.list_partition_sources("missing") == []
+    # The same read on the connection a partition delete's lock holds.
+    async with postgres_store.partition_repo.partition_operation_lock("a") as operation:
+        assert sorted(await operation.list_partition_sources("a")) == sorted(sources)
+
+
+async def test_count_unsettled_jobs(postgres_store):
+    now = datetime.now(UTC)
+    jobs = postgres_store.job_repo
+    for status, age in [
+        (DocumentStatus.QUEUED, 2),
+        (DocumentStatus.SERIALIZING, 3),
+        (DocumentStatus.COMPLETED, 3),
+        (DocumentStatus.FAILED, 3),
+        (DocumentStatus.CANCELLED, 3),
+        (DocumentStatus.QUEUED, 0),
+    ]:
+        job = await jobs.upsert_job(IndexationJob(status=status))
+        # The row takes the database's clock: age it by hand.
+        await jobs.pool.execute("UPDATE jobs SET created_at = $1 WHERE id = $2", now - timedelta(days=age), job.id)
+    assert await jobs.count_unsettled_jobs(created_before=now - timedelta(days=1)) == 2
+    assert await jobs.count_unsettled_jobs(created_before=now - timedelta(days=5)) == 0
 
 
 async def test_the_lookup_uses_the_source_index(postgres_store):

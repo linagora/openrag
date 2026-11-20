@@ -127,6 +127,16 @@ async def _refuse_if_embedder_changed(
         )
 
 
+async def fetch_partition_sources(executor: asyncpg.Pool | asyncpg.Connection, partition: str) -> list[str]:
+    """The distinct ``source`` paths of a partition's files, read on ``executor``."""
+    rows = await executor.fetch(
+        "SELECT DISTINCT file_metadata ->> 'source' AS source FROM files "
+        "WHERE partition_name = $1 AND file_metadata ->> 'source' IS NOT NULL",
+        partition,
+    )
+    return [row["source"] for row in rows]
+
+
 class PgDocumentRepository(DocumentRepository):
     """asyncpg-backed implementation of :class:`DocumentRepository`."""
 
@@ -472,12 +482,7 @@ class PgDocumentRepository(DocumentRepository):
         return {row["source"] for row in rows}
 
     async def list_partition_sources(self, partition: str) -> list[str]:
-        rows = await self.pool.fetch(
-            "SELECT DISTINCT file_metadata ->> 'source' AS source FROM files "
-            "WHERE partition_name = $1 AND file_metadata ->> 'source' IS NOT NULL",
-            partition,
-        )
-        return [row["source"] for row in rows]
+        return await fetch_partition_sources(self.pool, partition)
 
     async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
         config = await self.pool.fetchval(

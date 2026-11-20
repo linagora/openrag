@@ -52,7 +52,7 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
     - `stat(key) -> ObjectInfo` (size, SHA-256 or `None`, metadata);
     - `put_bytes`, a helper over `put_stream`;
     - `open_stream` as an async context manager.
-  - **Metadata rules:** keys are `[a-z0-9-]`, values any string, at most 640 UTF-8 bytes in all; `openrag-` is kept for the adapters' own entries.
+  - **Metadata rules:** keys are 1 to 64 characters of `[a-z0-9-]` starting with a letter or digit, values any text, at most 640 UTF-8 bytes in all; `openrag-` is kept for the adapters' own entries.
   - **Writes:** a failed `put_stream` leaves the key as it was.
   - **Not added yet:** `list`.
 - **Why:**
@@ -120,12 +120,13 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
   - a job that fails after its catalog commit leaves an indexed file, whose original must stay;
   - no row references a failed upload, so deleting it after the fence is released is safe.
 - **Rejected:** deleting it in `process_file`'s failure path, which misses those failures.
+- **Impact:** a task cancelled while still queued never reaches the pool, so its upload stays until the orphan script removes it.
 
 ## D10. Originals are deleted only under `data_dir`, after a reference check
 
 **#1428**, `services/storage/originals.py` (#1472). Status: taken.
 
-- **Decision:** `OriginalsCleaner` deletes a path, with its `.md`, only if it resolves under `data_dir` (symlinks followed) and `referenced_sources` no longer names it. If the check fails, the whole batch stays.
+- **Decision:** `OriginalsCleaner` deletes a path, with its `.md`, only if it resolves under `data_dir` (symlinks followed) and `referenced_sources` no longer names it. The `.md` is checked too, and a `.md` stays while its upload is referenced. If the check fails, the whole batch stays.
 - **Why:** a copy keeps its source's `source`, possibly in another partition. The resolve keeps a bad path from reaching outside the data directory.
 - **Impact:** an MCP `index_url` original, which sits in the node's temp directory, is never deleted by this change. It's kept only with `SAVE_UPLOADED_FILES=true`, until #1003 moves it into `data_dir`.
 
@@ -133,7 +134,7 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
 
 **#1428**, `originals_cleaner_for`, used by the API container and each indexer worker (#1472). Status: taken.
 
-- **Decision:** a process builds the cleaner only with `FILE_FENCES=postgres`, the v2.4.0 default. Otherwise there is none: every delete, replace and failed job keeps its original, as today.
+- **Decision:** a process builds the cleaner only with `FILE_FENCES=postgres`, the v2.4.0 default. Otherwise there is none: every delete, replace and failed job keeps the upload it saved, as today. With `SAVE_UPLOADED_FILES=false`, nothing is saved: a job's upload is deleted once it settles, failed or not, whatever the fences, as before this change.
 - **Why:** #1428 is a bug users have today, which could ship in a 2.3.x release, but the refactor keeps its behavior changes off until v2.4.0, and 2.3.x is cut from `develop`. A deleted file can't be brought back, so this lands with the release that announces it. Tying it to the fences adds no setting.
 - **Rejected:**
   - shipping it in 2.3.x as a plain fix: `SAVE_UPLOADED_FILES` defaults to `true`, so every deployment would start deleting at once;
@@ -158,7 +159,8 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
 
 - **Decision:**
   - it lists only files directly under `data_dir` named like an upload (`make_unique_filename`), with their `.md` copies, older than `--min-age-hours` (24 by default, at least 1);
-  - `--delete` fails, deleting nothing, when no upload there is referenced;
+  - `--delete` fails, deleting nothing, when no upload there is referenced, or while an indexing job created before the cutoff hasn't settled: a job's record doesn't name its file, and its upload has no row yet;
+  - it deletes exactly the files it lists: a `.md` younger than the cutoff stays, even when its upload goes;
   - it isn't gated by `FILE_FENCES` (D11): an operator runs it on purpose, and listing is the default.
 - **Why:** `data_dir` holds more than uploads, and the catalog stores paths as the API sees them. Run on the host, or against another database, every upload would look unreferenced.
 - **Rejected:** a `--force` past that refusal. A catalog that really references no upload is rare, and the list shows what to remove by hand.

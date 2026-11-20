@@ -193,7 +193,10 @@ async def test_the_orphan_scan_deletes_only_what_no_row_references(postgres_stor
 
     async def scan(**kwargs):
         return [
-            e async for e in scan_orphan_originals(store.document_repo, data_dir, min_age_seconds=24 * 3600, **kwargs)
+            e
+            async for e in scan_orphan_originals(
+                store.document_repo, data_dir, min_age_seconds=24 * 3600, job_repo=store.job_repo, **kwargs
+            )
         ]
 
     events = await scan(delete=True)

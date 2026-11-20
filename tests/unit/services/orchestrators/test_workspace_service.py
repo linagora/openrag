@@ -518,3 +518,49 @@ async def test_a_retried_cleanup_deletes_the_original():
     svc = _svc_with_cleaner(cleaner, wrepo=wrepo)
     assert await svc.retry_failed_file_cleanup("bad", "p")
     assert cleaner.deleted == [["/data/bad"]]
+
+
+class SessionTrackingRepo(FakeWorkspaceRepo):
+    """Counts the cleanup sessions open: each holds a pool connection."""
+
+    open_sessions = 0
+
+    @asynccontextmanager
+    async def cleanup_session(self, file_id, partition):
+        self.open_sessions += 1
+        try:
+            yield self
+        finally:
+            self.open_sessions -= 1
+
+
+class SessionCheckingCleaner(RecordingCleaner):
+    """Records how many cleanup sessions were open at each catalog read."""
+
+    def __init__(self, wrepo):
+        super().__init__(wrepo)
+        self.sessions_open_at: list[int] = []
+
+    async def source_of(self, file_id, partition):
+        self.sessions_open_at.append(self.wrepo.open_sessions)
+        return await super().source_of(file_id, partition)
+
+    async def delete_unreferenced(self, sources):
+        self.sessions_open_at.append(self.wrepo.open_sessions)
+        return await super().delete_unreferenced(sources)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry", [False, True])
+async def test_the_originals_catalog_reads_run_outside_the_cleanup_session(retry):
+    # Inside it, a read would wait for a second pool connection: with as
+    # many orphans as the pool holds, every session waits on another.
+    wrepo = SessionTrackingRepo(orphaned=["fA", "fB"])
+    cleaner = SessionCheckingCleaner(wrepo)
+    svc = _svc_with_cleaner(cleaner, wrepo=wrepo)
+    if retry:
+        assert await svc.retry_failed_file_cleanup("fA", "p")
+    else:
+        await svc.delete_workspace("p", "w1")
+    assert cleaner.sessions_open_at and set(cleaner.sessions_open_at) == {0}
+    assert sorted(sum(cleaner.deleted, [])) == (["/data/fA"] if retry else ["/data/fA", "/data/fB"])

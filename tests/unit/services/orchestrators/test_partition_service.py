@@ -879,8 +879,10 @@ class RecordingCleaner:
         self.release = release
         self.deleted: list[list[str]] = []
 
-    async def sources_in_partition(self, partition):
+    async def sources_in_partition(self, partition, list_sources=None):
         self.events.append("sources")
+        if list_sources is not None:
+            return await list_sources(partition)
         return list(self.sources)
 
     async def delete_unreferenced(self, sources):
@@ -920,6 +922,35 @@ async def test_delete_partition_reads_its_originals_before_the_rows_and_deletes_
     assert events == ["sources", "rows", "originals"]
     assert cleaner.deleted == [["/data/1_a.pdf", "/data/2_b.pdf"]]
     assert svc._original_cleanups == set()
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_reads_its_originals_on_the_lock_connection():
+    class Guard:
+        """The operation lock's connection: a read on the pool could wait for ever while it's held."""
+
+        def __init__(self):
+            self.listed: list[str] = []
+
+        async def list_partition_sources(self, name):
+            self.listed.append(name)
+            return ["/data/held.pdf"]
+
+    guard = Guard()
+
+    class LockingRepo(FakePartitionRepo):
+        @asynccontextmanager
+        async def partition_operation_lock(self, name):
+            yield guard
+
+    cleaner = RecordingCleaner()
+    svc = _svc(prepo=LockingRepo({"p1"}), cleaner=cleaner)
+
+    await svc.delete_partition("p1")
+    await _cleanups_settle(svc)
+
+    assert guard.listed == ["p1"]
+    assert cleaner.deleted == [["/data/held.pdf"]]
 
 
 @pytest.mark.asyncio

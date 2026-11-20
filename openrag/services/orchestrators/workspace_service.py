@@ -194,10 +194,15 @@ class WorkspaceService:
         }
 
     async def _delete_file(self, file_id: str, partition: str) -> None:
+        # The original's catalog reads run outside the cleanup session: it
+        # holds a pool connection throughout, and orphans are deleted
+        # concurrently, so a read inside it could wait on the pool forever.
+        source = await self._source_of_original(file_id, partition)
         async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
             if owned is None:
                 raise RuntimeError(f"Workspace cleanup already running for {file_id}")
             await self._delete_owned_file(file_id, partition, owned)
+        await self._delete_original(source)
 
     async def _delete_owned_file(
         self, file_id: str, partition: str, owned: WorkspaceRepository, *, cleanup_started: bool = False
@@ -207,11 +212,8 @@ class WorkspaceService:
         Drops the file's chunks from the vector store (via the clean
         port: query ids by filter + delete), then finalizes its catalog
         deletion. The catalog row was claimed before vector cleanup started,
-        so a concurrent workspace attachment cannot be lost. Once the row
-        is gone, so is the uploaded original, unless a copy references it.
+        so a concurrent workspace attachment cannot be lost.
         """
-        cleaner = self._originals_cleaner
-        source = await cleaner.source_of(file_id, partition) if cleaner is not None else None
         vector_cleanup_started = cleanup_started
         try:
             ids = await self._vector_store.query_ids_by_filter(
@@ -248,17 +250,28 @@ class WorkspaceService:
                         error=str(release_error),
                     )
             raise
-        if cleaner is not None and source is not None:
-            await cleaner.delete_unreferenced([source])
         logger.info("Deleted orphaned file", file_id=file_id, partition=partition)
+
+    async def _source_of_original(self, file_id: str, partition: str) -> str | None:
+        """The uploaded original of a file about to go; ``None`` keeps it."""
+        if self._originals_cleaner is None:
+            return None
+        return await self._originals_cleaner.source_of(file_id, partition)
+
+    async def _delete_original(self, source: str | None) -> None:
+        """Once the file's row is gone, its original goes too, unless a copy references it."""
+        if self._originals_cleaner is not None and source is not None:
+            await self._originals_cleaner.delete_unreferenced([source])
 
     async def retry_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
         """Retry a failed or abandoned cleanup while keeping attachment fenced."""
+        source = await self._source_of_original(file_id, partition)
         async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
             if owned is None or not await owned.claim_failed_file_cleanup(file_id, partition):
                 return False
             await self._delete_owned_file(file_id, partition, owned, cleanup_started=True)
-            return True
+        await self._delete_original(source)
+        return True
 
 
 __all__ = ["WorkspaceService"]

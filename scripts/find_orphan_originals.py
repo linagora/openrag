@@ -17,16 +17,13 @@ async def scan(args):
     from core.config import load_config
     from services.persistence.connection import ConnectionManager
     from services.persistence.document_repo import PgDocumentRepository
+    from services.persistence.job_repo import PgJobRepository
     from services.storage.orphan_originals import scan_orphan_originals
+    from services.storage.postgres_store import catalog_rdb_config
 
     settings = load_config()
     # A maintenance scan must not create a database or run migrations.
-    rdb = settings.rdb.model_copy(
-        update={
-            "database": settings.rdb.database or f"partitions_for_collection_{settings.vectordb.collection_name}",
-            "auto_create_database": False,
-        }
-    )
+    rdb = catalog_rdb_config(settings).model_copy(update={"auto_create_database": False})
     connection = ConnectionManager(rdb)
     await connection.initialize()
     try:
@@ -35,6 +32,7 @@ async def scan(args):
             settings.paths.data_dir,
             min_age_seconds=args.min_age_hours * 3600,
             delete=args.delete,
+            job_repo=PgJobRepository(lambda: connection.pool),
         )
         async with aclosing(events):
             async for event in events:
@@ -67,7 +65,11 @@ def main(argv=None) -> int:
         default=24,
         help="Skip files younger than this (at least 1): an upload is on disk before its job writes its row.",
     )
-    parser.add_argument("--delete", action="store_true", help="Delete the listed files and their .md copies.")
+    parser.add_argument(
+        "--delete",
+        action="store_true",
+        help="Delete the listed files, unless an indexing job old enough to own one hasn't settled.",
+    )
     args = parser.parse_args(argv)
     try:
         validate_min_age(args.min_age_hours * 3600)

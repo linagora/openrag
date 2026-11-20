@@ -55,6 +55,30 @@ async def test_keeps_an_original_a_copy_still_references(data_dir):
     assert Path(source).exists() and markdown_sidecar_path(source).exists()
 
 
+async def test_keeps_a_sidecar_a_row_references_while_its_original_goes(data_dir):
+    source = upload(data_dir, "1713700000000_a1b2_report.pdf", sidecar=True)
+    sidecar = str(markdown_sidecar_path(source))
+    cleaner = OriginalsCleaner(FakeDocumentRepo(referenced={sidecar}), data_dir)
+    assert await cleaner.delete_unreferenced([source]) == 1
+    assert not Path(source).exists() and Path(sidecar).exists()
+
+
+async def test_exact_targets_leave_the_sidecar(data_dir):
+    source = upload(data_dir, "1713700000000_a1b2_report.pdf", sidecar=True)
+    cleaner = OriginalsCleaner(FakeDocumentRepo(), data_dir)
+    assert await cleaner.delete_unreferenced([source], with_sidecars=False) == 1
+    assert not Path(source).exists() and markdown_sidecar_path(source).exists()
+
+
+@pytest.mark.parametrize("with_sidecars", [True, False])
+async def test_an_md_copy_stays_while_its_upload_is_referenced(data_dir, with_sidecars):
+    source = upload(data_dir, "1713700000000_a1b2_report.pdf", sidecar=True)
+    sidecar = str(markdown_sidecar_path(source))
+    cleaner = OriginalsCleaner(FakeDocumentRepo(referenced={source}), data_dir)
+    assert await cleaner.delete_unreferenced([sidecar], with_sidecars=with_sidecars) == 0
+    assert Path(sidecar).exists()
+
+
 async def test_a_markdown_upload_and_its_sidecar_both_go(data_dir):
     source = upload(data_dir, "1713700000000_a1b2_notes.md", sidecar=True)
     assert markdown_sidecar_path(source).name == "1713700000000_a1b2_notes.md.md"
@@ -136,7 +160,8 @@ async def test_checks_references_in_batches_without_repeats_or_blanks(data_dir):
     cleaner = OriginalsCleaner(repo, data_dir, batch_size=2)
     deleted = await cleaner.delete_unreferenced([*sources, sources[0], None, ""])
     assert deleted == 4
-    assert repo.calls == [sources[0:2], sources[2:4], sources[4:5]]
+    # Each batch is checked with its sidecars, in one query.
+    assert repo.calls == [[*batch, *(f"{s}.md" for s in batch)] for batch in (sources[0:2], sources[2:4], sources[4:5])]
     assert [Path(s).exists() for s in sources] == [False, True, False, False, False]
 
 
@@ -204,6 +229,26 @@ async def test_sources_in_partition(data_dir):
 
 async def test_sources_in_partition_that_cannot_be_read_are_none(data_dir):
     assert await OriginalsCleaner(ListingRepo(fail_read=True), data_dir).sources_in_partition("docs") == []
+
+
+async def test_sources_in_partition_on_a_connection_the_caller_holds(data_dir):
+    repo = ListingRepo(fail_read=True)
+    asked: list[str] = []
+
+    async def on_held_connection(partition):
+        asked.append(partition)
+        return ["/data/1_a.pdf"]
+
+    cleaner = OriginalsCleaner(repo, data_dir)
+    assert await cleaner.sources_in_partition("docs", on_held_connection) == ["/data/1_a.pdf"]
+    assert asked == ["docs"]
+
+
+async def test_sources_on_a_held_connection_that_cannot_be_read_are_none(data_dir):
+    async def failing(partition):
+        raise ConnectionError("lock connection lost")
+
+    assert await OriginalsCleaner(ListingRepo(), data_dir).sources_in_partition("docs", failing) == []
 
 
 # --- originals_cleaner_for ----------------------------------------------------------------

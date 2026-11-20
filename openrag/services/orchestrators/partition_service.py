@@ -537,7 +537,11 @@ class PartitionService:
                 partition=partition,
             )
         cleaner = self._originals_cleaner
-        sources = await cleaner.sources_in_partition(partition) if cleaner is not None else []
+        sources: list[str] = []
+        if cleaner is not None:
+            # On the operation lock's connection when there is one: another
+            # from the pool, while that one is held, could wait for ever.
+            sources = await cleaner.sources_in_partition(partition, getattr(operation, "list_partition_sources", None))
         deleted = await self._delete_partition_for_operation(partition, operation=operation)
         if deleted and self._config is not None:
             self._config.partitions.pop(partition, None)
