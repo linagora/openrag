@@ -143,17 +143,12 @@ size other than `50m` stops it the same way: the overlay declares that zone at
 
 Set these in `.env`:
 
-- **`UVICORN_FORWARDED_ALLOW_IPS`**: `172.16.0.0/12`, the range Docker assigns
-  Compose networks from by default. NPM reaches the API from that network, not
-  from loopback. Without this setting, uvicorn ignores NPM's `X-Forwarded-For`
-  and `X-Forwarded-Proto`. All users then share one failed-login rate-limit
-  bucket, and links built by the API use `http://`. Prefer the range to the
-  network's exact subnet: Docker can assign a different one when the network
-  is re-created, and the setting would then stop matching without any error.
-  Check that the subnet falls in the range with
-  `docker network inspect <project>_default -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'`;
-  if Docker gave it a `192.168.x.x` subnet, use that subnet instead. Do not use
-  `*`; see [Rate Limiting](/openrag/documentation/env_vars/#rate-limiting).
+- Add the TLS proxy to **`UVICORN_FORWARDED_ALLOW_IPS`** so the API receives
+  the client's address and HTTPS scheme. With the default Compose addresses,
+  use `127.0.0.1,172.31.253.200,172.31.253.201`. If you change the bridge
+  subnet, set `OPENRAG_NPM_PROXY_IP` inside the new subnet and outside the
+  dynamic range, then update the allowlist with the new proxy addresses.
+  [Rate Limiting](/openrag/documentation/env_vars/#rate-limiting)
 - **`OIDC_REDIRECT_URI`** (OIDC mode only): `https://<domain>/auth/callback`.
   The `ADMIN_UI_PORT` URL from the [OIDC guide](/openrag/documentation/oidc/)
   no longer works from outside the host. Register the same URL in the IdP's
