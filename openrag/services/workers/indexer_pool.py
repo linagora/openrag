@@ -15,7 +15,9 @@ from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
     FILE_FENCE_RENEW_INTERVAL_SECONDS,
     FILE_FENCE_TTL_SECONDS,
+    FileFenceKind,
 )
+from core.observability.file_fence_metrics import record_file_fence_renewal_failure, start_file_fence_series
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
@@ -282,6 +284,9 @@ class IndexerWorkerActor:
         # actor boundary — not in the worker — so cleanup also covers failures
         # that never reach the worker (catalog/registry init, state updates).
         self._save_uploaded_files = cfg.loader.save_uploaded_files
+        if cfg.loader.file_fences == "postgres":
+            # This worker's refused commits and renewals are counted from 0.
+            start_file_fence_series()
 
     async def _ensure_catalog(self) -> None:
         if self._catalog_initialized:
@@ -1175,6 +1180,8 @@ class IndexerPool:
 
     def _start_fence_renewal(self) -> None:
         if self._fence_renewal is None or self._fence_renewal.done():
+            # A round before any renewal can fail: the series is scraped at 0 first.
+            start_file_fence_series()
             self._fence_renewal = asyncio.create_task(self._keep_file_fences_alive())
 
     async def _keep_file_fences_alive(self) -> None:
@@ -1194,6 +1201,7 @@ class IndexerPool:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - renewal retries until the tasks settle
+                record_file_fence_renewal_failure(holder_kind=FileFenceKind.INDEX.value)
                 from core.utils.logging import get_logger
 
                 get_logger().warning("Failed to renew file fences; retrying.", fences=len(fences), error=str(exc))

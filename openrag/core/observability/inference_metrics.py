@@ -45,9 +45,12 @@ already draws that line with ``skip_if=_targets_client_endpoint``.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import NamedTuple, Protocol
+from typing import NamedTuple
 
-from core.observability._ray_counters import start_counter_at_zero
+from core.observability._dual_backend import Instrument as _Instrument
+from core.observability._dual_backend import PrometheusInstrument as _PrometheusInstrument
+from core.observability._dual_backend import RayInstrument as _RayInstrument
+from core.observability._dual_backend import use_ray_backend as _use_ray_backend
 from core.observability._reporting import report_once
 from core.observability.metric_specs import (
     CIRCUIT_BREAKER_STATE,
@@ -136,73 +139,11 @@ def _start_request_series(provider: str, instance: object) -> None:
 CLIENT_OVERRIDE_PROVIDER = "client_override"
 
 
-class _Instrument(Protocol):
-    """The two backends' APIs differ; call sites should not have to know which."""
-
-    def inc(self, value: float, tags: dict[str, str]) -> None: ...
-
-    def start_at_zero(self, tags: dict[str, str]) -> None: ...
-
-    def observe(self, value: float, tags: dict[str, str]) -> None: ...
-
-    def set(self, value: float, tags: dict[str, str]) -> None: ...
-
-
-class _RayInstrument:
-    def __init__(self, metric: object) -> None:
-        self._metric = metric
-
-    def inc(self, value: float, tags: dict[str, str]) -> None:
-        self._metric.inc(value, tags=tags)
-
-    def start_at_zero(self, tags: dict[str, str]) -> None:
-        start_counter_at_zero(self._metric, tags)
-
-    def observe(self, value: float, tags: dict[str, str]) -> None:
-        self._metric.observe(value, tags=tags)
-
-    def set(self, value: float, tags: dict[str, str]) -> None:
-        self._metric.set(value, tags=tags)
-
-
-class _PrometheusInstrument:
-    def __init__(self, metric: object) -> None:
-        self._metric = metric
-
-    def inc(self, value: float, tags: dict[str, str]) -> None:
-        self._metric.labels(**tags).inc(value)
-
-    def start_at_zero(self, tags: dict[str, str]) -> None:
-        self._metric.labels(**tags).inc(0)
-
-    def observe(self, value: float, tags: dict[str, str]) -> None:
-        self._metric.labels(**tags).observe(value)
-
-    def set(self, value: float, tags: dict[str, str]) -> None:
-        self._metric.labels(**tags).set(value)
-
-
 class _Instruments(NamedTuple):
     requests: _Instrument
     duration: _Instrument
     tokens: _Instrument
     circuit_breaker: _Instrument
-
-
-@lru_cache(maxsize=1)
-def _use_ray_backend() -> bool:
-    """Whether this process exports through Ray rather than ``/metrics``.
-
-    Cached: a process does not migrate between the two. A failure resolving
-    Ray's context means we are not in an actor, so ``prometheus_client`` is the
-    correct answer rather than an error.
-    """
-    try:
-        import ray
-
-        return ray.get_runtime_context().get_actor_id() is not None
-    except Exception:  # noqa: BLE001 - absence of Ray is an answer, not a failure
-        return False
 
 
 @lru_cache(maxsize=1)

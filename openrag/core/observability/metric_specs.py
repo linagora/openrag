@@ -216,6 +216,13 @@ INFERENCE_OUTCOME_VALUES: tuple[str, ...] = ("success", "error", "timeout", "cir
 #: Token direction.
 TOKEN_KIND_VALUES: tuple[str, ...] = ("prompt", "completion")
 
+#: The operation that met a busy file (#1430): an upload or replace, a delete,
+#: a metadata update, or a copy (into the file, or of it).
+FILE_OPERATION_VALUES: tuple[str, ...] = ("index", "delete", "metadata", "copy")
+
+#: What held the file: ``FileFenceKind``'s values, one per operation that takes a fence.
+FILE_FENCE_HOLDER_KIND_VALUES: tuple[str, ...] = ("index", "delete", "metadata")
+
 
 # ---------------------------------------------------------------------------
 # Tier 1 — produced in Ray workers (exported via ray.util.metrics)
@@ -378,6 +385,37 @@ LLM_TOKENS_TOTAL = MetricSpec(
 
 #: Every spec declared above. The cardinality test walks this; the backends
 #: instantiate from it. A metric that is not here is not covered by either.
+#: Each refusal of an operation because another one held the file (#1430).
+#: Recorded where the refusal is decided, in the API process; with
+#: ``FILE_FENCES=ray`` nothing is recorded.
+FILE_FENCE_CONFLICTS_TOTAL = MetricSpec(
+    name="openrag_file_fence_conflicts_total",
+    description="Operations refused because another operation held the file, by operation and holder",
+    kind="counter",
+    labels=("file_operation", "holder_kind"),
+)
+
+#: A catalog write refused because its operation had lost the file's fence:
+#: most often an indexing task whose file was deleted meanwhile. Expected now
+#: and then; a steady rate means fences lapse (see the renewal failures).
+FILE_FENCE_COMMITS_REFUSED_TOTAL = MetricSpec(
+    name="openrag_file_fence_commits_refused_total",
+    description="Catalog writes refused because their operation no longer held the file's fence",
+    kind="counter",
+    labels=(),
+)
+
+#: A renewal that failed on a database error and will be retried. The lease
+#: outlasts three missed rounds, so a burst is harmless; a sustained rate means
+#: fences are about to lapse.
+FILE_FENCE_RENEWAL_FAILURES_TOTAL = MetricSpec(
+    name="openrag_file_fence_renewal_failures_total",
+    description="File fence renewals that failed, retried or ending the operation, by the kind of holder",
+    kind="counter",
+    labels=("holder_kind",),
+)
+
+
 ALL_SPECS: tuple[MetricSpec, ...] = (
     CIRCUIT_BREAKER_STATE,
     INGEST_DOCUMENTS_TOTAL,
@@ -395,12 +433,20 @@ ALL_SPECS: tuple[MetricSpec, ...] = (
     INFERENCE_REQUESTS_TOTAL,
     INFERENCE_DURATION_SECONDS,
     LLM_TOKENS_TOTAL,
+    FILE_FENCE_CONFLICTS_TOTAL,
+    FILE_FENCE_COMMITS_REFUSED_TOTAL,
+    FILE_FENCE_RENEWAL_FAILURES_TOTAL,
 )
 
 
 __all__ = [
     "ALL_SPECS",
     "CIRCUIT_BREAKER_STATE",
+    "FILE_FENCE_COMMITS_REFUSED_TOTAL",
+    "FILE_FENCE_CONFLICTS_TOTAL",
+    "FILE_FENCE_HOLDER_KIND_VALUES",
+    "FILE_FENCE_RENEWAL_FAILURES_TOTAL",
+    "FILE_OPERATION_VALUES",
     "FORBIDDEN_LABELS",
     "INFERENCE_DURATION_SECONDS",
     "INFERENCE_OPERATION_VALUES",

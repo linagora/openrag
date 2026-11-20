@@ -17,6 +17,7 @@ from core.models.catalog import (
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     DocumentStatus,
+    FileFenceKind,
     IndexationJob,
     reconcile_task_state,
 )
@@ -304,6 +305,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 partition=partition,
                 file_id=file_id,
                 holder_id=fence_id,
+                holder_kind=FileFenceKind.DELETE,
                 work=lambda: self._delete_file_with_fence(file_id=file_id, partition=partition),
             )
         )
@@ -777,6 +779,7 @@ class WorkerDispatcher(IndexingDispatcher):
             partition=partition,
             file_id=file_id,
             holder_id=holder_id,
+            holder_kind=FileFenceKind.METADATA,
             work=lambda: self._update_file_metadata(file_id, metadata, partition),
         )
 
@@ -840,7 +843,7 @@ class WorkerDispatcher(IndexingDispatcher):
         # writing the target, as an upload would be.
         claim_token = f"{COPY_CONTENT_CLAIM_TOKEN_PREFIX}{uuid.uuid4().hex}"
         fenced = await self._file_fences.acquire_for_indexing(
-            partition=target_partition, file_id=target_file_id, holder_id=claim_token
+            partition=target_partition, file_id=target_file_id, holder_id=claim_token, operation="copy"
         )
 
         def run_copy() -> Awaitable[None]:
@@ -864,7 +867,11 @@ class WorkerDispatcher(IndexingDispatcher):
         if fenced:
             # Re-embedding into another vector field can outlast the lease.
             await self._file_fences.hold(
-                partition=target_partition, file_id=target_file_id, holder_id=claim_token, work=run_copy
+                partition=target_partition,
+                file_id=target_file_id,
+                holder_id=claim_token,
+                holder_kind=FileFenceKind.INDEX,
+                work=run_copy,
             )
         else:
             await run_copy()
