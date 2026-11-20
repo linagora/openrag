@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")
 
 
 @pytest.mark.xfail(
-    reason="cross-store fixture lands in Phase 7C — see REFACTORING_DECISION_LOG.md",
+    reason="the cross-store fixture is not written yet",
     strict=True,
 )
 async def test_cross_store_full_cycle():
