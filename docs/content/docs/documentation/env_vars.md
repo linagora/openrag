@@ -72,6 +72,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy, so URLs indexed through MCP are skipped. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
 |`SAVE_UPLOADED_FILES`|`bool`|`true`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
+| `FILE_FENCES` | `str` | `ray` | Where the per-file fences live: `ray` or `postgres`. With `postgres`, an upload or replace of a file that is being indexed or deleted is refused with `409`; a delete of a file being indexed stops the indexing and wins, and a delete of a file already being deleted waits for it (up to 60 s, then `409`); an indexing task whose file was deleted meanwhile cannot write it back. Set the same value on every API replica: a replica on `ray` doesn't take the fences, so a file it deletes can be written back by a task the others started. Not yet meant for production. |
 | `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
 | `PARSE_TIMEOUT` | `int` | `3600` | Outer wall-clock bound (in seconds) for a single file's parse stage, whichever loader runs it. Marker and Docling self-limit via their own timeouts, but `PyMuPDFLoader` has none — this bound stops a wedged parse from stalling indexing: the file fails and is reported instead. |
 | `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS` | `bool` | `false` | Development-only escape hatch for the upload `callback_url`. By default, literal localhost, private, link-local, and reserved addresses are refused. DNS hostnames are not resolved by this check. Set it to `true` only in a dev stack whose callback target is a local instance (e.g. `http://cozy.localhost:8080`). Non-`http(s)` schemes stay rejected either way. |
@@ -85,10 +86,11 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `XLSX_BATCH_SIZE` | `int` | `10000` | Positive number of data rows per parser batch for `.xlsx` and `.xlsm` workbooks. The rendered batch byte limit can flush a batch earlier. This is independent of the chunk token budget. |
+| `XLSX_CHARTS` | `str` | `full` | Charts in workbooks: `full` indexes every chart with its data, including data plotted from hidden worksheets; `without_hidden_data` indexes every chart but leaves out values, labels, names, titles and text boxes read from hidden worksheets, rows or columns; `off` reads no chart (worksheet text boxes are still indexed). |
 
 Set archive, worksheet, cell, and batch byte limits through `loader.xlsx_limits` in YAML; there are no individual environment-variable overrides for these limits. Unknown limit names, non-integer values, and non-positive values are rejected. Rows waiting for their table's turn in the single worksheet pass use memory first, then a temporary file in the standard `TMPDIR`; a read-only or full `TMPDIR` only makes large worksheets fall back to slower per-table reads, never changes what is indexed. Header selection is automatic per table; the former `XLSX_HEADER_ROW` and per-sheet header settings are no longer supported.
 
-See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, formula handling, hidden content, and default safety limits.
+See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, charts, formula handling, hidden content, and default safety limits.
 
 #### PDF Loader
 ##### PyMuPDF Loader Configuration
@@ -276,7 +278,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
 | `EMBEDDER_TIMEOUT` | `float` | 120.0 | Per-request HTTP timeout (in seconds) for embedding calls. Raise it for slow remote endpoints. |
 | `EMBEDDER_BATCH_SIZE` | `int` | 32 | Number of chunks sent per embedding request; large documents are split into batches of this size. |
-| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests in flight at once. |
+| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests one `embed()` call keeps in flight, when its texts span several batches of `EMBEDDER_BATCH_SIZE`. It is not a limit for the whole process: N files embedding at once send up to N times this many requests. |
 
 If you prefer to use an **external embedding service**, simply comment out the embedder service in the [docker-compose.yaml](https://github.com/linagora/openrag/blob/dev/docker-compose.yaml#L117-L153) and provide the variables above in your environment.
 
@@ -465,7 +467,7 @@ The retriever fetches relevant documents from the vector database based on query
 |----------|------|---------|-------------|
 | `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
 | `RETRIEVER_TOP_K` | int | 50 | Number of documents to retrieve before reranking.|
-| `SIMILARITY_THRESHOLD` | float | 0.6 | Minimum similarity score (0.0-1.0) for document retrieval. Documents below this threshold are filtered out |
+| `SIMILARITY_THRESHOLD` | float | 0.2 | Minimum similarity score (0.0-1.0) applied to the dense (semantic) search only, before it is merged with the keyword (BM25) results. Its scale depends on the embedding model; with the default embedder relevant passages score about 0.2-0.7. Read only when no partition is loaded. Chat uses the `similarity_threshold` of the partition's retrieval preset, `GET /search` its own `similarity_threshold` parameter (default 0.2), and the MCP search tool `OPENRAG_MCP_SIMILARITY_THRESHOLD` |
 | `WITH_SURROUNDING_CHUNKS` | `bool` | false | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
 | `INCLUDE_RELATED` | `bool` | true | Expand results with chunks from files sharing the matched file's `relationship_id` (see [Linked files](/openrag/documentation/linked_files/)). |
 | `INCLUDE_ANCESTORS` | `bool` | true | Expand results with chunks from ancestor files in the parent/child file hierarchy (see [Linked files](/openrag/documentation/linked_files/)). |
@@ -819,7 +821,7 @@ OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol
 | `OPENRAG_MCP_PATH` | `str` | `/mcp` | HTTP path the MCP endpoint is served under. |
 | `OPENRAG_MCP_DEFAULT_TOP_K` | `int` | `5` | Number of chunks the search tool returns when the caller doesn't specify `top_k`. |
 | `OPENRAG_MCP_MAX_TOP_K` | `int` | `50` | Upper bound clamped on a caller-supplied `top_k`. |
-| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.8` | Minimum similarity score for a chunk to be returned by the search tool. |
+| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.2` | Minimum similarity score applied to the dense (semantic) side of the search only, before the merge with keyword (BM25) results. Its scale depends on the embedder. |
 | `OPENRAG_MCP_DOWNLOAD_TIMEOUT` | `float` | `30.0` | Timeout (seconds) for the server-side `index_url` fetch (SSRF/DoS hardening). |
 | `OPENRAG_MCP_MAX_DOWNLOAD_BYTES` | `int` | `104857600` | Maximum bytes downloaded by an `index_url` fetch. Default is 100 MiB. |
 

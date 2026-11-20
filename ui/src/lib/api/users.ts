@@ -1,4 +1,4 @@
-import { request } from "./client";
+import { ApiError, request } from "./client";
 import {
   listPartitions,
   listPartitionMembers,
@@ -21,6 +21,8 @@ export interface UserResponse {
   file_quota: number | null;
   file_count?: number | null;
   created_at: string | null;
+  /** Only returned by GET /users/{id}, not by the list endpoint. */
+  memberships?: UserMembership[];
 }
 
 /** create and regenerate_token also return the one-time bearer token. */
@@ -101,6 +103,37 @@ export function deleteUser(id: string | number) {
   return request<void>(`${BASE}/${id}`, { method: "DELETE" });
 }
 
+// The backend never deletes the default partition: a user who owns it only
+// loses their membership, and the default admin becomes its owner.
+const DEFAULT_PARTITION = "default";
+
+/** Confirmation text for deleting a user. Deleting a user deletes every
+ *  partition where they hold the owner role (even if others own it too), with
+ *  its documents. Pass `memberships` to name those partitions; without them the
+ *  text stays generic. */
+export function deleteUserDescription(label: string, memberships?: UserMembership[]): string {
+  // The cascade sentence is always shown: the names below are a snapshot from
+  // when the dialog opened, and DELETE removes whatever they own at that time.
+  const parts = [
+    `Permanently delete "${label}"?`,
+    "Every partition they own is deleted too, with all its documents, even if it has other owners (the default partition is kept).",
+  ];
+  if (memberships) {
+    const owned = memberships.filter((m) => m.role === "owner").map((m) => m.partition);
+    const deleted = owned.filter((p) => p !== DEFAULT_PARTITION);
+    parts.push(
+      deleted.length === 0
+        ? "Right now they own no such partition."
+        : `Right now that is: ${deleted.join(", ")}.`,
+    );
+    if (owned.includes(DEFAULT_PARTITION)) {
+      parts.push("They own the default partition, so the default admin becomes its owner.");
+    }
+  }
+  parts.push("They lose access to every other partition, and their token stops working.");
+  return parts.join(" ");
+}
+
 // One rotating bearer token per user; regenerating invalidates the old one.
 export function regenerateUserToken(id: string | number) {
   return request<UserWithToken>(`${BASE}/${id}/regenerate_token`, { method: "POST" });
@@ -117,20 +150,40 @@ export interface UserMembership {
   added_at: string | null;
 }
 
-export async function listUserMemberships(userId: number): Promise<UserMembership[]> {
+export interface UserMembershipsResult {
+  memberships: UserMembership[];
+  unavailablePartitions: string[];
+}
+
+export async function listUserMemberships(userId: number): Promise<UserMembershipsResult> {
   const { partitions } = await listPartitions();
   const rows = await Promise.all(
     partitions.map(async (p) => {
       try {
         const { members } = await listPartitionMembers(p.name);
         const m = members.find((mm) => mm.user_id === userId);
-        return m ? { partition: p.name, role: m.role as PartitionRole, added_at: m.added_at } : null;
-      } catch {
-        return null;
+        return {
+          membership: m ? { partition: p.name, role: m.role as PartitionRole, added_at: m.added_at } : null,
+          unavailable: false,
+        };
+      } catch (error) {
+        // A 403 means the caller cannot inspect this partition, so the result
+        // is incomplete. A 404 means it disappeared after the initial list and
+        // cannot contain a current membership. Other failures must propagate.
+        if (error instanceof ApiError && error.status === 403) {
+          return { membership: null, unavailable: true };
+        }
+        if (error instanceof ApiError && error.status === 404) {
+          return { membership: null, unavailable: false };
+        }
+        throw error;
       }
     }),
   );
-  return rows.filter((r): r is UserMembership => r !== null);
+  return {
+    memberships: rows.flatMap((row) => row.membership ? [row.membership] : []),
+    unavailablePartitions: rows.flatMap((row, index) => row.unavailable ? [partitions[index].name] : []),
+  };
 }
 
 export function grantMembership(partition: string, userId: number, role: PartitionRole) {

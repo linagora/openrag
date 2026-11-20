@@ -511,3 +511,54 @@ async def test_quota_allows_when_indexed_plus_pending_is_under_limit():
         config=_config(default_file_quota=10),
     )
     assert user["id"] == 7
+
+
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.parametrize("role", ["viewer", "editor", "owner"])
+@pytest.mark.asyncio
+async def test_ensure_partition_role_refuses_a_reserved_partition_name(partition, role):
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            partition=partition,
+            user={"id": 7, "is_admin": False},
+            user_partitions=[{"partition": partition, "role": "owner"}],
+            required_role=role,
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing={partition}),
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_super_admin_may_read_through_a_reserved_name(monkeypatch):
+    import api.dependencies.auth as auth_dependencies
+
+    monkeypatch.setattr(auth_dependencies, "SUPER_ADMIN_MODE", True)
+    assert await ensure_partition_role(
+        partition="all",
+        user={"id": 1, "is_admin": True},
+        user_partitions=[],
+        required_role="viewer",
+        auth_service=FakeAuthService,
+        partition_service=FakePartitionService(existing=set()),
+    )
+
+
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.parametrize("role", ["editor", "owner"])
+@pytest.mark.asyncio
+async def test_super_admin_cannot_change_a_reserved_partition(monkeypatch, partition, role):
+    """The store reads `all` as every partition: deleting file X in it deleted X everywhere."""
+    import api.dependencies.auth as auth_dependencies
+
+    monkeypatch.setattr(auth_dependencies, "SUPER_ADMIN_MODE", True)
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            partition=partition,
+            user={"id": 1, "is_admin": True},
+            user_partitions=[],
+            required_role=role,
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing={"all"}),
+        )
+    assert exc.value.status_code == 403

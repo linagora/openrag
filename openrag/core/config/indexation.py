@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 
@@ -176,6 +176,10 @@ class LoaderConfig(ConfigMixin):
     csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
     xlsx_batch_size: int = Field(default=10_000, gt=0, strict=True)
     xlsx_limits: dict[str, Annotated[int, Field(gt=0, strict=True)]] = Field(default_factory=dict)
+    # Charts in workbooks: "full" (with all their data, hidden sources
+    # included), "without_hidden_data" (data read from hidden worksheets, rows
+    # or columns left out) or "off".
+    xlsx_charts: Literal["full", "without_hidden_data", "off"] = "full"
 
     @field_validator("xlsx_limits")
     @classmethod
@@ -201,6 +205,10 @@ class LoaderConfig(ConfigMixin):
     # embedding, and storage. The upload hash is calculated while streaming the
     # file to disk, so this does not add a second read for HTTP uploads.
     content_deduplication_enabled: bool = True
+    # Where the per-file fences live (#1430). ``ray``: the TaskStateManager
+    # fences only, as before. ``postgres``: a Postgres fence too, which also
+    # covers a replace and refuses a catalog write whose fence was taken.
+    file_fences: Literal["ray", "postgres"] = "ray"
     mimetypes: MimetypesConfig = Field(default_factory=MimetypesConfig)
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)

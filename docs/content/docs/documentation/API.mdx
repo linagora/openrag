@@ -106,7 +106,7 @@ Upload a new file to a specific partition for indexing.
 **Responses:**
 - `201 Created`: Returns task status URL
 - `400 Bad Request`: malformed URL, non-HTTP(S) scheme, or unsafe literal address
-- `409 Conflict`: File already exists in partition. Three more cases name a code,
+- `409 Conflict`: File already exists in partition. Four more cases name a code,
   as the `[CODE]` prefix of `detail` (`"[CODE]: message"`):
   - `DOCUMENT_INDEXING_IN_PROGRESS`: another task is still indexing this `file_id`.
     `extra.existing_task_id` points at it, so a client that re-sent after a
@@ -127,6 +127,21 @@ Upload a new file to a specific partition for indexing.
     task is indexing it any more, for example because it settled a moment ago.
   - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
     expired before indexing started. Nothing was queued; retry the upload.
+  - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted and its catalog
+    entry is already gone; while the delete still holds it, `POST` answers the plain
+    "already exists" `409`. Nothing was queued; retry once the delete has succeeded.
+    Earlier releases answered `500`.
+- `415 Unsupported Media Type`: the file's extension and mimetype are both
+  unsupported, or its content does not match its extension (for example a `.pdf`
+  that is not a PDF, or a `.docx` that is not a readable Office package)
+- `422 Unprocessable Entity`: the `file` part has no filename, or the Office file
+  is password-protected or encrypted (`ENCRYPTED_OFFICE_FILE`)
+
+A `201` only means the file was queued. A document that yields no indexable
+content (for example a CSV with a header but no data rows, or a workbook with no visible sheet) is not
+refused at upload: its task ends `FAILED` with `NO_INDEXABLE_CONTENT`, visible
+through the task-status URL and `GET /indexer/task/{task_id}/error`, and its
+callback reports `"error"`.
 
 ##### Indexing status callback
 
@@ -271,6 +286,12 @@ Replace an existing file in the partition. Deletes the current entry and creates
     returns `DOCUMENT_INDEXING_IN_PROGRESS`.
   - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
     expired before indexing started. Nothing was queued; retry the request.
+  - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. Nothing was
+    queued. Once the delete has succeeded the file no longer exists, so a `PUT`
+    answers `404`: upload it again with `POST`, passing `workspace_ids` to add it
+    back to the workspaces the delete removed it from. Earlier releases answered `500`.
+- `415 Unsupported Media Type` / `422 Unprocessable Entity`: same cases as the
+  POST endpoint
 
 #### Update File Metadata
 ```http
@@ -282,7 +303,9 @@ Update file metadata without reindexing the document.
 **Request Body (form-data):**
 - `metadata` (JSON string): Updated metadata
 
-**Response:** `200 OK` on successful update
+**Response:** `200 OK` on successful update. A `partition` other than the file's own is refused with
+`400 Bad Request` (`PARTITION_CHANGE_UNSUPPORTED`): this endpoint does not move files. To move one, copy
+it to the other partition, then delete it from this one.
 
 #### Delete File
 ```http
@@ -929,7 +952,7 @@ List all available RAG models (partitions).
 
 **Model Naming Convention:**
 - Pattern: `openrag-{partition_name}` => This model allows to chat specifically with the partition `{partition_name}`
-- Special model: `partition-all` (queries entire vector database)
+- Special model: `openrag-all` (queries all partitions the caller can access)
 
 * Chat Completions
 ```http

@@ -62,6 +62,27 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
 
+The default similarity threshold is now `0.2`. The threshold filters the semantic
+(embedding) search only, before it is merged with the keyword search, and with
+the default embedder relevant passages score about 0.2-0.7, so the old values
+often emptied the semantic side. Retrieval results change: more passages come
+from the semantic search, mostly for questions in another language than the
+documents and for abbreviations. Each path reads its own value, so to keep the
+old behavior, set it back where that path reads it:
+
+- Chat uses the `similarity_threshold` of the partition's retrieval preset. A
+  migration sets it to `0.2` in every retrieval preset that still holds exactly
+  `0.6`, and a rollback does not restore `0.6`. A preset without the key, such
+  as the seeded `multiquery` and `hyde`, follows the new default of `0.2` (it was
+  `0.6`). A preset holding any other value keeps it. To keep `0.6`, set it in the
+  preset after the upgrade.
+- `GET /search` defaults to `0.2` (it was `0.75`). Pass `similarity_threshold` in
+  the request to keep the old value; the preset does not change it.
+- The MCP search tool reads `OPENRAG_MCP_SIMILARITY_THRESHOLD`, now `0.2` (it was
+  `0.8`). Set the variable to keep the old value; the preset does not change it.
+- `SIMILARITY_THRESHOLD` is now `0.2` (it was `0.6`). It is read only when no
+  partition is loaded.
+
 ## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
 
 The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any
@@ -115,6 +136,12 @@ the error names the setting.
 | `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. | Keep `openrag.replicas: 1`, or share one Ray cluster: `ray.enabled: true` together with `env.config.RAY_ADDRESS` or `env.config.ENABLE_RAY_SERVE=true` (see [Notes](/openrag/documentation/kubernetes/#notes)), or an external cluster through `env.config.RAY_ADDRESS`, with `ray.externalCluster: true` when `RAY_ADDRESS` comes from a Secret the chart cannot read. |
 | Marker, Docling and Whisper workers that don't fit the OpenRAG pod's GPUs | Each worker reserves its `*_NUM_GPUS` of the pod's GPUs (`MARKER_POOL_SIZE` × `MARKER_NUM_GPUS`, `DOCLING_POOL_SIZE` × `DOCLING_NUM_GPUS`, `WHISPER_N_WORKERS` × `WHISPER_NUM_GPUS`). Ray keeps a fraction of a GPU on a single card, and takes a reservation of 1 or more as whole cards, so three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and files sent to them fail after the parser's timeout. A preset can select Marker or Docling even when `PDFLOADER` names another parser, and Whisper transcribes audio by default, so the check applies to every deployment with a GPU in the pod, whatever order the workers start in. | Lower the pool sizes or the `*_NUM_GPUS` values, or give the pod more GPUs. A reservation above 1 must be a whole number. |
 
+The chart can check the GPU settings only where it can read them: in `env.config`,
+and in `env.secrets` when it renders the Secret itself. A `MARKER_*`, `DOCLING_*` or
+`WHISPER_*` value in an `env.existingSecret` or in a secret from an external secrets
+operator is not checked, and it overrides `env.config` at runtime. Keep these
+settings in `env.config` only, removed from that Secret, or check the fit yourself.
+
 The chart also drops `RAY_NUM_GPUS` from its defaults: OpenRAG never read it, so a
 copy in your values does nothing.
 
@@ -156,6 +183,28 @@ Two changes to chunks indexed after the upgrade. Chunks already indexed don't ch
 
 - Contextualized chunks no longer have a `* filename:` line. The chunker's `[Source: ...]` header now names the file once, using the sanitized filename.
 - `structured_section` no longer has a `prepend_heading_path` option. A preset that still sets it to `false` keeps loading and ignores it, so its new chunks get a header, which leaves less room for each chunk's body and can move chunk boundaries.
+
+## OpenRAG 2.3.5: a partition named `all`
+
+Search and chat use `all` to mean every partition you can access (`partitions=all`,
+`openrag-all`). From 2.3.5 it is a reserved partition name, in any case and with or
+without surrounding whitespace. A partition can no longer be created with that name, and
+the files of one that already exists are no longer reachable through the API after
+the upgrade.
+
+Only an instance that ran 2.2.2 or earlier can have one. Check before you upgrade, in
+the OpenRAG database:
+
+```sql
+SELECT partition FROM partitions WHERE lower(regexp_replace(partition, '[^[:alnum:]]', '', 'g')) = 'all';
+```
+
+The query also lists a name such as `a.l.l`, which is not reserved: only a name that
+reads `all` once the whitespace around it is removed is. If it returns such a name,
+upload that partition's files again into a partition with another name before you
+upgrade. Don't delete or copy files out of the `all` partition first:
+on 2.3.4 and earlier, those operations also reach files with the same ID in other
+partitions.
 
 ## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
 

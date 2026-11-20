@@ -16,12 +16,16 @@ const statusStyles: Record<string, string> = {
   PARTIAL: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
 };
 
+const statusLabels: Record<string, string> = {
+  SERIALIZING: "Active",
+};
+
 export function StatusBadge({ status }: { status: string }) {
   const upper = status.toUpperCase();
   const className = statusStyles[upper] || "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200";
   return (
     <Badge variant="outline" className={className}>
-      {upper}
+      {statusLabels[upper] ?? upper}
     </Badge>
   );
 }

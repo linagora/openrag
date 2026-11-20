@@ -51,6 +51,7 @@ import type {
   ModelType,
 } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import {
   AlertDialog,
@@ -178,11 +179,12 @@ export default function ModelsPage() {
   // which partitions stay behind.
   const [pendingDefault, setPendingDefault] = useState<ModelEndpointResponse | null>(null);
 
-  const { data, isLoading } = useQuery({
+  const endpointsQuery = useQuery({
     queryKey: ["model-endpoints"],
     queryFn: () => listModelEndpoints(),
     refetchInterval: refetchWhileDetecting,
   });
+  const { data, isLoading } = endpointsQuery;
 
   const createMut = useMutation({
     mutationFn: (req: CreateModelEndpointRequest) => createModelEndpoint(req),
@@ -297,8 +299,27 @@ export default function ModelsPage() {
                   <Skeleton key={i} className="h-48" />
                 ))}
               </div>
+            ) : endpointsQuery.isLoadingError ? (
+              <QueryErrorNotice
+                title="Model endpoints could not be loaded"
+                message="The endpoint list is unavailable. Try again to reload it."
+                isRetrying={endpointsQuery.isFetching}
+                onRetry={() => void endpointsQuery.refetch()}
+              />
             ) : (
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <>
+                {endpointsQuery.isRefetchError && (
+                  <div className="mb-4">
+                    <QueryErrorNotice
+                      title="Model endpoints could not be refreshed"
+                      message="Showing previously loaded endpoints. They may be out of date."
+                      isRetrying={endpointsQuery.isFetching}
+                      onRetry={() => void endpointsQuery.refetch()}
+                      stale
+                    />
+                  </div>
+                )}
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {endpoints
                   .filter((ep) => ep.model_type === type)
                   .map((ep) => {
@@ -399,7 +420,8 @@ export default function ModelsPage() {
                     No {type} endpoints configured.
                   </p>
                 )}
-              </div>
+                </div>
+              </>
             )}
           </TabsContent>
         ))}

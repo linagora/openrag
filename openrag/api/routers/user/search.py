@@ -78,7 +78,13 @@ class CommonSearchParams:
         text: str = Query(..., description="Text to search semantically"),
         top_k: int = Query(5, ge=1, description="Number of top results to return"),
         similarity_threshold: float = Query(
-            0.75, ge=0, le=1, description="Minimum similarity score for results (0 to 1)"
+            0.2,
+            ge=0,
+            le=1,
+            description=(
+                "Minimum similarity score (0 to 1) for the semantic (dense) candidates, applied before "
+                "they are merged with the keyword (BM25) results, which it does not filter"
+            ),
         ),
         filter: str | None = Query(
             default=None,
@@ -288,7 +294,7 @@ async def retrieval_diagnostics(
 - `partitions`: List of partition names (default: ["all"])
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
-- similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `similarity_threshold`: Minimum similarity score for the semantic (dense) candidates, applied before they are merged with the keyword (BM25) results, which it does not filter (0 to 1, default: 0.2)
 - `rerank`: Rerank the vector search candidates and return the best `top_k` (default: false). A search over one partition uses that partition's reranker preset, a search over several partitions uses the default reranker. Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
 - `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, or `retriever.top_k` for a search over several partitions; at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
@@ -410,7 +416,7 @@ async def search_multiple_partitions(
 **Query Parameters:**
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
-- similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `similarity_threshold`: Minimum similarity score for the semantic (dense) candidates, applied before they are merged with the keyword (BM25) results, which it does not filter (0 to 1, default: 0.2)
 - `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
 - `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
@@ -511,7 +517,7 @@ async def search_one_partition(
 **Query Parameters:**
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
-- similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `similarity_threshold`: Minimum similarity score for the semantic (dense) candidates, applied before they are merged with the keyword (BM25) results, which it does not filter (0 to 1, default: 0.2)
 - `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only.
 - `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `filter`: Milvus filter expression string for additional filtering (optional)

@@ -9,6 +9,15 @@ on:
       - "infra/charts/**"
   workflow_dispatch:
 
+# Runs outside main can all publish the same mutable X.Y.Z-dev tag, so they
+# share one group: they queue instead of overlapping, and a newer run replaces
+# a queued older one, so the tag ends up on the newest chart. Each main run is
+# its own group, since main publishes one version per release and a replaced
+# run would leave that version unpublished.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || 'dev' }}
+  cancel-in-progress: false
+
 env:
   HELM_REGISTRY: ghcr.io
   HELM_ORG: linagora
@@ -37,8 +46,14 @@ jobs:
             # Keep version as-is for stable
             CHART_VERSION="$BASE_VERSION"
           else
-            # Append branch for dev builds
-            CHART_VERSION="${BASE_VERSION}-dev"
+            # Only a release's bump commit moves Chart.yaml's version, so here
+            # it is the last release's. A dev build is a prerelease of the next
+            # patch, which sorts above that release.
+            if [[ ! "$BASE_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "::error::Chart.yaml version '$BASE_VERSION' is not MAJOR.MINOR.PATCH, so the next patch cannot be computed."
+              exit 1
+            fi
+            CHART_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))-dev"
             yq -i ".version = \"${CHART_VERSION}\"" infra/charts/openrag-stack/Chart.yaml
           fi
 

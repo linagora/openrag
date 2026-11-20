@@ -51,8 +51,13 @@ _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
 # Chainlit inserts source names into Markdown link labels. Strip only characters
 # that can break or restyle that label so ordinary filenames stay recognizable.
 _MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]*`\\<>", " "))
-_MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"^(?:(?:#{1,6}|[-+]|\d{1,9}[.)])\s+)+")
+_MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"^(?:(?:#{1,6}|[-+]|\d{1,9}[.)])(?:\s+|$))+")
 _MARKDOWN_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:-\s*){3,}|(?:_\s*){3,}|(?:\*\s*){3,})$")
+_MARKDOWN_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)$")
+_MARKDOWN_TILDE_RUN_RE = re.compile(r"~+")
+# Chainlit renders with remark-directive, which reads a colon followed by a letter
+# (`re:Invent`) as a directive and drops it from the text, unless a colon precedes it.
+_MARKDOWN_TEXT_DIRECTIVE_RE = re.compile(r"(?<!:):(?=[A-Za-z])")
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
@@ -102,30 +107,65 @@ def _neutralize_source_name_delimiters(value: str) -> str:
             underscore_openers.append((index, end))
         index = end
 
-    index = 0
-    while index < len(value):
-        if value[index] != "~":
-            index += 1
-            continue
-        end = index + 1
-        while end < len(value) and value[end] == "~":
-            end += 1
-        if end - index >= 2:
-            characters[index:end] = " " * (end - index)
-        index = end
+    for start, end in _strikethrough_tilde_runs(value):
+        characters[start:end] = " " * (end - start)
 
-    return "".join(characters)
+    return _MARKDOWN_TEXT_DIRECTIVE_RE.sub(": ", "".join(characters))
+
+
+def _strikethrough_tilde_runs(value: str) -> list[tuple[int, int]]:
+    """Return the tilde runs remark-gfm would pair into a strikethrough.
+
+    A run of one or two tildes opens when a word character follows it, or punctuation
+    while whitespace or punctuation precedes it; it closes in the mirrored case, and
+    it pairs with an open run of the same length. Runs of three or more stay text,
+    as do runs nothing pairs with (`PROGRA~1.pdf`, `cost ~5 or ~10`). Each length is
+    paired on its own: a pair hidden inside another strikethrough pairs once that
+    one is blanked.
+    """
+
+    def character_group(character: str) -> str | None:
+        # remark reads U+FEFF as whitespace too (JavaScript's `\s`); Python does not.
+        if character.isspace() or character == "﻿":
+            return "whitespace"
+        if unicodedata.category(character)[0] in {"P", "S"}:
+            return "punctuation"
+        return None
+
+    openers: dict[int, list[tuple[int, int]]] = {1: [], 2: []}
+    paired: list[tuple[int, int]] = []
+    for match in _MARKDOWN_TILDE_RUN_RE.finditer(value):
+        start, end = match.span()
+        if end - start > 2:
+            continue
+        # Chainlit renders the name as `[name](...)`, so the brackets border it.
+        before = character_group(value[start - 1] if start else "[")
+        after = character_group(value[end] if end < len(value) else "]")
+        can_close = before is None or (before == "punctuation" and after is not None)
+        if can_close and openers[end - start]:
+            paired += [openers[end - start].pop(), (start, end)]
+        elif after is None or (after == "punctuation" and before is not None):
+            openers[end - start].append((start, end))
+    return paired
 
 
 def _safe_source_name(value: str, existing: dict) -> str:
     """Build a Markdown-inert name that Chainlit can match to its element."""
-    value = _neutralize_source_name_delimiters(value)
-    value = value.lstrip()
-    if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value):
-        value = ""
-    else:
-        value = _MARKDOWN_BLOCK_PREFIX_RE.sub("", value)
-    base = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split()) or "source"
+    # Blank the unsafe characters first: whether a tilde or an underscore is a
+    # delimiter depends on its neighbours, and remark sees spaces in their place.
+    value = _neutralize_source_name_delimiters(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS))
+    while True:
+        value = " ".join(value.split())
+        if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value) or _MARKDOWN_SETEXT_UNDERLINE_RE.fullmatch(value):
+            value = ""
+            break
+
+        stripped = _MARKDOWN_BLOCK_PREFIX_RE.sub("", value)
+        if stripped == value:
+            break
+        value = stripped
+
+    base = value or "source"
     candidate = base
     suffix = 2
     while candidate in existing:
@@ -587,6 +627,7 @@ def _chunk_field(source: dict, key: str):
 
 
 async def _format_sources(metadata_sources, only_txt=False, api_key=None):
+    """Format retrieved web and file sources as Chainlit elements."""
     if not isinstance(metadata_sources, list) or not metadata_sources:
         return [], []
 
@@ -608,6 +649,7 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
             markdown_url = quote(url, safe=_MARKDOWN_URL_SAFE_CHARS)
 
             source_label = title or url
+            source_label = " ".join(source_label.split())
             source_name = _safe_source_name(source_label, d)
             content = f"**[{_escape_markdown_text(source_label)}]({markdown_url})**"
             if snippet:
