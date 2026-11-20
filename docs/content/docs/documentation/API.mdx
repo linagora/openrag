@@ -287,7 +287,8 @@ Replace an existing file in the partition. Deletes the current entry and creates
   - `DOCUMENT_CONTENT_EXISTS`: content deduplication finds the same bytes held by
     another file, or by a task still indexing this one (`extra.existing_file_id`).
     A replace is not refused for a task already indexing the file, so it never
-    returns `DOCUMENT_INDEXING_IN_PROGRESS`.
+    returns `DOCUMENT_INDEXING_IN_PROGRESS`, except with `FILE_FENCES=postgres`:
+    see [Concurrent operations on one file](#concurrent-operations-on-one-file).
   - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
     expired before indexing started. Nothing was queued; retry the request.
   - `DOCUMENT_DELETE_IN_PROGRESS`: this `file_id` is being deleted. The content
@@ -325,6 +326,67 @@ Remove a file from the specified partition.
 **Responses:**
 - `204 No Content`: Successfully deleted
 - `404 Not Found`: File not found in partition
+
+#### Copy File
+```http
+POST /indexer/partition/{partition}/file/{file_id}/copy
+```
+
+Copy an indexed file into `partition` under `file_id`, without parsing it again.
+
+**Request Body (form-data):**
+- `source_partition`: Partition of the file to copy (viewer access needed)
+- `source_file_id`: File to copy
+- `metadata` (JSON string, optional): Metadata to override on the copy
+
+**Responses** (whatever `FILE_FENCES` says):
+- `201 Created`: the file was copied
+- `404 Not Found` (`DOCUMENT_NOT_FOUND`): the source file doesn't exist, or has no indexed chunks
+- `404 Not Found` (`PARTITION_NOT_FOUND`): the destination partition was deleted while the copy ran
+- `409 Conflict` (`DOCUMENT_ALREADY_EXISTS`): `file_id` already exists in `partition`. Retrying
+  doesn't change that: delete it first, or copy under another `file_id`. Earlier releases answered
+  `201` and added the copied chunks to the existing file.
+
+Nothing is left behind when a copy is refused or fails: the chunks it wrote are removed.
+
+#### Concurrent operations on one file
+
+With [`FILE_FENCES=postgres`](/openrag/documentation/env_vars/) (not yet the default), one operation
+changes a file at a time: an upload, a replace, a delete, a metadata update, or a copy into it.
+Another one arriving meanwhile is answered:
+
+| Arriving | While the file is indexed | While it is deleted | While its metadata is updated |
+|---|---|---|---|
+| Upload (`POST`) or replace (`PUT`) | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
+| Delete | Stops the indexing and deletes the file | Waits for it, then `409 DOCUMENT_DELETE_IN_PROGRESS` after 60 s | Waits for it, then `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` after 60 s |
+| Metadata update (`PATCH`) | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
+| Copy, of this file | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
+| Copy, into this `file_id` | `409 DOCUMENT_INDEXING_IN_PROGRESS` | `409 DOCUMENT_DELETE_IN_PROGRESS` | `409 DOCUMENT_METADATA_UPDATE_IN_PROGRESS` |
+
+The code is the `[CODE]` prefix of `detail`. `DOCUMENT_INDEXING_IN_PROGRESS` carries
+`extra.existing_task_id` when an indexing task holds the file; a copy into it has no task to point
+at. Every `409` here is temporary: retry once the other operation has ended. Copies of one file can
+run side by side; a copy whose source changed while it was read answers
+`409 DOCUMENT_CHANGED_DURING_COPY`.
+
+The table applies to a file the catalog knows. Whether the file exists is checked first, so a file
+whose first upload hasn't finished indexing, or that a delete has already removed from the catalog,
+gets the answer for a missing file instead of a `409`: a metadata update returns `200` without
+changing anything, and a delete or a copy of it returns `404`. A copy into a `file_id` that already
+exists answers `409 DOCUMENT_ALREADY_EXISTS` with or without fences (see [Copy File](#copy-file)).
+
+Deleting a workspace deletes the files it orphaned under the same rules, with two differences: it
+does not stop a file's indexing task, it takes the file over (the task runs on until its final
+write, which is refused, and then removes the chunks it stored); and a file it could not delete
+does not fail the request. Such files are listed in the response's `orphaned_files_failed`, and the
+codes below never come back from the workspace delete itself.
+
+A delete, metadata update or copy keeps the file for as long as it runs. If the catalog database
+stops answering meanwhile, the operation stops before another one could take the file and answers
+`503 FILE_FENCE_UNAVAILABLE`: retry once the database is back. The file stays held for up to two
+minutes after that, so that a write already sent to the vector store lands before another operation
+starts. One whose file was taken over meanwhile answers `409 FILE_FENCE_LOST`. These two codes come
+from the file endpoints: upload, replace, delete, metadata update and copy.
 
 #### Check Indexing Status
 ```http

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from core.models.catalog import FileFence, FileFenceKind
 from core.models.workspace import Workspace
-from core.utils.exceptions import AmbiguousWorkspaceError
+from core.ports.file_fence_repo import FileFenceRepository
+from core.utils.exceptions import AmbiguousWorkspaceError, ConflictError
 from services.orchestrators.workspace_service import WorkspaceService
 
 
@@ -449,3 +452,314 @@ async def test_resolve_scope_raises_when_id_matches_several_searchable_partition
     assert "p1, p2" in str(excinfo.value)
     # Never silently picks one.
     assert wrepo.listed == []
+
+
+# --------------------------------------------------------------------------- #
+# file fences (#1430)
+# --------------------------------------------------------------------------- #
+
+
+class _InMemoryFileFences(FileFenceRepository):
+    def __init__(self) -> None:
+        self.fences: dict[tuple[str, str], FileFence] = {}
+
+    def hold(self, partition: str, file_id: str, kind: FileFenceKind, holder_id: str) -> None:
+        now = datetime.now(UTC)
+        self.fences[(partition, file_id)] = FileFence(
+            partition=partition,
+            file_id=file_id,
+            kind=kind,
+            holder_id=holder_id,
+            acquired_at=now,
+            expires_at=now + timedelta(minutes=2),
+        )
+
+    async def acquire(
+        self, *, partition, file_id, kind, holder_id, ttl_seconds, take_over_finished_task=True
+    ) -> FileFence:
+        if (partition, file_id) not in self.fences:
+            self.hold(partition, file_id, kind, holder_id)
+        return self.fences[(partition, file_id)]
+
+    async def take_over(self, *, partition, file_id, kind, holder_id, expected_holder_id, ttl_seconds) -> bool:
+        current = self.fences.get((partition, file_id))
+        if current is None or current.holder_id != expected_holder_id:
+            return False
+        self.hold(partition, file_id, kind, holder_id)
+        return True
+
+    async def renew(self, *, partition, file_id, holder_id, ttl_seconds) -> bool:
+        current = self.fences.get((partition, file_id))
+        return current is not None and current.holder_id == holder_id
+
+    async def renew_all(self, fences, *, ttl_seconds) -> int:
+        raise NotImplementedError
+
+    async def release(self, *, partition, file_id, holder_id) -> bool:
+        current = self.fences.get((partition, file_id))
+        if current is None or current.holder_id != holder_id:
+            return False
+        del self.fences[(partition, file_id)]
+        return True
+
+    async def get(self, *, partition, file_id) -> FileFence | None:
+        return self.fences.get((partition, file_id))
+
+    async def get_live(self, *, partition, file_id) -> FileFence | None:
+        return self.fences.get((partition, file_id))
+
+
+class _FenceObservingVectorStore(FakeVectorStore):
+    """Records who holds each file's fence when its chunks are deleted."""
+
+    def __init__(self, fences: _InMemoryFileFences, ids_by_file) -> None:
+        super().__init__(ids_by_file)
+        self._fences = fences
+        self.holders: list[FileFence | None] = []
+
+    async def query_ids_by_filter(self, collection, filters):
+        self.holders.append(self._fences.fences.get((filters["partition"], filters["file_id"])))
+        return await super().query_ids_by_filter(collection, filters)
+
+
+def _fenced_svc(fences: _InMemoryFileFences, *, wrepo, vstore, wait_timeout: float = 5.0) -> WorkspaceService:
+    return WorkspaceService(
+        workspace_repo=wrepo,
+        document_repo=FakeDocumentRepo(),
+        vector_store=vstore,
+        collection="vdb",
+        file_fence_repo=fences,
+        fence_wait_timeout=wait_timeout,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_is_deleted_under_its_delete_fence_and_the_fence_released():
+    fences = _InMemoryFileFences()
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+
+    out = await _fenced_svc(fences, wrepo=FakeWorkspaceRepo(orphaned=["fA"]), vstore=vstore).delete_workspace("p", "w1")
+
+    assert out["orphaned_files_deleted"] == 1
+    assert vstore.holders[0].kind is FileFenceKind.DELETE
+    assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_being_indexed_is_taken_over_so_the_task_cannot_commit():
+    fences = _InMemoryFileFences()
+    fences.hold("p", "fA", FileFenceKind.INDEX, "task-running")
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+
+    await _fenced_svc(fences, wrepo=FakeWorkspaceRepo(orphaned=["fA"]), vstore=vstore).delete_workspace("p", "w1")
+
+    assert vstore.holders[0].kind is FileFenceKind.DELETE
+    assert vstore.holders[0].holder_id != "task-running"
+    assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_another_delete_holds_is_reported_failed_after_the_wait(monkeypatch):
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "_WAIT_INTERVAL_SECONDS", 0)
+    fences = _InMemoryFileFences()
+    fences.hold("p", "fA", FileFenceKind.DELETE, "other-delete")
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+    wrepo = FakeWorkspaceRepo(orphaned=["fA"])
+    svc = _fenced_svc(fences, wrepo=wrepo, vstore=vstore, wait_timeout=0)
+
+    out = await svc.delete_workspace("p", "w1")
+
+    assert out["orphaned_files_failed"] == ["fA"]
+    assert vstore.holders == []
+    assert fences.fences[("p", "fA")].holder_id == "other-delete"
+    # The claim delete_workspace took is given back: the file can be attached again.
+    assert wrepo.released == [("fA", "p")]
+    assert wrepo.failed == []
+
+
+@pytest.mark.asyncio
+async def test_a_retried_cleanup_runs_under_the_delete_fence():
+    fences = _InMemoryFileFences()
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+    svc = _fenced_svc(fences, wrepo=FakeWorkspaceRepo(), vstore=vstore)
+
+    assert await svc.retry_failed_file_cleanup("fA", "p") is True
+
+    assert vstore.holders[0].kind is FileFenceKind.DELETE
+    assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_a_retry_of_a_file_being_indexed_is_refused_and_leaves_its_fence_alone():
+    fences = _InMemoryFileFences()
+    fences.hold("p", "fA", FileFenceKind.INDEX, "task-running")
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+    wrepo = FakeWorkspaceRepo()
+    svc = _fenced_svc(fences, wrepo=wrepo, vstore=vstore)
+
+    with pytest.raises(ConflictError) as caught:
+        await svc.retry_failed_file_cleanup("fA", "p")
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert wrepo.retry_claimed == []
+    assert vstore.holders == []
+    assert fences.fences[("p", "fA")].holder_id == "task-running"
+    assert fences.fences[("p", "fA")].kind is FileFenceKind.INDEX
+
+
+@pytest.mark.asyncio
+async def test_a_retry_of_a_file_not_eligible_gives_its_fence_back():
+    class NotEligible(FakeWorkspaceRepo):
+        async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+            return False
+
+    fences = _InMemoryFileFences()
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+    svc = _fenced_svc(fences, wrepo=NotEligible(), vstore=vstore)
+
+    assert await svc.retry_failed_file_cleanup("fA", "p") is False
+
+    assert vstore.holders == []
+    assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_a_retry_waits_for_the_fence_before_it_holds_a_cleanup_session(monkeypatch):
+    # The session holds a pooled connection for the whole deletion; waiting for
+    # the fence while holding it could exhaust the pool.
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "_WAIT_INTERVAL_SECONDS", 0)
+    fences = _InMemoryFileFences()
+    fences.hold("p", "fA", FileFenceKind.DELETE, "other-delete")
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+    sessions: list[str] = []
+
+    class RecordingSessions(FakeWorkspaceRepo):
+        @asynccontextmanager
+        async def cleanup_session(self, file_id, partition):
+            sessions.append(file_id)
+            yield self
+
+    wrepo = RecordingSessions()
+    svc = _fenced_svc(fences, wrepo=wrepo, vstore=vstore, wait_timeout=0)
+
+    with pytest.raises(ConflictError):
+        await svc.retry_failed_file_cleanup("fA", "p")
+
+    assert sessions == []
+    assert wrepo.retry_claimed == []
+    assert wrepo.failed == []
+    assert fences.fences[("p", "fA")].holder_id == "other-delete"
+
+
+class _SessionFailingFirst(FakeWorkspaceRepo):
+    """The cleanup's own session fails to open; the one that gives the claim back opens."""
+
+    def __init__(self, failure, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._failure = failure
+        self.sessions = 0
+
+    @asynccontextmanager
+    async def cleanup_session(self, file_id, partition):
+        self.sessions += 1
+        if self.sessions == 1:
+            await self._failure()
+        yield self
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_whose_cleanup_session_fails_to_open_gives_its_claim_back():
+    # Otherwise it stays CLAIMED, which no retry accepts, with its workspace gone.
+    async def unreachable():
+        raise ConnectionError("pool exhausted")
+
+    fences = _InMemoryFileFences()
+    wrepo = _SessionFailingFirst(unreachable, orphaned=["fA"])
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+
+    out = await _fenced_svc(fences, wrepo=wrepo, vstore=vstore).delete_workspace("p", "w1")
+
+    assert out["orphaned_files_failed"] == ["fA"]
+    assert wrepo.released == [("fA", "p")]
+    assert vstore.holders == []
+    assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_whose_cleanup_stops_while_its_session_opens_gives_its_claim_back(monkeypatch):
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "FILE_FENCE_TTL_SECONDS", 0.4)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
+
+    async def hangs():
+        await asyncio.sleep(5)
+
+    fences = _InMemoryFileFences()
+    fences.renew = _always_fails
+    wrepo = _SessionFailingFirst(hangs, orphaned=["fA"])
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+
+    out = await asyncio.wait_for(_fenced_svc(fences, wrepo=wrepo, vstore=vstore).delete_workspace("p", "w1"), timeout=5)
+
+    assert out["orphaned_files_failed"] == ["fA"]
+    assert wrepo.released == [("fA", "p")]
+    # Stopped from outside: the fence is left to expire rather than released.
+    assert fences.fences[("p", "fA")].kind is FileFenceKind.DELETE
+
+
+async def _always_fails(**_kwargs) -> bool:
+    raise ConnectionError("postgres unreachable")
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_another_cleanup_owns_keeps_that_cleanups_claim():
+    class OwnedElsewhere(FakeWorkspaceRepo):
+        @asynccontextmanager
+        async def cleanup_session(self, file_id, partition):
+            yield None
+
+    fences = _InMemoryFileFences()
+    wrepo = OwnedElsewhere(orphaned=["fA"])
+    vstore = _FenceObservingVectorStore(fences, {"fA": ["c1"]})
+
+    out = await _fenced_svc(fences, wrepo=wrepo, vstore=vstore).delete_workspace("p", "w1")
+
+    assert out["orphaned_files_failed"] == ["fA"]
+    assert wrepo.released == []
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_delete_cleans_up_a_bounded_number_of_orphans_at_a_time():
+    # Each cleanup holds a pooled connection; its fence renewals need another.
+    # Unbounded, many orphans starved the renewals and failed after the lease deadline.
+    import services.orchestrators.workspace_service as module
+
+    running = 0
+    peak = 0
+
+    class CountingSessions(FakeWorkspaceRepo):
+        @asynccontextmanager
+        async def cleanup_session(self, file_id, partition):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            try:
+                await asyncio.sleep(0.01)
+                yield self
+            finally:
+                running -= 1
+
+    orphans = [f"f{i}" for i in range(module._ORPHAN_CLEANUP_CONCURRENCY * 3)]
+    fences = _InMemoryFileFences()
+    vstore = _FenceObservingVectorStore(fences, {file_id: ["c"] for file_id in orphans})
+
+    out = await _fenced_svc(fences, wrepo=CountingSessions(orphaned=orphans), vstore=vstore).delete_workspace("p", "w1")
+
+    assert out["orphaned_files_deleted"] == len(orphans)
+    assert peak == module._ORPHAN_CLEANUP_CONCURRENCY
+    assert fences.fences == {}

@@ -107,6 +107,25 @@ async def test_an_index_fence_whose_job_is_over_is_taken(store, status):
     assert fence.holder_id == "task-b"
 
 
+@pytest.mark.parametrize("status", [DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED])
+async def test_an_index_fence_whose_job_is_over_is_kept_from_who_must_not_take_over_a_task(store, status):
+    # A job can read as over while its worker still writes: only its lease says
+    # it stopped. A cleanup retry with nothing to do must not cost it its fence.
+    holder = await _job(store, status)
+    await _acquire(store, holder)
+
+    fence = await store.file_fence_repo.acquire(
+        partition=PARTITION,
+        file_id=FILE_ID,
+        kind=FileFenceKind.DELETE,
+        holder_id="retry",
+        ttl_seconds=HOUR,
+        take_over_finished_task=False,
+    )
+
+    assert fence.holder_id == holder
+
+
 @pytest.mark.parametrize("status", [DocumentStatus.QUEUED, DocumentStatus.SERIALIZING])
 async def test_an_index_fence_whose_job_runs_is_kept(store, status):
     holder = await _job(store, status)
@@ -132,6 +151,53 @@ async def test_a_delete_fence_is_not_freed_by_a_job_row(store):
     fence = await _acquire(store, "task-b")
 
     assert fence.holder_id == holder
+
+
+# ── What may still be writing the file (get_live): the lease alone ────
+
+
+async def test_a_held_fence_is_live(store):
+    await _acquire(store, "task-a")
+
+    fence = await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID)
+
+    assert fence.holder_id == "task-a"
+
+
+async def test_an_expired_fence_is_not_live_though_its_row_is_still_there(store):
+    await _acquire(store, "task-a", ttl=0)
+
+    assert await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID) is None
+    assert (await store.file_fence_repo.get(partition=PARTITION, file_id=FILE_ID)).holder_id == "task-a"
+
+
+@pytest.mark.parametrize("status", [DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED])
+async def test_an_index_fence_stays_live_while_its_lease_runs_whatever_its_job_says(store, status):
+    # A job can turn terminal while its worker still writes (an API restart's
+    # fail_orphaned_jobs): acquire may take such a fence, a reader must not trust it.
+    holder = await _job(store, status)
+    await _acquire(store, holder)
+
+    assert (await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID)).holder_id == holder
+
+
+@pytest.mark.parametrize("status", [DocumentStatus.QUEUED, DocumentStatus.SERIALIZING])
+async def test_an_index_fence_whose_job_runs_is_live(store, status):
+    holder = await _job(store, status)
+    await _acquire(store, holder)
+
+    assert (await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID)).holder_id == holder
+
+
+async def test_a_delete_fence_is_live_whatever_its_job_row_says(store):
+    holder = await _job(store, DocumentStatus.COMPLETED)
+    await _acquire(store, holder, kind=FileFenceKind.DELETE)
+
+    assert (await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID)).holder_id == holder
+
+
+async def test_a_free_file_has_no_live_fence(store):
+    assert await store.file_fence_repo.get_live(partition=PARTITION, file_id=FILE_ID) is None
 
 
 async def test_fences_of_different_files_are_independent(store):

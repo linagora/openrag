@@ -566,6 +566,9 @@ class ServiceContainer:
                 document_repo=self.document_repo,
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
+                file_fence_repo=(
+                    self.catalog_store.file_fence_repo if settings.loader.file_fences == "postgres" else None
+                ),
             )
         return self._workspace_service
 

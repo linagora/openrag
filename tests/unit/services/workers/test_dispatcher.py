@@ -94,6 +94,10 @@ def _document_repo() -> MagicMock:
     )
     repo.update_file_metadata_in_db = AsyncMock(return_value=True)
     repo.add_file_to_partition = AsyncMock(return_value=True)
+    # A copy's target is new unless a test says otherwise.
+    repo.file_exists_in_partition = AsyncMock(return_value=False)
+    # The source's hash as the copy reads it again: unchanged since the caller read it.
+    repo.get_content_sha256 = AsyncMock(return_value="abc123")
     repo.get_indexation_config = AsyncMock(return_value=None)
     return repo
 
@@ -1879,6 +1883,7 @@ async def test_copy_receives_grace_before_catalog_write_and_matches_afterward() 
 
     async def add(**kwargs):
         entries[kwargs["partition"], kwargs["file_id"]] = kwargs["indexed_at"]
+        return True
 
     catalog.get_indexed_documents.side_effect = lookup
     catalog.list_indexed_documents = AsyncMock(side_effect=list_documents)

@@ -85,9 +85,13 @@ class IndexingDispatcher(ABC):
         embedder: Embedder | None = None,
         embedder_reference: str | None = None,
         embedder_fingerprint: Mapping[str, str | None] | None = None,
+        deduplicate: bool = False,
         quota_reservation_id: str | None = None,
     ) -> None:
         """Copy a file's chunks into another partition / file id.
+
+        With ``deduplicate``, the source's content hash is read with its
+        snapshot and claimed for the target, whatever ``metadata`` carries.
 
         ``quota_reservation_id`` names the file slot reserved for the copy; the
         catalog insert consumes it (#664).

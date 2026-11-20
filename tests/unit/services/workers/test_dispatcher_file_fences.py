@@ -8,10 +8,17 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from core.models.catalog import DocumentStatus, FileFence, FileFenceKind
+from core.models.catalog import COPY_CONTENT_CLAIM_TOKEN_PREFIX, DocumentStatus, FileFence, FileFenceKind
 from core.ports.file_fence_repo import FileFenceRepository
-from core.utils.exceptions import ConflictError, ServiceUnavailableError
+from core.utils.exceptions import (
+    ConflictError,
+    FileFenceLostError,
+    FileFenceUnavailableError,
+    PartitionNotFoundError,
+    ServiceUnavailableError,
+)
 from services.workers.dispatcher import WorkerDispatcher
+from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
 PARTITION = "tenant-a"
 FILE_ID = "file-1"
@@ -37,7 +44,9 @@ class InMemoryFileFences(FileFenceRepository):
     def holder(self) -> FileFence | None:
         return self.fences.get((PARTITION, FILE_ID))
 
-    async def acquire(self, *, partition, file_id, kind, holder_id, ttl_seconds) -> FileFence:
+    async def acquire(
+        self, *, partition, file_id, kind, holder_id, ttl_seconds, take_over_finished_task=True
+    ) -> FileFence:
         current = self.fences.get((partition, file_id))
         if current is None or current.holder_id == holder_id:
             now = datetime.now(UTC)
@@ -76,6 +85,9 @@ class InMemoryFileFences(FileFenceRepository):
         return True
 
     async def get(self, *, partition, file_id) -> FileFence | None:
+        return self.fences.get((partition, file_id))
+
+    async def get_live(self, *, partition, file_id) -> FileFence | None:
         return self.fences.get((partition, file_id))
 
 
@@ -468,9 +480,9 @@ async def test_a_delete_that_fails_after_taking_the_fence_over_still_costs_the_u
 
 @pytest.mark.asyncio
 async def test_a_delete_survives_a_failed_fence_renewal(monkeypatch: pytest.MonkeyPatch) -> None:
-    import services.workers.dispatcher as module
+    import core.indexing.file_fences as fences_module
 
-    monkeypatch.setattr(module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
     fences = InMemoryFileFences()
     renewals = 0
 
@@ -497,9 +509,9 @@ async def test_a_delete_survives_a_failed_fence_renewal(monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_a_delete_whose_fence_was_lost_stops(monkeypatch: pytest.MonkeyPatch) -> None:
-    import services.workers.dispatcher as module
+    import core.indexing.file_fences as fences_module
 
-    monkeypatch.setattr(module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
     fences = InMemoryFileFences()
     fences.renew = AsyncMock(return_value=False)
     repo = _document_repo()
@@ -509,5 +521,584 @@ async def test_a_delete_whose_fence_was_lost_stops(monkeypatch: pytest.MonkeyPat
 
     repo.remove_file_from_partition.side_effect = slow_remove
 
-    with pytest.raises(RuntimeError, match="lease was lost"):
+    with pytest.raises(FileFenceLostError):
         await _dispatcher(fences, document_repo=repo).delete_file(FILE_ID, PARTITION)
+
+
+def _short_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 0.4 s Postgres lease renewed every 0.1 s: without a renewal the delete must stop by 0.3 s."""
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "FILE_FENCE_TTL_SECONDS", 0.4)
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.1)
+
+
+@pytest.mark.asyncio
+async def test_a_delete_that_cannot_renew_stops_before_its_lease_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    _short_lease(monkeypatch)
+    fences = InMemoryFileFences()
+    fences.renew = AsyncMock(side_effect=ConnectionError("postgres unreachable"))
+    repo = _document_repo()
+
+    async def slow_remove(**_kwargs) -> None:
+        await asyncio.sleep(5)
+
+    repo.remove_file_from_partition.side_effect = slow_remove
+    started = asyncio.get_running_loop().time()
+
+    # A 503: the database didn't answer, nothing else took the file.
+    with pytest.raises(FileFenceUnavailableError):
+        await _dispatcher(fences, document_repo=repo).delete_file(FILE_ID, PARTITION)
+
+    assert asyncio.get_running_loop().time() - started < 0.4
+    assert fences.renew.await_count >= 2
+    # Its vector delete may still land: the fence is left to expire, not released.
+    assert fences.holder().kind is FileFenceKind.DELETE
+
+
+@pytest.mark.asyncio
+async def test_a_slow_task_state_renewal_does_not_hold_up_the_postgres_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.dispatcher as module
+
+    _short_lease(monkeypatch)
+    monkeypatch.setattr(module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    fences = InMemoryFileFences()
+    renewals = 0
+
+    async def renew_once_failing(**kwargs) -> bool:
+        nonlocal renewals
+        renewals += 1
+        if renewals == 1:
+            raise ConnectionError("postgres blip")
+        return await InMemoryFileFences.renew(fences, **kwargs)
+
+    fences.renew = renew_once_failing
+    tsm = _task_state_manager()
+
+    async def slow_task_state_renewal(**_kwargs) -> bool:
+        await asyncio.sleep(1)
+        return True
+
+    tsm.renew_file_delete.remote = slow_task_state_renewal
+    repo = _document_repo()
+
+    async def slow_remove(**_kwargs) -> None:
+        await asyncio.sleep(1.5)
+
+    repo.remove_file_from_partition.side_effect = slow_remove
+
+    # The delete outlives the 0.4 s lease, and the task state renewal takes 1 s:
+    # only Postgres renewals that run on their own keep the fence.
+    await _dispatcher(fences, tsm=tsm, document_repo=repo).delete_file(FILE_ID, PARTITION)
+
+    assert renewals >= 3
+    repo.remove_file_from_partition.assert_awaited_once()
+
+
+# ── Metadata update ──────────────────────────────────────────────────
+
+
+def _metadata_dispatcher(fences: InMemoryFileFences) -> tuple[WorkerDispatcher, MagicMock, MagicMock]:
+    repo = _document_repo()
+    repo.get_file_metadata = AsyncMock(return_value={"file_id": FILE_ID, "indexed_at": "2026-11-18T10:00:00+00:00"})
+    repo.update_file_metadata_in_db = AsyncMock()
+    store = _vector_store()
+    store.query_chunks_by_filter = AsyncMock(return_value=[{"_id": 1, "text": "a", "file_id": FILE_ID}])
+    store.upsert_entities = AsyncMock()
+    dispatcher = _dispatcher(fences, document_repo=repo)
+    dispatcher._vector_store = store
+    return dispatcher, repo, store
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_update_holds_the_metadata_fence_while_it_rewrites_the_chunks() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _metadata_dispatcher(fences)
+    seen: list[FileFence | None] = []
+    store.upsert_entities.side_effect = lambda *_a, **_k: seen.append(fences.holder())
+
+    await dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None)
+
+    assert seen[0].kind is FileFenceKind.METADATA
+    repo.update_file_metadata_in_db.assert_awaited_once()
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "code"),
+    [
+        (FileFenceKind.INDEX, "DOCUMENT_INDEXING_IN_PROGRESS"),
+        (FileFenceKind.DELETE, "DOCUMENT_DELETE_IN_PROGRESS"),
+        (FileFenceKind.METADATA, "DOCUMENT_METADATA_UPDATE_IN_PROGRESS"),
+    ],
+)
+async def test_a_metadata_update_of_a_busy_file_is_refused_and_writes_nothing(kind: FileFenceKind, code: str) -> None:
+    fences = InMemoryFileFences()
+    fences.hold(kind, "other")
+    dispatcher, repo, store = _metadata_dispatcher(fences)
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None)
+
+    assert caught.value.code == code
+    store.upsert_entities.assert_not_awaited()
+    repo.update_file_metadata_in_db.assert_not_awaited()
+    assert fences.holder().holder_id == "other"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_metadata_update_releases_the_fence() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, _, store = _metadata_dispatcher(fences)
+    store.upsert_entities.side_effect = RuntimeError("milvus down")
+
+    with pytest.raises(RuntimeError, match="milvus down"):
+        await dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None)
+
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_update_of_a_missing_file_takes_no_fence() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _metadata_dispatcher(fences)
+    repo.get_file_metadata.return_value = None
+
+    await dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None)
+
+    assert fences.fences == {}
+    store.query_chunks_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_update_protects_the_values_it_reads_under_the_fence() -> None:
+    # Another update wrote label "B" and released the fence between this one's
+    # first look and its fence: the chunks hold "B", and so must the protected values.
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _metadata_dispatcher(fences)
+    repo.get_file_metadata.side_effect = [
+        {"file_id": FILE_ID, "label": "A"},
+        {"file_id": FILE_ID, "label": "B"},
+    ]
+
+    await dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None)
+
+    protected = store.upsert_entities.await_args.kwargs["protected_metadata"]
+    assert protected["label"] == "B"
+    assert protected["title"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_update_of_a_file_deleted_before_its_fence_writes_nothing() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _metadata_dispatcher(fences)
+    repo.get_file_metadata.side_effect = [{"file_id": FILE_ID}, None]
+
+    await dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None)
+
+    store.upsert_entities.assert_not_awaited()
+    repo.update_file_metadata_in_db.assert_not_awaited()
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_update_that_cannot_renew_leaves_its_fence_to_expire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Its upsert may already be on its way to Milvus: no delete may start before the lease ends.
+    _short_lease(monkeypatch)
+    fences = InMemoryFileFences()
+    fences.renew = AsyncMock(side_effect=ConnectionError("postgres unreachable"))
+    dispatcher, _, store = _metadata_dispatcher(fences)
+
+    async def slow_upsert(*_args, **_kwargs) -> None:
+        await asyncio.sleep(5)
+
+    store.upsert_entities.side_effect = slow_upsert
+
+    with pytest.raises(FileFenceUnavailableError):
+        await dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None)
+
+    assert fences.holder().kind is FileFenceKind.METADATA
+
+
+# ── Copy ─────────────────────────────────────────────────────────────
+
+SOURCE_ROW = {"file_id": "source", "partition": PARTITION, "indexed_at": "2026-11-18T10:00:00+00:00"}
+
+
+def _copy_dispatcher(fences: InMemoryFileFences) -> tuple[WorkerDispatcher, MagicMock, MagicMock]:
+    repo = _document_repo()
+    repo.get_file_metadata = AsyncMock(return_value=dict(SOURCE_ROW))
+    repo.get_indexation_config = AsyncMock(return_value=None)
+    repo.file_exists_in_partition = AsyncMock(return_value=False)
+    repo.add_file_to_partition = AsyncMock(return_value=True)
+    store = _vector_store()
+    store.query_chunks_by_filter = AsyncMock(return_value=[{"_id": 1, "text": "a", "file_id": "source"}])
+    store.insert_entities = AsyncMock()
+    dispatcher = _dispatcher(fences, document_repo=repo)
+    dispatcher._vector_store = store
+    return dispatcher, repo, store
+
+
+async def _copy(dispatcher: WorkerDispatcher) -> None:
+    await dispatcher.copy_file("source", {"file_id": FILE_ID, "partition": PARTITION}, PARTITION, None)
+
+
+@pytest.mark.asyncio
+async def test_a_copy_writes_its_target_under_the_targets_index_fence() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, _ = _copy_dispatcher(fences)
+    seen: list[FileFence | None] = []
+    repo.add_file_to_partition.side_effect = lambda **_: seen.append(fences.holder()) or True
+
+    await _copy(dispatcher)
+
+    holder = seen[0]
+    assert holder.kind is FileFenceKind.INDEX
+    assert repo.add_file_to_partition.await_args.kwargs["fence_holder_id"] == holder.holder_id
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_long_copy_renews_its_target_fence(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    fences = InMemoryFileFences()
+    renewed: list[str] = []
+
+    async def counting_renew(**kwargs) -> bool:
+        renewed.append(kwargs["file_id"])
+        return await InMemoryFileFences.renew(fences, **kwargs)
+
+    fences.renew = counting_renew
+    dispatcher, _, store = _copy_dispatcher(fences)
+
+    async def slow_insert(*_args, **_kwargs) -> None:
+        await asyncio.sleep(0.1)
+
+    store.insert_entities.side_effect = slow_insert
+
+    await _copy(dispatcher)
+
+    assert renewed
+    assert set(renewed) == {FILE_ID}
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_loses_its_target_fence_writes_no_catalog_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.indexing.file_fences as fences_module
+
+    monkeypatch.setattr(fences_module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.01)
+    fences = InMemoryFileFences()
+    fences.renew = AsyncMock(return_value=False)
+    dispatcher, repo, store = _copy_dispatcher(fences)
+
+    async def slow_insert(*_args, **_kwargs) -> None:
+        await asyncio.sleep(1)
+
+    store.insert_entities.side_effect = slow_insert
+
+    with pytest.raises(FileFenceLostError):
+        await _copy(dispatcher)
+
+    repo.add_file_to_partition.assert_not_awaited()
+    # The vectors the stopped insert may have written, marked with the copy's token, are removed.
+    cleanup_filter = store.delete_by_filter.await_args.args[0]
+    assert cleanup_filter["file_id"] == FILE_ID
+    assert cleanup_filter[INDEXING_TASK_ID_METADATA_KEY].startswith(COPY_CONTENT_CLAIM_TOKEN_PREFIX)
+
+
+@pytest.mark.asyncio
+async def test_a_copy_whose_commit_went_through_despite_the_error_keeps_its_vectors() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    committed: dict[str, str] = {}
+
+    async def commit_then_lose_the_connection(**kwargs) -> None:
+        committed["indexed_at"] = kwargs["indexed_at"].isoformat()
+        raise ConnectionError("connection lost after COMMIT was sent")
+
+    async def read_metadata(file_id, _partition) -> dict:
+        if file_id == FILE_ID and committed:
+            return {"file_id": FILE_ID, "indexed_at": committed["indexed_at"]}
+        return dict(SOURCE_ROW)
+
+    repo.add_file_to_partition.side_effect = commit_then_lose_the_connection
+    repo.get_file_metadata.side_effect = read_metadata
+
+    with pytest.raises(ConnectionError):
+        await _copy(dispatcher)
+
+    store.delete_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_cannot_tell_whether_it_committed_keeps_its_vectors() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+
+    async def read_metadata(file_id, _partition) -> dict:
+        if file_id == FILE_ID:
+            raise ConnectionError("database unreachable")
+        return dict(SOURCE_ROW)
+
+    repo.add_file_to_partition.side_effect = ConnectionError("database unreachable")
+    repo.get_file_metadata.side_effect = read_metadata
+
+    with pytest.raises(ConnectionError):
+        await _copy(dispatcher)
+
+    # Vectors without a row are an orphan to reconcile; a row without its vectors would be worse.
+    store.delete_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_copy_reads_the_source_record_before_its_final_check() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, _ = _copy_dispatcher(fences)
+    reads: list[str] = []
+
+    async def read_metadata(*_args) -> dict:
+        reads.append("metadata")
+        return dict(SOURCE_ROW)
+
+    async def read_config(*_args) -> None:
+        reads.append("indexation_config")
+
+    repo.get_file_metadata.side_effect = read_metadata
+    repo.get_indexation_config.side_effect = read_config
+
+    await _copy(dispatcher)
+
+    # The last read is the final check: a replace finishing after the record was read is refused.
+    assert reads == ["metadata", "indexation_config", "metadata"]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_into_a_busy_file_is_refused_before_reading_the_source() -> None:
+    fences = InMemoryFileFences()
+    fences.hold(FileFenceKind.INDEX, "task-running")
+    dispatcher, _, store = _copy_dispatcher(fences)
+
+    with pytest.raises(ConflictError) as caught:
+        await _copy(dispatcher)
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    store.query_chunks_by_filter.assert_not_awaited()
+    assert fences.holder().holder_id == "task-running"
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_file_being_replaced_is_refused_and_writes_nothing() -> None:
+    fences = InMemoryFileFences()
+    fences.fences[(PARTITION, "source")] = FileFence(
+        partition=PARTITION,
+        file_id="source",
+        kind=FileFenceKind.INDEX,
+        holder_id="replace-task",
+        acquired_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=2),
+    )
+    dispatcher, repo, store = _copy_dispatcher(fences)
+
+    with pytest.raises(ConflictError) as caught:
+        await _copy(dispatcher)
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    store.insert_entities.assert_not_awaited()
+    repo.add_file_to_partition.assert_not_awaited()
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_copy_whose_source_changed_during_the_read_is_refused() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    repo.get_file_metadata.side_effect = [dict(SOURCE_ROW), {**SOURCE_ROW, "indexed_at": "2026-11-18T10:00:09+00:00"}]
+
+    with pytest.raises(ConflictError) as caught:
+        await _copy(dispatcher)
+
+    assert caught.value.code == "DOCUMENT_CHANGED_DURING_COPY"
+    store.insert_entities.assert_not_awaited()
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_two_copies_of_one_source_do_not_conflict() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    reading = 0
+    both_reading = asyncio.Event()
+
+    async def read_source(*_args, **_kwargs) -> list[dict]:
+        # Each read waits for the other: copies that took turns on the source never get here together.
+        nonlocal reading
+        reading += 1
+        if reading == 2:
+            both_reading.set()
+        await asyncio.wait_for(both_reading.wait(), timeout=5)
+        return [{"_id": 1, "text": "a", "file_id": "source"}]
+
+    store.query_chunks_by_filter.side_effect = read_source
+
+    await asyncio.gather(
+        dispatcher.copy_file("source", {"file_id": "copy-a", "partition": PARTITION}, PARTITION, None),
+        dispatcher.copy_file("source", {"file_id": "copy-b", "partition": PARTITION}, PARTITION, None),
+    )
+
+    written = {call.kwargs["file_id"] for call in repo.add_file_to_partition.await_args_list}
+    assert written == {"copy-a", "copy-b"}
+    assert fences.fences == {}
+
+
+@pytest.mark.asyncio
+async def test_a_copy_claims_the_hash_of_the_revision_it_snapshots() -> None:
+    # The caller read the hash before a replace settled; the snapshot sees the
+    # replace, so the hash must too, or its chunks would carry the old one.
+    fences = InMemoryFileFences()
+    dispatcher, repo, _ = _copy_dispatcher(fences)
+    reads: list[str] = []
+
+    async def read_metadata(*_args) -> dict:
+        reads.append("metadata")
+        return dict(SOURCE_ROW)
+
+    async def read_hash(*_args) -> str:
+        reads.append("hash")
+        return "sha-after-replace"
+
+    repo.get_file_metadata.side_effect = read_metadata
+    repo.get_content_sha256 = AsyncMock(side_effect=read_hash)
+
+    await dispatcher.copy_file(
+        "source",
+        {"file_id": FILE_ID, "partition": PARTITION, "content_sha256": "sha-before-replace"},
+        PARTITION,
+        None,
+    )
+
+    assert reads[:2] == ["metadata", "hash"]
+    assert repo.claim_content_sha256.await_args.kwargs["content_sha256"] == "sha-after-replace"
+    assert repo.add_file_to_partition.await_args.kwargs["content_sha256"] == "sha-after-replace"
+
+
+@pytest.mark.asyncio
+async def test_a_copy_without_deduplication_reads_no_hash() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, _ = _copy_dispatcher(fences)
+    repo.get_content_sha256 = AsyncMock()
+
+    await _copy(dispatcher)
+
+    repo.get_content_sha256.assert_not_awaited()
+    repo.claim_content_sha256.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_copy_into_an_existing_file_is_refused_and_writes_nothing() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    repo.file_exists_in_partition.return_value = True
+
+    with pytest.raises(ConflictError) as caught:
+        await _copy(dispatcher)
+
+    assert caught.value.code == "DOCUMENT_ALREADY_EXISTS"
+    store.insert_entities.assert_not_awaited()
+    repo.add_file_to_partition.assert_not_awaited()
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_copy_into_an_existing_file_is_refused_without_fences_too() -> None:
+    # The FILE_FENCES=ray default: earlier releases answered 201 and added the
+    # copied chunks to the existing file.
+    dispatcher, repo, store = _copy_dispatcher(None)
+    repo.file_exists_in_partition.return_value = True
+
+    with pytest.raises(ConflictError) as caught:
+        await _copy(dispatcher)
+
+    assert caught.value.code == "DOCUMENT_ALREADY_EXISTS"
+    store.insert_entities.assert_not_awaited()
+    repo.add_file_to_partition.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_copy_whose_catalog_insert_is_refused_removes_its_chunks_and_answers_409() -> None:
+    # Without fences nothing keeps the target free between the check and the
+    # insert: a refused insert is a conflict, not a 201 with stray chunks.
+    dispatcher, repo, store = _copy_dispatcher(None)
+    repo.file_exists_in_partition.side_effect = [False, True]
+    repo.add_file_to_partition.return_value = False
+    repo.get_file_metadata.side_effect = lambda file_id, _p: (
+        dict(SOURCE_ROW) if file_id == "source" else {"file_id": FILE_ID, "indexed_at": "2026-01-01T00:00:00+00:00"}
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await _copy(dispatcher)
+
+    assert caught.value.code == "DOCUMENT_ALREADY_EXISTS"
+    cleanup_filter = store.delete_by_filter.await_args.args[0]
+    assert cleanup_filter["file_id"] == FILE_ID
+    assert cleanup_filter[INDEXING_TASK_ID_METADATA_KEY].startswith(COPY_CONTENT_CLAIM_TOKEN_PREFIX)
+
+
+@pytest.mark.asyncio
+async def test_a_copy_whose_target_partition_went_is_refused_and_removes_its_chunks() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    repo.add_file_to_partition.return_value = False
+    repo.get_file_metadata.side_effect = lambda file_id, _p: dict(SOURCE_ROW) if file_id == "source" else None
+
+    with pytest.raises(PartitionNotFoundError):
+        await _copy(dispatcher)
+
+    assert store.delete_by_filter.await_args.args[0]["file_id"] == FILE_ID
+    assert fences.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_a_deduplicated_copy_of_a_source_without_a_hash_yet_reads_it_after_the_snapshot() -> None:
+    # The caller read no hash; a replace adding one settled before the snapshot.
+    # Without the read, the copy would store the replacement with no hash and skip dedup.
+    fences = InMemoryFileFences()
+    dispatcher, repo, _ = _copy_dispatcher(fences)
+    repo.get_content_sha256 = AsyncMock(return_value="sha-of-replacement")
+
+    await dispatcher.copy_file(
+        "source",
+        {"file_id": FILE_ID, "partition": PARTITION, "content_sha256": None},
+        PARTITION,
+        None,
+        deduplicate=True,
+    )
+
+    assert repo.claim_content_sha256.await_args.kwargs["content_sha256"] == "sha-of-replacement"
+    assert repo.add_file_to_partition.await_args.kwargs["content_sha256"] == "sha-of-replacement"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_copy_removes_its_chunks_even_when_the_catalog_cannot_be_read() -> None:
+    # A refused insert is known not to have committed: a failed lookup must not keep its chunks.
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _copy_dispatcher(fences)
+    repo.add_file_to_partition.return_value = False
+    repo.file_exists_in_partition.side_effect = [False, ConnectionError("database unreachable")]
+
+    async def read_metadata(file_id, _partition) -> dict:
+        if file_id == FILE_ID:
+            raise ConnectionError("database unreachable")
+        return dict(SOURCE_ROW)
+
+    repo.get_file_metadata.side_effect = read_metadata
+
+    with pytest.raises(ConnectionError):
+        await _copy(dispatcher)
+
+    cleanup_filter = store.delete_by_filter.await_args.args[0]
+    assert cleanup_filter["file_id"] == FILE_ID
+    assert cleanup_filter[INDEXING_TASK_ID_METADATA_KEY].startswith(COPY_CONTENT_CLAIM_TOKEN_PREFIX)

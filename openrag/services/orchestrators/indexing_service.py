@@ -470,6 +470,7 @@ class IndexingService:
                 metadata,
                 source_partition,
                 user,
+                deduplicate=self._deduplication_enabled(),
                 quota_reservation_id=quota_reservation_id,
                 **destination,
             )
