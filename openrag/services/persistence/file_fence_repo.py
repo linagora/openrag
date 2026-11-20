@@ -81,7 +81,11 @@ class PgFileFenceRepository(FileFenceRepository):
         kind: FileFenceKind,
         holder_id: str,
         ttl_seconds: float,
+        take_over_finished_task: bool = True,
     ) -> FileFence:
+        # No status matches an empty list: an unexpired INDEX fence then stays
+        # with its task whatever its jobs row says.
+        finished_statuses = _TERMINAL_JOB_STATUSES if take_over_finished_task else []
         for _ in range(_ACQUIRE_ATTEMPTS):
             row = await self.pool.fetchrow(
                 _ACQUIRE_SQL,
@@ -90,7 +94,7 @@ class PgFileFenceRepository(FileFenceRepository):
                 kind.value,
                 holder_id,
                 float(ttl_seconds),
-                _TERMINAL_JOB_STATUSES,
+                finished_statuses,
             )
             if row is None:
                 row = await self.pool.fetchrow(_HOLDER_SQL, partition, file_id)

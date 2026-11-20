@@ -32,13 +32,14 @@ class FileFenceRepository(ABC):
         kind: FileFenceKind,
         holder_id: str,
         ttl_seconds: float,
+        take_over_finished_task: bool = True,
     ) -> FileFence:
         """Take the fence if it is free, and return whoever holds it now.
 
         The caller holds the fence when the returned ``holder_id`` is its own.
-        A fence is free when nobody holds it, when its lease has expired, or
-        when it is an ``INDEX`` fence whose task's ``jobs`` row is in a
-        terminal state. Acquiring again with the same ``holder_id`` renews it,
+        A fence is free when nobody holds it, when its lease has expired, or,
+        with ``take_over_finished_task``, when it is an ``INDEX`` fence whose
+        task's ``jobs`` row is in a terminal state. Acquiring again with the same ``holder_id`` renews it,
         so a retried admission is harmless. The partition row must exist.
         """
 

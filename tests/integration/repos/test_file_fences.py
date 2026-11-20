@@ -107,6 +107,25 @@ async def test_an_index_fence_whose_job_is_over_is_taken(store, status):
     assert fence.holder_id == "task-b"
 
 
+@pytest.mark.parametrize("status", [DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED])
+async def test_an_index_fence_whose_job_is_over_is_kept_from_who_must_not_take_over_a_task(store, status):
+    # A job can read as over while its worker still writes: only its lease says
+    # it stopped. A cleanup retry with nothing to do must not cost it its fence.
+    holder = await _job(store, status)
+    await _acquire(store, holder)
+
+    fence = await store.file_fence_repo.acquire(
+        partition=PARTITION,
+        file_id=FILE_ID,
+        kind=FileFenceKind.DELETE,
+        holder_id="retry",
+        ttl_seconds=HOUR,
+        take_over_finished_task=False,
+    )
+
+    assert fence.holder_id == holder
+
+
 @pytest.mark.parametrize("status", [DocumentStatus.QUEUED, DocumentStatus.SERIALIZING])
 async def test_an_index_fence_whose_job_runs_is_kept(store, status):
     holder = await _job(store, status)
