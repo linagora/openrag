@@ -435,6 +435,18 @@ class _UnlockFailsPartitionService(FakePartitionService):
         raise ConnectionError("advisory unlock failed")
 
 
+class _UnlockAlwaysFailsPartitionService(FakePartitionService):
+    """Admission whose exit raises even while the body's error propagates."""
+
+    @asynccontextmanager
+    async def indexing_admission(self, partition: str):
+        try:
+            async with super().indexing_admission(partition) as existed:
+                yield existed
+        finally:
+            raise ConnectionError("advisory unlock failed")
+
+
 @pytest.mark.asyncio
 async def test_add_file_marks_an_admission_exit_failure_after_dispatch(tmp_path):
     """The task is queued, so its worker may still insert the file (#664).
@@ -465,6 +477,42 @@ async def test_add_file_marks_an_admission_exit_failure_after_dispatch(tmp_path)
         )
 
     assert disp.dispatched
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_marks_an_admission_exit_failure_after_a_marked_dispatch_error(tmp_path):
+    """The unlock error replaces the dispatcher's marked one, whose worker may
+    still run (#664): the error reaching the route must stay marked."""
+    from core.utils.exceptions import indexing_worker_may_be_running, mark_indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+
+    class UnknownSubmissionDispatcher(FakeDispatcher):
+        async def dispatch_indexing(self, **kwargs):
+            exc = RuntimeError("submission outcome unknown")
+            mark_indexing_worker_may_be_running(exc)
+            raise exc
+
+    svc = _service(
+        disp=UnknownSubmissionDispatcher(),
+        config=config,
+        partition_service=_UnlockAlwaysFailsPartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
     assert indexing_worker_may_be_running(excinfo.value) is True
 
 

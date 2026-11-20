@@ -28,6 +28,7 @@ from core.utils.exceptions import (
     DocumentNotFoundError,
     PartitionNotFoundError,
     ValidationError,
+    indexing_worker_may_be_running,
     mark_indexing_worker_may_be_running,
 )
 from core.utils.filename import extract_temporal_fields
@@ -339,6 +340,7 @@ class IndexingService:
             content_sha256=content_sha256,
         )
         dispatched_task_id: str | None = None
+        worker_may_run = False
         try:
             async with self._partition_admission(partition) as partition_existed_at_admission:
                 await self._ensure_no_embedder_swap(partition)
@@ -348,26 +350,32 @@ class IndexingService:
                 require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
                 indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
                 legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
-                dispatched_task_id = await self._dispatcher.dispatch_indexing(
-                    path=file_path,
-                    metadata=full_metadata,
-                    partition=partition,
-                    user=user,
-                    workspace_ids=workspace_ids,
-                    replace=replace,
-                    indexation_config=indexation_config,
-                    embedder_name=embedder_name,
-                    callback_url=callback_url,
-                    callback_token=callback_token,
-                    require_existing_partition=require_existing_partition,
-                    allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
-                    task_id=task_id,
-                )
+                try:
+                    dispatched_task_id = await self._dispatcher.dispatch_indexing(
+                        path=file_path,
+                        metadata=full_metadata,
+                        partition=partition,
+                        user=user,
+                        workspace_ids=workspace_ids,
+                        replace=replace,
+                        indexation_config=indexation_config,
+                        embedder_name=embedder_name,
+                        callback_url=callback_url,
+                        callback_token=callback_token,
+                        require_existing_partition=require_existing_partition,
+                        allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+                        task_id=task_id,
+                    )
+                except BaseException as exc:
+                    worker_may_run = indexing_worker_may_be_running(exc)
+                    raise
+                worker_may_run = True
         except BaseException as exc:
             # Leaving admission (e.g. the advisory unlock) can fail after the
-            # task was queued: its worker will still run, so the caller must
-            # keep the upload and its quota slot (#664).
-            if dispatched_task_id is not None:
+            # task was queued, or replace a dispatch error that said its worker
+            # may still run: either way the caller must keep the upload and its
+            # quota slot (#664).
+            if worker_may_run:
                 mark_indexing_worker_may_be_running(exc)
             raise
         return dispatched_task_id
