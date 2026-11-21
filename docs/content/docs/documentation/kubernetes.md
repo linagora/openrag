@@ -418,11 +418,13 @@ What restarts the pods after a credential in the env Secret changes (`AUTH_TOKEN
   restarted API pods can't connect until the database has the new password too. Do one of:
 
   - Change it in the database just before the `helm upgrade`: open `psql` as the
-    application role (`root` unless you changed `postgresql.auth.username`), run
-    `\password root`, and type the new password.
+    application role (`postgresql.auth.username`, `root` by default), run `\password`,
+    and type the new password. The command below reads the role and its current password
+    from the PostgreSQL container, whether `postgresql.auth.usePasswordFiles` is on (the
+    default) or off.
 
     ```bash
-    kubectl exec -it -n <release namespace> <fullname>-postgresql-0 -- sh -c 'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" psql -h 127.0.0.1 -U root -d postgres'
+    kubectl exec -it -n <release namespace> <fullname>-postgresql-0 -- sh -c 'PGPASSWORD="${POSTGRES_PASSWORD:-$(cat "$POSTGRES_PASSWORD_FILE")}" psql -h 127.0.0.1 -U "${POSTGRES_USER:-postgres}" -d postgres'
     ```
 
   - Or set `postgresql.passwordUpdateJob.enabled: true` in the `helm upgrade` that changes
