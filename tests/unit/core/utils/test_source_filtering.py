@@ -231,6 +231,22 @@ class TestExtractAndStripSourcesBlock:
     @pytest.mark.parametrize(
         "text",
         [
+            pytest.param("The team has the following.\nTotal resources: 3", id="resources-en"),
+            pytest.param("Voici le bilan.\nRessources : 2", id="ressources-fr"),
+            pytest.param("Allocated Resources: 12", id="allocated-resources"),
+            pytest.param("Open resources: 5 available.", id="open-resources-inline"),
+            pytest.param("datasources: 4", id="datasources"),
+        ],
+    )
+    def test_sources_inside_another_word_is_not_a_tag(self, text):
+        """'sources' or 'source' that is part of a longer word must not be parsed as a citation tag."""
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == text
+        assert citations is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
             pytest.param("*" * 100_000, id="marks"),
             pytest.param("*_`" * 33_000 + "x", id="mixed-marks"),
             pytest.param("[" + "*" * 100_000 + "x", id="bracket-marks"),
