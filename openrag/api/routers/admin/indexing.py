@@ -21,6 +21,8 @@ from api.dependencies.auth import (
     current_user,
     current_user_partitions,
     ensure_partition_role,
+    file_slot_reservation_id,
+    hand_off_file_slot,
     require_partition_editor,
     require_task_owner,
 )
@@ -32,17 +34,19 @@ from api.dependencies.files import (
     validate_metadata,
 )
 from core.models.catalog import TERMINAL_TASK_STATES
+from core.models.stage_progress import StageProgressEventCursor
 from core.utils.error_summary import summarize_task_error
 from core.utils.exceptions import ConflictError, OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
-from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
+from di.providers import get_auth_service, get_config, get_indexing_service, get_job_service, get_partition_service
 from fastapi import (
     APIRouter,
     Depends,
     Form,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -85,18 +89,44 @@ def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | 
     return str(url)
 
 
-def _point_conflict_at_running_task(exc: BaseException, request: Request, config) -> None:
+async def _point_conflict_at_running_task(
+    exc: BaseException,
+    request: Request,
+    config,
+    *,
+    user: dict[str, Any],
+    job_service,
+    auth_service,
+) -> None:
     """Tell a caller turned away by the admission fence where to look.
 
     The fence lives in the dispatcher, which has no ``Request`` and so cannot
     build the link itself. Left as an extra field on the 409 body: a client that
     retried after a timeout can poll the task it already started instead of
     treating the refusal as a lost upload.
+
+    The link is only given to someone the task-status route would serve (the
+    task's owner or an admin). Another editor of the partition still gets
+    ``existing_task_id``, but a URL that answers them 403 would only mislead.
     """
     if not isinstance(exc, ConflictError) or exc.code != "DOCUMENT_INDEXING_IN_PROGRESS":
         return
     existing_task_id = exc.extra.get("existing_task_id")
     if not existing_task_id:
+        return
+    try:
+        task_details = await job_service.get_task_details(
+            existing_task_id,
+            require_owner_identity=not bool(user and user.get("is_admin", False)),
+        )
+    except Exception as lookup_error:  # noqa: BLE001 - the 409 stands without the link
+        logger.warning(
+            "Could not read the running task's owner for a 409 link.",
+            task_id=existing_task_id,
+            error=str(lookup_error),
+        )
+        return
+    if not task_details or not auth_service.authorize(user=user, action="task:access", resource=task_details):
         return
     exc.extra["task_status_url"] = build_url(
         request,
@@ -141,7 +171,10 @@ async def get_supported_types(config=Depends(get_config)):
 
 **File Type Support:**
 - Supports standard file extensions listed in `/supported/types`
-- For unsupported extensions, specify `mimetype` in metadata
+- For unsupported or missing extensions, specify `mimetype` in metadata: a
+  supported mimetype then decides how the file is parsed (`minutes.cozy-note`
+  sent as `text/markdown` is parsed as Markdown). A supported extension is
+  never overridden by the mimetype.
 
 **Metadata Format:**
 JSON string containing file metadata. Example:
@@ -172,7 +205,8 @@ Returns 201 Created with a task status URL for tracking indexing progress.
 - `DOCUMENT_INDEXING_IN_PROGRESS` — another task is still indexing this
   `file_id`. `extra.existing_task_id` / `extra.task_status_url` point at it, so
   a client that re-sent after a timeout can poll the first task instead of
-  re-uploading.
+  re-uploading. `task_status_url` is only included for the task's owner or an
+  admin, the callers the task-status route serves.
 - `DOCUMENT_CONTENT_EXISTS` — content deduplication matched an existing file
   (`extra.existing_file_id`).
 """,
@@ -190,9 +224,11 @@ async def add_file(
         description="Optional bearer token sent as `Authorization` on the callback_url request",
     ),
     user=Depends(require_partition_editor),
-    _quota_check=Depends(check_user_file_quota),
+    file_slot=Depends(check_user_file_quota),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
+    job_service=Depends(get_job_service),
+    auth_service=Depends(get_auth_service),
 ):
     _validate_callback_url(callback_url, config)
 
@@ -230,11 +266,17 @@ async def add_file(
                 file,
                 Path(config.paths.data_dir),
                 with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
             )
             file_path = saved_upload.path
             content_sha256 = saved_upload.sha256
         else:
-            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
+            )
             content_sha256 = None
     except OpenRAGError:
         # Domain errors (e.g. 413 too-large, 400 bad filename) carry their own
@@ -263,15 +305,33 @@ async def add_file(
             content_sha256=content_sha256,
             callback_url=callback_url,
             callback_token=callback_token,
+            # The task runs under the reservation's id, which is how the worker
+            # consumes the slot and the completion tracker releases it (#664).
+            task_id=file_slot_reservation_id(file_slot),
         )
     except BaseException as exc:
         # A submission whose outcome is unknown may have left a worker running
         # that has not read the file yet; deleting it would fail an indexing
         # run that could still succeed. The worker cleans up its own input.
-        if not indexing_worker_may_be_running(exc):
+        if indexing_worker_may_be_running(exc):
+            # That worker would consume the slot, so it stays with the task:
+            # the completion tracker or the reconcile sweep releases it once
+            # the task settles, or once past the grace window if it never ran.
+            hand_off_file_slot(file_slot)
+        else:
             file_path.unlink(missing_ok=True)
-        _point_conflict_at_running_task(exc, request, config)
+        await _point_conflict_at_running_task(
+            exc,
+            request,
+            config,
+            user=user,
+            job_service=job_service,
+            auth_service=auth_service,
+        )
         raise
+    # Queued: the task owns the slot now. Any earlier exit left it with the
+    # request, whose teardown released it.
+    hand_off_file_slot(file_slot)
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -384,11 +444,17 @@ async def put_file(
                 file,
                 Path(config.paths.data_dir),
                 with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
             )
             file_path = saved_upload.path
             content_sha256 = saved_upload.sha256
         else:
-            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
+            )
             content_sha256 = None
     except OpenRAGError:
         raise
@@ -446,7 +512,8 @@ async def put_file(
 **Behavior:**
 - Updates only the specified metadata fields
 - Does not require file re-upload
-- Can change the file's partition if user has access
+- Does not move the file: a `partition` other than the file's own is refused
+  with `400 Bad Request`. Copy the file to the other partition, then delete it.
 
 **Response:**
 Returns 200 OK with a success message.
@@ -457,22 +524,8 @@ async def patch_file(
     file_id: str = Depends(validate_file_id),
     metadata: Any | None = Depends(validate_metadata),
     user=Depends(require_partition_editor),
-    user_partitions=Depends(current_user_partitions),
     service=Depends(get_indexing_service),
-    auth_service=Depends(get_auth_service),
-    partition_service=Depends(get_partition_service),
 ):
-    # Make sure partition role is valid if partition is being changed
-    if "partition" in metadata:
-        await ensure_partition_role(
-            partition=metadata["partition"],
-            user=user,
-            user_partitions=user_partitions,
-            required_role="editor",
-            auth_service=auth_service,
-            partition_service=partition_service,
-        )
-
     await service.update_metadata(file_id, metadata, partition, user)
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -507,7 +560,7 @@ async def copy_file_between_partitions(
     source_file_id: str = Form(...),
     user=Depends(require_partition_editor),
     user_partitions=Depends(current_user_partitions),
-    _quota_check=Depends(check_user_file_quota),
+    file_slot=Depends(check_user_file_quota),
     service=Depends(get_indexing_service),
     auth_service=Depends(get_auth_service),
     partition_service=Depends(get_partition_service),
@@ -526,6 +579,10 @@ async def copy_file_between_partitions(
         partition_service=partition_service,
     )
 
+    # The copy is synchronous, so the slot is never handed off: the catalog
+    # insert consumes it, and the teardown release that follows is then a
+    # no-op. A copy that writes no row (empty source, refused write) gets it
+    # back from that same release (#664).
     await service.copy_file(
         source_file_id=source_file_id,
         source_partition=source_partition,
@@ -533,6 +590,7 @@ async def copy_file_between_partitions(
         target_partition=partition,
         metadata=metadata,
         user=user,
+        quota_reservation_id=file_slot_reservation_id(file_slot),
     )
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -584,6 +642,36 @@ async def get_task_status(
         )
 
     return JSONResponse(status_code=status.HTTP_200_OK, content=content)
+
+
+@router.get(
+    "/task/{task_id}/stages",
+    description="Read a bounded, per-file indexing-stage history page.",
+)
+async def get_task_stage_progress(
+    task_id: str,
+    before_attempt: int | None = Query(default=None, ge=1, le=2_147_483_647),
+    before_sequence: int | None = Query(default=None, ge=1, le=9_223_372_036_854_775_807),
+    limit: int = Query(default=100, ge=1, le=200),
+    task_details=Depends(require_task_owner),
+    job_service=Depends(get_job_service),
+):
+    # Keep this route under the same task-owner policy as status and errors.
+    # The dependency must finish before any stage event or failure evidence is read.
+    if (before_attempt is None) != (before_sequence is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="before_attempt and before_sequence must be supplied together",
+        )
+    cursor = (
+        StageProgressEventCursor(attempt=before_attempt, sequence=before_sequence)
+        if before_attempt is not None and before_sequence is not None
+        else None
+    )
+    progress = await job_service.get_task_stage_progress(task_id, before=cursor, limit=limit)
+    if progress is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Task '{task_id}' not found.")
+    return JSONResponse(status_code=status.HTTP_200_OK, content=progress)
 
 
 @router.get(

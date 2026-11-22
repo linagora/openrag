@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from core.utils.exceptions import ServiceUnavailableError
+from core.utils.exceptions import DocumentNotFoundError, ServiceUnavailableError
 from ray.exceptions import ActorUnavailableError
 from services.workers.task_state import PENDING_TASK_DETAILS, SUBMITTED_TASK_WITHOUT_REF
 
@@ -32,6 +32,17 @@ def _pool_with_ref(ref: object) -> MagicMock:
     # awaits the call and takes element 0).
     pool.submit = _remote_mock([ref])
     return pool
+
+
+# A delete budget no runner stall can use up before the check a test is about.
+# With 0.01 s, a slow CI runner timed out the first task-state lookup instead.
+_DELETE_BUDGET = 5.0
+
+
+def _straight_to_final_check():
+    """A wait interval above the budget sends the delete's first pass straight to
+    its final check, so a test given ``_DELETE_BUDGET`` doesn't wait it out."""
+    return patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 999)
 
 
 def _settled_ref() -> asyncio.Future[None]:
@@ -257,6 +268,41 @@ async def test_queue_registration_warns_when_the_actor_predates_the_admission_fe
 
 
 @pytest.mark.asyncio
+async def test_queue_registration_warns_on_the_split_write_fallback() -> None:
+    """Neither registration method: state and details go separately, unfenced, and the log says so."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"set_state", "set_details"}
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    with patch("services.workers.dispatcher.logger") as mock_logger:
+        admission = await dispatcher._set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=42,
+            reject_if_file_active=False,
+        )
+
+    assert admission == _queue_admitted()
+    tsm.set_state.remote.assert_called_once_with("task-1", "QUEUED")
+    tsm.set_details.remote.assert_called_once()
+    mock_logger.bind.assert_called_once_with(task_id="task-1", file_id="file-1", partition="tenant-a")
+    assert "admission fence" in mock_logger.bind.return_value.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_queue_registration_retries_actor_reconstruction() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -316,6 +362,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
                 "filename": "report.txt",
                 "_openrag_job_created_at": "forged-created",
                 "_openrag_job_finished_at": "forged-finished",
+                "_openrag_job_outcome_pending": True,
             },
             partition="tenant-a",
             user={"id": 42},
@@ -352,6 +399,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
             "filename": "report.txt",
             "_openrag_job_created_at": "forged-created",
             "_openrag_job_finished_at": "forged-finished",
+            "_openrag_job_outcome_pending": True,
         },
         partition="tenant-a",
         user={"id": 42},
@@ -398,6 +446,92 @@ async def test_dispatch_indexing_registers_completion_with_detached_tracker() ->
         )
     tracker.track.remote.assert_called_once_with("task-1", {"ref": ref})
     tsm.set_details.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_submit_reads_the_borrowed_worker_ref() -> None:
+    """#1296: dropped unread, a failed ref makes Ray print an unhandled error in this process."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = asyncio.get_running_loop().create_future()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(ref),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.read_ref_when_settled") as read:
+        assert await dispatcher._submit_indexing_task_once("task-1", {}) is ref
+
+    read.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_runs_under_a_caller_supplied_task_id() -> None:
+    """A capped upload's task id is its file-slot reservation (#664): every
+    store keys the task by it, and the worker's catalog insert consumes it."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    pool = _pool_with_ref(ref)
+    tsm = _task_state_manager()
+    tracker = _completion_tracker()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=tracker,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "minted"
+        task_id = await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+            task_id="reservation-1",
+        )
+
+    assert task_id == "reservation-1"
+    assert tsm.set_queued_details_v2.remote.call_args.args[0] == "reservation-1"
+    assert pool.submit.remote.call_args.kwargs["task_id"] == "reservation-1"
+    tracker.track.remote.assert_called_once_with("reservation-1", {"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_copy_file_hands_its_reservation_to_the_catalog_insert() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.copy_file(
+        "file-1",
+        {"file_id": "copy-1", "partition": "tenant-b"},
+        "tenant-a",
+        user={"id": 7},
+        quota_reservation_id="reservation-1",
+    )
+
+    assert document_repo.add_file_to_partition.call_args.kwargs["quota_reservation_id"] == "reservation-1"
 
 
 @pytest.mark.asyncio
@@ -781,6 +915,48 @@ async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["catalog", "chunks"])
+async def test_copy_file_refuses_missing_source_without_writing(missing) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    store = _vector_store()
+    if missing == "catalog":
+        repo.get_file_metadata.return_value = None
+    else:
+        store.query_chunks_by_filter.return_value = []
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(DocumentNotFoundError) as exc:
+        await dispatcher.copy_file(
+            "file-1",
+            {"file_id": "copy-1", "partition": "tenant-b", "content_sha256": "abc123"},
+            "tenant-a",
+            user=None,
+        )
+
+    assert exc.value.status_code == 404
+    assert "file-1" in exc.value.message
+    assert "tenant-a" in exc.value.message
+    store.insert_entities.assert_not_awaited()
+    repo.add_file_to_partition.assert_not_awaited()
+    if missing == "catalog":
+        store.query_chunks_by_filter.assert_not_awaited()
+        repo.claim_content_sha256.assert_not_awaited()
+    else:
+        # An unsuccessful copy must release its reservation so a retry can proceed.
+        repo.release_content_sha256_claim.assert_awaited_once_with(**repo.claim_content_sha256.await_args.kwargs)
+
+
+@pytest.mark.asyncio
 async def test_copy_file_uses_non_task_content_claim_token() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -823,7 +999,10 @@ async def test_copy_file_uses_non_task_content_claim_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active() -> None:
+@pytest.mark.parametrize("replace", [False, True])
+async def test_dispatch_indexing_refuses_a_file_being_deleted_with_409(replace: bool) -> None:
+    """Not a 500: the client can retry once the delete is done (#1457)."""
+    from core.utils.exceptions import ConflictError
     from services.workers.dispatcher import WorkerDispatcher
 
     pool = _pool_with_ref(object())
@@ -844,19 +1023,57 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
         patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(RuntimeError, match="is being deleted"):
+        with pytest.raises(ConflictError) as caught:
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
                 partition="tenant-a",
                 user={"id": 42},
                 workspace_ids=["ws-1"],
-                replace=True,
+                replace=replace,
             )
 
+    assert caught.value.status_code == 409
+    assert caught.value.code == "DOCUMENT_DELETE_IN_PROGRESS"
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_returns_service_unavailable_when_capacity_is_full() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("outcome_backlog"))
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ServiceUnavailableError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=["ws-1"],
+            replace=True,
+        )
+
+    assert caught.value.code == "INDEXING_OUTCOME_BACKLOG"
+    assert caught.value.message == (
+        "Indexing is temporarily paused because task capacity is full "
+        "(queued or running work and unsaved job outcomes). Please retry shortly."
+    )
+    pool.submit.remote.assert_not_called()
+    tsm.set_object_ref.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1351,7 +1568,7 @@ async def test_dispatch_indexing_keeps_claim_when_submission_outcome_is_unknown(
         patch("services.workers.ray_utils.ray.cancel"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(TimeoutError, match="submit timed out"):
+        with pytest.raises(TimeoutError, match=r"submit\(task-1\) timed out after"):
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "content_sha256": "abc123"},
@@ -1390,7 +1607,7 @@ async def test_dispatch_indexing_preserves_unknown_submission_without_content_cl
         patch("services.workers.ray_utils.ray.cancel"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(TimeoutError, match="submit timed out"):
+        with pytest.raises(TimeoutError, match=r"submit\(task-1\) timed out after"):
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "source": "/data/report.txt"},
@@ -1505,6 +1722,8 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
         content_sha256=None,
         indexed_at=copied_at,
         chunk_count=1,
+        quota_reservation_id=None,
+        recheck_quota_if_slot_gone=True,
     )
     vector_store.upsert_entities.assert_awaited_once()
     vector_store.insert_entities.assert_awaited_once()
@@ -1524,11 +1743,12 @@ async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() 
         "title": "old",
         "degraded_stages": ["caption", "topic_tag"],
     }
+    vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=_task_state_manager(),
         completion_tracker=_completion_tracker(),
-        vector_store=_vector_store(),
+        vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=_workspace_repo(),
         collection="default",
@@ -1537,6 +1757,9 @@ async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() 
     await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
 
     assert document_repo.update_file_metadata_in_db.await_args.args[2] == {"title": "new"}
+    protected_metadata = vector_store.upsert_entities.await_args.kwargs["protected_metadata"]
+    assert protected_metadata["title"] == "new"
+    assert protected_metadata["degraded_stages"] == ["caption", "topic_tag"]
 
 
 @pytest.mark.asyncio
@@ -1574,6 +1797,12 @@ async def test_copy_inherits_catalog_degraded_stages(degraded_stages: list[str])
     assert copied_metadata["partition"] == "tenant-b"
     assert copied_metadata["title"] == "Copy"
     assert copied_metadata["degraded_stages"] == degraded_stages
+    protected_metadata = vector_store.insert_entities.await_args.kwargs["protected_metadata"]
+    assert protected_metadata["file_id"] == "copy"
+    assert protected_metadata["partition"] == "tenant-b"
+    assert protected_metadata["title"] == "Copy"
+    assert protected_metadata["degraded_stages"] == degraded_stages
+    assert "indexed_at" in protected_metadata
 
 
 @pytest.mark.asyncio
@@ -1597,12 +1826,13 @@ async def test_metadata_mutation_aborts_when_catalog_row_is_missing(operation: s
     if operation == "update":
         await dispatcher.update_file_metadata("missing", {"title": "new"}, "tenant-a", user=None)
     else:
-        await dispatcher.copy_file(
-            "missing",
-            {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
-            "tenant-a",
-            user=None,
-        )
+        with pytest.raises(DocumentNotFoundError):
+            await dispatcher.copy_file(
+                "missing",
+                {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
+                "tenant-a",
+                user=None,
+            )
 
     vector_store.query_chunks_by_filter.assert_not_awaited()
     vector_store.upsert_entities.assert_not_awaited()
@@ -1640,7 +1870,7 @@ async def test_copy_receives_grace_before_catalog_write_and_matches_afterward() 
         for offset in range(0, len(rows), batch_size):
             yield rows[offset : offset + batch_size]
 
-    async def insert(entities, collection):
+    async def insert(entities, collection, *, protected_metadata):
         copied.extend({**entity, "_id": index + 10} for index, entity in enumerate(entities))
         events = [e async for e in reconcile_partition(catalog, vectors, collection, "b", repair=True)]
         assert events[-1]["recent_chunks_skipped"] == 2
@@ -1742,12 +1972,30 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
         collection="default",
     )
 
-    with patch("ray.cancel") as cancel:
+    with patch("ray.cancel") as cancel, patch("services.workers.dispatcher.read_ref_when_settled") as read:
         result = await dispatcher.cancel_task("task-1")
 
     assert result is False
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
     cancel.assert_not_called()
+    # #1296: the ref was borrowed by the fetch and is dropped here unread.
+    read.assert_called_once_with({"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_counting_active_tasks_reads_the_refs_it_fetched() -> None:
+    """#1296: a replica that did not submit the task borrows its ref for the count, then drops it."""
+    from services.workers.task_cancellation import count_active_indexing_tasks
+    from services.workers.task_state import PENDING_TASK_DETAILS
+
+    ref = object()
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": ref}, "task-2": PENDING_TASK_DETAILS})
+
+    with patch("services.workers.task_cancellation.read_ref_when_settled") as read:
+        assert await count_active_indexing_tasks(tsm, partition="p") == 2
+
+    assert read.call_args_list == [call({"ref": ref}), call(PENDING_TASK_DETAILS)]
 
 
 @pytest.mark.asyncio
@@ -2020,7 +2268,7 @@ async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup(
 
     tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="tenant-a", file_id="file-1")
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
 
@@ -2052,7 +2300,7 @@ async def test_delete_file_waits_for_matching_task_ref_before_cleanup() -> None:
 
     assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2077,16 +2325,16 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with patch("ray.cancel") as cancel:
+    with _straight_to_final_check(), patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
     assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2139,10 +2387,18 @@ async def test_delete_file_fails_closed_when_pending_task_details_do_not_settle(
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=5.0,
     )
 
-    with pytest.raises(TimeoutError, match="routing details"), patch("ray.cancel") as cancel:
+    # The interval above the timeout sends the first pass straight to the final
+    # check, so the test doesn't wait out the deadline, and each lookup gets the
+    # whole budget: with 0.01 s a slow CI runner timed out the first lookup
+    # instead, before the routing-details check.
+    with (
+        pytest.raises(TimeoutError, match="routing details"),
+        patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 999),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2170,10 +2426,14 @@ async def test_delete_file_fails_closed_for_submitted_task_without_ref() -> None
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="expose worker references or settle"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="expose worker references or settle"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2246,7 +2506,7 @@ async def test_delete_file_waits_for_cancelled_task_to_settle_before_cleanup() -
         await delete_task
 
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2318,7 +2578,7 @@ async def test_delete_file_uses_legacy_task_state_lookup_when_matching_api_missi
     tsm.get_all_info.remote.assert_called_once_with()
     tsm.get_object_ref.remote.assert_called_once_with("task-1")
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2386,10 +2646,14 @@ async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> Non
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="routing details"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="routing details"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     assert tsm.get_all_info.remote.call_count == 2
@@ -2426,10 +2690,14 @@ async def test_delete_file_legacy_lookup_blocks_submitted_task_without_ref() -> 
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with pytest.raises(TimeoutError, match="expose worker references or settle"), patch("ray.cancel") as cancel:
+    with (
+        pytest.raises(TimeoutError, match="expose worker references or settle"),
+        _straight_to_final_check(),
+        patch("ray.cancel") as cancel,
+    ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2456,7 +2724,9 @@ async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle(
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        # The ref never settles, so the test waits the whole budget out: 0.5 s
+        # leaves a stalled runner time to reach that wait at all.
+        timeout=0.5,
     )
 
     with pytest.raises(TimeoutError, match="settle after cancellation request"), patch("ray.cancel") as cancel:
@@ -2467,6 +2737,122 @@ async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle(
     vector_store.delete_by_filter.assert_not_called()
     workspace_repo.remove_file_from_all_workspaces.assert_not_called()
     document_repo.remove_file_from_partition.assert_not_called()
+
+
+def _owner_died_ref() -> asyncio.Future[None]:
+    from ray.exceptions import OwnerDiedError
+
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_exception(OwnerDiedError("00" * 28, owner_address=None, call_site=""))
+    return ref
+
+
+@pytest.mark.asyncio
+async def test_delete_file_waits_for_an_orphaned_worker_to_settle_before_cleanup() -> None:
+    """ray.cancel cannot reach a worker whose ref lost its owner: it would write the file back after the delete."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": _owner_died_ref()}})
+    calls: list[str] = []
+    tsm.set_cancelled_if_active.remote.side_effect = lambda task_id: calls.append("set_cancelled_if_active")
+    settled = iter([False, False, True])
+    tsm.has_worker_settled = _remote_mock()
+    tsm.has_worker_settled.remote.side_effect = lambda task_id: calls.append("has_worker_settled") or next(settled)
+    vector_store = _vector_store()
+    vector_store.delete_by_filter.side_effect = lambda *_a, **_k: calls.append("delete_chunks")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.task_cancellation._ORPHANED_WORKER_POLL_SECONDS", 0), patch("ray.cancel"):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    # Cancelled first, so the worker reads it on its next lease renewal and stops.
+    assert calls[:4] == ["set_cancelled_if_active", "has_worker_settled", "has_worker_settled", "has_worker_settled"]
+    assert calls.index("delete_chunks") > 3
+    tsm.has_worker_settled.remote.assert_called_with("task-1")
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_delete_file_does_not_cleanup_while_an_orphaned_worker_still_runs() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": _owner_died_ref()}})
+    tsm.has_worker_settled = _remote_mock(False)
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=_DELETE_BUDGET,
+    )
+
+    with (
+        # A poll interval above the budget raises on the first unsettled answer,
+        # so the test doesn't wait the budget out.
+        patch("services.workers.task_cancellation._ORPHANED_WORKER_POLL_SECONDS", 999),
+        pytest.raises(TimeoutError, match="settle after cancellation request"),
+        patch("ray.cancel"),
+    ):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
+    tsm.set_state.remote.assert_not_called()
+    assert tsm.has_worker_settled.remote.await_count >= 1
+    tsm.finish_cancellation.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
+    document_repo.remove_file_from_partition.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_worker_wait_keeps_the_state_of_a_task_that_completed_meanwhile() -> None:
+    from time import monotonic
+
+    from services.workers import task_cancellation
+
+    tsm = _task_state_manager()
+    tsm.set_cancelled_if_active = _remote_mock(False)
+    tsm.has_worker_settled = _remote_mock(True)
+
+    await task_cancellation._wait_for_orphaned_worker_to_settle(
+        tsm, task_id="task-1", deadline=monotonic() + 5, partition="tenant-a", file_id="file-1"
+    )
+
+    tsm.set_cancelled_if_active.remote.assert_awaited_once_with("task-1")
+    tsm.set_state.remote.assert_not_called()
+    tsm.has_worker_settled.remote.assert_awaited_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_orphaned_worker_wait_warns_that_an_older_task_state_manager_needs_a_ray_restart() -> None:
+    from time import monotonic
+
+    from services.workers import task_cancellation
+
+    tsm = MagicMock()
+    tsm._ray_actor_method_names = frozenset({"set_state"})
+    with patch.object(task_cancellation, "logger") as logger:
+        await task_cancellation._wait_for_orphaned_worker_to_settle(
+            tsm, task_id="task-1", deadline=monotonic() + 5, partition="tenant-a", file_id="file-1"
+        )
+
+    logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in logger.warning.call_args.args[0]
+    tsm.set_state.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2486,10 +2872,10 @@ async def test_delete_file_marks_stale_ref_less_task_failed_before_cleanup() -> 
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection="default",
-        timeout=0.01,
+        timeout=_DELETE_BUDGET,
     )
 
-    with patch("ray.cancel") as cancel:
+    with _straight_to_final_check(), patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
     cancel.assert_not_called()
@@ -2622,6 +3008,54 @@ async def test_dispatch_indexing_marks_unknown_submission_so_upload_is_kept() ->
                 replace=False,
             )
 
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.parametrize(
+    "cancel_error",
+    [RuntimeError("ray.cancel failed"), TimeoutError("cancel wait timed out")],
+    ids=["cancel-raises", "cancel-times-out"],
+)
+@pytest.mark.asyncio
+async def test_dispatch_indexing_marks_a_failed_cancel_after_submission(cancel_error) -> None:
+    """A cancel that raises never confirmed the submitted worker stopped (#664).
+
+    Its error is what reaches the upload route, so it must carry the marker:
+    otherwise the route deletes the upload and releases the quota slot while
+    the worker may still insert the file.
+    """
+    from core.utils.exceptions import indexing_worker_may_be_running
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tracker = _completion_tracker()
+    tracker.track.remote.side_effect = RuntimeError("tracker unreachable")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=tracker,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher.read_ref_when_settled"),
+        patch.object(dispatcher, "_cancel_submitted_task", AsyncMock(side_effect=cancel_error)),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(type(cancel_error)) as excinfo:
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "content_sha256": "abc123"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    assert excinfo.value is cancel_error
     assert indexing_worker_may_be_running(excinfo.value) is True
 
 
@@ -3004,6 +3438,7 @@ async def test_a_re_embedded_copy_records_the_target_embedder_and_is_checked_aga
         "embedder_model_name": "BAAI/bge-m3",
         "embedder_endpoint": "http://bge/v1",
         "embedder_dimension": 3,
+        "embedder_vector_field": "vector_bge_m3",
     }
     assert catalog["embedder_fingerprint"] == _TARGET_FINGERPRINT
 
@@ -3020,6 +3455,65 @@ async def test_a_copy_that_keeps_its_vectors_keeps_the_source_record() -> None:
     assert catalog["indexation_config"] == _SOURCE_CONFIG
     # Nothing was embedded now, so there is no run to check against the endpoint.
     assert "embedder_fingerprint" not in catalog
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_swapped_file_re_embeds_rather_than_reuse_the_old_fields_vectors() -> None:
+    """The file's partition moved from bge-m3 to e5: its chunks keep their old
+    bge-m3 vectors, and its record names the e5 field. Copied as they are, those
+    vectors may come from a model the endpoint was edited away from since, under
+    a record that names e5 — and with e5's own vectors stripped, a later swap of
+    the target to e5 would skip the file, then complete with it out of search."""
+    rows = [
+        {
+            "_id": 1,
+            "text": "hello",
+            "vector_bge_m3": [0.5, 0.5, 0.5],
+            "vector_e5": [0.1, 0.2],
+            "file_id": "file-1",
+            "partition": "a",
+        }
+    ]
+    embedder = _CopyEmbedder()
+    embedder.model_name, embedder.endpoint = "BAAI/bge-m3", "http://bge/v1"
+    repo = _document_repo()
+    repo.get_indexation_config = AsyncMock(return_value={**_SOURCE_CONFIG, "embedder_vector_field": "vector_e5"})
+
+    store = await _copy(rows, embedder, repo, embedder_reference="bge-m3", embedder_fingerprint=_TARGET_FINGERPRINT)
+
+    assert embedder.calls == [["hello"]]
+    inserted = store.insert_entities.await_args.args[0]
+    assert inserted[0]["vector_bge_m3"] == [1.0, 2.0, 3.0]
+    assert "vector_e5" not in inserted[0]
+    catalog = repo.add_file_to_partition.await_args.kwargs
+    assert catalog["indexation_config"]["embedder_vector_field"] == "vector_bge_m3"
+    assert catalog["embedder_fingerprint"] == _TARGET_FINGERPRINT
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_file_recorded_in_the_target_field_keeps_its_vectors() -> None:
+    rows = [
+        {
+            "_id": 1,
+            "text": "hello",
+            "vector_bge_m3": [0.5, 0.5, 0.5],
+            "vector_e5": [0.1, 0.2],
+            "file_id": "file-1",
+            "partition": "a",
+        }
+    ]
+    source_config = {**_SOURCE_CONFIG, "embedder_vector_field": "vector_bge_m3"}
+    embedder = _CopyEmbedder()
+    repo = _document_repo()
+    repo.get_indexation_config = AsyncMock(return_value=dict(source_config))
+
+    store = await _copy(rows, embedder, repo, embedder_reference="bge-m3", embedder_fingerprint=_TARGET_FINGERPRINT)
+
+    assert embedder.calls == []
+    inserted = store.insert_entities.await_args.args[0]
+    assert inserted[0]["vector_bge_m3"] == [0.5, 0.5, 0.5]
+    assert "vector_e5" not in inserted[0]
+    assert repo.add_file_to_partition.await_args.kwargs["indexation_config"] == source_config
 
 
 @pytest.mark.asyncio
@@ -3063,3 +3557,96 @@ async def test_a_copy_the_catalog_refuses_leaves_none_of_its_chunks() -> None:
     store.delete_by_filter.assert_awaited_once_with(
         {"partition": "b", "file_id": "copy-1", INDEXING_TASK_ID_METADATA_KEY: marker}
     )
+
+
+def _ref_failed_on_its_own_timeout() -> asyncio.Future[None]:
+    """A task ref whose task already failed with a TimeoutError it raised itself
+    (a parse bound, say), shaped the way Ray hands it back to the caller."""
+    from ray.exceptions import RayTaskError
+
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_exception(
+        RayTaskError(
+            "IndexerWorker.process_file", "traceback", TimeoutError("parse timed out after 3600s for 'f.pdf'")
+        ).as_instanceof_cause()
+    )
+    return ref
+
+
+@pytest.mark.asyncio
+async def test_cancel_submitted_task_treats_a_task_raised_timeout_as_settled() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=5,
+    )
+
+    with patch("ray.cancel"):
+        cancelled = await dispatcher._cancel_submitted_task("task-1", _ref_failed_on_its_own_timeout())
+
+    assert cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_submitted_task_still_times_out_on_its_own_wait() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=0.01,
+    )
+    never_settles = asyncio.get_running_loop().create_future()
+
+    with patch("ray.cancel"), pytest.raises(TimeoutError, match="to settle after dispatch failure"):
+        await dispatcher._cancel_submitted_task("task-1", never_settles)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_to_settle_treats_a_task_raised_timeout_as_settled() -> None:
+    from time import monotonic
+
+    from services.workers.task_cancellation import _wait_for_task_to_settle
+
+    with patch("ray.cancel") as cancel:
+        await _wait_for_task_to_settle(
+            MagicMock(),
+            _ref_failed_on_its_own_timeout(),
+            task_id="task-1",
+            deadline=monotonic() + 5,
+            partition="tenant-a",
+            file_id="file-1",
+        )
+
+    cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_to_settle_still_times_out_on_its_own_wait() -> None:
+    from time import monotonic
+
+    from services.workers.task_cancellation import _wait_for_task_to_settle
+
+    never_settles = asyncio.get_running_loop().create_future()
+
+    with patch("ray.cancel"), pytest.raises(TimeoutError, match="to settle after cancellation request"):
+        await _wait_for_task_to_settle(
+            MagicMock(),
+            never_settles,
+            task_id="task-1",
+            deadline=monotonic() + 0.01,
+            partition="tenant-a",
+            file_id="file-1",
+        )

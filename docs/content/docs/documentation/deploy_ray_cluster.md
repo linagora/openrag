@@ -159,8 +159,10 @@ PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
 
 If the timeout expires, the command leaves the actors running. Do not use the legacy confirmation while old API replicas can still submit indexing work. A complete Ray cluster restart also removes all detached generations.
 
+After jobs settle, stage-history writer shutdown has a separate deadline. If a writer does not respond, the command logs the affected worker and continues removing the idle generation; its remaining history may be incomplete.
+
 :::caution
-Some upgrades also replace the shared `TaskStateManager` actor: the first replica of the new release kills it at startup when it lacks a method the new release needs, and creates a new one. `v13` does this to a `v12` deployment. Old-generation workers keep a handle to the killed actor, so the jobs they are still running lose their state writes, and their tasks stay `SERIALIZING` in the status API. For such an upgrade, drain the old generation before the first new replica starts: stop traffic to the old replicas, run the retirement command above for the old generation (it waits for accepted jobs to settle), then start the new release.
+Some upgrades also replace the shared `TaskStateManager` actor: the first replica of the new release kills it at startup when it lacks a method the new release needs, and creates a new one. 2.3.x (`v13`) does this to a 2.2.x deployment (`v7`). Old-generation workers keep a handle to the killed actor, so the jobs they are still running lose their state writes, and their tasks stay `SERIALIZING` in the status API. For such an upgrade, drain the old generation before the first new replica starts: stop traffic to the old replicas, run the retirement command above for the old generation (it waits for accepted jobs to settle), then start the new release.
 :::
 
 ---

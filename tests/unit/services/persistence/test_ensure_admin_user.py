@@ -28,6 +28,10 @@ class _FakeConn:
             return self.existing
         return None
 
+    async def fetch(self, query: str, *params):
+        self.executed.append((query, params))
+        return []
+
     async def execute(self, query: str, *params):
         self.executed.append((query, params))
         return "UPDATE 1"
@@ -79,3 +83,7 @@ async def test_restart_with_auth_token_syncs_db_to_env():
         "UPDATE users SET is_admin = TRUE, token = $1 WHERE id = 1" in query and params == (_hash_token("or-new"),)
         for query, params in pool.conn.executed
     )
+    # A managed account holding the same hash loses it first, before the
+    # admin's write would hit the unique index (#1153).
+    clear, sync = (i for i, (query, _) in enumerate(pool.conn.executed) if "token" in query and "UPDATE" in query)
+    assert "managed_by_config" in pool.conn.executed[clear][0] and clear < sync

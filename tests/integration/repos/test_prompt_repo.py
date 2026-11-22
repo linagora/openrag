@@ -56,6 +56,22 @@ class TestCrud:
         assert updated is not None
         assert (updated.name, updated.content) == ("new", "new-body")
 
+    async def test_seed_refresh_requires_the_same_default_name_and_content(self, postgres_store: PostgresStore):
+        repo = postgres_store.prompt_repo
+        created = await repo.create(_prompt(name="default_sys_prompt", content="old", is_default=True))
+
+        assert not await repo.update_default_content_if_unchanged(created.id, "other", "old", "new")
+        await repo.update(created.id, content="admin edit")
+        assert not await repo.update_default_content_if_unchanged(created.id, "default_sys_prompt", "old", "new")
+        assert (await repo.get(created.id)).content == "admin edit"
+
+        await repo.update(created.id, content="old")
+        assert await repo.update_default_content_if_unchanged(created.id, "default_sys_prompt", "old", "new")
+        refreshed = await repo.get(created.id)
+        assert refreshed.content == "new"
+        assert refreshed.id == created.id
+        assert refreshed.name == created.name
+
     async def test_renaming_asr_prompt_preserves_indexation_preset_selection(self, postgres_store: PostgresStore):
         repo = postgres_store.prompt_repo
         prompt = await repo.create(_prompt("asr_transcription", name="meeting-notes"))

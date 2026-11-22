@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
+import { PartitionCombobox } from "@/components/shared/partition-combobox";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import {
   DEGRADED_STAGE_OPTIONS,
@@ -25,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
   SelectContent,
@@ -42,6 +44,8 @@ import { usePermissions } from "@/lib/permissions";
 import { downloadCsv } from "@/lib/csv";
 import { EmbedderDriftDialog } from "./embedder-drift-dialog";
 import { resolveDocumentsPartition } from "./partition-selection";
+import { EmbedderSwapNotice } from "../partitions/embedder-swap";
+import { useEmbedderSwap } from "../partitions/use-embedder-swap";
 
 const fileHref = (partition: string, fileId: string) =>
   `/documents/${encodeURIComponent(partition)}/${encodeURIComponent(fileId)}`;
@@ -104,6 +108,15 @@ export default function DocumentListPage() {
   const selectedPartitionExists = partitions.some((p) => p.partition === selected);
   const role = partitions.find((p) => p.partition === selected)?.role;
   const writable = canWrite(role);
+  // The server refuses uploads while the partition is re-embedded with another
+  // embedder; say so before anyone picks files.
+  const { swap: embedderSwap, running: swapRunning } = useEmbedderSwap(
+    writable && selectedPartitionExists ? selected : undefined,
+  );
+  const uploadPausedReason = swapRunning
+    ? `Uploads are paused while ${selected} is re-embedded with ${embedderSwap?.target_embedder} ` +
+      `(${embedderSwap?.files_done} of ${embedderSwap?.files_total} files).`
+    : null;
 
   // Keep the remembered partition in sync, and heal a stale ?partition= URL so a
   // refresh / shared link doesn't re-trigger the not-found error.
@@ -353,8 +366,11 @@ export default function DocumentListPage() {
     const counts = new Map<string, { label: string; file_count: number; drifted: boolean }>();
     for (const f of fileRows) {
       const label = fileModel(f) ?? "unrecorded";
-      const entry = counts.get(label) ?? { label, file_count: 0, drifted: driftedFrom(f) !== null };
+      const entry = counts.get(label) ?? { label, file_count: 0, drifted: false };
       entry.file_count += 1;
+      // Any drifted file marks the group: one model can be recorded under
+      // endpoint labels that disagree, and the first file seen decides nothing.
+      entry.drifted ||= driftedFrom(f) !== null;
       counts.set(label, entry);
     }
     return [...counts.values()].sort((a, b) => b.file_count - a.file_count);
@@ -471,11 +487,27 @@ export default function DocumentListPage() {
         actions={
           writable && selected ? (
             <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
-              <DialogTrigger asChild>
-                <Button>
-                  <Plus className="h-4 w-4" /> Upload
-                </Button>
-              </DialogTrigger>
+              {uploadPausedReason ? (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      {/* A disabled button fires no pointer events, so the span carries the tooltip. */}
+                      <span tabIndex={0} aria-label={uploadPausedReason}>
+                        <Button disabled>
+                          <Plus className="h-4 w-4" /> Upload
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs">{uploadPausedReason}</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : (
+                <DialogTrigger asChild>
+                  <Button>
+                    <Plus className="h-4 w-4" /> Upload
+                  </Button>
+                </DialogTrigger>
+              )}
               <DialogContent>
                 <DialogHeader>
                   <DialogTitle>Upload files</DialogTitle>
@@ -496,6 +528,7 @@ export default function DocumentListPage() {
                   {files.length > 0 && (
                     <p className="text-sm text-muted-foreground">{files.length} file(s) selected</p>
                   )}
+                  {uploadPausedReason && <p className="text-sm text-destructive">{uploadPausedReason}</p>}
                 </div>
                 <DialogFooter>
                   <Button
@@ -508,7 +541,10 @@ export default function DocumentListPage() {
                   >
                     Cancel
                   </Button>
-                  <Button onClick={() => uploadMutation.mutate()} disabled={!files.length || uploading}>
+                  <Button
+                    onClick={() => uploadMutation.mutate()}
+                    disabled={!files.length || uploading || !!uploadPausedReason}
+                  >
                     {uploading ? "Uploading..." : "Upload"}
                   </Button>
                 </DialogFooter>
@@ -520,18 +556,13 @@ export default function DocumentListPage() {
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Label className="text-sm font-medium">Partition</Label>
-        <Select value={selected} onValueChange={selectPartition}>
-          <SelectTrigger className="w-[220px]">
-            <SelectValue placeholder="Select partition" />
-          </SelectTrigger>
-          <SelectContent>
-            {partitions.map((p) => (
-              <SelectItem key={p.partition} value={p.partition}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <PartitionCombobox
+          partitions={partitions}
+          value={selected}
+          onValueChange={selectPartition}
+          className="w-[220px]"
+          aria-label="Partition"
+        />
         <div className="relative max-w-xs">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -651,6 +682,10 @@ export default function DocumentListPage() {
           </Button>
         </div>
       </div>
+
+      {/* Above the table, not only on the disabled Upload button: this page is
+          where a paused partition is felt, and a tooltip has to be hunted for. */}
+      <EmbedderSwapNotice swap={embedderSwap} />
 
       {!selected ? (
         <div

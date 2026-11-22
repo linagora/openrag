@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 from core.config.auth import OIDCConfig
-from core.models.user import PartitionRole, User, UserPartition
+from core.models.user import FileSlotGrant, PartitionRole, User, UserPartition
 from core.utils.exceptions import OpenRAGError
 from cryptography.fernet import Fernet
 from services.auth import StateCookieSerializer, hash_session_token
@@ -368,6 +368,37 @@ async def test_callback_auto_provision_email_collision_returns_conflict():
 
 
 @pytest.mark.asyncio
+async def test_callback_refuses_an_account_managed_by_config():
+    """An IdP ``sub`` equal to a seed user's external_user_id must not log in as it (#1153).
+
+    Refused before any write: no profile sync, no claim mapping, no group sync,
+    no session.
+    """
+    managed = User(id=42, display_name="cozy-stack", external_user_id="svc-cozy", is_admin=True, managed_by_config=True)
+    urepo = FakeUserRepo({"svc-cozy": managed})
+    srepo = FakeSessionRepo()
+    mrepo = FakeMembershipRepo(seed=[(42, "twake", "editor")])
+    claims = {"sub": "svc-cozy", "name": "Mallory", "email": "m@evil.io", "groups": ["/openrag/other/owner"]}
+    svc = _service(
+        user_repo=urepo,
+        session_repo=srepo,
+        membership_repo=mrepo,
+        client=FakeOIDCClient(bundle=_bundle(claims=claims)),
+        cfg=_group_cfg(auto_provision_login=True, claim_mapping="display_name:name,email:email", group_sync_prune=True),
+    )
+
+    state, cookie = await _login_and_get_state(svc)
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert ei.value.status_code == 403
+    assert urepo.updated == [] and urepo.created == []
+    assert (managed.display_name, managed.email, managed.is_admin) == ("cozy-stack", None, True)
+    assert mrepo.assigned == [] and mrepo.updated == [] and mrepo.removed == []
+    assert srepo.created == []
+
+
+@pytest.mark.asyncio
 async def test_callback_code_exchange_failure_is_masked():
     svc = _service(client=FakeOIDCClient(bundle=RuntimeError("idp 500")))
     state, cookie = await _login_and_get_state(svc)
@@ -610,25 +641,65 @@ def test_authorize_unknown_action_raises():
         AuthService.authorize(user={"id": 1, "is_admin": True}, action="bogus:action")
 
 
-def test_validate_file_quota():
-    # Admin bypass.
-    AuthService.validate_file_quota({"is_admin": True}, pending_task_count=99, default_quota=1)
-    # Disabled globally.
-    AuthService.validate_file_quota({"file_count": 50}, pending_task_count=50, default_quota=-1)
-    # Specific limit exceeded (3 indexed + 2 pending >= 5).
+@pytest.mark.parametrize(
+    ("user", "default_quota", "unlimited"),
+    [
+        ({"is_admin": True, "file_quota": 0}, 1, True),
+        ({"file_quota": None}, -1, True),
+        ({"file_quota": -1}, 10, True),
+        ({"file_quota": 5}, 10, False),
+        ({"file_quota": None}, 0, False),
+        # A per-user limit holds even when the global default is unlimited.
+        ({"file_quota": 10}, -1, False),
+    ],
+    ids=["admin", "unlimited-default", "unlimited-user", "capped-user", "zero-default", "limit-over-negative-default"],
+)
+def test_has_unlimited_file_quota(user, default_quota, unlimited):
+    assert AuthService.has_unlimited_file_quota(user, default_quota=default_quota) is unlimited
+
+
+class _SlotRepo:
+    def __init__(self, grant: FileSlotGrant = FileSlotGrant.RESERVED, release_error: Exception | None = None):
+        self.grant = grant
+        self.release_error = release_error
+        self.reserved: list[tuple[int, str, int]] = []
+        self.released: list[str] = []
+
+    async def try_reserve_file_slot(self, user_id, reservation_id, *, default_quota):
+        self.reserved.append((user_id, reservation_id, default_quota))
+        return self.grant
+
+    async def release_file_slot(self, reservation_id):
+        if self.release_error is not None:
+            raise self.release_error
+        self.released.append(reservation_id)
+        return True
+
+
+@pytest.mark.parametrize("grant", [FileSlotGrant.RESERVED, FileSlotGrant.UNLIMITED])
+@pytest.mark.asyncio
+async def test_reserve_file_slot_returns_the_grant(grant):
+    repo = _SlotRepo(grant)
+
+    assert await _service(user_repo=repo).reserve_file_slot(7, "r-1", default_quota=3) is grant
+    assert repo.reserved == [(7, "r-1", 3)]
+
+
+@pytest.mark.asyncio
+async def test_reserve_file_slot_refuses_a_full_quota_with_403():
     with pytest.raises(OpenRAGError) as ei:
-        AuthService.validate_file_quota({"file_count": 3, "file_quota": 5}, pending_task_count=2, default_quota=10)
+        await _service(user_repo=_SlotRepo(FileSlotGrant.DENIED)).reserve_file_slot(7, "r-1", default_quota=3)
+
     assert ei.value.code == "FILE_QUOTA_EXCEEDED"
-    # Under the limit is fine.
-    AuthService.validate_file_quota({"file_count": 1, "file_quota": 5}, pending_task_count=1, default_quota=10)
-    # Regression: a per-user limit is enforced even when the global default
-    # is unlimited (-1). The negative default used to short-circuit to
-    # "unlimited" and ignore the per-user quota entirely.
-    with pytest.raises(OpenRAGError) as ei:
-        AuthService.validate_file_quota({"file_count": 10, "file_quota": 10}, pending_task_count=0, default_quota=-1)
-    assert ei.value.code == "FILE_QUOTA_EXCEEDED"
-    # ...but a user with no per-user quota still inherits the unlimited default.
-    AuthService.validate_file_quota({"file_count": 999}, pending_task_count=0, default_quota=-1)
+    assert ei.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_release_file_slot_never_raises():
+    """It runs on cleanup paths; raising there would replace the caller's real error."""
+    repo = _SlotRepo(release_error=RuntimeError("postgres down"))
+
+    await _service(user_repo=repo).release_file_slot("r-1")
 
 
 # --------------------------------------------------------------------------- #
@@ -753,3 +824,64 @@ async def test_membership_sync_survives_list_failure():
     # Must not raise.
     await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner"]})
     assert repo.assigned == []
+
+
+class _RacingUserRepo(FakeUserRepo):
+    """First lookup misses, the insert loses a race, the re-read finds ``winner``."""
+
+    def __init__(self, winner: User):
+        super().__init__({})
+        self._winner = winner
+        self._lookups = 0
+
+    async def get_user_by_external_id(self, external_id: str) -> User | None:
+        self._lookups += 1
+        return None if self._lookups == 1 else self._winner
+
+    async def create_user(self, user: User) -> User:
+        raise ValueError("duplicate key value violates unique constraint")
+
+
+@pytest.mark.asyncio
+async def test_callback_refuses_a_managed_account_found_on_the_provisioning_retry():
+    """The unique-conflict retry re-reads by ``sub``: a managed row found there is refused too (#1153)."""
+    managed = User(id=42, display_name="cozy-stack", external_user_id="svc-cozy", managed_by_config=True)
+    urepo = _RacingUserRepo(managed)
+    srepo = FakeSessionRepo()
+    svc = _service(
+        user_repo=urepo,
+        session_repo=srepo,
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": "svc-cozy", "name": "Mallory"})),
+        cfg=_cfg(auto_provision_login=True),
+    )
+
+    state, cookie = await _login_and_get_state(svc)
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert ei.value.status_code == 403
+    assert urepo.updated == []
+    assert srepo.created == []
+
+
+@pytest.mark.asyncio
+async def test_callback_returns_an_unmanaged_account_found_on_the_provisioning_retry():
+    winner = User(id=43, display_name="Bob", external_user_id="kc-bob")
+    svc = _service(
+        user_repo=_RacingUserRepo(winner),
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": "kc-bob", "name": "Bob"})),
+        cfg=_cfg(auto_provision_login=True),
+    )
+
+    state, cookie = await _login_and_get_state(svc)
+    result = await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+    assert result.next_url == "/home"
+
+
+@pytest.mark.asyncio
+async def test_request_partitions_skip_reserved_names():
+    repo = FakeMembershipRepo(
+        seed=[(7, "all", "owner"), (7, "ALL", "viewer"), (7, "team", "editor"), (8, "x", "viewer")]
+    )
+    partitions = await _service(membership_repo=repo).list_user_partitions_for_request(7)
+    assert [(p["partition"], p["role"]) for p in partitions] == [("team", "editor")]

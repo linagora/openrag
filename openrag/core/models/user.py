@@ -55,6 +55,17 @@ class PartitionRole(str, Enum):
     OWNER = "owner"
 
 
+class FileSlotGrant(str, Enum):
+    """Outcome of asking for one file slot against a user's quota (#664)."""
+
+    #: A slot was taken and must end up consumed by a file or released.
+    RESERVED = "reserved"
+    #: Admin, or a resolved quota below zero: nothing to reserve.
+    UNLIMITED = "unlimited"
+    #: The quota is full, or the user does not exist.
+    DENIED = "denied"
+
+
 class User(BaseModel):
     """An OpenRAG user account.
 
@@ -80,6 +91,9 @@ class User(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     partitions: list[UserPartition] = Field(default_factory=list)
+    # Provisioned from ``auth.seed_users``: the config owns the account, so an
+    # OIDC login whose ``sub`` matches its external_user_id is refused.
+    managed_by_config: bool = False
 
 
 class UserPartition(BaseModel):

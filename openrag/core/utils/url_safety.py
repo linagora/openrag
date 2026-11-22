@@ -14,6 +14,8 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
+_IDNA_LABEL_SEPARATORS = str.maketrans({"。": ".", "．": ".", "｡": "."})
+
 
 def _bare_numeric_host_value(host: str) -> int | None:
     """Parse *host* as a single C-style integer literal (decimal, ``0x`` hex,
@@ -77,15 +79,30 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     if not host:
         return False
 
+    # DNS length bounds, checked before any downstream IDN processing: no
+    # valid hostname exceeds 253 characters or a 63-character label, and a
+    # crafted very long internationalized hostname can consume
+    # disproportionate CPU in vulnerable idna releases (GHSA-65pc-fj4g-8rjx)
+    # while the fetch resolves it — stalling the shared event loop.
+    normalized_host = host.translate(_IDNA_LABEL_SEPARATORS)
+    hostname_for_length_check = normalized_host[:-1] if normalized_host.endswith(".") else normalized_host
+    labels = hostname_for_length_check.split(".")
+    if len(hostname_for_length_check) > 253 or any(not label or len(label) > 63 for label in labels):
+        return False
+
     if allow_private_hosts:
         return True
 
-    if host.lower() == "localhost":
+    # Drop only the optional DNS root dot; an additional dot was rejected by
+    # the empty-label check above.
+    host_for_address_checks = hostname_for_length_check
+
+    if host_for_address_checks.lower() == "localhost":
         return False
 
     # Dotted-decimal or IPv6 literal (e.g. "127.0.0.1", "::1", "10.0.0.1").
     try:
-        return not is_blocked_address(ipaddress.ip_address(host))
+        return not is_blocked_address(ipaddress.ip_address(host_for_address_checks))
     except ValueError:
         pass
 
@@ -97,14 +114,14 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     # instead of raising. Relying on ip_address(int(host)) here would have
     # the opposite problem: it never raises for a value this large, it just
     # silently builds an unrelated, often-public-looking IPv6 address.
-    numeric_value = _bare_numeric_host_value(host)
+    numeric_value = _bare_numeric_host_value(host_for_address_checks)
     if numeric_value is not None and numeric_value > 0xFFFFFFFF:
         return False
 
     # inet_aton covers decimal/hex/octal/short-form IPv4 the same way glibc's
     # resolver does, for every in-range value.
     try:
-        packed = socket.inet_aton(host)
+        packed = socket.inet_aton(host_for_address_checks)
     except OSError:
         pass
     else:

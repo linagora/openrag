@@ -46,8 +46,10 @@ spec:
                 else
                   echo "No env ready, cleaning and syncing..."
                   rm -rf /app/.venv/*
-                  uv sync
-                  touch /app/.venv/.ready
+                  # Mark the venv ready only once the install succeeded. A failed
+                  # sync then fails this init container, which is retried, instead
+                  # of leaving a half-installed venv that every pod starts on.
+                  uv sync && touch /app/.venv/.ready
                 fi
             volumeMounts:
               - name: venv

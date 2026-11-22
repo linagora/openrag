@@ -54,7 +54,7 @@ def _default_reranker_config() -> InfinityRerankerConfig:
 
 class _BaseRetrieverConfig(ConfigMixin):
     top_k: int = 50
-    similarity_threshold: float = 0.6
+    similarity_threshold: float = 0.2
     with_surrounding_chunks: bool = False
     include_related: bool = True
     include_ancestors: bool = True
@@ -67,12 +67,13 @@ class _BaseRetrieverConfig(ConfigMixin):
     # document hierarchies.
     max_ancestor_depth_cap: int = 1000
     allow_filterless_fallback: bool = True
-    # Upper bound on how many per-partition retrievals run concurrently within a
-    # single request. A multi-partition search (notably a SUPER_ADMIN_MODE
+    # Upper bound on how many partition-group retrievals run concurrently within
+    # a single request. A multi-partition search (notably a SUPER_ADMIN_MODE
     # ``openrag-all`` that expands to every partition) fans out one embed+search
-    # per partition; without a cap that is proportional to the partition count
-    # and can exhaust the Milvus/embedder pools from one request. Small fan-outs
-    # (the common case) stay fully parallel — the cap only engages past it.
+    # per group of partitions sharing an embedder (and, for chat, a retrieval
+    # preset); without a cap that is proportional to the group count and can
+    # exhaust the Milvus/embedder pools from one request. Small fan-outs (the
+    # common case) stay fully parallel — the cap only engages past it.
     max_partition_concurrency: int = Field(default=16, gt=0)
 
 

@@ -1,0 +1,32 @@
+# Opt-in: publish the Ray dashboard on the host's loopback. Layer it last, after
+# any other overlay (proxy.docker-compose.yaml replaces the port list):
+#
+#   docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml up -d                # GPU
+#   docker compose -f docker-compose.yaml -f ray-dashboard.docker-compose.yaml --profile cpu up -d  # CPU
+#
+# then open http://127.0.0.1:${RAY_DASHBOARD_PORT:-8265}, or forward it over SSH
+# from a server. The dashboard has no authentication and its job-submission API
+# runs arbitrary code, so publish it only while you use it, and bring the stack
+# back up without this file afterwards. Adding or removing this file recreates the
+# API container, which restarts the embedded Ray.
+#
+# The dashboard binds to RAY_DASHBOARD_HOST, 127.0.0.1 by default: the container's
+# own loopback, which a published port does not reach. This file sets it to
+# 0.0.0.0, which also opens it to the Compose network while the file is in use.
+#
+# Docker Engine releases older than 28.0.0 let hosts on the same L2 network reach
+# ports published to 127.0.0.1. On those releases, use this file only on a network
+# where every host is trusted.
+
+services:
+  openrag:
+    environment:
+      RAY_DASHBOARD_HOST: 0.0.0.0
+    ports:
+      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
+
+  openrag-cpu:
+    environment:
+      RAY_DASHBOARD_HOST: 0.0.0.0
+    ports:
+      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265

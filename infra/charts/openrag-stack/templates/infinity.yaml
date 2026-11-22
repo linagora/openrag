@@ -1,4 +1,76 @@
+{{- $reranker := .Values.reranker }}
+{{- /* rerankerModelName and servicePort are gone, so a values file that still
+   sets them would have them ignored without a word. rerankerModelName is the
+   model OpenRAG asked an external reranker for, so ignoring it would send that
+   reranker another model's name. Checked whether or not the bundled reranker
+   runs; equal values, as in a copy of the old defaults, pass. */}}
+{{- if and (hasKey $reranker "rerankerModelName") (ne (toString $reranker.rerankerModelName) (toString $reranker.model.id)) }}
+{{- fail (printf "reranker.rerankerModelName is %q but reranker.model.id is %q. This chart reads only reranker.model.id, for the bundled reranker and an external one alike: set the model there and delete reranker.rerankerModelName." (toString $reranker.rerankerModelName) (toString $reranker.model.id)) }}
+{{- end }}
+{{- if and (hasKey $reranker "servicePort") (ne (toString $reranker.servicePort) (toString $reranker.service.port)) }}
+{{- fail (printf "reranker.servicePort is %q but reranker.service.port is %q. This chart reads only reranker.service.port: set the port there and delete reranker.servicePort." (toString $reranker.servicePort) (toString $reranker.service.port)) }}
+{{- end }}
+{{- /* A values file copied from an earlier chart also carries env.config
+   templates that read those keys. Once a key is deleted, they render empty:
+   an external reranker would be asked for no model, which no check below
+   sees. Equal values, kept alongside, still pass above. */}}
+{{- $replacements := dict "rerankerModelName" "'{{ .Values.reranker.model.id }}'" "servicePort" "the chart default, which reads reranker.service.port" }}
+{{- range $section := list "config" "secrets" }}
+{{- range $name, $value := (index $.Values.env $section | default dict) }}
+{{- range $key := list "rerankerModelName" "servicePort" }}
+{{- if and (not (hasKey $reranker $key)) (contains (printf ".Values.reranker.%s" $key) (printf "%v" $value)) }}
+{{- fail (printf "env.%s.%s reads reranker.%s, which this chart removed, so it would render empty. Set env.%s.%s to %s." $section $name $key $section $name (get $replacements $key)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if .Values.reranker.enabled }}
+{{- $port := toString $reranker.service.port }}
+{{- $args := list "v2" "--model-id" (toString $reranker.model.id) "--port" $port }}
+{{- /* reranker.command was never read: the container always ran
+   `v2 --model-id <model> --port <port>`, from reranker.model.id and
+   reranker.service.port. A copy of that old default passes whatever model and
+   port it names, which never applied either; extra or different flags were a
+   change that never applied, so they fail here instead of being ignored again. */}}
+{{- if not (kindIs "invalid" $reranker.command) }}
+{{- $shape := list }}
+{{- range $i, $arg := $reranker.command }}
+{{- $shape = append $shape (ternary "" (toString $arg) (has $i (list 2 4))) }}
+{{- end }}
+{{- if ne (join "\n" $shape) (join "\n" (list "v2" "--model-id" "" "--port" "")) }}
+{{- fail (printf "reranker.command is not read by the chart, and never was: the reranker runs %q. Put extra flags in reranker.extraArgs, the model in reranker.model.id and the port in reranker.service.port, then delete reranker.command." (join " " $args)) }}
+{{- end }}
+{{- end }}
+{{- /* The model and the port come from reranker.model.id and
+   reranker.service.port alone: a second --model-id would load another model,
+   and a second --port would move Infinity off the port that the probes,
+   the Service and RERANKER_BASE_URL use. */}}
+{{- range $reranker.extraArgs | default list }}
+{{- $flag := toString . }}
+{{- range list "--model-id" "--port" }}
+{{- if or (eq $flag .) (hasPrefix (printf "%s=" .) $flag) }}
+{{- fail (printf "reranker.extraArgs sets %s, which the chart already passes from %s. Set it there and remove it from reranker.extraArgs." . (ternary "reranker.model.id" "reranker.service.port" (eq . "--model-id"))) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /* With the bundled reranker, OpenRAG must name the model Infinity serves
+   (Infinity ignores the name when it serves one model, so a mismatch reranks
+   with another model than the one configured) and call the port it listens
+   on. Checked on the rendered env.config values, so a values file that still
+   reads the removed rerankerModelName / servicePort keys passes as long as
+   they agree. */}}
+{{- if not $reranker.externalUrl }}
+{{- $model := tpl (printf "%v" (index .Values.env.config "RERANKER_MODEL" | default "")) $ }}
+{{- if ne $model (toString $reranker.model.id) }}
+{{- fail (printf "env.config.RERANKER_MODEL renders %q but the reranker serves reranker.model.id %q: Infinity answers with the one model it loaded whatever a request names, so OpenRAG would report one model and rerank with the other. Set the model in reranker.model.id, which replaces reranker.rerankerModelName, and env.config.RERANKER_MODEL to '{{ .Values.reranker.model.id }}'." $model (toString $reranker.model.id)) }}
+{{- end }}
+{{- $url := tpl (printf "%v" (index .Values.env.config "RERANKER_BASE_URL" | default "")) $ }}
+{{- $parsedUrl := urlParse $url }}
+{{- $urlPort := splitList ":" $parsedUrl.host | rest | last | default (get (dict "http" "80" "https" "443") $parsedUrl.scheme) }}
+{{- if ne $urlPort $port }}
+{{- fail (printf "env.config.RERANKER_BASE_URL renders %q but the reranker listens on port %s (reranker.service.port), so OpenRAG could not reach it. Set the port in reranker.service.port, which replaces reranker.servicePort, and env.config.RERANKER_BASE_URL to the chart default, which reads it." $url $port) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,33 +105,81 @@ spec:
           securityContext:
             {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.reranker.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 12 }}
           args:
-            - "v2"
-            - "--model-id"
-            - "{{ .Values.reranker.model.id }}"
-            - "--port"
-            - "{{ .Values.reranker.service.port }}"
+            {{- range (concat $args ($reranker.extraArgs | default list)) }}
+            - {{ toString . | quote }}
+            {{- end }}
           ports:
             - containerPort: {{ .Values.reranker.service.port }}
               name: reranker
           resources:
             {{- toYaml .Values.reranker.resources | nindent 12 }}
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: reranker
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            failureThreshold: 6
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: reranker
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            failureThreshold: 3
+          {{- /* The default probes live here, not in values.yaml: Helm deletes a
+             null that overrides a default, so a probe set to null could not be
+             told from one left out. With no default under reranker.probes, a
+             null stays a null whether the chart's defaults are loaded or, after
+             `helm upgrade --reuse-values` from an earlier chart, they are not.
+             Each probe is merged over its default: a null probe is dropped, a
+             null field removed, and another handler replaces the default httpGet. */}}
+          {{- $defaults := fromYaml `
+startup:
+  httpGet:
+    path: /health
+    port: reranker
+  periodSeconds: 10
+  failureThreshold: 60
+readiness:
+  httpGet:
+    path: /health
+    port: reranker
+  periodSeconds: 10
+  failureThreshold: 6
+liveness:
+  httpGet:
+    path: /health
+    port: reranker
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  failureThreshold: 3
+` }}
+          {{- $handlers := list "httpGet" "tcpSocket" "exec" "grpc" }}
+          {{- $overrides := $reranker.probes | default dict }}
+          {{- range $name := list "startup" "readiness" "liveness" }}
+          {{- $override := index $overrides $name }}
+          {{- if not (and (hasKey $overrides $name) (kindIs "invalid" $override)) }}
+          {{- $override = $override | default dict }}
+          {{- $probe := deepCopy (index $defaults $name) }}
+          {{- range $handler := $handlers }}
+          {{- if hasKey $override $handler }}
+          {{- range $other := without $handlers $handler }}{{- $_ := unset $probe $other }}{{- end }}
+          {{- end }}
+          {{- end }}
+          {{- range $key, $value := $override }}
+          {{- if kindIs "invalid" $value }}
+          {{- $_ := unset $probe $key }}
+          {{- else if and (kindIs "map" $value) (kindIs "map" (index $probe $key)) }}
+          {{- $merged := deepCopy (index $probe $key) }}
+          {{- range $field, $setting := $value }}
+          {{- if kindIs "invalid" $setting }}{{- $_ := unset $merged $field }}{{- else }}{{- $_ := set $merged $field $setting }}{{- end }}
+          {{- end }}
+          {{- $_ := set $probe $key $merged }}
+          {{- else }}
+          {{- $_ := set $probe $key $value }}
+          {{- end }}
+          {{- end }}
+          {{- if not (or $probe.httpGet $probe.tcpSocket $probe.exec $probe.grpc) }}
+          {{- fail (printf "reranker.probes.%s has no handler: set httpGet, tcpSocket, exec or grpc, or set the probe to null to drop it." $name) }}
+          {{- end }}
+          {{ $name }}Probe:
+            {{- toYaml $probe | nindent 12 }}
+          {{- end }}
+          {{- end }}
           volumeMounts:
             - name: hf-cache
               mountPath: /app/.cache/huggingface
+          {{- with $reranker.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "openrag-stack.fullname" . }}-env

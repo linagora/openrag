@@ -9,11 +9,17 @@ every partition.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock
+
 import pytest
 from api.dependencies.auth import partitions_with_details, require_partition_viewer
 from api.routers.admin import partitions
+from core.utils.exceptions import NotFoundError
 from di.providers import get_partition_service
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from services.orchestrators.partition_service import PartitionService
+from services.persistence.document_repo import PgDocumentRepository
 
 
 def _summary(name: str, **overrides) -> dict:
@@ -37,10 +43,13 @@ class _FakeService:
     """Minimal partition service exposing only what the list route calls."""
 
     def __init__(self, summaries: dict[str, dict]) -> None:
+        """Seed the canned summaries and record per-file call sites."""
         self._summaries = summaries
         self.file_calls: list[dict] = []
         self.file_chunks: list[dict] = []
         self.file_chunk_calls: list[dict] = []
+        self.topic_tags: list[str] = []
+        self.topic_tag_calls: list[dict] = []
 
     async def list_partition_summaries(self) -> dict[str, dict]:
         return self._summaries
@@ -52,13 +61,18 @@ class _FakeService:
     async def get_file_metadata(self, partition: str, file_id: str) -> dict:
         return {"filename": "catalog.pdf", "degraded_stages": ["caption"]}
 
+    async def get_file_topic_tags(self, partition: str, file_id: str) -> list[str]:
+        """Record the lookup and replay the canned tags."""
+        self.topic_tag_calls.append({"partition": partition, "file_id": file_id})
+        return list(self.topic_tags)
+
     async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list:
         self.file_chunk_calls.append({"partition": partition, "file_id": file_id, "limit": limit})
         return self.file_chunks[:limit]
 
 
 def _build_app(
-    service: _FakeService,
+    service: _FakeService | PartitionService,
     principal_partitions: list[dict],
     *,
     is_admin: bool = False,
@@ -160,8 +174,17 @@ async def test_file_list_rejects_an_unbounded_degraded_stage(async_client_factor
 
 @pytest.mark.asyncio
 async def test_file_detail_uses_authoritative_catalog_metadata(async_client_factory) -> None:
+    """Chunk-stored stale columns are replaced by the catalog metadata and tags are read."""
     service = _FakeService({})
-    service.file_chunks = [{"_id": "chunk-1", "filename": "stale-chunk-name.pdf", "page": 1}]
+    service.file_chunks = [
+        {
+            "_id": "chunk-1",
+            "filename": "stale-chunk-name.pdf",
+            "page": 1,
+            "vector": [0.1, 0.2],
+            "text": "private chunk text",
+        }
+    ]
     app = _build_app(service, [])
 
     async with async_client_factory(app) as client:
@@ -177,10 +200,13 @@ async def test_file_detail_uses_authoritative_catalog_metadata(async_client_fact
     assert body["documents"] == [
         {"link": "http://testserver/extract/chunk-1"},
     ]
+    assert body["topic_tags"] == []
+    assert service.topic_tag_calls == [{"partition": "legal", "file_id": "file-1"}]
 
 
 @pytest.mark.asyncio
 async def test_file_detail_with_zero_limit_skips_chunk_storage(async_client_factory) -> None:
+    """A limit of 0 skips the vector-store round trip and still returns tags."""
     service = _FakeService({})
     service.file_chunks = [{"_id": "chunk-1", "filename": "stale.pdf"}]
     app = _build_app(service, [])
@@ -192,5 +218,103 @@ async def test_file_detail_with_zero_limit_skips_chunk_storage(async_client_fact
     assert response.json() == {
         "metadata": {"filename": "catalog.pdf", "degraded_stages": ["caption"]},
         "documents": [],
+        "topic_tags": [],
     }
     assert service.file_chunk_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, 2000])
+@pytest.mark.parametrize("stale_metadata", [{}, {"partition": "old-partition", "indexed_at": "old-timestamp"}])
+async def test_file_detail_preserves_catalog_columns(async_client_factory, limit, stale_metadata) -> None:
+    """The real service stamps catalog columns onto metadata without merging chunk fields."""
+    indexed_at = datetime(2026, 10, 1, tzinfo=UTC)
+    file_metadata = {"filename": "catalog.pdf", **stale_metadata}
+    pool = AsyncMock()
+    pool.fetchval.return_value = True
+    pool.fetchrow.return_value = {
+        "file_metadata": file_metadata,
+        "partition_name": "legal",
+        "indexed_at": indexed_at,
+    }
+    vector_store = AsyncMock()
+    vector_store.query_chunks_by_filter.return_value = [
+        {"_id": "chunk-1", "page": 1, "partition": "stale-chunk-partition", "indexed_at": "stale-chunk-timestamp"}
+    ]
+    service = PartitionService(
+        partition_repo=AsyncMock(),
+        membership_repo=AsyncMock(),
+        document_repo=PgDocumentRepository(lambda: pool),
+        vector_store=vector_store,
+        user_repo=AsyncMock(),
+        collection="test",
+    )
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/file/file-1", params={"limit": limit})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "metadata": {
+            "filename": "catalog.pdf",
+            "partition": "legal",
+            "indexed_at": indexed_at.isoformat(),
+            **({"page": 1} if limit else {}),
+        },
+        "documents": [{"link": "http://testserver/extract/chunk-1"}] if limit else [],
+        "topic_tags": [],
+    }
+    if not limit:
+        vector_store.query_chunks_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_file_detail_includes_stored_topic_tags(async_client_factory) -> None:
+    """Tags from the topic-tag repo are surfaced top-level on the detail response."""
+    service = _FakeService({})
+    service.topic_tags = ["finance", "risk"]
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/file/file-1")
+
+    assert response.status_code == 200
+    assert response.json()["topic_tags"] == ["finance", "risk"]
+    assert service.topic_tag_calls == [{"partition": "legal", "file_id": "file-1"}]
+
+
+@pytest.mark.asyncio
+async def test_file_detail_still_requires_partition_viewer(async_client_factory) -> None:
+    """Authorization is unchanged: a denied viewer gets 403 and no tags leak."""
+
+    async def _deny() -> dict:
+        """Deny the viewer dependency with a 403."""
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    service = _FakeService({})
+    service.topic_tags = ["finance"]
+    app = _build_app(service, [])
+    app.dependency_overrides[require_partition_viewer] = _deny
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/file/file-1")
+
+    assert response.status_code == 403
+    assert service.topic_tag_calls == []
+
+
+@pytest.mark.asyncio
+async def test_file_detail_does_not_mask_catalog_errors_with_empty_tags(async_client_factory) -> None:
+    """A missing file still fails instead of returning 200 with empty tags."""
+
+    class _MissingFileService(_FakeService):
+        async def get_file_metadata(self, partition: str, file_id: str) -> dict:
+            """Mimic the catalog raising for an unknown file."""
+            raise NotFoundError("'file-1' not found in partition 'legal'", code="FILE_NOT_FOUND")
+
+    app = _build_app(_MissingFileService({}), [])
+
+    async with async_client_factory(app) as client:
+        with pytest.raises(NotFoundError):
+            await client.get("/partition/legal/file/file-1")

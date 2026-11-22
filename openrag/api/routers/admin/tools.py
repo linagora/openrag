@@ -103,7 +103,12 @@ async def execute_tool(
     file_path = None
     try:
         if tool["name"] == "extractText":
-            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+                mimetype=metadata.get("mimetype"),
+            )
 
             logger.debug(f"Execute tool extractText with file {file.filename}")
             sanitized_content = await service.serialize_file(

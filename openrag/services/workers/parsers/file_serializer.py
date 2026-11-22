@@ -58,7 +58,7 @@ class ParserFileSerializer(FileSerializer):
 
     async def serialize(self, path: str, metadata: dict) -> str:
         from core.models.document import Document, DocumentType
-        from services.workers.stages.caption import _caption_document
+        from services.workers.stages.caption import _caption_document, drop_uncaptioned_image_refs
 
         metadata = dict(metadata or {})
         p = Path(path)
@@ -72,7 +72,7 @@ class ParserFileSerializer(FileSerializer):
             # shared volume, so path-based parsers can be dispatched to a
             # worker on another node (#911).
             source_path=str(p),
-            content_type=Document.detect_content_type(name_for_type),
+            content_type=Document.detect_content_type(name_for_type, metadata.get("mimetype")),
             metadata=metadata,
         )
 
@@ -84,6 +84,7 @@ class ParserFileSerializer(FileSerializer):
         )
         if should_caption:
             processed = await _caption_document(processed, self._vlm, self._caption_prompt, self._caption_concurrency)
+        processed = drop_uncaptioned_image_refs(processed)
 
         return "\n\n".join(block.text for block in processed.text_blocks if block.text)
 

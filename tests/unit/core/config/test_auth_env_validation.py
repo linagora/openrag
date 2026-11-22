@@ -276,3 +276,10 @@ def test_group_pattern_validated_even_in_token_mode(monkeypatch):
     monkeypatch.setenv("OIDC_GROUP_PATTERN", "(unbalanced")
     with pytest.raises(RuntimeError, match="Invalid OIDC_GROUP_PATTERN"):
         OIDCConfig.from_env()
+
+
+def test_oidc_secrets_are_left_out_of_repr():
+    cfg = OIDCConfig(client_secret="oidc-client-secret", token_encryption_key="fernet-key-secret")
+
+    assert "oidc-client-secret" not in repr(cfg)
+    assert "fernet-key-secret" not in repr(cfg)

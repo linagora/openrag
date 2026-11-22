@@ -6,6 +6,7 @@ import {
   createModelEndpoint,
   getModelEndpointIndexedUsage,
   listModelEndpoints,
+  type ModelEndpointResponse,
   setDefaultModelEndpoint,
   updateModelEndpoint,
   validateModelEndpoint,
@@ -55,10 +56,11 @@ beforeAll(() => {
   });
 });
 
-function renderPage() {
+function renderPage(cachedEndpoints?: ModelEndpointResponse[]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  if (cachedEndpoints) queryClient.setQueryData(["model-endpoints"], cachedEndpoints, { updatedAt: 0 });
   return render(
     <QueryClientProvider client={queryClient}>
       <ModelsPage />
@@ -513,6 +515,32 @@ describe("ModelsPage validation", () => {
   });
 });
 
+describe("ModelsPage read errors", () => {
+  beforeEach(() => listModelEndpointsMock.mockReset());
+
+  it("shows a retryable load error instead of empty endpoint groups", async () => {
+    listModelEndpointsMock
+      .mockRejectedValueOnce(new Error("service unavailable"))
+      .mockResolvedValueOnce([]);
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("Model endpoints could not be loaded")).not.toBeNull();
+    expect(screen.queryByText("No embedder endpoints configured.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No embedder endpoints configured.")).not.toBeNull();
+  });
+
+  it("keeps the last loaded endpoints visible when a refresh fails", async () => {
+    listModelEndpointsMock.mockRejectedValueOnce(new Error("service unavailable"));
+    renderPage([]);
+
+    expect(await screen.findByText("Model endpoints could not be refreshed")).not.toBeNull();
+    expect(screen.getByText("No embedder endpoints configured.")).not.toBeNull();
+  });
+
+});
+
 describe("ModelsPage delete warning (#762)", () => {
   const embedder = (used_by_partitions: number) => ({
     name: "jina",
@@ -768,6 +796,35 @@ describe("ModelsPage embedder edit guard (#762 C)", () => {
     await user.click(within(form).getByRole("button", { name: "Update" }));
     return screen.findByRole("alertdialog");
   };
+
+  it("offers the drift repair only when the model name changes", async () => {
+    // Drift is a file recording another model: with the same name, the files
+    // never show as drifted, and a re-embed onto this endpoint skips them.
+    const user = userEvent.setup();
+    renderPage();
+
+    const confirm = await openModelChangeConfirm(user);
+    expect(within(confirm).getByText(/re-embed its drifted files afterwards/)).toBeTruthy();
+    expect(within(confirm).queryByText(/The model name stays the same/)).toBeNull();
+  });
+
+  it("points a same-model edit at Change embedder instead", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const form = await openEditForm(user);
+    const urlInput = within(form).getByDisplayValue("https://a.example/v1");
+    await user.clear(urlInput);
+    await user.type(urlInput, "https://b.example/v1");
+    await user.click(within(form).getByRole("button", { name: /Validate/ }));
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalled());
+    await user.click(within(form).getByRole("button", { name: "Update" }));
+
+    const confirm = await screen.findByRole("alertdialog");
+    expect(within(confirm).getByText(/This changes the vector space/)).toBeTruthy();
+    expect(within(confirm).getByText(/The model name stays the same/)).toBeTruthy();
+    expect(within(confirm).queryByText(/re-embed its drifted files afterwards/)).toBeNull();
+  });
 
   it("keeps a model change unconfirmable until the indexed count arrives", async () => {
     // Ticking the box before the number shows acknowledges nothing.

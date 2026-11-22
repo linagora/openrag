@@ -22,9 +22,11 @@ Safe to re-run after a failure; only the final drop is irreversible. Rows whose
 partition is not in Postgres are already unreachable and lose their vector.
 OpenRAG must be stopped: the migration aborts if the row count moves.
 
-The partial upsert rewrites every number in a chunk's dynamic field as a
-float64, so any other integer above 2**53 in its metadata comes back rounded.
-Postgres keeps the exact upload metadata of each file.
+Milvus 3.0.2 and older or unverified builds can rewrite dynamic-field numbers
+through float64, rounding some integers above 2**53. The tested Milvus 3.0.5
+build preserves them exactly. The migration still folds section IDs before the
+copy so neighbour links stay stable across server versions. Postgres keeps the
+exact upload metadata of each file.
 
 Usage — prefer the generic runner (from infra/compose, with DC and SVC set as in the upgrade guide:
 ``DC="docker compose"; SVC=openrag`` on a GPU host,
@@ -83,11 +85,11 @@ _COPY_PAGE_BUDGET_BYTES = 32 * 1024 * 1024
 #: Dynamic keys that link a chunk to its neighbours in the same file.
 SECTION_ID_KEYS = ("section_id", "prev_section_id", "next_section_id")
 
-#: A partial upsert rewrites every number in the dynamic field as a float64,
-#: which rounds integers above 2**53. Section IDs used to be about 1.8e18, where
-#: that rounding makes a few hundred neighbouring chunks share one ID, so the
-#: copy keeps only their low 53 bits. Applied to all three keys, the links still
-#: match, and a file's consecutive IDs stay distinct.
+#: Keep section IDs below 2**53 during the copy so neighbour links remain
+#: stable on Milvus versions whose dynamic-field round trip uses float64.
+#: Section IDs used to be about 1.8e18, where rounding made a few hundred
+#: neighbouring chunks share one ID. Applying the same mask to all three keys
+#: keeps links matched and a file's consecutive IDs distinct.
 SECTION_ID_MASK = 2**53 - 1
 
 logger = get_logger()

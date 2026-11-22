@@ -110,6 +110,29 @@ async def test_save_file_to_disk_with_random_prefix(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "mimetype", "saved_name"),
+    [
+        ("report", "application/pdf", "report.pdf"),
+        ("minutes.cozy-note", "text/markdown", "minutes.cozy-note.md"),
+        ("Report.PDF", "text/plain", "Report.PDF"),
+        ("minutes.cozy-note", None, "minutes.cozy-note"),
+    ],
+)
+async def test_save_file_to_disk_stores_the_upload_under_the_suffix_it_is_parsed_as(
+    tmp_path, filename, mimetype, saved_name
+):
+    """The path-based parsers only take the saved upload when its suffix is the
+    parsed type's; otherwise they get a node-local copy another node cannot open."""
+    upload = UploadFile(filename=filename, file=io.BytesIO(b"content"))
+
+    saved_path = await save_file_to_disk(file=upload, dest_dir=tmp_path, mimetype=mimetype)
+
+    assert saved_path.name == saved_name
+    assert saved_path.read_bytes() == b"content"
+
+
+@pytest.mark.asyncio
 async def test_save_file_to_disk_strips_path_components(tmp_path):
     upload = UploadFile(
         filename="../../nested/evil.txt",
@@ -205,7 +228,7 @@ class _LoaderFormats:
 
 class _Mimetypes:
     def to_dict(self):
-        return {}
+        return {"application/pdf": ".pdf", "text/plain": ".txt"}
 
 
 class _StubConfig:
@@ -224,6 +247,26 @@ async def test_validate_file_format_rejects_content_that_contradicts_the_extensi
 
     with pytest.raises(ValidationError) as exc_info:
         await files_dep.validate_file_format(file=upload, metadata={}, config=_StubConfig)
+
+    assert exc_info.value.status_code == 415
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "mimetype"),
+    [
+        # The mimetype types an extensionless upload, so the PDF check applies.
+        ("report", "application/pdf"),
+        # A generic mimetype does not take over a recognised extension, so it
+        # cannot switch the check off: text/plain has no signature to verify.
+        ("renamed.pdf", "text/plain"),
+    ],
+)
+async def test_validate_file_format_checks_the_content_against_the_resolved_type(filename, mimetype):
+    upload = UploadFile(file=io.BytesIO(_PNG_BYTES), filename=filename)
+
+    with pytest.raises(ValidationError) as exc_info:
+        await files_dep.validate_file_format(file=upload, metadata={"mimetype": mimetype}, config=_StubConfig)
 
     assert exc_info.value.status_code == 415
 

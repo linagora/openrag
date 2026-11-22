@@ -37,6 +37,9 @@ export interface ModelEndpointResponse {
   context_size_detection_pending?: boolean;
   default_max_llm_context_size?: number | null;
   default_max_output_tokens?: number | null;
+  /** Dense vector field this embedder owns; null for other model types. Set
+   *  when the endpoint is created and kept through renames. */
+  vector_field?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -93,6 +96,7 @@ const SECRET_FIELD_NAMES = new Set([
   "api_token",
   "access_key",
   "auth_token",
+  "authorization",
   "chainlit_auth_secret",
   "client_secret",
   "hf_token",
@@ -125,10 +129,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Whether a key holds a secret, and so comes back redacted rather than as its
- *  stored value — which is why a diff has to leave it alone. */
+ *  stored value — which is why a diff has to leave it alone. Hyphens count as
+ *  underscores, as on the backend, so a header such as `X-API-Key` matches too. */
 export function isSecretField(key: string | undefined): boolean {
   if (!key) return false;
-  const normalized = key.toLowerCase();
+  const normalized = key.toLowerCase().replaceAll("-", "_");
   return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
 }
 
@@ -370,7 +375,7 @@ export function mergeModelEndpointMossSpeakerAware(
 export const IMPLEMENTATION_KEY = "implementation";
 
 export const VENDOR_OPTIONS_BY_TYPE: Record<ModelType, string[]> = {
-  embedder: ["vllm", "ollama"],
+  embedder: ["vllm", "ollama", "tei"],
   reranker: ["infinity", "openai", "tei"],
   llm: ["vllm", "ollama"],
   vlm: ["vllm"],

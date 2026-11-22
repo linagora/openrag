@@ -64,6 +64,8 @@ def test_documented_kind_and_labels_match_the_spec(spec: specs.MetricSpec) -> No
     ("label", "values"),
     [
         ("status", specs.INGEST_STATUS_VALUES),
+        ("reason", specs.INGEST_STAGE_EVENT_DROP_REASONS),
+        ("result", specs.INGEST_STAGE_EVENT_WRITE_RESULTS),
         ("stage", specs.STAGE_VALUES),
         ("state", specs.INGEST_TASK_STATE_VALUES),
         ("operation", specs.INFERENCE_OPERATION_VALUES),

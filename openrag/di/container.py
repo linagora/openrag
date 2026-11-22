@@ -6,8 +6,9 @@ three things:
 1. Populates the inference registries (Phase 6) so factory helpers can spin
    up embedders, LLMs, rerankers and VLMs by name.
 2. Builds the storage adapters (Phase 7E) when a :class:`Settings` instance
-   is supplied — a :class:`~core.ports.catalog_store.CatalogStore` and a
-   :class:`~core.vector_stores.VectorStore`.
+   is supplied — a :class:`~core.ports.catalog_store.CatalogStore`, a
+   :class:`~core.vector_stores.VectorStore` and the
+   :class:`~core.ports.object_store.ObjectStore` of uploaded files.
 3. Owns the async :meth:`initialize` / :meth:`shutdown` lifecycle that opens
    and closes the asyncpg pool.
 
@@ -35,6 +36,7 @@ from core.vlm import vlm_registry
 from di.embedders import register_embedders
 from di.factories import make_component_factory
 from di.llms import register_llms
+from di.object_stores import create_upload_store
 from di.repositories import create_catalog_store
 from di.rerankers import register_rerankers
 from di.vector_stores import create_vector_store
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from core.ports.idempotency_repo import IdempotencyRepository
     from core.ports.job_repo import JobRepository
     from core.ports.model_endpoint_repo import ModelEndpointRepository
+    from core.ports.object_store import ObjectStore
     from core.ports.oidc_session_repo import OIDCSessionRepository
     from core.ports.partition_membership_repo import PartitionMembershipRepository
     from core.ports.partition_repo import PartitionRepository
@@ -62,6 +65,7 @@ if TYPE_CHECKING:
     from core.vector_stores import VectorStore
     from services.orchestrators.auth_service import AuthService
     from services.orchestrators.conversion_service import ConversionService
+    from services.orchestrators.embedder_swap_service import EmbedderSwapService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.mcp_service import MCPService
@@ -122,9 +126,11 @@ class ServiceContainer:
         self.vlm_factory = self._missing_named_factory("vlm")
         self._catalog_store: CatalogStore | None = create_catalog_store(settings) if settings is not None else None
         self._vector_store: VectorStore | None = create_vector_store(settings) if settings is not None else None
+        self._upload_store: ObjectStore | None = create_upload_store(settings) if settings is not None else None
         self._auth_service: AuthService | None = None
         self._user_service: UserService | None = None
         self._partition_service: PartitionService | None = None
+        self._embedder_swap_service: EmbedderSwapService | None = None
         self._model_endpoint_service: ModelEndpointService | None = None
         self._preset_service: PresetService | None = None
         self._prompt_service: PromptService | None = None
@@ -211,8 +217,13 @@ class ServiceContainer:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def initialize(self) -> None:
-        """Open the storage adapters (asyncpg pool + Alembic migrations)."""
+    async def initialize(self, *, seed_users: bool = False) -> None:
+        """Open the storage adapters (asyncpg pool + Alembic migrations).
+
+        ``seed_users`` provisions ``auth.seed_users``. Only the API process
+        passes it: Chainlit and the MCP server build their own container in a
+        separate process, and the accounts must have one writer.
+        """
         if self._catalog_store is not None:
             await self._initialize_step("initializing catalog store", self._catalog_store.initialize)
             await self._initialize_step(
@@ -228,8 +239,32 @@ class ServiceContainer:
             # only startup step.
             await self._initialize_step("seeding prompts", self.prompt_service.seed_defaults)
             await self._initialize_step("ensuring default partition", self.partition_service.seed_default_partition)
+            # After the partitions exist (memberships reference them) and after
+            # the admin owns users.id = 1. Run on an empty list too: a removed
+            # entry is revoked, the last one included.
+            if seed_users and self._settings is not None:
+                await self._initialize_step("ensuring seed users", self._ensure_seed_users)
             await self._initialize_step("loading partition configs", self.partition_service.load_partitions)
+            # Swaps interrupted by the last shutdown continue where they
+            # stopped, and ones another process lets go of later are claimed
+            # then. Only schedules the jobs; startup does not wait on them.
+            await self._initialize_step("resuming embedder swaps", self.embedder_swap_service.watch)
         self._initialized = True
+
+    async def _ensure_seed_users(self) -> None:
+        """Provision ``auth.seed_users``; a failure is logged, never raised.
+
+        Seeding must not keep the API at 503: the accounts it would have
+        updated keep their previous state until the next boot. Only the
+        exception type is logged, since a driver message or a traceback with
+        locals can carry a token or its hash.
+        """
+        try:
+            await self.user_repo.ensure_seed_users(self._settings.auth.seed_users)
+        except Exception as exc:
+            logger.bind(error_type=type(exc).__name__).error(
+                "Seed users not provisioned: the step failed, the API starts without applying auth.seed_users"
+            )
 
     async def _initialize_step(self, label: str, operation: Callable[[], Awaitable[Any]]) -> None:
         """Run one startup step with consistent failure logging."""
@@ -247,6 +282,10 @@ class ServiceContainer:
         remaining clients, the database pool, or the state reset.
         """
         try:
+            if self._embedder_swap_service is not None:
+                # Before the clients and the pool close under the jobs. Their
+                # swaps stay running and resume at the next start.
+                await self._embedder_swap_service.shutdown()
             seen_client_ids: set[int] = set()
             for client in self._inference_clients:
                 await self._close_inference_client(client, seen_client_ids)
@@ -305,6 +344,13 @@ class ServiceContainer:
         if self._vector_store is None:
             raise RuntimeError(_NO_SETTINGS_MESSAGE)
         return self._vector_store
+
+    @property
+    def upload_store(self) -> ObjectStore:
+        """The :class:`ObjectStore` that holds uploaded files, built from settings."""
+        if self._upload_store is None:
+            raise RuntimeError(_NO_SETTINGS_MESSAGE)
+        return self._upload_store
 
     # ------------------------------------------------------------------
     # Per-repo accessors (Phase 8 orchestrators take one repo, not the
@@ -421,6 +467,7 @@ class ServiceContainer:
                 partition_service=self.partition_service,
                 membership_repo=self.membership_repo,
                 job_service=self.job_service,
+                seed_user_ids=frozenset(seed.external_user_id for seed in settings.auth.seed_users),
             )
         return self._user_service
 
@@ -442,8 +489,31 @@ class ServiceContainer:
                 config=settings,
                 task_state_manager_factory=get_task_state_manager,
                 prompt_repo=self.prompt_repo,
+                topic_tag_repo=self.topic_tag_repo,
             )
         return self._partition_service
+
+    @property
+    def embedder_swap_service(self) -> EmbedderSwapService:
+        """EmbedderSwapService — lazily built, cached for the container's lifetime."""
+        if self._embedder_swap_service is None:
+            from services.orchestrators.embedder_swap_service import EmbedderSwapService
+            from services.workers.bootstrap import get_task_state_manager
+
+            settings = self._require_settings()
+            self._embedder_swap_service = EmbedderSwapService(
+                partition_repo=self.partition_repo,
+                document_repo=self.document_repo,
+                vector_store=self.vector_store,
+                partition_service=self.partition_service,
+                config=settings,
+                embedder_factory=lambda name: self.embedder_factory(name),
+                collection=settings.vectordb.collection_name,
+                model_endpoint_repo=self.model_endpoint_repo,
+                refresh_endpoints=lambda: self.model_endpoint_service.load_all(),
+                task_state_manager_factory=get_task_state_manager,
+            )
+        return self._embedder_swap_service
 
     @property
     def model_endpoint_service(self) -> ModelEndpointService:
@@ -477,6 +547,7 @@ class ServiceContainer:
                 preset_repo=self.preset_repo,
                 config=self._require_settings(),
                 partition_service=self.partition_service,
+                load_new_endpoints=lambda: self.model_endpoint_service.load_new(),
             )
         return self._preset_service
 
@@ -591,6 +662,7 @@ class ServiceContainer:
                 reranker_factory=self.reranker_factory,
                 llm_factory=self.llm_factory,
                 prompt_service=self.prompt_service,
+                preset_service=self.preset_service,
             )
         return self._retrieval_service
 
@@ -613,7 +685,7 @@ class ServiceContainer:
 
         Shares the same core LLM construction as ``retrieval_service``
         (built from ``settings.llm``); the named ``llm_factory`` lets the
-        service honor a partition's ``chat_llm`` model-endpoint preset for
+        service honor a partition's ``chat_llm`` model endpoint for
         query generation and answer generation. The web-search service
         comes from the
         ``WebSearchFactory`` (provider is ``None`` when
@@ -667,6 +739,9 @@ class ServiceContainer:
                     workspace_repo=self.workspace_repo,
                     collection=settings.vectordb.collection_name,
                     job_repo=self.job_repo,
+                    file_fence_repo=(
+                        self.catalog_store.file_fence_repo if settings.loader.file_fences == "postgres" else None
+                    ),
                 ),
                 config=settings,
                 partition_service=self.partition_service,
@@ -685,9 +760,13 @@ class ServiceContainer:
         """
         if self._job_service is None:
             from services.orchestrators.job_service import JobService
-            from services.workers.bootstrap import get_task_state_manager
+            from services.workers.bootstrap import get_stage_progress_manager, get_task_state_manager
 
-            self._job_service = JobService(task_state_manager=get_task_state_manager(), job_repo=self.job_repo)
+            self._job_service = JobService(
+                task_state_manager=get_task_state_manager(),
+                job_repo=self.job_repo,
+                stage_progress_manager=get_stage_progress_manager(),
+            )
         return self._job_service
 
     @property

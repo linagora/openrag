@@ -78,6 +78,7 @@ def test_blank_values_pass(blank):
         ("AUTH_TOKEN", "test-admin-token"),
         ("METRICS_TOKEN", "replace-with-a-random-secret"),
         ("METRICS_TOKEN", "<random secret>"),
+        ("METRICS_TOKEN", "<openssl rand -hex 16>"),
     ],
 )
 def test_published_defaults_are_refused(env_var, value):

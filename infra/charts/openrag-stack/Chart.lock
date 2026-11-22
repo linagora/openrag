@@ -4,15 +4,15 @@ dependencies:
   version: 1.4.0
 - name: postgresql
   repository: https://charts.bitnami.com/bitnami
-  version: 18.10.0
+  version: 18.12.17
 - name: milvus
   repository: https://zilliztech.github.io/milvus-helm/
-  version: 5.0.27
+  version: 5.0.33
 - name: vllm-stack
   repository: https://vllm-project.github.io/production-stack
-  version: 0.1.12
+  version: 0.1.13
 - name: kube-prometheus-stack
   repository: https://prometheus-community.github.io/helm-charts
   version: 91.4.1
-digest: sha256:3b222599ad4118e4be67c0a82845b1499635aa483fef4a3b17b4bd8435cd53f6
-generated: "2026-09-25T16:42:06.898978442+02:00"
+digest: sha256:bebfe084e1307db631d70e2316069d445113d6e3b8ea531a94371d3c71ccb485
+generated: "2026-11-03T15:52:26.514559324+01:00"

@@ -12,7 +12,7 @@ from core.config.model_endpoints import (
     MOSS_SPEAKER_AWARE_KEY,
     STT_LANGUAGE_KEY,
 )
-from core.utils.redaction import redact_secret_mapping
+from core.utils.redaction import RedactedExtraRepr, redact_secret_mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
@@ -101,6 +101,21 @@ def validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | N
     return extra
 
 
+def validate_vlm_extra(extra: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reject an ``extra.max_image_side`` that is not a positive integer — VLMs only.
+
+    The VLM client is built lazily, so a bad value saved here would only
+    surface later, failing every caption. ``bool`` is excluded as for the LLM
+    token budgets; ``null`` leaves resizing off.
+    """
+    if not extra or extra.get("max_image_side") is None:
+        return extra
+    value = extra["max_image_side"]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("extra.max_image_side must be a positive integer")
+    return extra
+
+
 def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) -> None:
     """Validate fields that are meaningful for an OpenAI-compatible STT endpoint.
 
@@ -123,7 +138,7 @@ def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) ->
         raise ValueError(f"extra.{MOSS_SPEAKER_AWARE_KEY} must be a boolean")
 
 
-class CreateModelEndpointRequest(BaseModel):
+class CreateModelEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body for registering a model endpoint."""
 
     model_config = ConfigDict(extra="forbid")
@@ -164,6 +179,8 @@ class CreateModelEndpointRequest(BaseModel):
         and present in ``info.data`` here (absent only when it failed its own
         validation, in which case the request is rejected regardless).
         """
+        if info.data.get("model_type") == "vlm":
+            return validate_vlm_extra(value)
         if info.data.get("model_type") != "llm":
             return value
         return validate_llm_token_extra(value)
@@ -175,7 +192,7 @@ class CreateModelEndpointRequest(BaseModel):
         return self
 
 
-class UpdateModelEndpointRequest(BaseModel):
+class UpdateModelEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body for updating a registered model endpoint."""
 
     model_config = ConfigDict(extra="forbid")
@@ -265,6 +282,10 @@ class ModelEndpointResponse(BaseModel):
     extra: dict[str, Any]
     has_api_key: bool = False
     is_default: bool
+    # Dense vector field this embedder owns; null for other model types. Set
+    # when the endpoint is created and kept through renames. The admin UI
+    # compares it with the field each file was indexed into.
+    vector_field: str | None = None
     # Partitions whose resolved reference is this endpoint — those naming it
     # plus, for the default endpoint, those riding the `default` alias. Zero
     # for types with no partition column (reranker/vlm/stt), which are
@@ -300,7 +321,7 @@ class ModelEndpointResponse(BaseModel):
         return data
 
 
-class ValidateEndpointRequest(BaseModel):
+class ValidateEndpointRequest(RedactedExtraRepr, BaseModel):
     """Request body to validate endpoint values before they are saved (draft)."""
 
     endpoint: str
@@ -308,7 +329,7 @@ class ValidateEndpointRequest(BaseModel):
     model_name: str | None = None
     timeout: float | None = Field(default=None, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
     stored_api_key_model_type: ModelEndpointType | None = None
     stored_api_key_name: str | None = None
 
@@ -353,7 +374,7 @@ class ValidateEndpointResponse(BaseModel):
 class RevealApiKeyResponse(BaseModel):
     """Response body for explicitly revealing a stored endpoint API key."""
 
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
 
 
 __all__ = [

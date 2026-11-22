@@ -75,6 +75,7 @@ KNOWN_DEFAULT_SECRETS: frozenset[str] = frozenset(
         "xxxxxxxxxxxxxxxxxxxxxxxx",
         "replace-with-a-random-secret",
         "<random secret>",
+        "<openssl rand -hex 16>",
         # tests/integration/api/api_run
         "test-admin-token",
         # The marker the example env files carry where a credential belongs, so

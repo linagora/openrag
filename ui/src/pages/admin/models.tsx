@@ -51,6 +51,7 @@ import type {
   ModelType,
 } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import {
   AlertDialog,
@@ -178,11 +179,12 @@ export default function ModelsPage() {
   // which partitions stay behind.
   const [pendingDefault, setPendingDefault] = useState<ModelEndpointResponse | null>(null);
 
-  const { data, isLoading } = useQuery({
+  const endpointsQuery = useQuery({
     queryKey: ["model-endpoints"],
     queryFn: () => listModelEndpoints(),
     refetchInterval: refetchWhileDetecting,
   });
+  const { data, isLoading } = endpointsQuery;
 
   const createMut = useMutation({
     mutationFn: (req: CreateModelEndpointRequest) => createModelEndpoint(req),
@@ -297,8 +299,27 @@ export default function ModelsPage() {
                   <Skeleton key={i} className="h-48" />
                 ))}
               </div>
+            ) : endpointsQuery.isLoadingError ? (
+              <QueryErrorNotice
+                title="Model endpoints could not be loaded"
+                message="The endpoint list is unavailable. Try again to reload it."
+                isRetrying={endpointsQuery.isFetching}
+                onRetry={() => void endpointsQuery.refetch()}
+              />
             ) : (
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <>
+                {endpointsQuery.isRefetchError && (
+                  <div className="mb-4">
+                    <QueryErrorNotice
+                      title="Model endpoints could not be refreshed"
+                      message="Showing previously loaded endpoints. They may be out of date."
+                      isRetrying={endpointsQuery.isFetching}
+                      onRetry={() => void endpointsQuery.refetch()}
+                      stale
+                    />
+                  </div>
+                )}
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {endpoints
                   .filter((ep) => ep.model_type === type)
                   .map((ep) => {
@@ -307,8 +328,8 @@ export default function ModelsPage() {
                     return (
                       <Card key={`${ep.model_type}-${ep.name}`}>
                         <CardHeader className="pb-3">
-                          <div className="flex items-center justify-between gap-2">
-                            <CardTitle className="text-base truncate min-w-0">
+                          <div className="flex flex-wrap items-center justify-between gap-2 min-w-0">
+                            <CardTitle className="text-base truncate min-w-0" title={ep.name}>
                               {ep.name}
                             </CardTitle>
                             <div className="flex items-center gap-1.5 shrink-0">
@@ -326,7 +347,7 @@ export default function ModelsPage() {
                             </div>
                           </div>
                           {ep.model_name && (
-                            <CardDescription className="font-mono text-xs truncate">
+                            <CardDescription className="font-mono text-xs truncate" title={ep.model_name}>
                               {ep.model_name}
                             </CardDescription>
                           )}
@@ -399,7 +420,8 @@ export default function ModelsPage() {
                     No {type} endpoints configured.
                   </p>
                 )}
-              </div>
+                </div>
+              </>
             )}
           </TabsContent>
         ))}
@@ -571,9 +593,10 @@ function EmbedderEditIntroDialog({
                 degrades silently &mdash; nothing errors, results just stop being meaningful.
               </p>
               <p>
-                If you are switching to a different model, add a second endpoint and move partitions
-                to it deliberately. Editing is for correcting a URL or a typo that points at the same
-                model.
+                If you are switching to a different model, add a second endpoint, then move each
+                partition to it with <span className="font-medium">Change embedder</span> on the
+                partition&apos;s page: its files are re-embedded before searches switch over. Editing is
+                for correcting a URL or a typo that points at the same model.
               </p>
             </div>
           </AlertDialogDescription>
@@ -1421,6 +1444,9 @@ function EndpointUpdateConfirmDialog({
   onConfirm: () => void;
 }) {
   const material = hasMaterialChange(changes);
+  // Drift is a file recording another model, so only a model change makes the
+  // affected files show as drifted and re-embeddable on this endpoint.
+  const modelChanged = changes.some((c) => c.field === "model_name");
   const [acknowledged, setAcknowledged] = useState(false);
 
   // Only worth asking for when it changes what the dialog says. The count is
@@ -1524,8 +1550,24 @@ function EndpointUpdateConfirmDialog({
                       vectors are not rebuilt.
                     </li>
                     <li>
-                      If it really is a different model, add a second endpoint and migrate partitions
-                      to it instead, so the old vectors keep working until their files are re-embedded.
+                      If it really is a different model, add a second endpoint and move partitions to
+                      it with <span className="font-medium">Change embedder</span> on each
+                      partition&apos;s page instead: the files are re-embedded first, and searches keep
+                      working until they are.
+                    </li>
+                    <li>
+                      {modelChanged ? (
+                        <>
+                          If you go ahead anyway, each affected partition can re-embed its drifted files
+                          afterwards from its page.
+                        </>
+                      ) : (
+                        <>
+                          The model name stays the same, so nothing marks these files as drifted afterwards,
+                          and re-embedding onto this endpoint skips them. Rebuilding their vectors takes a
+                          second endpoint and <span className="font-medium">Change embedder</span>.
+                        </>
+                      )}
                     </li>
                   </ul>
 

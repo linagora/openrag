@@ -366,7 +366,8 @@ describe("DocumentListPage", () => {
     renderDocuments(["/documents"], true);
 
     await waitFor(() => expect(getQueueInfoMock).toHaveBeenCalledTimes(1));
-    expect(screen.getByTestId("active-jobs").textContent).toBe("0");
+    expect(screen.getByTestId("active-jobs").textContent).toBe("");
+    await waitFor(() => expect(screen.getByTestId("active-jobs").textContent).toBe("0"));
     await userEvent.click(await screen.findByRole("button", { name: "Upload" }));
     await userEvent.upload(screen.getByLabelText("Files"), [
       new File(["first"], "first.txt", { type: "text/plain" }),
@@ -510,6 +511,28 @@ describe("DocumentsPage embedder drift (#762 E)", () => {
 
     await screen.findByText("a.pdf");
     expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("marks the toolbar entry drifted when any file in it drifted, not just the first", async () => {
+    // Both files are listed under "bge-m3": the first only by the endpoint
+    // label it recorded, whose model is unknown — so its drift is unknown too —
+    // and the second with the model recorded, which differs from the one
+    // queries run. One toolbar entry, and only the file seen second drifted.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [
+        file({ file_id: "file-a", filename: "a.pdf", embedder: "bge-m3" }),
+        file({ file_id: "file-b", filename: "b.pdf", embedder: "bge-m3", embedder_model_name: "bge-m3" }),
+      ],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("b.pdf");
+    await waitFor(() => expect(driftMarkers()).toHaveLength(1));
+    const summary = screen.getByTitle("Embedder these files were indexed with");
+    const entry = [...summary.querySelectorAll("span.font-medium")].find((el) => el.textContent === "bge-m3");
+    expect(entry?.className).toContain("text-amber-700");
   });
 
   it("does not flag files indexed before provenance existed", async () => {

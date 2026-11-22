@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
-from core.models.document import Document
+from core.models.catalog import (
+    FILE_FENCE_RENEW_INTERVAL_SECONDS,
+    FILE_FENCE_TTL_SECONDS,
+    DocumentStatus,
+    IndexationJob,
+    normalize_degraded_stages,
+)
+from core.models.document import Document, DocumentType
+from core.models.stage_progress import StageProgressWorkerSnapshot, StageTaskPhase
+from core.observability.ray_metrics import initialize_stage_writer_counters
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
-from services.workers.failure_reporting import submit_task_failure
+from services.workers.failure_reporting import log_interrupted_failure, log_task_failure, submit_task_failure
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
@@ -19,6 +28,8 @@ from services.workers.pipeline_builder import (
     IndexingPipeline,
 )
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
+from services.workers.stage_event_writer import StageEventWriter
+from services.workers.stage_tracker import StageTracker
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
@@ -59,6 +70,9 @@ class IndexerWorker:
         vector_store: Any = None,
         collection: str = "default",
         job_repo: Any = None,
+        stage_snapshot_sink: Any = None,
+        stage_writer_max_active_tasks: int = 1,
+        file_fence_repo: Any = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -67,6 +81,73 @@ class IndexerWorker:
         self._vector_store = vector_store
         self._collection = collection
         self._job_repo = job_repo
+        self._file_fence_repo = file_fence_repo
+        initialize_stage_writer_counters()
+        self._stage_writer = (
+            StageEventWriter(
+                job_repo,
+                live_sink=stage_snapshot_sink,
+                max_active_tasks=stage_writer_max_active_tasks,
+            )
+            if job_repo is not None
+            else None
+        )
+
+    async def release_file_fence(self, *, partition: str, file_id: str, holder_id: str | None) -> None:
+        """Free the file after its last write (#1430).
+
+        On success that is before the outcome is reported, and after the
+        workspace attachment when one follows, so a client that sees the task
+        settle may replace the file at once. The pool's own release, when the
+        task settles, is a backstop.
+        """
+        if self._file_fence_repo is None or not holder_id or not file_id:
+            return
+        try:
+            await self._file_fence_repo.release(partition=partition, file_id=file_id, holder_id=holder_id)
+        except Exception as exc:  # noqa: BLE001 - the pool releases it again, and the lease expires
+            logger.bind(file_id=file_id, partition=partition).warning(
+                "Failed to release the file fence", error=str(exc)
+            )
+
+    async def keep_file_fence_alive(self, *, partition: str, file_id: str, holder_id: str | None) -> None:
+        """Renew this task's fence while the worker runs it (#1430).
+
+        The pool renews it too, but only while the pool actor lives; this
+        renewal runs where the work runs. It stops once the fence is no longer
+        this task's: the catalog write refuses the task then anyway.
+        """
+        if self._file_fence_repo is None or not holder_id or not file_id:
+            return
+        while True:
+            await asyncio.sleep(FILE_FENCE_RENEW_INTERVAL_SECONDS)
+            try:
+                renewed = await self._file_fence_repo.renew(
+                    partition=partition, file_id=file_id, holder_id=holder_id, ttl_seconds=FILE_FENCE_TTL_SECONDS
+                )
+            except Exception as exc:  # noqa: BLE001 - the next round retries, and the lease outlasts three misses
+                logger.bind(file_id=file_id, partition=partition).warning(
+                    "Failed to renew the file fence; retrying.", error=str(exc)
+                )
+                continue
+            if not renewed:
+                return
+
+    async def holds_file_fence(self, *, partition: str, file_id: str, holder_id: str | None) -> bool:
+        """Whether this task still holds the file's fence; always True without fences."""
+        if self._file_fence_repo is None or not holder_id or not file_id:
+            return True
+        fence = await self._file_fence_repo.get(partition=partition, file_id=file_id)
+        return fence is not None and fence.holder_id == holder_id
+
+    async def close_stage_writer(self) -> None:
+        if self._stage_writer is not None:
+            await self._stage_writer.close()
+
+    def get_stage_progress_snapshot(self, task_id: str) -> StageProgressWorkerSnapshot | None:
+        if self._stage_writer is None:
+            return None
+        return self._stage_writer.snapshot_for_task(task_id)
 
     async def _record_started(
         self,
@@ -93,6 +174,7 @@ class IndexerWorker:
                     partition=partition,
                     file_id=metadata.get("file_id"),
                     user_id=(user or {}).get("id"),
+                    stage_tracking_version=1,
                     started_at=datetime.now(UTC),
                 )
             )
@@ -120,6 +202,7 @@ class IndexerWorker:
                     file_id=metadata.get("file_id"),
                     user_id=(user or {}).get("id"),
                     degraded_stages=degraded_stages,
+                    stage_tracking_version=1,
                     completed_at=datetime.now(UTC),
                 )
             )
@@ -142,6 +225,9 @@ class IndexerWorker:
         callback_token: str | None = None,
         require_existing_partition: bool = False,
         resolved_prompts: dict[str, str] | None = None,
+        on_failure_report: Callable[[], None] | None = None,
+        fence_holder_id: str | None = None,
+        before_success: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -152,12 +238,38 @@ class IndexerWorker:
         When *callback_url* is provided, a best-effort ``POST`` notification is
         sent to it once the task reaches a terminal state; never affects the
         indexing outcome.
+
+        *on_failure_report* is called once the failed run is cleaned up, right
+        before its failure is reported.
+
+        With *fence_holder_id*, the catalog write is refused unless this task
+        still holds the file's fence (#1430); the failure path then removes the
+        vectors it stored. *before_success* runs the caller's own last writes
+        (the workspace attachment) after the catalog write and while the fence
+        is still held, so the fence is released, the task completed and the
+        callback sent only once the file is fully written. If it raises, the
+        run fails like any other.
         """
         file_id = metadata.get("file_id", "")
         log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
         row: dict[str, Any] | None = None
         catalog_written = False
+        stage_tracker: StageTracker | None = None
+        stage_tracker_finalization_attempted = False
+
+        def finish_stage_tracker_once() -> None:
+            nonlocal stage_tracker_finalization_attempted
+            if stage_tracker is None or stage_tracker_finalization_attempted:
+                return
+            stage_tracker_finalization_attempted = True
+            if self._stage_writer is not None:
+                _finish_stage_tracker(self._stage_writer, stage_tracker)
+            else:
+                _safe_stage_tracker_call(stage_tracker, "finish_task")
+
         try:
+            if self._stage_writer is not None:
+                await self._stage_writer.wait_for_summary_capacity()
             # Inside the try so a TaskStateManager outage here still reaches
             # the except block below and sends the error callback.
             accepted = await retry_idempotent_ray_actor_method(
@@ -166,6 +278,12 @@ class IndexerWorker:
             )
             if accepted is False:
                 raise _TaskCancelledBeforeStart
+            stage_tracker = StageTracker(
+                task_id,
+                deliver=self._stage_writer.publish if self._stage_writer is not None else None,
+            )
+            if self._stage_writer is not None:
+                self._stage_writer.register_tracker(stage_tracker)
             await self._record_started(task_id, partition=partition, metadata=metadata, user=user)
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
@@ -175,7 +293,8 @@ class IndexerWorker:
                 "document": document,
                 "partition": partition,
                 "filename": document.filename,
-                "language": metadata.get("language", "en"),
+                # None lets the enrichment stages detect it (see resolve_language).
+                "language": metadata.get("language"),
                 "replace": replace,
                 "user": user,
                 "workspace_ids": workspace_ids,
@@ -187,7 +306,11 @@ class IndexerWorker:
             # process-wide disk default. Absent keys leave the disk fallback.
             if resolved_prompts:
                 row.update(resolved_prompts)
-            row = await self._pipeline.run(row)
+            if isinstance(self._pipeline, IndexingPipeline):
+                row = await self._pipeline.run(row, stage_tracker=stage_tracker)
+            else:
+                row = await self._pipeline.run(row)
+            _safe_stage_tracker_call(stage_tracker, "set_phase", StageTaskPhase.FINALIZING)
             stored_count = row.get("stored_count", 0)
             if stored_count == 0:
                 raise NoIndexableContentError("No indexable content was extracted from this document.")
@@ -198,6 +321,7 @@ class IndexerWorker:
             if self._document_repo is not None:
                 wrote_catalog = await _write_catalog_record(
                     doc_repo=self._document_repo,
+                    task_id=task_id,
                     metadata=metadata,
                     partition=partition,
                     user=user,
@@ -209,6 +333,7 @@ class IndexerWorker:
                     workspace_ids=workspace_ids,
                     embedder_fingerprint=row.get("embedder_fingerprint"),
                     degraded_stages=degraded_stages,
+                    fence_holder_id=fence_holder_id,
                 )
                 if not wrote_catalog:
                     raise RuntimeError("Catalog row was not written after vector indexing")
@@ -226,6 +351,10 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
+            if before_success is not None:
+                await before_success()
+            await self.release_file_fence(partition=partition, file_id=file_id, holder_id=fence_holder_id)
+            finish_stage_tracker_once()
             completion_outcome = await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),
                 task_description=f"complete_with_degraded_stages({task_id})",
@@ -253,33 +382,49 @@ class IndexerWorker:
             # ask it again, and a cancellation must not fire an error callback.
             raise RuntimeError(f"Task {task_id} was cancelled before indexing started") from None
         except Exception as exc:
-            should_cleanup_vectors = row is not None and (
-                row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
-            )
-            if not catalog_written and should_cleanup_vectors:
-                await _cleanup_indexed_vectors(
-                    vector_store=self._vector_store or getattr(self._pipeline, "vector_store", None),
-                    collection=self._collection,
-                    metadata=metadata,
-                    partition=partition,
-                    task_id=task_id,
-                )
-            tb = traceback.format_exc()
             error_reason = failure_reason_from_exception(exc)
             try:
-                was_failed = await retry_idempotent_ray_actor_method(
-                    lambda: submit_task_failure(
-                        self._tsm,
-                        task_id,
-                        tb,
-                        error_reason,
-                    ),
-                    task_description=f"set_failed_if_not_cancelled({task_id})",
+                finish_stage_tracker_once()
+                should_cleanup_vectors = row is not None and (
+                    row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
                 )
+                if not catalog_written and should_cleanup_vectors:
+                    await _cleanup_indexed_vectors(
+                        vector_store=self._vector_store or getattr(self._pipeline, "vector_store", None),
+                        collection=self._collection,
+                        metadata=metadata,
+                        partition=partition,
+                        task_id=task_id,
+                    )
+                await self.release_file_fence(partition=partition, file_id=file_id, holder_id=fence_holder_id)
+                tb = traceback.format_exc()
+                if on_failure_report is not None:
+                    on_failure_report()
+                try:
+                    was_failed = await retry_idempotent_ray_actor_method(
+                        lambda: submit_task_failure(
+                            self._tsm,
+                            task_id,
+                            tb,
+                            error_reason,
+                        ),
+                        task_description=f"set_failed_if_not_cancelled({task_id})",
+                    )
+                except Exception:
+                    # TSM still unreachable: treat as failed so the callback still fires.
+                    was_failed = True
+            except asyncio.CancelledError:
+                log_interrupted_failure(log, exc, error_reason)
+                raise
             except Exception:
-                # TSM still unreachable: treat as failed so the callback still fires.
-                was_failed = True
+                # The transition never ran: log here so a failing cleanup cannot
+                # swallow the original failure.
+                log_task_failure(log, exc, error_reason)
+                raise
             if was_failed:
+                # Only once accepted: cancel_task marks CANCELLED before ray.cancel,
+                # so an error raised in between belongs to a cancelled task.
+                log_task_failure(log, exc, error_reason)
                 await send_indexing_callback(
                     callback_url, partition, file_id, "error", metadata, callback_token=callback_token
                 )
@@ -297,10 +442,29 @@ class IndexerWorker:
                 "stage": row.get("stage", ""),
                 "degraded_stages": degraded_stages,
             }
+        finally:
+            # Ray cancellation raises BaseException and bypasses the ordinary
+            # failure handler. Close the observed sequence without inventing an
+            # end transition for an invocation that was interrupted.
+            finish_stage_tracker_once()
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See
         # ``delete_uploaded_file`` and ``IndexerWorkerActor.process_file``.
+
+
+def _safe_stage_tracker_call(tracker: StageTracker, method: str, *args: Any, **kwargs: Any) -> None:
+    try:
+        getattr(tracker, method)(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - tracking must preserve the indexing outcome
+        logger.warning("Indexing stage progress update failed", operation=method)
+
+
+def _finish_stage_tracker(writer: StageEventWriter, tracker: StageTracker) -> None:
+    try:
+        writer.finish_task(tracker)
+    except Exception:  # noqa: BLE001 - tracking must preserve the indexing outcome
+        logger.warning("Could not finalize indexing stage progress")
 
 
 def _with_embedder_provenance(
@@ -322,6 +486,7 @@ async def _write_catalog_record(
     *,
     doc_repo: Any,
     metadata: dict[str, Any],
+    task_id: str | None = None,
     partition: str,
     user: dict[str, Any] | None,
     replace: bool,
@@ -332,12 +497,17 @@ async def _write_catalog_record(
     workspace_ids: list[str] | None = None,
     embedder_fingerprint: dict[str, str | None] | None = None,
     degraded_stages: list[str] | None = None,
+    fence_holder_id: str | None = None,
 ) -> bool:
     """Record an indexed file in the catalog, which is what makes it visible.
 
     With ``embedder_fingerprint``, the repo first checks that the partition's
     embedder is still the config the vectors were built with, and refuses the
     file otherwise (#958); the caller's failure path then removes its vectors.
+
+    A new file consumes the file slot reserved under ``task_id``: a
+    quota-capped upload runs under its reservation's id (#664). Any other task
+    holds no slot, and the insert counts the file instead.
     """
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
@@ -345,6 +515,8 @@ async def _write_catalog_record(
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
     if embedder_fingerprint is not None:
         config_kwargs["embedder_fingerprint"] = embedder_fingerprint
+    if fence_holder_id is not None:
+        config_kwargs["fence_holder_id"] = fence_holder_id
     if replace:
         return await doc_repo.update_file_in_partition(
             file_id=file_id,
@@ -371,6 +543,7 @@ async def _write_catalog_record(
         # Stay protected until the outer worker has completed every attachment.
         independently_indexed=True,
         content_sha256=metadata.get("content_sha256"),
+        quota_reservation_id=task_id,
         **config_kwargs,
     )
 
@@ -484,7 +657,8 @@ async def _load_document(
     # (see IndexerWorker.process_file); it is intentionally not stamped into the
     # document metadata so it never leaks into chunk metadata.
     filename = _display_filename(path, metadata)
-    raw_bytes = await asyncio.to_thread(p.read_bytes)
+    content_type = Document.detect_content_type(filename, metadata.get("mimetype"))
+    raw_bytes = None if content_type in {DocumentType.CSV, DocumentType.XLSX} else await asyncio.to_thread(p.read_bytes)
     return Document(
         id=file_id,
         filename=filename,
@@ -504,7 +678,7 @@ async def _load_document(
         # pre-existing #911 behaviour for that route rather than a regression,
         # and closing it means downloading into ``data_dir``.
         source_path=str(p),
-        content_type=Document.detect_content_type(filename),
+        content_type=content_type,
         partition=partition,
         metadata=dict(metadata),
     )

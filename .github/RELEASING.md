@@ -233,14 +233,28 @@ rebuilt from a corrected tag.
 
 ## 7. The tag is where it should be
 
+The tag must sit on the merge of the release or hotfix pull request, not on a
+later commit. v2.3.4 was tagged on its release merge, then moved onto a docs
+pull request merged into `main` half an hour later, and its images were rebuilt
+under the same version (rule 5 below). A printed subject that nobody compared
+let that pass, so this is a gate:
+
 ```bash
-git fetch origin main --tags
-git tag --contains "$VER" >/dev/null 2>&1
-git merge-base --is-ancestor "$VER" origin/main && echo "OK: $VER is on main" || echo "FAIL: not on main"
-git log -1 --format='%H %s' "$VER"
+git fetch --no-tags origin main "+refs/tags/$VER:refs/tags/$VER" || exit 1
+fail=0
+git merge-base --is-ancestor "$VER" origin/main \
+  && echo "OK    $VER is on main" \
+  || { echo "FAIL  $VER is not on main"; fail=1; }
+subject=$(git log -1 --format=%s "$VER")
+case "$subject" in
+  "Merge pull request #"*" from linagora/release/"*|"Merge pull request #"*" from linagora/hotfix/"*)
+    echo "OK    $subject" ;;
+  *) echo "FAIL  not a release or hotfix merge: $subject"; fail=1 ;;
+esac
+[ "$fail" -eq 0 ] && echo "step 7 PASS" || { echo "step 7 FAIL" >&2; exit 1; }
 ```
 
-**PASS**: `OK`, and the commit is the release-branch merge commit.
+**PASS**: `step 7 PASS`.
 
 ## 8. Chart and compose reference the published tags
 
@@ -392,6 +406,78 @@ git show "$VER:infra/charts/openrag-stack/Chart.yaml" | grep -E '^version:'
 
 **PASS**: `step 8 PASS`, and chart `version` moved.
 
+## 9. The GitHub Release itself is correctly formed
+
+Run this once the GitHub Release is published, after steps 1-8 pass: the
+Release comes last (rule 3 below), so before then this step fails.
+
+Steps 1-8 verify what was *built*. Nothing so far looks at the Release object
+users actually land on. v2.2.0 was published displaying
+`Merge pull request #895 from linagora/release/v2.2.0` — the release merge
+commit's subject — as its title, and corrected by hand minutes later. Nothing
+caught it: the title is only right when someone happens to notice.
+
+The convention is a title that is the tag: **always pass `--title "$VER"`**,
+however the notes are written. Run non-interactively, `gh release create` sets
+no title unless `--title` or `--generate-notes` is passed, and an untitled
+release displays whatever GitHub falls back to — the tag, sometimes followed by
+the tagged commit's subject. This step rejects an untitled release either way.
+
+```bash
+gh release view "${VER:?set VER to the release tag first}" -R linagora/openrag \
+  --json name,tagName,isDraft,isPrerelease,body \
+  --jq '{name, tag: .tagName, draft: .isDraft, prerelease: .isPrerelease, notes: (.body|gsub("\\s"; "")|length)}'
+```
+
+A hard gate:
+
+```bash
+fail=0
+rel=$(gh release view "${VER:?set VER to the release tag first}" -R linagora/openrag \
+  --json name,tagName,isDraft,isPrerelease,body) || {
+  echo "FAIL  could not read the GitHub Release for $VER (see the error above)" >&2; exit 1; }
+
+# The title must be the tag, optionally followed by a space and a description
+# (v2.0.0 is "v2.0.0 — Hexagonal architecture"). A commit subject, an empty
+# title, "v2.0.0-rc.1" or "v2.0.01" fails; the tag check below is what pins the
+# version, so a description is not checked.
+name=$(printf '%s' "$rel" | jq -r '.name')
+case "$name" in
+  "$VER"|"$VER "*) echo "OK    title=$name" ;;
+  *) echo "FAIL  title=${name:-<empty>} (want $VER)"; fail=1 ;;
+esac
+
+[ "$(printf '%s' "$rel" | jq -r '.tagName')" = "$VER" ] \
+  && echo "OK    tag=$VER" || { echo "FAIL  tag mismatch"; fail=1; }
+
+[ "$(printf '%s' "$rel" | jq -r '.isDraft')" = "false" ] \
+  && echo "OK    published (not a draft)" || { echo "FAIL  still a draft"; fail=1; }
+
+# A GA release marked prerelease is excluded from "latest" and from most tooling.
+[ "$(printf '%s' "$rel" | jq -r '.isPrerelease')" = "false" ] \
+  && echo "OK    not flagged prerelease" || { echo "FAIL  GA release flagged as prerelease"; fail=1; }
+
+# Counts non-blank characters, so a body of spaces or newlines does not pass.
+# 200, not 0: a body of "." passes a >0 check while telling a user nothing.
+# Real notes are far longer (non-blank: v2.2.1 623, v2.2.2 709, v2.3.1 2270,
+# v2.3.0 11384), so this trips empty or near-empty bodies. It does not prove the
+# notes were edited: an unedited --generate-notes body listing one PR passes.
+n=$(printf '%s' "$rel" | jq -r '.body | gsub("\\s"; "") | length')
+[ "$n" -gt 200 ] \
+  && echo "OK    release notes present ($n non-blank chars)" \
+  || { echo "FAIL  release notes empty or near-empty ($n non-blank chars)"; fail=1; }
+
+[ "$fail" -eq 0 ] && echo "step 9 PASS" || { echo "step 9 FAIL" >&2; exit 1; }
+```
+
+**PASS**: `step 9 PASS`.
+
+Fixing a bad title needs no rebuild and no retag — it is metadata only:
+
+```bash
+gh release edit "$VER" -R linagora/openrag --title "$VER"
+```
+
 ---
 
 ## What v2.0.1 actually did, and the rules that follow
@@ -424,6 +510,14 @@ Rules this produces:
 4. **Dry-run the verification itself against the previous release.** Doing that
    for v2.0.1 is what exposed the broken `--format` flag above. A checklist
    that silently reports nonsense is worse than none.
+5. **A published tag never moves.** Rule 2 covers a tag whose build failed and
+   published nothing. Once its images are in the registry, the version is
+   fixed: anyone may already run them or have pinned their digests. v2.3.4 broke
+   this. Its tag was deleted and re-created on a docs-only merge into `main`
+   (#1334), so `build.yml` rebuilt and re-pushed `v2.3.4` and `latest` 30
+   minutes after the first build, with different digests for the same version.
+   A code fix after that is a new patch version. A docs-only fix is merged
+   without a tag ("Hotfixes" in [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ### Open risk for the next release
 

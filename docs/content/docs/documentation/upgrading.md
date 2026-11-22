@@ -13,6 +13,292 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## 2.3.0 or 2.3.1 to a later 2.3.x
+
+The fence that holds a file while an orphaned indexing worker may still write to
+it lives in the Ray actors, and these upgrades keep the indexer generation `v13`,
+so actors already running are not replaced. On a shared Ray cluster
+(`ray.enabled: true`, or an external cluster) restart the Ray cluster once after
+the upgrade, at a time when no indexing is running, so the actors are recreated.
+Until then the API logs a warning that the running Ray actors predate the fence.
+With Ray inside the OpenRAG pod or container (`ray.enabled: false`, or Docker
+Compose without a separate Ray cluster), the upgrade restarts Ray and recreates
+the actors on its own. See
+[Upgrades that keep the generation](/openrag/documentation/kubernetes/#upgrades-that-keep-the-generation).
+
+From OpenRAG 2.3.2, `MARKER_PDFTEXT_WORKERS` is ignored: Marker runs pdftext with
+one worker, inside the Marker child, so its processes no longer outlive a crashed
+worker. Remove the setting; the Marker worker logs a warning while it is above 1.
+`MARKER_PARSE_MEMORY_LIMIT_MB` no longer needs to be divided by
+`1 + MARKER_PDFTEXT_WORKERS`: size it for one process.
+
+From OpenRAG 2.3.2, the bundled object store runs SILO, the maintained MinIO
+fork, instead of the unpatched MinIO build. The switch is one-way, so back up
+the MinIO, etcd and Milvus data first. On Kubernetes, stop every MinIO pod
+before `helm upgrade`, and set `minioCredentials.accessKey` and `secretKey`: the
+chart refuses to install without them. Deployments on an external S3 store are
+not affected. Follow
+[Object storage upgrade (MinIO to SILO)](/openrag/documentation/minio_silo_upgrade/)
+before upgrading.
+
+From OpenRAG 2.3.2, a default prompt that still holds the text an earlier release
+seeded is replaced with the bundled template at startup. Defaults you edited or
+renamed, and named prompts, are kept. In every deployment this replaces an
+untouched `query_contextualizer` default; in one first installed on 2.1.x, also
+the `sys_prompt` and `spoken_style_answer` defaults. To keep an earlier text, copy it
+into a named prompt before you upgrade: rolling the image back does not restore
+it. While 2.3.0 or 2.3.1 instances still run beside 2.3.2 ones, set
+`PROMPTS_REFRESH_DEFAULTS=false`, and remove it once they have stopped. See the
+[Prompt Library](/openrag/documentation/api/#-prompt-library).
+
+From OpenRAG 2.3.2, `enable_thinking: false` reaches the model's chat template;
+earlier releases dropped it. A model with a Mistral tokenizer rejects it with a
+400, so remove `enable_thinking` from the `extra` of that model's endpoint, on the
+Models page or with `PUT /model-endpoints/{model_type}/{name}`, which replaces
+`extra`: send the rest of it back. `LLM_ENABLE_THINKING` and `VLM_ENABLE_THINKING`
+are only copied into an endpoint when it is first created, so changing them does
+not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
+`"enable_thinking": false` in its `extra` the same way. `OPENAI_LOADER_ENABLE_THINKING`
+is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
+See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
+
+The default similarity threshold is now `0.2`. The threshold filters the semantic
+(embedding) search only, before it is merged with the keyword search, and with
+the default embedder relevant passages score about 0.2-0.7, so the old values
+often emptied the semantic side. Retrieval results change: more passages come
+from the semantic search, mostly for questions in another language than the
+documents and for abbreviations. Each path reads its own value, so to keep the
+old behavior, set it back where that path reads it:
+
+- Chat uses the `similarity_threshold` of the partition's retrieval preset. A
+  migration sets it to `0.2` in every retrieval preset that still holds exactly
+  `0.6`, and a rollback does not restore `0.6`. A preset without the key, such
+  as the seeded `multiquery` and `hyde`, follows the new default of `0.2` (it was
+  `0.6`). A preset holding any other value keeps it. To keep `0.6`, set it in the
+  preset after the upgrade.
+- `GET /search` defaults to `0.2` (it was `0.75`). Pass `similarity_threshold` in
+  the request to keep the old value; the preset does not change it.
+- The MCP search tool reads `OPENRAG_MCP_SIMILARITY_THRESHOLD`, now `0.2` (it was
+  `0.8`). Set the variable to keep the old value; the preset does not change it.
+- `SIMILARITY_THRESHOLD` is now `0.2` (it was `0.6`). It is read only when no
+  partition is loaded.
+
+## OpenRAG 2.3.6 on a shared Ray cluster: file quota during the upgrade
+
+From OpenRAG 2.3.6, an upload by a user with a file quota takes a slot when it is
+accepted and holds it in Postgres until the file is recorded in the catalog,
+or until cleanup gives the slot back when the task fails or is cancelled.
+Admins and users without a limit take no slot. Uploads queued before the upgrade
+hold no slot. With Ray inside the OpenRAG pod or container, the upgrade restarts
+Ray and those tasks are gone. On a shared Ray cluster (`ray.enabled: true`, or an
+external cluster), the previous release's indexer workers keep running the tasks
+they had queued, and until those tasks finish a user's new uploads are accepted
+as if they were not there: a user with uploads queued at the time can end up over
+their quota by that many files. When upgrading from a release older than 2.3.5,
+the [2.3.5 note below](#openrag-235-on-a-shared-ray-cluster-stop-indexing-first)
+applies as well, and those queued files can stay `SERIALIZING` instead.
+
+To avoid it, stop upload traffic, wait until no indexing task is queued or
+running, upgrade, and resume uploads once every old replica has stopped. A user
+who did go over their quota can upload again once their file count is below the
+limit: they delete enough files to get below it, or an administrator raises the
+quota above their current count.
+
+## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
+
+The first 2.3.5 replica replaces the shared `TaskStateManager` actor left by any
+earlier 2.3.x. Workers of the old release keep a handle to the replaced actor, so
+a file they are still indexing loses its state writes and stays `SERIALIZING`.
+On a shared Ray cluster (`ray.enabled: true`, or an external cluster), stop
+traffic and wait until no indexing task is active before the first 2.3.5 replica
+starts, as in
+[Upgrades that change the indexer generation](/openrag/documentation/kubernetes/#upgrades-that-change-the-indexer-generation).
+On an external cluster, retire the `v13` generation there. With Ray inside the
+OpenRAG pod or container, nothing extra is needed.
+
+## OpenRAG 2.3.5 on Kubernetes: recreate the Ray pods
+
+With `LOG_FORMAT=json` (the chart's default), the chart now sets
+`TQDM_DISABLE=1`, unless `env.config.TQDM_DISABLE` is set, so progress bars stop
+breaking the JSON log stream. With `ray.enabled: true`, KubeRay does not
+recreate Ray pods when the chart changes, and the pods already running keep
+their bars. After `helm upgrade`, at a time when no indexing is running, scale
+OpenRAG down, delete every Ray pod, head included, and scale OpenRAG back up once
+the new pods are Ready: an OpenRAG pod connected to the old Ray head does not
+reconnect on its own.
+
+```bash
+NS=openrag            # the release namespace
+FULLNAME=openrag      # fullnameOverride; `kubectl get raycluster -n $NS` shows it as <FULLNAME>-raycluster
+REPLICAS=$(kubectl get deploy -n "$NS" "$FULLNAME-openrag" -o jsonpath='{.spec.replicas}')
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
+kubectl wait -n "$NS" pod -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance="$FULLNAME" \
+  --for=delete --timeout=10m
+kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
+# Wait for KubeRay to create the new pods, then for them to be Ready (fails after 10m).
+until kubectl get pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster" -o name | grep -q .; do sleep 5; done
+kubectl wait -n "$NS" pod -l ray.io/cluster="$FULLNAME-raycluster" --for=condition=Ready --timeout=10m
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas="$REPLICAS"
+kubectl rollout status -n "$NS" deploy/"$FULLNAME-openrag"   # before resuming indexing
+```
+
+The same applies after any upgrade that changes an `env.config` value read by
+Ray: the Ray containers read it only when they start.
+
+## OpenRAG 2.3.5 on Kubernetes: settings the chart refuses with the embedded Ray
+
+With `ray.enabled: false`, no `RAY_ADDRESS` and `ray.externalCluster: false` (the
+default), each OpenRAG pod starts its own Ray. From OpenRAG 2.3.5, the chart refuses two kinds of settings that break
+indexing in that mode. `helm upgrade` then stops before it changes anything, and
+the error names the setting.
+
+| The chart refuses | Why | What to change |
+|---|---|---|
+| `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, cancelling a task only sees one pod, and, from 2.3.6, each pod's quota sweep gives back the upload slots the other pods hold once they are older than five minutes, so a user can go over their file quota. | Keep `openrag.replicas: 1`, or share one Ray cluster: `ray.enabled: true` together with `env.config.RAY_ADDRESS` or `env.config.ENABLE_RAY_SERVE=true` (see [Notes](/openrag/documentation/kubernetes/#notes)), or an external cluster through `env.config.RAY_ADDRESS`, with `ray.externalCluster: true` when `RAY_ADDRESS` comes from a Secret the chart cannot read. |
+| Marker, Docling and Whisper workers that don't fit the OpenRAG pod's GPUs | Each worker reserves its `*_NUM_GPUS` of the pod's GPUs (`MARKER_POOL_SIZE` × `MARKER_NUM_GPUS`, `DOCLING_POOL_SIZE` × `DOCLING_NUM_GPUS`, `WHISPER_N_WORKERS` × `WHISPER_NUM_GPUS`). Ray keeps a fraction of a GPU on a single card, and takes a reservation of 1 or more as whole cards, so three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and files sent to them fail after the parser's timeout. A preset can select Marker or Docling even when `PDFLOADER` names another parser, and Whisper transcribes audio by default, so the check applies to every deployment with a GPU in the pod, whatever order the workers start in. | Lower the pool sizes or the `*_NUM_GPUS` values, or give the pod more GPUs. A reservation above 1 must be a whole number. |
+
+The chart can check the GPU settings only where it can read them: in `env.config`,
+and in `env.secrets` when it renders the Secret itself. A `MARKER_*`, `DOCLING_*` or
+`WHISPER_*` value in an `env.existingSecret` or in a secret from an external secrets
+operator is not checked, and it overrides `env.config` at runtime. Keep these
+settings in `env.config` only, removed from that Secret, or check the fit yourself.
+
+The chart also drops `RAY_NUM_GPUS` from its defaults: OpenRAG never read it, so a
+copy in your values does nothing.
+
+With the embedded Ray, the OpenRAG Deployment now uses the `Recreate` strategy: an
+upgrade stops the old pod before it starts the new one. A rolling update ran both
+for a moment, each with its own Ray, and the new pod's job reconciler could mark
+the old pod's queued jobs failed for good. Expect the API to be unavailable while
+the new pod starts. With a shared Ray cluster, the rolling update is unchanged.
+
+## OpenRAG 2.3.5 on Kubernetes: a larger venv volume
+
+With `ray.enabled: true`, the Ray head installs the Python dependencies into the
+`<fullname>-venv` volume when it first starts. They take about 7 GB, which left
+little room in the former 10Gi default. From OpenRAG 2.3.5, that default is
+20Gi, and an install that fails stops the Ray head's `init-venv-sync` init
+container instead of being marked complete.
+
+`helm upgrade` resizes the existing volume, which fails unless its StorageClass
+sets `allowVolumeExpansion: true`. On a StorageClass that does not, keep
+`persistence.volumes.venv.size: 10Gi` in your values, or delete the volume and
+let the upgrade create it again.
+
+If an earlier install failed, the volume can hold a half-installed environment
+already marked complete, and the pods start on it. To install it again, delete
+`/app/.venv/.ready` in the Ray head and restart the Ray head pod, then the Ray
+workers and the OpenRAG pod.
+
+## OpenRAG 2.3.5: Milvus 3.0.5
+
+The tested upgrade from Milvus 3.0.2 to 3.0.5 needs no Milvus data migration
+with the default message queue. Stop writes and take a verified backup first.
+Milvus 3.0.5 removes server-side row-level security (RLS); if you rely on RLS,
+hold the upgrade until an equivalent authorization control is in place and
+validated. Follow the [Milvus 3.0.2 to 3.0.5 upgrade procedure](/openrag/documentation/milvus_migration/#upgrade-from-milvus-302-to-305).
+
+## OpenRAG 2.3.5: how new chunks name their file
+
+Two changes to chunks indexed after the upgrade. Chunks already indexed don't change.
+
+- Contextualized chunks no longer have a `* filename:` line. The chunker's `[Source: ...]` header now names the file once, using the sanitized filename.
+- `structured_section` no longer has a `prepend_heading_path` option. A preset that still sets it to `false` keeps loading and ignores it, so its new chunks get a header, which leaves less room for each chunk's body and can move chunk boundaries.
+
+## OpenRAG 2.3.5: a partition named `all`
+
+Search and chat use `all` to mean every partition you can access (`partitions=all`,
+`openrag-all`). From 2.3.5 it is a reserved partition name, in any case and with or
+without surrounding whitespace. A partition can no longer be created with that name, and
+the files of one that already exists are no longer reachable through the API after
+the upgrade.
+
+Only an instance that ran 2.2.2 or earlier can have one. Check before you upgrade, in
+the OpenRAG database:
+
+```sql
+SELECT partition FROM partitions WHERE lower(regexp_replace(partition, '[^[:alnum:]]', '', 'g')) = 'all';
+```
+
+The query also lists a name such as `a.l.l`, which is not reserved: only a name that
+reads `all` once the whitespace around it is removed is. If it returns such a name,
+upload that partition's files again into a partition with another name before you
+upgrade. Don't delete or copy files out of the `all` partition first:
+on 2.3.4 and earlier, those operations also reach files with the same ID in other
+partitions.
+
+## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
+
+From OpenRAG 2.3.4, `recursive_splitter` puts the filename at the start of every
+chunk, so a question like "what is report.pdf about?" can find it. This only
+reaches files indexed after the upgrade. If you use `recursive_splitter`, or used
+it before, run the script that
+[adds the filename to chunks already indexed](/openrag/documentation/milvus_migration/#add-the-filename-to-chunks-already-indexed)
+once after upgrading. It re-indexes nothing. Nothing changes for
+`structured_section`, the default.
+
+## OpenRAG 2.3.3 on Docker Compose: the Ray dashboard is not published
+
+From OpenRAG 2.3.3, Docker Compose no longer maps port 8265. With the default
+`RAY_DASHBOARD_HOST`, that mapping did not reach the dashboard anyway. To open it
+while you need it, add `-f ray-dashboard.docker-compose.yaml` last, after
+`-f docker-compose.yaml` and any other overlay. See
+[Ray dashboard](/openrag/installation/docker/#ray-dashboard).
+
+## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
+
+From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
+render values that leave them unapplied or that it cannot honour. `helm upgrade`
+then stops before it changes anything in the cluster, and the error names the
+setting to change. Render the new chart with your values first, as in
+[Render the new chart offline](#render-the-new-chart-offline), to find out before
+the upgrade.
+
+| The chart refuses | What to change |
+|---|---|
+| `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` that disagrees with `postgresProvisioning.runMigrationsInApp`. This includes `POSTGRES_RUN_MIGRATIONS: "false"` set for a managed PostgreSQL while `runMigrationsInApp` is left at its default, `true`. | Remove `POSTGRES_RUN_MIGRATIONS` and set `runMigrationsInApp`, which the chart turns into that variable. |
+| `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` with a value the app rejects at startup: anything but `true`, `1`, `yes`, `false`, `0`, `no` (in any case), or blank. | The same. |
+| `runMigrationsInApp` set to anything but `true`, `1`, `yes`, `false`, `0` or `no`. | Set it to `true` or `false`. |
+| `runMigrationsInApp: false` with `migrationJob.enabled: false`: nothing would apply the migrations. | Enable one of them, or set `postgresProvisioning.externalMigrations: true` if you apply them yourself. |
+| `migrationJob.enabled: true` with `postgresql.enabled: true`: the Job runs before Helm creates the bundled PostgreSQL. | Turn the Job off and let the app apply the migrations. |
+| With the Job on, a fullname ending in `-migration` of 50, 51, 58 or 59 characters, which would give a copy of the env the name of the app's ConfigMap or Secret. | Change the release name or `fullnameOverride`. |
+
+The chart can check `env.secrets` only when it renders the Secret itself. Do not
+put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an
+external secrets operator: that value replaces `runMigrationsInApp` unchecked.
+See [Managed PostgreSQL](/openrag/documentation/kubernetes/#managed-postgresql).
+
+## OpenRAG 2.3.2 on Kubernetes: one value for the reranker's model and port
+
+The bundled reranker's model and port each have one value now:
+
+- `reranker.model.id` replaces `reranker.rerankerModelName`. `env.config.RERANKER_MODEL`
+  defaults to `'{{ .Values.reranker.model.id }}'`.
+- `reranker.service.port` replaces `reranker.servicePort`. `env.config.RERANKER_BASE_URL`
+  reads it.
+- `reranker.command` is removed. The chart never read it; extra Infinity flags go in
+  the new `reranker.extraArgs`.
+
+A values file copied from an earlier chart still installs while each removed key
+holds the same value as the key that replaces it, which is the case unless you
+changed one of them. When they differ, the install fails and names the value to
+fix. With the bundled reranker, that configuration was already broken: OpenRAG
+named one model while Infinity reranked with another, or called a port Infinity
+did not listen on. With an external reranker, `reranker.rerankerModelName` was
+the model OpenRAG asked for: move it to `reranker.model.id`. Extra flags left in
+`reranker.command` fail the same way, since they never applied.
+
+When you delete a removed key, also check `env.config` and `env.secrets`: a copied
+`env.config` still sets `RERANKER_MODEL` to `'{{ .Values.reranker.rerankerModelName }}'`
+and `RERANKER_BASE_URL` from `reranker.servicePort`. The install fails while any
+value reads a key you deleted, since it would render empty, and names the value to
+change. Set `RERANKER_MODEL` to `'{{ .Values.reranker.model.id }}'` and
+`RERANKER_BASE_URL` to the chart default, or remove both to take the defaults.
+
+The reranker also has a startup probe now, and `reranker.probes` sets all three of
+its probes. A start that hangs is restarted after 10 minutes instead of 2. See
+[Kubernetes](/openrag/documentation/kubernetes/#notes).
+
 ## Changes in 2.3.0 for every deployment
 
 This section applies to every upgrade from OpenRAG 2.2.1 or 2.2.2, on Kubernetes
@@ -35,7 +321,7 @@ finishes. Each procedure has three parts:
 
 | Change | Impact on an existing deployment |
 |---|---|
-| Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` while OpenRAG reports ready, and uploads fail. The old `vector` field is dropped. |
+| Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` and uploads fail. OpenRAG 2.3.0 to 2.3.4 still report ready; from 2.3.5, `/ready` fails with `checks.milvus: migration_required`. The old `vector` field is dropped. |
 | New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job if you enabled it. |
 | Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
 | `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`, unless unauthenticated scrapes are enabled (see [Metrics scraping](#metrics-scraping)). |
@@ -113,10 +399,14 @@ With neither, every scrape gets `403`. See
 
 OpenRAG 2.3.0 refuses to start, with an error naming the variable, when:
 
-- `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `MINIO_SECRET_KEY` or
-  `GRAFANA_ADMIN_PASSWORD` is shorter than 12 characters;
+- `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `MINIO_SECRET_KEY`,
+  `GRAFANA_ADMIN_PASSWORD` or `METRICS_TOKEN` is shorter than 12 characters;
 - a secret is set to a value the project publishes as an example, such as the
   defaults of the 2.2.x `.env.example`.
+
+`METRICS_TOKEN` is now validated too. After upgrading, a token shorter than 12
+characters or set to a published/default placeholder refuses to start. Replace
+it with a sufficiently strong random token.
 
 The rules are in
 [Environment variables — What will be refused](/openrag/documentation/env_vars/#what-will-be-refused).
@@ -292,10 +582,9 @@ all three to `v2.3.0`, or remove them to take the chart's default. The 2.3.0
 chart's readiness probe calls `/ready`, which 2.2.x images do not serve: a 2.2.x
 image under the new chart never becomes Ready, and the rollout stops.
 
-If your values pin `milvus.image.all.tag`, set it to `v3.0.2` or remove the
-override. Charts 0.6.4 and 0.6.5 pinned it to `v3.0.1`. If you keep that pin, the
-migration runs on v3.0.1, which cannot compact the segments the migration
-creates.
+If your values contain `milvus.image.all.tag`, remove the override. The 2.3.0
+chart defaults to Milvus v3.0.2; a copied image tag takes precedence over that
+default.
 
 #### vLLM engine overrides
 
@@ -400,9 +689,9 @@ Your values decide what applies the PostgreSQL migrations:
 
 | `postgresProvisioning` | What applies the migrations |
 |---|---|
-| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. |
+| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. With an external PostgreSQL only: [the chart released with OpenRAG 2.3.2 and later](#openrag-232-on-kubernetes-migration-settings-the-chart-refuses) refuses it with `postgresql.enabled`. |
 | `runMigrationsInApp: true` (the default), Job off | The new OpenRAG pod, when it starts. Under Ray Serve, the Serve replicas on the Ray pods, once you scale OpenRAG back up. |
-| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. |
+| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. [The chart released with OpenRAG 2.3.2 and later](#openrag-232-on-kubernetes-migration-settings-the-chart-refuses) refuses this unless you also set `externalMigrations: true`. |
 
 If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, before
 `helm upgrade`:
@@ -415,19 +704,24 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
    ```
 
    With an external PostgreSQL, run the same `ALTER ROLE` with your client.
-2. Update the Secret OpenRAG reads now, rather than letting `helm upgrade` do it:
-   if the migration Job is enabled, it runs before Helm updates that Secret, and
-   would log in with the old password. For the Secret the chart renders from
-   your values:
+2. If the migration Job is enabled, make sure it logs in with the new password.
+   It runs before Helm updates the release's Secret. With `env.existingSecret`,
+   it reads that Secret: update it now. With an external secrets provider,
+   update the source. With the Secret the chart renders from your values, the
+   Job reads a copy rendered from your new values, so there is nothing to do.
+
+   When you upgrade to chart 0.7.1 (OpenRAG 2.3.1) or earlier, there is no copy:
+   the Job reads the release's Secret, so update that one now, rather than
+   letting `helm upgrade` do it.
+   With an external secrets provider, wait until it has synced. For the Secret
+   the chart renders from your values:
 
    ```bash
    kubectl patch secret -n "$NS" "$FULLNAME-env-secrets" \
      -p '{"stringData":{"POSTGRES_PASSWORD":"<new password>"}}'
    ```
 
-   With `env.existingSecret`, update that Secret; with an external secrets
-   provider, update the source and wait until the Secret has synced. Your values
-   already carry the new value, from
+   Your values already carry the new value, from
    [Render the new chart offline](#render-the-new-chart-offline); with
    `postgresql.auth.existingSecret`, update that Secret's password too.
 
@@ -482,9 +776,10 @@ kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
 kubectl rollout restart -n "$NS" deploy/"$FULLNAME-openrag"
 ```
 
-Once the PostgreSQL migrations are applied, the pod becomes Ready, but searches
-answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5:
-readiness does not check the Milvus schema version.
+Once the PostgreSQL migrations are applied, searches answer `503` with
+`VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5. OpenRAG 2.3.0 to
+2.3.4 report the pod Ready anyway. From 2.3.5 it stays unready until step 5, and
+`/ready` reports `checks.milvus: migration_required`.
 
 #### 5. Migrate the Milvus collection
 
@@ -564,9 +859,10 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded, except section
-  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
-  neighbours. PostgreSQL keeps each file's original upload metadata.
+- On Milvus 3.0.2 and older or unverified builds, copying a chunk's metadata can
+  round integers above 2^53; the tested Milvus 3.0.5 build preserves them. The
+  copy folds section IDs below 2^53 so each chunk stays linked to its neighbours.
+  PostgreSQL keeps each file's original upload metadata.
 
 Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
@@ -881,9 +1177,10 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded, except section
-  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
-  neighbours. PostgreSQL keeps each file's original upload metadata.
+- On Milvus 3.0.2 and older or unverified builds, copying a chunk's metadata can
+  round integers above 2^53; the tested Milvus 3.0.5 build preserves them. The
+  copy folds section IDs below 2^53 so each chunk stays linked to its neighbours.
+  PostgreSQL keeps each file's original upload metadata.
 
 Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).

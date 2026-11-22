@@ -35,24 +35,25 @@ class _Embedder:
 def test_provenance_records_what_the_reference_resolved_to():
     """The endpoint name alone cannot catch a repointed endpoint — the
     model_name/endpoint pair is the only thing that does (problem C)."""
-    from services.workers.embedder_provenance import embedder_provenance as _embedder_provenance
+    from services.workers.embedder_provenance import embedder_provenance
 
-    prov = _embedder_provenance(_Embedder(), "Qwen3-Embedding-0.6B")
+    prov = embedder_provenance(_Embedder(), "Qwen3-Embedding-0.6B", "vector_Qwen3_Embedding_0_6B")
 
     assert prov == {
         "embedder": "Qwen3-Embedding-0.6B",
         "embedder_model_name": "Qwen3-Embedding-0.6B",
         "embedder_endpoint": "https://x/v1",
         "embedder_dimension": 1024,
+        "embedder_vector_field": "vector_Qwen3_Embedding_0_6B",
     }
 
 
 def test_provenance_keeps_the_default_alias_as_written():
     """The record shows what was *asked for*; the resolved model name beside it
     shows what that meant at the time."""
-    from services.workers.embedder_provenance import embedder_provenance as _embedder_provenance
+    from services.workers.embedder_provenance import embedder_provenance
 
-    prov = _embedder_provenance(_Embedder(), "default")
+    prov = embedder_provenance(_Embedder(), "default")
 
     assert prov["embedder"] == "default"
     assert prov["embedder_model_name"] == "Qwen3-Embedding-0.6B"
@@ -61,9 +62,9 @@ def test_provenance_keeps_the_default_alias_as_written():
 def test_provenance_survives_an_embedder_that_never_ran():
     """A file that produced no chunks has no dimension to record. Describing
     the run must not fail the run."""
-    from services.workers.embedder_provenance import embedder_provenance as _embedder_provenance
+    from services.workers.embedder_provenance import embedder_provenance
 
-    prov = _embedder_provenance(_Embedder(dimension=None), None)
+    prov = embedder_provenance(_Embedder(dimension=None), None)
 
     assert prov["embedder"] == "default"
     assert prov["embedder_dimension"] is None

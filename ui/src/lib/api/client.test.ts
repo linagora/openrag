@@ -60,6 +60,23 @@ describe("api client", () => {
     expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
   });
 
+  it("preserves the stored token on a 503 response", async () => {
+    localStorage.setItem(TOKEN_KEY, "or-secret");
+    fetchMock.mockResolvedValue(fakeResponse({ status: 503, body: '{"detail":"Service unavailable"}' }));
+
+    await expect(request("/users/info")).rejects.toMatchObject({ status: 503 });
+    expect(localStorage.getItem(TOKEN_KEY)).toBe("or-secret");
+  });
+
+  it("preserves the stored token when the network request fails", async () => {
+    localStorage.setItem(TOKEN_KEY, "or-secret");
+    const networkError = new TypeError("Failed to fetch");
+    fetchMock.mockRejectedValue(networkError);
+
+    await expect(request("/users/info")).rejects.toBe(networkError);
+    expect(localStorage.getItem(TOKEN_KEY)).toBe("or-secret");
+  });
+
   it("tolerates an empty 200 body (resolves undefined, no JSON parse crash)", async () => {
     fetchMock.mockResolvedValue(fakeResponse({ status: 200, body: "" }));
     await expect(request("/partition/x")).resolves.toBeUndefined();
