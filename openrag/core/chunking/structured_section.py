@@ -710,9 +710,9 @@ class StructuredSectionChunker(BaseChunker):
                 continue
             if cur is None:
                 cur = _copy_unit(unit)
-            elif cur.heading_path == unit.heading_path and self.length_function(f"{cur.text}\n\n{unit.text}".strip()) <= self._packing_budget(
-                filename, cur.heading_path, cur.pages | unit.pages
-            ):
+            elif cur.heading_path == unit.heading_path and self.length_function(
+                f"{cur.text}\n\n{unit.text}".strip()
+            ) <= self._packing_budget(filename, cur.heading_path, cur.pages | unit.pages):
                 _absorb(cur, unit, self.length_function)
             else:
                 out.append(cur)
@@ -918,7 +918,9 @@ class StructuredSectionChunker(BaseChunker):
                     # the section from both the header and ``hierarchy_path``,
                     # where it becomes unreachable by dense and sparse search
                     # alike (BM25 is declared over ``text`` only).
-                    _absorb(prev, unit, self.length_function, path=merged_path or prev.heading_path or unit.heading_path)
+                    _absorb(
+                        prev, unit, self.length_function, path=merged_path or prev.heading_path or unit.heading_path
+                    )
                     continue
             out.append(_copy_unit(unit))
         return out
@@ -1106,9 +1108,7 @@ def _copy_unit(unit: _Unit) -> _Unit:
     )
 
 
-def _absorb(
-    cur: _Unit, unit: _Unit, length_function: Callable[[str], int], *, path: list[str] | None = None
-) -> None:
+def _absorb(cur: _Unit, unit: _Unit, length_function: Callable[[str], int], *, path: list[str] | None = None) -> None:
     cur.text = f"{cur.text}\n\n{unit.text}".strip()
     cur.tokens = length_function(cur.text)
     cur.pages |= unit.pages
