@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import time
 import zipfile
 from pathlib import Path
 
@@ -300,6 +301,20 @@ async def test_padding_short_rows_to_a_wide_one_is_bounded(odf_package):
     md = await _markdown(odf_package, tables)
 
     assert md.count("|") <= 2 * (500_000 + 50 * 256)
+
+
+@pytest.mark.asyncio
+async def test_many_notes_and_spaces_in_one_paragraph_are_taken_out_in_linear_time(odf_package):
+    """Taking them out one by one appended to the same string each time: 100,000
+    notes in one paragraph, from a file of a few kilobytes, took about 40 s."""
+    count = 100_000
+    body = "<text:p>" + "<text:note/>ab" * count + "<text:s/>c" * count + "</text:p>"
+
+    start = time.perf_counter()
+    md = await _markdown(odf_package, body)
+
+    assert time.perf_counter() - start < 10
+    assert md == "ab" * count + " c" * count
 
 
 @pytest.mark.asyncio

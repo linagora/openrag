@@ -113,16 +113,44 @@ def _detach(element) -> None:
     parent.remove(element)
 
 
+def _detach_all(elements) -> None:
+    """:func:`_detach` each of *elements*, joining each parent's text once.
+
+    Detaching them one by one appends to the same string each time, which is
+    quadratic in the number of elements a parent holds."""
+    removed: dict[Any, set] = {}
+    for element in elements:
+        parent = element.getparent()
+        if parent is not None:
+            removed.setdefault(parent, set()).add(element)
+    for parent, children in removed.items():
+        anchor, pieces = None, [parent.text or ""]
+        for child in list(parent):
+            if child in children:
+                pieces.append(child.tail or "")
+                parent.remove(child)
+                continue
+            if anchor is None:
+                parent.text = "".join(pieces) or None
+            else:
+                anchor.tail = "".join(pieces) or None
+            anchor, pieces = child, [child.tail or ""]
+        if anchor is None:
+            parent.text = "".join(pieces) or None
+        else:
+            anchor.tail = "".join(pieces) or None
+
+
 def _patch_content(root, package: zipfile.ZipFile) -> None:
     from lxml import etree
 
     # Footnotes, endnotes and comments are not indexed.
-    for note in list(root.iter(f"{_TEXT}note", f"{_OFFICE}annotation", f"{_OFFICE}annotation-end")):
-        _detach(note)
+    _detach_all(list(root.iter(f"{_TEXT}note", f"{_OFFICE}annotation", f"{_OFFICE}annotation-end")))
     # A lone <text:s/> is dropped, which merges the two words around it.
-    for space in list(root.iter(f"{_TEXT}s")):
+    spaces = list(root.iter(f"{_TEXT}s"))
+    for space in spaces:
         space.tail = " " + (space.tail or "")
-        _detach(space)
+    _detach_all(spaces)
     # A list header's text is dropped. It is how LibreOffice writes the titles of a
     # deck imported from PowerPoint: an unnumbered paragraph, so that is what it becomes.
     for header in list(root.iter(f"{_TEXT}list-header")):
@@ -180,12 +208,14 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
                 anchor.addnext(heading)
     for page in root.iter(f"{_DRAW}page"):
         title = ""
-        for shape in list(page):
+        skipped = []
+        for shape in page:
             shape_class = shape.get(_PRESENTATION_CLASS)
             if shape_class in _SKIPPED_SLIDE_CLASSES:
-                _detach(shape)
+                skipped.append(shape)
             elif shape_class == "title":
                 title = title or " ".join("".join(shape.itertext()).split())
+        _detach_all(skipped)
         # A slide's only heading is its name. Naming it after its title shape makes
         # that heading the title, and a slide with no title shape has none.
         page.attrib.pop(f"{_DRAW}name", None)
