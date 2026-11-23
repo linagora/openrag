@@ -29,7 +29,8 @@ class AgentProfileConfig(ConfigMixin):
 
     #: A prompt of type ``agent`` named in the library; empty for the type's default.
     prompt_name: str | None = None
-    #: The tools it is offered, by name; an unknown name fails startup.
+    #: The tools it is offered, by name. An unknown name isn't checked here: building the
+    #: chat service raises ``ConfigError`` for it, on the first chat request.
     tools: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENT_TOOLS), min_length=1)
     #: Used when the request sends no temperature; ``None`` then leaves the endpoint's own.
     temperature: float | None = Field(default=0.2, ge=0, le=2)
