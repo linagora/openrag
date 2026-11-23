@@ -150,12 +150,11 @@ size other than `50m` stops it the same way: the overlay declares that zone at
 
 Set these in `.env`:
 
-- Compose trusts loopback and both bundled proxy addresses by default, so no
-  allowlist change is needed with their default addresses. If you change a
-  proxy address or set **`UVICORN_FORWARDED_ALLOW_IPS`** explicitly, include
-  loopback and each proxy address you use. When changing the bridge subnet,
-  keep `OPENRAG_NPM_PROXY_IP` inside the new subnet and outside the dynamic
-  range.
+- Compose trusts loopback by default. Do not add the NPM address to
+  **`UVICORN_FORWARDED_ALLOW_IPS`** while private-network clients can supply
+  `X-Real-IP` to NPM. Add proxy addresses only after hardening and verifying
+  their forwarded-IP handling. When changing the bridge subnet, keep
+  `OPENRAG_NPM_PROXY_IP` inside the new subnet and outside the dynamic range.
   [Rate Limiting](/openrag/documentation/env_vars/#rate-limiting)
 - **`OIDC_REDIRECT_URI`** (OIDC mode only): `https://<domain>/auth/callback`.
   The `ADMIN_UI_PORT` URL from the [OIDC guide](/openrag/documentation/oidc/)
