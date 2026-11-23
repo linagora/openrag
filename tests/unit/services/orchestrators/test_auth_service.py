@@ -460,22 +460,38 @@ async def test_callback_refuses_an_account_managed_by_config():
 
 
 class FailingUserRepo(FakeUserRepo):
+    def __init__(self, *, failure_message: str):
+        super().__init__({})
+        self.failure_message = failure_message
+
     async def create_user(self, user: User) -> User:
-        raise RuntimeError("database connection failed")
+        error = RuntimeError(self.failure_message)
+        error.sqlstate = "23505"
+        raise error
 
 
 @pytest.mark.asyncio
 async def test_callback_auto_provision_failure_does_not_log_raw_sub():
     sub = "kc-provision-failure"
+    id_token = "id-token-sensitive-value"
+    access_token = "access-token-sensitive-value"
+    refresh_token = "refresh-token-sensitive-value"
+    claim_secret = "private-claim-sensitive-value"
     svc = _service(
-        user_repo=FailingUserRepo({}),
+        user_repo=FailingUserRepo(
+            failure_message=f"database error {sub} {id_token} {access_token} {refresh_token} {claim_secret}"
+        ),
         client=FakeOIDCClient(
             bundle=_bundle(
+                id_token=id_token,
+                access_token=access_token,
+                refresh_token=refresh_token,
                 claims={
                     "sub": sub,
                     "name": "Bob",
                     "email": "bob@example.com",
-                }
+                    "private_claim": claim_secret,
+                },
             )
         ),
         cfg=_cfg(auto_provision_login=True),
@@ -484,7 +500,7 @@ async def test_callback_auto_provision_failure_does_not_log_raw_sub():
     log_messages = []
     handler_id = logger.add(
         lambda message: log_messages.append(str(message)),
-        format="{message} {extra}",
+        format="{message} {extra}\n{exception}",
         level="ERROR",
     )
 
@@ -503,9 +519,17 @@ async def test_callback_auto_provision_failure_does_not_log_raw_sub():
 
     captured_logs = "".join(log_messages)
     assert sub not in captured_logs
+    assert id_token not in captured_logs
+    assert access_token not in captured_logs
+    assert refresh_token not in captured_logs
+    assert claim_secret not in captured_logs
     assert hash_oidc_sub(sub) in captured_logs
     assert "RuntimeError" in captured_logs
-    assert "database connection failed" not in captured_logs
+    assert "database error" not in captured_logs
+    assert "23505" in captured_logs
+    assert "exception_stack" in captured_logs
+    assert "auth_service.py" in captured_logs
+    assert "_resolve_user" in captured_logs
 
 
 @pytest.mark.asyncio
@@ -565,7 +589,7 @@ async def test_claim_mapping_rejects_userinfo_sub_mismatch():
 @pytest.mark.asyncio
 async def test_backchannel_logout_revokes_by_sid():
     srepo = FakeSessionRepo()
-    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid="sess-9", iat=0, jti=None, exp=1)
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid="sess-9", iat=0, jti="jti-revoke-sid", exp=1)
     svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
     count = await svc.handle_backchannel_logout("tok")
     assert count == 3
@@ -583,10 +607,49 @@ async def test_backchannel_logout_invalid_token_carries_description():
 @pytest.mark.asyncio
 async def test_backchannel_logout_sidless_is_noop_200():
     srepo = FakeSessionRepo()
-    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid=None, iat=0, jti=None, exp=1)
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid=None, iat=0, jti="jti-sidless-noop", exp=1)
     svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
     assert await svc.handle_backchannel_logout("tok") == 0
     assert srepo.revoked_sids == []
+
+
+@pytest.mark.asyncio
+async def test_backchannel_logout_sid_only_token_revokes_by_sid():
+    srepo = FakeSessionRepo()
+    claims = LogoutTokenClaims(
+        iss="i",
+        aud="openrag",
+        sub=None,
+        sid="sess-sid-only",
+        iat=0,
+        jti="jti-sid-only",
+        exp=1,
+    )
+    svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
+
+    assert await svc.handle_backchannel_logout("tok") == 3
+    assert srepo.revoked_sids == ["sess-sid-only"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sub", "sid", "jti"),
+    [
+        (None, None, "jti-missing-identifiers"),
+        ({"malformed": "subject"}, None, "jti-malformed-sub"),
+        ("valid-sub", ["malformed", "sid"], "jti-malformed-sid"),
+        ("valid-sub", "valid-sid", ["malformed", "jti"]),
+    ],
+)
+async def test_backchannel_logout_rejects_malformed_claims(sub, sid, jti):
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub=sub, sid=sid, iat=0, jti=jti, exp=1)
+    svc = _service(client=FakeOIDCClient(logout_claims=claims))
+
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_backchannel_logout("tok")
+
+    assert ei.value.status_code == 400
+    assert ei.value.error_description == ei.value.message
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ import json
 import logging
 import sys
 import traceback
+from pathlib import Path
 
 from core.config import load_config
 from loguru import logger
@@ -12,6 +13,7 @@ from loguru import logger
 
 def escape_markup(s: str) -> str:
     return s.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>")
+
 
 def mask_email(email: str | None) -> str:
     """Mask an email address for logging — keep the first local character and
@@ -32,6 +34,19 @@ def mask_email(email: str | None) -> str:
 def hash_oidc_sub(sub: str) -> str:
     """Return a stable SHA-256 pseudonym for an OIDC subject."""
     return hashlib.sha256(sub.encode("utf-8")).hexdigest()
+
+
+def safe_exception_stack(exc: BaseException) -> list[str]:
+    """Summarize traceback frames without exception text, source lines, or locals.
+
+    Loguru's rendered exception includes the exception message, while diagnostic
+    mode can include local values. This summary keeps only a basename, function,
+    and line number for each frame.
+    """
+    return [
+        f"{Path(frame.filename).name}:{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)
+    ]
+
 
 def truncate_client_addr(client_addr: object) -> str:
     """Reduce uvicorn's ``host:port`` client address to its network.

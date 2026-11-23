@@ -570,6 +570,7 @@ def test_verbose_config_defaults_are_production_safe():
     assert config.level == "INFO"
     assert config.personal_data is False
 
+
 def test_hash_oidc_sub_is_deterministic():
     assert hash_oidc_sub("kc-bob") == hash_oidc_sub("kc-bob")
 

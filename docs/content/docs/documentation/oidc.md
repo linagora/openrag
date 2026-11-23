@@ -832,7 +832,7 @@ To identify the account associated with a log entry:
 3. Compare the resulting hash with the `sub_hash` in the OpenRAG log entry.
 4. Once you have identified the account, update its `external_user_id` using the admin-only `PATCH /users/{user_id}` endpoint shown above.
 
-**Note:** Updating `external_user_id` for an account managed by `auth.seed_users` is refused with `409`. Update the corresponding entry in the seed configuration instead.
+**Seed-managed accounts:** Accounts provisioned through `auth.seed_users` are for bearer-token use. If an OIDC `sub` matches one of these accounts, login is rejected with `403`; changing the seed entry does not make that account eligible for OIDC login. Do not use seed configuration to link an OIDC identity to a seed-managed account.
 
 ### 5. "session not found" or "session expired"
 

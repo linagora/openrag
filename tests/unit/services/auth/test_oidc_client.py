@@ -27,7 +27,13 @@ def _sign_jwt(payload: dict[str, Any]) -> str:
     return token.decode() if isinstance(token, bytes) else token
 
 
-def _logout_token(*, iat: int, exp: int | None = None) -> str:
+def _logout_token(
+    *,
+    iat: int,
+    exp: int | None = None,
+    overrides: dict[str, Any] | None = None,
+    omit: tuple[str, ...] = (),
+) -> str:
     payload: dict[str, Any] = {
         "iss": ISSUER,
         "aud": CLIENT_ID,
@@ -39,6 +45,10 @@ def _logout_token(*, iat: int, exp: int | None = None) -> str:
     }
     if exp is not None:
         payload["exp"] = exp
+    if overrides:
+        payload.update(overrides)
+    for claim_name in omit:
+        payload.pop(claim_name, None)
     return _sign_jwt(payload)
 
 
@@ -87,4 +97,52 @@ async def test_verify_logout_token_rejects_future_iat_without_exp(monkeypatch) -
     token = _logout_token(iat=now + 120)
 
     with pytest.raises(ValueError, match="not yet valid"):
+        await _client().verify_logout_token(token)
+
+
+@pytest.mark.asyncio
+async def test_verify_logout_token_accepts_sid_without_sub(monkeypatch) -> None:
+    now = 1_700_000_000
+    monkeypatch.setattr(oidc_module.time, "time", lambda: now)
+    token = _logout_token(iat=now, omit=("sub",))
+
+    claims = await _client().verify_logout_token(token)
+
+    assert claims.sub is None
+    assert claims.sid == "sid-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claim_name", "claim_value"),
+    [("sub", {"unexpected": "object"}), ("sid", ["unexpected", "list"])],
+)
+async def test_verify_logout_token_rejects_non_string_subject_or_session_id(
+    monkeypatch, claim_name: str, claim_value: Any
+) -> None:
+    now = 1_700_000_000
+    monkeypatch.setattr(oidc_module.time, "time", lambda: now)
+    token = _logout_token(iat=now, overrides={claim_name: claim_value})
+
+    with pytest.raises(ValueError, match=f"{claim_name} claim must be a non-empty string"):
+        await _client().verify_logout_token(token)
+
+
+@pytest.mark.asyncio
+async def test_verify_logout_token_rejects_missing_subject_and_session_id(monkeypatch) -> None:
+    now = 1_700_000_000
+    monkeypatch.setattr(oidc_module.time, "time", lambda: now)
+    token = _logout_token(iat=now, omit=("sub", "sid"))
+
+    with pytest.raises(ValueError, match="must contain sub or sid"):
+        await _client().verify_logout_token(token)
+
+
+@pytest.mark.asyncio
+async def test_verify_logout_token_rejects_non_string_jti(monkeypatch) -> None:
+    now = 1_700_000_000
+    monkeypatch.setattr(oidc_module.time, "time", lambda: now)
+    token = _logout_token(iat=now, overrides={"jti": ["unexpected", "list"]})
+
+    with pytest.raises(ValueError, match="missing jti claim"):
         await _client().verify_logout_token(token)
