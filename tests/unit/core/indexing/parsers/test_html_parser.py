@@ -203,8 +203,7 @@ async def test_html_parser_preserves_literal_image_attributes_with_caption():
 
     assert "été" in text
     assert "&eacute;" not in text
-    assert "a=1&b=2" in text
-    assert "a=1&amp;b=2" not in text
+    assert "a=1&amp;b=2" in text
 
 
 @pytest.mark.asyncio
@@ -231,3 +230,25 @@ async def test_html_parser_preserves_content_around_table_with_bare_col():
     assert "Table summary" in text
     assert "unique-cell-value" in text
     assert "apr\u00e8s" in text
+@pytest.mark.asyncio
+async def test_html_parser_preserves_unicode_attribute_values_with_caption():
+    html = (
+        "<table><caption>Résumé</caption><tbody>"
+        "<tr><td>"
+        '<abbr title="Société">Sté</abbr>, '
+        '<a href="/x" title="L’été">lien</a>'
+        "</td></tr></tbody></table>"
+    )
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="unicode-attributes.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "Sté (Société)" in text
+    assert '[lien](/x "L’été")' in text

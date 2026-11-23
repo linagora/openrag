@@ -10,36 +10,14 @@ No file I/O, JavaScript execution, or image fetching is performed.
 from __future__ import annotations
 
 import asyncio
-import re
 
-from bs4 import BeautifulSoup
-from bs4.dammit import EntitySubstitution
-from bs4.formatter import HTMLFormatter
 from core.indexing.image_preprocessor import normalize_data_uri_images
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from selectolax.lexbor import LexborHTMLParser
 
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
 from .registry import parser_registry
-
-
-class _LiteralAttributeValue(str):
-    """Mark an HTML attribute value that must not undergo entity substitution."""
-
-
-class _CaptionHTMLFormatter(HTMLFormatter):
-    """Preserve literal image attributes while escaping HTML text nodes."""
-
-    def attributes(self, tag):
-        for name, value in super().attributes(tag):
-            if tag.name == "img" and name in {"alt", "src"} and value is not None:
-                value = _LiteralAttributeValue(value)
-            yield name, value
-
-    def substitute(self, value):
-        if isinstance(value, _LiteralAttributeValue):
-            return str(value)
-        return super().substitute(value)
 
 
 @parser_registry.register("html")
@@ -83,13 +61,5 @@ class HtmlParser(DocumentParser):
     def _to_markdown(html: str) -> str:
         from html_to_markdown import convert
 
-        if re.search(r"<caption(?=[\s/>])", html, re.IGNORECASE):
-            soup = BeautifulSoup(html, "html5lib")
-
-            formatter = _CaptionHTMLFormatter(
-                entity_substitution=EntitySubstitution.substitute_html,
-                void_element_close_prefix=None,
-            )
-
-            html = soup.decode(formatter=formatter)
-        return convert(html)
+        normalized_html = LexborHTMLParser(html).html
+        return convert(normalized_html)
