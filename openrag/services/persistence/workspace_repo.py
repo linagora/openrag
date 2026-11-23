@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from core.models.workspace import Workspace
@@ -139,7 +140,15 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return [self._row_to_workspace(r) for r in rows]
 
-    async def delete_workspace(self, partition: str, workspace_id: str, *, keep_files: bool = False) -> list[str]:
+    async def delete_workspace(
+        self,
+        partition: str,
+        workspace_id: str,
+        *,
+        keep_files: bool = False,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> list[str] | None:
         """Delete the workspace and return the orphaned ``file_id`` list.
 
         Only files uploaded for workspaces, with no independent ownership
@@ -154,9 +163,16 @@ class PgWorkspaceRepository(WorkspaceRepository):
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                workspace_pk = await self._workspace_pk(conn, partition, workspace_id, for_update=True)
+                workspace_pk = await self._workspace_pk(
+                    conn,
+                    partition,
+                    workspace_id,
+                    for_update=True,
+                    expected_created_at=expected_created_at,
+                    expected_created_at_is_null=expected_created_at_is_null,
+                )
                 if workspace_pk is None:
-                    return []
+                    return None if expected_created_at is not None or expected_created_at_is_null else []
                 await conn.fetch(
                     """
                     SELECT f.id
@@ -255,13 +271,19 @@ class PgWorkspaceRepository(WorkspaceRepository):
         partition: str,
         workspace_id: str,
         file_ids: list[str],
-    ) -> list[str]:
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> list[str] | None:
         """Attach files identified by their string ``file_id`` to a workspace.
 
         Returns the list of supplied ``file_ids`` that do not exist in
         the workspace's partition — callers surface these to the user as
         "not found". An unknown workspace resolves nothing, so every id
-        comes back.
+        comes back. Returns ``None`` instead when ``expected_created_at``
+        generation is supplied and the workspace no longer matches it (a
+        same-ID replacement), so the caller can distinguish a stale
+        confirmation from a missing file.
         """
         if not file_ids:
             return []
@@ -271,9 +293,16 @@ class PgWorkspaceRepository(WorkspaceRepository):
                 # takes them in that order, and the ``workspace_files`` insert
                 # below would otherwise grab a KEY SHARE on the workspace only
                 # after the file locks, deadlocking against a concurrent delete.
-                workspace_pk = await self._workspace_pk(conn, partition, workspace_id, for_key_share=True)
+                workspace_pk = await self._workspace_pk(
+                    conn,
+                    partition,
+                    workspace_id,
+                    for_key_share=True,
+                    expected_created_at=expected_created_at,
+                    expected_created_at_is_null=expected_created_at_is_null,
+                )
                 if workspace_pk is None:
-                    return list(file_ids)
+                    return None if expected_created_at is not None or expected_created_at_is_null else list(file_ids)
                 resolved = await conn.fetch(
                     """
                     SELECT file_id, id FROM files
@@ -470,12 +499,22 @@ class PgWorkspaceRepository(WorkspaceRepository):
         partition: str,
         workspace_id: str,
         file_id: str,
-    ) -> bool:
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> bool | None:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                workspace_pk = await self._workspace_pk(conn, partition, workspace_id)
+                workspace_pk = await self._workspace_pk(
+                    conn,
+                    partition,
+                    workspace_id,
+                    for_key_share=True,
+                    expected_created_at=expected_created_at,
+                    expected_created_at_is_null=expected_created_at_is_null,
+                )
                 if workspace_pk is None:
-                    return False
+                    return None if expected_created_at is not None or expected_created_at_is_null else False
                 file_pk = await conn.fetchval(
                     """
                     SELECT id FROM files
@@ -499,19 +538,38 @@ class PgWorkspaceRepository(WorkspaceRepository):
         except (ValueError, IndexError):
             return False
 
-    async def list_workspace_files(self, partition: str, workspace_id: str) -> list[str]:
+    async def list_workspace_files(
+        self,
+        partition: str,
+        workspace_id: str,
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> list[str] | None:
+        """Read one workspace's membership, optionally guarding its generation.
+
+        The left joins and workspace timestamp are read in one statement so a
+        replacement cannot put its membership under a stale UI cache key.
+        """
         rows = await self.pool.fetch(
             """
-            SELECT f.file_id
-            FROM workspace_files wf
-            JOIN workspaces w ON w.id = wf.workspace_id
-            JOIN files f ON f.id = wf.file_id
+            SELECT w.created_at, f.file_id
+            FROM workspaces w
+            LEFT JOIN workspace_files wf ON w.id = wf.workspace_id
+            LEFT JOIN files f ON f.id = wf.file_id
             WHERE w.partition_name = $1 AND w.workspace_id = $2
             """,
             partition,
             workspace_id,
         )
-        return [r["file_id"] for r in rows]
+        if not rows:
+            return None
+        actual_created_at = rows[0]["created_at"]
+        if expected_created_at_is_null and actual_created_at is not None:
+            return None
+        if expected_created_at is not None and actual_created_at != expected_created_at:
+            return None
+        return [r["file_id"] for r in rows if r["file_id"] is not None]
 
     async def get_file_workspaces(
         self,
@@ -664,6 +722,8 @@ class PgWorkspaceRepository(WorkspaceRepository):
         *,
         for_update: bool = False,
         for_key_share: bool = False,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
     ) -> int | None:
         """Translate ``(partition, workspace_id)`` to the ``workspaces.id`` the join table uses.
 
@@ -672,11 +732,17 @@ class PgWorkspaceRepository(WorkspaceRepository):
         every path locks the workspace row before any file row.
         """
         query = "SELECT id FROM workspaces WHERE partition_name = $1 AND workspace_id = $2"
+        params: tuple[object, ...] = (partition, workspace_id)
+        if expected_created_at_is_null:
+            query += " AND created_at IS NULL"
+        elif expected_created_at is not None:
+            query += " AND created_at = $3"
+            params += (expected_created_at,)
         if for_update:
             query += " FOR UPDATE"
         elif for_key_share:
             query += " FOR KEY SHARE"
-        return await conn.fetchval(query, partition, workspace_id)
+        return await conn.fetchval(query, *params)
 
     @staticmethod
     def _row_to_workspace(row: asyncpg.Record) -> Workspace:
