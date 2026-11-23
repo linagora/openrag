@@ -28,7 +28,7 @@ class _FakeOp:
 
 
 def test_revision_chain(migration) -> None:
-    assert migration.down_revision == "4d7e2b9c1f35"
+    assert migration.down_revision == "a2b3c4d5e6f7"
 
 
 def test_upgrade_drops_the_four_fields_from_retrieval_presets_only(monkeypatch, migration) -> None:

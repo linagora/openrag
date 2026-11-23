@@ -201,6 +201,10 @@ class LoaderConfig(ConfigMixin):
     # embedding, and storage. The upload hash is calculated while streaming the
     # file to disk, so this does not add a second read for HTTP uploads.
     content_deduplication_enabled: bool = True
+    # Where the per-file fences live (#1430). ``ray``: the TaskStateManager
+    # fences only, as before. ``postgres``: a Postgres fence too, which also
+    # covers a replace and refuses a catalog write whose fence was taken.
+    file_fences: Literal["ray", "postgres"] = "ray"
     mimetypes: MimetypesConfig = Field(default_factory=MimetypesConfig)
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)

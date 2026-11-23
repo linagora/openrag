@@ -19,7 +19,7 @@ from .conftest import _admin_dsn, _admin_dsn_parts, _connect_admin
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
 
 REVISION = "d9e2e59a7a4e"
-PREVIOUS = "4d7e2b9c1f35"
+PREVIOUS = "a2b3c4d5e6f7"
 
 
 def _alembic_config(database: str) -> Config:

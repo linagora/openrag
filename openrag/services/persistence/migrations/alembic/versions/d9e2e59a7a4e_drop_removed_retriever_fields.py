@@ -6,7 +6,7 @@ the stored presets keeps the admin UI and ``GET /presets`` from showing settings
 that do nothing.
 
 Revision ID: d9e2e59a7a4e
-Revises: 4d7e2b9c1f35
+Revises: a2b3c4d5e6f7
 Create Date: 2026-11-18
 
 """
@@ -19,7 +19,7 @@ from schema_helpers import column_exists, table_exists
 
 # revision identifiers, used by Alembic.
 revision: str = "d9e2e59a7a4e"
-down_revision: str | Sequence[str] | None = "4d7e2b9c1f35"
+down_revision: str | Sequence[str] | None = "a2b3c4d5e6f7"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

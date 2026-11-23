@@ -19,7 +19,7 @@ async def get_partition_name(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Model not found. Model should respect this format: {consts.PARTITION_PREFIX}partition_name",
         )
-    partition = model_name.split(partition_prefix)[1]
+    partition = model_name.removeprefix(partition_prefix)
     if partition != "all" and not await partition_service.partition_exists(partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
