@@ -428,11 +428,13 @@ What restarts the pods after a credential in the env Secret changes (`AUTH_TOKEN
     ```
 
   - Or set `postgresql.passwordUpdateJob.enabled: true` in the `helm upgrade` that changes
-    the password. The sub-chart then runs a job before the upgrade that changes it in the
-    database, signing in with the old password from the Secret already deployed, so it
-    needs `helm upgrade`, not `helm template` or Argo CD. The job also changes the
-    `postgres` superuser's password and refuses to render without
-    `postgresql.auth.postgresPassword`: set it to the current one, or the job changes it too.
+    the password. The sub-chart then runs a job before the upgrade (a PreSync hook under
+    Argo CD) that changes it in the database, signing in with the old password from the
+    Secret already deployed. It doesn't run when the chart is rendered with `helm template`
+    and applied. Enable it only for the upgrade that changes the password: Argo CD runs it
+    on every sync, the first one included. The job also changes the `postgres` superuser's
+    password and refuses to render without `postgresql.auth.postgresPassword`: set it to the
+    current one, or the job changes it too.
 
     ```bash
     kubectl get secret -n <release namespace> <fullname>-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d
@@ -451,8 +453,10 @@ What restarts the pods after a credential in the env Secret changes (`AUTH_TOKEN
   kubectl rollout restart -n <release namespace> deploy/<fullname>-openrag
   ```
 
-Until it restarts, a pod keeps the value it started with: a rotated `AUTH_TOKEN` is still
-accepted, and the Prometheus scrapes fail with 403 after a `METRICS_TOKEN` change.
+Until it restarts, a pod keeps the value it started with: Prometheus scrapes fail with 403
+after a `METRICS_TOKEN` change. `AUTH_TOKEN` is different: the admin token is stored in the
+database, and each API pod writes it there when it starts. The old token keeps working until
+the first pod starts with the new value, and from then on every pod refuses it.
 
 With `ray.enabled: true`, also delete the Ray pods after any rotation, whichever provider
 you use. KubeRay never replaces a running Ray pod when the cluster's spec changes, so the
