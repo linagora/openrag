@@ -239,6 +239,27 @@ def _strip_credential_fields(payload: dict) -> dict:
     return payload
 
 
+#: LiteLLM's body field naming the OpenAI parameters to forward even for a
+#: model it doesn't know supports them.
+_LITELLM_ALLOWED_PARAMS = "allowed_openai_params"
+
+
+def _let_litellm_forward(payload: dict, field: str) -> None:
+    """Ask a LiteLLM gateway in front of vLLM to forward *field*, in place.
+
+    LiteLLM refuses ``reasoning_effort`` with a 400 (``UnsupportedParamsError``)
+    for a model it doesn't know as a reasoning model, which is any model vLLM
+    serves under a name of its own, unless the request names it in
+    ``allowed_openai_params``. vLLM itself ignores that field: its requests
+    accept unknown fields. The names already there are kept.
+    """
+    allowed = payload.get(_LITELLM_ALLOWED_PARAMS)
+    allowed = [allowed] if isinstance(allowed, str) else list(allowed or [])
+    if field not in allowed:
+        allowed.append(field)
+    payload[_LITELLM_ALLOWED_PARAMS] = allowed
+
+
 def _targets_client_endpoint(client: VLLMClient, *_args, **kwargs) -> bool:
     """Breaker predicate: is this call routed to a client-supplied endpoint?
 
@@ -445,6 +466,10 @@ class VLLMClient(LLM):
         # template's enable_thinking from it), and an explicit enable_thinking
         # would override it there: the endpoint's is left out.
         reasoning = REASONING_EFFORT_KEY in payload_kwargs
+        # Only on the server's own endpoints: a client-supplied one may be a
+        # provider that rejects the unknown field.
+        if reasoning and use_defaults:
+            _let_litellm_forward(payload_kwargs, REASONING_EFFORT_KEY)
         fallback_thinking = self._enable_thinking if use_defaults and not reasoning else None
         enable_thinking = payload_kwargs.pop("enable_thinking", fallback_thinking)
         # False must be sent too: Qwen3 templates think unless told not to.

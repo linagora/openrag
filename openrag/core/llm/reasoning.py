@@ -5,9 +5,9 @@ profile, an LLM endpoint's default. It goes to the model as the top-level
 ``reasoning_effort`` of the chat request, which OpenAI, vLLM, Ollama's
 ``/v1``, OpenRouter, Mistral's API and Moonshot all read. Their accepted
 values differ: vLLM took only ``low``/``medium``/``high`` before 0.18 and
-added ``minimal`` and ``xhigh`` in 0.22, Mistral's API takes ``none`` and
-``high``. An endpoint's ``reasoning_effort_map`` rewrites a level to what its
-backend takes, or to ``null`` to send none.
+added ``minimal`` and ``xhigh`` in 0.22, Mistral's API and Mistral models on
+vLLM take only ``none`` and ``high``. An endpoint's ``reasoning_effort_map``
+rewrites a level to what its backend takes, or to ``null`` to send none.
 """
 
 from __future__ import annotations

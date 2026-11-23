@@ -243,6 +243,8 @@ class TestVLLMClient:
         assert chat["reasoning_effort"] == "low"
         assert streamed["reasoning_effort"] == "low"
         assert "reasoning_effort" not in completion, "a text completion has no reasoning level"
+        assert chat["allowed_openai_params"] == streamed["allowed_openai_params"] == ["reasoning_effort"]
+        assert "allowed_openai_params" not in completion
 
     @pytest.mark.asyncio
     async def test_the_request_s_reasoning_level_wins_and_the_map_rewrites_it(self):
@@ -261,6 +263,7 @@ class TestVLLMClient:
         captured.clear()
         await client.chat([{"role": "user", "content": "hi"}], reasoning_effort="none")
         assert "reasoning_effort" not in captured, "a level mapped to null is not sent"
+        assert "allowed_openai_params" not in captured
 
     @pytest.mark.asyncio
     async def test_no_reasoning_level_is_sent_by_default(self):
@@ -273,6 +276,38 @@ class TestVLLMClient:
         await self._make_client(capture).chat([{"role": "user", "content": "hi"}])
 
         assert "reasoning_effort" not in captured
+        assert "allowed_openai_params" not in captured
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("configured", "sent"),
+        [
+            (["temperature"], ["temperature", "reasoning_effort"]),
+            ("temperature", ["temperature", "reasoning_effort"]),
+            (["reasoning_effort"], ["reasoning_effort"]),
+        ],
+    )
+    async def test_a_reasoning_level_keeps_the_endpoint_s_allowed_openai_params(self, configured, sent):
+        # A LiteLLM gateway refuses reasoning_effort for a model it doesn't know
+        # as a reasoning model unless the request names it there.
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        client = self._make_client(capture, allowed_openai_params=configured)
+        await client.chat([{"role": "user", "content": "hi"}], reasoning_effort="none")
+
+        assert captured["allowed_openai_params"] == sent
+
+    def test_a_client_supplied_endpoint_gets_no_allowed_openai_params(self):
+        client = VLLMClient(endpoint="http://default:8000/v1", model_name="m", reasoning_effort="low")
+
+        payload = client._chat_payload_kwargs({"reasoning_effort": "high"}, use_defaults=False)
+
+        assert payload["reasoning_effort"] == "high"
+        assert "allowed_openai_params" not in payload
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_thinking", [True, False])
