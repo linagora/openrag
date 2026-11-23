@@ -722,7 +722,7 @@ The following environment variables configure the FastAPI server and control acc
 | `METRICS_ALLOW_UNAUTHENTICATED` | `boolean` | `false` | Serve `GET /metrics` to anyone who can reach the API port when `METRICS_TOKEN` is unset. Only for deployments that block `/metrics` at the edge and scrape from inside the network; a configured token always wins. |
 | `ASSISTANT_NAME` | `string` | empty | Name used in the assistant's greeting. Leave unset for a neutral introduction; set it for a white-label deployment. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
-| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | Loopback plus the bundled admin UI proxy in Compose. Loopback elsewhere. | Comma-separated addresses allowed to supply `X-Forwarded-*` headers. Set this explicitly for Helm and other reverse proxies. See [Rate Limiting](#rate-limiting). |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | Loopback plus both bundled proxy addresses in Compose. Loopback elsewhere. | Comma-separated addresses allowed to supply `X-Forwarded-*` headers. Set this explicitly for Helm and other additional reverse proxies. See [Rate Limiting](#rate-limiting). |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
 | `MAX_PARTITIONS_PER_USER` | `int` | `100` | Maximum number of partitions a non-admin user may own. `-1` disables the cap (unlimited). Admin users always bypass it. |
 | `APP_UID` | `int` | `1000` | UID the API container drops to before running the app. Override when your host user is not UID 1000 and bind-mounted folders (`data/`, `logs/`) would otherwise not be writable by the container user. |
@@ -753,7 +753,7 @@ Limit values use the `<count>/<period>` format from the [`limits`](https://limit
 :::caution[Behind a reverse proxy, trust the right client IP]
 The `/auth/*` limits and failed-login budget use the client IP. If the API cannot trust a proxy's forwarding headers, requests share the proxy's IP and failure budget. The trusted proxy also supplies the original HTTPS scheme for OIDC cookies.
 
-- **Compose** trusts loopback and the bundled admin UI proxy's fixed address. For an additional proxy, such as the TLS overlay, set `UVICORN_FORWARDED_ALLOW_IPS` to the exact addresses you use. A custom value replaces the default list.
+- **Compose** trusts loopback and the fixed addresses of both bundled proxies, including the TLS proxy. For additional proxies, or if you change a bundled proxy address, set `UVICORN_FORWARDED_ALLOW_IPS` to the exact addresses you use. A custom value replaces the default list.
 - **Helm** leaves trust at loopback until an administrator sets `env.config.UVICORN_FORWARDED_ALLOW_IPS` in the chart values. Use your proxy's stable addresses and update the allowlist if the addresses change.
 
 Keep the allowlist limited to proxies you control. A wildcard or a shared container or pod subnet gives unrelated clients the ability to supply forwarding headers. Configure the edge proxy to supply the actual client address and only accept forwarded addresses from trusted upstreams.

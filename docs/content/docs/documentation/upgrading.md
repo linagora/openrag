@@ -15,6 +15,21 @@ split `$DC` into `docker compose`, so the commands below fail.
 
 ## 2.3.0 or 2.3.1 to a later 2.3.x
 
+The Compose stack now declares its bridge subnet so it can reserve the bundled
+proxy addresses. When upgrading an existing stack, apply the network change
+with a full `docker compose up -d` from `infra/compose/`; do not update only
+one service. Compose must recreate the project network, and a service-only
+update can leave that service stopped when the old network still has active
+endpoints. If you have set `UVICORN_FORWARDED_ALLOW_IPS` to an exact old
+address or subnet, update it to include loopback and the new proxy addresses
+(`OPENRAG_ADMIN_UI_PROXY_IP`, and `OPENRAG_NPM_PROXY_IP` when using the TLS
+overlay). A broad range that already includes the new addresses does not need
+to change. If Compose reports `Pool overlaps with other one on this address
+space`, choose an unused range and set `OPENRAG_COMPOSE_SUBNET`,
+`OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP`; with the
+TLS overlay, set `OPENRAG_NPM_PROXY_IP` as well. Keep both proxy addresses
+inside the subnet and outside the dynamic range.
+
 The fence that holds a file while an orphaned indexing worker may still write to
 it lives in the Ray actors, and these upgrades keep the indexer generation `v13`,
 so actors already running are not replaced. On a shared Ray cluster

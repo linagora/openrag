@@ -13,6 +13,13 @@ The OpenRAG docker image is available on [DockerHub](https://hub.docker.com/r/rc
 
 OpenRAG requires several services to run, which can be orchestrated using Docker Compose.
 
+If Compose reports `Pool overlaps with other one on this address space` when
+creating the OpenRAG network, choose an unused range and set
+`OPENRAG_COMPOSE_SUBNET`, `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and
+`OPENRAG_ADMIN_UI_PROXY_IP` in `.env`. Keep the proxy address inside the subnet
+and outside the dynamic range. When using the TLS overlay, also set
+`OPENRAG_NPM_PROXY_IP` to a distinct address with the same constraints.
+
 ## Grafana monitoring
 
 The optional monitoring stack provides ready-to-use dashboards for OpenRAG HTTP
@@ -143,11 +150,12 @@ size other than `50m` stops it the same way: the overlay declares that zone at
 
 Set these in `.env`:
 
-- Add the TLS proxy to **`UVICORN_FORWARDED_ALLOW_IPS`** so the API receives
-  the client's address and HTTPS scheme. With the default Compose addresses,
-  use `127.0.0.1,172.31.253.200,172.31.253.201`. If you change the bridge
-  subnet, set `OPENRAG_NPM_PROXY_IP` inside the new subnet and outside the
-  dynamic range, then update the allowlist with the new proxy addresses.
+- Compose trusts loopback and both bundled proxy addresses by default, so no
+  allowlist change is needed with their default addresses. If you change a
+  proxy address or set **`UVICORN_FORWARDED_ALLOW_IPS`** explicitly, include
+  loopback and each proxy address you use. When changing the bridge subnet,
+  keep `OPENRAG_NPM_PROXY_IP` inside the new subnet and outside the dynamic
+  range.
   [Rate Limiting](/openrag/documentation/env_vars/#rate-limiting)
 - **`OIDC_REDIRECT_URI`** (OIDC mode only): `https://<domain>/auth/callback`.
   The `ADMIN_UI_PORT` URL from the [OIDC guide](/openrag/documentation/oidc/)
