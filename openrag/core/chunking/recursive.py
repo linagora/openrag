@@ -2,7 +2,7 @@
 
 Pure domain logic — no LLM client, no Ray, no LangChain ``Document``.
 The token-counting function is injected (``length_function``); the actual
-text splitter is ``langchain.text_splitter.RecursiveCharacterTextSplitter``,
+text splitter is ``langchain_text_splitters.RecursiveCharacterTextSplitter``,
 a pure utility kept until a stdlib-only replacement is in place.
 
 Contextualization (the LLM-driven [CONTEXT] block prepended to each chunk)
@@ -351,7 +351,7 @@ class BaseChunker(ChunkingStrategy):
 
     def _build_text_splitter(self, chunk_size: int) -> Any:
         """A splitter for *chunk_size*, with this chunker's overlap rate."""
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
 
         return RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -572,7 +572,7 @@ class RecursiveSplitter(BaseChunker):
         self.text_splitter = self._build_text_splitter(self.chunk_size)
 
     def _build_text_splitter(self, chunk_size: int) -> Any:
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
 
         return RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,

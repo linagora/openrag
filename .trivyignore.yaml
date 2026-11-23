@@ -21,7 +21,4 @@
 # not report it either way; its ongoing tracking is the code scanning alert,
 # which this file does not suppress.
 
-vulnerabilities:
-  - id: CVE-2026-104873
-    purls: ["pkg:pypi/langgraph-sdk@0.2.15"]
-    statement: "Unreachable here. langgraph-sdk is the LangGraph Platform client that langgraph 1.0.1 depends on; the advisory (GHSA-fvww-7h3r-vfhp) is in its server-side custom auth decorators (Auth.on.threads/assistants/crons). OpenRAG only compiles local StateGraphs and never loads langgraph_sdk: langgraph imports it only from langgraph.pregel.remote, and scripts/check_layer_imports.py rejects both in openrag/. The fix, langgraph-sdk 0.4.4, needs langgraph 1.2.5+, which needs langchain-core 1.4.7+; OpenRAG is on langchain-core 0.3.86. Revisit with the move to langchain-core 1.x."
+vulnerabilities: []

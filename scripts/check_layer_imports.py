@@ -13,16 +13,16 @@ Layer boundaries are checked only inside openrag/{core,services,api,di}/.
 Two third-party rules apply inside openrag/ as well:
 
     langgraph               -> only in openrag/services/chat/graphs/
-    langchain_openai,
-    langchain_community,
     langchain_core.messages -> not in openrag/services/
     langgraph_sdk,
-    langgraph.pregel.remote -> nowhere in openrag/
+    langgraph.pregel.remote,
+    langchain_openai        -> nowhere in openrag/
 
 LangGraph only wires the chat workflows; the nodes call OpenRag's own LLM
 port with OpenAI-style message dicts, never LangChain's model layer.
 langgraph-sdk, the LangGraph Platform client langgraph depends on, is never
-loaded: .trivyignore.yaml accepts its advisories as unreachable on that basis.
+loaded. langchain-openai is a dev dependency (the evaluation scripts under
+tests/load/), absent from the image.
 
 Absolute application imports must use the bare layer root, not ``openrag.``:
 mixing the two loads distinct copies of classes such as exception types.
@@ -61,12 +61,13 @@ CONFINED_THIRD_PARTY: dict[str, tuple[str, ...]] = {
 
 #: Third-party modules a layer must not import.
 BANNED_THIRD_PARTY: dict[str, tuple[str, ...]] = {
-    "services": ("langchain_openai", "langchain_community", "langchain_core.messages"),
+    "services": ("langchain_core.messages",),
 }
 
 #: Third-party modules nothing in openrag/ may import. langgraph.pregel.remote
-#: is langgraph's only importer of langgraph_sdk.
-UNUSED_THIRD_PARTY: tuple[str, ...] = ("langgraph_sdk", "langgraph.pregel.remote")
+#: is langgraph's only importer of langgraph_sdk; langchain_openai is only in
+#: the dev dependencies, so the image doesn't have it.
+UNUSED_THIRD_PARTY: tuple[str, ...] = ("langgraph_sdk", "langgraph.pregel.remote", "langchain_openai")
 
 
 def _is_module_or_submodule(module: str, prefix: str) -> bool:

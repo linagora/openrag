@@ -79,9 +79,14 @@ def test_layer_boundaries_only_apply_to_application_layers(tmp_path, monkeypatch
         ("openrag/services/orchestrators/query_service.py", "from langchain_core.messages import HumanMessage", True),
         ("openrag/services/orchestrators/query_service.py", "from langchain_core import messages", True),
         ("openrag/services/inference/client.py", "import langchain_openai", True),
-        ("openrag/services/storage/loader.py", "from langchain_community.document_loaders import PyPDFLoader", True),
         ("openrag/core/models/chunk.py", "from langchain_core.documents.base import Document", False),
-        ("openrag/core/utils/text.py", "from langchain_openai import ChatOpenAI", False),
+        # langchain-openai is a dev dependency: the image doesn't have it.
+        ("openrag/core/utils/text.py", "from langchain_openai import ChatOpenAI", True),
+        (
+            "openrag/core/chunking/recursive.py",
+            "from langchain_text_splitters import RecursiveCharacterTextSplitter",
+            False,
+        ),
         ("openrag/services/orchestrators/query_service.py", "from langchain_core.documents import Document", False),
     ],
 )
