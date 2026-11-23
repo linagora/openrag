@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from api.dependencies.auth import check_user_file_quota, require_partition_editor
+from api.dependencies.auth import FileSlotReservation, check_user_file_quota, require_partition_editor
 from api.dependencies.files import validate_file_format, validate_file_id, validate_metadata
 from api.error_handlers import register_error_handlers
 from api.routers.admin.indexing import router as indexer_router
@@ -51,6 +51,14 @@ class _FileIndexingService(_FakeIndexingService):
             "File 'f1' is already being indexed in partition 'p1'.",
             code="DOCUMENT_INDEXING_IN_PROGRESS",
             existing_task_id="task-running",
+        )
+
+
+class _FileDeletingService(_FakeIndexingService):
+    async def add_file(self, **_kwargs):
+        raise ConflictError(
+            "File 'f1' is being deleted from partition 'p1'.",
+            code="DOCUMENT_DELETE_IN_PROGRESS",
         )
 
 
@@ -101,6 +109,7 @@ def _build_app(
 ) -> FastAPI:
     # Cap at ~8 bytes so a small upload trips the limit.
     monkeypatch.setattr("api.dependencies.files.max_upload_size_bytes", lambda: 8)
+    monkeypatch.setattr("api.routers.admin.indexing.max_upload_size_bytes", lambda: 8)
 
     app = FastAPI()
     register_error_handlers(app)
@@ -375,3 +384,38 @@ async def test_put_file_keeps_upload_when_worker_may_still_be_running(tmp_path, 
 
     assert resp.status_code == 500
     assert len(list((tmp_path / "data").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_add_file_being_deleted_returns_409_and_removes_upload(tmp_path, monkeypatch):
+    app = _build_app(tmp_path, monkeypatch, content=b"same", service=_FileDeletingService())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"].startswith("[DOCUMENT_DELETE_IN_PROGRESS]")
+    assert list((tmp_path / "data").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_hands_the_quota_slot_to_the_admitted_task(tmp_path, monkeypatch):
+    slot = FileSlotReservation("quota-task", user_id=1)
+
+    class QuotaUploadService(_FakeIndexingService):
+        async def reserve_upload_admission(self, **kwargs):
+            assert kwargs["task_id"] == slot.id
+            return slot.id
+
+        async def add_file(self, **kwargs):
+            assert kwargs["admission_reservation_id"] == slot.id
+            return slot.id
+
+    app = _build_app(tmp_path, monkeypatch, b"tiny", service=QuotaUploadService())
+    app.dependency_overrides[check_user_file_quota] = lambda: slot
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert response.status_code == 201
+    assert slot.handed_off

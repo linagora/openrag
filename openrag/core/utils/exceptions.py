@@ -14,11 +14,14 @@ The hierarchy is organised by concern:
     |   +-- AuthenticationError          (401)
     +-- ValidationError                  (422)
     |   +-- AmbiguousWorkspaceError
+    |   +-- InvalidObjectKeyError        (400)
+    |   +-- InvalidByteRangeError        (416)
     +-- NotFoundError                    (404)
     |   +-- DocumentNotFoundError
     |   +-- PartitionNotFoundError
     |   +-- UserNotFoundError
     |   +-- WorkspaceNotFoundError
+    |   +-- ObjectNotFoundError
     +-- ConflictError                    (409)
     +-- QuotaExceededError               (429)
     +-- ServiceUnavailableError          (503)
@@ -30,6 +33,7 @@ The hierarchy is organised by concern:
     +-- StorageError                     (500)
     |   +-- MilvusError
     |   +-- PostgresError
+    |   +-- ObjectStoreError
     +-- EmbeddingError                   (500)
     |   +-- EmbeddingAPIError
     |   +-- EmbeddingResponseError       (422)
@@ -175,6 +179,24 @@ class AmbiguousWorkspaceError(ValidationError):
         )
 
 
+class InvalidObjectKeyError(ValidationError):
+    """An object key, or a part of one, that ``core.utils.object_keys`` would not build.
+
+    400: the parts come from the request (partition, file id, suffix), so a
+    refusal is the caller's input, never a server fault.
+    """
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, status_code=400, code="INVALID_OBJECT_KEY", **kwargs)
+
+
+class InvalidByteRangeError(ValidationError):
+    """A byte range that starts past the end of the object it reads (HTTP 416)."""
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, status_code=416, code="INVALID_BYTE_RANGE", **kwargs)
+
+
 class ContextWindowExceededError(ValidationError):
     """The answer instructions and the request alone don't fit in the answering model's context window.
 
@@ -234,6 +256,13 @@ class WorkspaceNotFoundError(NotFoundError):
         super().__init__(message, code="WORKSPACE_NOT_FOUND", **kwargs)
 
 
+class ObjectNotFoundError(NotFoundError):
+    """No object is stored under the key."""
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, code="OBJECT_NOT_FOUND", **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Conflict
 # ---------------------------------------------------------------------------
@@ -244,6 +273,22 @@ class ConflictError(OpenRAGError):
 
     def __init__(self, message: str, code: str = "CONFLICT", **kwargs):
         super().__init__(message, code=code, status_code=409, **kwargs)
+
+
+class FileFenceLostError(ConflictError):
+    """A catalog write whose operation no longer holds the file's fence (#1430).
+
+    Another operation took the fence meanwhile, most often a delete, which wins
+    over indexing. The write is refused so the file is not made visible again;
+    the caller's failure path removes the vectors it stored.
+    """
+
+    def __init__(self, file_id: str, partition: str, **kwargs):
+        super().__init__(
+            f"File '{file_id}' in partition '{partition}' was changed by another operation while this one ran.",
+            code="FILE_FENCE_LOST",
+            **kwargs,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +416,13 @@ class PostgresError(StorageError):
 
     def __init__(self, message: str, **kwargs):
         super().__init__(message, code="POSTGRES_ERROR", **kwargs)
+
+
+class ObjectStoreError(StorageError):
+    """An object store that failed to read, write or delete an object."""
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, code="OBJECT_STORE_ERROR", **kwargs)
 
 
 # ---------------------------------------------------------------------------
