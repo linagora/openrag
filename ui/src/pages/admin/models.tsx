@@ -970,10 +970,10 @@ function EndpointDialog({
   const defaultBatchSize = isStt ? 1 : 32;
   const defaultTimeout = isStt ? 3600 : 30;
   // A key typed into this form only goes with the URL it was entered for (see
-  // keyEndpoint): on another URL, discovery waits for a key entered for it, or
-  // for Refresh, which sends it there on purpose. The stored key goes by
-  // reference (the server fills it in), and only to the saved URL. Revealing it
-  // only changes what the field shows: it is still the stored key.
+  // keyEndpoint): on another URL, discovery, Refresh included, waits for a key
+  // entered for it. The stored key goes by reference (the server fills it in),
+  // and only to the saved URL. Revealing it only changes what the field shows:
+  // it is still the stored key.
   const discoverySubmittedKey = apiKeySubmitValue();
   const discoveryTypedKey =
     typeof discoverySubmittedKey === "string" && discoverySubmittedKey !== REDACTED_SECRET
@@ -994,11 +994,8 @@ function EndpointDialog({
   const typedKeyOffItsUrl =
     !!discoveryTypedKey && keyEndpoint !== normalizeEndpointUrl(committedEndpoint);
   const typedKeyAwaitsUrl = fieldsCommitted && typedKeyOffItsUrl && keyEndpoint !== null;
-  // The listing request for the fields as they stand. `sendTypedKeyHere` is
-  // Refresh's: it lets a typed key go to a URL it wasn't entered for.
-  const buildDiscoveryRequest = (sendTypedKeyHere: boolean) => {
-    if (!fieldsCommitted || storedKeyOffSavedUrl) return null;
-    if (typedKeyOffItsUrl && !sendTypedKeyHere) return null;
+  const discoveryRequest = (() => {
+    if (!fieldsCommitted || storedKeyOffSavedUrl || typedKeyOffItsUrl) return null;
     const base = {
       endpoint: committedEndpoint,
       model_type: modelType,
@@ -1014,8 +1011,7 @@ function EndpointDialog({
       };
     }
     return base;
-  };
-  const discoveryRequest = buildDiscoveryRequest(false);
+  })();
   const discoveryKey = discoveryRequest ? JSON.stringify(discoveryRequest) : "";
   // Back on a URL / key already listed (A, then B, then A again, whether B has
   // answered or not): A's answer stands and no new probe starts, so a list is
@@ -1024,16 +1020,11 @@ function EndpointDialog({
   const discoveryCurrent = discoveryKey ? (discoveryResults.get(discoveryKey) ?? null) : null;
   const discoveryAnswered = discoveryCurrent !== null;
   const refreshDiscovery = () => {
-    const request = buildDiscoveryRequest(typedKeyAwaitsUrl);
-    // Refresh on a URL the typed key wasn't entered for sends it there on
-    // purpose: the key now goes with this URL.
-    if (typedKeyAwaitsUrl) setKeyEndpoint(normalizeEndpointUrl(committedEndpoint));
-    if (!request) return;
-    const key = JSON.stringify(request);
+    if (!discoveryKey) return;
     setDiscoveryResults((prev) => {
-      if (!prev.has(key)) return prev;
+      if (!prev.has(discoveryKey)) return prev;
       const next = new Map(prev);
-      next.delete(key);
+      next.delete(discoveryKey);
       return next;
     });
   };
@@ -1095,7 +1086,7 @@ function EndpointDialog({
           : storedKeyOffSavedUrl
             ? "The stored API key is only used with the saved URL. Enter the key for this URL to list its models, or type the name."
             : typedKeyAwaitsUrl
-              ? "The API key was entered for another URL. Enter the key for this URL, or press Refresh to list its models with this one."
+              ? "The API key was entered for another URL. Enter the key for this URL to list its models, or type the name."
             : "Enter the endpoint URL and API key to list its models, or type the name.";
 
   const fetchStoredApiKey = async ({ cache = true }: { cache?: boolean } = {}): Promise<string | null> => {
@@ -1522,7 +1513,7 @@ function EndpointDialog({
                     variant="outline"
                     size="icon"
                     onClick={refreshDiscovery}
-                    disabled={(!discoveryRequest && !typedKeyAwaitsUrl) || discovery.status === "loading"}
+                    disabled={!discoveryRequest || discovery.status === "loading"}
                     aria-label="Refresh model list"
                     title="Refresh model list"
                   >

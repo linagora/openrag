@@ -1432,38 +1432,28 @@ describe("ModelsPage endpoint form layout", () => {
     await new Promise((r) => setTimeout(r, 900));
     expect(validateModelEndpointMock).toHaveBeenCalledTimes(callsForA);
 
-    // Refresh sends it to B on purpose.
-    await user.click(within(dialog).getByRole("button", { name: "Refresh model list" }));
-    await waitFor(
-      () =>
-        expect(validateModelEndpointMock).toHaveBeenLastCalledWith(
-          expect.objectContaining({ endpoint: "http://b/v1", api_key: "sk-for-a" }),
-          WITH_SIGNAL,
-        ),
-      DISCOVERY_WAIT,
-    );
+    // Refresh can't send A's key to B either.
+    const refresh = within(dialog).getByRole("button", { name: "Refresh model list" });
+    expect((refresh as HTMLButtonElement).disabled).toBe(true);
+    await user.click(refresh);
+    await new Promise((r) => setTimeout(r, 900));
+    expect(validateModelEndpointMock).toHaveBeenCalledTimes(callsForA);
+    expect(within(dialog).getByText(/The API key was entered for another URL/)).toBeTruthy();
 
-    // A key entered for C goes with C.
-    await user.clear(url);
-    await user.type(url, "http://c/v1");
-    await user.tab();
-    await within(dialog).findByText(/The API key was entered for another URL/);
+    // A key entered for B goes with B.
     await user.clear(key);
-    await user.type(key, "sk-for-c");
+    await user.type(key, "sk-for-b");
     await user.tab();
     await waitFor(
       () =>
         expect(validateModelEndpointMock).toHaveBeenLastCalledWith(
-          expect.objectContaining({ endpoint: "http://c/v1", api_key: "sk-for-c" }),
+          expect.objectContaining({ endpoint: "http://b/v1", api_key: "sk-for-b" }),
           WITH_SIGNAL,
         ),
       DISCOVERY_WAIT,
     );
     const sent = validateModelEndpointMock.mock.calls.map(([req]) => `${req.endpoint} ${req.api_key ?? "-"}`);
-    expect(sent.filter((s) => !s.startsWith("http://a/v1 "))).toEqual([
-      "http://b/v1 sk-for-a",
-      "http://c/v1 sk-for-c",
-    ]);
+    expect(sent.filter((s) => !s.startsWith("http://a/v1 "))).toEqual(["http://b/v1 sk-for-b"]);
   });
 
   it("asks again when the form is reopened after a failed listing", async () => {
