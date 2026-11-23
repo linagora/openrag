@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Literal
 
 import pytest
@@ -107,3 +108,68 @@ def test_every_parameter_needs_a_type_hint():
 
     with pytest.raises(TypeError, match="'query' needs a type hint"):
         ToolRegistry.from_toolsets(Untyped())
+
+
+def test_the_model_is_shown_the_tool_s_description_never_its_docstring():
+    class Documented:
+        @tool("lookup", "Look a word up")
+        async def lookup(self, ctx: ToolContext, word: str) -> str:
+            """Internal notes for developers, not for the model."""
+            return word
+
+    schema = json.dumps(tool_spec(Documented().lookup).schema())
+
+    assert '"description": "Look a word up"' in schema
+    assert "Internal notes" not in schema
+
+
+async def test_the_decorator_leaves_the_method_as_it_is():
+    library = Library()
+
+    assert await library.search(None, ["x"]) == "found", "still a plain async method"
+    assert tool_spec(library.search).handler == library.search
+
+
+def test_a_method_without_the_decorator_has_no_spec():
+    with pytest.raises(TypeError, match="is not a @tool method"):
+        tool_spec(Library().helper)
+
+
+def test_a_tool_must_take_the_context():
+    class Contextless:
+        @tool("bare", "Takes nothing")
+        async def bare(self) -> str:
+            return ""
+
+    with pytest.raises(TypeError, match="must take the ToolContext as its first parameter"):
+        ToolRegistry.from_toolsets(Contextless())
+
+
+@pytest.mark.parametrize("variadic", ["args", "kwargs"])
+def test_a_tool_takes_named_parameters_only(variadic):
+    class Variadic:
+        if variadic == "args":
+
+            @tool("many", "Takes any")
+            async def many(self, ctx: ToolContext, *words: str) -> str:
+                return ""
+        else:
+
+            @tool("many", "Takes any")
+            async def many(self, ctx: ToolContext, **words: str) -> str:
+                return ""
+
+    with pytest.raises(TypeError, match="parameter 'words' must be a named parameter"):
+        ToolRegistry.from_toolsets(Variadic())
+
+
+def test_a_keyword_only_parameter_is_one_the_model_fills_in():
+    class KeywordOnly:
+        @tool("find", "Find a word")
+        async def find(self, ctx: ToolContext, *, word: str, limit: int = 5) -> str:
+            return word
+
+    parameters = tool_spec(KeywordOnly().find).schema()["function"]["parameters"]
+
+    assert set(parameters["properties"]) == {"word", "limit"}
+    assert parameters["required"] == ["word"]
