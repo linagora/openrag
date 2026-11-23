@@ -275,6 +275,11 @@ def test_chart_length_floor_matches_python():
     assert int(match.group(1)) == MIN_SECRET_LENGTH
 
 
+def test_chart_length_floor_counts_unicode_characters():
+    text = _CHART_SECRETS_TEMPLATE.read_text()
+    assert 'len (splitList "" (trim $stringValue))' in text
+
+
 def test_chart_length_checked_keys_match_python():
     chart_keys = set(_chart_list("lengthCheckedSecrets"))
     python_keys = {spec.env_var for spec in SECRET_SPECS if spec.enforce_min_length}
