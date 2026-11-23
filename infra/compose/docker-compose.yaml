@@ -72,8 +72,10 @@ x-openrag: &openrag_template
       aliases:
         - openrag
   env_file:
-    - ./proxy-defaults.env
     - ${SHARED_ENV:-.env}
+    # Load defaults after the shared file so an empty allowlist cannot erase
+    # the safe fallback. A non-empty value is preserved by :- in that file.
+    - ./proxy-defaults.env
   environment:
     <<: *openrag_env
   shm_size: 10.24gb

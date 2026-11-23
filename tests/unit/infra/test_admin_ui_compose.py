@@ -12,7 +12,10 @@ import yaml
 COMPOSE_DIR = Path(__file__).resolve().parents[3] / "infra/compose"
 
 
-@pytest.mark.parametrize("scenario", ["default", "custom-subnet", "explicit-allowlist", "tls-overlay"])
+@pytest.mark.parametrize(
+    "scenario",
+    ["default", "custom-subnet", "explicit-allowlist", "empty-allowlist", "tls-overlay"],
+)
 def test_compose_proxy_trust(tmp_path, scenario):
     if (
         shutil.which("docker") is None
@@ -23,12 +26,14 @@ def test_compose_proxy_trust(tmp_path, scenario):
     project_values = (
         "POSTGRES_PASSWORD=render-test-only\nMINIO_SECRET_KEY=render-test-only\nMINIO_ACCESS_KEY=render-test-only\n"
     )
-    project_env = tmp_path / ".env"
-    project_env.write_text(project_values, encoding="utf-8")
-    shared_env = tmp_path / "shared.env"
     override = "127.0.0.1,192.0.2.10" if scenario == "explicit-allowlist" else None
     if override is not None:
         project_values += f"UVICORN_FORWARDED_ALLOW_IPS={override}\n"
+    elif scenario == "empty-allowlist":
+        project_values += "UVICORN_FORWARDED_ALLOW_IPS=\n"
+    project_env = tmp_path / ".env"
+    project_env.write_text(project_values, encoding="utf-8")
+    shared_env = tmp_path / "shared.env"
     shared_env.write_text(project_values, encoding="utf-8")
     render_env = {"SHARED_ENV": str(shared_env)}
     if scenario == "custom-subnet":

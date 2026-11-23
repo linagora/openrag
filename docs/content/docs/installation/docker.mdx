@@ -155,7 +155,11 @@ Set these in `.env`:
   private-network clients can supply `X-Real-IP` to NPM. Replace broad ranges
   such as `172.16.0.0/12` with the exact addresses you trust. When changing
   the bridge subnet, keep `OPENRAG_NPM_PROXY_IP` inside the new subnet and
-  outside the dynamic range.
+  outside the dynamic range. With NPM excluded from the trusted list, requests
+  through NPM share its address for failed-login rate limiting, and generated
+  API URLs may use `http`; set `PREFERRED_URL_SCHEME=https` for HTTPS URLs.
+  Trust NPM only after it is configured to accept client-supplied `X-Real-IP`
+  from an explicitly trusted upstream proxy.
   [Rate Limiting](/openrag/documentation/env_vars/#rate-limiting)
 - **`OIDC_REDIRECT_URI`** (OIDC mode only): `https://<domain>/auth/callback`.
   The `ADMIN_UI_PORT` URL from the [OIDC guide](/openrag/documentation/oidc/)
