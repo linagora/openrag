@@ -7,11 +7,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
 import { ApiError } from "@/lib/api/client";
-import { listPartitionFiles } from "@/lib/api/documents";
+import { getFileDetail, listPartitionFiles } from "@/lib/api/documents";
 import { deleteFile, newFileId, uploadFile } from "@/lib/api/indexing";
 import { listModelEndpoints } from "@/lib/api/models";
 import { listPartitions } from "@/lib/api/partitions";
-import { getQueueInfo, type QueueInfo } from "@/lib/api/jobs";
+import { getQueueInfo, getTaskStatus, type QueueInfo } from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
 import { useActiveJobsCount } from "@/lib/jobs-queries";
 import DocumentListPage from "./list";
@@ -39,7 +39,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@/lib/api/jobs", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api/jobs")>("@/lib/api/jobs");
-  return { ...actual, getQueueInfo: vi.fn() };
+  return { ...actual, getQueueInfo: vi.fn(), getTaskStatus: vi.fn() };
 });
 
 vi.mock("@/lib/api/partitions", () => ({
@@ -58,6 +58,7 @@ vi.mock("@/lib/api/partitions", () => ({
 
 vi.mock("@/lib/api/documents", () => ({
   listPartitionFiles: vi.fn(),
+  getFileDetail: vi.fn(),
 }));
 
 vi.mock("@/lib/api/indexing", () => ({
@@ -161,6 +162,8 @@ describe("DocumentListPage", () => {
     uploadFileMock.mockReset();
     vi.mocked(newFileId).mockImplementation(() => "new-file-id");
     getQueueInfoMock.mockReset();
+    vi.mocked(getTaskStatus).mockReset();
+    vi.mocked(getFileDetail).mockReset();
     listPartitionFilesMock.mockReset();
     listPartitionFilesMock.mockResolvedValue({
       files: [
@@ -548,9 +551,78 @@ describe("DocumentListPage", () => {
         extra: { existing_task_id: "task-1" },
       }),
     );
+    vi.mocked(getTaskStatus).mockResolvedValue({
+      task_id: "task-1",
+      task_state: "QUEUED",
+      details: { file_id: "new-file-id", partition: "docs", metadata: {}, user_id: 7 },
+    });
     await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(vi.mocked(getTaskStatus)).toHaveBeenCalledWith("task-1");
+    expect(toastSuccessMock).toHaveBeenCalledWith("1 file(s) queued for indexing.", expect.anything());
+  });
+
+  it("keeps a file for retry while the earlier attempt's task is not confirmed", async () => {
+    uploadFileMock.mockRejectedValue(new Error("Network error"));
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["lost"], "lost.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByRole("button", { name: "Retry failed" });
+    toastSuccessMock.mockClear();
+
+    // The fence holder has not been admitted yet, so its task does not exist.
+    uploadFileMock.mockRejectedValue(
+      new ApiError(409, {
+        detail: "[DOCUMENT_INDEXING_IN_PROGRESS]: File is already being indexed",
+        extra: { existing_task_id: "task-1" },
+      }),
+    );
+    vi.mocked(getTaskStatus).mockRejectedValue(new ApiError(404, { detail: "Task 'task-1' not found." }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    expect(
+      await screen.findByText("lost.txt: An earlier attempt is not confirmed as queued yet. Retry to check again."),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry failed" })).toBeTruthy();
+    expect(toastSuccessMock).not.toHaveBeenCalled();
+  });
+
+  it("counts a retry whose content conflict names its own indexed file as uploaded", async () => {
+    let next = 0;
+    vi.mocked(newFileId).mockImplementation(() => `file-id-${++next}`);
+    uploadFileMock.mockRejectedValue(new Error("Network error"));
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), [
+      new File(["late"], "late.txt", { type: "text/plain" }),
+      new File(["dup"], "dup.txt", { type: "text/plain" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByRole("button", { name: "Retry failed" });
+    toastSuccessMock.mockClear();
+
+    // late.txt's first attempt finished after the retry's file check; dup.txt
+    // matches another file's content.
+    uploadFileMock.mockImplementation(async (_partition, id, file) => {
+      throw new ApiError(409, {
+        detail: "[DOCUMENT_CONTENT_EXISTS]: Same content already indexed",
+        extra: { existing_file_id: (file as File).name === "late.txt" ? id : "other-file" },
+      });
+    });
+    vi.mocked(getFileDetail).mockResolvedValue({} as Awaited<ReturnType<typeof getFileDetail>>);
+    await userEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+
+    expect(await screen.findByText("late.txt: already uploaded")).toBeTruthy();
+    expect(screen.getByText("dup.txt: Same content already indexed")).toBeTruthy();
+    expect(vi.mocked(getFileDetail)).toHaveBeenCalledWith("docs", "file-id-1", 1);
     expect(toastSuccessMock).toHaveBeenCalledWith("1 file(s) queued for indexing.", expect.anything());
   });
 

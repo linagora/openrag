@@ -36,8 +36,9 @@ import {
 } from "@/components/ui/select";
 import { formatDate } from "@/lib/utils";
 import { ApiError } from "@/lib/api/client";
-import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
+import { getFileDetail, listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
+import { getTaskStatus } from "@/lib/api/jobs";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { listPartitions } from "@/lib/api/partitions";
 import { listModelEndpoints, resolveEmbedderName, resolveEmbedderModel } from "@/lib/api/models";
@@ -53,6 +54,11 @@ const fileHref = (partition: string, fileId: string) =>
 const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
 const str = (v: unknown) => (v == null ? "" : String(v));
 const ALL_DEGRADED_STAGES = "all";
+// A string field from a domain error's `extra`, e.g. the task or file a 409 names.
+const conflictExtra = (e: ApiError, key: string): string | undefined => {
+  const value = (e.body as { extra?: Record<string, unknown> } | null)?.extra?.[key];
+  return typeof value === "string" ? value : undefined;
+};
 
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
@@ -334,17 +340,38 @@ export default function DocumentListPage() {
           results.push({ name: f.name });
         } catch (e) {
           // A retry resends the same file ID, so this conflict means an earlier
-          // attempt was accepted and is still indexing (its response was lost).
-          // Count it as queued instead of offering yet another retry.
+          // attempt holds the file (its response was lost). That attempt may
+          // only have reserved the file and can still fail admission: count it
+          // as queued once its task is confirmed, else keep the file for retry.
           if (e instanceof ApiError && e.code === "DOCUMENT_INDEXING_IN_PROGRESS") {
-            ok += 1;
-            results.push({ name: f.name, note: "already indexing" });
+            const taskId = conflictExtra(e, "existing_task_id");
+            const state = taskId ? await getTaskStatus(taskId).then((t) => t.task_state, () => undefined) : undefined;
+            if (state && state !== "FAILED" && state !== "CANCELLED") {
+              ok += 1;
+              results.push({ name: f.name, note: "already indexing" });
+            } else {
+              results.push({ name: f.name, error: "An earlier attempt is not confirmed as queued yet. Retry to check again." });
+              failed.push(f);
+            }
             continue;
           }
           // An uncoded 409 on a reused ID means that earlier attempt already
-          // finished indexing ("File '<id>' already exists"). Coded 409s such
-          // as DOCUMENT_CONTENT_EXISTS stay real errors.
-          if (isRetry && e instanceof ApiError && e.status === 409 && !e.code) {
+          // finished indexing ("File '<id>' already exists"). If it finished
+          // after this retry's file check, the content check names this very
+          // file instead: confirm it is in the catalog. A content conflict
+          // naming another file stays a real duplicate error.
+          const alreadyIndexed =
+            isRetry &&
+            e instanceof ApiError &&
+            e.status === 409 &&
+            (!e.code ||
+              (e.code === "DOCUMENT_CONTENT_EXISTS" &&
+                conflictExtra(e, "existing_file_id") === fileId &&
+                (await getFileDetail(selected, fileId, 1).then(
+                  () => true,
+                  () => false,
+                ))));
+          if (alreadyIndexed) {
             ok += 1;
             results.push({ name: f.name, note: "already uploaded" });
             continue;
