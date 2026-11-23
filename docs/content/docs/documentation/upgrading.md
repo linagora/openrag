@@ -24,6 +24,9 @@ docker compose down
 docker compose up -d
 ```
 
+Before `down`, stop and disconnect any containers outside this Compose project
+that use its network. Reconnect them after `up -d` recreates the network; an
+attached external container can prevent removal and leave the stack stopped.
 Use the same `-f` files and profiles that you use for the deployment on both
 commands. Do not add `-v` to `down`, because that removes persistent volumes.
 A full `up -d` alone may leave an existing network with its old subnet, and a
@@ -32,10 +35,11 @@ If you explicitly set `UVICORN_FORWARDED_ALLOW_IPS`, include loopback and the
 exact admin UI proxy address. With the TLS overlay, remove broad ranges such as
 `172.16.0.0/12`, which include NPM's address. Do not add the NPM address while
 private-network clients can set `X-Real-IP` at NPM. Until NPM's forwarding
-behavior is hardened, requests through NPM share its address for failed-login
-rate limiting; set `PREFERRED_URL_SCHEME=https` so generated API URLs use
-HTTPS. Trust other proxy addresses only after verifying their
-forwarded-header behavior. If Compose reports `Pool overlaps with other one on this address
+behavior is hardened, requests through NPM share its address for both the
+`/auth/*` and failed-login rate limits. The forwarded HTTPS scheme is ignored,
+so most generated API links remain `http`; `PREFERRED_URL_SCHEME=https` only
+corrects links from the indexing API. Trust other proxy addresses only after
+verifying their forwarded-header behavior. If Compose reports `Pool overlaps with other one on this address
 space`, choose an unused range and set `OPENRAG_COMPOSE_SUBNET`,
 `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP`; with the
 TLS overlay, set `OPENRAG_NPM_PROXY_IP` as well. Keep both proxy addresses

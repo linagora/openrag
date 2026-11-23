@@ -16,6 +16,9 @@ x-openrag-env: &openrag_env
   # the font at a bind-mounted dir the app user owns, so the ~15MB download
   # happens once and persists across restarts.
   FONT_PATH: ${FONT_PATH:-/app/data/fonts/GoNotoCurrent-Regular.ttf}
+  # The entrypoint uses this Compose-resolved address when the shared env file
+  # leaves UVICORN_FORWARDED_ALLOW_IPS empty.
+  OPENRAG_ADMIN_UI_PROXY_IP: ${OPENRAG_ADMIN_UI_PROXY_IP:-172.31.253.200}
 
 x-openrag: &openrag_template
   image: linagoraai/openrag:v2.3.5
@@ -72,10 +75,8 @@ x-openrag: &openrag_template
       aliases:
         - openrag
   env_file:
-    - ${SHARED_ENV:-.env}
-    # Load defaults after the shared file so an empty allowlist cannot erase
-    # the safe fallback. A non-empty value is preserved by :- in that file.
     - ./proxy-defaults.env
+    - ${SHARED_ENV:-.env}
   environment:
     <<: *openrag_env
   shm_size: 10.24gb

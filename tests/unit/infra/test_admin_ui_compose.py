@@ -14,7 +14,14 @@ COMPOSE_DIR = Path(__file__).resolve().parents[3] / "infra/compose"
 
 @pytest.mark.parametrize(
     "scenario",
-    ["default", "custom-subnet", "explicit-allowlist", "empty-allowlist", "tls-overlay"],
+    [
+        "default",
+        "custom-subnet",
+        "explicit-allowlist",
+        "shared-override",
+        "empty-allowlist",
+        "tls-overlay",
+    ],
 )
 def test_compose_proxy_trust(tmp_path, scenario):
     if (
@@ -27,14 +34,19 @@ def test_compose_proxy_trust(tmp_path, scenario):
         "POSTGRES_PASSWORD=render-test-only\nMINIO_SECRET_KEY=render-test-only\nMINIO_ACCESS_KEY=render-test-only\n"
     )
     override = "127.0.0.1,192.0.2.10" if scenario == "explicit-allowlist" else None
+    shared_override = "10.8.8.8" if scenario == "shared-override" else override
     if override is not None:
         project_values += f"UVICORN_FORWARDED_ALLOW_IPS={override}\n"
     elif scenario == "empty-allowlist":
         project_values += "UVICORN_FORWARDED_ALLOW_IPS=\n"
+    shared_values = project_values
+    if scenario == "shared-override":
+        project_values += "UVICORN_FORWARDED_ALLOW_IPS=10.9.9.9\n"
+        shared_values += f"UVICORN_FORWARDED_ALLOW_IPS={shared_override}\n"
     project_env = tmp_path / ".env"
     project_env.write_text(project_values, encoding="utf-8")
     shared_env = tmp_path / "shared.env"
-    shared_env.write_text(project_values, encoding="utf-8")
+    shared_env.write_text(shared_values, encoding="utf-8")
     render_env = {"SHARED_ENV": str(shared_env)}
     if scenario == "custom-subnet":
         render_env.update(
@@ -79,7 +91,12 @@ def test_compose_proxy_trust(tmp_path, scenario):
         assert npm_proxy_ip != proxy_ip
         assert ipaddress.ip_address(npm_proxy_ip) in ipaddress.ip_network(ipam["subnet"])
         assert ipaddress.ip_address(npm_proxy_ip) not in ipaddress.ip_network(ipam["ip_range"])
-    expected_allowlist = override or f"127.0.0.1,{proxy_ip}"
+    if scenario == "shared-override":
+        expected_allowlist = shared_override
+    elif scenario == "empty-allowlist":
+        expected_allowlist = ""
+    else:
+        expected_allowlist = override or f"127.0.0.1,{proxy_ip}"
     for api in ("openrag", "openrag-cpu"):
         assert config["services"][api]["environment"]["UVICORN_FORWARDED_ALLOW_IPS"] == expected_allowlist
 
