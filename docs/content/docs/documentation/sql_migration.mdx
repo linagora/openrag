@@ -31,13 +31,17 @@ Replace **`<revision_message>`** with your descriptive message before running th
 :::
 
 :::note[Generating needs your checkout mounted and writable]
-Generating writes a new file into the source tree, so it only makes sense in dev mode. Uncomment the `../../openrag:/app/openrag` source mount on the `openrag` service in `docker-compose.yaml`, otherwise the script stays in the throwaway container. The command runs as the image's non-root app user (`APP_UID`, default `1000`), so build the image with your own UID so that user can write to your checkout. The prefix `APP_UID=$(id -u)` below does that. Applying migrations (`upgrade head`) only reads these files and needs neither.
+Generating writes a new file into the source tree, so it only makes sense in dev mode. Uncomment the `../../openrag:/app/openrag` source mount on the `openrag` service in `docker-compose.yaml`, otherwise the script stays in the throwaway container. The command runs as the image's non-root app user (`APP_UID`, default `1000`), so build the image with your own UID so that user can write to your checkout. The prefix `APP_UID=$(id -u)` below does that, and `-e APP_UID="$(id -u)"` keeps an `APP_UID` set in your `.env` from overriding it at runtime. Applying migrations (`upgrade head`) only reads these files and needs neither.
+:::
+
+:::caution[If an earlier command fails with `Permission denied`]
+Older versions of these commands bypassed the entrypoint (`--entrypoint "..."`) and ran as root, which can leave root-owned files in the `openrag_venv` volume. Remove the volume once so it resyncs: `docker compose down`, then `docker volume rm <project>_openrag_venv` (`docker volume ls` lists the name).
 :::
 
 ```bash "<revision_message>" title="Generate a migration script..."
 docker compose up -d rdb
 APP_UID=$(id -u) docker compose \
-    run --no-deps --build --rm \
+    run --no-deps --build --rm -e APP_UID="$(id -u)" \
     openrag \
     uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini revision --autogenerate -m '<revision_message>'
 ```
@@ -113,7 +117,7 @@ This usually happens when two or more migration scripts are created independentl
 
      ```bash title="Merge Alembic heads"
      docker compose up -d rdb
-     APP_UID=$(id -u) docker compose run --no-deps --build --rm \
+     APP_UID=$(id -u) docker compose run --no-deps --build --rm -e APP_UID="$(id -u)" \
          openrag \
          uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini merge -m 'merge heads' <head1> <head2>
      ```
