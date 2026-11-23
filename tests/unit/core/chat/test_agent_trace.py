@@ -74,14 +74,14 @@ def test_a_call_shows_what_the_model_asked_and_the_sources_it_was_shown():
 
 
 def test_a_failed_call_is_an_error_and_one_answered_without_running_is_refused():
-    broken = ToolCall("c1", "read_file", "{not json")
+    broken = ToolCall("c1", "read_passage", "{not json")
     again = ToolCall("c2", "search_knowledge", _SEARCH.arguments)
     trace = _trace()
     trace.tools(
         round=2,
         duration_seconds=0.1,
         calls=[
-            CallRecord(broken, ToolResult("c1", "read_file", "Error: the arguments are not JSON.", is_error=True)),
+            CallRecord(broken, ToolResult("c1", "read_passage", "Error: the arguments are not JSON.", is_error=True)),
             CallRecord(
                 again,
                 ToolResult("c2", "search_knowledge", "Error: you already made this call.", is_error=True),

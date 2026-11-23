@@ -298,7 +298,7 @@ async def test_about_ranks_files_by_their_best_passage_and_shows_it_as_a_source(
     lines = result.content.splitlines()
     assert lines[0] == (
         "3 of 3 files with passages about it, best match first; "
-        "under each, its best passage as an excerpt, which read_file shows in full."
+        "under each, its best passage as an excerpt, which read_passage shows in full."
     )
     assert _listed(result.content) == ["f2", "f1", "f5"]
     assert lines[1:6] == [
@@ -310,7 +310,7 @@ async def test_about_ranks_files_by_their_best_passage_and_shows_it_as_a_source(
         "   passage 1 of f2",
     ]
     assert shown_sources(result.content) == [1, 2, 3]
-    assert ctx.sources.entries == [hits[0], hits[1], hits[3]], "read_file opens a file's best passage"
+    assert ctx.sources.entries == [hits[0], hits[1], hits[3]], "read_passage opens a file's best passage"
     (call,) = retriever.calls
     assert call["route"] == Route.DOCUMENTS
     assert call["scope"] == ctx.scope

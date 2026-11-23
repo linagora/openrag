@@ -125,7 +125,7 @@ def test_the_registry_offers_the_agents_read_only_tools():
     assert registry.names == [
         "search_knowledge",
         "search_file",
-        "read_file",
+        "read_passage",
         "summarize",
         "find_files",
         "get_file_info",
@@ -365,16 +365,16 @@ async def test_search_file_never_leaves_the_request_scope(scope, partition, file
 
 
 # --------------------------------------------------------------------------- #
-# read_file
+# read_passage
 # --------------------------------------------------------------------------- #
 
 
-async def test_read_file_reads_a_passage_in_full_with_its_neighbours_in_reading_order():
+async def test_read_passage_reads_a_passage_in_full_with_its_neighbours_in_reading_order():
     registry, service = _tools(FakeRetriever([_chunk(3, text="word " * 200)]))
     ctx = _ctx()
     await _call(registry, ctx, "search_knowledge", queries=["q"])
 
-    result = await _call(registry, ctx, "read_file", source=1, before=2, after=1)
+    result = await _call(registry, ctx, "read_passage", source=1, before=2, after=1)
 
     assert result.content.startswith("[Source 1] in full, with 2 passage(s) before and 1 after:")
     order = [result.content.index(f"[Source {n}]\n") for n in (2, 3, 1, 4)]
@@ -384,24 +384,24 @@ async def test_read_file_reads_a_passage_in_full_with_its_neighbours_in_reading_
     assert service.calls == [["f-3"], ["f-2"]]
 
 
-async def test_read_file_stops_at_the_start_of_the_file():
+async def test_read_passage_stops_at_the_start_of_the_file():
     registry, service = _tools(FakeRetriever([_chunk(1)]))
     ctx = _ctx()
     await _call(registry, ctx, "search_knowledge", queries=["q"])
 
-    result = await _call(registry, ctx, "read_file", source=1, before=3, after=0)
+    result = await _call(registry, ctx, "read_passage", source=1, before=3, after=0)
 
     assert result.content.startswith("[Source 1] in full, with 0 passage(s) before and 0 after:")
     assert service.calls == []
 
 
-async def test_read_file_reads_only_a_source_a_search_returned():
+async def test_read_passage_reads_only_a_source_a_search_returned():
     registry, _ = _tools()
     ctx = _ctx()
     ctx.sources.number({"url": "https://example.org"}, key="https://example.org")
 
-    unknown = await _call(registry, ctx, "read_file", source=4)
-    web = await _call(registry, ctx, "read_file", source=1)
+    unknown = await _call(registry, ctx, "read_passage", source=4)
+    web = await _call(registry, ctx, "read_passage", source=1)
 
     assert unknown.content == "Error: There is no [Source 4] yet: use the numbers a search returned."
     assert web.content == "Error: [Source 1] is a web page, not a document."

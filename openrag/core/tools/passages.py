@@ -27,7 +27,7 @@ def passage(number: int, chunk: Chunk, *, excerpt_chars: int | None = None) -> s
     """*chunk* as ``[Source number]``: its date and file, the ids to read it by, its text.
 
     With *excerpt_chars* the text is cut to about that many characters, at a
-    word boundary: an excerpt locates the passage, ``read_file`` reads it.
+    word boundary: an excerpt locates the passage, ``read_passage`` reads it.
     """
     lines = [f"[Source {number}]"]
     provenance = describe_source(chunk.metadata)

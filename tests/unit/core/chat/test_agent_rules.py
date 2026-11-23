@@ -37,11 +37,15 @@ def _call(name="search_knowledge", arguments='{"queries": ["x"]}', call_id="abc1
 
 
 def test_tool_calls_are_read_with_their_id_name_and_arguments():
-    message = {"role": "assistant", "content": None, "tool_calls": [_call(), _call("read_file", '{"source": 1}', "x2")]}
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [_call(), _call("read_passage", '{"source": 1}', "x2")],
+    }
 
     assert tool_calls(message) == [
         ToolCall("abc123def", "search_knowledge", '{"queries": ["x"]}'),
-        ToolCall("x2", "read_file", '{"source": 1}'),
+        ToolCall("x2", "read_passage", '{"source": 1}'),
     ]
 
 
@@ -96,7 +100,7 @@ def test_a_call_is_described_with_its_arguments_compact_and_capped():
     assert describe_call(ToolCall("a", "search_knowledge", '{ "queries" : ["préavis"] }')) == (
         'search_knowledge {"queries": ["préavis"]}'
     )
-    assert describe_call(ToolCall("b", "read_file", "not json")) == "read_file not json"
+    assert describe_call(ToolCall("b", "read_passage", "not json")) == "read_passage not json"
     long = describe_call(ToolCall("c", "search_knowledge", json.dumps({"queries": ["x" * 400]})))
     assert len(long) == len("search_knowledge ") + 300 and long.endswith("…")
 
@@ -209,8 +213,8 @@ def test_calls_sent_whole_or_with_their_name_repeated_read_the_same():
     whole = {"name": "find_files", "arguments": {"name": "acme"}}
     lines = [
         _line({"tool_calls": [{"id": "a", "function": whole}]}),  # whole, no index (Ollama)
-        _line({"tool_calls": [{"index": 1, "id": "b", "function": {"name": "read_file", "arguments": '{"sou'}}]}),
-        _line({"tool_calls": [{"index": 1, "function": {"name": "read_file", "arguments": 'rce": 2}'}}]}),
+        _line({"tool_calls": [{"index": 1, "id": "b", "function": {"name": "read_passage", "arguments": '{"sou'}}]}),
+        _line({"tool_calls": [{"index": 1, "function": {"name": "read_passage", "arguments": 'rce": 2}'}}]}),
         _line({}, "tool_calls"),
     ]
 
@@ -218,7 +222,7 @@ def test_calls_sent_whole_or_with_their_name_repeated_read_the_same():
 
     assert [(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in calls] == [
         ("a", "find_files", '{"name": "acme"}'),
-        ("b", "read_file", '{"source": 2}'),
+        ("b", "read_passage", '{"source": 2}'),
     ]
 
 

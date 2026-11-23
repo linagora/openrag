@@ -1,13 +1,20 @@
-"""The agent's tools over the documents: search them all, search one file, read around a passage, summarize.
+"""The agent's tools over the passages: search them all, search one file, read one passage, condense some.
+
+- ``search_knowledge`` searches the passages of every document in scope.
+- ``search_file`` searches the passages of one file.
+- ``read_passage`` shows one ``[Source N]`` in full, with the passages just
+  before and after it in its file. It never shows a whole file.
+- ``summarize`` keeps the passages relevant to a question, each condensed by
+  ``classic``'s map-reduce: the ``[Source N]`` it is given, or the passages of
+  a file that best match the question. It never condenses a whole file either.
 
 Searching *locates*: it returns passages, numbered ``[Source N]``, best match
 first, the best-ranked in full (``ToolContext.full_passages``, the agent
 profile's) and the others as excerpts, so a model that answers without reading
-still answers from the best passages in full. Reading proves: ``read_file``
-returns a passage in full with the ones around it in the file. Both go through chat retrieval, so the partition's
-retrieval preset (reranker, ``top_n``) applies as in ``classic``, and both stay
-within the request's scope (``ToolContext.scope``), whatever the model asks for.
-``summarize`` condenses passages for a question with ``classic``'s map-reduce.
+still answers from the best passages in full. Reading proves. The searches go
+through chat retrieval, so the partition's retrieval preset (reranker,
+``top_n``) applies as in ``classic``, and every tool stays within the request's
+scope (``ToolContext.scope``), whatever the model asks for.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ if TYPE_CHECKING:
 #: Characters of a chunk a search shows: enough to judge it, short enough to search widely.
 DEFAULT_EXCERPT_CHARS = 400
 
-#: Passages ``read_file`` may add on each side of the one asked for.
+#: Passages ``read_passage`` may add on each side of the one asked for.
 MAX_NEIGHBOURS = 3
 
 # What the model is shown of each tool, sent with every reply it makes: what the
@@ -46,7 +53,7 @@ _SEARCH_KNOWLEDGE = (
     "different periods take separate calls."
 )
 _SEARCH_FILE = "Search inside one file, named by the partition and file id shown with a source."
-_READ_FILE = "Read a [Source N] in full, with the passages around it in its file, in reading order."
+_READ_PASSAGE = "Read a [Source N] in full, with the passages around it in its file, in reading order."
 _SUMMARIZE = (
     'Only for a question about a file as a whole, e.g. "what is this report about?": summarizes the file '
     "(partition and file id), or the [Source N] of its passages. For any other question, read the passages "
@@ -97,7 +104,7 @@ def created_between(after: date | None, before: date | None) -> list[TemporalPre
 
 
 class DocumentTools:
-    """``search_knowledge``, ``search_file``, ``read_file`` and ``summarize``.
+    """``search_knowledge``, ``search_file``, ``read_passage`` and ``summarize``.
 
     *summarizer* is ``classic``'s map-reduce, which runs on the static LLM.
     """
@@ -126,6 +133,13 @@ class DocumentTools:
         created_before: CreatedBefore = None,
         order: Order = None,
     ) -> str:
+        """The passages of the scope's documents that best match *queries*, each under its ``[Source N]``.
+
+        One search of 1 to 3 queries, within the documents' own dates when
+        given, cut to the partitions' ``top_n``. With *order*, the newest or the
+        oldest document comes first. The ``full_passages`` best-ranked are
+        shown in full, the others as excerpts.
+        """
         if not ctx.scope.partitions:
             raise ToolError("This conversation has no documents to search.")
         if created_after and created_before and created_after >= created_before:
@@ -149,6 +163,10 @@ class DocumentTools:
         file_id: Annotated[str, Field(description="The file id shown with a source.")],
         queries: Queries,
     ) -> str:
+        """``search_knowledge`` within one file, named by *partition* and *file_id*, without dates.
+
+        Refused for a file outside the scope.
+        """
         if not ctx.allows_file(partition, file_id):
             raise ToolError(f"File '{file_id}' of partition '{partition}' is not among this conversation's documents.")
         search = SearchQueries(query_list=[Query(query=text) for text in queries])
@@ -157,14 +175,20 @@ class DocumentTools:
             return f"No passage of file '{file_id}' matched. Try other words."
         return self._located(ctx, chunks, ranked=chunks, of=f" of file '{file_id}'")
 
-    @tool("read_file", _READ_FILE)
-    async def read_file(
+    @tool("read_passage", _READ_PASSAGE)
+    async def read_passage(
         self,
         ctx: ToolContext,
         source: Annotated[int, Field(ge=1, description="The N of a [Source N] a search returned.")],
         before: Annotated[Neighbours, Field(description="Passages to add before it.")] = 1,
         after: Annotated[Neighbours, Field(description="Passages to add after it.")] = 1,
     ) -> str:
+        """``[Source source]`` in full, with up to *before* passages before it and *after* after it, in reading order.
+
+        The neighbours are the passages next to it in its file, each under a
+        ``[Source N]`` of its own. Only a document passage a tool already
+        showed, within the scope, can be read; never a whole file.
+        """
         chunk = self._document_source(ctx, source)
         earlier, later = await self._neighbours(chunk, before=before, after=after)
         blocks = [passage(ctx.sources.number(c, key=c.id), c) for c in [*earlier, chunk, *later]]
@@ -185,6 +209,14 @@ class DocumentTools:
         partition: Annotated[str | None, Field(description="With file_id, the file to condense.")] = None,
         file_id: Annotated[str | None, Field(description="With partition, the file to condense.")] = None,
     ) -> str:
+        """The passages relevant to *question*, each replaced by its summary, under its ``[Source N]``.
+
+        It takes the ``[Source N]`` of passages already shown, or a file
+        (*partition* and *file_id*): then the file's passages that best match
+        *question* are searched first, cut to ``top_n``, so a file is never
+        condensed whole. The map-reduce runs on the static LLM; a passage it
+        could not judge is kept as an excerpt marked "(Not summarized.)".
+        """
         if (sources is None) == (partition is None and file_id is None):
             raise ToolError("Give either sources or a file (partition and file_id), not both.")
         if sources is not None:

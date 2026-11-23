@@ -1,11 +1,15 @@
 """The agent's tools over the catalog: find files by name, date, type or subject, and describe one.
 
-``find_files`` looks the files up in the catalog. It matches the file names
-(``core.tools.file_names``) and filters on the document's date, the upload
-date and the type. With ``about``, it ranks the files by what they discuss:
-one search of their passages, grouped by file, each file ranked by its best
-passage, which it shows as an excerpt numbered ``[Source N]``. Both tools stay
-within the request's scope.
+- ``find_files`` lists files from the catalog, never their content. It
+  matches the file names (``core.tools.file_names``) and filters on the
+  document's date, the upload date and the type. With ``about``, it ranks the
+  files by what they discuss: one search of their passages, grouped by file,
+  each file ranked by its best passage, which it shows as an excerpt numbered
+  ``[Source N]`` for ``read_passage`` to open.
+- ``get_file_info`` describes one file from its catalog row, its upload
+  metadata and its topic tags.
+
+Both tools stay within the request's scope.
 """
 
 from __future__ import annotations
@@ -129,6 +133,12 @@ class FileTools:
         oldest_first: Annotated[bool, Field(description="Oldest first when sorting by a date.")] = False,
         limit: Annotated[int, Field(ge=1, le=25)] = 10,
     ) -> str:
+        """The scope's files that match *name* and pass the filters, at most *limit*, each with its details.
+
+        Without *about*, a catalog lookup: the best name match first with a
+        *name*, the latest uploads first without one. With *about*, the files
+        whose passages are about it (``_find_by_subject``).
+        """
         partitions = ctx.scope.partitions
         if not partitions:
             raise ToolError("This conversation has no documents.")
@@ -266,7 +276,7 @@ class FileTools:
         heading = (
             f"{min(limit, len(found))} of {len(found)} files with passages about it, "
             f"{'best match first' if sort == 'match' else _date_order(sort, oldest_first)}; "
-            "under each, its best passage as an excerpt, which read_file shows in full."
+            "under each, its best passage as an excerpt, which read_passage shows in full."
         )
         lines = [heading, *notes]
         for number, (f, passages) in enumerate(found[:limit], 1):
@@ -312,6 +322,11 @@ class FileTools:
         partition: Annotated[str, Field(description="The partition shown with the file.")],
         file_id: Annotated[str, Field(description="The file id shown with the file.")],
     ) -> str:
+        """One file of the scope: its names, details, topics, failed indexing steps and other metadata.
+
+        Read from its catalog row, its upload metadata and its topic tags,
+        never from its passages. Refused for a file outside the scope.
+        """
         if not ctx.allows_file(partition, file_id):
             raise ToolError(f"File '{file_id}' of partition '{partition}' is not among this conversation's documents.")
         found = await self._repo.list_catalog_files([partition], file_ids=[file_id], limit=1)

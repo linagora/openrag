@@ -398,13 +398,13 @@ rag:
 # sends none; reasoning_effort null leaves the LLM endpoint's), the rounds of
 # tool calls it may make before it must answer from what it found, and how many
 # of a search's best-ranked hits it is shown in full (full_passages; the others
-# are excerpts of about 400 characters, which read_file shows in full).
+# are excerpts of about 400 characters, which read_passage shows in full).
 agentic:
   default_profile: default
   profiles:
     default:
       prompt_name: null
-      tools: [search_knowledge, search_file, read_file, summarize, find_files, get_file_info]
+      tools: [search_knowledge, search_file, read_passage, summarize, find_files, get_file_info]
       temperature: 0.2
       reasoning_effort: null
       max_tool_rounds: 6

@@ -17,7 +17,7 @@ from .base import ConfigMixin
 DEFAULT_AGENT_TOOLS = (
     "search_knowledge",
     "search_file",
-    "read_file",
+    "read_passage",
     "summarize",
     "find_files",
     "get_file_info",

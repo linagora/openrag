@@ -48,7 +48,7 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # v2.2.0-v2.3.2 and current
     ),
     "agent": (
-        "ffb81f1ee3c421fa664210c2e11e79e8ae81afa13669298eb67ff29c682e6b6b",  # current (agentic mode)
+        "a49fbffe8a3026e8fc44b1071fcbf3ae92fb2b8792c61241ebf7585b48bfd218",  # current (agentic mode)
     ),
     "chunk_contextualizer": (
         "35cc087891c587627f572d4876890c3a78a59e3141b217d05ffd77750ffd1af6",  # v2.1.0-v2.3.2 and current
