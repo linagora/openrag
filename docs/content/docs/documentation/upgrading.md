@@ -13,6 +13,27 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## Bounded indexing admission
+
+Before upgrading, set `MAX_UPLOAD_SIZE_MB` to a positive value no larger than
+`RAY_MAX_ADMITTED_BYTES` in MiB. Earlier deployments may have used zero or a
+negative value for unlimited uploads, or allowed files larger than the new
+shared budget. Update those settings before starting the new version, otherwise
+the API stops at startup with a configuration error.
+
+The default admission limit is 50 indexing tasks at a time. When capacity is
+full, uploads receive `429` with a `Retry-After` header. Update bulk API clients
+to wait and retry refused uploads, or configure a different task limit for the
+deployment. The byte limit applies after the API has received the multipart
+upload. Temporary files used while receiving requests need separate storage
+capacity and are outside this limit.
+
+Before deploying this version, stop new uploads and wait for all indexing jobs to
+finish. Stop all old API replicas before starting the new version. The upgrade
+replaces the shared Ray task-state actor and starts a new indexer generation.
+Old replicas and workers hold handles to the replaced actor, so a mixed-version
+rollout can interrupt work. Once the new version is running, uploads can resume.
+
 ## 2.3.0 or 2.3.1 to a later 2.3.x
 
 The fence that holds a file while an orphaned indexing worker may still write to

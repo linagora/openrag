@@ -1069,8 +1069,7 @@ async def test_dispatch_indexing_returns_service_unavailable_when_capacity_is_fu
 
     assert caught.value.code == "INDEXING_OUTCOME_BACKLOG"
     assert caught.value.message == (
-        "Indexing is temporarily paused because task capacity is full "
-        "(queued or running work and unsaved job outcomes). Please retry shortly."
+        "Indexing is temporarily paused because the task-state outcome capacity is full. Please retry shortly."
     )
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
@@ -3650,3 +3649,26 @@ async def test_wait_for_task_to_settle_still_times_out_on_its_own_wait() -> None
             partition="tenant-a",
             file_id="file-1",
         )
+
+
+@pytest.mark.asyncio
+async def test_upload_renewal_translates_delete_refusal_to_conflict():
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+    from services.workers.task_state import QUEUE_REFUSED_FILE_DELETING
+
+    tsm = _task_state_manager()
+    tsm.renew_upload_admission_v2 = _remote_mock(_queue_refused(QUEUE_REFUSED_FILE_DELETING))
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="test",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.renew_upload_admission("upload-1")
+    assert caught.value.code == "DOCUMENT_DELETE_IN_PROGRESS"

@@ -137,6 +137,7 @@ def _supports_task_state_recovery(actor) -> bool:
         # Upload reservations must stay live during slow request processing and
         # queue transfer must prove the reservation still exists.
         and getattr(actor, "renew_upload_admission", None) is not None
+        and getattr(actor, "renew_upload_admission_v2", None) is not None
         # has_object_ref marks the release that reads the worker refs it holds;
         # an older actor drops them unread, and Ray prints each failed one as an
         # unhandled error (#1296).

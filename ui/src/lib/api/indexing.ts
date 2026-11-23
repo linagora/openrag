@@ -65,9 +65,11 @@ export function uploadFile(
   file: File,
   metadata?: Record<string, unknown>,
   workspaceIds?: string[],
+  signal?: AbortSignal,
 ): Promise<TaskAccepted> {
   return request<TaskAccepted>(`${I}/partition/${enc(partition)}/file/${enc(fileId)}`, {
     method: "POST",
+    signal,
     body: fileForm(file, metadata, workspaceIds),
   });
 }

@@ -30,6 +30,7 @@ import ray
 import uvicorn
 from api.cors_config import sanitize_cors_origins
 from api.dependencies.auth import require_admin
+from api.dependencies.files import validate_upload_admission_config
 from api.error_handlers import register_error_handlers
 from api.middleware import (
     AuthMiddleware,
@@ -84,6 +85,8 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 
 logger = get_logger()
 settings = load_config()
+
+validate_upload_admission_config(settings)
 CONTAINER_STARTUP_TIMEOUT = float(
     os.getenv("OPENRAG_CONTAINER_STARTUP_TIMEOUT", max(60, settings.rdb.command_timeout * 4))
 )

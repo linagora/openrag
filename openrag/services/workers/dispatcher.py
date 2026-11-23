@@ -179,7 +179,7 @@ class WorkerDispatcher(IndexingDispatcher):
             logger.warning("Could not release upload admission reservation", task_id=task_id, error=str(exc))
 
     async def renew_upload_admission(self, task_id: str) -> bool:
-        remote = _remote_actor_method(self._tsm, "renew_upload_admission")
+        remote = _remote_actor_method(self._tsm, "renew_upload_admission_v2")
         if remote is None:
             raise ServiceUnavailableError(
                 "The indexing actor cannot renew upload capacity reservations.",
@@ -190,7 +190,17 @@ class WorkerDispatcher(IndexingDispatcher):
             recovery_timeout=self._timeout,
             task_description=f"renew_upload_admission({task_id})",
         )
-        return renewed is True
+        if not isinstance(renewed, dict) or "accepted" not in renewed:
+            raise ServiceUnavailableError(
+                "The indexing actor returned an invalid upload admission renewal.",
+                code="INDEXING_ADMISSION_UNAVAILABLE",
+            )
+        if renewed.get("reason") == QUEUE_REFUSED_FILE_DELETING:
+            raise ConflictError(
+                "The file is being deleted. Retry the upload after deletion finishes.",
+                code="DOCUMENT_DELETE_IN_PROGRESS",
+            )
+        return renewed["accepted"] is True
 
     async def _set_queued_details(
         self,

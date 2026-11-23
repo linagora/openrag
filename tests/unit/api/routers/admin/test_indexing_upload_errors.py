@@ -109,7 +109,6 @@ def _build_app(
 ) -> FastAPI:
     # Cap at ~8 bytes so a small upload trips the limit.
     monkeypatch.setattr("api.dependencies.files.max_upload_size_bytes", lambda: 8)
-    monkeypatch.setattr("api.routers.admin.indexing.max_upload_size_bytes", lambda: 8)
 
     app = FastAPI()
     register_error_handlers(app)
@@ -419,3 +418,41 @@ async def test_upload_hands_the_quota_slot_to_the_admitted_task(tmp_path, monkey
 
     assert response.status_code == 201
     assert slot.handed_off
+
+
+@pytest.mark.asyncio
+async def test_delete_during_upload_renewal_returns_delete_conflict(tmp_path, monkeypatch):
+    import asyncio
+
+    class DeletingWhileUploading(_FakeIndexingService):
+        async def renew_upload_admission(self, _task_id):
+            raise ConflictError("File is being deleted", code="DOCUMENT_DELETE_IN_PROGRESS")
+
+        async def add_file(self, **_kwargs):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr("api.routers.admin.indexing._UPLOAD_ADMISSION_RENEW_INTERVAL_SECONDS", 0)
+    app = _build_app(tmp_path, monkeypatch, b"tiny", service=DeletingWhileUploading())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert response.status_code == 409
+    assert "DOCUMENT_DELETE_IN_PROGRESS" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_full_upload_admission_returns_retry_after(tmp_path, monkeypatch):
+    from core.utils.exceptions import IndexingAdmissionError
+
+    class FullAdmission(_FakeIndexingService):
+        async def reserve_upload_admission(self, **_kwargs):
+            raise IndexingAdmissionError("Indexing is full", retry_after_seconds=5)
+
+    app = _build_app(tmp_path, monkeypatch, b"tiny", service=FullAdmission())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "5"
+    assert "INDEXING_ADMISSION_FULL" in response.json()["detail"]
+    assert not (tmp_path / "data").exists()

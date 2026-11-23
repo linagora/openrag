@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/select";
 import { formatDate } from "@/lib/utils";
 import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
+import { ApiError } from "@/lib/api/client";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { listPartitions } from "@/lib/api/partitions";
@@ -69,6 +70,9 @@ export default function DocumentListPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [waitingFile, setWaitingFile] = useState<string | null>(null);
+  const uploadAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => uploadAbort.current?.abort(), []);
   const [fileSearch, setFileSearch] = useState("");
   const [indexedSince, setIndexedSince] = useState("");
   const [degradedStage, setDegradedStage] = useState<DegradedStage | typeof ALL_DEGRADED_STAGES>(
@@ -285,18 +289,42 @@ export default function DocumentListPage() {
     mutationFn: async () => {
       if (!files.length) throw new Error("No file selected");
       setUploading(true);
+      const controller = new AbortController();
+      uploadAbort.current = controller;
       let ok = 0;
       const errors: string[] = [];
       for (const f of files) {
-        try {
-          await uploadFile(selected, newFileId(), f, {
-            filename: f.name,
-            ...(f.type ? { mimetype: f.type } : {}),
-          });
-          ok += 1;
-        } catch (e) {
-          errors.push(`${f.name}: ${(e as Error).message}`);
+        const fileId = newFileId();
+        while (!controller.signal.aborted) {
+          try {
+            setWaitingFile(null);
+            await uploadFile(selected, fileId, f, {
+              filename: f.name,
+              ...(f.type ? { mimetype: f.type } : {}),
+            }, undefined, controller.signal);
+            ok += 1;
+            break;
+          } catch (error) {
+            if (controller.signal.aborted) break;
+            if (!(error instanceof ApiError) || error.status !== 429 || error.code !== "INDEXING_ADMISSION_FULL") {
+              errors.push(`${f.name}: ${(error as Error).message}`);
+              break;
+            }
+            setWaitingFile(f.name);
+            const seconds = Number(error.retryAfter);
+            const delay = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 5000;
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(done, delay);
+              function done() {
+                clearTimeout(timer);
+                controller.signal.removeEventListener("abort", done);
+                resolve();
+              }
+              controller.signal.addEventListener("abort", done, { once: true });
+            });
+          }
         }
+        if (controller.signal.aborted) break;
       }
       return { ok, errors };
     },
@@ -317,7 +345,11 @@ export default function DocumentListPage() {
       queryClient.invalidateQueries({ queryKey: ["partition-files", selected] });
     },
     onError: (err: Error) => toast.error(`Upload failed: ${err.message}`),
-    onSettled: () => setUploading(false),
+    onSettled: () => {
+      uploadAbort.current = null;
+      setWaitingFile(null);
+      setUploading(false);
+    },
   });
 
   // The embedder queries will use, resolved through the `default` alias.
@@ -486,7 +518,10 @@ export default function DocumentListPage() {
         description="Files indexed in a partition"
         actions={
           writable && selected ? (
-            <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
+            <Dialog open={uploadOpen} onOpenChange={(open) => {
+              if (!open && uploading) uploadAbort.current?.abort();
+              setUploadOpen(open);
+            }}>
               {uploadPausedReason ? (
                 <TooltipProvider>
                   <Tooltip>
@@ -522,18 +557,21 @@ export default function DocumentListPage() {
                     id="files"
                     type="file"
                     multiple
+                    disabled={uploading}
                     ref={fileRef}
                     onChange={(e) => setFiles(e.target.files ? Array.from(e.target.files) : [])}
                   />
                   {files.length > 0 && (
                     <p className="text-sm text-muted-foreground">{files.length} file(s) selected</p>
                   )}
+                  {waitingFile && <p className="text-sm" role="status">{waitingFile} is waiting for capacity. Retrying automatically.</p>}
                   {uploadPausedReason && <p className="text-sm text-destructive">{uploadPausedReason}</p>}
                 </div>
                 <DialogFooter>
                   <Button
                     variant="outline"
                     onClick={() => {
+                      uploadAbort.current?.abort();
                       setUploadOpen(false);
                       setFiles([]);
                       if (fileRef.current) fileRef.current.value = "";

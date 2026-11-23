@@ -255,8 +255,8 @@ class _Cluster:
         self.refs: dict[str, ray.ObjectRef] = {}
         for task_id, hold in ((self.held, True), (self.queued, False)):
             ray.get(
-                self.tsm.set_queued_details.remote(
-                    task_id, file_id=f"file-{task_id}", partition="tenant-a", metadata={}, user_id=42
+                self.tsm.set_queued_details_v2.remote(
+                    task_id, file_id=f"file-{task_id}", partition="tenant-a", metadata={}, user_id=42, admitted_bytes=1
                 )
             )
             [self.refs[task_id]] = ray.get(self.pool.submit.remote(task_id, hold))
@@ -280,6 +280,7 @@ class _Cluster:
                 metadata={},
                 user_id=42,
                 reject_if_file_active=True,
+                admitted_bytes=1,
             )
         )
         if outcome["accepted"]:

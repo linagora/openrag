@@ -20,8 +20,9 @@ export class ApiError extends Error {
   status: number;
   body: unknown;
   code?: string;
+  retryAfter?: string | null;
 
-  constructor(status: number, body: unknown) {
+  constructor(status: number, body: unknown, retryAfter?: string | null) {
     // API uses two envelopes: {detail: "..."} for FastAPI validation errors,
     // and {error: {message, type, code, request_id}} for domain errors.
     let raw = `HTTP ${status}`;
@@ -43,6 +44,7 @@ export class ApiError extends Error {
     this.status = status;
     this.code = match ? match[1] : undefined;
     this.body = body;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -104,7 +106,7 @@ export async function request<T>(
     } catch {
       body = { detail: res.statusText };
     }
-    throw new ApiError(res.status, body);
+    throw new ApiError(res.status, body, res.headers.get("Retry-After"));
   }
 
   if (res.status === 204) return undefined as T;

@@ -28,8 +28,8 @@ def _max_upload_size_bytes() -> int:
     """Maximum accepted upload size in bytes, resolved at call time.
 
     Streamed writes are bounded so a single request cannot exhaust disk/RAM
-    (the per-user quota limits file count, not bytes). 0 or negative disables
-    the limit. Override with ``MAX_UPLOAD_SIZE_MB``.
+    (the per-user quota limits file count, not bytes). Override with
+    ``MAX_UPLOAD_SIZE_MB``.
 
     Read lazily rather than at import: ``api.main`` imports the admin routers
     (and therefore this module) before it calls ``load_config()`` /
@@ -42,6 +42,19 @@ def _max_upload_size_bytes() -> int:
 def max_upload_size_bytes() -> int:
     """Public accessor for the active upload ceiling used by admission checks."""
     return _max_upload_size_bytes()
+
+
+def validate_upload_admission_config(config) -> None:
+    """Fail startup when the per-file ceiling cannot fit the shared budget."""
+    try:
+        max_upload_bytes = max_upload_size_bytes()
+    except ValueError as exc:
+        raise ValueError("MAX_UPLOAD_SIZE_MB must be a positive integer.") from exc
+    if max_upload_bytes <= 0 or max_upload_bytes > config.ray.indexer.max_admitted_bytes:
+        raise ValueError(
+            "MAX_UPLOAD_SIZE_MB must be positive and no larger than RAY_MAX_ADMITTED_BYTES "
+            "converted to MiB. Update these settings before starting OpenRAG."
+        )
 
 
 async def validate_file_id(file_id: str):

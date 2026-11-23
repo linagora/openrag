@@ -7,6 +7,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
 import { listPartitionFiles } from "@/lib/api/documents";
+import { ApiError } from "@/lib/api/client";
 import { deleteFile, uploadFile } from "@/lib/api/indexing";
 import { listModelEndpoints } from "@/lib/api/models";
 import { listPartitions } from "@/lib/api/partitions";
@@ -358,6 +359,34 @@ describe("DocumentListPage", () => {
     act(() => action.onClick({} as ReactMouseEvent<HTMLButtonElement>));
 
     expect(screen.getByTestId("location").textContent).toBe("/jobs");
+  });
+
+  it("waits and retries an upload when admission is full", async () => {
+    uploadFileMock
+      .mockRejectedValueOnce(new ApiError(429, { detail: "[INDEXING_ADMISSION_FULL]: Busy" }, "0.05"))
+      .mockResolvedValueOnce({ task_status_url: "/queue/task-1" });
+    renderDocuments();
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), new File(["data"], "waiting.txt"));
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    expect(await screen.findByText("waiting.txt is waiting for capacity. Retrying automatically.")).toBeTruthy();
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(2));
+    expect(uploadFileMock.mock.calls[0][1]).toBe(uploadFileMock.mock.calls[1][1]);
+    await waitFor(() => expect(toastSuccessMock).toHaveBeenCalled());
+  });
+
+  it("stops retrying when the user cancels a waiting upload", async () => {
+    uploadFileMock.mockRejectedValue(new ApiError(429, { detail: "[INDEXING_ADMISSION_FULL]: Busy" }, "60"));
+    renderDocuments();
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Files"), new File(["data"], "waiting.txt"));
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByText("waiting.txt is waiting for capacity. Retrying automatically.");
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByText("waiting.txt is waiting for capacity. Retrying automatically.")).toBeNull());
+    expect(uploadFileMock).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes the active Jobs count as soon as uploads are accepted", async () => {

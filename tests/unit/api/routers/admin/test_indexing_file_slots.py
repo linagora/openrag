@@ -48,6 +48,15 @@ class _IndexingService:
         self.add_calls: list[dict] = []
         self.copy_calls: list[dict] = []
 
+    async def reserve_upload_admission(self, **kwargs):
+        return kwargs.get("task_id") or "admission-task"
+
+    async def release_upload_admission(self, task_id):
+        pass
+
+    async def renew_upload_admission(self, task_id):
+        return True
+
     async def file_exists(self, file_id: str, partition: str) -> bool:
         return self.exists
 
@@ -58,7 +67,7 @@ class _IndexingService:
         self.add_calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        return kwargs.get("task_id") or "minted-task"
+        return kwargs.get("admission_reservation_id") or "minted-task"
 
     async def copy_file(self, **kwargs):
         self.copy_calls.append(kwargs)
@@ -135,7 +144,7 @@ async def test_a_queued_upload_runs_under_its_reservation_and_keeps_it(tmp_path,
 
     assert resp.status_code == 201
     (reservation_id,) = repo.reserved
-    assert service.add_calls[0]["task_id"] == reservation_id
+    assert service.add_calls[0]["admission_reservation_id"] == reservation_id
     assert resp.json()["task_status_url"].endswith(f"/task/{reservation_id}")
     # Handed off: the completion tracker releases it if the task ends without a file.
     assert repo.released == []
@@ -226,7 +235,7 @@ async def test_an_unlimited_upload_reserves_nothing(tmp_path, monkeypatch):
     resp = await _send(app, "POST", "/indexer/partition/p1/file/f1")
 
     assert resp.status_code == 201
-    assert service.add_calls[0]["task_id"] is None
+    assert service.add_calls[0]["admission_reservation_id"] == "admission-task"
     assert repo.reserved == []
 
 

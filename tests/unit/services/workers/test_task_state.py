@@ -1489,7 +1489,9 @@ async def test_recovered_terminal_tasks_are_subject_to_retention(monkeypatch) ->
     assert set(manager.terminal_tasks) == {"settled-cancelled-task"}
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
-    await manager.set_queued_details("new-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=3)
+    await manager.set_queued_details_v2(
+        "new-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=3, admitted_bytes=1
+    )
 
     assert set(manager.tasks) == {"queued-task", "new-task"}
 
@@ -2016,12 +2018,13 @@ async def test_get_active_indexing_task_for_file_reads_the_fence_without_queuein
 
 
 async def _serializing_task_for_file_1(manager: Any, worker_ref: object) -> None:
-    await manager.set_queued_details(
+    await manager.set_queued_details_v2(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
         metadata={},
         user_id=42,
+        admitted_bytes=1,
     )
     assert await manager.set_object_ref("task-1", {"ref": worker_ref}) is True
     assert await manager.set_state("task-1", "SERIALIZING") is True
@@ -2042,6 +2045,7 @@ async def test_admission_fence_releases_the_file_of_a_task_whose_worker_crashed(
         metadata={},
         user_id=42,
         reject_if_file_active=True,
+        admitted_bytes=1,
     )
 
     assert admitted["accepted"] is True
@@ -2069,6 +2073,7 @@ async def test_admission_fence_releases_the_file_of_a_task_stamped_finished() ->
         metadata={},
         user_id=42,
         reject_if_file_active=True,
+        admitted_bytes=1,
     )
 
     assert admitted["accepted"] is True
@@ -2217,6 +2222,7 @@ async def _refuses_a_second_upload_of_file_1(manager: Any) -> bool:
         metadata={},
         user_id=42,
         reject_if_file_active=True,
+        admitted_bytes=1,
     )
     if outcome["accepted"]:
         return False
@@ -2408,7 +2414,9 @@ async def _orphaned_queued_task_for_file_1(
 ) -> _FakeWorkerRef:
     """task-1 sent to worker actor ``w1``, never started, and its owner died."""
     worker_ref = _FakeWorkerRef()
-    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    await manager.set_queued_details_v2(
+        "task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42, admitted_bytes=1
+    )
     registration: dict[str, Any] = {"ref": worker_ref, task_state_module.WORKER_ACTOR_ID_KEY: "w1"}
     if restarts_at_submission is not None:
         registration[task_state_module.WORKER_RESTARTS_KEY] = restarts_at_submission
@@ -2815,3 +2823,250 @@ def test_reads_hold_while_any_timed_out_read_is_still_running(stalled_gcs) -> No
 
     assert task_state_module.read_worker_actor_state("w3") is None
     assert stalled_gcs.reads == ["w1", "w2"]
+
+
+@pytest.mark.asyncio
+async def test_upload_renewal_reports_delete_after_reservation(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_save_file_delete_fences", lambda _fences: None)
+    manager = _task_state_manager()
+    accepted = await manager.reserve_upload_admission(
+        "upload-1", file_id="file-1", partition="tenant-a", admitted_bytes=1
+    )
+    assert accepted["accepted"] is True
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
+
+    assert (await manager.renew_upload_admission_v2("upload-1"))["reason"] == (
+        task_state_module.QUEUE_REFUSED_FILE_DELETING
+    )
+    assert await manager.renew_upload_admission("upload-1") is False
+    refused = await manager.set_queued_details_v2(
+        "upload-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=1,
+        require_upload_reservation=True,
+    )
+    assert refused["reason"] == task_state_module.QUEUE_REFUSED_FILE_DELETING
+    refused = await manager.reserve_upload_admission(
+        "upload-2",
+        file_id="file-1",
+        partition="tenant-a",
+        admitted_bytes=1,
+    )
+    assert refused["reason"] == task_state_module.QUEUE_REFUSED_FILE_DELETING
+    assert (await manager.renew_upload_admission_v2("missing"))["reason"] == (
+        task_state_module.QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_admission_enforces_count_and_bytes_and_releases_capacity() -> None:
+    manager = _task_state_manager()
+
+    async def reserve(task_id, size, *, max_tasks=2, max_bytes=10):
+        return await manager.reserve_upload_admission(
+            task_id,
+            file_id=task_id,
+            partition="tenant-a",
+            admitted_bytes=size,
+            max_admitted_tasks=max_tasks,
+            max_admitted_bytes=max_bytes,
+        )
+
+    assert (await reserve("first", 4))["accepted"]
+    assert (await reserve("second", 4))["accepted"]
+    assert (await reserve("third", 1))["reason"] == task_state_module.QUEUE_REFUSED_INDEXING_ADMISSION
+    assert await manager.release_upload_admission("first")
+    assert (await reserve("third", 7))["reason"] == task_state_module.QUEUE_REFUSED_INDEXING_ADMISSION
+    assert (await reserve("too-large", 11))["reason"] == task_state_module.QUEUE_REFUSED_INDEXING_FILE_TOO_LARGE
+    assert (await reserve("third", 6))["accepted"]
+    queued = await manager.set_queued_details_v2(
+        "third", file_id="third", partition="tenant-a", metadata={}, user_id=1, require_upload_reservation=True
+    )
+    assert queued["accepted"]
+    assert not await manager.release_upload_admission("third")
+    assert (await reserve("fourth", 1))["reason"] == task_state_module.QUEUE_REFUSED_INDEXING_ADMISSION
+
+
+@pytest.mark.asyncio
+async def test_expired_upload_reservation_cannot_transfer_and_releases_capacity(clock) -> None:
+    manager = _task_state_manager()
+    assert (
+        await manager.reserve_upload_admission(
+            "old", file_id="old", partition="tenant-a", admitted_bytes=4, max_admitted_tasks=1, max_admitted_bytes=4
+        )
+    )["accepted"]
+    clock.now += task_state_module._UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS + 1
+    result = await manager.set_queued_details_v2(
+        "old", file_id="old", partition="tenant-a", metadata={}, user_id=1, require_upload_reservation=True
+    )
+    assert result["reason"] == task_state_module.QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED
+    assert (
+        await manager.reserve_upload_admission(
+            "new", file_id="new", partition="tenant-a", admitted_bytes=4, max_admitted_tasks=1, max_admitted_bytes=4
+        )
+    )["accepted"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["COMPLETED", "FAILED"])
+async def test_terminal_task_holds_admission_until_worker_cleanup(monkeypatch, state) -> None:
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 0)
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    manager.tasks["task-1"].admitted_bytes = 4
+    manager.tasks["task-1"].worker_submitted = True
+    await manager.set_state("task-1", state)
+
+    result = await manager.reserve_upload_admission(
+        "task-2",
+        file_id="file-2",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert result["reason"] == task_state_module.QUEUE_REFUSED_INDEXING_ADMISSION
+    assert "task-1" in manager.tasks
+    await manager.end_worker_lease("task-1")
+    result = await manager.reserve_upload_admission(
+        "task-2",
+        file_id="file-2",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert result["accepted"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_admission_is_restored_after_actor_restart(monkeypatch) -> None:
+    worker_ref = _FakeWorkerRef()
+    info = TaskInfo(
+        state="COMPLETED",
+        details={"file_id": "first", "partition": "tenant-a", "metadata": {TASK_FINISHED_AT_METADATA_KEY: "done"}},
+        object_ref={"ref": worker_ref},
+        worker_submitted=True,
+        admitted_bytes=4,
+    )
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: ({"first": info}, {}))
+    manager = _task_state_manager()
+    result = await manager.reserve_upload_admission(
+        "second",
+        file_id="second",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert result["reason"] == task_state_module.QUEUE_REFUSED_INDEXING_ADMISSION
+    worker_ref.settle(None)
+    result = await manager.reserve_upload_admission(
+        "second",
+        file_id="second",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert result["accepted"]
+
+
+@pytest.mark.asyncio
+async def test_stale_submission_releases_admission_after_fence_expires(clock) -> None:
+    manager = _task_state_manager()
+    queued = await manager.set_queued_details_v2(
+        "stale",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=1,
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert queued["accepted"]
+    assert await manager.begin_worker_submission("stale")
+    clock.now += task_state_module._CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS + 1
+    assert await manager.expire_refless_task_if_stale("stale")
+    await _mark_job_outcome_persisted(manager, "stale")
+    result = await manager.reserve_upload_admission(
+        "next",
+        file_id="file-2",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert result["reason"] == task_state_module.QUEUE_REFUSED_INDEXING_ADMISSION
+    clock.now += (
+        max(
+            task_state_module._CANCELLATION_TOMBSTONE_TTL_SECONDS,
+            task_state_module._TERMINAL_TASK_RETENTION_SECONDS,
+        )
+        + 1
+    )
+    result = await manager.reserve_upload_admission(
+        "next",
+        file_id="file-2",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert result["accepted"]
+
+
+def test_terminal_worker_admission_survives_kv_round_trip(monkeypatch) -> None:
+    from ray.experimental import internal_kv
+
+    storage: dict[bytes, bytes] = {}
+    monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
+    monkeypatch.setattr(task_state_module, "_task_state_kv_namespace", lambda: b"test")
+    monkeypatch.setattr(internal_kv, "_internal_kv_list", lambda *_args, **_kwargs: list(storage))
+    monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda key, **_kwargs: storage.get(key))
+    monkeypatch.setattr(internal_kv, "_internal_kv_put", lambda key, value, **_kwargs: storage.__setitem__(key, value))
+    monkeypatch.setattr(internal_kv, "_internal_kv_del", lambda key, **_kwargs: storage.pop(key, None))
+    info = TaskInfo(
+        state="COMPLETED",
+        details={"metadata": {TASK_FINISHED_AT_METADATA_KEY: "done"}},
+        object_ref={"ref": _FakeWorkerRef()},
+        worker_submitted=True,
+        admitted_bytes=4,
+    )
+
+    task_state_module._save_recoverable_task("task-1", info)
+    restored, _ = task_state_module._load_recoverable_tasks()
+    assert task_state_module._task_reserves_admission(restored["task-1"])
+    assert restored["task-1"].admitted_bytes == 4
+
+
+@pytest.mark.asyncio
+async def test_failed_worker_without_ref_holds_capacity_only_until_lease_expires(clock) -> None:
+    manager = _task_state_manager()
+    queued = await manager.set_queued_details_v2(
+        "first",
+        file_id="first",
+        partition="tenant",
+        metadata={},
+        user_id=1,
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert queued["accepted"]
+    assert await manager.begin_worker_submission("first")
+    assert await manager.renew_worker_lease("first")
+    assert await manager.set_failed_if_not_cancelled("first", "Pool lost before registering worker reference")
+    for expected in (False, True):
+        outcome = await manager.reserve_upload_admission(
+            "second",
+            file_id="second",
+            partition="tenant",
+            admitted_bytes=4,
+        )
+        assert outcome["accepted"] is expected
+        clock.now += manager._worker_lease_ttl_seconds + 1

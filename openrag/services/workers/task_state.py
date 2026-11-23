@@ -294,6 +294,7 @@ def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
         or info.state == _UPLOAD_RESERVED_STATE
         or _is_fenced_failure(info)
         or _job_outcome_requires_persistence(info)
+        or _terminal_worker_holds_admission(info)
     ):
         snapshot, expires_at = _recovery_snapshot(info)
         _internal_kv_put(
@@ -402,6 +403,23 @@ def _job_outcome_requires_persistence(info: TaskInfo) -> bool:
     )
 
 
+def _terminal_worker_holds_admission(info: TaskInfo) -> bool:
+    if info.state not in TERMINAL_TASK_STATES or getattr(info, "worker_finished", False):
+        return False
+    ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
+    if ref is not None:
+        return not _worker_ref_has_settled(info)
+    if _is_fenced_failure(info):
+        return False
+    if getattr(info, "worker_started", False) or getattr(info, "worker_submitted", False):
+        return _worker_lease_is_live(info)
+    submission_started_at = getattr(info, "submission_started_at", None)
+    return (
+        isinstance(submission_started_at, (int, float))
+        and time.time() < submission_started_at + _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS
+    )
+
+
 def _task_reserves_admission(info: TaskInfo) -> bool:
     """Whether this task can still occupy a worker or touch its source file."""
     return (
@@ -409,6 +427,7 @@ def _task_reserves_admission(info: TaskInfo) -> bool:
         or info.state in CANCELLABLE_INDEXING_STATES
         or (info.state == "CANCELLED" and _cancelled_task_has_worker_fence(info))
         or _is_fenced_failure(info)
+        or _terminal_worker_holds_admission(info)
     )
 
 
@@ -794,6 +813,10 @@ class TaskStateManager:
                 continue
             info = self.tasks.get(task_id)
             if info is not None and _job_outcome_pending(info):
+                self.terminal_tasks.move_to_end(task_id)
+                examined += 1
+                continue
+            if info is not None and _terminal_worker_holds_admission(info):
                 self.terminal_tasks.move_to_end(task_id)
                 examined += 1
                 continue
@@ -1200,6 +1223,7 @@ class TaskStateManager:
         """Reserve shared count and byte capacity before an upload is copied to disk."""
         with self.lock:
             self._expire_upload_reservations_locked()
+            self._evict_terminal_tasks_locked()
             existing = self.tasks.get(task_id)
             if existing is not None:
                 details = existing.details or {}
@@ -1278,23 +1302,30 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def renew_upload_admission(self, task_id: str) -> bool:
-        """Keep a live upload's admission reservation until queue transfer."""
+        """Keep compatibility with callers expecting a Boolean renewal result."""
+        return self._renew_upload_admission_locked(task_id)["accepted"]
+
+    @ray.method(concurrency_group="set")
+    async def renew_upload_admission_v2(self, task_id: str) -> dict[str, Any]:
+        """Renew the reservation and preserve the reason for refusal."""
+        return self._renew_upload_admission_locked(task_id)
+
+    def _renew_upload_admission_locked(self, task_id: str) -> dict[str, Any]:
         with self.lock:
             self._expire_upload_reservations_locked()
             info = self.tasks.get(task_id)
             if info is None:
-                return False
+                return _queue_refused(QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED)
             if info.state != _UPLOAD_RESERVED_STATE:
-                # Queue transfer won the race with this renewal. The request no
-                # longer owns a temporary reservation, but its task was admitted.
-                if info.state == DocumentStatus.CANCELLED:
-                    return info.admission_reservation_expires_at is None
-                return True
+                # Queue transfer may have won the race with renewal.
+                if info.state == DocumentStatus.CANCELLED and info.admission_reservation_expires_at is not None:
+                    return _queue_refused(QUEUE_REFUSED_CANCELLED)
+                return {"accepted": True, "reason": None, "existing_task_id": None}
             if getattr(info, "admission_reservation_cancelled", False):
-                return False
+                return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
             info.admission_reservation_expires_at = time.time() + _UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS
             self._persist_task_locked(task_id, info)
-            return True
+            return {"accepted": True, "reason": None, "existing_task_id": None}
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(

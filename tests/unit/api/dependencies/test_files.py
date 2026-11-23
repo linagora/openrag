@@ -325,3 +325,22 @@ async def test_validate_file_format_rejects_a_zip_renamed_docx():
         await files_dep.validate_file_format(file=upload, metadata={}, config=_StubConfig)
 
     assert exc_info.value.status_code == 415
+
+
+@pytest.mark.parametrize("upload_mb", ["0", "-1", "3", "invalid"])
+def test_invalid_upload_admission_settings_fail_at_startup(monkeypatch, upload_mb):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", upload_mb)
+    config = SimpleNamespace(ray=SimpleNamespace(indexer=SimpleNamespace(max_admitted_bytes=2 * 1024 * 1024)))
+    with pytest.raises(ValueError, match="MAX_UPLOAD_SIZE_MB"):
+        files_dep.validate_upload_admission_config(config)
+
+
+@pytest.mark.parametrize("upload_mb", ["1", "2"])
+def test_upload_admission_accepts_a_file_limit_within_the_shared_budget(monkeypatch, upload_mb):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", upload_mb)
+    config = SimpleNamespace(ray=SimpleNamespace(indexer=SimpleNamespace(max_admitted_bytes=2 * 1024 * 1024)))
+    files_dep.validate_upload_admission_config(config)

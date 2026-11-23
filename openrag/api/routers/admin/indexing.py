@@ -29,7 +29,6 @@ from api.dependencies.auth import (
     require_task_owner,
 )
 from api.dependencies.files import (
-    max_upload_size_bytes,
     save_file_to_disk,
     save_file_to_disk_with_sha256,
     validate_file_format,
@@ -117,17 +116,6 @@ def _uploaded_file_size_bytes(file: UploadFile) -> int:
             code="INDEXING_ADMISSION_SIZE_UNAVAILABLE",
         ) from exc
     return max(0, int(size))
-
-
-def _validate_upload_limit_within_admission(config) -> None:
-    """Keep legacy queue callers' maximum file size within the shared byte cap."""
-    max_upload_bytes = max_upload_size_bytes()
-    max_admitted_bytes = config.ray.indexer.max_admitted_bytes
-    if max_upload_bytes <= 0 or max_upload_bytes > max_admitted_bytes:
-        raise ServiceUnavailableError(
-            "MAX_UPLOAD_SIZE_MB must be finite and no larger than RAY_MAX_ADMITTED_BYTES.",
-            code="INDEXING_ADMISSION_CONFIG_INVALID",
-        )
 
 
 def _validate_callback_url(callback_url: str | None, config) -> None:
@@ -344,7 +332,6 @@ async def add_file(
 
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    _validate_upload_limit_within_admission(config)
     reservation_id = await service.reserve_upload_admission(
         file_id=file_id,
         partition=partition,
@@ -531,7 +518,6 @@ async def put_file(
     # duplicates behind (recoverable; #658/#660 reconciliation covers that).
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    _validate_upload_limit_within_admission(config)
     reservation_id = await service.reserve_upload_admission(
         file_id=file_id,
         partition=partition,
