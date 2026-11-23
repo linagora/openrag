@@ -261,6 +261,38 @@ def test_split_caption_never_ends_on_its_own_heading():
         assert not last.lstrip().startswith("#"), f"heading stranded at chunk end: {last!r}"
 
 
+def test_public_chunker_keeps_merged_text_within_character_limit(monkeypatch):
+    document = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="beta\n\nx\n\n😀", page_number=1)],
+        metadata={},
+    )
+    chunker = _chunker(chunk_size=25, hard_max_tokens=8, length_function=len, layout="flowing")
+    original_merge = chunker._merge_small
+    merge_calls = []
+
+    def record_merge(units, filename):
+        merge_calls.append(True)
+        return original_merge(units, filename)
+
+    monkeypatch.setattr(chunker, "_merge_small", record_merge)
+    chunks = chunker.chunk(document)
+
+    assert merge_calls
+    assert all(chunk.token_count == len(chunk.text) <= 8 for chunk in chunks)
+    assert [word for chunk in chunks for word in chunk.content.split()] == ["beta", "x", "😀"]
+
+
+def test_merge_small_counts_joiners_and_updates_token_count():
+    chunker = _chunker(chunk_size=25, hard_max_tokens=8, length_function=len, layout="flowing")
+    units = [_Unit([], text, len(text), pages={1}) for text in ("beta", "x", "😀")]
+
+    merged = chunker._merge_small(units, "")
+
+    assert [unit.text for unit in merged] == ["beta\n\nx", "😀"]
+    assert all(unit.tokens == len(unit.text) <= 8 for unit in merged)
+
+
 def test_greedy_split_does_not_rehome_heading_past_max_tokens():
     pieces = _greedy_split("alpha beta\n\n### Heading\n\ngamma delta", 2, 2, _words)
 

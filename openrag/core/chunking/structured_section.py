@@ -434,7 +434,7 @@ class StructuredSectionChunker(BaseChunker):
         """
         if not units:
             return None
-        total = sum(u.tokens for u in units) + 2 * (len(units) - 1)
+        total = self.length_function("\n\n".join(u.text for u in units).strip())
         path = units[0].heading_path
         for unit in units[1:]:
             path = _common_prefix(path, unit.heading_path)
@@ -450,7 +450,7 @@ class StructuredSectionChunker(BaseChunker):
         merged = _copy_unit(units[0])
         merged.heading_path = list(path)
         for unit in units[1:]:
-            _absorb(merged, unit, path=path)
+            _absorb(merged, unit, self.length_function, path=path)
         merged.tokens = total
         return [merged]
 
@@ -710,10 +710,10 @@ class StructuredSectionChunker(BaseChunker):
                 continue
             if cur is None:
                 cur = _copy_unit(unit)
-            elif cur.heading_path == unit.heading_path and cur.tokens + unit.tokens <= self._packing_budget(
+            elif cur.heading_path == unit.heading_path and self.length_function(f"{cur.text}\n\n{unit.text}".strip()) <= self._packing_budget(
                 filename, cur.heading_path, cur.pages | unit.pages
             ):
-                _absorb(cur, unit)
+                _absorb(cur, unit, self.length_function)
             else:
                 out.append(cur)
                 cur = _copy_unit(unit)
@@ -918,7 +918,7 @@ class StructuredSectionChunker(BaseChunker):
                     # the section from both the header and ``hierarchy_path``,
                     # where it becomes unreachable by dense and sparse search
                     # alike (BM25 is declared over ``text`` only).
-                    _absorb(prev, unit, path=merged_path or prev.heading_path or unit.heading_path)
+                    _absorb(prev, unit, self.length_function, path=merged_path or prev.heading_path or unit.heading_path)
                     continue
             out.append(_copy_unit(unit))
         return out
@@ -953,7 +953,9 @@ class StructuredSectionChunker(BaseChunker):
         # this strategy exists to remove, arriving through the merge pass.
         if _is_headings_only(unit, self._is_heading_line):
             return False
-        if prev.tokens + unit.tokens > self._effective_max(filename, merged_path, prev.pages | unit.pages):
+        if self.length_function(f"{prev.text}\n\n{unit.text}".strip()) > self._effective_max(
+            filename, merged_path, prev.pages | unit.pages
+        ):
             return False
         if prev.pages & unit.pages and _keeps_context(prev.heading_path, unit.heading_path):
             return True
@@ -1104,9 +1106,11 @@ def _copy_unit(unit: _Unit) -> _Unit:
     )
 
 
-def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
+def _absorb(
+    cur: _Unit, unit: _Unit, length_function: Callable[[str], int], *, path: list[str] | None = None
+) -> None:
     cur.text = f"{cur.text}\n\n{unit.text}".strip()
-    cur.tokens = cur.tokens + unit.tokens
+    cur.tokens = length_function(cur.text)
     cur.pages |= unit.pages
     if unit.chunk_type is not ChunkType.TEXT and cur.chunk_type is ChunkType.TEXT:
         cur.chunk_type = unit.chunk_type
@@ -1239,14 +1243,21 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
     def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
         out: list[str] = []
         buf: list[str] = []
+        char_count = 0
         for item in items:
             it = length_function(item)
-            if buf and length_function(joiner.join([*buf, item])) > packing_target:
+            if length_function is len:
+                candidate_size = char_count + (len(joiner) if buf else 0) + it
+            else:
+                candidate_size = length_function(joiner.join([*buf, item])) if buf else it
+            if buf and candidate_size > packing_target:
                 out.append(joiner.join(buf))
                 buf = []
+                char_count = 0
             if it > max_tokens and not buf:
                 out.extend(descend(item, levels))
                 continue
+            char_count += (len(joiner) if buf else 0) + len(item)
             buf.append(item)
         if buf:
             out.append(joiner.join(buf))
