@@ -25,9 +25,17 @@ def _load_app_front(monkeypatch, *, auth_mode: str, module_name: str):
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
     monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
 
-    spec = importlib.util.spec_from_file_location(module_name, _FIX_SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    from chainlit.config import CodeSettings, config
+
+    saved_code = config.code
+    config.code = CodeSettings(action_callbacks={})
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, _FIX_SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._registered_chainlit_code = config.code
+    finally:
+        config.code = saved_code
     return module
 
 
@@ -111,6 +119,10 @@ async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_ch
         return [], []
 
     module.cl = SimpleNamespace(user_session=UserSession(), Step=Step, Message=Message)
+    runtime_session = SimpleNamespace(id="shared-chat-policy-test")
+    monkeypatch.setitem(module.user_sessions, runtime_session.id, module.cl.user_session.values)
+    monkeypatch.setattr(module, "get_context", lambda: SimpleNamespace(session=runtime_session))
+    setattr(runtime_session, module._WORKSPACE_RUNTIME_READY_ATTRIBUTE, module._workspace_runtime_state())
     monkeypatch.setattr(module, "AsyncOpenAI", FakeAsyncOpenAI)
     monkeypatch.setattr(module, "_format_sources", capture_sources)
 
@@ -149,21 +161,23 @@ def test_token_mode_keeps_chainlit_password_login(monkeypatch):
     """Token mode keeps manual login while allowing Admin UI handoff."""
     from chainlit.config import config
 
-    monkeypatch.setattr(config.code, "header_auth_callback", None)
-    monkeypatch.setattr(config.code, "password_auth_callback", None)
+    original_code = config.code
 
-    _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_mode_test")
+    def existing_callback(_headers):
+        return None
 
-    assert config.code.header_auth_callback is not None
-    assert config.code.password_auth_callback is not None
+    monkeypatch.setattr(original_code, "header_auth_callback", existing_callback)
+
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_mode_test")
+
+    assert config.code is original_code
+    assert config.code.header_auth_callback is existing_callback
+    assert callable(module._registered_chainlit_code.header_auth_callback)
+    assert callable(module._registered_chainlit_code.password_auth_callback)
 
 
 @pytest.mark.asyncio
 async def test_token_mode_header_auth_accepts_chainlit_handoff_cookie(monkeypatch):
-    from chainlit.config import config
-
-    monkeypatch.setattr(config.code, "header_auth_callback", None)
-    monkeypatch.setattr(config.code, "password_auth_callback", None)
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_handoff_test")
 
     async def fake_load_user_info(_client, api_key):
@@ -181,7 +195,9 @@ async def test_token_mode_header_auth_accepts_chainlit_handoff_cookie(monkeypatc
     monkeypatch.setattr(module, "_load_user_info", fake_load_user_info)
     monkeypatch.setattr(module, "_load_openrag_model_ids_for_metadata", fake_load_model_ids)
 
-    user = await config.code.header_auth_callback({"cookie": f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=or-user-token"})
+    user = await module._registered_chainlit_code.header_auth_callback(
+        {"cookie": f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=or-user-token"}
+    )
 
     assert user.identifier == "Token User"
     assert user.metadata["provider"] == "credentials"
@@ -337,6 +353,9 @@ async def test_chat_start_handles_expired_handoff_without_exception_log(monkeypa
     )
     module.logger = logger
     module.cl = SimpleNamespace(user_session=UserSession(), Message=Message)
+    runtime_session = SimpleNamespace(id="chat-start-expired-handoff-test")
+    monkeypatch.setitem(module.user_sessions, runtime_session.id, module.cl.user_session.values)
+    monkeypatch.setattr(module, "get_context", lambda: SimpleNamespace(session=runtime_session))
     monkeypatch.setattr(
         module,
         "_current_openrag_api_key",
@@ -755,6 +774,13 @@ async def test_chainlit_keeps_source_names_unique_after_sanitizing(monkeypatch):
         ("report.pdf (page: 3)", "report.pdf (page: 3)"),
         ("C++_style_guide.pdf", "C++_style_guide.pdf"),
         ("report=final.pdf", "report=final.pdf"),
+        ("PROGRA~1.pdf", "PROGRA~1.pdf"),
+        ("cost ~5 or ~10", "cost ~5 or ~10"),
+        ("~*draft~", "~ draft~"),
+        ("v1~~~v2.pdf", "v1~~~v2.pdf"),
+        ("12:30 meeting.pdf", "12:30 meeting.pdf"),
+        ("std::vector.pdf", "std::vector.pdf"),
+        ("https://example.test/a", "https://example.test/a"),
     ],
 )
 def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_name, expected):
@@ -771,6 +797,12 @@ def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_nam
         ("__trusted__", "trusted"),
         ("foo _trusted_ bar", "foo trusted bar"),
         ("~~irrelevant~~", "irrelevant"),
+        ("~draft~ notes.pdf", "draft notes.pdf"),
+        ("a~b~c.pdf", "a b c.pdf"),
+        ("~a ~~b~ c~~", "a b c"),
+        ("a﻿~~!draft~~.pdf", "a﻿ !draft .pdf"),
+        ("AWS re:Invent 2025 recap", "AWS re: Invent 2025 recap"),
+        (":draft notes.pdf", ": draft notes.pdf"),
         ("# Trusted source", "Trusted source"),
         ("1. Official result", "Official result"),
         ("- Search result", "Search result"),
@@ -978,7 +1010,14 @@ def test_app_front_raises_when_secret_missing(monkeypatch):
     for mod in [m for m in sys.modules if m == "app_front" or m.endswith(".app_front")]:
         sys.modules.pop(mod, None)
 
-    spec = importlib.util.spec_from_file_location("app_front_test", _FIX_SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    with pytest.raises(RuntimeError, match="CHAINLIT_AUTH_SECRET"):
-        spec.loader.exec_module(module)
+    from chainlit.config import CodeSettings, config
+
+    saved_code = config.code
+    config.code = CodeSettings(action_callbacks={})
+    try:
+        spec = importlib.util.spec_from_file_location("app_front_test", _FIX_SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        with pytest.raises(RuntimeError, match="CHAINLIT_AUTH_SECRET"):
+            spec.loader.exec_module(module)
+    finally:
+        config.code = saved_code

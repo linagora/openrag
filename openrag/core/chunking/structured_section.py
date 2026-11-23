@@ -45,6 +45,7 @@ from core.chunking.markdown_utils import (
     MDElement,
     attach_captions,
     chunk_table,
+    chunk_xlsx_chart,
     split_md_elements,
 )
 from core.chunking.recursive import (
@@ -57,6 +58,7 @@ from core.chunking.recursive import (
 from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
+from core.utils.consts import XLSX_TEXT_CONTENT_KINDS
 from core.utils.text import sanitize_text
 
 # Markdown ATX heading: ``## Title``. Level = number of ``#``.
@@ -300,7 +302,21 @@ class StructuredSectionChunker(BaseChunker):
         filename = str(metadata.get("filename") or metadata.get("source") or "")
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
-        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells":
+        if metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") == "chart":
+            # Pre-sized pieces, each opening with the chart context (see
+            # chunk_xlsx_chart); prose units would leave rows without it.
+            units = [
+                self._atomic_unit(MDElement(type="table", content=piece, metadata=metadata), [], 1)
+                # Sized like any packed chunk: the target less the source header,
+                # within the ceiling even when hard_max_tokens lowered it.
+                for piece in chunk_xlsx_chart(
+                    content, metadata, self._packing_budget(filename, [], {1}), self.length_function
+                )
+            ]
+        elif (
+            metadata.get("tabular_format") == "xlsx"
+            and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
+        ):
             units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
         else:
             units = self._page_units(content) if paginated else self._build_units(content)
@@ -325,7 +341,10 @@ class StructuredSectionChunker(BaseChunker):
         # metadata under it would bring back keys the unit dropped (whole-table
         # formula/format groups, a detached worksheet context, table columns on
         # a worksheet-note chunk).
-        xlsx_table = metadata.get("tabular_format") == "xlsx" and metadata.get("xlsx_content_kind") != "cells"
+        xlsx_table = (
+            metadata.get("tabular_format") == "xlsx"
+            and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
+        )
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
             base = unit.metadata if xlsx_table and unit.metadata else metadata

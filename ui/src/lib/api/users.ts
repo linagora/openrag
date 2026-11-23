@@ -21,6 +21,8 @@ export interface UserResponse {
   file_quota: number | null;
   file_count?: number | null;
   created_at: string | null;
+  /** Only returned by GET /users/{id}, not by the list endpoint. */
+  memberships?: UserMembership[];
 }
 
 /** create and regenerate_token also return the one-time bearer token. */
@@ -99,6 +101,37 @@ export function updateUser(id: string | number, data: UserUpdateRequest) {
 
 export function deleteUser(id: string | number) {
   return request<void>(`${BASE}/${id}`, { method: "DELETE" });
+}
+
+// The backend never deletes the default partition: a user who owns it only
+// loses their membership, and the default admin becomes its owner.
+const DEFAULT_PARTITION = "default";
+
+/** Confirmation text for deleting a user. Deleting a user deletes every
+ *  partition where they hold the owner role (even if others own it too), with
+ *  its documents. Pass `memberships` to name those partitions; without them the
+ *  text stays generic. */
+export function deleteUserDescription(label: string, memberships?: UserMembership[]): string {
+  // The cascade sentence is always shown: the names below are a snapshot from
+  // when the dialog opened, and DELETE removes whatever they own at that time.
+  const parts = [
+    `Permanently delete "${label}"?`,
+    "Every partition they own is deleted too, with all its documents, even if it has other owners (the default partition is kept).",
+  ];
+  if (memberships) {
+    const owned = memberships.filter((m) => m.role === "owner").map((m) => m.partition);
+    const deleted = owned.filter((p) => p !== DEFAULT_PARTITION);
+    parts.push(
+      deleted.length === 0
+        ? "Right now they own no such partition."
+        : `Right now that is: ${deleted.join(", ")}.`,
+    );
+    if (owned.includes(DEFAULT_PARTITION)) {
+      parts.push("They own the default partition, so the default admin becomes its owner.");
+    }
+  }
+  parts.push("They lose access to every other partition, and their token stops working.");
+  return parts.join(" ");
 }
 
 // One rotating bearer token per user; regenerating invalidates the old one.
