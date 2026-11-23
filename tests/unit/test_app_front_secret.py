@@ -167,7 +167,7 @@ async def test_the_model_s_thinking_and_tool_calls_are_shown_as_steps_before_the
         _delta(reasoning_content="search."),
         _event(type="tool_call", id="c1", tool="search_knowledge", arguments={"queries": ["préavis"]}),
         _event(type="tool_result", id="c1", tool="search_knowledge", status="ok", summary="10 excerpts."),
-        _delta(reasoning="Found it."),  # OpenRouter's key
+        _delta(reasoning="Found it."),  # vLLM's and OpenRouter's key
         _delta("Three "),
         _delta("months."),
         SimpleNamespace(extra={"cited_sources": [{"filename": "contract.pdf"}]}, choices=[]),

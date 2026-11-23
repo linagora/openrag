@@ -1,7 +1,8 @@
 """Progress in an answer's stream: what the client is shown before and between the answer's text.
 
-A thinking model streams its reasoning as ``delta.reasoning_content`` (vLLM,
-DeepSeek, Moonshot) or ``delta.reasoning`` (OpenRouter). In ``agentic`` the
+A thinking model streams its reasoning as ``delta.reasoning`` (vLLM, OpenRouter)
+or ``delta.reasoning_content`` (DeepSeek, Moonshot, and vLLM before it renamed
+the field). In ``agentic`` the
 agent adds an ``extra.agent_step`` event when a tool call starts and another
 when it ends. Neither is answer text: they reach the client as they come, the
 citation filter leaves them alone, and the empty-answer retry does not hold
