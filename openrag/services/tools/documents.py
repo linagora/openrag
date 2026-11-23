@@ -55,9 +55,10 @@ _SEARCH_KNOWLEDGE = (
 _SEARCH_FILE = "Search inside one file, named by the partition and file id shown with a source."
 _READ_PASSAGE = "Read a [Source N] in full, with the passages around it in its file, in reading order."
 _SUMMARIZE = (
-    'Only for a question about a file as a whole, e.g. "what is this report about?": summarizes the file '
-    "(partition and file id), or the [Source N] of its passages. For any other question, read the passages "
-    "instead. Returns the relevant ones as short summaries, each under its [Source N]."
+    'Only for a question about a file as a whole, e.g. "what is this report about?". Condenses the passages '
+    "of a file (partition and file id) that best match the question, or the [Source N] given: returns the "
+    "relevant ones as short summaries, each under its [Source N]. For any other question, read the passages "
+    "instead."
 )
 
 #: Sources ``summarize`` takes in one call.
