@@ -230,6 +230,8 @@ async def test_html_parser_preserves_content_around_table_with_bare_col():
     assert "Table summary" in text
     assert "unique-cell-value" in text
     assert "apr\u00e8s" in text
+
+
 @pytest.mark.asyncio
 async def test_html_parser_preserves_unicode_attribute_values_with_caption():
     html = (
