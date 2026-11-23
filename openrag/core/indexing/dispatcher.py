@@ -20,6 +20,7 @@ plain dicts and strings.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -65,6 +66,7 @@ class IndexingDispatcher(ABC):
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
         task_id: str | None = None,
+        on_admission_transferred: Callable[[], None] | None = None,
     ) -> str:
         """Queue an (re)indexing job, register its task state, return its id.
 

@@ -687,6 +687,8 @@ class TaskStateManager:
         self.terminal_tasks: OrderedDict[str, float] = OrderedDict()
         now = time.time()
         for task_id, info in self.tasks.items():
+            if info.state != _UPLOAD_RESERVED_STATE:
+                info.worker_lease_expires_at = now + worker_lease_ttl_seconds
             # Older snapshots do not carry source size. Charge them the full
             # budget so a rollout cannot admit another large file beside work
             # whose memory footprint is unknown.
@@ -702,7 +704,6 @@ class TaskStateManager:
                 continue
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
             read_ref_when_settled(info.object_ref)
-            info.worker_lease_expires_at = now + worker_lease_ttl_seconds
             if info.state not in TERMINAL_TASK_STATES:
                 continue
             if _job_outcome_requires_persistence(info):
@@ -1446,9 +1447,12 @@ class TaskStateManager:
         previous_admitted = previous is not None and _task_reserves_admission(previous)
         active_count = len(active_tasks) - int(previous_admitted)
         active_bytes = sum(max(0, int(getattr(existing, "admitted_bytes", 0) or 0)) for existing in active_tasks)
+        has_upload_reservation = previous is not None and previous.state == _UPLOAD_RESERVED_STATE
+        previous_bytes = max(0, int(getattr(previous, "admitted_bytes", 0) or 0)) if previous_admitted else 0
         if previous_admitted:
-            admitted_bytes = max(0, int(getattr(previous, "admitted_bytes", 0) or 0))
-            active_bytes -= admitted_bytes
+            active_bytes -= previous_bytes
+            if not has_upload_reservation:
+                admitted_bytes = previous_bytes
 
         # A changed deployment may lower its admission cap while work is live.
         # Keep the tighter cap until this shared actor has drained, then adopt
@@ -1464,21 +1468,22 @@ class TaskStateManager:
         # byte budget prevents that compatibility path from bypassing weighted
         # admission; it runs alone until it settles.
         if admitted_bytes is None:
-            admitted_bytes = self._admission_max_bytes
+            admitted_bytes = previous_bytes if has_upload_reservation else self._admission_max_bytes
         else:
             admitted_bytes = max(0, int(admitted_bytes))
 
-        if not previous_admitted and admitted_bytes > self._admission_max_bytes:
+        admission_size_changed = not previous_admitted or has_upload_reservation
+        if admission_size_changed and admitted_bytes > self._admission_max_bytes:
             if info is not previous:
                 self.tasks.pop(task_id, None)
                 self.terminal_tasks.pop(task_id, None)
             return _queue_refused(QUEUE_REFUSED_INDEXING_FILE_TOO_LARGE)
-        if not previous_admitted and active_count >= self._admission_max_tasks:
+        if admission_size_changed and active_count >= self._admission_max_tasks:
             if info is not previous:
                 self.tasks.pop(task_id, None)
                 self.terminal_tasks.pop(task_id, None)
             return _queue_refused(QUEUE_REFUSED_INDEXING_ADMISSION)
-        if not previous_admitted and active_bytes + admitted_bytes > self._admission_max_bytes:
+        if admission_size_changed and active_bytes + admitted_bytes > self._admission_max_bytes:
             if info is not previous:
                 self.tasks.pop(task_id, None)
                 self.terminal_tasks.pop(task_id, None)

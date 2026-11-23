@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import type { Action } from "sonner";
 import { listPartitionFiles } from "@/lib/api/documents";
 import { ApiError } from "@/lib/api/client";
-import { deleteFile, uploadFile } from "@/lib/api/indexing";
+import { deleteFile, newFileId, uploadFile } from "@/lib/api/indexing";
 import { listModelEndpoints } from "@/lib/api/models";
 import { listPartitions } from "@/lib/api/partitions";
 import { getQueueInfo, type QueueInfo } from "@/lib/api/jobs";
@@ -362,6 +362,7 @@ describe("DocumentListPage", () => {
   });
 
   it("waits and retries an upload when admission is full", async () => {
+    vi.mocked(newFileId).mockClear();
     uploadFileMock
       .mockRejectedValueOnce(new ApiError(429, { detail: "[INDEXING_ADMISSION_FULL]: Busy" }, "0.05"))
       .mockResolvedValueOnce({ task_status_url: "/queue/task-1" });
@@ -373,6 +374,7 @@ describe("DocumentListPage", () => {
     expect(await screen.findByText("waiting.txt is waiting for capacity. Retrying automatically.")).toBeTruthy();
     await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(2));
     expect(uploadFileMock.mock.calls[0][1]).toBe(uploadFileMock.mock.calls[1][1]);
+    expect(newFileId).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(toastSuccessMock).toHaveBeenCalled());
   });
 

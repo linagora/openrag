@@ -13,7 +13,7 @@ endpoints returned via ``HTTPException``.
 
 import asyncio
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -66,26 +66,48 @@ logger = get_logger()
 _UPLOAD_ADMISSION_RENEW_INTERVAL_SECONDS = 60.0
 
 
-async def _renew_upload_admission_until_transferred(service, reservation_id: str) -> None:
+async def _renew_upload_admission_until_transferred(service, reservation_id: str, transferred: asyncio.Event) -> None:
     while True:
         await asyncio.sleep(_UPLOAD_ADMISSION_RENEW_INTERVAL_SECONDS)
+        if transferred.is_set():
+            return
         if not await service.renew_upload_admission(reservation_id):
+            if transferred.is_set():
+                return
             raise IndexingAdmissionError(
                 "The upload admission reservation expired or was cancelled. Please retry the upload.",
                 retry_after_seconds=5,
             )
 
 
-async def _run_with_upload_admission(service, reservation_id: str, operation: Awaitable[Any]) -> Any:
+async def _run_with_upload_admission(
+    service, reservation_id: str, operation: Callable[[Callable[[], None]], Awaitable[Any]]
+) -> Any:
     """Renew a reservation while saving and queuing a potentially slow upload."""
+    transferred = asyncio.Event()
+
+    def mark_transferred() -> None:
+        transferred.set()
+
+    # The operation factory receives the callback so the dispatcher can signal
+    # the exact point at which TaskStateManager accepted the task.
+    operation = operation(mark_transferred)
     operation_task = asyncio.create_task(operation)
-    renewal_task = asyncio.create_task(_renew_upload_admission_until_transferred(service, reservation_id))
+    renewal_task = asyncio.create_task(_renew_upload_admission_until_transferred(service, reservation_id, transferred))
+    transfer_task = asyncio.create_task(transferred.wait())
     try:
-        done, _ = await asyncio.wait({operation_task, renewal_task}, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait({operation_task, renewal_task, transfer_task}, return_when=asyncio.FIRST_COMPLETED)
         if operation_task in done:
             return await operation_task
 
+        if transferred.is_set() or transfer_task in done:
+            renewal_task.cancel()
+            await asyncio.gather(renewal_task, return_exceptions=True)
+            return await operation_task
+
         renewal_error = renewal_task.exception()
+        if transferred.is_set():
+            return await operation_task
         operation_task.cancel()
         await asyncio.gather(operation_task, return_exceptions=True)
         if renewal_error is not None:
@@ -95,10 +117,10 @@ async def _run_with_upload_admission(service, reservation_id: str, operation: Aw
             retry_after_seconds=5,
         )
     finally:
-        for task in (operation_task, renewal_task):
+        for task in (operation_task, renewal_task, transfer_task):
             if not task.done():
                 task.cancel()
-        await asyncio.gather(operation_task, renewal_task, return_exceptions=True)
+        await asyncio.gather(operation_task, renewal_task, transfer_task, return_exceptions=True)
 
 
 def _uploaded_file_size_bytes(file: UploadFile) -> int:
@@ -274,12 +296,16 @@ Returns 201 Created with a task status URL for tracking indexing progress.
 **Admission control:**
 - `429` with `INDEXING_ADMISSION_FULL` means the shared active-task or upload-byte
   budget is full. Retry after the number of seconds in the `Retry-After` header.
-- `429` with `QUOTA_EXCEEDED` means the caller reached their file quota.
-- `413` means this file exceeds the configured aggregate upload-byte budget.
+- `403` with `FILE_QUOTA_EXCEEDED` means the caller reached their file quota.
+- `413` means this file exceeds either the per-upload size limit or the shared
+  indexing admission byte limit.
 """,
     responses={
-        413: {"description": "The file exceeds the configured indexing admission byte limit."},
-        429: {"description": "Admission saturation includes `Retry-After`; file quota errors use `QUOTA_EXCEEDED`."},
+        403: {"description": "The caller reached their file quota (`FILE_QUOTA_EXCEEDED`)."},
+        413: {
+            "description": "The file exceeds either the per-upload size limit or shared indexing admission byte limit."
+        },
+        429: {"description": "Admission saturation includes `Retry-After`."},
         503: {"description": "The upload-size ceiling exceeds the shared indexing admission byte budget."},
     },
 )
@@ -339,7 +365,7 @@ async def add_file(
         task_id=file_slot_reservation_id(file_slot),
     )
 
-    async def save_and_queue() -> str:
+    async def save_and_queue(on_admission_transferred: Callable[[], None]) -> str:
         try:
             if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
                 saved_upload = await save_file_to_disk_with_sha256(
@@ -384,6 +410,7 @@ async def add_file(
                 callback_url=callback_url,
                 callback_token=callback_token,
                 admission_reservation_id=reservation_id,
+                on_admission_transferred=on_admission_transferred,
             )
         except BaseException as exc:
             # An unknown submission may still be using this file; its worker owns cleanup.
@@ -404,7 +431,7 @@ async def add_file(
         return task_id
 
     try:
-        task_id = await _run_with_upload_admission(service, reservation_id, save_and_queue())
+        task_id = await _run_with_upload_admission(service, reservation_id, save_and_queue)
     finally:
         await service.release_upload_admission(reservation_id)
 
@@ -482,8 +509,10 @@ JSON string containing file metadata. Example:
 Returns 202 Accepted with a task status URL for tracking indexing progress.
 """,
     responses={
-        413: {"description": "The file exceeds the configured indexing admission byte limit."},
-        429: {"description": "Admission saturation includes `Retry-After`; file quota errors use `QUOTA_EXCEEDED`."},
+        413: {
+            "description": "The file exceeds either the per-upload size limit or shared indexing admission byte limit."
+        },
+        429: {"description": "Admission saturation includes `Retry-After`."},
         503: {"description": "The upload-size ceiling exceeds the shared indexing admission byte budget."},
     },
 )
@@ -525,7 +554,7 @@ async def put_file(
         replace=True,
     )
 
-    async def save_and_queue() -> str:
+    async def save_and_queue(on_admission_transferred: Callable[[], None]) -> str:
         try:
             if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
                 saved_upload = await save_file_to_disk_with_sha256(
@@ -569,6 +598,7 @@ async def put_file(
                 callback_url=callback_url,
                 callback_token=callback_token,
                 admission_reservation_id=reservation_id,
+                on_admission_transferred=on_admission_transferred,
             )
         except BaseException as exc:
             # An unknown submission may still be using this file; its worker owns cleanup.
@@ -577,7 +607,7 @@ async def put_file(
             raise
 
     try:
-        task_id = await _run_with_upload_admission(service, reservation_id, save_and_queue())
+        task_id = await _run_with_upload_admission(service, reservation_id, save_and_queue)
     finally:
         await service.release_upload_admission(reservation_id)
 

@@ -2890,6 +2890,36 @@ async def test_upload_admission_enforces_count_and_bytes_and_releases_capacity()
 
 
 @pytest.mark.asyncio
+async def test_upload_transfer_accounts_for_dispatcher_measured_size() -> None:
+    manager = _task_state_manager()
+    admission = {"max_admitted_tasks": 3, "max_admitted_bytes": 10}
+    assert (
+        await manager.reserve_upload_admission(
+            "other", file_id="other", partition="tenant-a", admitted_bytes=3, **admission
+        )
+    )["accepted"]
+    assert (
+        await manager.reserve_upload_admission(
+            "upload", file_id="upload", partition="tenant-a", admitted_bytes=6, **admission
+        )
+    )["accepted"]
+
+    outcome = await manager.set_queued_details_v2(
+        "upload",
+        file_id="upload",
+        partition="tenant-a",
+        metadata={},
+        user_id=1,
+        require_upload_reservation=True,
+        admitted_bytes=8,
+        **admission,
+    )
+
+    assert outcome["reason"] == task_state_module.QUEUE_REFUSED_INDEXING_ADMISSION
+    assert manager.tasks["upload"].admitted_bytes == 6
+
+
+@pytest.mark.asyncio
 async def test_expired_upload_reservation_cannot_transfer_and_releases_capacity(clock) -> None:
     manager = _task_state_manager()
     assert (
@@ -2973,6 +3003,36 @@ async def test_terminal_admission_is_restored_after_actor_restart(monkeypatch) -
         max_admitted_bytes=4,
     )
     assert result["accepted"]
+
+
+def test_recovery_restores_live_lease_before_charging_legacy_terminal_tasks(monkeypatch) -> None:
+    active = TaskInfo(
+        state="COMPLETED",
+        details={"metadata": {TASK_FINISHED_AT_METADATA_KEY: "done"}},
+        worker_submitted=True,
+        worker_started=True,
+        admitted_bytes=None,
+        worker_lease_expires_at=0,
+    )
+    settled = TaskInfo(
+        state="COMPLETED",
+        details={"metadata": {TASK_FINISHED_AT_METADATA_KEY: "done"}},
+        worker_submitted=True,
+        worker_started=True,
+        worker_finished=True,
+        admitted_bytes=None,
+        worker_lease_expires_at=0,
+    )
+    monkeypatch.setattr(
+        task_state_module, "_load_recoverable_tasks", lambda: ({"active": active, "settled": settled}, {})
+    )
+
+    manager = _task_state_manager()
+
+    assert manager.tasks["active"].admitted_bytes == manager._admission_max_bytes
+    assert task_state_module._task_reserves_admission(manager.tasks["active"])
+    assert manager.tasks["settled"].admitted_bytes == 0
+    assert not task_state_module._task_reserves_admission(manager.tasks["settled"])
 
 
 @pytest.mark.asyncio

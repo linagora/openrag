@@ -14,6 +14,7 @@ import pytest
 from api.dependencies.auth import FileSlotReservation, check_user_file_quota, require_partition_editor
 from api.dependencies.files import validate_file_format, validate_file_id, validate_metadata
 from api.error_handlers import register_error_handlers
+from api.routers.admin.indexing import _run_with_upload_admission
 from api.routers.admin.indexing import router as indexer_router
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from di.providers import get_auth_service, get_config, get_indexing_service, get_job_service
@@ -424,12 +425,21 @@ async def test_upload_hands_the_quota_slot_to_the_admitted_task(tmp_path, monkey
 async def test_delete_during_upload_renewal_returns_delete_conflict(tmp_path, monkeypatch):
     import asyncio
 
+    dispatch_started = asyncio.Event()
+    dispatch_cancelled = asyncio.Event()
+
     class DeletingWhileUploading(_FakeIndexingService):
         async def renew_upload_admission(self, _task_id):
+            await dispatch_started.wait()
             raise ConflictError("File is being deleted", code="DOCUMENT_DELETE_IN_PROGRESS")
 
         async def add_file(self, **_kwargs):
-            await asyncio.Event().wait()
+            dispatch_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                dispatch_cancelled.set()
+                raise
 
     monkeypatch.setattr("api.routers.admin.indexing._UPLOAD_ADMISSION_RENEW_INTERVAL_SECONDS", 0)
     app = _build_app(tmp_path, monkeypatch, b"tiny", service=DeletingWhileUploading())
@@ -438,6 +448,37 @@ async def test_delete_during_upload_renewal_returns_delete_conflict(tmp_path, mo
 
     assert response.status_code == 409
     assert "DOCUMENT_DELETE_IN_PROGRESS" in response.json()["detail"]
+    assert dispatch_cancelled.is_set()
+    assert list((tmp_path / "data").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_renewal_failure_after_queue_transfer_does_not_cancel_dispatch(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr("api.routers.admin.indexing._UPLOAD_ADMISSION_RENEW_INTERVAL_SECONDS", 0)
+    renewal_started = asyncio.Event()
+    finish_renewal = asyncio.Event()
+    dispatch_finished = asyncio.Event()
+
+    class RenewalLosesRace:
+        async def renew_upload_admission(self, _task_id):
+            renewal_started.set()
+            await finish_renewal.wait()
+            return False
+
+    async def dispatch(on_admission_transferred):
+        await renewal_started.wait()
+        on_admission_transferred()
+        finish_renewal.set()
+        await asyncio.sleep(0)
+        dispatch_finished.set()
+        return "queued-task"
+
+    result = await _run_with_upload_admission(RenewalLosesRace(), "reservation", dispatch)
+
+    assert result == "queued-task"
+    assert dispatch_finished.is_set()
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ import asyncio
 import os
 import traceback
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
@@ -574,6 +574,7 @@ class WorkerDispatcher(IndexingDispatcher):
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
         task_id: str | None = None,
+        on_admission_transferred: Callable[[], None] | None = None,
     ) -> str:
         task_id = task_id or uuid.uuid4().hex
         try:
@@ -656,8 +657,15 @@ class WorkerDispatcher(IndexingDispatcher):
             await release_claim()
             raise
         if not admission["accepted"]:
-            await release_claim()
+            try:
+                await release_claim()
+            except Exception as exc:  # noqa: BLE001 - the admission refusal remains the client-facing result
+                logger.bind(task_id=task_id, file_id=file_id, partition=partition).warning(
+                    "Could not release indexing claims after admission refusal", error=str(exc)
+                )
             _raise_admission_refusal(admission, task_id=task_id, file_id=file_id, partition=partition)
+        if on_admission_transferred is not None:
+            on_admission_transferred()
 
         task: Any | None = None
         submission_started = False

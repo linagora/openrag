@@ -357,6 +357,7 @@ class IndexingService:
         callback_url: str | None = None,
         callback_token: str | None = None,
         admission_reservation_id: str | None = None,
+        on_admission_transferred: Callable[[], None] | None = None,
         task_id: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
@@ -383,6 +384,9 @@ class IndexingService:
             content_sha256=content_sha256,
         )
         upload_reservation_kwargs = {"require_upload_reservation": True} if admission_reservation_id is not None else {}
+        admission_transfer_kwargs = (
+            {"on_admission_transferred": on_admission_transferred} if on_admission_transferred is not None else {}
+        )
         dispatched_task_id: str | None = None
         worker_may_run = False
         try:
@@ -409,6 +413,7 @@ class IndexingService:
                         require_existing_partition=require_existing_partition,
                         allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
                         task_id=admission_reservation_id or task_id,
+                        **admission_transfer_kwargs,
                         **upload_reservation_kwargs,
                     )
                 except BaseException as exc:

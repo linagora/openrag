@@ -1041,6 +1041,41 @@ async def test_dispatch_indexing_refuses_a_file_being_deleted_with_409(replace: 
 
 
 @pytest.mark.asyncio
+async def test_admission_refusal_survives_content_claim_release_failure() -> None:
+    from core.utils.exceptions import IndexingAdmissionError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.release_content_sha256_claim.side_effect = RuntimeError("claim store unavailable")
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("admission_full"))
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(IndexingAdmissionError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.status_code == 429
+    repo.release_content_sha256_claim.assert_awaited_once()
+    pool = dispatcher._pool
+    pool.submit.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_returns_service_unavailable_when_capacity_is_full() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
