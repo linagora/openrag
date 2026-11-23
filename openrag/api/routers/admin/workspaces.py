@@ -10,11 +10,13 @@ schema validation, and the guards whose exact non-bracketed
 unknown/missing-file 404s, the not-removed 404).
 """
 
+from datetime import datetime
+
 from api.dependencies.auth import require_partition_editor, require_partition_owner, require_partition_viewer
 from api.schemas.admin.workspaces import AddFilesRequest, CreateWorkspaceRequest
 from core.utils.logging import get_logger
 from di.providers import get_workspace_service
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 router = APIRouter()
 logger = get_logger()
@@ -35,6 +37,23 @@ async def require_workspace_in_partition(
     if not ws:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
     return ws
+
+
+def _validate_workspace_generation(expected_created_at: datetime | None, expected_created_at_is_null: bool) -> None:
+    if expected_created_at is not None and expected_created_at_is_null:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Supply either expected_created_at or expected_created_at_is_null, not both",
+        )
+    # ``workspaces.created_at`` is a timezone-naive timestamp. Reject
+    # offset-bearing values before the repository instead of failing its bind.
+    if expected_created_at is not None and (
+        expected_created_at.tzinfo is not None or expected_created_at.utcoffset() is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="expected_created_at must be a naive timestamp without a UTC offset",
+        )
 
 
 @router.post(
@@ -88,10 +107,24 @@ async def delete_workspace(
     partition: str,
     workspace_id: str,
     keep_files: bool = False,
+    expected_created_at: datetime | None = Query(default=None),
+    expected_created_at_is_null: bool = Query(default=False),
     _ws=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
-    result = await service.delete_workspace(partition, workspace_id, keep_files=keep_files)
+    _validate_workspace_generation(expected_created_at, expected_created_at_is_null)
+    result = await service.delete_workspace(
+        partition,
+        workspace_id,
+        keep_files=keep_files,
+        expected_created_at=expected_created_at,
+        expected_created_at_is_null=expected_created_at_is_null,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Workspace changed after it was loaded. Refresh and confirm deletion again.",
+        )
     return {"status": "deleted", **result}
 
 
@@ -106,6 +139,7 @@ async def add_files_to_workspace(
     _ws=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
+    _validate_workspace_generation(body.expected_created_at, body.expected_created_at_is_null)
     existing_ids = await service.get_existing_file_ids(partition, body.file_ids)
     unknown_ids = sorted(set(body.file_ids) - set(existing_ids))
     if unknown_ids:
@@ -113,7 +147,18 @@ async def add_files_to_workspace(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"File IDs not found in partition '{partition}': {unknown_ids}",
         )
-    missing = await service.add_files(partition, workspace_id, body.file_ids)
+    missing = await service.add_files(
+        partition,
+        workspace_id,
+        body.file_ids,
+        expected_created_at=body.expected_created_at,
+        expected_created_at_is_null=body.expected_created_at_is_null,
+    )
+    if missing is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Workspace changed after it was loaded. Refresh and retry.",
+        )
     if missing:
         # TOCTOU: files were deleted between the pre-check and the insert.
         raise HTTPException(
@@ -130,10 +175,24 @@ async def add_files_to_workspace(
 async def list_workspace_files(
     partition: str,
     workspace_id: str,
+    expected_created_at: datetime | None = Query(default=None),
+    expected_created_at_is_null: bool = Query(default=False),
     _ws=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
-    return {"file_ids": await service.list_files(partition, workspace_id)}
+    _validate_workspace_generation(expected_created_at, expected_created_at_is_null)
+    file_ids = await service.list_files(
+        partition,
+        workspace_id,
+        expected_created_at=expected_created_at,
+        expected_created_at_is_null=expected_created_at_is_null,
+    )
+    if file_ids is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Workspace changed after it was loaded. Refresh and retry.",
+        )
+    return {"file_ids": file_ids}
 
 
 @router.get(
@@ -157,10 +216,24 @@ async def remove_file_from_workspace(
     partition: str,
     workspace_id: str,
     file_id: str,
+    expected_created_at: datetime | None = Query(default=None),
+    expected_created_at_is_null: bool = Query(default=False),
     _ws=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
-    removed = await service.remove_file(partition, workspace_id, file_id)
+    _validate_workspace_generation(expected_created_at, expected_created_at_is_null)
+    removed = await service.remove_file(
+        partition,
+        workspace_id,
+        file_id,
+        expected_created_at=expected_created_at,
+        expected_created_at_is_null=expected_created_at_is_null,
+    )
+    if removed is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Workspace changed after it was loaded. Refresh and retry.",
+        )
     if not removed:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found in workspace")
     return {"status": "removed"}

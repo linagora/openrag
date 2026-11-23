@@ -55,6 +55,8 @@ def validate_file_id(
     file_id = file_id.strip()
     if not file_id:
         raise ValidationError("File ID cannot be empty.", status_code=400)
+    if file_id in {".", ".."}:
+        raise ValidationError("File ID cannot be a dot path segment.", status_code=400)
     if _VALID_IDENTIFIER_RE.fullmatch(file_id) is None:
         raise ValidationError(
             "File ID may only contain letters, digits, '.', '_', ':' and '-'.",

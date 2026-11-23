@@ -1,5 +1,6 @@
 import pytest
 from api.dependencies.llm import get_partition_name
+from core.utils.consts import LEGACY_PARTITION_PREFIX, PARTITION_PREFIX
 from fastapi import HTTPException
 
 
@@ -35,3 +36,16 @@ async def test_get_partition_name_all_uses_accessible_partitions():
     )
 
     assert partitions == ["legal", "finance"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", [PARTITION_PREFIX, LEGACY_PARTITION_PREFIX])
+async def test_get_partition_name_retains_prefix_in_partition_name(prefix):
+    partition = f"finance-{prefix}archive"
+    partitions = await get_partition_name(
+        f"{prefix}{partition}",
+        [partition],
+        partition_service=FakePartitionService({partition}),
+    )
+
+    assert partitions == [partition]
