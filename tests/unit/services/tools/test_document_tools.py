@@ -133,6 +133,19 @@ def test_the_registry_offers_the_agents_read_only_tools():
     assert all(registry.get(name).read_only for name in registry.names)
 
 
+def test_every_parameter_the_model_fills_in_is_described():
+    registry, _ = _tools()
+
+    undescribed = [
+        f"{schema['function']['name']}.{name}"
+        for schema in registry.schemas()
+        for name, prop in schema["function"]["parameters"].get("properties", {}).items()
+        if not prop.get("description")
+    ]
+
+    assert undescribed == []
+
+
 # --------------------------------------------------------------------------- #
 # search_knowledge
 # --------------------------------------------------------------------------- #

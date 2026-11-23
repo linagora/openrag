@@ -131,7 +131,7 @@ class FileTools:
             ),
         ] = None,
         oldest_first: Annotated[bool, Field(description="Oldest first when sorting by a date.")] = False,
-        limit: Annotated[int, Field(ge=1, le=25)] = 10,
+        limit: Annotated[int, Field(ge=1, le=25, description="How many files to list at most.")] = 10,
     ) -> str:
         """The scope's files that match *name* and pass the filters, at most *limit*, each with its details.
 
