@@ -213,6 +213,20 @@ async def test_a_failed_check_fails_the_scan_instead_of_reporting_orphans(data_d
     assert Path(orphan).exists()
 
 
+async def test_a_failed_check_just_before_the_delete_fails_the_scan(data_dir):
+    kept = put(data_dir, "1713700000000_a1b2_kept.pdf")
+    orphan = put(data_dir, "1713700000001_c3d4_gone.pdf")
+
+    class DownBeforeTheDelete(FakeDocumentRepo):
+        async def referenced_sources(self, sources):
+            self.fail = bool(self.calls)
+            return await super().referenced_sources(sources)
+
+    with pytest.raises(ConnectionError):
+        await scan(DownBeforeTheDelete({kept}), data_dir, delete=True)
+    assert Path(orphan).exists()
+
+
 async def test_checks_references_in_batches(data_dir):
     sources = [put(data_dir, f"171370000000{i}_a1b2_{i}.pdf") for i in range(5)]
     repo = FakeDocumentRepo({sources[0]})

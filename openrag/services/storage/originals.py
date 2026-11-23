@@ -19,7 +19,8 @@ Two rules make that safe:
 
 Deleting is best effort: it runs after the user's operation has committed, so
 a failure is logged and the file stays, for the orphan script to find later.
-Nothing here raises.
+Nothing here raises, except a failed reference check when the orphan script
+asks for it: that script must fail rather than end with a normal summary.
 """
 
 from __future__ import annotations
@@ -104,7 +105,9 @@ class OriginalsCleaner:
             )
             return []
 
-    async def delete_unreferenced(self, sources: Iterable[str | None], *, with_sidecars: bool = True) -> int:
+    async def delete_unreferenced(
+        self, sources: Iterable[str | None], *, with_sidecars: bool = True, strict: bool = False
+    ) -> int:
         """Delete each of ``sources`` that no catalog row references. Returns how many of them went.
 
         With ``with_sidecars``, each one's ``.md`` copy goes with it unless a
@@ -112,7 +115,9 @@ class OriginalsCleaner:
         the orphan script deletes only the files that passed its filters. A
         ``.md`` path stays while the upload it was parsed from is referenced.
         Empty and repeated paths are skipped. A batch whose reference check
-        fails is left whole: when in doubt, keep the file.
+        fails is left whole: when in doubt, keep the file. With ``strict``,
+        that failure is raised, the batches before it gone: the orphan script
+        then fails.
         """
         candidates = list(dict.fromkeys(source for source in sources if source))
         deleted = 0
@@ -123,6 +128,8 @@ class OriginalsCleaner:
             try:
                 referenced = await self._document_repo.referenced_sources([*batch, *sidecars.values(), *parsed_from])
             except Exception as exc:  # noqa: BLE001 - best effort, after the user's operation committed
+                if strict:
+                    raise
                 logger.bind(count=len(batch), error=str(exc)).warning(
                     "Could not check whether uploaded originals are still referenced; keeping them."
                 )

@@ -1,4 +1,4 @@
-"""OriginalsCleaner: what it deletes, what it keeps, and that it never raises."""
+"""OriginalsCleaner: what it deletes, what it keeps, and that it raises only when asked."""
 
 from __future__ import annotations
 
@@ -133,6 +133,20 @@ async def test_a_failed_reference_check_keeps_the_whole_batch(data_dir):
     cleaner = OriginalsCleaner(FakeDocumentRepo(fail=True), data_dir)
     assert await cleaner.delete_unreferenced(sources) == 0
     assert all(Path(source).exists() for source in sources)
+
+
+async def test_strict_raises_a_failed_check_once_the_batches_before_it_are_gone(data_dir):
+    sources = [upload(data_dir, f"{i}_report.pdf") for i in range(3)]
+
+    class DownAfterTheFirstBatch(FakeDocumentRepo):
+        async def referenced_sources(self, sources):
+            self.fail = bool(self.calls)
+            return await super().referenced_sources(sources)
+
+    cleaner = OriginalsCleaner(DownAfterTheFirstBatch(), data_dir, batch_size=2)
+    with pytest.raises(ConnectionError):
+        await cleaner.delete_unreferenced(sources, strict=True)
+    assert [Path(source).exists() for source in sources] == [False, False, True]
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")

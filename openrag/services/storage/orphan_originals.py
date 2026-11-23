@@ -24,10 +24,10 @@ Four rules keep the delete safe:
   likely runs with another ``DATA_DIR`` or database than the API, and nothing
   is deleted.
 * **A failed check fails the scan** instead of reporting files as
-  unreferenced, and :class:`OriginalsCleaner` checks each file again just
-  before deleting it. Only the files listed are deleted: a ``.md`` copy
-  younger than its upload stays, and so does one whose upload became
-  referenced meanwhile.
+  unreferenced. :class:`OriginalsCleaner` checks each file again just before
+  deleting it, and a failure there fails the scan too. Only the files
+  listed are deleted: a ``.md`` copy younger than its upload stays, and so
+  does one whose upload became referenced meanwhile.
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ async def scan_orphan_originals(
                     "they have."
                 )
         await OriginalsCleaner(document_repo, root, batch_size=batch_size).delete_unreferenced(
-            orphans, with_sidecars=False
+            orphans, with_sidecars=False, strict=True
         )
         deleted = await asyncio.to_thread(lambda: sum(not Path(source).exists() for source in orphans))
 
