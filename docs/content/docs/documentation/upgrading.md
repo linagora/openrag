@@ -27,11 +27,11 @@ docker compose up -d
 Use the same `-f` files and profiles that you use for the deployment on both
 commands. Do not add `-v` to `down`, because that removes persistent volumes.
 A full `up -d` alone may leave an existing network with its old subnet, and a
-service-only update can stop that service while failing to remove the network. If you have set `UVICORN_FORWARDED_ALLOW_IPS` to an exact old
-address or subnet, keep loopback in it. Add proxy addresses only after verifying that the
-proxy cannot accept forged forwarding headers. Do not trust the bundled NPM
-address while private-network clients can set `X-Real-IP`. A broad range that already includes the new addresses does not need
-to change. If Compose reports `Pool overlaps with other one on this address
+service-only update can stop that service while failing to remove the network. If you explicitly set `UVICORN_FORWARDED_ALLOW_IPS`, include loopback and
+the exact admin UI proxy address. With the TLS overlay, remove broad ranges such
+as `172.16.0.0/12`, which include NPM's address. Do not add the NPM address
+while private-network clients can set `X-Real-IP` at NPM. Add other proxy
+addresses only after verifying their forwarded-header behavior. If Compose reports `Pool overlaps with other one on this address
 space`, choose an unused range and set `OPENRAG_COMPOSE_SUBNET`,
 `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP`; with the
 TLS overlay, set `OPENRAG_NPM_PROXY_IP` as well. Keep both proxy addresses
