@@ -121,6 +121,7 @@ preset_configuration_revision = Table(
 # The canonical prompt types — kept in sync with core.models.prompt.PromptType.
 # Used by the CHECK constraint on the prompts table so a junk type can never be
 # stored. (Mirrors the ck_model_endpoint_type / ck_pipeline_preset_type pattern.)
+# The retired types (hyde, multi_query) stay listed so stored rows remain valid.
 _PROMPT_TYPE_VALUES = (
     "sys_prompt",
     "query_contextualizer",

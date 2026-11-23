@@ -629,7 +629,7 @@ class IndexingPipeline:
         unconditionally, for every file — including partitions on
         ``recursive_splitter`` that use nothing else here. Re-tokenising every
         chunk cost ~360 ms per 3000-chunk document (more than double that with
-        the production ``ChatOpenAI`` counter), freezing every other in-flight
+        the production tiktoken counter), freezing every other in-flight
         file's continuation. The adjacent chunk stage goes out of its way to
         avoid exactly this, running the chunker under ``asyncio.to_thread``.
         """

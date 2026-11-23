@@ -103,7 +103,7 @@ _PIN_INDEXED_ALIAS_PARTITIONS_SQL = """
 # referenced through presets rather than partitions and correctly count 0.
 #
 # ``chat_llm IS NULL`` counts for the default LLM: the column is optional and
-# QueryService._resolve_llm falls through to the catalog default for a partition
+# ChatService._resolve_llm falls through to the catalog default for a partition
 # that sets none, so those partitions really are served by that endpoint. The
 # embedder column has no such case — it is NOT NULL, defaulting to the alias.
 _PARTITION_USAGE_COUNTS_SQL = """

@@ -7,15 +7,16 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from api.dependencies import model_limits
 from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
 from api.error_handlers import register_error_handlers
 from api.routers.user import chat
 from core.config.root import Settings
-from di.providers import get_config, get_partition_service, get_query_service
+from di.providers import get_chat_service, get_config, get_partition_service
 from fastapi import FastAPI
 
 
-class RecordingQueryService:
+class RecordingChatService:
     def __init__(self) -> None:
         self.calls: dict[str, dict[str, Any]] = {}
 
@@ -33,19 +34,19 @@ class FakePartitionService:
 
 
 @pytest.fixture
-def service() -> RecordingQueryService:
-    return RecordingQueryService()
+def service() -> RecordingChatService:
+    return RecordingChatService()
 
 
 @pytest.fixture
 def client(async_client_factory, monkeypatch, service):
-    monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+    monkeypatch.setattr(model_limits, "_max_model_tokens_by_name", {})
     app = FastAPI()
     register_error_handlers(app)
     app.include_router(chat.router, prefix="/v1")
     app.dependency_overrides[current_user] = lambda: {"id": 2, "is_admin": False}
     app.dependency_overrides[current_user_or_admin_partitions_list] = lambda: ["p"]
-    app.dependency_overrides[get_query_service] = lambda: service
+    app.dependency_overrides[get_chat_service] = lambda: service
     app.dependency_overrides[get_partition_service] = FakePartitionService
     app.dependency_overrides[get_config] = lambda: Settings()
     return async_client_factory(app)

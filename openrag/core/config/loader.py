@@ -173,7 +173,6 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("CHUNK_SIZE", "chunker.chunk_size", int),
     ("CHUNK_OVERLAP_RATE", "chunker.chunk_overlap_rate", float),
     # Retriever
-    ("RETRIEVER_TYPE", "retriever.type", str),
     ("RETRIEVER_TOP_K", "retriever.top_k", int),
     ("SIMILARITY_THRESHOLD", "retriever.similarity_threshold", float),
     ("WITH_SURROUNDING_CHUNKS", "retriever.with_surrounding_chunks", bool),

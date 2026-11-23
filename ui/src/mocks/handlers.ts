@@ -17,7 +17,7 @@ const partitions = [
     indexation_overrides: {},
     retrieval_overrides: {},
     indexation_pipeline: { chunking: { strategy: "recursive", chunk_size: 512, chunk_overlap: 50 }, embedder: "bge-m3", image_captioning: false },
-    retrieval_pipeline: { type: "multiquery", embedder: "bge-m3", reranker: "bge-reranker-v2", llm: "llama-3.1", top_k: 10 },
+    retrieval_pipeline: { embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 10 },
     created_at: "2024-11-20T09:00:00Z",
   },
   {
@@ -32,7 +32,7 @@ const partitions = [
     indexation_overrides: { contextualization: true },
     retrieval_overrides: {},
     indexation_pipeline: { chunking: { strategy: "sentence", chunk_size: 256, chunk_overlap: 30 }, embedder: "bge-m3", image_captioning: true, vlm: "qwen-vl" },
-    retrieval_pipeline: { type: "hyde", embedder: "bge-m3", reranker: "bge-reranker-v2", llm: "llama-3.1", top_k: 15 },
+    retrieval_pipeline: { embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 15 },
     created_at: "2024-12-05T14:30:00Z",
   },
   {
@@ -47,7 +47,7 @@ const partitions = [
     indexation_overrides: {},
     retrieval_overrides: {},
     indexation_pipeline: { chunking: { strategy: "fixed", chunk_size: 400, chunk_overlap: 40 }, embedder: "bge-m3" },
-    retrieval_pipeline: { type: "simple", embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 5 },
+    retrieval_pipeline: { embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 5 },
     created_at: "2025-01-10T11:15:00Z",
   },
 ];
@@ -120,28 +120,24 @@ const presets = [
   { name: "default", preset_type: "indexation", config: { chunking_strategy: "recursive", chunk_size: 512, chunk_overlap: 50, embedder: "bge-m3", image_captioning: false, contextualization: false, batch_size: 16 }, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
   { name: "high-quality", preset_type: "indexation", config: { chunking_strategy: "sentence", chunk_size: 256, chunk_overlap: 30, embedder: "bge-m3", image_captioning: true, vlm: "qwen-vl", contextualization: true, batch_size: 8 }, created_at: "2025-01-02T00:00:00Z", updated_at: "2025-01-14T00:00:00Z" },
   { name: "default", preset_type: "retrieval", config: { type: "simple", embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 10, rerank_top_k: 5 }, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
-  { name: "precise", preset_type: "retrieval", config: { type: "multiquery", embedder: "bge-m3", reranker: "bge-reranker-v2", llm: "llama-3.1", top_k: 15, rerank_top_k: 5, num_queries: 3 }, created_at: "2025-01-03T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
+  { name: "precise", preset_type: "retrieval", config: { embedder: "bge-m3", reranker: "bge-reranker-v2", top_k: 15, rerank_top_k: 5 }, created_at: "2025-01-03T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
 ];
 
 const prompts = [
   // _default (global) prompts
   { id: "prm-def-001", partition: "_default", prompt_type: "rag_system", name: "Default RAG System", content: "You are a helpful AI assistant. Use the provided context to answer the user's question accurately. If you cannot find the answer in the context, say so clearly. Always cite the source documents.", is_active: true, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
   { id: "prm-def-002", partition: "_default", prompt_type: "contextualization", name: "Default Contextualizer", content: "Given the following chunk from a document, provide additional context that helps understand this excerpt within the broader document. Focus on what section this belongs to and what key concepts are being discussed.", is_active: true, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
-  { id: "prm-def-003", partition: "_default", prompt_type: "multiquery", name: "Default MultiQuery", content: "Generate 3 alternative search queries for the following question. Each query should approach the topic from a different angle to improve retrieval coverage.\n\nOriginal query: {query}", is_active: true, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
-  { id: "prm-def-004", partition: "_default", prompt_type: "hyde", name: "Default HyDE", content: "Write a hypothetical document passage that would answer the following question. Include specific details that would appear in a real document.\n\nQuestion: {query}", is_active: true, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
   { id: "prm-def-005", partition: "_default", prompt_type: "vlm_caption", name: "Default Image Captioner", content: "Describe this image in detail. Identify any text, diagrams, charts, tables, or visual elements. Provide a structured description that would help someone searching for this content.", is_active: true, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
 
   // legal-docs prompts
   { id: "prm-001", partition: "legal-docs", prompt_type: "rag_system", name: "Legal Assistant", content: "You are a helpful legal assistant. Answer questions about contracts and legal documents accurately. Always cite the source document and relevant clause numbers.", is_active: true, created_at: "2025-01-10T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
   { id: "prm-002", partition: "legal-docs", prompt_type: "rag_system", name: "Legal Assistant v2 (concise)", content: "You are a legal expert. Provide brief, precise answers citing specific contract clauses. Use bullet points for clarity.", is_active: false, created_at: "2025-01-14T00:00:00Z", updated_at: "2025-01-14T00:00:00Z" },
   { id: "prm-003", partition: "legal-docs", prompt_type: "contextualization", name: "Legal Context", content: "Given the following document chunk from a legal document, provide additional context that helps understand this excerpt within the broader legal agreement. Focus on which party is being referenced and what obligations are described.", is_active: true, created_at: "2025-01-11T00:00:00Z", updated_at: "2025-01-11T00:00:00Z" },
-  { id: "prm-004", partition: "legal-docs", prompt_type: "multiquery", name: "Legal MultiQuery", content: "Generate 3 alternative search queries for the following legal question. Each query should approach the topic from a different angle (e.g. by clause type, by party, by obligation).\n\nOriginal query: {query}", is_active: true, created_at: "2025-01-12T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
 
   // technical-manuals prompts
   { id: "prm-005", partition: "technical-manuals", prompt_type: "rag_system", name: "Tech Support", content: "You are a technical support assistant. Help users find information in product documentation. Be concise and provide step-by-step instructions when applicable. Include code examples where relevant.", is_active: true, created_at: "2025-01-11T00:00:00Z", updated_at: "2025-01-13T00:00:00Z" },
   { id: "prm-006", partition: "technical-manuals", prompt_type: "contextualization", name: "Tech Contextualizer", content: "Given this chunk from a technical manual, add context about which product feature or API endpoint is being described. Mention any prerequisites or related sections.", is_active: true, created_at: "2025-01-12T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
   { id: "prm-007", partition: "technical-manuals", prompt_type: "vlm_caption", name: "Diagram Captioner", content: "Describe this technical diagram or screenshot in detail. Identify UI elements, data flows, architecture components, or code structures shown. Provide a structured description that would help someone searching for this content.", is_active: true, created_at: "2025-01-13T00:00:00Z", updated_at: "2025-01-13T00:00:00Z" },
-  { id: "prm-008", partition: "technical-manuals", prompt_type: "hyde", name: "Tech HyDE", content: "Write a hypothetical technical documentation passage that would answer the following question. Include specific technical details, configuration examples, and step-by-step instructions.\n\nQuestion: {query}", is_active: true, created_at: "2025-01-14T00:00:00Z", updated_at: "2025-01-14T00:00:00Z" },
 
   // hr-policies prompts
   { id: "prm-009", partition: "hr-policies", prompt_type: "rag_system", name: "HR Bot", content: "You are an HR assistant. Answer employee questions about company policies. Always refer to the official policy document and provide the relevant section number.", is_active: false, created_at: "2025-01-12T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
@@ -700,7 +696,6 @@ export const handlers = [
   http.get(`${API}/presets/options`, () =>
     HttpResponse.json({
       chunking_strategies: ["recursive", "sentence", "semantic", "markdown"],
-      retrieval_types: ["simple", "multiquery", "hyde"],
       reranker_providers: ["infinity", "openai", "none"],
       default_top_n: 10,
     }),

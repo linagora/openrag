@@ -56,9 +56,8 @@ class _ManyDocuments:
 
 
 class _Retrieval:
-    def __init__(self, prompt_hash="prompt-hash-a", expansion_model="query-model-a"):
+    def __init__(self, prompt_hash="prompt-hash-a"):
         self.prompt_hash = prompt_hash
-        self.expansion_model = expansion_model
 
     @staticmethod
     def configuration_fingerprint(_partitions):
@@ -73,21 +72,13 @@ class _Retrieval:
                     "name": "legal-rag-bench",
                     "embedder": {"name": "embed", "model": "bge", "api_key": "must-not-leak"},
                     "retrieval": {
-                        "type": "multiQuery",
                         "top_k": 60,
                         "similarity_threshold": 0.2,
                         "rrf_k": 42,
-                        "k_queries": 3,
-                        "combine": False,
                         "with_surrounding_chunks": True,
                         "allow_filterless_fallback": True,
-                        "hyde_prompt_name": None,
-                        "multi_query_prompt_name": "legal-multi-query",
-                        "query_expansion_llm": {
-                            "name": "query-llm",
-                            "model": self.expansion_model,
-                            "api_key": "query-must-not-leak",
-                        },
+                        # Not allowlisted: the snapshot must drop it.
+                        "query_expansion_llm": {"name": "query-llm", "api_key": "query-must-not-leak"},
                     },
                     "reranker": {"name": "rerank", "model": "bge-reranker", "enabled": True, "top_n": 10},
                     "contextualizer": {"name": "chat", "model": "qwen", "prompt_name": "legal"},
@@ -98,12 +89,6 @@ class _Retrieval:
 
     async def resolved_public_retrieval_configuration(self, partitions):
         public = self.public_retrieval_configuration(partitions)
-        public["partitions"][0]["retrieval"]["query_expansion_prompt"] = {
-            "type": "multi_query",
-            "name": "legal-multi-query",
-            "source": "named",
-            "content_hash": "multi-query-hash",
-        }
         public["contextualizer_prompt"] = {
             "name": "legal",
             "source": "named",
@@ -127,32 +112,16 @@ async def test_snapshot_is_allowlisted_and_fingerprinted():
 
     assert snapshot["configuration"]["reranker"]["top_n"] == 10
     assert snapshot["configuration"]["retrieval"] == {
-        "type": "multiQuery",
         "top_k": 60,
         "similarity_threshold": 0.2,
         "rrf_k": 42,
-        "k_queries": 3,
-        "combine": False,
         "with_surrounding_chunks": True,
         "allow_filterless_fallback": True,
-        "hyde_prompt_name": None,
-        "multi_query_prompt_name": "legal-multi-query",
-        "query_expansion_llm": {"name": "query-llm", "model": "query-model-a"},
-        "query_expansion_prompt": {
-            "type": "multi_query",
-            "name": "legal-multi-query",
-            "source": "named",
-            "content_hash": "multi-query-hash",
-        },
     }
     assert snapshot["retrieval_configuration_fingerprint"] == canonical_fingerprint(
         await retrieval.resolved_public_retrieval_configuration(["legal-rag-bench"])
     )
     assert snapshot["configuration"]["embedder"]["dimensions"] == 768
-    assert snapshot["configuration"]["retrieval"]["query_expansion_llm"] == {
-        "name": "query-llm",
-        "model": "query-model-a",
-    }
     assert snapshot["index"]["indexed_corpus_count"] == 2
     assert snapshot["index"]["document_ids"] == ["doc-1", "doc-2"]
     assert snapshot["index"]["document_ids_truncated"] is False
@@ -229,28 +198,6 @@ async def test_prompt_hash_changes_retrieval_and_snapshot_fingerprints_without_e
     )
     assert first_snapshot["fingerprint"] != second_snapshot["fingerprint"]
     assert "private contextualizer instructions" not in json.dumps(first_snapshot)
-
-
-@pytest.mark.asyncio
-async def test_query_expansion_model_changes_top_level_snapshot_fingerprint():
-    first = RetrievalSnapshotService(
-        partition_service=_Partitions(),
-        document_repo=_Documents(),
-        retrieval_service=_Retrieval(expansion_model="query-model-a"),
-    )
-    second = RetrievalSnapshotService(
-        partition_service=_Partitions(),
-        document_repo=_Documents(),
-        retrieval_service=_Retrieval(expansion_model="query-model-b"),
-    )
-
-    first_snapshot = await first.snapshot("legal-rag-bench")
-    second_snapshot = await second.snapshot("legal-rag-bench")
-
-    assert (
-        first_snapshot["retrieval_configuration_fingerprint"] != second_snapshot["retrieval_configuration_fingerprint"]
-    )
-    assert first_snapshot["fingerprint"] != second_snapshot["fingerprint"]
 
 
 @pytest.mark.asyncio

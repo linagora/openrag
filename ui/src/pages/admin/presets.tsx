@@ -706,7 +706,7 @@ function FeatureToggle({
   );
 }
 
-/* ---------- Standalone prompt picker (retrieval hyde / multi_query) ---------- */
+/* ---------- Standalone prompt picker (retrieval query contextualizer) ---------- */
 
 function PromptSelect({
   label,
@@ -755,23 +755,18 @@ function PromptSelect({
 function RetrievalPresetForm({
   config,
   onChange,
-  retrievalPipelines,
   rerankers,
-  llms,
   prompts,
   defaultTopN,
 }: {
   config: Config;
   onChange: (c: Config) => void;
-  retrievalPipelines: string[];
   rerankers: string[];
-  llms: string[];
   prompts: PromptResponse[];
   /** What an unset top_n resolves to (RERANKER_TOP_K); absent on older backends. */
   defaultTopN?: number;
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
-  const pipelineType: string = configGet(config, "type", "single");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const promptsByType = (type: string) => prompts.filter((p) => p.prompt_type === type);
 
@@ -780,60 +775,12 @@ function RetrievalPresetForm({
       {/* Search */}
       <section className="space-y-3">
         <h4 className="text-sm font-medium">Search</h4>
-        <div className="space-y-1.5">
-          <Label className="text-xs">Strategy</Label>
-          <Select value={pipelineType} onValueChange={(v) => set("type", v)}>
-            <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {retrievalPipelines.map((p) => (
-                <SelectItem key={p} value={p}>{p}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
         <PromptSelect
           label="Query contextualizer prompt"
           prompts={promptsByType("query_contextualizer")}
           value={configGet(config, "query_contextualizer_prompt_name", "")}
           onChange={(v) => set("query_contextualizer_prompt_name", v || null)}
         />
-        {pipelineType !== "single" && (
-          <div className="space-y-1.5">
-            <Label className="text-xs">Expansion LLM</Label>
-            <p className="text-[0.7rem] text-muted-foreground">
-              LLM used to expand the query for the {pipelineType} strategy. Default = the
-              pipeline's configured LLM.
-            </p>
-            <Select
-              value={configGet(config, "llm", "__none__")}
-              onValueChange={(v) => set("llm", v === "__none__" ? null : v)}
-            >
-              <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">Default</SelectItem>
-                {llms.map((m) => (
-                  <SelectItem key={m} value={m}>{m}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        )}
-        {pipelineType === "hyde" && (
-          <PromptSelect
-            label="HyDE prompt"
-            prompts={promptsByType("hyde")}
-            value={configGet(config, "hyde_prompt_name", "")}
-            onChange={(v) => set("hyde_prompt_name", v || null)}
-          />
-        )}
-        {pipelineType === "multiQuery" && (
-          <PromptSelect
-            label="Multi-query prompt"
-            prompts={promptsByType("multi_query")}
-            value={configGet(config, "multi_query_prompt_name", "")}
-            onChange={(v) => set("multi_query_prompt_name", v || null)}
-          />
-        )}
         <div className="space-y-1.5">
           <Label className="text-xs">top_k (vector retrieval count)</Label>
           <Input
@@ -1329,9 +1276,7 @@ function PresetDialog({
             <RetrievalPresetForm
               config={config}
               onChange={setConfig}
-              retrievalPipelines={options?.retrieval_types ?? []}
               rerankers={rerankers}
-              llms={llms}
               prompts={allPrompts}
               defaultTopN={options?.default_top_n}
             />

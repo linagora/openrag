@@ -2,7 +2,7 @@ import { request } from "./client";
 
 // OpenRag pipeline-preset registry (Phase 14). Mounted at `/presets` (admin-only).
 // Shapes verified against openrag/api/schemas/admin/preset_schemas.py + routers/admin/presets.py:
-//   GET    /presets/options              { chunking_strategies, retrieval_types, reranker_providers, default_top_n }
+//   GET    /presets/options              { chunking_strategies, reranker_providers, default_top_n }
 //   GET    /presets/                     list (bare array; optional ?preset_type=)
 //   GET    /presets/{type}/{name}        get one
 //   POST   /presets/                     create → 201
@@ -37,7 +37,6 @@ export interface PresetOptionsResponse {
   chunking_strategies: string[];
   // Optional: older backends don't return this (UI falls back to a default list).
   parsing_strategies?: string[];
-  retrieval_types: string[];
   reranker_providers: string[];
   // What a retrieval preset's unset top_n resolves to (RERANKER_TOP_K).
   // Optional: older backends don't return it.

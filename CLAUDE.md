@@ -91,9 +91,9 @@ The main application entry point is `openrag/api/main.py` which creates a FastAP
 - `MarkerPool` / `MarkerWorker` (`openrag/services/workers/parsers/marker_workers.py`) - Pool of workers for PDF processing with Marker
 
 **Pipeline Classes**:
-- `RagPipeline` (`openrag/services/orchestrators/query_service.py`) - Orchestrates retrieval and LLM generation
+- `ChatService` (`openrag/services/orchestrators/chat_service.py`) - Orchestrates retrieval and LLM generation. Every chat request runs a workflow (`ChatWorkflow.prepare(ChatRequest) -> PreparedAnswer`, `openrag/services/chat/workflow.py`): the `classic` LangGraph graph (`ClassicWorkflow`; wiring in `openrag/services/chat/graphs/classic.py`, the only module importing `langgraph`; node bodies in `openrag/services/chat/classic.py`), whose steps settle the history window and the scope, then call the capabilities in `openrag/services/capabilities/` (contextualize, retrieve, web search, summarize). A request with no partition and no web search runs it too: its `direct` step leaves the payload as the client sent it. `AnswerService` then answers, outside the graph. `create_chat_service` (`openrag/di/chat.py`) builds the capabilities, compiles the graph once and builds the service. The graph and its steps, as a diagram: `docs/content/docs/documentation/chat_architecture.md`
 - `RetrieverPipeline` (`openrag/core/retrieval/pipeline.py`) - Handles document retrieval and reranking
-- `RAGMapReduce` (`openrag/services/orchestrators/query_service.py`) - Map-reduce for processing large document sets
+- `Summarizer` (`openrag/services/capabilities/summarize.py`) - Map-reduce for processing large document sets
 
 ### Document Processing Flow
 
@@ -134,7 +134,7 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 2. Prompt templates (`openrag/prompts/templates/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
 3. `extract_and_strip_sources_block()` (`openrag/core/utils/source_filtering.py`) strips this tag from the response before sending to the client
 4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every presented source is kept instead (a missing tag means the model didn't report citations, not that it used none)
-5. For streaming, `stream_with_source_filtering()` (same module, driven by `query_service.chat_stream`) holds back a lookahead of at least 80 chars, more with many sources, and emits only text no later chunk can change, so a tag never reaches the client. At each chunk it strips only the part of the answer it has not yet cut off and emitted; when there is nowhere to cut, it strips that part again only once it has grown by an eighth. That keeps a long stream linear
+5. For streaming, `stream_with_source_filtering()` (same module, driven by `AnswerService.chat_stream` in `services/orchestrators/answer_service.py`) holds back a lookahead of at least 80 chars, more with many sources, and emits only text no later chunk can change, so a tag never reaches the client. At each chunk it strips only the part of the answer it has not yet cut off and emitted; when there is nowhere to cut, it strips that part again only once it has grown by an eighth. That keeps a long stream linear
 
 The `extra` field in API responses is a JSON object with these keys. It was a
 JSON-encoded *string* up to and including v2.2.2 — a breaking change for readers
@@ -198,7 +198,8 @@ Four caveats:
 - Its scale is provider-dependent: Infinity/vLLM return a `relevance_score`, TEI a
   `score` with `raw_scores: false` (0–1). Compare within one response, never across
   deployments, and don't threshold on an absolute value.
-- On the multi-query path it does **not** explain the ordering. `get_relevant_docs`
+- When the contextualizer splits the question into several sub-queries it does **not**
+  explain the ordering. `get_relevant_docs`
   reranks each sub-query's list separately and then fuses them with RRF, so the final
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
@@ -216,9 +217,9 @@ answer stays usable). `Query.to_milvus_filter()` (`core/models/query.py`) render
 `order_chunks_by_date` (`core/retrieval/date_order.py`) orders the sources the answering LLM
 reads, stable within a document and with undated (or future-dated) chunks last. The date never
 decides *which* sources the model gets: retrieval, the `top_k` cut, the context-budget fit
-(`_fit_sources`) and the drop-until-it-fits loop all stay relevance-ranked, exactly as without a
-date order, and only the chunks that made it in are re-sorted, in `_prepare_chat` and
-`_prepare_completions` right before rendering. Selecting by date instead let recent, loosely
+(`fit_sources`) and the drop-until-it-fits loop (`fit_prompt`, both in `core/chat/budget.py`) all
+stay relevance-ranked, exactly as without a date order, and only the chunks that made it in are
+re-sorted, in the classic graph's `prompt` step and in `_prepare_completions`, right before rendering. Selecting by date instead let recent, loosely
 matching documents (invitations, agendas) crowd the asked-for report out of the context (review
 on PR #1317); with the dates shown, the model picks the newest relevant source itself. The
 returned `docs` (hence `extra.sources` and the citation numbers) follow the rendered order.
@@ -233,9 +234,9 @@ ahead of the real one under the trusted marker.
 
 `created_at` is the only temporal field and is client-supplied at upload (`TEMPORAL_FIELDS` in
 `indexing_service.py`, a TIMESTAMPTZ column in Milvus); cozy-stack sends the Cozy file creation
-date. A chunk without it is neither filtered in nor sorted first. `_QUERY_JSON_HINT`
-(`query_service.py`) must keep `temporal_filters` / `date_order` open ("per the rules above"): a
-literal `null` there is copied verbatim by the model.
+date. A chunk without it is neither filtered in nor sorted first. `QUERY_JSON_HINT`
+(`core/prompts/query_contextualizer.py`) must keep `temporal_filters` / `date_order` open ("per the
+rules above"): a literal `null` there is copied verbatim by the model.
 
 Known limits: `retriever.allow_filterless_fallback` (default `true`) retries without the filter
 when a period matches nothing, and the model is not told — it then summarizes out-of-period
@@ -349,9 +350,10 @@ Optional web search augmentation via the Staan API, allowing the LLM to combine 
 - Source entries include `source_type: "document"` or `source_type: "web"` in the `extra.sources` response
 
 **Key files:**
-- `openrag/services/websearch/` — `WebSearchService` (`service.py`), `BaseWebSearchProvider` (`base.py`), `StaanProvider` (`providers/staan.py`)
+- `openrag/core/websearch/` — the provider port `WebSearcher` and `WebResult` (`searcher.py`)
+- `openrag/services/websearch/` — `WebSearchService` (`service.py`), `StaanProvider` (`providers/staan.py`)
 - `openrag/core/prompts/chat_prompt_builder.py` — `format_web_context()` formats web results as numbered source blocks
-- `openrag/services/orchestrators/query_service.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
+- `openrag/services/capabilities/retrieve.py` — documents and web results searched in parallel; `web_search.py` searches every sub-query and dedupes by URL
 - `openrag/api/routers/user/chat.py` — `__prepare_sources()` merges document and web sources
 
 ### Indexing Status Callbacks

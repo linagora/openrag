@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from core.config.infrastructure import _DEFAULT_PROMPTS_DIR
-from core.models.prompt import Prompt, PromptType
+from core.models.prompt import RETIRED_PROMPT_TYPES, Prompt, PromptType
 from core.prompts.template_loader import load_template_by_key
 from core.utils.exceptions import ConfigError, NotFoundError, ServiceUnavailableError, ValidationError
 from core.utils.logging import get_logger
@@ -447,6 +447,12 @@ class PromptService:
 
     async def create_prompt(self, *, prompt_type: str, name: str, content: str, is_default: bool = False) -> Prompt:
         self._validate_type(prompt_type)
+        if prompt_type in RETIRED_PROMPT_TYPES:
+            raise ValidationError(
+                f"Prompt type '{prompt_type}' belongs to a removed feature: no new prompt can be created for it.",
+                status_code=422,
+                code="PROMPT_TYPE_RETIRED",
+            )
         content = _validate_and_normalize_content(prompt_type, content)
         if await self._repo.get_by_name(prompt_type, name) is not None:
             raise ValidationError(
@@ -527,11 +533,12 @@ class PromptService:
         Refuses to delete a type's current default — removing it would strand
         every prompt that resolves to the default on the disk seed and leave the
         library with no default for that type. Promote another prompt first.
+        A retired type's default can go: nothing resolves it any more.
         """
         existing = await self._repo.get(prompt_id)
         if existing is None:
             raise NotFoundError(f"Prompt '{prompt_id}' not found.")
-        if existing.is_default:
+        if existing.is_default and existing.prompt_type not in RETIRED_PROMPT_TYPES:
             raise ValidationError(
                 f"Cannot delete the default '{existing.prompt_type}' prompt. Set another default first.",
             )

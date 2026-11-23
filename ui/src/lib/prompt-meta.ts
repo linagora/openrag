@@ -16,6 +16,8 @@ export interface PromptGroup {
   // Where a prompt of this concern applies (preset, partition, or globally).
   description: string;
   types: PromptTypeEntry[];
+  // Types of a removed feature: listed so their prompts can be deleted, never offered for a new prompt.
+  retired?: boolean;
 }
 
 export const PROMPT_GROUPS: PromptGroup[] = [
@@ -35,21 +37,40 @@ export const PROMPT_GROUPS: PromptGroup[] = [
   },
   {
     name: "Retrieval",
-    description: "Query-transformation prompts — selected on the retrieval preset",
-    types: [
-      { value: "query_contextualizer", label: "Query contextualizer" },
-      { value: "hyde", label: "HyDE" },
-      { value: "multi_query", label: "Multi-query" },
-    ],
+    description: "The query-rewriting prompt — selected on the retrieval preset",
+    types: [{ value: "query_contextualizer", label: "Query contextualizer" }],
   },
   {
     name: "Transcription",
     description: "ASR instruction — selected per indexation preset when AUDIOLOADER=OpenAIAudioLoader",
     types: [{ value: "asr_transcription", label: "ASR transcription" }],
   },
+  {
+    name: "Removed",
+    description: "Prompts of the removed HyDE and multi-query retrievers — no longer used; you can delete them",
+    types: [
+      { value: "hyde", label: "HyDE" },
+      { value: "multi_query", label: "Multi-query" },
+    ],
+    retired: true,
+  },
 ];
 
 export const PROMPT_TYPES: PromptTypeEntry[] = PROMPT_GROUPS.flatMap((g) => g.types);
+
+/** The types a new prompt can be created with: every type but the retired ones. */
+export const CREATABLE_PROMPT_TYPES: PromptTypeEntry[] = PROMPT_GROUPS.filter((g) => !g.retired).flatMap(
+  (g) => g.types,
+);
+
+const RETIRED_PROMPT_TYPES = new Set<string>(
+  PROMPT_GROUPS.filter((g) => g.retired).flatMap((g) => g.types.map((t) => t.value)),
+);
+
+/** True for a type of a removed feature: nothing uses its prompts, the default included. */
+export function isRetiredPromptType(type: string): boolean {
+  return RETIRED_PROMPT_TYPES.has(type);
+}
 
 const PROMPT_TYPE_LABELS: Record<string, string> = Object.fromEntries(
   PROMPT_TYPES.map((t) => [t.value, t.label]),

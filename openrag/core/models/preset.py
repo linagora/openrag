@@ -71,7 +71,7 @@ def resolve_partition_chat_llm(
     the default LLM": a direct-LLM request (no partitions), the ``"all"``
     cross-partition sentinel, or a multi-partition request whose partitions
     disagree (or none set one). Shared by the answering-LLM resolution
-    (``QueryService._resolve_llm``) and the chat-completions token preflight
+    (``ChatService._resolve_llm``) and the chat-completions token preflight
     (``api.routers.user.chat``), so the LLM that actually answers a request
     and the budget it was checked against never fall out of sync.
     """

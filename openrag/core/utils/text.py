@@ -22,31 +22,20 @@ _cached_length_function = None
 
 
 def get_num_tokens():
-    """Return the configured token counter, with a local tiktoken fallback."""
+    """Return the token counter: tiktoken's encoding for the configured model.
+
+    A model tiktoken doesn't know (any non-OpenAI one) is counted with
+    ``cl100k_base``. Literal control-token spellings count as ordinary text.
+    """
     global _cached_length_function
     if _cached_length_function is None:
+        import tiktoken
+
         try:
-            from langchain_openai import ChatOpenAI
-
-            config = load_config()
-            llm_kwargs = config.llm.model_dump()
-            llm_kwargs.pop("enable_thinking", None)
-            llm = ChatOpenAI(**llm_kwargs)
-            if llm.custom_get_token_ids is None:
-                # Keep LangChain's model/encoding selection, but count literal
-                # control-token spellings as ordinary user text.
-                _, encoding = llm._get_encoding_model()
-                llm.custom_get_token_ids = encoding.encode_ordinary
-            _cached_length_function = llm.get_num_tokens
-        except Exception as exc:
-            import tiktoken
-
-            logger.warning(
-                "ChatOpenAI unavailable for token counting, falling back to tiktoken cl100k_base",
-                error_type=type(exc).__name__,
-            )
+            encoding = tiktoken.encoding_for_model(load_config().llm.model or "")
+        except KeyError:
             encoding = tiktoken.get_encoding("cl100k_base")
-            _cached_length_function = lambda text: len(encoding.encode_ordinary(text))  # noqa: E731
+        _cached_length_function = lambda text: len(encoding.encode_ordinary(text))  # noqa: E731
     return _cached_length_function
 
 

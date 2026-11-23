@@ -30,6 +30,7 @@ import ray
 import uvicorn
 from api.cors_config import sanitize_cors_origins
 from api.dependencies.auth import require_admin
+from api.dependencies.model_limits import prime_max_model_tokens
 from api.error_handlers import register_error_handlers
 from api.middleware import (
     AuthMiddleware,
@@ -54,7 +55,6 @@ from api.routers.admin.tools import router as tools_router
 from api.routers.admin.users import router as users_router
 from api.routers.admin.workspaces import router as workspaces_router
 from api.routers.auth.oidc import router as auth_router
-from api.routers.user.chat import prime_max_model_tokens
 from api.routers.user.chat import router as openai_router
 from api.routers.user.download import router as download_router
 from api.routers.user.extract import router as extract_router

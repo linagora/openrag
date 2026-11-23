@@ -168,8 +168,6 @@ prompts:
   chunk_contextualizer: chunk_contextualizer_tmpl.txt
   image_describer: image_captioning_tmpl.txt
   spoken_style_answer: spoken_style_answer_tmpl.txt
-  hyde: hyde.txt
-  multi_query: multi_query_pmpt_tmpl.txt
   asr_transcription: asr_transcription_tmpl.txt
 
 # --- Document loader ---
@@ -364,11 +362,10 @@ chunker:
   chunk_overlap_rate: 0.2
 
 # --- Retriever ---
-# Env: RETRIEVER_TYPE, RETRIEVER_TOP_K, SIMILARITY_THRESHOLD,
+# Env: RETRIEVER_TOP_K, SIMILARITY_THRESHOLD,
 #      WITH_SURROUNDING_CHUNKS, INCLUDE_RELATED, INCLUDE_ANCESTORS,
 #      RELATED_LIMIT, MAX_DEPTH, RETRIEVER_ALLOW_FILTERLESS_FALLBACK
 retriever:
-  type: single
   top_k: 50
   similarity_threshold: 0.2
   with_surrounding_chunks: false
@@ -376,8 +373,6 @@ retriever:
   include_ancestors: true
   related_limit: 10
   max_ancestor_depth: 10
-  k_queries: 3
-  combine: false
   # When a temporally-filtered retrieval returns no documents, re-query
   # without the filter. Set to false for strict temporal retrieval.
   allow_filterless_fallback: true

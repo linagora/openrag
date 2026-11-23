@@ -61,10 +61,12 @@ def test_indexation_pipeline_accepts_preset_scoped_stt_and_asr_prompt():
     assert cfg.asr_transcription_prompt_name == "meeting-diarization"
 
 
-def test_retrieval_pipeline_rejects_unknown_type():
-    """Retrieval presets reject unsupported retrieval modes."""
-    with pytest.raises(ValidationError):
-        RetrievalPipelineConfig(type="unknown")
+def test_retrieval_pipeline_ignores_the_removed_retriever_fields():
+    """A client may still send the fields of the removed multiQuery / hyde retrievers: they are ignored."""
+    removed = {"type": "hyde", "llm": "rewriter", "hyde_prompt_name": "h", "multi_query_prompt_name": "m"}
+    config = RetrievalPipelineConfig(**removed)
+
+    assert set(removed).isdisjoint(config.model_dump())
 
 
 @pytest.mark.parametrize("provider", [InfinityRerankerConfig, OpenAIRerankerConfig, TEIRerankerConfig])

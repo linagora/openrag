@@ -1,4 +1,4 @@
-"""Unit tests for :class:`QueryService` (Phase 8C.2).
+"""Unit tests for :class:`ChatService` (Phase 8C.2).
 
 The Ray-backed LLM semaphore and the model-file-backed language detector
 are monkeypatched (both are infra concerns exercised in integration, not
@@ -14,20 +14,25 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import core.utils.text as text_utils
+import di.chat as chat_factory
 import pytest
-import services.orchestrators.query_service as qs
+import services.chat.classic as classic_steps
+import services.orchestrators.chat_service as qs
+from core.chat import smalltalk
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
+from core.models.chat import ChatOptions
 from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries
-from core.models.retrieval_trace import TraceCandidate
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
-from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder
 from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
-from services.orchestrators.query_service import QueryService
+from di.chat import create_chat_service
+from services.chat.workflow import ChatRequest
+from services.orchestrators.chat_service import ChatService
 
-# Real prompt-template config (dir + key->filename mapping) so QueryService
+# Real prompt-template config (dir + key->filename mapping) so ChatService
 # can load its system / contextualizer / spoken-style templates from disk.
 _PROMPT_CFG = load_config()
 
@@ -55,8 +60,8 @@ def _patch_infra(monkeypatch):
     async def _noop_sem():
         yield
 
-    monkeypatch.setattr(qs, "get_llm_semaphore", _noop_sem)
-    monkeypatch.setattr(qs, "detect_language", lambda _t, **_kwargs: "en")
+    monkeypatch.setattr(chat_factory, "get_llm_semaphore", _noop_sem)
+    monkeypatch.setattr(chat_factory, "detect_language", lambda _t, **_kwargs: "en")
 
 
 class FakeLLM:
@@ -102,15 +107,10 @@ class FakeRetrieval:
     def __init__(self, chunks=None):
         self._chunks = chunks if chunks is not None else [Chunk(id="c1", text="ctx", metadata={"_id": "c1"})]
         self.retrieve_multi_calls: list[dict] = []
-        self.retrieve_per_query_calls: list[dict] = []
 
     async def retrieve_multi(self, **kwargs):
         self.retrieve_multi_calls.append(kwargs)
         return list(self._chunks)
-
-    async def retrieve_per_query(self, *, queries, **kwargs):
-        self.retrieve_per_query_calls.append({"queries": queries, **kwargs})
-        return [list(self._chunks) for _ in queries]
 
     @staticmethod
     def configuration_fingerprint(_partitions):
@@ -173,16 +173,32 @@ def _config(mode="SimpleRag"):
     )
 
 
-def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> QueryService:
-    return QueryService(
+def _svc(
+    *, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None, prompt_service=None
+) -> ChatService:
+    return create_chat_service(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
         config=_config(mode),
         web_search_service=web or FakeWeb(),
         workspace_service=workspace or FakeWorkspace(),
-        prompt_service=_disk_prompt_service(),
+        prompt_service=prompt_service or _disk_prompt_service(),
         llm_factory=llm_factory,
     )
+
+
+async def _prepare_chat(svc, partitions, payload, llm=None, trace=None, max_prompt_tokens=None):
+    """Run the ``classic`` workflow's graph for a request, as a chat request does before its answer."""
+    request = ChatRequest(
+        partitions=partitions,
+        payload=payload,
+        options=ChatOptions.from_metadata(payload.get("metadata")),
+        llm=llm,
+        prepare_sources=lambda _docs, _web: [],
+        started=0.0,
+        max_prompt_tokens=max_prompt_tokens,
+    )
+    return await svc._classic.run(request, trace)
 
 
 # --------------------------------------------------------------------------- #
@@ -193,7 +209,7 @@ def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=No
 def test_resolve_chat_history_depth_uses_partition_value():
     svc = _svc()  # global default = 4
     svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=10)}
-    assert svc._resolve_chat_history_depth(["p"]) == 10
+    assert svc._prompt_settings.chat_history_depth(["p"]) == 10
 
 
 def test_resolve_chat_history_depth_zero_inherits_global_default():
@@ -201,11 +217,11 @@ def test_resolve_chat_history_depth_zero_inherits_global_default():
     # would select the entire history).
     svc = _svc()
     svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=0)}
-    assert svc._resolve_chat_history_depth(["p"]) == 4
+    assert svc._prompt_settings.chat_history_depth(["p"]) == 4
 
 
 # --------------------------------------------------------------------------- #
-# sources: the retrieval preset's top_n, within the model window
+# a partition's config, as the chat path reads it
 # --------------------------------------------------------------------------- #
 
 
@@ -215,48 +231,8 @@ def _partition_cfg(top_n: int | None = None, **fields) -> SimpleNamespace:
     return SimpleNamespace(retrieval=RetrievalPipelineConfig(top_n=top_n), **{**defaults, **fields})
 
 
-def test_top_n_follows_the_partition_preset():
-    svc = _svc()  # reranker.top_k = 5
-    svc._config.partitions = {"p": _partition_cfg(top_n=15)}
-    assert svc._resolve_top_n(["p"]) == 15
-
-
-def test_unset_top_n_follows_reranker_top_k():
-    svc = _svc()
-    svc._config.partitions = {"p": _partition_cfg(top_n=None)}
-    assert svc._resolve_top_n(["p"]) == 5
-
-
-def test_top_n_takes_the_largest_across_partitions():
-    svc = _svc()
-    svc._config.partitions = {"small": _partition_cfg(top_n=15), "unset": _partition_cfg(top_n=None)}
-    assert svc._resolve_top_n(["small", "unset"]) == 15
-    assert svc._resolve_top_n(["all"]) == 15
-
-
-def test_top_n_falls_back_to_reranker_top_k():
-    svc = _svc()
-    svc._config.partitions = {"p": _partition_cfg(top_n=15)}
-    assert svc._resolve_top_n(None) == 5
-    assert svc._resolve_top_n(["unknown"]) == 5
-
-
-def test_empty_response_retry_instruction_uses_one_system_message():
-    messages = [
-        {"role": "system", "content": "Follow the existing answer instructions."},
-        {"role": "user", "content": "ok"},
-    ]
-
-    retry_messages = qs._empty_response_retry_messages(messages)
-
-    assert [message["role"] for message in retry_messages].count("system") == 1
-    assert "Follow the existing answer instructions." in retry_messages[0]["content"]
-    assert "previous response was empty" in retry_messages[0]["content"]
-    assert messages[0]["content"] == "Follow the existing answer instructions."
-
-
 def test_acknowledgement_prompt_does_not_assume_the_user_expressed_gratitude():
-    prompt = qs.build_casual_response_prompt("acknowledgement", "en")
+    prompt = classic_steps.build_casual_response_prompt("acknowledgement", "en")
 
     assert "Acknowledge the user's response briefly" in prompt
     assert "current topic" in prompt
@@ -266,8 +242,8 @@ def test_acknowledgement_prompt_does_not_assume_the_user_expressed_gratitude():
 def test_resolve_chat_history_depth_none_and_unknown_use_default():
     svc = _svc()
     svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=9)}
-    assert svc._resolve_chat_history_depth(None) == 4
-    assert svc._resolve_chat_history_depth(["missing"]) == 4
+    assert svc._prompt_settings.chat_history_depth(None) == 4
+    assert svc._prompt_settings.chat_history_depth(["missing"]) == 4
 
 
 def test_resolve_chat_history_depth_all_sentinel_uses_default():
@@ -276,7 +252,7 @@ def test_resolve_chat_history_depth_all_sentinel_uses_default():
     # per-partition value.
     svc = _svc()  # global default = 4
     svc._config.partitions = {"a": SimpleNamespace(chat_history_depth=10)}
-    assert svc._resolve_chat_history_depth(["all"]) == 4
+    assert svc._prompt_settings.chat_history_depth(["all"]) == 4
 
 
 def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
@@ -286,7 +262,7 @@ def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
         "b": SimpleNamespace(chat_history_depth=2),
         "c": SimpleNamespace(chat_history_depth=0),  # inherits → ignored
     }
-    assert svc._resolve_chat_history_depth(["a", "b", "c"]) == 6
+    assert svc._prompt_settings.chat_history_depth(["a", "b", "c"]) == 6
 
 
 @pytest.mark.parametrize("global_depth", [0, -1])
@@ -297,7 +273,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
     of what this depth is meant to limit."""
     config = _config()
     config.rag.chat_history_depth = global_depth
-    svc = QueryService(
+    svc = create_chat_service(
         retrieval_service=FakeRetrieval(),
         llm=FakeLLM(),
         config=config,
@@ -305,8 +281,8 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
         workspace_service=FakeWorkspace(),
         prompt_service=_disk_prompt_service(),
     )
-    assert svc._default_chat_history_depth == 4
-    assert svc._resolve_chat_history_depth(None) == 4
+    assert svc._prompt_settings._default_chat_history_depth == 4
+    assert svc._prompt_settings.chat_history_depth(None) == 4
 
 
 # --------------------------------------------------------------------------- #
@@ -449,119 +425,6 @@ async def test_chat_query_generation_uses_partition_chat_llm():
     assert out["choices"][0]["message"]["content"] == "preset answer"
     assert len(preset_llm.chat_calls) == 2  # query generation + answer
     assert default_llm.chat_calls == []
-
-
-# --------------------------------------------------------------------------- #
-# generate_query
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.asyncio
-async def test_generate_query_simplerag_uses_last_message():
-    sq = await _svc(mode="SimpleRag").generate_query([{"role": "user", "content": "what is X?"}])
-    assert [q.query for q in sq.query_list] == ["what is X?"]
-
-
-@pytest.mark.asyncio
-async def test_generate_query_chatbotrag_parses_json():
-    payload = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
-    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
-    sq = await svc.generate_query([{"role": "user", "content": "hi"}])
-    assert sq.query_list[0].query == "rewritten"
-    assert sq.requires_retrieval is True
-
-
-@pytest.mark.asyncio
-async def test_generate_query_chatbotrag_can_skip_retrieval():
-    payload = json.dumps({"intent": "capability", "requires_retrieval": False, "query_list": []})
-    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
-    sq = await svc.generate_query([{"role": "user", "content": "How can you help me?"}])
-    assert sq.intent == "capability"
-    assert sq.requires_retrieval is False
-    assert sq.query_list == []
-
-
-@pytest.mark.asyncio
-async def test_contextualizer_prompt_distinguishes_social_acknowledgement_from_factual_acceptance():
-    payload = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
-    llm = FakeLLM(chat_responses=[payload])
-    svc = _svc(llm=llm, mode="ChatBotRag")
-
-    await svc.generate_query(
-        [
-            {"role": "assistant", "content": "Was that helpful?"},
-            {"role": "user", "content": "ok"},
-        ]
-    )
-
-    contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
-    assert "Replies to social, wellbeing, or feedback questions remain gratitude" in contextualizer_prompt
-    assert (
-        'assistant: Was that helpful?\nuser: ok\n{"intent":"gratitude","requires_retrieval":false,"query_list":[]}'
-    ) in contextualizer_prompt
-    assert (
-        "assistant: Albendazole treats lymphatic filariasis and several worm infections. "
-        "Would you like the recommended dosages?\nuser: ok\n"
-        '{"intent":"other","requires_retrieval":true,'
-    ) in contextualizer_prompt
-
-
-@pytest.mark.asyncio
-async def test_query_hint_preserves_acknowledgement_rules_with_a_stored_contextualizer():
-    class StoredPromptService:
-        async def resolve_prompt(self, prompt_type, names=None):
-            assert prompt_type == "query_contextualizer"
-            return "Stored contextualizer for {query_language} on {current_date}."
-
-    payload = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
-    llm = FakeLLM(chat_responses=[payload])
-    svc = _svc(llm=llm, mode="ChatBotRag")
-    svc._prompt_service = StoredPromptService()
-
-    await svc.generate_query(
-        [
-            {"role": "assistant", "content": "Was that helpful?"},
-            {"role": "user", "content": "ok"},
-        ]
-    )
-
-    contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
-    assert "social, wellbeing, or feedback question" in contextualizer_prompt
-    assert "factual, informational, analytical, or document-backed continuation" in contextualizer_prompt
-
-
-@pytest.mark.asyncio
-async def test_generate_query_chatbotrag_falls_back_on_garbage():
-    svc = _svc(llm=FakeLLM(chat_responses=["not json", "still not json"]), mode="ChatBotRag")
-    sq = await svc.generate_query([{"role": "user", "content": "raw question"}])
-    assert sq.query_list[0].query == "raw question"  # fallback to raw user query
-
-
-@pytest.mark.asyncio
-async def test_generate_query_renders_history_with_a_content_free_turn():
-    """The chat-history string is built over *every* message, so the assistant
-    turn that carries ``tool_calls`` — no ``content`` at all once the router
-    dumps with ``exclude_none=True`` — reaches it too. ChatBotRag is the default
-    ``rag.mode``, so the SimpleRag early return is no shield: reading the key
-    unguarded 500s on a plain tool-call replay.
-    """
-    llm = FakeLLM(chat_responses=['{"requires_retrieval": true, "query_list": [{"query": "q"}]}'])
-    svc = _svc(llm=llm, mode="ChatBotRag")
-
-    sq = await svc.generate_query(
-        [
-            {"role": "user", "content": "weather in Paris?"},
-            {"role": "assistant", "tool_calls": [{"id": "c1"}]},
-            {"role": "tool", "content": "18C", "tool_call_id": "c1"},
-            {"role": "user", "content": "and tomorrow?"},
-        ]
-    )
-
-    assert sq.query_list[0].query == "q"
-    # The turn is still rendered (role kept, empty body) rather than skipped, so
-    # the history handed to the contextualizer keeps its shape.
-    history = llm.chat_calls[0][0][1]["content"]
-    assert "assistant: \n" in history
 
 
 # --------------------------------------------------------------------------- #
@@ -873,7 +736,7 @@ async def _presented(svc, *, max_prompt_tokens, metadata=None, **request):
 async def test_chat_caps_sources_at_what_the_model_window_leaves(monkeypatch):
     """With the window known, the sources get what is left of it after the
     instructions and the conversation, even below the partition's top_n."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
     first_only = 100 + qs.get_num_tokens()("[Source 1]\nshort")
 
@@ -885,7 +748,7 @@ async def test_chat_caps_sources_at_what_the_model_window_leaves(monkeypatch):
 async def test_chat_takes_top_n_chunks_however_long(monkeypatch):
     """The count is top_n, not a token budget sized from the chunk size: a chunk
     longer than the chunk size, or one carrying a long header, still makes it."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     chunks = [Chunk(id="c1", text="word " * 2000, metadata={"_id": "c1"})]
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer"]))
     svc._config.partitions = {"p": _partition_cfg(top_n=1)}
@@ -896,7 +759,7 @@ async def test_chat_takes_top_n_chunks_however_long(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_skips_a_source_the_window_cannot_fit_and_keeps_going(monkeypatch):
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     chunks = [
         Chunk(id="long", text="word " * 2000, metadata={"_id": "long"}),
         Chunk(id="short", text="short", metadata={"_id": "short"}),
@@ -909,7 +772,7 @@ async def test_chat_skips_a_source_the_window_cannot_fit_and_keeps_going(monkeyp
 
 @pytest.mark.asyncio
 async def test_chat_without_a_known_window_takes_top_n(monkeypatch):
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
 
     assert await _presented(svc, max_prompt_tokens=None) == ["c1", "c2"]
@@ -925,10 +788,10 @@ def _long_tool_definition():
 async def test_chat_sources_leave_room_for_the_tool_definitions(monkeypatch):
     """The client's tool definitions reach the provider with the prompt, so
     the sources get what is left of the window after them too."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
     tools = [_long_tool_definition()]
-    tools_tokens = qs.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
+    tools_tokens = classic_steps.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
     first_only = 100 + tools_tokens + qs.get_num_tokens()("[Source 1]\nshort")
 
     assert await _presented(svc, max_prompt_tokens=first_only, tools=tools) == ["c1"]
@@ -945,7 +808,7 @@ async def test_chat_with_tools_never_sends_more_than_the_window_leaves(monkeypat
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
     svc._config.partitions = {"p": _partition_cfg(top_n=5)}
     tools = [_long_tool_definition()]
-    tools_tokens = qs.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
+    tools_tokens = classic_steps.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
 
     async def sent(max_prompt_tokens):
         await svc.chat(
@@ -957,7 +820,7 @@ async def test_chat_with_tools_never_sends_more_than_the_window_leaves(monkeypat
         )
         messages, kwargs = llm.chat_calls[-1]
         assert kwargs["tools"] == tools
-        return qs._messages_tokens(messages) + tools_tokens
+        return classic_steps.messages_tokens(messages) + tools_tokens
 
     everything = await sent(None)
     for window in range(everything - 600, everything + 1):
@@ -971,10 +834,10 @@ def _long_web_result():
 @pytest.mark.asyncio
 async def test_window_cap_counts_the_web_results(monkeypatch):
     """Under a known window the web results take their share of it."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     web = _long_web_result()
     svc = _two_chunk_svc(web=FakeWeb(results=[web]))
-    _, _, web_tokens = qs.format_web_context([web], length_function=qs.get_num_tokens(), max_tokens=2000)
+    _, _, web_tokens = classic_steps.format_web_context([web], length_function=qs.get_num_tokens(), max_tokens=2000)
     first_only = 100 + web_tokens + qs.get_num_tokens()("[Source 1]\nshort")
 
     presented = await _presented(svc, max_prompt_tokens=first_only, metadata={"websearch": True})
@@ -985,7 +848,7 @@ async def test_window_cap_counts_the_web_results(monkeypatch):
 @pytest.mark.asyncio
 async def test_web_results_take_no_more_than_the_window_leaves(monkeypatch):
     """A web context larger than the room left is cut to it, not sent over the window."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc(web=FakeWeb(results=[_long_web_result()]))
 
     # 50 tokens left: the 600-word web result doesn't fit, both chunks do.
@@ -998,7 +861,7 @@ async def test_web_results_take_no_more_than_the_window_leaves(monkeypatch):
 async def test_chat_never_sends_more_than_the_window_leaves(monkeypatch):
     """Whatever the window, the answer messages fit it: the separator between the
     documents and the web results counts too, though the sizing leaves it out."""
-    monkeypatch.setattr(qs, "get_num_tokens", lambda: len)
+    monkeypatch.setattr(text_utils, "_cached_length_function", len)
     chunks = [Chunk(id=f"c{i}", text="word " * (5 * i), metadata={"_id": f"c{i}"}) for i in range(1, 6)]
     web = [
         SimpleNamespace(url=f"https://example.test/{i}", title="Web", content="word " * 8, snippet="") for i in range(3)
@@ -1017,9 +880,9 @@ async def test_chat_never_sends_more_than_the_window_leaves(monkeypatch):
         )
         return llm.chat_calls[-1][0]
 
-    everything = qs._messages_tokens(await sent(None))
+    everything = classic_steps.messages_tokens(await sent(None))
     for window in range(everything - 400, everything + 1):
-        assert qs._messages_tokens(await sent(window)) <= window
+        assert classic_steps.messages_tokens(await sent(window)) <= window
 
 
 @pytest.mark.asyncio
@@ -1030,7 +893,7 @@ async def test_complete_never_sends_more_than_the_window_leaves(monkeypatch):
         # The assembled prompt costs more than its parts: 5 per source in it.
         return len(text) + (5 * text.count("[Source") if "# User request" in text else 0)
 
-    monkeypatch.setattr(qs, "get_num_tokens", lambda: num_tokens)
+    monkeypatch.setattr(text_utils, "_cached_length_function", num_tokens)
     chunks = [Chunk(id=f"c{i}", text="word " * (5 * i), metadata={"_id": f"c{i}"}) for i in range(1, 6)]
     llm = FakeLLM(gen_text="answer")
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
@@ -1075,7 +938,7 @@ async def test_chat_without_documents_never_sends_more_than_the_window_leaves():
         )
         messages = llm.chat_calls[-1][0]
         assert EMPTY_CONTEXT_MESSAGE in messages[0]["content"]
-        return qs._messages_tokens(messages)
+        return classic_steps.messages_tokens(messages)
 
     everything = await sent(None)
     for window in range(everything - 50, everything + 1):
@@ -1123,7 +986,7 @@ async def test_casual_answer_never_sends_more_than_the_window_leaves():
             model_name="m",
             max_prompt_tokens=max_prompt_tokens,
         )
-        return qs._messages_tokens(llm.chat_calls[-1][0])
+        return classic_steps.messages_tokens(llm.chat_calls[-1][0])
 
     everything = await sent(None)
     assert await sent(everything) == everything
@@ -1155,7 +1018,7 @@ async def test_window_counts_an_empty_assistant_turn_as_sent(question):
         )
         messages = llm.chat_calls[-1][0]
         assert messages[2]["content"] == "NO_CONTENT"
-        return qs._messages_tokens(messages)
+        return classic_steps.messages_tokens(messages)
 
     everything = await sent(None)
     assert await sent(everything) == everything
@@ -1165,7 +1028,7 @@ async def test_window_counts_an_empty_assistant_turn_as_sent(question):
 
 @pytest.mark.asyncio
 async def test_chat_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
 
     with pytest.raises(ContextWindowExceededError) as exc:
@@ -1178,7 +1041,7 @@ async def test_chat_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_stream_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
 
     with pytest.raises(ContextWindowExceededError):
@@ -1195,7 +1058,7 @@ async def test_chat_stream_rejects_a_conversation_the_window_cannot_hold(monkeyp
 @pytest.mark.asyncio
 async def test_web_results_leave_the_top_n_whole_when_the_window_has_room(monkeypatch):
     """Web results come out of the window, not out of the top_n chunks."""
-    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    monkeypatch.setattr(classic_steps, "messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc(web=FakeWeb(results=[_long_web_result()]))
 
     for window in (None, 100_000):
@@ -1212,7 +1075,7 @@ async def test_complete_caps_sources_at_what_the_model_window_leaves(monkeypatch
         # The rendered instructions always end with the user request; count them as one block.
         return instructions if "# User request" in text else len(text.split())
 
-    monkeypatch.setattr(qs, "get_num_tokens", lambda: num_tokens)
+    monkeypatch.setattr(text_utils, "_cached_length_function", num_tokens)
     chunks = [Chunk(id="c1", text="short", metadata={"_id": "c1"})]
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
     svc._config.partitions = {"p": _partition_cfg(top_n=10)}
@@ -1344,7 +1207,8 @@ async def test_chat_casual_response_prompt_takes_priority_over_spoken_style():
 async def test_chat_casual_response_preserves_the_safely_wrapped_client_system_prompt():
     svc = _svc(mode="ChatBotRag")
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -1371,7 +1235,7 @@ async def test_chat_casual_response_preserves_the_safely_wrapped_client_system_p
     ],
 )
 def test_casual_response_prompt_is_intent_specific(intent, required_text):
-    prompt = qs.build_casual_response_prompt(intent, "en")
+    prompt = classic_steps.build_casual_response_prompt(intent, "en")
 
     assert "Respond in English" in prompt
     assert f"intent is {intent}" in prompt
@@ -1382,14 +1246,14 @@ def test_casual_response_prompt_is_intent_specific(intent, required_text):
 
 @pytest.mark.parametrize("intent", ["gratitude", "farewell", "empty"])
 def test_casual_response_prompt_addresses_assistant_directly(intent):
-    prompt = qs.build_casual_response_prompt(intent, "en")
+    prompt = classic_steps.build_casual_response_prompt(intent, "en")
 
     assert "list your capabilities" in prompt
     assert "list its capabilities" not in prompt
 
 
 def test_casual_response_prompt_uses_configured_assistant_name_without_vendor_attribution():
-    prompt = qs.build_casual_response_prompt("greeting", "en", assistant_name="Marianne")
+    prompt = classic_steps.build_casual_response_prompt("greeting", "en", assistant_name="Marianne")
 
     assert "You are Marianne, a helpful assistant" in prompt
     assert "introduce yourself as Marianne" in prompt
@@ -1402,7 +1266,8 @@ async def test_chat_casual_greeting_uses_assistant_name_from_runtime_configurati
     svc = _svc(mode="ChatBotRag")
     svc._config.server.assistant_name = "Marianne"
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": "Bonjour"}], "metadata": {}},
     )
@@ -1418,7 +1283,8 @@ async def test_chat_casual_greeting_preserves_literal_braces_in_assistant_name(a
     svc = _svc(mode="ChatBotRag")
     svc._config.server.assistant_name = assistant_name
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -1804,7 +1670,7 @@ async def test_original_query_comparison_never_changes_actual_documents():
     ]
     comparison = out["extra"]["retrieval_trace"]["comparisons"]["original_query"]
     assert comparison["status"] == "complete"
-    expected_fingerprint = qs.canonical_fingerprint(
+    expected_fingerprint = classic_steps.canonical_fingerprint(
         {
             "stored_configuration_fingerprint": "fake-fingerprint",
             "effective_request_overrides": {
@@ -1817,110 +1683,6 @@ async def test_original_query_comparison_never_changes_actual_documents():
     )
     assert comparison["configuration_fingerprint"] == expected_fingerprint
     assert out["extra"]["retrieval_trace"]["configuration_fingerprint"] == expected_fingerprint
-
-
-@pytest.mark.asyncio
-async def test_original_query_comparison_preserves_partition_child_traces():
-    class PartitionedRetrieval(FakeRetrieval):
-        async def retrieve_multi(self, **kwargs):
-            trace = kwargs["trace"]
-            child = RetrievalTraceBuilder(
-                "partition-child",
-                "original query",
-                partition="legal",
-                diagnostics=trace.diagnostics,
-            )
-            child.record_stage("final", status="complete", candidates=[])
-            trace.record_query_trace(child)
-            return await super().retrieve_multi(**kwargs)
-
-    retrieval = PartitionedRetrieval()
-    service = _svc(mode="ChatBotRag", retrieval=retrieval)
-    trace = RetrievalTraceBuilder("request", "original query")
-
-    await service._compare_original_query(
-        trace,
-        original_query="original query",
-        partition=["legal"],
-        top_k=10,
-        retrieval_top_k=10,
-        filter_params=None,
-        configuration_fingerprint="fingerprint",
-    )
-
-    comparison = trace.finish(configuration_fingerprint="fingerprint")["comparisons"]["original_query"]
-    assert comparison["query_traces"][0]["partition"] == "legal"
-    assert comparison["query_traces"][0]["query"] == "original query"
-
-
-@pytest.mark.asyncio
-async def test_original_query_comparison_has_an_independent_candidate_budget():
-    class CandidateHeavyRetrieval(FakeRetrieval):
-        async def retrieve_multi(self, **kwargs):
-            trace = kwargs["trace"]
-            for stage in ("original_query", "contextualized_query", "dense_before_threshold", "final"):
-                candidates = [TraceCandidate(id=f"{stage}-{index}", rank=index + 1) for index in range(150)]
-                trace.record_stage(stage, status="complete", candidates=candidates)
-            return await super().retrieve_multi(**kwargs)
-
-    diagnostics = RetrievalDiagnosticsContext(candidate_limit=500)
-    trace = RetrievalTraceBuilder("request", "original query", diagnostics=diagnostics)
-    for stage in ("original_query", "contextualized_query", "dense_before_threshold"):
-        candidates = [TraceCandidate(id=f"main-{stage}-{index}", rank=index + 1) for index in range(150)]
-        trace.record_stage(stage, status="complete", candidates=candidates)
-
-    service = _svc(mode="ChatBotRag", retrieval=CandidateHeavyRetrieval())
-    await service._compare_original_query(
-        trace,
-        original_query="original query",
-        partition=["legal"],
-        top_k=None,
-        retrieval_top_k=50,
-        filter_params=None,
-        configuration_fingerprint="fingerprint",
-    )
-
-    comparison = trace.finish(configuration_fingerprint="fingerprint")["comparisons"]["original_query"]
-    assert comparison["candidate_limit"] == 500
-    assert comparison["candidates_truncated"] is True
-    assert diagnostics.remaining_candidates == 50
-    assert diagnostics.candidates_truncated is False
-    assert "candidates_truncated" not in trace.finish(configuration_fingerprint="fingerprint")
-
-
-@pytest.mark.asyncio
-async def test_original_query_comparison_reports_truncated_partition_traces():
-    class FanoutRetrieval(FakeRetrieval):
-        async def retrieve_multi(self, **kwargs):
-            trace = kwargs["trace"]
-            for index in range(501):
-                trace.record_query_trace(
-                    RetrievalTraceBuilder(
-                        f"partition-{index}",
-                        "original query",
-                        partition=f"partition-{index}",
-                        diagnostics=trace.diagnostics,
-                    )
-                )
-            return await super().retrieve_multi(**kwargs)
-
-    service = _svc(mode="ChatBotRag", retrieval=FanoutRetrieval())
-    trace = RetrievalTraceBuilder("request", "original query")
-
-    await service._compare_original_query(
-        trace,
-        original_query="original query",
-        partition=["all"],
-        top_k=10,
-        retrieval_top_k=10,
-        filter_params=None,
-        configuration_fingerprint="fingerprint",
-    )
-
-    comparison = trace.finish(configuration_fingerprint="fingerprint")["comparisons"]["original_query"]
-    assert len(comparison["query_traces"]) == 500
-    assert comparison["query_traces_truncated"] is True
-    assert comparison["trace_truncated"] is True
 
 
 @pytest.mark.asyncio
@@ -1937,7 +1699,8 @@ async def test_non_allowlisted_social_messages_retrieve_despite_contextualizer_c
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=[query_json]), retrieval=retrieval)
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": message}], "metadata": {}},
     )
@@ -1953,7 +1716,8 @@ async def test_ok_after_social_history_uses_contextualizer_gratitude_decision():
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -1978,7 +1742,8 @@ async def test_explicit_retrieval_metadata_still_forces_retrieval_for_acknowledg
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -2011,7 +1776,8 @@ async def test_ack_after_factual_offer_still_retrieves_the_accepted_request(ackn
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [
@@ -2036,7 +1802,8 @@ async def test_thumb_reaction_keeps_simple_rag_casual_behavior(reaction):
     retrieval = FakeRetrieval()
     svc = _svc(mode="SimpleRag", retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": reaction}], "metadata": {}},
     )
@@ -2060,7 +1827,6 @@ async def test_empty_contextualized_casual_answer_retries_in_the_same_language(o
         ],
     )
     retrieval = FakeRetrieval()
-    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
     def detect_test_language(text, **_kwargs):
         if text.startswith("Voici"):
@@ -2069,7 +1835,8 @@ async def test_empty_contextualized_casual_answer_retries_in_the_same_language(o
             return "en"
         return None
 
-    monkeypatch.setattr(qs, "detect_language", detect_test_language)
+    monkeypatch.setattr(chat_factory, "detect_language", detect_test_language)
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
     kwargs = {
         "partitions": ["p"],
         "payload": {
@@ -2279,64 +2046,6 @@ async def test_partial_retry_stream_failure_keeps_partial_text_and_truncation_fl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("close_early", [False, True])
-async def test_empty_response_retry_closes_streams_before_retry_and_on_disconnect(close_early):
-    close_order = []
-    retry_opened_after = []
-
-    class TrackedStream:
-        def __init__(self, name, lines):
-            self.name = name
-            self.lines = list(lines)
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            if not self.lines:
-                raise StopAsyncIteration
-            return self.lines.pop(0)
-
-        async def aclose(self):
-            close_order.append(self.name)
-
-    initial_stream = TrackedStream(
-        "initial",
-        [
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-            "data: [DONE]\n\n",
-        ],
-    )
-
-    def retry_stream_factory():
-        retry_opened_after.append(list(close_order))
-        return TrackedStream(
-            "retry",
-            [
-                'data: {"choices":[{"delta":{"content":"Answer"}}]}\n\n',
-                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-                "data: [DONE]\n\n",
-            ],
-        )
-
-    response_stream = qs._retry_empty_response_stream(
-        initial_stream,
-        retry_stream_factory,
-        fallback_text="Please try again.",
-        fallback_extra={},
-        model_name="m",
-    )
-    if close_early:
-        await anext(response_stream)
-        await response_stream.aclose()
-    else:
-        _ = [line async for line in response_stream]
-
-    assert retry_opened_after == [["initial"]]
-    assert close_order == ["initial", "retry"]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["chat", "chat_stream"])
 async def test_empty_length_completion_uses_fallback_without_retry(operation):
     contextualizer_result = json.dumps({"intent": "other", "requires_retrieval": True, "query_list": []})
@@ -2493,7 +2202,8 @@ async def test_chat_fails_closed_to_retrieval_for_incomplete_or_inconsistent_cas
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": message}], "metadata": {}},
     )
@@ -2702,7 +2412,8 @@ async def test_explicit_websearch_forces_retrieval_for_allowlisted_casual_messag
     web = FakeWeb()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval, web=web)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [{"role": "user", "content": "Hello!"}],
@@ -2721,7 +2432,8 @@ async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
     retrieval = FakeRetrieval(chunks=[])
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [{"role": "user", "content": "Merci!"}],
@@ -2731,25 +2443,22 @@ async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
 
     assert len(retrieval.retrieve_multi_calls) == 1
     assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == "Merci!"
-    assert retrieval.retrieve_multi_calls[0]["top_k"] == svc._mr_max
+    assert retrieval.retrieve_multi_calls[0]["top_k"] == svc._config.map_reduce.max_total_documents
     assert retrieval.retrieve_multi_calls[0]["retrieval_top_k"] is None
 
 
 @pytest.mark.asyncio
 async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
-    # #707/#740: with a partition AND websearch enabled, the document branch must
-    # fuse through retrieve_multi (which honors the partition's rrf_k), NOT the
-    # legacy retrieve_per_query + fuse()@60. Revert-proves _gather_rag_and_web:
-    # reverting it to retrieve_per_query + fuse flips these call records and fails.
+    # With a partition and websearch, the documents are fused by retrieve_multi,
+    # which honors the partition's rrf_k, not by fuse() at the fixed 60.
     retrieval = FakeRetrieval()
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
-    result = await svc._prepare_chat(
-        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
+    result = await _prepare_chat(
+        svc, ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
     )
     web = result.web_results
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
-    assert retrieval.retrieve_per_query_calls == []  # legacy per-query + fuse()@60 path NOT used
     assert web and web[0].url == "https://ex.com"  # websearch branch actually taken
 
 
@@ -2759,7 +2468,8 @@ async def test_websearch_with_partition_forwards_retrieval_diagnostic_overrides(
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [{"role": "user", "content": "q"}],
@@ -2785,7 +2495,7 @@ async def test_websearch_with_partition_forwards_retrieval_diagnostic_overrides(
 async def test_answer_system_prompt_comes_from_prompt_service():
     # Revert-proves the query seam: the payload's system message is built from
     # prompt_service.resolve_prompt("sys_prompt", ...), resolved request-time —
-    # not a startup snapshot. Reverting query_service to load_template_by_key at
+    # not a startup snapshot. Reverting chat_service to load_template_by_key at
     # __init__ makes the marker disappear.
     class MarkerPromptService:
         def __init__(self):
@@ -2795,11 +2505,10 @@ async def test_answer_system_prompt_comes_from_prompt_service():
             self.seen.append(prompt_type)
             return "MARKER-SYS::{context}"
 
-    svc = _svc(retrieval=FakeRetrieval())  # SimpleRag → no contextualizer call
     marker = MarkerPromptService()
-    svc._prompt_service = marker
+    svc = _svc(retrieval=FakeRetrieval(), prompt_service=marker)  # SimpleRag → no contextualizer call
 
-    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    result = await _prepare_chat(svc, ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     payload = result.payload
 
     assert payload["messages"][0]["role"] == "system"
@@ -2820,18 +2529,17 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
             self.calls.append((prompt_type, tuple(names or ())))
             return "SYS::{context}"
 
-    svc = _svc(retrieval=FakeRetrieval())
     rec = RecordingPromptService()
-    svc._prompt_service = rec
+    svc = _svc(retrieval=FakeRetrieval(), prompt_service=rec)
     svc._config.partitions = {
         "p": _partition_cfg(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
     }
 
-    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    await _prepare_chat(svc, ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     assert ("sys_prompt", ("legal",)) in rec.calls
 
     rec.calls.clear()
-    await svc._prepare_chat(["p", "q"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    await _prepare_chat(svc, ["p", "q"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     assert ("sys_prompt", (None,)) in rec.calls  # no single owning partition
 
 
@@ -2851,14 +2559,14 @@ async def test_spoken_style_metadata_swaps_the_answer_prompt():
             self.calls.append((prompt_type, tuple(names or ())))
             return "SPOKEN::{context}"
 
-    svc = _svc(retrieval=FakeRetrieval())
     rec = RecordingPromptService()
-    svc._prompt_service = rec
+    svc = _svc(retrieval=FakeRetrieval(), prompt_service=rec)
     svc._config.partitions = {
         "p": _partition_cfg(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
     }
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": "q"}], "metadata": {"spoken_style_answer": True}},
     )
@@ -2868,36 +2576,9 @@ async def test_spoken_style_metadata_swaps_the_answer_prompt():
 
     # Without the flag the ordinary answer prompt is used.
     rec.calls.clear()
-    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    await _prepare_chat(svc, ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     assert any(call[0] == "sys_prompt" for call in rec.calls)
     assert not any(call[0] == "spoken_style_answer" for call in rec.calls)
-
-
-@pytest.mark.asyncio
-async def test_query_contextualizer_name_from_retrieval_preset_reaches_resolver():
-    # query_contextualizer is selected on the partition's RETRIEVAL preset (not
-    # generation prompts). A single owning partition's preset name is passed to
-    # resolve_prompt; multi-partition passes None (global default).
-    class RecordingPromptService:
-        def __init__(self):
-            self.calls: list = []
-
-        async def resolve_prompt(self, prompt_type, names=None):
-            self.calls.append((prompt_type, tuple(names or ())))
-            return "CTX"
-
-    payload = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
-    svc = _svc(llm=FakeLLM(chat_responses=[payload, payload]), mode="ChatBotRag")
-    rec = RecordingPromptService()
-    svc._prompt_service = rec
-    svc._config.partitions = {"p": SimpleNamespace(retrieval=SimpleNamespace(query_contextualizer_prompt_name="myctx"))}
-
-    await svc.generate_query([{"role": "user", "content": "q"}], partition=["p"])
-    assert ("query_contextualizer", ("myctx",)) in rec.calls
-
-    rec.calls.clear()
-    await svc.generate_query([{"role": "user", "content": "q"}], partition=["p", "q"])
-    assert ("query_contextualizer", (None,)) in rec.calls  # no single owning partition
 
 
 @pytest.mark.asyncio
@@ -2947,7 +2628,7 @@ async def test_chat_trace_labels_workspace_scope_for_diagnostics():
 
 @pytest.mark.asyncio
 async def test_chat_workspace_restricts_openrag_all_to_owning_partition():
-    # "openrag-all" reaches _prepare_chat as partitions=["all"] — a workspace
+    # "openrag-all" reaches the workflow as partitions=["all"] — a workspace
     # must narrow retrieval to its single owning partition, never search
     # every accessible partition with just a file_id filter (#706).
     scope = WorkspaceScope(workspace_id="w1", partition="only-this-one", file_ids=["fa"])
@@ -3542,20 +3223,6 @@ async def test_empty_casual_trace_records_the_actual_no_retrieval_decision():
 
 
 @pytest.mark.asyncio
-async def test_map_reduce_keeps_relevant_drops_irrelevant():
-    rel = json.dumps({"relevancy": True, "summary": "kept"})
-    irr = json.dumps({"relevancy": False, "summary": ""})
-    svc = _svc(llm=FakeLLM(chat_responses=[rel, irr]))
-    docs = [
-        Chunk(id="a", text="A", metadata={"_id": "a"}).to_langchain(),
-        Chunk(id="b", text="B", metadata={"_id": "b"}).to_langchain(),
-    ]
-    out = await svc._map_reduce("q", docs)
-    assert len(out) == 1
-    assert out[0].page_content == "kept"
-
-
-@pytest.mark.asyncio
 async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
     """#847 follow-up review: map-reduce replaces `docs` with LLM-generated
     summaries before the prompt is built. all_retrieved_sources must still
@@ -3593,269 +3260,28 @@ async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
 
 
 # --------------------------------------------------------------------------- #
-# helpers
+# small talk
 # --------------------------------------------------------------------------- #
-
-
-def test_json_slice_extracts_object():
-    assert qs._json_slice('noise {"a": 1} trailing') == '{"a": 1}'
-
-
-def test_dedupe_web_preserves_first_seen():
-    a = SimpleNamespace(url="https://example.test/one")
-    b = SimpleNamespace(url="https://example.test/one")
-    c = SimpleNamespace(url="https://example.test/two")
-    assert qs._dedupe_web([[a, b], [c]]) == [a, c]
-
-
-def test_dedupe_web_drops_invalid_urls_before_source_numbering():
-    invalid = SimpleNamespace(url="javascript:alert(1)")
-    valid = SimpleNamespace(url="https://example.test/evidence")
-
-    assert qs._dedupe_web([[invalid, valid]]) == [valid]
-
-
-def test_sampling_strips_transport_keys():
-    out = qs._sampling({"messages": [], "stream": True, "model": "m", "temperature": 0.5})
-    assert out == {"temperature": 0.5}
-
-
-# --------------------------------------------------------------------------- #
-# _sanitize_messages
-# --------------------------------------------------------------------------- #
-
-
-def test_sanitize_valid_alternating_unchanged():
-    """Valid alternating history → identical output."""
-    msgs = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi"},
-        {"role": "user", "content": "again"},
-    ]
-    assert QueryService._sanitize_messages(msgs) == msgs
-
-
-def test_sanitize_empty_content_replaced_with_placeholder():
-    """Empty assistant content → replaced with NO_CONTENT, alternation preserved."""
-    msgs = [
-        {"role": "user", "content": "first"},
-        {"role": "assistant", "content": ""},
-        {"role": "user", "content": "second"},
-    ]
-    out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 3
-    assert out[1]["role"] == "assistant"
-    assert out[1]["content"] == "NO_CONTENT"
-
-
-def test_sanitize_whitespace_only_replaced():
-    """Whitespace-only assistant content → replaced with NO_CONTENT."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": "   "},
-    ]
-    out = QueryService._sanitize_messages(msgs)
-    assert out[1]["content"] == "NO_CONTENT"
-
-
-def test_sanitize_no_content_key_replaced():
-    """Assistant with no 'content' key → replaced with NO_CONTENT, other keys kept."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "name": "bot"},
-    ]
-    out = QueryService._sanitize_messages(msgs)
-    assert out[1]["content"] == "NO_CONTENT"
-    assert out[1]["name"] == "bot"
-
-
-def test_sanitize_empty_list_content_replaced():
-    """Empty multimodal content list → treated as empty, replaced with NO_CONTENT."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": []},
-    ]
-    out = QueryService._sanitize_messages(msgs)
-    assert out[1]["content"] == "NO_CONTENT"
-
-
-def test_sanitize_assistant_with_tool_calls_untouched():
-    """Empty assistant content is legitimate when carrying tool_calls → untouched."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function"}]},
-    ]
-    out = QueryService._sanitize_messages(msgs)
-    assert out == msgs
-
-
-def test_sanitize_assistant_with_function_call_untouched():
-    """Empty assistant content is legitimate when carrying function_call → untouched."""
-    msgs = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": None, "function_call": {"name": "f"}},
-    ]
-    out = QueryService._sanitize_messages(msgs)
-    assert out == msgs
-
-
-def test_sanitize_empty_user_not_touched():
-    """User message with empty content → kept as-is (only assistant is patched)."""
-    msgs = [{"role": "user", "content": ""}]
-    assert QueryService._sanitize_messages(msgs) == msgs
-
-
-def test_sanitize_multiple_empty_assistants_all_replaced():
-    """Multiple empty assistants → all replaced, alternation intact."""
-    msgs = [
-        {"role": "user", "content": "u1"},
-        {"role": "assistant", "content": ""},
-        {"role": "user", "content": "u2"},
-        {"role": "assistant", "content": ""},
-        {"role": "user", "content": "u3"},
-    ]
-    out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 5
-    assert out[1]["content"] == "NO_CONTENT"
-    assert out[3]["content"] == "NO_CONTENT"
-
-
-def test_sanitize_multimodal_content_untouched():
-    """Non-empty multimodal content list → never replaced."""
-    msgs = [
-        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]},
-        {"role": "assistant", "content": [{"type": "text", "text": "desc"}]},
-    ]
-    assert QueryService._sanitize_messages(msgs) == msgs
-
-
-def test_sanitize_empty_list():
-    """Empty input → empty output."""
-    assert QueryService._sanitize_messages([]) == []
-
-
-def test_sanitize_system_message_preserved():
-    """System message in head → preserved untouched."""
-    msgs = [
-        {"role": "system", "content": "You are an assistant."},
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi"},
-    ]
-    assert QueryService._sanitize_messages(msgs) == msgs
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("message", [*sorted(qs.CASUAL_MESSAGES), "   ?! 👋   "])
+@pytest.mark.parametrize("message", [*sorted(smalltalk.CASUAL_MESSAGES), "   ?! 👋   "])
 async def test_allowlisted_or_normalized_empty_chat_bypasses_contextualization_and_retrieval(message):
     llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": True, "query_list": [{"query": "wrong"}]})])
     retrieval = FakeRetrieval()
     svc = _svc(llm=llm, retrieval=retrieval, mode="ChatBotRag")
 
-    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": message}], "metadata": {}})
+    result = await _prepare_chat(svc, ["p"], {"messages": [{"role": "user", "content": message}], "metadata": {}})
 
-    policy = qs.casual_message_policy(message)
+    policy = smalltalk.casual_message_policy(message)
     assert policy is not None
-    if not qs.normalize_casual_message(message):
-        assert policy == qs.CasualMessagePolicy("empty", "en")
+    if not smalltalk.normalize_casual_message(message):
+        assert policy == smalltalk.CasualMessagePolicy("empty", "en")
     assert llm.chat_calls == []
     assert retrieval.retrieve_multi_calls == []
     assert result.docs == []
     assert result.web_results == []
     assert result.payload["messages"][0]["role"] == "system"
-
-
-def test_split_leading_system_prompt_tolerates_content_free_system_turn():
-    """``OpenAIMessage`` allows a null content and the router dumps with
-    ``exclude_none=True``, so a leading system message can reach here with no
-    ``content`` key at all. Reading it unguarded raised KeyError — a 500 on a
-    request the schema had just accepted.
-    """
-    raw = [
-        {"role": "system"},
-        {"role": "system", "content": "be terse"},
-        {"role": "user", "content": "hi"},
-    ]
-
-    pinned, rest = qs._split_leading_system_prompt(raw, raw)
-
-    # The content-free turn is still consumed by the leading run (stripped from
-    # the history) — it just contributes nothing to the pinned prompt.
-    assert pinned == "be terse"
-    assert rest == [{"role": "user", "content": "hi"}]
-
-
-def test_split_leading_system_prompt_returns_none_when_every_system_turn_is_empty():
-    """A leading run made only of content-free system messages pins nothing,
-    rather than joining empty strings into a blank custom prompt.
-    """
-    raw = [{"role": "system"}, {"role": "system", "content": ""}, {"role": "user", "content": "hi"}]
-
-    pinned, rest = qs._split_leading_system_prompt(raw, raw)
-
-    assert pinned is None
-    assert rest == [{"role": "user", "content": "hi"}]
-
-
-@pytest.mark.parametrize(
-    ("message", "normalized"),
-    [
-        ("Bonjour ! 👋", "bonjour"),
-        ("BONJOUR", "bonjour"),
-        ("Hey, how are you?", "hey how are you"),
-        ("Merci.", "merci"),
-        ("THANK YOU!", "thank you"),
-        ("   ?! 👋   ", ""),
-        ("Bonjour, qu’est-ce qu’OpenRAG ?", "bonjour qu est ce qu openrag"),
-        ("  ÉTÉ\t東京  １２３  ", "été 東京 123"),
-        ("👩‍💻 ❤️ 1️⃣", "1"),
-    ],
-)
-def test_normalize_casual_message_preserves_words_while_removing_symbols_and_punctuation(message, normalized):
-    assert qs.normalize_casual_message(message) == normalized
-
-
-@pytest.mark.parametrize(
-    ("message", "intent", "language"),
-    [
-        ("bonjour", "greeting", "fr"),
-        ("salut", "greeting", "fr"),
-        ("hello", "greeting", "en"),
-        ("hey", "greeting", "en"),
-        ("comment allez vous", "greeting", "fr"),
-        ("how are you", "greeting", "en"),
-        ("hey how are you", "greeting", "en"),
-        ("comment pouvez-vous m'aider ?", "capability", "fr"),
-        ("how can you help me", "capability", "en"),
-        ("what can you do", "capability", "en"),
-        ("merci", "gratitude", "fr"),
-        ("thank you", "gratitude", "en"),
-        ("au revoir", "farewell", "fr"),
-        ("bye", "farewell", "en"),
-    ],
-)
-def test_casual_message_policy_classifies_every_allowlisted_expression(message, intent, language):
-    policy = qs.casual_message_policy(message)
-
-    assert policy is not None
-    assert policy.intent == intent
-    assert policy.language == language
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Bonjour, qu’est-ce qu’OpenRAG ?",
-        "Hello, summarize the uploaded document.",
-        "Merci, mais que dit le rapport sur ce problème ?",
-        "Albendazole is used to treat lymphatic filariasis.",
-        "OpenRAG utilise Milvus.",
-        "say hello",
-        "How can you help me with Product A revenue?",
-        "What can you do with the uploaded report?",
-    ],
-)
-def test_casual_message_policy_requires_an_exact_complete_message_match(message):
-    assert qs.casual_message_policy(message) is None
 
 
 @pytest.mark.asyncio
@@ -3968,7 +3394,8 @@ async def test_only_explicit_json_true_forces_retrieval_for_casual_or_normalized
     if require_retrieval is not None:
         metadata["require_retrieval"] = require_retrieval
 
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p"],
         {"messages": [{"role": "user", "content": message}], "metadata": metadata},
     )
@@ -3991,7 +3418,8 @@ async def test_require_retrieval_preserves_workspace_scope():
         llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
         workspace=FakeWorkspace(scope=WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["allowed-file"])),
     )
-    await svc._prepare_chat(
+    await _prepare_chat(
+        svc,
         ["p1", "p2"],
         {
             "messages": [{"role": "user", "content": "Verify this claim."}],
@@ -4013,7 +3441,8 @@ async def test_require_retrieval_does_not_bypass_missing_workspace():
         llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
     )
     with pytest.raises(WorkspaceNotFoundError):
-        await svc._prepare_chat(
+        await _prepare_chat(
+            svc,
             ["p"],
             {
                 "messages": [{"role": "user", "content": "Verify this claim."}],
@@ -4047,7 +3476,8 @@ async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(h
             ]
         ),
     )
-    result = await svc._prepare_chat(
+    result = await _prepare_chat(
+        svc,
         ["p"],
         {
             "messages": [{"role": "user", "content": "Find papers from 2020."}],
@@ -4064,28 +3494,7 @@ async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(h
 
 
 @pytest.mark.asyncio
-async def test_generate_query_hands_the_contextualizer_precomputed_calendar_anchors():
-    """ "Last week" must reach Milvus as Monday-to-Monday. Mistral Small resolved
-    it to the past seven days when left to do the arithmetic, so the system
-    prompt now carries the boundaries pre-computed through the template's
-    ``{calendar_anchors}`` placeholder.
-    """
-    payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
-    llm = FakeLLM(chat_responses=[payload])
-    svc = _svc(llm=llm, mode="ChatBotRag")
-
-    await svc.generate_query([{"role": "user", "content": "résume mes échanges de la semaine dernière"}])
-
-    system = llm.chat_calls[0][0][0]
-    assert system["role"] == "system"
-    assert "Calendar anchors (use verbatim, do not recompute)" in system["content"]
-    assert "- last week [" in system["content"]
-    # The bundled template points its resolution rules at those anchors.
-    assert "copy the matching anchor under Current date verbatim" in system["content"]
-
-
-@pytest.mark.asyncio
-async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
+async def test_the_contextualizer_reads_the_clock_in_utc(monkeypatch):
     """23:30 UTC on the 16th is already the 17th in Paris. The anchors are
     compared against UTC ``created_at`` timestamps, so the day must come from
     the UTC clock, not the host's local one, and the boundaries the model
@@ -4097,15 +3506,15 @@ async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
         @classmethod
         def now(cls, tz=None):
             if tz is not UTC:
-                raise AssertionError("generate_query must read the UTC clock")
+                raise AssertionError("the contextualizer must read the UTC clock")
             return instant
 
-    monkeypatch.setattr(qs, "datetime", FrozenDatetime)
+    monkeypatch.setattr(chat_factory, "datetime", FrozenDatetime)
     payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
     llm = FakeLLM(chat_responses=[payload])
     svc = _svc(llm=llm, mode="ChatBotRag")
 
-    await svc.generate_query([{"role": "user", "content": "what did I receive today?"}])
+    await svc._contextualizer.contextualize([{"role": "user", "content": "what did I receive today?"}])
 
     system = llm.chat_calls[0][0][0]["content"]
     assert "Current date: Wednesday, September 16, 2026, 23:30:00" in system
@@ -4122,36 +3531,6 @@ _TOOL_TURN = [
     {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function"}]},
     {"role": "tool", "tool_call_id": "c1", "content": "2 emails: ..."},
 ]
-
-
-def test_history_window_keeps_the_latest_message_of_the_user():
-    messages = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "ok"}, *_TOOL_TURN]
-    assert qs._history_window(messages, 2) == _TOOL_TURN, "widened to the request the results serve"
-    assert qs._history_window(messages, 10) == messages
-    assert qs._history_window(messages, 3) == _TOOL_TURN
-
-
-def test_history_window_never_opens_on_a_tool_result():
-    messages = [*_TOOL_TURN, {"role": "assistant", "content": "Claire wrote..."}, {"role": "user", "content": "thanks"}]
-    assert qs._history_window(messages, 3) == messages[3:], "the result cut from its call is dropped"
-    assert qs._history_window([{"role": "tool", "content": "x"}], 4) == []
-
-
-@pytest.mark.asyncio
-async def test_generate_query_searches_the_request_of_the_user_not_the_tool_result():
-    svc = _svc(mode="SimpleRag")
-    sq = await svc.generate_query(_TOOL_TURN)
-    assert sq.query_list[0].query == "Reply to the last email of Claire"
-
-
-@pytest.mark.asyncio
-async def test_generate_query_leaves_the_tool_results_out_of_the_history():
-    llm = FakeLLM(chat_responses=['{"requires_retrieval": true, "query_list": [{"query": "q"}]}'])
-    svc = _svc(llm=llm, mode="ChatBotRag")
-    await svc.generate_query(_TOOL_TURN)
-    history = llm.chat_calls[0][0][1]["content"]
-    assert "2 emails" not in history, "the data the app gave do not shape the search"
-    assert "user: Reply to the last email of Claire" in history
 
 
 @pytest.mark.asyncio
@@ -4205,28 +3584,6 @@ async def test_chat_context_carries_each_sources_file_and_creation_date():
     assert "[Source 2]\nundated text" in system
 
 
-@pytest.mark.asyncio
-async def test_generate_query_keeps_the_contextualizers_date_order():
-    payload = json.dumps(
-        {
-            "intent": "other",
-            "requires_retrieval": True,
-            "query_list": [{"query": "meeting notes", "temporal_filters": None, "date_order": "newest"}],
-        }
-    )
-    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
-    out = await svc.generate_query([{"role": "user", "content": "résume le dernier meeting que j'ai eu"}])
-    assert out.query_list[0].date_order == "newest"
-    assert out.date_order == "newest"
-
-
-def test_query_json_hint_leaves_the_temporal_fields_open():
-    """The hint is the last thing the model reads; a literal ``null`` there was
-    copied verbatim and the date rules never fired."""
-    assert '"temporal_filters": null' not in qs._QUERY_JSON_HINT
-    assert '"date_order"' in qs._QUERY_JSON_HINT
-
-
 def _dated(cid: str, created_at: str) -> Chunk:
     return Chunk(id=cid, text=f"text of {cid}", metadata={"_id": cid, "created_at": created_at})
 
@@ -4243,10 +3600,11 @@ def _service_with_orders(orders):
     svc = _svc(retrieval=FakeRetrieval(chunks=_BY_RELEVANCE))
     svc._config.partitions = {"p": _partition_cfg(top_n=2)}
 
-    async def generate_query(*_args, **_kwargs):
+    async def contextualize(*_args, **_kwargs):
         return SearchQueries(query_list=[Query(query=f"q{i}", date_order=order) for i, order in enumerate(orders)])
 
-    svc.generate_query = generate_query
+    # One contextualizer: chat reads it in the graph's steps, completions in the service.
+    svc._contextualizer.contextualize = contextualize
     return svc
 
 
@@ -4261,8 +3619,8 @@ def _in_reading_order(text: str, ids: list[str]) -> bool:
 )
 @pytest.mark.asyncio
 async def test_prepare_chat_selects_sources_by_relevance_and_shows_them_by_date(orders, shown):
-    out = await _service_with_orders(orders)._prepare_chat(
-        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
+    out = await _prepare_chat(
+        _service_with_orders(orders), ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
     )
     assert [doc.metadata["_id"] for doc in out.docs] == shown, "the citation numbers index into this order"
     system = out.payload["messages"][0]["content"]

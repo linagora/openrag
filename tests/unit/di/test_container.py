@@ -483,7 +483,7 @@ _ORCHESTRATORS = [
     ("workspace_service", "get_workspace_service"),
     ("retrieval_service", "get_retrieval_service"),
     ("retrieval_snapshot_service", "get_retrieval_snapshot_service"),
-    ("query_service", "get_query_service"),
+    ("chat_service", "get_chat_service"),
     ("indexing_service", "get_indexing_service"),
     ("job_service", "get_job_service"),
     ("conversion_service", "get_conversion_service"),
@@ -513,7 +513,7 @@ class TestPhase8OrchestratorWiring:
         monkeypatch.setattr(container.document_repo, "get_indexed_documents", AsyncMock(return_value={}))
 
         service = container.retrieval_service
-        for searcher in (service._searcher, service._searcher_factory("named")):
+        for searcher in (service._pipelines._searcher, service._pipelines._searcher_factory("named")):
             assert await searcher.search("q", ["a"], 5, with_surrounding_chunks=False) == []
 
     def test_clients_built_from_static_settings_are_labelled_default(self, monkeypatch):
@@ -537,10 +537,10 @@ class TestPhase8OrchestratorWiring:
         monkeypatch.setattr("services.websearch.WebSearchFactory.create_service", lambda settings: None)
 
         container.retrieval_service
-        container.query_service
+        container.chat_service
 
-        assert len(built) == 4
-        assert [getattr(client, PROVIDER_NAME_ATTR, None) for client in built] == ["default"] * 4
+        assert len(built) == 3
+        assert [getattr(client, PROVIDER_NAME_ATTR, None) for client in built] == ["default"] * 3
 
     @pytest.mark.parametrize("prop,_provider", _ORCHESTRATORS)
     def test_property_is_lazy_and_cache_slot_starts_none(self, prop, _provider):

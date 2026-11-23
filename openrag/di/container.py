@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from core.ports.workspace_repo import WorkspaceRepository
     from core.vector_stores import VectorStore
     from services.orchestrators.auth_service import AuthService
+    from services.orchestrators.chat_service import ChatService
     from services.orchestrators.conversion_service import ConversionService
     from services.orchestrators.embedder_swap_service import EmbedderSwapService
     from services.orchestrators.indexing_service import IndexingService
@@ -73,7 +74,6 @@ if TYPE_CHECKING:
     from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.preset_service import PresetService
     from services.orchestrators.prompt_service import PromptService
-    from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
     from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
     from services.orchestrators.user_service import UserService
@@ -137,7 +137,7 @@ class ServiceContainer:
         self._workspace_service: WorkspaceService | None = None
         self._retrieval_service: RetrievalService | None = None
         self._retrieval_snapshot_service: RetrievalSnapshotService | None = None
-        self._query_service: QueryService | None = None
+        self._chat_service: ChatService | None = None
         self._indexing_service: IndexingService | None = None
         self._job_service: JobService | None = None
         self._conversion_service: ConversionService | None = None
@@ -584,7 +584,7 @@ class ServiceContainer:
     def retrieval_service(self) -> RetrievalService:
         """RetrievalService — lazily built, cached for the container's lifetime."""
         if self._retrieval_service is None:
-            from services.orchestrators.retrieval_service import RetrievalService
+            from di.retrieval import create_retrieval_service
             from services.storage.catalog_searcher import CatalogSearcher
             from services.storage.vector_store_searcher import VectorStoreSearcher
 
@@ -629,17 +629,6 @@ class ServiceContainer:
                     self.document_repo,
                 )
 
-            llm_cfg = settings.llm.model_dump()
-            llm = set_provider_name(
-                self.create_llm(
-                    "vllm",
-                    endpoint=llm_cfg["base_url"],
-                    model_name=llm_cfg["model"],
-                    api_key=llm_cfg.get("api_key", ""),
-                    **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
-                ),
-                DEFAULT_PROVIDER,
-            )
             reranker = None
             rcfg = settings.reranker
             if rcfg.enabled:
@@ -653,10 +642,9 @@ class ServiceContainer:
                     ),
                     DEFAULT_PROVIDER,
                 )
-            self._retrieval_service = RetrievalService(
+            self._retrieval_service = create_retrieval_service(
                 searcher=searcher,
                 reranker=reranker,
-                llm=llm,
                 config=settings,
                 searcher_factory=searcher_factory,
                 reranker_factory=self.reranker_factory,
@@ -680,9 +668,10 @@ class ServiceContainer:
         return self._retrieval_snapshot_service
 
     @property
-    def query_service(self) -> QueryService:
-        """QueryService — lazily built, cached for the container's lifetime.
+    def chat_service(self) -> ChatService:
+        """ChatService — lazily built, cached for the container's lifetime.
 
+        Built by ``di.chat.create_chat_service``, with the steps it runs.
         Shares the same core LLM construction as ``retrieval_service``
         (built from ``settings.llm``); the named ``llm_factory`` lets the
         service honor a partition's ``chat_llm`` model endpoint for
@@ -691,8 +680,8 @@ class ServiceContainer:
         ``WebSearchFactory`` (provider is ``None`` when
         ``WEBSEARCH_API_TOKEN`` is unset — web search silently disabled).
         """
-        if self._query_service is None:
-            from services.orchestrators.query_service import QueryService
+        if self._chat_service is None:
+            from di.chat import create_chat_service
             from services.websearch import WebSearchFactory
 
             settings = self._require_settings()
@@ -707,16 +696,16 @@ class ServiceContainer:
                 ),
                 DEFAULT_PROVIDER,
             )
-            self._query_service = QueryService(
-                retrieval_service=self.retrieval_service,
-                llm=llm,
+            self._chat_service = create_chat_service(
                 config=settings,
+                llm=llm,
+                retrieval_service=self.retrieval_service,
                 web_search_service=WebSearchFactory.create_service(settings),
                 workspace_service=self.workspace_service,
                 prompt_service=self.prompt_service,
                 llm_factory=self.llm_factory,
             )
-        return self._query_service
+        return self._chat_service
 
     @property
     def indexing_service(self) -> IndexingService:

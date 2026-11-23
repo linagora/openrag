@@ -24,7 +24,7 @@ def _partition_detail(**overrides: Any) -> dict[str, Any]:
         "indexation_preset": "default",
         "retrieval_preset": "default",
         "indexation_pipeline": {"chunking": {"name": "recursive_splitter"}},
-        "retrieval_pipeline": {"type": "single", "top_k": 50},
+        "retrieval_pipeline": {"top_k": 50},
         "dimension": 1024,
         "created_at": "2026-01-01T00:00:00+00:00",
     }

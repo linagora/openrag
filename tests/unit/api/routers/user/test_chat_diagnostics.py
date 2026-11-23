@@ -18,9 +18,9 @@ async def test_chat_router_forwards_http_request_id(monkeypatch):
             return {"choices": [{"message": {"content": "answer"}}]}
 
     monkeypatch.setattr(chat_router, "is_direct_llm_model", lambda *_args: True)
-    monkeypatch.setattr(chat_router, "_apply_default_max_tokens", lambda *_args: None)
+    monkeypatch.setattr(chat_router, "apply_default_max_tokens", lambda *_args: None)
     monkeypatch.setattr(chat_router, "check_tokens_limit", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(chat_router, "_max_prompt_tokens", lambda *_args: None)
+    monkeypatch.setattr(chat_router, "max_prompt_tokens_for", lambda *_args: None)
     request = OpenAIChatCompletionRequest(
         model="direct-model",
         messages=[{"role": "user", "content": "question"}],

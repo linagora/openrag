@@ -19,7 +19,7 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import validate_file_id
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
-from api.routers.user.chat import check_tokens_limit
+from api.dependencies.token_budget import check_tokens_limit
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAIMessage
 from api.schemas.user.retrieval_diagnostics import (
     RetrievalDiagnosticRequest,
@@ -35,8 +35,8 @@ from core.utils.consts import MAX_RERANK_CANDIDATES, RETRIEVAL_SCORE_KEYS
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import (
+    get_chat_service,
     get_config,
-    get_query_service,
     get_retrieval_service,
     get_retrieval_snapshot_service,
     get_workspace_service,
@@ -252,7 +252,7 @@ async def retrieval_diagnostics(
     partition: str,
     payload: RetrievalDiagnosticRequest,
     partition_viewer=Depends(require_partition_viewer),
-    service=Depends(get_query_service),
+    service=Depends(get_chat_service),
     config=Depends(get_config),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
