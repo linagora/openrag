@@ -31,6 +31,7 @@ from services.persistence.connection import ConnectionManager
 from services.persistence.conversation_repo import PgConversationRepository
 from services.persistence.document_repo import PgDocumentRepository
 from services.persistence.entity_repo import PgEntityRepository
+from services.persistence.file_fence_repo import PgFileFenceRepository
 from services.persistence.idempotency_repo import PgIdempotencyRepository
 from services.persistence.job_repo import PgJobRepository
 from services.persistence.model_endpoint_repo import PgModelEndpointRepository
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from core.ports.conversation_repo import ConversationRepository
     from core.ports.document_repo import DocumentRepository
     from core.ports.entity_repo import EntityRepository
+    from core.ports.file_fence_repo import FileFenceRepository
     from core.ports.idempotency_repo import IdempotencyRepository
     from core.ports.job_repo import JobRepository
     from core.ports.model_endpoint_repo import ModelEndpointRepository
@@ -86,7 +88,7 @@ class PostgresStore(CatalogStore):
         # reinitialised between tests.
         pool_getter = self._pool_getter
 
-        self._document_repo = PgDocumentRepository(pool_getter)
+        self._document_repo = PgDocumentRepository(pool_getter, default_file_quota=config.default_file_quota)
         self._user_repo = PgUserRepository(pool_getter)
         self._partition_repo = PgPartitionRepository(pool_getter, connect=self._conn.connect)
         self._membership_repo = PgPartitionMembershipRepository(pool_getter)
@@ -94,6 +96,7 @@ class PostgresStore(CatalogStore):
         self._workspace_repo = PgWorkspaceRepository(pool_getter)
 
         self._job_repo = PgJobRepository(pool_getter)
+        self._file_fence_repo = PgFileFenceRepository(pool_getter)
 
         # Stubs — every method raises StubRepositoryError until the matching
         # table exists. Listed in the post-refactoring roadmap.
@@ -187,6 +190,10 @@ class PostgresStore(CatalogStore):
     @property
     def job_repo(self) -> JobRepository:
         return self._job_repo
+
+    @property
+    def file_fence_repo(self) -> FileFenceRepository:
+        return self._file_fence_repo
 
     # ------------------------------------------------------------------
     # Stub repos — methods raise StubRepositoryError until the matching

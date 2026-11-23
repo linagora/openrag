@@ -1,0 +1,111 @@
+"""Revision 4d7e2b9c1f35 against a real Postgres: which presets move from 0.6 to 0.2."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+
+import asyncpg
+import pytest
+import pytest_asyncio
+from alembic import command
+from alembic.config import Config
+from services.persistence.connection import _ALEMBIC_INI, _MIGRATIONS_DIR
+from sqlalchemy import URL
+
+from .conftest import _admin_dsn, _admin_dsn_parts, _connect_admin
+
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
+
+REVISION = "4d7e2b9c1f35"
+PREVIOUS = "f3a4b5c6d7e8"
+
+
+def _alembic_config(database: str) -> Config:
+    parts = _admin_dsn_parts()
+    url = URL.create(
+        "postgresql",
+        username=str(parts["user"]),
+        password=str(parts["password"]),
+        host=str(parts["host"]),
+        port=int(parts["port"]),
+        database=database,
+    ).render_as_string(hide_password=False)
+    cfg = Config(str(_ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
+    cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    return cfg
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def previous_db():
+    """An empty database migrated up to the revision before the one under test."""
+    admin = await _connect_admin()
+    if admin is None:
+        pytest.skip("Postgres unreachable; set POSTGRES_TEST_ADMIN_DSN or start the rdb container.")
+    name = f"openrag_threshold_migration_{uuid.uuid4().hex[:8]}"
+    try:
+        await admin.execute(f'CREATE DATABASE "{name}"')
+    finally:
+        await admin.close()
+
+    cfg = _alembic_config(name)
+    await asyncio.to_thread(command.upgrade, cfg, PREVIOUS)
+    conn = await asyncpg.connect(_admin_dsn().rsplit("/", 1)[0] + f"/{name}")
+    try:
+        yield conn, cfg
+    finally:
+        await conn.close()
+        admin = await _connect_admin()
+        if admin is not None:
+            try:
+                await admin.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+                    name,
+                )
+                await admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
+            finally:
+                await admin.close()
+
+
+# (name, preset_type, config before the upgrade, config expected after it)
+PRESETS = [
+    ("seeded", "retrieval", {"type": "single", "top_k": 50, "similarity_threshold": 0.6}, 0.2),
+    ("chosen", "retrieval", {"type": "single", "top_k": 50, "similarity_threshold": 0.4}, 0.4),
+    ("unset", "retrieval", {"type": "multiQuery", "top_k": 50}, None),
+    ("seeded", "indexation", {"chunking": {"name": "recursive_splitter"}, "similarity_threshold": 0.6}, 0.6),
+]
+
+
+async def _presets(conn: asyncpg.Connection) -> dict[tuple[str, str], dict]:
+    rows = await conn.fetch("SELECT name, preset_type, config FROM pipeline_presets")
+    return {(r["name"], r["preset_type"]): json.loads(r["config"]) for r in rows}
+
+
+async def test_upgrade_rewrites_only_an_exact_06_on_retrieval_presets(previous_db):
+    conn, cfg = previous_db
+    for name, preset_type, config, _ in PRESETS:
+        await conn.execute(
+            "INSERT INTO pipeline_presets (name, preset_type, config) VALUES ($1, $2, $3::jsonb)",
+            name,
+            preset_type,
+            json.dumps(config),
+        )
+
+    await asyncio.to_thread(command.upgrade, cfg, REVISION)
+
+    after = await _presets(conn)
+    for name, preset_type, config, expected in PRESETS:
+        stored = after[(name, preset_type)]
+        assert stored.get("similarity_threshold") == expected, (name, preset_type)
+        # Only the threshold changes; the rest of the preset is kept as it was.
+        assert {k: v for k, v in stored.items() if k != "similarity_threshold"} == {
+            k: v for k, v in config.items() if k != "similarity_threshold"
+        }
+
+    # The downgrade does not restore 0.6, and upgrading again changes nothing.
+    await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
+    assert await _presets(conn) == after
+    await asyncio.to_thread(command.upgrade, cfg, REVISION)
+    assert await _presets(conn) == after

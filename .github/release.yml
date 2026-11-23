@@ -21,6 +21,12 @@ changelog:
         - docs
         - documentation
         - test
+    # Without a catch-all, a pull request with none of the labels above is
+    # left out of the generated notes without a trace (#1279, #1325 and #1391
+    # were, in 2.3.5). Label it, or it lands here.
+    - title: 📦 Other changes
+      labels:
+        - "*"
 
   exclude:
     labels:

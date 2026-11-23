@@ -92,7 +92,7 @@ class MCPService:
         collection: str,
         default_top_k: int = 5,
         max_top_k: int = 50,
-        similarity_threshold: float = 0.8,
+        similarity_threshold: float = 0.2,
         download_timeout: float = 30.0,
         max_download_bytes: int = 100 * 1024 * 1024,
     ) -> None:
