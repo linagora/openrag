@@ -99,6 +99,7 @@ import { MemberPicker } from "./member-picker";
 import { candidateLabel, candidateSecondaryLabel } from "./member-candidate";
 import { addPartitionMembers } from "./member-batch";
 import type { MemberAddFailure } from "./member-batch";
+import { WorkspacesTab } from "./workspaces-tab";
 import {
   PartitionMemberEmail,
   PartitionMemberIdentity,
@@ -1283,6 +1284,9 @@ export default function PartitionDetailPage() {
           <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="pipeline">Pipeline Config</TabsTrigger>
           <TabsTrigger value="users">Users</TabsTrigger>
+          <TabsTrigger value="workspaces">
+            Workspaces <NewBadge feature="partitions.workspaces" />
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="general" className="mt-6">
@@ -1295,6 +1299,10 @@ export default function PartitionDetailPage() {
 
         <TabsContent value="users" className="mt-6">
           <UsersTab partitionName={partition.name} />
+        </TabsContent>
+
+        <TabsContent value="workspaces" className="mt-6">
+          <WorkspacesTab key={partition.name} partition={partition.name} />
         </TabsContent>
       </Tabs>
     </div>

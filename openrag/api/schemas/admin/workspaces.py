@@ -6,6 +6,7 @@ imports these symbols rather than redefining them.
 """
 
 import re
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -32,6 +33,8 @@ class AddFilesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     file_ids: list[str]
+    expected_created_at: datetime | None = None
+    expected_created_at_is_null: bool = False
 
 
 __all__ = ["AddFilesRequest", "CreateWorkspaceRequest", "WORKSPACE_ID_RE"]
