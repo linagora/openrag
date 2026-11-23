@@ -16,14 +16,21 @@ split `$DC` into `docker compose`, so the commands below fail.
 ## 2.3.0 or 2.3.1 to a later 2.3.x
 
 The Compose stack now declares its bridge subnet so it can reserve the bundled
-proxy addresses. When upgrading an existing stack, apply the network change
-with a full `docker compose up -d` from `infra/compose/`; do not update only
-one service. Compose must recreate the project network, and a service-only
-update can leave that service stopped when the old network still has active
-endpoints. If you have set `UVICORN_FORWARDED_ALLOW_IPS` to an exact old
-address or subnet, update it to include loopback and the new proxy addresses
-(`OPENRAG_ADMIN_UI_PROXY_IP`, and `OPENRAG_NPM_PROXY_IP` when using the TLS
-overlay). A broad range that already includes the new addresses does not need
+proxy addresses. When upgrading an existing stack, schedule a service
+interruption and recreate the project network from `infra/compose/`:
+
+```sh
+docker compose down
+docker compose up -d
+```
+
+Use the same `-f` files and profiles that you use for the deployment on both
+commands. Do not add `-v` to `down`, because that removes persistent volumes.
+A full `up -d` alone may leave an existing network with its old subnet, and a
+service-only update can stop that service while failing to remove the network. If you have set `UVICORN_FORWARDED_ALLOW_IPS` to an exact old
+address or subnet, keep loopback in it. Add proxy addresses only after verifying that the
+proxy cannot accept forged forwarding headers. Do not trust the bundled NPM
+address while private-network clients can set `X-Real-IP`. A broad range that already includes the new addresses does not need
 to change. If Compose reports `Pool overlaps with other one on this address
 space`, choose an unused range and set `OPENRAG_COMPOSE_SUBNET`,
 `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP`; with the

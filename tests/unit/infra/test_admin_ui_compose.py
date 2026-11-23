@@ -74,12 +74,8 @@ def test_compose_proxy_trust(tmp_path, scenario):
         assert npm_proxy_ip != proxy_ip
         assert ipaddress.ip_address(npm_proxy_ip) in ipaddress.ip_network(ipam["subnet"])
         assert ipaddress.ip_address(npm_proxy_ip) not in ipaddress.ip_network(ipam["ip_range"])
-    else:
-        npm_proxy_ip = "172.31.253.201"
     for api in ("openrag", "openrag-cpu"):
-        assert config["services"][api]["environment"]["UVICORN_FORWARDED_ALLOW_IPS"] == (
-            override or f"127.0.0.1,{proxy_ip},{npm_proxy_ip}"
-        )
+        assert config["services"][api]["environment"]["UVICORN_FORWARDED_ALLOW_IPS"] == (override or "127.0.0.1")
 
 
 def test_admin_ui_compose_service_uses_project_scoped_container_name():

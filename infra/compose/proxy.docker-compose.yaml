@@ -11,8 +11,9 @@
 # every API call. NPM only forwards the Upgrade/Connection headers Chainlit's
 # WebSocket needs when "Websockets Support" is on for the proxy host.
 #
-# NPM's reserved address is trusted by default. If you change the proxy address
-# or set UVICORN_FORWARDED_ALLOW_IPS explicitly, keep the allowlist in sync.
+# NPM is not trusted by default because it accepts X-Real-IP from private
+# network clients. Configure a safe trusted-upstream policy before adding its
+# address to UVICORN_FORWARDED_ALLOW_IPS.
 # Full walkthrough: docs, "Reverse proxy (TLS)".
 #
 # An overlay rather than a profile: the API service declares `profiles: [""]`,
