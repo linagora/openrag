@@ -2890,6 +2890,87 @@ async def test_upload_admission_enforces_count_and_bytes_and_releases_capacity()
 
 
 @pytest.mark.asyncio
+async def test_settled_serializing_worker_releases_upload_admission() -> None:
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    manager.tasks["task-1"].admitted_bytes = 4
+    worker_ref.settle(None)
+
+    result = await manager.reserve_upload_admission(
+        "task-2",
+        file_id="file-2",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+
+    assert result["accepted"]
+
+
+@pytest.mark.asyncio
+async def test_finished_serializing_worker_releases_upload_admission() -> None:
+    manager = _task_state_manager()
+    await _serializing_task_for_file_1(manager, _FakeWorkerRef())
+    manager.tasks["task-1"].admitted_bytes = 4
+    await manager.set_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={TASK_FINISHED_AT_METADATA_KEY: "2026-11-24T00:00:00+00:00"},
+        user_id=1,
+    )
+
+    result = await manager.reserve_upload_admission(
+        "task-2",
+        file_id="file-2",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+
+    assert result["accepted"]
+
+
+@pytest.mark.asyncio
+async def test_raising_upload_admission_limits_takes_effect_with_active_tasks() -> None:
+    manager = _task_state_manager()
+    first = await manager.reserve_upload_admission(
+        "first",
+        file_id="first",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=1,
+        max_admitted_bytes=4,
+    )
+    assert first["accepted"]
+
+    raised = await manager.reserve_upload_admission(
+        "second",
+        file_id="second",
+        partition="tenant-a",
+        admitted_bytes=4,
+        max_admitted_tasks=2,
+        max_admitted_bytes=8,
+    )
+
+    assert raised["accepted"]
+    transferred = await manager.set_queued_details_v2(
+        "second",
+        file_id="second",
+        partition="tenant-a",
+        metadata={},
+        user_id=1,
+        require_upload_reservation=True,
+        max_admitted_tasks=2,
+        max_admitted_bytes=8,
+    )
+    assert transferred["accepted"]
+
+
+@pytest.mark.asyncio
 async def test_upload_transfer_accounts_for_dispatcher_measured_size() -> None:
     manager = _task_state_manager()
     admission = {"max_admitted_tasks": 3, "max_admitted_bytes": 10}

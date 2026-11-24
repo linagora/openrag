@@ -13,6 +13,7 @@ endpoints returned via ``HTTPException``.
 
 import asyncio
 import json
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,20 @@ async def _run_with_upload_admission(
             if not task.done():
                 task.cancel()
         await asyncio.gather(operation_task, renewal_task, transfer_task, return_exceptions=True)
+
+
+async def _reserve_upload_admission(service, *, task_id: str, **kwargs: Any) -> str:
+    """Release a possibly accepted reservation if its RPC fails ambiguously."""
+    try:
+        return await service.reserve_upload_admission(task_id=task_id, **kwargs)
+    except BaseException:
+        # The actor may have committed before the client timed out. The stable
+        # task id lets this idempotent cleanup remove that reservation.
+        try:
+            await asyncio.shield(service.release_upload_admission(task_id))
+        except Exception:
+            logger.exception("Could not release upload admission after reservation RPC failure", task_id=task_id)
+        raise
 
 
 def _uploaded_file_size_bytes(file: UploadFile) -> int:
@@ -358,11 +373,13 @@ async def add_file(
 
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    reservation_id = await service.reserve_upload_admission(
+    reservation_id = file_slot_reservation_id(file_slot) or uuid.uuid4().hex
+    reservation_id = await _reserve_upload_admission(
+        service,
+        task_id=reservation_id,
         file_id=file_id,
         partition=partition,
         admitted_bytes=_uploaded_file_size_bytes(file),
-        task_id=file_slot_reservation_id(file_slot),
     )
 
     async def save_and_queue(on_admission_transferred: Callable[[], None]) -> str:
@@ -388,6 +405,7 @@ async def add_file(
             if isinstance(exc, OpenRAGError):
                 # Preserve domain status codes such as 413 and 400.
                 raise
+
             if not isinstance(exc, Exception):
                 raise
             logger.exception("Failed to save file to disk.", error=str(exc))
@@ -547,7 +565,10 @@ async def put_file(
     # duplicates behind (recoverable; #658/#660 reconciliation covers that).
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    reservation_id = await service.reserve_upload_admission(
+    reservation_id = uuid.uuid4().hex
+    reservation_id = await _reserve_upload_admission(
+        service,
+        task_id=reservation_id,
         file_id=file_id,
         partition=partition,
         admitted_bytes=_uploaded_file_size_bytes(file),

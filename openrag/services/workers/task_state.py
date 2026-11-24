@@ -424,7 +424,7 @@ def _task_reserves_admission(info: TaskInfo) -> bool:
     """Whether this task can still occupy a worker or touch its source file."""
     return (
         info.state == _UPLOAD_RESERVED_STATE
-        or info.state in CANCELLABLE_INDEXING_STATES
+        or (info.state in CANCELLABLE_INDEXING_STATES and not _worker_has_settled(info))
         or (info.state == "CANCELLED" and _cancelled_task_has_worker_fence(info))
         or _is_fenced_failure(info)
         or _terminal_worker_holds_admission(info)
@@ -1254,12 +1254,11 @@ class TaskStateManager:
             )
             active_tasks = [info for info in self.tasks.values() if _task_reserves_admission(info)]
             active_bytes = sum(max(0, int(getattr(info, "admitted_bytes", 0) or 0)) for info in active_tasks)
-            if active_tasks:
-                self._admission_max_tasks = min(self._admission_max_tasks, requested_max_tasks)
-                self._admission_max_bytes = min(self._admission_max_bytes, requested_max_bytes)
-            else:
-                self._admission_max_tasks = requested_max_tasks
-                self._admission_max_bytes = requested_max_bytes
+            # Apply the caller's current limits even while older tasks remain
+            # active. Lower limits still block new reservations until usage
+            # falls below them; raised limits can admit work immediately.
+            self._admission_max_tasks = requested_max_tasks
+            self._admission_max_bytes = requested_max_bytes
 
             admitted_bytes = max(0, int(admitted_bytes))
             if admitted_bytes > self._admission_max_bytes:
@@ -1454,15 +1453,11 @@ class TaskStateManager:
             if not has_upload_reservation:
                 admitted_bytes = previous_bytes
 
-        # A changed deployment may lower its admission cap while work is live.
-        # Keep the tighter cap until this shared actor has drained, then adopt
-        # the next request's current settings.
-        if active_tasks:
-            self._admission_max_tasks = min(self._admission_max_tasks, requested_max_tasks)
-            self._admission_max_bytes = min(self._admission_max_bytes, requested_max_bytes)
-        else:
-            self._admission_max_tasks = requested_max_tasks
-            self._admission_max_bytes = requested_max_bytes
+        # Apply the caller's current limits while work is live as well. A lower
+        # limit blocks further transfers until usage falls below it; a raised
+        # limit makes the newly available capacity usable immediately.
+        self._admission_max_tasks = requested_max_tasks
+        self._admission_max_bytes = requested_max_bytes
 
         # Older API callers do not send a file size. Charging them the whole
         # byte budget prevents that compatibility path from bypassing weighted

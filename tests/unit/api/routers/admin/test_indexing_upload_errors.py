@@ -497,3 +497,37 @@ async def test_full_upload_admission_returns_retry_after(tmp_path, monkeypatch):
     assert response.headers["retry-after"] == "5"
     assert "INDEXING_ADMISSION_FULL" in response.json()["detail"]
     assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("post", "/indexer/partition/p1/file/f1"), ("put", "/indexer/partition/p1/file/f1")],
+)
+async def test_ambiguous_admission_timeout_releases_stable_reservation(tmp_path, monkeypatch, method, path):
+    class AcceptedThenTimedOut(_ExistingFileService):
+        def __init__(self):
+            super().__init__()
+            self.reservation_id = None
+            self.released_id = None
+
+        async def file_exists(self, file_id: str, partition: str) -> bool:
+            return method == "put"
+
+        async def reserve_upload_admission(self, **kwargs):
+            self.reservation_id = kwargs["task_id"]
+            raise TimeoutError("response lost after actor accepted reservation")
+
+        async def release_upload_admission(self, task_id: str) -> None:
+            self.released_id = task_id
+
+    service = AcceptedThenTimedOut()
+    app = _build_app(tmp_path, monkeypatch, b"tiny", service=service)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.request(method, path, data={"_": "1"})
+
+    assert response.status_code == 500
+    assert service.reservation_id
+    assert service.released_id == service.reservation_id
+    assert not (tmp_path / "data").exists()

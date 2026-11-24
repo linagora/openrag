@@ -608,6 +608,8 @@ The following environment variables control Ray's logging behavior, task retry s
 | `RAY_ENABLE_UV_RUN_RUNTIME_ENV` | `number` | `0` | Controls UV runtime environment integration. **Critical**: Must be set to `0` when using the newest version of UV to avoid compatibility issues. |
 |`RAY_memory_monitor_refresh_ms`| `number` | 250 ms | To control the frequency of memory usage checks and task or actor termination if needed. If you set this value to 0, task killing is disabled. |
 
+Keep `RAY_MAX_ADMITTED_TASKS` and `RAY_MAX_ADMITTED_BYTES` identical across API replicas. New limits apply on the next reservation: raising them makes capacity available while jobs are active, while lowering them blocks new admission until current usage fits.
+
 #### Ray Serve Configuration
 
 Ray Serve enables deployment of the FastAPI app as a horizontally scalable service.
