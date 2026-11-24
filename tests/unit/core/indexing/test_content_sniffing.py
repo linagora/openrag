@@ -57,7 +57,7 @@ XLSX = _ooxml("xl/workbook.xml")
 
 @pytest.mark.parametrize(
     ("extension", "head"),
-    [("pdf", PDF), ("png", PNG), ("jpg", JPG), ("jpeg", JPG), ("gif", GIF)],
+    [("pdf", PDF), ("png", PNG), ("jpg", JPG), ("jpeg", JPG), ("gif", GIF), ("xls", OLE2)],
 )
 def test_matching_content_is_accepted(extension, head):
     validate_content_matches_extension(extension, head)
@@ -78,6 +78,7 @@ def test_the_head_check_does_not_judge_ooxml(extension):
         ("pdf", ELF, "an executable renamed .pdf"),
         ("pdf", TEXT, "unrecognised bytes renamed .pdf"),
         ("png", PDF, "a PDF renamed .png"),
+        ("xls", XLSX, "an OOXML workbook renamed .xls"),
     ],
 )
 def test_contradicting_content_is_refused(extension, head, reason):

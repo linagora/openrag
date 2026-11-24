@@ -6,6 +6,21 @@ OpenRAG indexes `.xlsx` and `.xlsm` workbooks as structured tabular content. It 
 
 The parser is designed for retrieval, not spreadsheet execution: it preserves stored values, formulas, worksheet context, and physical row references, but it does not recalculate formulas or reproduce Excel's visual layout.
 
+## Legacy Excel (.xls)
+
+OpenRAG also accepts Excel 97–2003 binary workbooks and indexes one table per visible worksheet with xlrd. The
+first nonempty row serves as the header when all populated cells in it are text and another data row follows.
+Otherwise, OpenRAG generates column names and keeps the first row as data. Worksheet names and physical cell
+coordinates stay with the indexed rows. Hidden worksheets, rows, and columns are excluded, including rows hidden
+by filters. Use one logical table per sheet for accurate column labels.
+
+OpenRAG indexes stored values, including cached formula results. Formula expressions, charts, macros, and embedded
+objects are outside this XLS path. Password-protected workbooks are rejected. An XLS workbook may be up to 16 MiB,
+with up to 128 worksheets, 2 million cells in any worksheet's bounding rectangle, and 5 million across the visible
+worksheets. xlrd reads one worksheet into memory at a time. Indexing batches hold up to 1,000 rows or 2 MiB of
+rendered text, and the complete workbook can produce up to 32 MiB of rendered text.
+For XLSX table detection, chart extraction, or formula text, save a copy as `.xlsx` before upload.
+
 ## What is indexed
 
 For every visible, nonempty worksheet, OpenRAG preserves:
@@ -324,7 +339,7 @@ XLSX stores text in XML, so CSV character-set detection does not apply. OpenRAG 
 | Chart value series formatted as dates in the cells, with no format stored in the chart | The values stay Excel serial numbers | Plot dates as categories, or store a date format in the chart |
 | Password-protected or encrypted workbook | Rejected at upload with HTTP 422 `ENCRYPTED_OFFICE_FILE` ("This file is password-protected or encrypted"); encrypted `.docx` and `.pptx` uploads get the same response | Remove the password and upload it again |
 | `.xlsm` macro-enabled workbook | Tabular cells, cached values, and formula text are indexed; VBA is neither retained nor executed | Upload it directly when the workbook's tabular content is needed |
-| `.xls`, `.xlsb`, or `.ods` | Unsupported by the XLSX route | Convert to a plain `.xlsx`/`.xlsm` workbook or use a dedicated parser |
+| `.xlsb` or `.ods` | Unsupported | Convert to `.xlsx` before uploading |
 | Exact aggregation across very large tables or several workbooks | Semantic retrieval may not return every row needed for a calculation | Use an analytical query pipeline for exact full-dataset computation |
 
 ## Operational guidance

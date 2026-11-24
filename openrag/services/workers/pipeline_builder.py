@@ -224,6 +224,7 @@ class IndexingPipeline:
             and document.content_type
             in {
                 DocumentType.CSV,
+                DocumentType.XLS,
                 DocumentType.XLSX,
             }
         ):
