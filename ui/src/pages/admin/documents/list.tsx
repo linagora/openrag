@@ -67,7 +67,7 @@ export default function DocumentListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [remembered] = useState(() => sessionStorage.getItem("documents.partition") || "");
   const [uploadOpen, setUploadOpen] = useState(false);
-  const [files, setFiles] = useState<File[]>([]);
+  const [files, setFiles] = useState<{ file: File; createdAt: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const [fileSearch, setFileSearch] = useState("");
   const [indexedSince, setIndexedSince] = useState("");
@@ -287,11 +287,13 @@ export default function DocumentListPage() {
       setUploading(true);
       let ok = 0;
       const errors: string[] = [];
-      for (const f of files) {
+      for (const { file: f, createdAt } of files) {
         try {
           await uploadFile(selected, newFileId(), f, {
             filename: f.name,
             ...(f.type ? { mimetype: f.type } : {}),
+            // A date-only value uses midnight UTC, independent of the browser's timezone.
+            ...(createdAt ? { created_at: `${createdAt}T00:00:00Z` } : {}),
           });
           ok += 1;
         } catch (e) {
@@ -486,7 +488,16 @@ export default function DocumentListPage() {
         description="Files indexed in a partition"
         actions={
           writable && selected ? (
-            <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
+            <Dialog
+              open={uploadOpen}
+              onOpenChange={(open) => {
+                setUploadOpen(open);
+                if (!open && !uploading) {
+                  setFiles([]);
+                  if (fileRef.current) fileRef.current.value = "";
+                }
+              }}
+            >
               {uploadPausedReason ? (
                 <TooltipProvider>
                   <Tooltip>
@@ -516,20 +527,61 @@ export default function DocumentListPage() {
                     processed as its own job.
                   </DialogDescription>
                 </DialogHeader>
-                <div className="space-y-2">
+                <form
+                  id="document-upload"
+                  className="space-y-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!files.length || uploading || uploadPausedReason) return;
+                    uploadMutation.mutate();
+                  }}
+                >
                   <Label htmlFor="files">Files</Label>
                   <Input
                     id="files"
                     type="file"
                     multiple
                     ref={fileRef}
-                    onChange={(e) => setFiles(e.target.files ? Array.from(e.target.files) : [])}
+                    disabled={uploading}
+                    onChange={(e) => setFiles(Array.from(e.target.files ?? [], (file) => ({ file, createdAt: "" })))}
                   />
                   {files.length > 0 && (
                     <p className="text-sm text-muted-foreground">{files.length} file(s) selected</p>
                   )}
+                  {files.length > 0 && (
+                    <>
+                      <p id="document-date-help" className="text-sm text-muted-foreground">
+                        Set each document's creation date to use it in date filters and questions about the latest
+                        documents. Leave blank if unknown.
+                      </p>
+                      <div className="max-h-60 space-y-3 overflow-y-auto">
+                        {files.map(({ file, createdAt }, index) => (
+                          <div key={`${index}-${file.name}`} className="space-y-1">
+                            <Label htmlFor={`document-date-${index}`} className="break-all">
+                              Document date for {file.name} (optional)
+                            </Label>
+                            <Input
+                              id={`document-date-${index}`}
+                              type="date"
+                              min="0001-01-01"
+                              max="9999-12-31"
+                              aria-describedby="document-date-help"
+                              value={createdAt}
+                              disabled={uploading}
+                              onChange={(e) => {
+                                const date = e.target.value;
+                                setFiles((current) =>
+                                  current.map((entry, i) => i === index ? { ...entry, createdAt: date } : entry),
+                                );
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
                   {uploadPausedReason && <p className="text-sm text-destructive">{uploadPausedReason}</p>}
-                </div>
+                </form>
                 <DialogFooter>
                   <Button
                     variant="outline"
@@ -542,7 +594,8 @@ export default function DocumentListPage() {
                     Cancel
                   </Button>
                   <Button
-                    onClick={() => uploadMutation.mutate()}
+                    type="submit"
+                    form="document-upload"
                     disabled={!files.length || uploading || !!uploadPausedReason}
                   >
                     {uploading ? "Uploading..." : "Upload"}
