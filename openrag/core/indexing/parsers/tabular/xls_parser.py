@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterator
 from datetime import time, timedelta
 from html import escape
@@ -222,6 +223,15 @@ def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> tuple[int
     raise xlrd.XLRDError("Missing BIFF worksheet ending")
 
 
+_FORMAT_LITERALS = re.compile(r'"(?:\\.|[^"\\])*"|[\\_*].')
+
+
+def _is_elapsed_format(format_code: str | None) -> bool:
+    # Strip quoted literals and single-character escapes before OpenPyXL
+    # inspects the first section. A literal such as "[m]" is not a unit.
+    return is_timedelta_format(_FORMAT_LITERALS.sub(" ", format_code or ""))
+
+
 def _cell_text(value: str | float | int, kind: int, datemode: int, *, elapsed: bool = False) -> str:
     if kind == xlrd.XL_CELL_BOOLEAN:
         return "true" if value else "false"
@@ -388,7 +398,7 @@ class XlsParser(TabularBatchParser):
                     raise xlrd.XLRDError("Unsupported legacy Excel workbook version")
                 if book.nsheets > _MAX_SHEETS:
                     raise _limit("XLS workbook exceeds the worksheet limit")
-                elapsed_formats = {key for key, fmt in book.format_map.items() if is_timedelta_format(fmt.format_str)}
+                elapsed_formats = {key for key, fmt in book.format_map.items() if _is_elapsed_format(fmt.format_str)}
                 elapsed_styles = {i for i, xf in enumerate(book.xf_list) if xf.format_key in elapsed_formats}
                 for index in range(book.nsheets):
                     # xlrd only exposes visibility publicly on a loaded sheet.

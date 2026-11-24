@@ -142,7 +142,8 @@ def test_xls_uses_stored_cells_for_area_and_preserves_elapsed_time(monkeypatch):
     monkeypatch.setattr(xls_parser, "_MAX_SHEET_AREA", 10)
     result = list(XlsParser().iter_batches(Document(filename="formats.xls", source_path=str(fixture))))
     (table,) = result
-    assert table.metadata["table_row_numbers"] == [2, 3]
-    assert table.metadata["table_range"] == "'Timesheet'!A1:B3"
+    assert table.metadata["table_row_numbers"] == [2, 3, 4]
+    assert table.metadata["table_range"] == "'Timesheet'!A1:B4"
     assert "| Shift | 1 day, 12:00:00 |" in table.text
     assert "| Total | 2 days, 0:00:00 |" in table.text
+    assert "| Rate | 2 |" in table.text
