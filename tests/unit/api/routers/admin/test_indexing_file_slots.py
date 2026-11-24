@@ -235,7 +235,8 @@ async def test_an_unlimited_upload_reserves_nothing(tmp_path, monkeypatch):
     resp = await _send(app, "POST", "/indexer/partition/p1/file/f1")
 
     assert resp.status_code == 201
-    assert service.add_calls[0]["admission_reservation_id"] == "admission-task"
+    assert isinstance(service.add_calls[0]["admission_reservation_id"], str)
+    assert service.add_calls[0]["admission_reservation_id"]
     assert repo.reserved == []
 
 

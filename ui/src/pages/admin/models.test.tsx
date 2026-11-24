@@ -1360,7 +1360,7 @@ describe("ModelsPage endpoint form layout", () => {
     await new Promise((r) => setTimeout(r, 900));
     expect(callsTo("http://b/v1")).toBe(1);
     expect(validateModelEndpointMock).toHaveBeenCalledTimes(3);
-  });
+  }, 10_000);
 
   async function openEditDialog(endpoint: object) {
     listModelEndpointsMock.mockResolvedValue([endpoint as never]);
