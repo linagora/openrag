@@ -62,7 +62,7 @@ embedder:
   max_model_len: 2047 # truncate_prompt_tokens = this - 1; keep below the model's context boundary (vllm#29496)
   timeout: 120.0       # per-request HTTP timeout (s); raise for slow remote endpoints
   batch_size: 32       # chunks per embedding request (big docs are split into batches)
-  embed_concurrency: 4 # max embedding requests in flight at once
+  embed_concurrency: 4 # max embedding requests one file keeps in flight (not process-wide)
 
 # --- Vector Database (Milvus) ---
 # Env: VDB_HOST, VDB_PORT, VDB_CONNECTOR_NAME, VDB_COLLECTION_NAME, VDB_HYBRID_SEARCH,
@@ -175,14 +175,17 @@ prompts:
 # --- Document loader ---
 loader:
   # Env: IMAGE_CAPTIONING, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
-  #      CONTENT_DEDUPLICATION_ENABLED, CSV_BATCH_SIZE, CSV_DELIMITER,
-  #      XLSX_BATCH_SIZE
+  #      CONTENT_DEDUPLICATION_ENABLED, FILE_FENCES, CSV_BATCH_SIZE,
+  #      CSV_DELIMITER, XLSX_BATCH_SIZE, XLSX_CHARTS
   csv_batch_size: 10000
   # Null enables delimiter sniffing. Set one character to force a delimiter.
   csv_delimiter: null
   xlsx_batch_size: 10000
   # Optional overrides of the OOXML and batch resource limits.
   xlsx_limits: {}
+  # Charts: full (with their data, hidden sources included),
+  # without_hidden_data (data from hidden sheets, rows or columns left out), off.
+  xlsx_charts: full
   image_captioning: true
   save_markdown: false
   # Keep the raw upload on disk after indexation (needed for source viewing in
@@ -190,6 +193,8 @@ loader:
   save_uploaded_files: true
   # Reject identical content inside the same partition before indexing.
   content_deduplication_enabled: true
+  # ray | postgres. Where the per-file fences live; see FILE_FENCES.
+  file_fences: ray
 
   mimetypes:
     text/plain: .txt
@@ -365,7 +370,7 @@ chunker:
 retriever:
   type: single
   top_k: 50
-  similarity_threshold: 0.6
+  similarity_threshold: 0.2
   with_surrounding_chunks: false
   include_related: true
   include_ancestors: true
@@ -414,7 +419,7 @@ mcp:
   path: /mcp
   default_top_k: 5
   max_top_k: 50
-  similarity_threshold: 0.8
+  similarity_threshold: 0.2
   download_timeout: 30.0
   max_download_bytes: 104857600  # 100 MiB
 

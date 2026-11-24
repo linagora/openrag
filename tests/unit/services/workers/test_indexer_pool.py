@@ -48,6 +48,30 @@ async def test_indexer_worker_actor_exposes_stage_writer_drain() -> None:
     worker.close_stage_writer.assert_awaited_once_with()
 
 
+def test_stage_progress_sidecar_is_optional_at_startup_and_reconnected_later(monkeypatch) -> None:
+    from services.workers.indexer_pool import IndexerWorkerActor
+    from services.workers.stage_progress_manager import TASK_STAGE_PROGRESS_MANAGER_NAME
+
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
+    actor = object.__new__(actor_class)
+    actor._namespace = "custom-workers"
+    actor._stage_progress_manager = None
+    actor._logger = MagicMock()
+    manager = object()
+    get_actor = MagicMock(side_effect=[ValueError("actor not found"), TimeoutError("lookup timed out"), manager])
+    monkeypatch.setattr("services.workers.indexer_pool.ray.get_actor", get_actor)
+
+    assert actor._get_stage_progress_manager() is None
+    assert actor._get_stage_progress_manager() is None
+    assert actor._get_stage_progress_manager() is manager
+    actor._logger.warning.assert_called_once()
+    assert get_actor.call_args_list == [
+        ((TASK_STAGE_PROGRESS_MANAGER_NAME,), {"namespace": "custom-workers"}),
+        ((TASK_STAGE_PROGRESS_MANAGER_NAME,), {"namespace": "custom-workers"}),
+        ((TASK_STAGE_PROGRESS_MANAGER_NAME,), {"namespace": "custom-workers"}),
+    ]
+
+
 def test_build_pipeline_timeouts_bounds_parse_from_config() -> None:
     """The pipeline must bound the parse stage at loader.parse_timeout so a wedged
     parse fails that file instead of stalling indexing (#571)."""
@@ -173,7 +197,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v18"
+    assert opts["name"] == "IndexerPoolDispatcher-v21"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -214,9 +238,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v18-0",
-        "IndexerWorker-v18-1",
-        "IndexerWorker-v18-2",
+        "IndexerWorker-v21-0",
+        "IndexerWorker-v21-1",
+        "IndexerWorker-v21-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -1252,6 +1276,8 @@ def _bare_pool(workers: list) -> object:
     pool._release_tasks = set()
     pool._claim_store = None
     pool._claim_store_lock = asyncio.Lock()
+    pool._held_fences = {}
+    pool._fence_renewal = None
     pool._namespace = "openrag"
     pool._task_state_manager = SimpleNamespace(
         set_object_ref=SimpleNamespace(remote=AsyncMock(return_value=True)),
@@ -1338,7 +1364,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v18",
+        "protocol_version": "v21",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1371,7 +1397,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v18",
+        "protocol_version": "v21",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1406,7 +1432,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v18",
+        "protocol_version": "v21",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1421,7 +1447,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v18"
+    assert await pool.protocol_version() == "v21"
 
 
 @pytest.mark.asyncio
@@ -1671,6 +1697,7 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
         document_repo = object()
         topic_tag_repo = object()
         job_repo = object()
+        file_fence_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):
@@ -1773,6 +1800,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
         document_repo = object()
         topic_tag_repo = object()
         job_repo = object()
+        file_fence_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):
@@ -1823,13 +1851,34 @@ class _RecordingWorker:
         self._error = error
         self.calls = 0
         self.last_kwargs = None
+        self.released: list[dict] = []
+        self.renewals: list[dict] = []
+        self.renewal_stopped = False
+        self.holds_fence = True
 
     async def process_file(self, **kwargs) -> dict:
         self.calls += 1
         self.last_kwargs = kwargs
         if self._error is not None:
             raise self._error
+        # The real worker runs the hook after its catalog write, before it
+        # releases the fence and reports the outcome.
+        if kwargs.get("before_success") is not None:
+            await kwargs["before_success"]()
         return {"stored_count": 1, "stage": "stored"}
+
+    async def release_file_fence(self, **kwargs) -> None:
+        self.released.append(kwargs)
+
+    async def keep_file_fence_alive(self, **kwargs) -> None:
+        self.renewals.append(kwargs)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.renewal_stopped = True
+
+    async def holds_file_fence(self, **_kwargs) -> bool:
+        return self.holds_fence
 
 
 def _AsyncReturn(value):
@@ -1847,6 +1896,10 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
 
     actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
     actor = actor_class.__new__(actor_class)
+    actor._namespace = "openrag"
+    # This helper exercises file processing without a Ray runtime or the
+    # optional sidecar; its startup/reconnect behavior has a dedicated test.
+    actor._stage_progress_manager = SimpleNamespace()
 
     async def _noop(*_a, **_k):
         return None
@@ -1933,6 +1986,143 @@ async def test_actor_logs_a_workspace_attachment_failure_after_indexing(tmp_path
     error.assert_called_once()
     assert error.call_args.args == ("Workspace attachment failed after indexing.",)
     assert error.call_args.kwargs["error_reason"].startswith("RuntimeError: Cannot protect indexed file 'f'")
+
+
+@pytest.mark.asyncio
+async def test_actor_attaches_inside_the_run_with_a_postgres_fence(tmp_path) -> None:
+    """The attachment is the file's last write: it runs before the worker frees the file and reports (#1430)."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    events: list[str] = []
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(
+        side_effect=lambda *_: events.append("attached") or []
+    )
+    worker.release_file_fence = AsyncMock(side_effect=lambda **_: events.append("released"))
+
+    await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=["ws1"],
+        fence_holder_id="t",
+    )
+
+    assert worker.last_kwargs["before_success"] is not None
+    assert events == ["attached", "released"]
+    worker.release_file_fence.assert_awaited_once_with(partition="p", file_id="f", holder_id="t")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_ids", [None, ["ws1"]])
+async def test_actor_leaves_the_release_to_the_worker_without_an_attachment(tmp_path, workspace_ids) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=workspace_ids,
+        replace=workspace_ids is not None,
+        fence_holder_id="t",
+    )
+
+    assert worker.last_kwargs["before_success"] is None
+    assert worker.released == []
+
+
+@pytest.mark.asyncio
+async def test_actor_attaches_after_the_run_without_a_postgres_fence(tmp_path) -> None:
+    """With the Ray fences the run is reported first, as before #1430."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    events: list[str] = []
+
+    class _OrderedWorker(_RecordingWorker):
+        async def process_file(self, **kwargs) -> dict:
+            result = await super().process_file(**kwargs)
+            events.append("run reported")
+            return result
+
+    worker = _OrderedWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(
+        side_effect=lambda *_: events.append("attached") or []
+    )
+
+    await actor.process_file(
+        task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", workspace_ids=["ws1"]
+    )
+
+    assert worker.last_kwargs["before_success"] is None
+    assert events == ["run reported", "attached"]
+
+
+@pytest.mark.asyncio
+async def test_actor_does_not_fail_a_file_a_delete_took_during_its_attachment(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    worker.holds_fence = False
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(return_value=["f"])
+    actor._catalog_store.document_repo.mark_file_independently_indexed = AsyncMock(return_value=False)
+
+    result = await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=["ws1"],
+        fence_holder_id="t",
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    actor._logger.bind.return_value.info.assert_called_once_with("File deleted during its workspace attachment.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_actor_renews_the_fence_while_it_works_and_stops_after(tmp_path, fails) -> None:
+    """The pool renews too, but only while the pool actor lives (#1430)."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+
+    class _YieldingWorker(_RecordingWorker):
+        async def process_file(self, **kwargs) -> dict:
+            await asyncio.sleep(0)  # lets the renewal start, as real work does
+            return await super().process_file(**kwargs)
+
+    worker = _YieldingWorker(error=RuntimeError("boom") if fails else None)
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    try:
+        await actor.process_file(
+            task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", fence_holder_id="t"
+        )
+    except RuntimeError:
+        assert fails
+
+    assert worker.renewals == [{"partition": "p", "file_id": "f", "holder_id": "t"}]
+    assert worker.renewal_stopped
+
+
+@pytest.mark.asyncio
+async def test_actor_renews_nothing_without_a_fence(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert worker.renewals == []
 
 
 @pytest.mark.asyncio
@@ -3329,3 +3519,111 @@ async def test_a_cancelling_renewal_during_cleanup_does_not_cut_it_short(monkeyp
     assert result == {"stored_count": 1, "stage": "stored"}
     assert released == ["claim"]
     end.assert_awaited_once_with("t")
+
+
+def _fence_store() -> SimpleNamespace:
+    return SimpleNamespace(
+        file_fence_repo=SimpleNamespace(
+            renew_all=AsyncMock(return_value=1),
+            release=AsyncMock(return_value=True),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_pool_renews_the_file_fence_until_the_task_settles_then_releases_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    store = _fence_store()
+    renewed = asyncio.Event()
+    store.file_fence_repo.renew_all.side_effect = lambda *_args, **_kwargs: renewed.set() or 1
+    pool._claim_store = store
+    monkeypatch.setattr(module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0.001)
+
+    await pool.submit(
+        task_id="task-1",
+        partition="tenant-a",
+        metadata={"file_id": "file-1"},
+        fence_holder_id="task-1",
+    )
+    await asyncio.wait_for(renewed.wait(), timeout=1)
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+
+    renewed_fences = store.file_fence_repo.renew_all.await_args.args[0]
+    assert renewed_fences == [("tenant-a", "file-1", "task-1")]
+    store.file_fence_repo.release.assert_awaited_once_with(partition="tenant-a", file_id="file-1", holder_id="task-1")
+    assert pool._held_fences == {}
+
+
+@pytest.mark.asyncio
+async def test_pool_without_a_fence_holder_neither_renews_nor_releases() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    store = _fence_store()
+    pool._claim_store = store
+
+    await pool.submit(task_id="task-1", partition="tenant-a", metadata={"file_id": "file-1"})
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+
+    assert pool._fence_renewal is None
+    store.file_fence_repo.release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pool_releases_the_file_fence_of_a_submission_it_refuses() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    store = _fence_store()
+    pool._claim_store = store
+    pool._accepting_tasks = False
+
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(
+            task_id="task-1",
+            partition="tenant-a",
+            metadata={"file_id": "file-1"},
+            fence_holder_id="task-1",
+        )
+
+    store.file_fence_repo.release.assert_awaited_once_with(partition="tenant-a", file_id="file-1", holder_id="task-1")
+    assert pool._held_fences == {}
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_frees_the_file_before_reporting_it(tmp_path, monkeypatch) -> None:
+    """A client told the task failed may upload the file again at once (#1430)."""
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._ensure_catalog = AsyncMock(side_effect=RuntimeError("postgres down"))
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
+    events: list[str] = []
+    original_release = worker.release_file_fence
+
+    async def release(**kwargs):
+        events.append("released")
+        await original_release(**kwargs)
+
+    worker.release_file_fence = release
+
+    async def mark_failed(*_args, **_kwargs):
+        events.append("reported")
+        return True
+
+    monkeypatch.setattr(module, "retry_idempotent_ray_actor_method", mark_failed)
+    monkeypatch.setattr(module, "send_indexing_callback", AsyncMock())
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(
+            task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", fence_holder_id="t"
+        )
+
+    assert events[:2] == ["released", "reported"]
+    assert worker.released == [{"partition": "p", "file_id": "f", "holder_id": "t"}]

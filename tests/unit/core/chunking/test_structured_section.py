@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from core.chunking.registry import chunking_registry
-from core.chunking.structured_section import StructuredSectionChunker, _Unit
+from core.chunking.structured_section import StructuredSectionChunker, _greedy_split, _Unit
 from core.models.chunk import ChunkType
 from core.models.document import ProcessedDocument, TextBlock
 
@@ -258,6 +259,131 @@ def test_split_caption_never_ends_on_its_own_heading():
     for chunk in captions:
         last = [line for line in chunk.text.splitlines() if line.strip()][-1]
         assert not last.lstrip().startswith("#"), f"heading stranded at chunk end: {last!r}"
+
+
+def test_public_chunker_keeps_merged_text_within_character_limit(monkeypatch):
+    document = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="beta\n\nx\n\n😀", page_number=1)],
+        metadata={},
+    )
+    chunker = _chunker(chunk_size=25, hard_max_tokens=8, length_function=len, layout="flowing")
+    original_merge = chunker._merge_small
+    merge_calls = []
+
+    def record_merge(units, filename):
+        merge_calls.append(True)
+        return original_merge(units, filename)
+
+    monkeypatch.setattr(chunker, "_merge_small", record_merge)
+    chunks = chunker.chunk(document)
+
+    assert merge_calls
+    assert all(chunk.token_count == len(chunk.text) <= 8 for chunk in chunks)
+    assert [word for chunk in chunks for word in chunk.content.split()] == ["beta", "x", "😀"]
+
+
+def test_merge_small_counts_joiners_and_updates_token_count():
+    chunker = _chunker(chunk_size=25, hard_max_tokens=8, length_function=len, layout="flowing")
+    units = [_Unit([], text, len(text), pages={1}) for text in ("beta", "x", "😀")]
+
+    merged = chunker._merge_small(units, "")
+
+    assert [unit.text for unit in merged] == ["beta\n\nx", "😀"]
+    assert all(unit.tokens == len(unit.text) <= 8 for unit in merged)
+
+
+def test_greedy_split_does_not_rehome_heading_past_max_tokens():
+    pieces = _greedy_split("alpha beta\n\n### Heading\n\ngamma delta", 2, 2, _words)
+
+    assert pieces == ["alpha beta", "### Heading", "gamma delta"]
+    assert all(_words(piece) <= 2 for piece in pieces), pieces
+
+
+def test_greedy_split_counts_joiner_when_packing_to_target():
+    pieces = _greedy_split("a\n\n### H\n\nb", 6, 6, len)
+
+    assert pieces == ["a", "### H", "b"]
+    assert all(len(piece) <= 6 for piece in pieces), pieces
+
+
+def test_greedy_split_keeps_hard_limit_when_target_is_larger():
+    pieces = _greedy_split("aa\n\nbb", 8, 4, len)
+    wrapped = _greedy_split("aa bb cc dd", 8, 4, len)
+
+    assert pieces == ["aa", "bb"]
+    assert all(len(piece) <= 4 for piece in pieces), pieces
+    assert wrapped == ["aa", "bb", "cc", "dd"]
+    assert all(len(piece) <= 4 for piece in wrapped), wrapped
+
+
+def test_greedy_split_rehomes_heading_when_receiver_still_fits():
+    pieces = _greedy_split("alpha beta\n\n### Heading\n\ngamma delta", 4, 4, _words)
+
+    assert pieces == ["alpha beta", "### Heading\n\ngamma delta"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_rehomes_intact_heading_after_sentence_split_when_it_fits():
+    pieces = _greedy_split("alpha beta.\n### Heading.\ngamma delta.", 2, 4, _words)
+
+    assert pieces == ["alpha beta.", "### Heading.\n\ngamma delta."]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_does_not_rehome_hard_wrapped_heading_fragment():
+    pieces = _greedy_split("#### **Article L700-2 w1 details", 2, 4, _words)
+
+    assert pieces == ["#### **Article", "L700-2 w1", "details"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_does_not_rehome_sentence_split_heading_fragment():
+    pieces = _greedy_split("## Scope. alpha beta. gamma delta epsilon", 2, 4, _words)
+
+    assert pieces == ["## Scope.", "alpha beta.", "gamma delta epsilon"]
+
+
+def test_greedy_split_rehomes_complete_heading_from_word_wrapped_item():
+    pieces = _greedy_split("### Heading\nalpha beta gamma", 2, 4, _words)
+
+    assert pieces == ["### Heading\n\nalpha beta", "gamma"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_cascades_consecutive_headings_to_nonempty_receiver():
+    text = "### A\n\n### B\n\nbody"
+    pieces = _greedy_split(text, 2, 5, _words)
+    bounded_pieces = _greedy_split(text, 2, 4, _words)
+
+    assert pieces == [text]
+    assert bounded_pieces == ["### A", "### B\n\nbody"]
+    assert all(_words(piece) <= 4 for piece in bounded_pieces), bounded_pieces
+
+
+def test_greedy_split_rehomes_headings_packed_together_when_combined_piece_fits():
+    text = "intro\n\n### A\n\n### B\n\nbody"
+
+    pieces = _greedy_split(text, 5, 8, _words)
+
+    assert pieces == ["intro", "### A\n\n### B\n\nbody"]
+    assert all(_words(piece) <= 8 for piece in pieces), pieces
+
+
+def test_greedy_split_keeps_rehomed_heading_run_within_max_tokens():
+    text = "intro\n\n### A\n\n### B\n\nbody extra"
+
+    pieces = _greedy_split(text, 5, 5, _words)
+
+    assert pieces == ["intro\n\n### A", "### B\n\nbody extra"]
+    assert all(_words(piece) <= 5 for piece in pieces), pieces
+
+
+def test_greedy_split_distinguishes_fragment_from_duplicate_source_heading():
+    text = "#### **Article L700-2 w1 details\n\n#### **Article\n\nalpha beta"
+    pieces = _greedy_split(text, 2, 4, _words)
+
+    assert pieces == ["#### **Article", "L700-2 w1", "details", "#### **Article\n\nalpha beta"]
 
 
 def test_breakless_paragraph_splits_on_clauses_not_mid_sentence():
@@ -556,6 +682,68 @@ def test_hard_max_above_the_band_changes_nothing():
     assert [c.token_count for c in with_bound] == [c.token_count for c in without]
 
 
+@pytest.mark.parametrize("layout", ["flowing", "paginated"])
+@pytest.mark.parametrize("limit", [1, 8, 20])
+def test_long_header_respects_hard_max_without_losing_body(layout, limit):
+    heading = "Titre " + " ".join(f"mot{i}" for i in range(12))
+    body = "un deux trois quatre cinq six sept huit neuf dix onze douze"
+    chunks = _chunker(chunk_size=32, hard_max_tokens=limit, layout=layout).chunk(_doc(f"{heading}\n\n{body}"))
+    assert chunks
+    assert all(c.token_count <= limit for c in chunks), [c.text for c in chunks]
+    assert " ".join(c.content for c in chunks).split() == f"{heading} {body}".split()
+    assert all(c.metadata["hierarchy_path"] == [heading] for c in chunks)
+
+
+def test_long_filename_and_deep_heading_path_leave_room_for_body():
+    heading = "Titre " + " ".join(f"section{i}" for i in range(20))
+    filename = " ".join(f"name{i}" for i in range(30)) + ".pdf"
+    doc = _doc(f"# Outer\n\n## Inner\n\n{heading}\n\nSome body text.", filename=filename)
+    chunks = _chunker(chunk_size=32, hard_max_tokens=16).chunk(doc)
+    assert chunks
+    assert all(c.token_count <= 16 for c in chunks), [c.text for c in chunks]
+    assert all(c.metadata["filename"] == filename for c in chunks)
+    joined = " ".join(c.content for c in chunks)
+    for text in ("Outer", "Inner", heading, "Some body text."):
+        assert text in joined
+
+
+def test_header_sanitizes_control_characters_in_headings():
+    chunks = _chunker().chunk(_doc("Titre Hello\x07world\n\nSome body text."))
+    assert chunks[0].header
+    assert "\x07" not in chunks[0].header
+    assert "Helloworld" in chunks[0].header
+
+
+@pytest.mark.parametrize(
+    "length_function", [len, lambda text: len(text) // 4], ids=["characters", "quarter-characters"]
+)
+def test_header_budget_uses_the_injected_token_counter(length_function):
+    heading = "Titre " + " ".join(f"mot{i}" for i in range(20))
+    body = "un deux trois quatre cinq six sept huit neuf dix onze douze"
+    chunks = _chunker(chunk_size=28, max_tokens=28, hard_max_tokens=14, length_function=length_function).chunk(
+        _doc(f"{heading}\n\n{body}", page=9, filename="")
+    )
+    assert chunks
+    assert all(length_function(c.text) <= 14 for c in chunks), [c.text for c in chunks]
+    assert all(c.token_count == length_function(c.text) for c in chunks)
+    assert " ".join(c.content for c in chunks).split() == f"{heading} {body}".split()
+
+
+def test_bounded_header_keeps_the_innermost_heading():
+    doc = _doc("# Outer\n\n## Middle\n\n### Inner\n\nSome body text.")
+    chunks = _chunker(chunk_size=20, hard_max_tokens=20).chunk(doc)
+    assert chunks
+    assert all("Section: Middle > Inner]" in c.header for c in chunks)
+    assert all("Outer" not in c.header for c in chunks)
+    assert all(c.metadata["hierarchy_path"] == ["Outer", "Middle", "Inner"] for c in chunks)
+
+
+def test_small_header_keeps_its_existing_format():
+    chunk = _chunker().chunk(_doc("# Title\n\nSome body text.", page=9))[0]
+    assert chunk.header == "[Source: code.pdf | Page: 9 | Section: Title]"
+    assert chunk.text == f"{chunk.header}\n\n{chunk.content}"
+
+
 def test_every_chunk_of_a_named_file_has_a_source_header():
     doc = ProcessedDocument(
         document_id="d",
@@ -775,8 +963,10 @@ def test_heading_before_a_figure_travels_with_it():
 def test_headings_only_unit_never_merges_backward():
     from core.chunking.structured_section import _is_headings_only, _Unit
 
-    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\n### Sub", tokens=4))
-    assert not _is_headings_only(_Unit(heading_path=[], text="## Title\n\nBody line.", tokens=5))
+    is_heading = _chunker()._is_heading_line
+    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\n### Sub", tokens=4), is_heading)
+    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\nParagraphe 2 : Objet", tokens=6), is_heading)
+    assert not _is_headings_only(_Unit(heading_path=[], text="## Title\n\nBody line.", tokens=5), is_heading)
 
 
 def test_split_table_keeps_its_column_header_on_every_piece():
@@ -790,3 +980,121 @@ def test_split_table_keeps_its_column_header_on_every_piece():
     for piece in tables:
         assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
     assert "Regional breakdown" in tables[0].text, "the heading should lead the first piece"
+
+
+def test_split_table_under_an_anchored_article_heading_keeps_its_column_header():
+    """Marker anchors a heading with a page ``<span>``. The chunk keeps the line
+    without it, where the article test then reads ``Article L110-5`` as content,
+    not a heading: the line must still be recognised in front of the table."""
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    heading = '## <span id="page-1-0"></span>Article L110-5'
+    doc = _doc(f"{heading}\n\n| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n")
+    tables = [c for c in _chunker(chunk_size=200).chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    for piece in tables:
+        assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
+    assert "## Article L110-5" in tables[0].content, "the heading should lead the first piece"
+    assert all("Article L110-5" not in piece.content for piece in tables[1:]), "the heading must not be replayed"
+
+
+# The heading in front of a split table is recognised the way the chunker
+# recognised it when it opened the section: every default keyword, including
+# ``Paragraphe``, and a deployment's own ``heading_keywords``. Otherwise the
+# heading is replayed as the column header of every piece (#1375).
+@pytest.mark.parametrize(
+    ("heading", "keywords"),
+    [
+        ("Paragraphe 3 : Ventilation régionale", None),
+        ("Rubrique 4 : Ventilation régionale", ["rubrique"]),
+    ],
+)
+def test_split_table_under_a_keyword_heading_keeps_its_column_header(heading, keywords):
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    doc = _doc(f"{heading}\n\n| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n")
+    chunker = _chunker(chunk_size=200, heading_keywords=keywords)
+    tables = [c for c in chunker.chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    for piece in tables:
+        assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
+    assert heading in tables[0].text, "the heading should lead the first piece"
+    assert all(heading not in piece.content for piece in tables[1:]), "the heading must not be replayed"
+
+
+# A lone ``\r`` and the other characters ``str.splitlines()`` breaks on
+# (vertical tab, form feed, record separator, Unicode line separator) can sit
+# inside a table cell of converted documents. Splitting an oversize table must
+# not cut the row there, or the table parser drops the half-rows' text (#1375).
+@pytest.mark.parametrize("sep", ["\r", "\x0b", "\x0c", "\x1e", " "])
+def test_oversize_table_keeps_cell_text_around_a_line_break_character(sep):
+    rows = "\n".join(f"| r{i} | v{i} |" for i in range(20))
+    table = f"## Results\n\n| Name | Value |\n| --- | --- |\n| alpha{sep}beta | gamma |\n{rows}\n"
+    chunks = _chunker(chunk_size=8, inline_threshold=0, layout="flowing").chunk(_doc(table))
+    tables = [c for c in chunks if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    body = " ".join(c.content for c in chunks)
+    for word in ("alpha", "beta", "gamma", "r0", "v19"):
+        assert word in body, word
+
+
+_CRLF_DOC = """# Rapport annuel
+
+Introduction paragraph describing the scope of the report in a few words.
+
+## Contexte
+
+- first point of the list
+- second point of the list
+- third point of the list
+
+Chapitre 2 : Budget
+
+| Poste | Montant |
+| --- | --- |
+| Personnel | 120 |
+| Loyer | 40 |
+
+## Annexe détaillée
+
+{big}
+
+Closing paragraph after the large table.
+"""
+
+
+def test_crlf_document_chunks_like_the_lf_document():
+    big = "| Region | Q1 | Q2 |\n| --- | --- | --- |\n" + "\n".join(f"| R{i} | {i} | {i * 2} |" for i in range(60))
+    lf = _CRLF_DOC.format(big=big)
+    crlf = lf.replace("\n", "\r\n")
+    chunker = _chunker(chunk_size=60)
+    lf_chunks = chunker.chunk(_doc(lf))
+    crlf_chunks = chunker.chunk(_doc(crlf))
+    assert sum(c.chunk_type == ChunkType.TABLE for c in lf_chunks) > 1, "the big table must split"
+
+    def norm(text: str) -> str:
+        return text.replace("\r\n", "\n")
+
+    assert [norm(c.text) for c in crlf_chunks] == [c.text for c in lf_chunks]
+    assert [c.chunk_type for c in crlf_chunks] == [c.chunk_type for c in lf_chunks]
+
+
+def test_chart_pieces_fit_the_ceiling_lowered_by_hard_max_tokens():
+    """A chart is split like a packed chunk: the source header included, under
+    a ceiling a small-context embedder lowered below ``chunk_size``."""
+    rows = "\n".join(f"| 2026-{month:02d} | {100 + month} | {90 + month} |" for month in range(1, 13)) * 5
+    text = (
+        "Chart: Actual vs target\nType: clustered column chart + line chart\nWorksheet: Sales\n\n"
+        f"| Month | Actual | Target |\n| --- | --- | --- |\n{rows}"
+    )
+    doc = _doc(
+        text,
+        filename="book.xlsx",
+        tabular_format="xlsx",
+        xlsx_content_kind="chart",
+        chart_context="Chart: Actual vs target (clustered column chart + line chart), worksheet Sales",
+    )
+    chunker = _chunker(chunk_size=400, hard_max_tokens=80)
+    chunks = chunker.chunk(doc)
+
+    assert len(chunks) > 1
+    assert all(_words(chunk.text) <= 80 for chunk in chunks)
+    assert all("| Month | Actual | Target |" in chunk.text for chunk in chunks)

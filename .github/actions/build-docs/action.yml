@@ -1,0 +1,30 @@
+name: Build the documentation site
+description: >-
+  The build half of astro.yml, shared with the docs-build check in ci.yml so the
+  check builds exactly what gets deployed: the same Node, the same install and
+  the same Pages URL options. Needs a checkout and the `pages: read` permission.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+        cache: npm
+        cache-dependency-path: package-lock.json
+
+    - name: Read the Pages settings
+      id: pages
+      uses: actions/configure-pages@v5
+
+    - name: Install dependencies
+      shell: bash
+      run: npm ci
+
+    - name: Build with Astro
+      shell: bash
+      env:
+        SITE: ${{ steps.pages.outputs.origin }}
+        BASE: ${{ steps.pages.outputs.base_path }}
+      run: npx --no-install astro build --site "$SITE" --base "$BASE"

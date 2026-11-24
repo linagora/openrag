@@ -98,6 +98,14 @@ def _detect_stream_encoding(raw_stream) -> tuple[str, str]:
             # Use the same fallback as an unavailable detector.
             encoding = "cp1252"
 
+    try:
+        codecs.lookup(encoding)
+    except LookupError:
+        # chardet can name a codec Python does not ship, such as EUC-TW or
+        # ISO-2022-CN (#1370). Treat it like an unusable detection.
+        logger.bind(encoding=encoding).warning("CSV encoding is not a Python codec; using cp1252")
+        encoding = "cp1252"
+
     normalized_encoding = encoding.lower().replace("_", "-")
     if normalized_encoding in {"iso-8859-1", "latin-1", "latin1"}:
         encoding = "cp1252"

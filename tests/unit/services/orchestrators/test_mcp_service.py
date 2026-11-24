@@ -8,16 +8,34 @@ fuzzy ranking, task assembly and URL-indexation guards in isolation.
 from __future__ import annotations
 
 import asyncio
+import re
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from core.utils.exceptions import ValidationError
-from services.orchestrators.mcp_service import MCPService
+from core.utils.exceptions import ValidationError, mark_indexing_worker_may_be_running
+from services.orchestrators.mcp_service import MCPService, _download_name
 
 #: index_url verifies downloaded bytes against the URL extension; these
 #: fixtures use .pdf URLs, so their payloads must carry a PDF signature.
 _PDF_HEADER = b"%PDF-1.7\n"
+
+#: The data_dir ``_service()`` hands the service; set per test by ``data_dir``.
+_DATA_DIR: Path | None = None
+
+#: How the upload routes name a stored file (``make_unique_filename``).
+_UPLOAD_NAME = re.compile(r"\d{13}_[0-9a-f]{4}_")
+
+
+@pytest.fixture(autouse=True)
+def data_dir(tmp_path, monkeypatch) -> Path:
+    """Where ``index_url`` stores its downloads in each test: a data_dir of the test's own."""
+    path = tmp_path / "data"
+    monkeypatch.setitem(globals(), "_DATA_DIR", path)
+    return path
+
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -165,6 +183,7 @@ def _service(
     default_top_k=5,
     max_top_k=50,
     similarity_threshold=0.8,
+    data_dir=None,
 ):
     return MCPService(
         retrieval_service=retrieval or FakeRetrieval(),
@@ -174,6 +193,7 @@ def _service(
         conversion_service=conversion or FakeConversion(),
         vector_store=vector_store or FakeVectorStore(),
         collection="chunks",
+        data_dir=data_dir or _DATA_DIR,
         default_top_k=default_top_k,
         max_top_k=max_top_k,
         similarity_threshold=similarity_threshold,
@@ -534,6 +554,18 @@ async def test_delete_file_admin_wildcard_bypasses_membership():
     assert indexing.deleted == [("f1", "a")]
 
 
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.asyncio
+async def test_admin_wildcard_cannot_delete_in_a_reserved_partition(partition):
+    """The store reads `all` as every partition: deleting file X in it deleted X everywhere."""
+    indexing = FakeIndexing()
+    with pytest.raises(PermissionError, match="reserved"):
+        await _service(partitions=FakePartitions(exists=True), indexing=indexing).delete_file(
+            partition=partition, file_id="f1", allowed_partitions=["all"], user_id=1
+        )
+    assert indexing.deleted == []
+
+
 @pytest.mark.asyncio
 async def test_delete_file_invalid_file_id():
     with pytest.raises(ValueError):
@@ -780,6 +812,35 @@ async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_index_url_keeps_the_download_when_a_worker_may_be_running(monkeypatch):
+    """As for an upload: a worker that may have started has not necessarily read
+    the file yet, and it deletes its own input once it settles."""
+    error = asyncio.CancelledError()
+    mark_indexing_worker_may_be_running(error)
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing(add_error=error))
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(_PDF_HEADER + b"submitted")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f2",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None and downloaded_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_index_url_removes_download_when_the_content_check_is_cancelled(monkeypatch):
     """The package check awaits, so a cancelled request raises CancelledError
     inside the validation block — a BaseException, which an `except Exception`
@@ -936,6 +997,105 @@ async def test_index_url_treats_partition_exists_race_as_success(monkeypatch):
     assert out["task_id"] == "task-123"
 
 
+async def _index(svc, monkeypatch, url, **kwargs) -> Path:
+    """Index *url* with a stubbed download and return the path the task was given."""
+
+    async def fake_download(_url, dest):
+        dest.write_bytes(_PDF_HEADER + b"data")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+    await svc.index_url(url=url, partition="p1", file_id="f1", allowed_partitions=["p1"], user_id=7, **kwargs)
+    return Path(svc._indexing.added[0]["file_path"])
+
+
+def _editor_service(**kwargs):
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    return _service(partitions=parts, indexing=FakeIndexing(), **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_index_url_stores_the_download_in_the_data_dir_as_an_upload(monkeypatch, data_dir):
+    """data_dir is the volume every node mounts: a worker or parser on another
+    node opens the file there, as it does an upload's."""
+    stored = await _index(_editor_service(), monkeypatch, "https://example.com/docs/report-2026.pdf")
+
+    assert stored.parent == data_dir.resolve()
+    assert _UPLOAD_NAME.fullmatch(stored.name[:19]) and stored.name[19:] == "report_2026.pdf"
+    # Kept once the task is queued: the task keeps or deletes it, as for an upload.
+    assert stored.read_bytes() == _PDF_HEADER + b"data"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/..",
+        "https://example.com/a/..%2F..%2Fetc%2Fpasswd",
+        "https://example.com/%2e%2e",
+        "https://example.com/.pdf",
+    ],
+)
+async def test_index_url_keeps_a_hostile_url_name_in_the_data_dir(monkeypatch, data_dir, url):
+    stored = await _index(_editor_service(), monkeypatch, url, extra_metadata={"mimetype": "application/pdf"})
+
+    assert stored.parent == data_dir.resolve()
+    assert _UPLOAD_NAME.match(stored.name) and stored.suffix == ".pdf"
+
+
+@pytest.mark.asyncio
+async def test_index_url_never_overwrites_a_file_in_the_data_dir(monkeypatch, data_dir):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    data_dir.mkdir()
+    existing = data_dir / "1713700000000_a1b2_report.pdf"
+    existing.write_bytes(b"another upload")
+    monkeypatch.setattr(mcp_mod, "make_unique_filename", lambda name: f"1713700000000_a1b2_{name}")
+    svc = _editor_service()
+
+    with pytest.raises(FileExistsError):
+        await _index(svc, monkeypatch, "https://example.com/report.pdf")
+
+    assert existing.read_bytes() == b"another upload"
+    assert svc._indexing.added == []
+
+
+@pytest.mark.parametrize(
+    "filename,suffix",
+    [
+        ("r" * 400 + ".pdf", ".pdf"),
+        ("%E4%B8%AD" * 60 + ".docx", ".docx"),
+        ("中" * 200 + ".pdf", ".pdf"),
+        ("a." + "x" * 400, "." + "x" * 400),
+        ("." + "x" * 232, "." + "x" * 232),
+        ("é." + "x" * 231, "." + "x" * 231),
+    ],
+    ids=["ascii", "percent-encoded", "multibyte", "long-extension", "no-room-for-a-stem", "no-room-for-a-char"],
+)
+def test_a_long_url_name_is_cut_to_fit_the_file_system(filename, suffix):
+    name = _download_name(filename, suffix)
+
+    # The name and its SAVE_MARKDOWN copy (``<name>.md``) both fit in 255 bytes.
+    assert len(f"{name}.md".encode()) <= 255
+    assert _UPLOAD_NAME.match(name)
+    if len(suffix) < 200:
+        assert name.endswith(suffix)
+
+
+@pytest.mark.parametrize(
+    "filename,suffix,expected",
+    [
+        ("report.pdf", ".pdf", "report.pdf"),
+        ("report", ".pdf", "report.pdf"),
+        ("report.xyz", ".pdf", "report.xyz.pdf"),
+        ("Rapport final (v2).PDF", ".PDF", "Rapport_final_v2.PDF"),
+        ("..", "", "download"),
+    ],
+)
+def test_a_url_name_is_stored_as_an_upload_name_would_be(filename, suffix, expected):
+    name = _download_name(filename, suffix)
+    assert _UPLOAD_NAME.match(name) and name[19:] == expected
+
+
 @pytest.mark.asyncio
 async def test_safe_download_rejects_redirect_to_private(monkeypatch, tmp_path):
     # A public host that 302-redirects to a loopback target must be rejected on
@@ -996,13 +1156,207 @@ async def test_safe_download_resolves_the_httpx_idna_hostname(monkeypatch, tmp_p
     assert sent_hosts == ["xn--fa-hia.example"]
 
 
+@pytest.mark.asyncio
+async def test_index_url_keeps_file_io_off_the_event_loop(monkeypatch):
+    """Creating the temp file, opening it, writing each chunk and the content
+    sniff must all run in a worker thread, where no event loop is running."""
+    from services.orchestrators import mcp_service as mcp_mod
+
+    calls: list[tuple[str, bool]] = []
+
+    def on_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return True
+
+    class RecordingHandle:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+        def __getattr__(self, name):
+            return getattr(self._fh, name)
+
+        def read(self, *args):
+            calls.append(("read", on_loop()))
+            return self._fh.read(*args)
+
+        def write(self, data):
+            calls.append(("write", on_loop()))
+            return self._fh.write(data)
+
+        def close(self):
+            calls.append(("close", on_loop()))
+            self._fh.close()
+
+    real_create = mcp_mod._create_download_target
+    real_path_open = Path.open
+
+    def recording_create(*args):
+        calls.append(("create", on_loop()))
+        return real_create(*args)
+
+    def recording_path_open(self, *args, **kwargs):
+        calls.append(("open", on_loop()))
+        return RecordingHandle(real_path_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(mcp_mod, "_create_download_target", recording_create)
+    monkeypatch.setattr(Path, "open", recording_path_open)
+
+    def handler(request):
+        return httpx.Response(200, content=_PDF_HEADER + b"data")
+
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing()
+    svc = _service(partitions=parts, indexing=indexing)
+
+    async def _resolves_ok(host):
+        return None
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", _resolves_ok)
+
+    await svc.index_url(
+        url="https://example.com/report.pdf",
+        partition="p1",
+        file_id="f7",
+        allowed_partitions=["p1"],
+        user_id=7,
+    )
+    index_url_calls = list(calls)
+    monkeypatch.undo()
+    downloaded = Path(indexing.added[0]["file_path"])
+    assert downloaded.read_bytes() == _PDF_HEADER + b"data"
+    downloaded.unlink(missing_ok=True)
+
+    recorded = {name for name, _ in index_url_calls}
+    assert {"create", "open", "write", "read", "close"} <= recorded
+    assert [call for call in index_url_calls if call[1]] == []
+
+
+async def _cancel_while_blocked(task: asyncio.Task, gate: dict[str, threading.Event]) -> None:
+    """Cancel ``task`` while its worker thread is blocked, then let the thread finish."""
+    assert await asyncio.to_thread(gate["entered"].wait, 5), "the worker thread never started"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate["release"].set()
+    assert await asyncio.to_thread(gate["finished"].wait, 5), "the worker thread never finished"
+
+
+async def _until_removed(path: Path) -> bool:
+    """Wait for the cleanup that runs once the worker thread has finished."""
+    for _ in range(200):
+        if not path.exists():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+def _index_url_task(svc) -> asyncio.Task:
+    return asyncio.ensure_future(
+        svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f8",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+    )
+
+
+# A worker thread cannot be interrupted: cancelling the await returns at once
+# while the thread goes on. A temp file the thread creates or opens after the
+# request was cancelled must still be removed.
+@pytest.mark.asyncio
+async def test_index_url_removes_the_temp_file_created_after_a_cancel(monkeypatch):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    gate = {"entered": threading.Event(), "release": threading.Event(), "finished": threading.Event()}
+    created: list[Path] = []
+    real_create = mcp_mod._create_download_target
+
+    def blocked_create(*args):
+        gate["entered"].set()
+        gate["release"].wait(5)
+        created.append(real_create(*args))
+        gate["finished"].set()
+        return created[-1]
+
+    monkeypatch.setattr(mcp_mod, "_create_download_target", blocked_create)
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+
+    await _cancel_while_blocked(_index_url_task(svc), gate)
+
+    assert await _until_removed(created[0]), f"temp file left behind: {created[0]}"
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_the_download_opened_after_a_cancel(monkeypatch):
+    from services.orchestrators import mcp_service as mcp_mod
+
+    gate = {"entered": threading.Event(), "release": threading.Event(), "finished": threading.Event()}
+    opened: list[Path] = []
+    real_path_open = Path.open
+
+    def blocked_open(self, mode="r", *args, **kwargs):
+        if mode != "wb":
+            return real_path_open(self, mode, *args, **kwargs)
+        opened.append(self)
+        gate["entered"].set()
+        gate["release"].wait(5)
+        try:
+            return real_path_open(self, mode, *args, **kwargs)
+        finally:
+            gate["finished"].set()
+
+    def handler(request):
+        return httpx.Response(200, content=_PDF_HEADER + b"data")
+
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", blocked_open)
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+
+    async def _resolves_ok(host):
+        return None
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", _resolves_ok)
+
+    await _cancel_while_blocked(_index_url_task(svc), gate)
+
+    assert opened, "the download was never opened"
+    assert await _until_removed(opened[0]), f"download left behind: {opened[0]}"
+
+
 # ---------------------------------------------------------------------------
 # Metadata hardening + input bounds
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_update_metadata_strips_protected_keys_keeps_move():
+async def test_update_metadata_strips_protected_keys():
     indexing = FakeIndexing()
     await _service(partitions=FakePartitions(exists=True), indexing=indexing).update_file_metadata(
         partition="a",
@@ -1012,34 +1366,41 @@ async def test_update_metadata_strips_protected_keys_keeps_move():
             "source": "/evil",
             "created_by": 999,
             "degraded_stages": ["caption"],
-            "partition": "dest",
         },
         allowed_partitions=["all"],
         user_id=1,
     )
     _file_id, sent_md, _partition, _user = indexing.updated[0]
     assert sent_md["author"] == "x"
-    assert sent_md["partition"] == "dest"  # authorized move control preserved
     assert "source" not in sent_md and "created_by" not in sent_md and "degraded_stages" not in sent_md
 
 
 @pytest.mark.asyncio
-async def test_update_metadata_move_requires_editor_on_destination():
-    # Non-wildcard caller: editor on source but only viewer on the move target.
-    class P(FakePartitions):
-        async def list_members(self, partition):
-            role = "viewer" if partition == "dest" else "editor"
-            return [{"user_id": 5, "role": role}]
+async def test_update_metadata_refuses_another_partition():
+    from unittest.mock import MagicMock
 
-    svc = _service(partitions=P(exists=True))
-    with pytest.raises(PermissionError):
+    from services.orchestrators.indexing_service import IndexingService
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.updated: list = []
+
+        async def update_file_metadata(self, *args):
+            self.updated.append(args)
+
+    dispatcher = Dispatcher()
+    indexing = IndexingService(document_repo=MagicMock(), workspace_repo=MagicMock(), dispatcher=dispatcher)
+    svc = _service(partitions=FakePartitions(exists=True), indexing=indexing)
+    with pytest.raises(ValidationError) as exc:
         await svc.update_file_metadata(
             partition="src",
             file_id="f1",
             metadata={"partition": "dest"},
-            allowed_partitions=["src", "dest"],
+            allowed_partitions=["all"],
             user_id=5,
         )
+    assert exc.value.code == "PARTITION_CHANGE_UNSUPPORTED"
+    assert dispatcher.updated == []
 
 
 @pytest.mark.asyncio

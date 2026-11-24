@@ -153,8 +153,21 @@ def test_a_fractional_reservation_above_one_gpu_is_refused(tmp_path: Path) -> No
         # On a shared Ray cluster, the workers run on the Ray worker pods.
         ("--set-string", "env.config.MARKER_POOL_SIZE=3", *SHARED_RAY),
         ("--set-string", "env.config.MARKER_POOL_SIZE=3", "--set", "ray.externalCluster=true"),
+        # env.secrets reaches the pod only through the Secret the chart renders:
+        # beside another Secret it is a leftover the workers never read.
+        ("--set-string", "env.secrets.MARKER_POOL_SIZE=2", "--set", "env.existingSecret=openrag-env"),
+        ("--set-string", "env.secrets.MARKER_POOL_SIZE=2", "--set", "env.secretsProvider.type=externalSecret"),
     ],
-    ids=["fits-one-card", "one-per-card", "whole-card-each", "no-gpu-in-pod", "shared-ray", "external-ray-from-secret"],
+    ids=[
+        "fits-one-card",
+        "one-per-card",
+        "whole-card-each",
+        "no-gpu-in-pod",
+        "shared-ray",
+        "external-ray-from-secret",
+        "secrets-beside-an-existing-secret",
+        "secrets-beside-an-operator-secret",
+    ],
 )
 def test_gpu_workers_that_fit_render(tmp_path: Path, args: tuple[str, ...]) -> None:
     result = _render(tmp_path, *args)

@@ -118,6 +118,9 @@ def _supports_task_state_recovery(actor) -> bool:
         # Retention is a lifecycle change, and creation options cannot retrofit
         # it onto an actor a previous deployment left detached and leaking.
         and getattr(actor, "supports_bounded_task_retention", None) is not None
+        # Terminal state is retained until its durable job outcome is accepted;
+        # older actors can evict it before recovery writes the outcome.
+        and getattr(actor, "supports_job_outcome_retention", None) is not None
         # Degradation and COMPLETED must be one actor mutation. An older actor
         # can only perform the unsafe split writes and must not survive rollout.
         and getattr(actor, "complete_with_degraded_stages", None) is not None
@@ -187,12 +190,15 @@ def get_stage_progress_manager():
 def _supports_task_completion_recovery(actor) -> bool:
     method_names = getattr(actor, "_ray_actor_method_names", None)
     # ``reconcile_jobs`` came with durable history: a tracker that predates it
-    # would never write a settled row or recover one a restart orphaned.
+    # would never write a settled row or recover one a restart orphaned. One
+    # without ``supports_file_slot_release`` would never give back the quota
+    # slot of a dispatched upload that ends without a file (#664).
     required = (
         "supports_cancellation_recovery",
         "supports_degraded_stage_history",
         "supports_error_reason_history",
         "supports_interrupted_stage_history",
+        "supports_file_slot_release",
         "reconcile_jobs",
     )
     if isinstance(method_names, (frozenset, list, set, tuple)) and not set(required) <= set(method_names):
@@ -207,6 +213,7 @@ def _supports_task_completion_recovery(actor) -> bool:
             "supports_degraded_stage_history",
             "supports_error_reason_history",
             "supports_interrupted_stage_history",
+            "supports_file_slot_release",
         ):
             method = getattr(actor, capability, None)
             remote = getattr(method, "remote", None)

@@ -31,6 +31,7 @@ from core.ports.workspace_repo import WorkspaceRepository
 from core.rerankers import reranker_registry
 from core.vlm import vlm_registry
 from di.container import ServiceContainer
+from di.object_stores import create_upload_store
 from di.repositories import create_catalog_store
 from di.vector_stores import create_vector_store
 from fastapi import HTTPException
@@ -141,6 +142,12 @@ class TestLegacyContainerStillWorks:
         c = ServiceContainer()
         with pytest.raises(RuntimeError, match="without a Settings instance"):
             _ = c.vector_store
+
+    def test_upload_store_raises_when_unconfigured(self):
+        """Reject upload store access when settings were not provided."""
+        c = ServiceContainer()
+        with pytest.raises(RuntimeError, match="without a Settings instance"):
+            _ = c.upload_store
 
     @pytest.mark.parametrize(
         "name",
@@ -390,6 +397,36 @@ class TestVectorStoreWiring:
         # Repeated property reads must return the same instance — every
         # construction opens a fresh pymilvus gRPC channel.
         assert c.vector_store is c.vector_store
+
+
+class TestUploadStoreWiring:
+    """The store of uploaded files: the filesystem one, under ``paths.data_dir``."""
+
+    @staticmethod
+    def _settings_with_data_dir(data_dir) -> Settings:
+        settings = _settings()
+        return settings.model_copy(update={"paths": settings.paths.model_copy(update={"data_dir": data_dir})})
+
+    def test_factory_returns_a_filesystem_store_under_data_dir(self, tmp_path):
+        """Root the store at the resolved ``paths.data_dir``."""
+        from core.ports.object_store import ObjectStore
+        from services.storage.fs_object_store import FsObjectStore
+
+        store = create_upload_store(self._settings_with_data_dir(tmp_path / "data"))
+        assert isinstance(store, ObjectStore)
+        assert isinstance(store, FsObjectStore)
+        assert store.root == (tmp_path / "data").resolve()
+
+    def test_building_the_container_creates_nothing_on_disk(self, tmp_path):
+        """Leave ``data_dir`` alone until something is written."""
+        c = ServiceContainer(self._settings_with_data_dir(tmp_path / "data"))
+        assert c.upload_store.root == (tmp_path / "data").resolve()
+        assert not (tmp_path / "data").exists()
+
+    def test_container_caches_the_upload_store(self, tmp_path):
+        """Keep one store, and so one set of per-key locks, per container."""
+        c = ServiceContainer(self._settings_with_data_dir(tmp_path / "data"))
+        assert c.upload_store is c.upload_store
 
 
 class TestRepositoriesFactory:
@@ -895,6 +932,15 @@ class TestPhase14ServiceWiring:
         assert c.preset_service is service
         assert service._partition_service is c.partition_service
         assert c.partition_service._config is settings
+
+    def test_mcp_service_downloads_into_the_data_dir(self):
+        """index_url stores its download where the upload routes store a file."""
+        settings = _settings()
+        c = ServiceContainer(settings)
+        for name in ("retrieval", "indexing", "job", "conversion"):
+            setattr(c, f"_{name}_service", object())
+
+        assert c.mcp_service._data_dir == settings.paths.data_dir
 
     def test_prompt_service_is_lazy_cached_on_shared_prompt_repo(self):
         """Expose PromptService wired to the shared prompt_repo."""

@@ -54,7 +54,7 @@ def _default_reranker_config() -> InfinityRerankerConfig:
 
 class _BaseRetrieverConfig(ConfigMixin):
     top_k: int = 50
-    similarity_threshold: float = 0.6
+    similarity_threshold: float = 0.2
     with_surrounding_chunks: bool = False
     include_related: bool = True
     include_ancestors: bool = True

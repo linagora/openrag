@@ -26,7 +26,7 @@ class RetrievalPipelineConfig(BaseModel):
     # None follows the deployment's reranker.top_k (RERANKER_TOP_K).
     top_n: int | None = Field(default=None, gt=0, le=1000)
     enable_reranker: bool = True
-    similarity_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    similarity_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
     include_related: bool = True
     include_ancestors: bool = True
     rrf_k: int = Field(default=60, gt=0, le=1000)  # Reciprocal Rank Fusion constant

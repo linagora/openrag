@@ -21,6 +21,8 @@ from api.dependencies.auth import (
     current_user,
     current_user_partitions,
     ensure_partition_role,
+    file_slot_reservation_id,
+    hand_off_file_slot,
     require_partition_editor,
     require_task_owner,
 )
@@ -222,7 +224,7 @@ async def add_file(
         description="Optional bearer token sent as `Authorization` on the callback_url request",
     ),
     user=Depends(require_partition_editor),
-    _quota_check=Depends(check_user_file_quota),
+    file_slot=Depends(check_user_file_quota),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
     job_service=Depends(get_job_service),
@@ -303,12 +305,20 @@ async def add_file(
             content_sha256=content_sha256,
             callback_url=callback_url,
             callback_token=callback_token,
+            # The task runs under the reservation's id, which is how the worker
+            # consumes the slot and the completion tracker releases it (#664).
+            task_id=file_slot_reservation_id(file_slot),
         )
     except BaseException as exc:
         # A submission whose outcome is unknown may have left a worker running
         # that has not read the file yet; deleting it would fail an indexing
         # run that could still succeed. The worker cleans up its own input.
-        if not indexing_worker_may_be_running(exc):
+        if indexing_worker_may_be_running(exc):
+            # That worker would consume the slot, so it stays with the task:
+            # the completion tracker or the reconcile sweep releases it once
+            # the task settles, or once past the grace window if it never ran.
+            hand_off_file_slot(file_slot)
+        else:
             file_path.unlink(missing_ok=True)
         await _point_conflict_at_running_task(
             exc,
@@ -319,6 +329,9 @@ async def add_file(
             auth_service=auth_service,
         )
         raise
+    # Queued: the task owns the slot now. Any earlier exit left it with the
+    # request, whose teardown released it.
+    hand_off_file_slot(file_slot)
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -499,7 +512,8 @@ async def put_file(
 **Behavior:**
 - Updates only the specified metadata fields
 - Does not require file re-upload
-- Can change the file's partition if user has access
+- Does not move the file: a `partition` other than the file's own is refused
+  with `400 Bad Request`. Copy the file to the other partition, then delete it.
 
 **Response:**
 Returns 200 OK with a success message.
@@ -510,22 +524,8 @@ async def patch_file(
     file_id: str = Depends(validate_file_id),
     metadata: Any | None = Depends(validate_metadata),
     user=Depends(require_partition_editor),
-    user_partitions=Depends(current_user_partitions),
     service=Depends(get_indexing_service),
-    auth_service=Depends(get_auth_service),
-    partition_service=Depends(get_partition_service),
 ):
-    # Make sure partition role is valid if partition is being changed
-    if "partition" in metadata:
-        await ensure_partition_role(
-            partition=metadata["partition"],
-            user=user,
-            user_partitions=user_partitions,
-            required_role="editor",
-            auth_service=auth_service,
-            partition_service=partition_service,
-        )
-
     await service.update_metadata(file_id, metadata, partition, user)
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -560,7 +560,7 @@ async def copy_file_between_partitions(
     source_file_id: str = Form(...),
     user=Depends(require_partition_editor),
     user_partitions=Depends(current_user_partitions),
-    _quota_check=Depends(check_user_file_quota),
+    file_slot=Depends(check_user_file_quota),
     service=Depends(get_indexing_service),
     auth_service=Depends(get_auth_service),
     partition_service=Depends(get_partition_service),
@@ -579,6 +579,10 @@ async def copy_file_between_partitions(
         partition_service=partition_service,
     )
 
+    # The copy is synchronous, so the slot is never handed off: the catalog
+    # insert consumes it, and the teardown release that follows is then a
+    # no-op. A copy that writes no row (empty source, refused write) gets it
+    # back from that same release (#664).
     await service.copy_file(
         source_file_id=source_file_id,
         source_partition=source_partition,
@@ -586,6 +590,7 @@ async def copy_file_between_partitions(
         target_partition=partition,
         metadata=metadata,
         user=user,
+        quota_reservation_id=file_slot_reservation_id(file_slot),
     )
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
