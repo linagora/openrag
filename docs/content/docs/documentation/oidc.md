@@ -826,7 +826,7 @@ To identify the account associated with a log entry:
 1. Retrieve the user's exact `sub` from your identity provider (for example, Keycloak: **Users** → open the user → copy the **ID** field).
 2. Calculate its SHA-256 hash locally:
    ```bash
-   printf '%s' "$OIDC_SUB" | shasum -a 256
+   printf '%s' "$OIDC_SUB" | sha256sum
    ```
    Set `OIDC_SUB` to the subject value retrieved from your identity provider. Do not share the raw subject or access token in logs or external services.
 3. Compare the resulting hash with the `sub_hash` in the OpenRAG log entry.

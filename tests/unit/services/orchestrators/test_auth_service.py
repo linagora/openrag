@@ -661,6 +661,34 @@ async def test_backchannel_logout_sidless_is_noop_200():
 
 
 @pytest.mark.asyncio
+async def test_backchannel_logout_sidless_logs_sub_hash_and_hides_raw_sub():
+    sub = "private-sidless-sub-123"
+    srepo = FakeSessionRepo()
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub=sub, sid=None, iat=0, jti="jti-sidless-logs", exp=1)
+    svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        format="{message} {extra}\n{exception}",
+        level="WARNING",
+    )
+
+    try:
+        count = await svc.handle_backchannel_logout("tok")
+    finally:
+        logger.remove(handler_id)
+
+    assert count == 0
+    assert srepo.revoked_sids == []
+
+    captured_logs = "".join(log_messages)
+    assert sub not in captured_logs
+    assert f"sub_hash={hash_oidc_sub(sub)}" in captured_logs
+    assert "Received sid-less back-channel logout token" in captured_logs
+
+
+@pytest.mark.asyncio
 async def test_backchannel_logout_sid_only_token_revokes_by_sid():
     srepo = FakeSessionRepo()
     claims = LogoutTokenClaims(

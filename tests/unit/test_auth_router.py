@@ -18,8 +18,11 @@ at import time) through its dependency graph, so we stub that module in
 
 from __future__ import annotations
 
+import hashlib
 import sys
+import traceback
 import types
+from pathlib import Path
 
 import pytest
 
@@ -47,23 +50,21 @@ def _install_dependencies_stub() -> dict[str, types.ModuleType | None]:
     sys.modules["services.workers.bootstrap"] = stub
 
     def _logger():
-        logger = types.SimpleNamespace(
-            debug=lambda *args, **kwargs: None,
-            info=lambda *args, **kwargs: None,
-            warning=lambda *args, **kwargs: None,
-            error=lambda *args, **kwargs: None,
-            exception=lambda *args, **kwargs: None,
-        )
-        logger.bind = lambda *args, **kwargs: logger
+        from loguru import logger
+
         return logger
 
     logger_stub = types.ModuleType("core.utils.logging")
     logger_stub.escape_markup = lambda s: s.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>")
-    logger_stub.mask_email = (
-        lambda email: f"{email.partition('@')[0][0]}***@{email.partition('@')[2]}"
+    logger_stub.mask_email = lambda email: (
+        f"{email.partition('@')[0][0]}***@{email.partition('@')[2]}"
         if isinstance(email, str) and "@" in email and email.partition("@")[0]
         else "***"
     )
+    logger_stub.hash_oidc_sub = lambda sub: hashlib.sha256(sub.encode("utf-8")).hexdigest()
+    logger_stub.safe_exception_stack = lambda exc: [
+        f"{Path(frame.filename).name}:{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)
+    ]
     logger_stub.get_logger = _logger
     sys.modules["core.utils.logging"] = logger_stub
     return previous_modules

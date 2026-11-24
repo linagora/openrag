@@ -113,6 +113,40 @@ async def test_verify_logout_token_accepts_sid_without_sub(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_verify_logout_token_accepts_null_sub_with_valid_sid(monkeypatch) -> None:
+    now = 1_700_000_000
+    monkeypatch.setattr(oidc_module.time, "time", lambda: now)
+    token = _logout_token(iat=now, overrides={"sub": None})
+
+    claims = await _client().verify_logout_token(token)
+
+    assert claims.sub is None
+    assert claims.sid == "sid-1"
+
+
+@pytest.mark.asyncio
+async def test_verify_logout_token_accepts_null_sid_with_valid_sub(monkeypatch) -> None:
+    now = 1_700_000_000
+    monkeypatch.setattr(oidc_module.time, "time", lambda: now)
+    token = _logout_token(iat=now, overrides={"sid": None})
+
+    claims = await _client().verify_logout_token(token)
+
+    assert claims.sub == "sub-1"
+    assert claims.sid is None
+
+
+@pytest.mark.asyncio
+async def test_verify_logout_token_rejects_both_null_sub_and_sid(monkeypatch) -> None:
+    now = 1_700_000_000
+    monkeypatch.setattr(oidc_module.time, "time", lambda: now)
+    token = _logout_token(iat=now, overrides={"sub": None, "sid": None})
+
+    with pytest.raises(ValueError, match="must contain sub or sid"):
+        await _client().verify_logout_token(token)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("claim_name", "claim_value"),
     [("sub", {"unexpected": "object"}), ("sid", ["unexpected", "list"])],

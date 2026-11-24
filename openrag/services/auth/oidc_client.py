@@ -388,7 +388,8 @@ class OIDCClient:
             raise ValueError("logout_token must not contain nonce")
 
         for claim_name in ("sub", "sid"):
-            if claim_name in decoded and (not isinstance(decoded[claim_name], str) or not decoded[claim_name]):
+            value = decoded.get(claim_name)
+            if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"logout_token {claim_name} claim must be a non-empty string")
 
         if not decoded.get("sub") and not decoded.get("sid"):
