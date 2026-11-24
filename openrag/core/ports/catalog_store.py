@@ -13,6 +13,7 @@ from .chunk_repo import ChunkRepository
 from .conversation_repo import ConversationRepository
 from .document_repo import DocumentRepository
 from .entity_repo import EntityRepository
+from .file_fence_repo import FileFenceRepository
 from .idempotency_repo import IdempotencyRepository
 from .job_repo import JobRepository
 from .model_endpoint_repo import ModelEndpointRepository
@@ -45,6 +46,10 @@ class CatalogStore(ABC):
     @property
     @abstractmethod
     def job_repo(self) -> JobRepository: ...
+
+    @property
+    @abstractmethod
+    def file_fence_repo(self) -> FileFenceRepository: ...
 
     @property
     @abstractmethod

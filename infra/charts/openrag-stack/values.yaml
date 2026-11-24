@@ -1159,6 +1159,9 @@ env:
 
     # App
     APP_PORT: "8080"
+    # Set this to the addresses of the proxies that forward to the API.
+    # Reconcile the allowlist when those addresses change.
+    UVICORN_FORWARDED_ALLOW_IPS: "127.0.0.1"
     # Optional white-label name for casual introductions; empty is neutral.
     ASSISTANT_NAME: ""
     # Requires ray.enabled=true (a separate RayCluster with its own "serve" port
@@ -1272,6 +1275,10 @@ env:
     # env_vars.md.
     # PYMUPDF_POOL_SIZE: "4"
     # PYMUPDF_PARSE_MEMORY_LIMIT_MB: "1024"
+    # Spreadsheet charts: full (default) indexes each chart with its data, hidden
+    # worksheets, rows and columns included; without_hidden_data leaves hidden
+    # data out; off reads no chart. See xlsx_ingestion.md.
+    # XLSX_CHARTS: "full"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
     # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse

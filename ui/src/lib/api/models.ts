@@ -503,10 +503,14 @@ export interface ValidateModelEndpointRequest {
  * saving — validates exactly what's in the form, so typos / dead endpoints are
  * caught pre-save.
  */
-export function validateModelEndpoint(data: ValidateModelEndpointRequest) {
+export function validateModelEndpoint(
+  data: ValidateModelEndpointRequest,
+  options: { signal?: AbortSignal } = {},
+) {
   return request<ValidateModelEndpointResponse>(`${BASE}/validate`, {
     method: "POST",
     body: JSON.stringify(data),
+    signal: options.signal,
   });
 }
 

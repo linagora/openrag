@@ -6,8 +6,9 @@ three things:
 1. Populates the inference registries (Phase 6) so factory helpers can spin
    up embedders, LLMs, rerankers and VLMs by name.
 2. Builds the storage adapters (Phase 7E) when a :class:`Settings` instance
-   is supplied — a :class:`~core.ports.catalog_store.CatalogStore` and a
-   :class:`~core.vector_stores.VectorStore`.
+   is supplied — a :class:`~core.ports.catalog_store.CatalogStore`, a
+   :class:`~core.vector_stores.VectorStore` and the
+   :class:`~core.ports.object_store.ObjectStore` of uploaded files.
 3. Owns the async :meth:`initialize` / :meth:`shutdown` lifecycle that opens
    and closes the asyncpg pool.
 
@@ -35,6 +36,7 @@ from core.vlm import vlm_registry
 from di.embedders import register_embedders
 from di.factories import make_component_factory
 from di.llms import register_llms
+from di.object_stores import create_upload_store
 from di.repositories import create_catalog_store
 from di.rerankers import register_rerankers
 from di.vector_stores import create_vector_store
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from core.ports.idempotency_repo import IdempotencyRepository
     from core.ports.job_repo import JobRepository
     from core.ports.model_endpoint_repo import ModelEndpointRepository
+    from core.ports.object_store import ObjectStore
     from core.ports.oidc_session_repo import OIDCSessionRepository
     from core.ports.partition_membership_repo import PartitionMembershipRepository
     from core.ports.partition_repo import PartitionRepository
@@ -123,6 +126,7 @@ class ServiceContainer:
         self.vlm_factory = self._missing_named_factory("vlm")
         self._catalog_store: CatalogStore | None = create_catalog_store(settings) if settings is not None else None
         self._vector_store: VectorStore | None = create_vector_store(settings) if settings is not None else None
+        self._upload_store: ObjectStore | None = create_upload_store(settings) if settings is not None else None
         self._auth_service: AuthService | None = None
         self._user_service: UserService | None = None
         self._partition_service: PartitionService | None = None
@@ -340,6 +344,13 @@ class ServiceContainer:
         if self._vector_store is None:
             raise RuntimeError(_NO_SETTINGS_MESSAGE)
         return self._vector_store
+
+    @property
+    def upload_store(self) -> ObjectStore:
+        """The :class:`ObjectStore` that holds uploaded files, built from settings."""
+        if self._upload_store is None:
+            raise RuntimeError(_NO_SETTINGS_MESSAGE)
+        return self._upload_store
 
     # ------------------------------------------------------------------
     # Per-repo accessors (Phase 8 orchestrators take one repo, not the
@@ -728,6 +739,9 @@ class ServiceContainer:
                     workspace_repo=self.workspace_repo,
                     collection=settings.vectordb.collection_name,
                     job_repo=self.job_repo,
+                    file_fence_repo=(
+                        self.catalog_store.file_fence_repo if settings.loader.file_fences == "postgres" else None
+                    ),
                 ),
                 config=settings,
                 partition_service=self.partition_service,
@@ -816,6 +830,7 @@ class ServiceContainer:
                 conversion_service=self.conversion_service,
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
+                data_dir=settings.paths.data_dir,
                 default_top_k=mcp_cfg.default_top_k,
                 max_top_k=mcp_cfg.max_top_k,
                 similarity_threshold=mcp_cfg.similarity_threshold,
