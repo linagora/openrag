@@ -598,6 +598,20 @@ def test_recent_token_cache_covers_late_failure_window(monkeypatch) -> None:
     assert not middleware._has_recently_authenticated_token("ip:unknown", "known-user-token", "token")
 
 
+def test_recent_token_cache_evicts_oldest_entry_at_capacity(monkeypatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+    identity = "ip:unknown"
+
+    for index in range(1025):
+        middleware._remember_authenticated_token(identity, f"token-{index}", "token")
+
+    assert len(middleware._recently_authenticated_tokens) == 1024
+    assert not middleware._has_recently_authenticated_token(identity, "token-0", "token")
+    assert middleware._has_recently_authenticated_token(identity, "token-1024", "token")
+
+
 def test_recent_token_cache_purges_expired_entries_in_validation_order(monkeypatch) -> None:
     monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
     monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")

@@ -747,15 +747,18 @@ Limit values use the `<count>/<period>` format from the [`limits`](https://limit
 | `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
 | `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
 | `RETRIEVAL_DIAGNOSTICS_RATE_LIMIT` | `str` | `120/minute` | Separate per-administrator limit for retrieval traces, original-query comparisons, and retrieval snapshots. This limit applies even though administrators bypass the general tiers. It is enforced per API process, so the deployment-wide capacity scales with the number of replicas. |
-| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP (brute-force protection). Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
+| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP. After exhaustion, recently validated credentials from that IP may still be revalidated while their cache entries remain present; unseen credentials get `429` before lookup. Each process caches at most 1,024 client-identity/credential pairs, and entries may be evicted before the two-failure-window maximum retention period. Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 
 :::caution[Behind a reverse proxy, trust the right client IP]
 The `/auth/*` limits and failed-login budget use the client IP. If the API cannot
 trust a proxy's forwarding headers, requests share the proxy's IP and failure
-budget. The OIDC cookie's `Secure` flag reads `X-Forwarded-Proto` directly (or
-`PREFERRED_URL_SCHEME`); this check is independent of Uvicorn's forwarded-IP
-trust list.
+budget and recent-credential cache. In that case, a credential recently used by
+one client may still authenticate another client during lockout. This applies
+to Helm's default loopback trust setting and traffic through an untrusted proxy
+such as NPM. The OIDC cookie's `Secure` flag reads `X-Forwarded-Proto` directly
+(or `PREFERRED_URL_SCHEME`); this check is independent of Uvicorn's
+forwarded-IP trust list.
 
 - **Compose** trusts loopback and the exact admin UI proxy address by default. The admin UI proxy appends its peer address to `X-Forwarded-For`, allowing Uvicorn to select the actual client address. Do not add NPM’s address while it accepts client-supplied `X-Real-IP` from private networks.
 - **Helm** leaves trust at loopback until an administrator sets `env.config.UVICORN_FORWARDED_ALLOW_IPS` in the chart values. Use your proxy's stable addresses and update the allowlist if the addresses change.
